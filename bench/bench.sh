@@ -7,9 +7,12 @@
 #              mengembalikan JSON ~1KB, keep-alive, tanpa pipelining.
 #   Sekunder : memori per koneksi menganggur (belum diukur skrip ini).
 #
-# Catatan tahap 1: belum ada router dan belum ada JSON, jadi target default
-# masih "hello". Begitu lapisan Ctx jadi, ganti URL default ke rute
-# berparameter yang mengembalikan JSON ~1KB.
+# Sasarannya rute contoh di src/main.zig: GET /users/:id yang mengembalikan
+# JSON ~1KB. Jalankan servernya dulu dengan `zig build -Doptimize=ReleaseFast`
+# lalu `./zig-out/bin/zfast-hello`.
+#
+# Uji kebocoran pesan Fungsi gagal di bawah beban ada terpisah di
+# bench/campur.lua (lihat ADR 0007) — itu uji kebenaran, bukan kecepatan.
 
 set -euo pipefail
 

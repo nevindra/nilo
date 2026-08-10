@@ -12,6 +12,38 @@ pub const Opsi = struct {
     port: u16 = 8787,
 };
 
+// ---- slot per-request (lihat ADR 0007) ----
+//
+// zio menjalankan tiap koneksi di fiber-nya sendiri, dan banyak fiber
+// berbagi satu utas OS. Jadi threadlocal salah: fiber A bisa tertidur di
+// tengah handler, fiber B jalan di utas yang sama, lalu A bangun dan
+// menulis ke slot milik B. `zio.TaskLocal` mengikat nilai ke fiber-nya,
+// ikut berpindah kalau fiber-nya pindah utas — persis yang dibutuhkan.
+
+var slot_fiber: zio.TaskLocal(*anyopaque) = .{};
+
+/// Tempat penyimpanan satu ikatan slot. Milik pemanggil: taruh di stack
+/// fiber, jangan dipindah selama terikat.
+pub const Ikatan = zio.TaskLocal(*anyopaque).Node;
+
+pub const ikatan_kosong: Ikatan = .unset;
+
+/// Ikat `p` ke fiber yang sedang berjalan. Panik kalau dipanggil di luar
+/// fiber — hanya Mesin yang boleh memanggilnya, dan Mesin selalu tahu.
+pub fn ikatSlot(n: *Ikatan, p: *anyopaque) void {
+    slot_fiber.set(n, p);
+}
+
+pub fn lepasSlot(n: *Ikatan) void {
+    slot_fiber.clear(n);
+}
+
+/// Slot fiber yang sedang berjalan, atau null kalau tidak ada fiber
+/// (misalnya unit test yang memanggil App langsung).
+pub fn slot() ?*anyopaque {
+    return slot_fiber.get();
+}
+
 /// Jalankan `penangan(state, in, out)` untuk tiap koneksi yang diterima,
 /// masing-masing di fiber-nya sendiri, sampai koneksinya selesai.
 /// Reader/Writer sudah ber-buffer; penangan tidak perlu tahu socket di

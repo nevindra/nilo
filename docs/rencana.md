@@ -32,9 +32,9 @@ Hanya rilis stabil terbaru, satu branch. Sasaran penggunanya mengunduh Zig, menj
 
 ## Urutan pengerjaan
 
-1. **Rangka jalan.** Terima koneksi lewat zio, parse HTTP/1.1, kembalikan "hello". Belum ada framework. Tujuan satu-satunya: Sekat terbentuk dengan benar.
-2. **Lapisan `Ctx`.** Router, param, JSON, Arena request, `Str`. Di titik ini sudah terpakai, sudah bisa dibenchmark, dan sudah bisa dirilis kalau terpaksa.
-3. **Lapisan bertipe.** Mesin comptime, pencocokan Layanan per tipe, Fungsi gagal.
+1. ~~**Rangka jalan.**~~ *Selesai.* Terima koneksi lewat zio, parse HTTP/1.1, kembalikan "hello". Belum ada framework. Tujuan satu-satunya: Sekat terbentuk dengan benar.
+2. ~~**Lapisan `Ctx`.**~~ *Selesai.* Router, param, JSON, Arena request, `Str`. Di titik ini sudah terpakai, sudah bisa dibenchmark, dan sudah bisa dirilis kalau terpaksa.
+3. ~~**Lapisan bertipe.**~~ *Selesai.* Mesin comptime, pencocokan Layanan per tipe, Fungsi gagal. Keputusan yang lahir di sini: [ADR 0006](./adr/0006-layanan-lewat-daftar-runtime.md) dan [ADR 0007](./adr/0007-kotak-gagal-terikat-fiber.md).
 4. **Middleware dan empat bawaan.**
 5. **Dokumentasi dan contoh.** Untuk sasaran pengguna ini, dokumentasi bukan pelengkap — ia produknya.
 
@@ -44,7 +44,7 @@ Skrip benchmark ditaruh di repo sejak tahap 1 meski belum dijalankan serius, sup
 
 | Risiko | Penanganan |
 |---|---|
-| Lapisan comptime adalah bagian tersulit dan paling rawan | Lapisan `Ctx` di bawahnya bisa dirilis sendiri — itu jaring pengamannya, dan itu disengaja |
+| ~~Lapisan comptime adalah bagian tersulit dan paling rawan~~ *Lewat.* Lapisan bertipe jadi di tahap 3 tanpa perlu memakai jaring pengamannya | Lapisan `Ctx` di bawahnya bisa dirilis sendiri — itu jaring pengamannya, dan itu disengaja |
 | zio adalah proyek satu orang; bisa berhenti saat Zig 0.17 keluar | Sekat, dipasang sejak tahap 1, bukan ditambal belakangan |
 | Klaim "high performance" belum ada buktinya | Tidak ada angka di README sampai ada mesin Linux |
 | Jaminan `Str` tidak bisa penuh | Jebakan build debug harus ada sejak hari pertama |
@@ -54,7 +54,7 @@ Skrip benchmark ditaruh di repo sejak tahap 1 meski belum dijalankan serius, sup
 ## Belum diputuskan
 
 - **Nama.** `zfast` adalah nama kerja. Awalan `z-` di ekosistem Zig sudah sesak (`zap`, `zzz`, `zon`, belasan `zig-*`), jadi mudah tertukar. Nama modul harus gampang diganti tanpa mengubah kode pengguna.
-- **Tempat mengukur.** Belum ada mesin Linux. Sampai ada, [ADR 0001](./adr/0001-dx-menang-dengan-ambang-10-persen.md) belum aktif dan semua konflik menang ke DX.
+- **Tempat mengukur.** Masih belum ada. Tahap 3 sempat dijalankan `wrk` di sebuah VM Linux bersama, tapi itu cuma untuk memastikan servernya tidak roboh dan tidak ada respons yang tertukar — mesin bersama tidak bisa dipakai membandingkan angka, jadi tidak ada angka yang disimpan dan tidak ada yang masuk README. Sampai ada mesin yang tenang, [ADR 0001](./adr/0001-dx-menang-dengan-ambang-10-persen.md) belum aktif dan semua konflik menang ke DX.
 - **Algoritma router.** Tidak terlihat oleh pengguna, jadi tidak ada konflik DX di sini — murni pekerjaan, diputuskan dengan angka nanti.
 
 ## Metrik

@@ -47,6 +47,29 @@ pub const Str = struct {
         return .{ ._byte = byte, ._penanda = if (jebakan_aktif) null else {} };
     }
 
+    // ---- lewat JSON ----
+    //
+    // Supaya `struct { nama: Str }` bisa dipakai sebagai isi masuk maupun
+    // jawaban keluar, bukan cuma `[]const u8` telanjang yang justru
+    // dihindari ADR 0004.
+
+    /// Keluar sebagai string JSON biasa, bukan sebagai objek berisi
+    /// field internal.
+    pub fn jsonStringify(self: Str, jw: anytype) !void {
+        try jw.write(self.lihat());
+    }
+
+    /// Masuk dari string JSON. Penandanya belum terpasang di sini —
+    /// parser tidak tahu request mana yang sedang berjalan — jadi App
+    /// memanggil `stempel` setelah parse selesai.
+    pub fn jsonParse(gpa: std.mem.Allocator, sumber: anytype, opsi: std.json.ParseOptions) !Str {
+        return statis(try std.json.innerParse([]const u8, gpa, sumber, opsi));
+    }
+
+    pub fn jsonParseFromValue(gpa: std.mem.Allocator, sumber: std.json.Value, opsi: std.json.ParseOptions) !Str {
+        return statis(try std.json.innerParseFromValue([]const u8, gpa, sumber, opsi));
+    }
+
     /// Pinjam isinya. Hanya berlaku selama request-nya masih berjalan —
     /// untuk menyimpan lebih lama, pakai `.keep()`.
     pub fn lihat(self: Str) []const u8 {
@@ -94,6 +117,58 @@ pub const Str = struct {
     }
 };
 
+/// Pasang penanda umur `umur` ke semua Str di dalam `nilai` (sebuah
+/// penunjuk). Dipakai App setelah mem-parse isi request: hasil parse
+/// hidup di Arena request, jadi Str di dalamnya harus ikut mati saat
+/// request selesai.
+///
+/// Yang ditelusuri: Str, field struct, isi optional, elemen array, dan
+/// elemen slice yang bisa diubah. Slice `const` dan union dilewati —
+/// Str di sana tetap jalan, hanya saja jebakan debug tidak menjaganya.
+pub fn stempel(nilai: anytype, umur: *const Umur) void {
+    if (!jebakan_aktif) return;
+    stempelDalam(nilai, umur, 8);
+}
+
+fn stempelDalam(nilai: anytype, umur: *const Umur, comptime sisa: u8) void {
+    if (sisa == 0) return;
+    const T = @typeInfo(@TypeOf(nilai)).pointer.child;
+    if (comptime !mengandungStr(T, sisa)) return;
+
+    if (T == Str) {
+        nilai._penanda = .{ .hidup = &umur.gen, .gen = umur.gen };
+        return;
+    }
+    switch (@typeInfo(T)) {
+        .@"struct" => |s| inline for (s.fields) |f| {
+            stempelDalam(&@field(nilai, f.name), umur, sisa - 1);
+        },
+        .optional => if (nilai.*) |*isi| stempelDalam(isi, umur, sisa - 1),
+        .array => for (nilai) |*elemen| stempelDalam(elemen, umur, sisa - 1),
+        .pointer => |p| switch (p.size) {
+            .slice => if (!p.is_const) for (nilai.*) |*elemen| stempelDalam(elemen, umur, sisa - 1),
+            else => {},
+        },
+        else => {},
+    }
+}
+
+/// Apakah `T` mungkin memuat Str di dalamnya. Tipe yang tidak memuat Str
+/// sama sekali — mayoritas — tidak menghasilkan kode apa pun.
+fn mengandungStr(comptime T: type, comptime sisa: u8) bool {
+    if (sisa == 0) return false;
+    if (T == Str) return true;
+    return switch (@typeInfo(T)) {
+        .@"struct" => |s| for (s.fields) |f| {
+            if (mengandungStr(f.type, sisa - 1)) break true;
+        } else false,
+        .optional => |o| mengandungStr(o.child, sisa - 1),
+        .array => |a| mengandungStr(a.child, sisa - 1),
+        .pointer => |p| p.size == .slice and !p.is_const and mengandungStr(p.child, sisa - 1),
+        else => false,
+    };
+}
+
 const testing = std.testing;
 
 test "lihat dan sama" {
@@ -133,4 +208,58 @@ test "Str statis tidak pernah basi" {
     const s = Str.statis("literal");
     try testing.expect(s.hidup());
     try testing.expectEqualStrings("literal", s.lihat());
+}
+
+test "Str keluar sebagai string JSON biasa" {
+    var umur = Umur{};
+    const Pesan = struct { nama: Str, umur_tahun: u8 };
+    const json = try std.json.Stringify.valueAlloc(
+        testing.allocator,
+        Pesan{ .nama = Str.dariRequest("wati", &umur), .umur_tahun = 30 },
+        .{},
+    );
+    defer testing.allocator.free(json);
+    try testing.expectEqualStrings("{\"nama\":\"wati\",\"umur_tahun\":30}", json);
+}
+
+test "Str masuk dari JSON lalu distempel umur request" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var umur = Umur{};
+
+    const Masuk = struct { nama: Str, tag: []Str };
+    var nilai = try std.json.parseFromSliceLeaky(
+        Masuk,
+        arena.allocator(),
+        "{\"nama\":\"wati\",\"tag\":[\"a\",\"b\"]}",
+        .{},
+    );
+    stempel(&nilai, &umur);
+
+    try testing.expectEqualStrings("wati", nilai.nama.lihat());
+    try testing.expectEqualStrings("b", nilai.tag[1].lihat());
+
+    if (!jebakan_aktif) return;
+    umur.selesai();
+    try testing.expect(!nilai.nama.hidup());
+    try testing.expect(!nilai.tag[1].hidup()); // ikut basi sampai ke dalam slice
+}
+
+test "stempel tidak menyentuh tipe tanpa Str" {
+    var umur = Umur{};
+    var polos = struct { a: u32, b: [2]f64 }{ .a = 1, .b = .{ 2, 3 } };
+    stempel(&polos, &umur);
+    try testing.expectEqual(@as(u32, 1), polos.a);
+}
+
+test "stempel menembus optional dan struct bersarang" {
+    if (!jebakan_aktif) return;
+    var umur = Umur{};
+    const Dalam = struct { teks: Str };
+    var nilai = struct { mungkin: ?Dalam }{ .mungkin = .{ .teks = Str.statis("halo") } };
+    stempel(&nilai, &umur);
+
+    try testing.expect(nilai.mungkin.?.teks.hidup());
+    umur.selesai();
+    try testing.expect(!nilai.mungkin.?.teks.hidup());
 }

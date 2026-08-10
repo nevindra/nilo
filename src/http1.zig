@@ -228,12 +228,38 @@ pub fn tulisRespons(
     isi: []const u8,
     keep_alive: bool,
 ) !void {
-    try out.print(
-        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: {s}\r\n\r\n",
-        .{ status, frasa, tipe_konten, isi.len, if (keep_alive) "keep-alive" else "close" },
-    );
+    try tulisKepala(out, status, frasa, tipe_konten, isi.len, keep_alive);
     try out.writeAll(isi);
     try out.flush();
+}
+
+/// Jawaban untuk HEAD: kepalanya harus sama persis dengan jawaban GET —
+/// termasuk `Content-Length` yang menyebut panjang isi seandainya
+/// dikirim — tapi isinya sendiri tidak ikut.
+pub fn tulisResponsTanpaIsi(
+    out: *std.Io.Writer,
+    status: u16,
+    frasa: []const u8,
+    tipe_konten: []const u8,
+    panjang_isi: usize,
+    keep_alive: bool,
+) !void {
+    try tulisKepala(out, status, frasa, tipe_konten, panjang_isi, keep_alive);
+    try out.flush();
+}
+
+fn tulisKepala(
+    out: *std.Io.Writer,
+    status: u16,
+    frasa: []const u8,
+    tipe_konten: []const u8,
+    panjang_isi: usize,
+    keep_alive: bool,
+) !void {
+    try out.print(
+        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: {s}\r\n\r\n",
+        .{ status, frasa, tipe_konten, panjang_isi, if (keep_alive) "keep-alive" else "close" },
+    );
 }
 
 fn potongCR(baris: []const u8) []const u8 {

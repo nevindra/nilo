@@ -10,6 +10,7 @@
 const std = @import("std");
 const http1 = @import("http1.zig");
 const router = @import("router.zig");
+const layanan_mod = @import("layanan.zig");
 const str_mod = @import("str.zig");
 const Str = str_mod.Str;
 
@@ -29,8 +30,17 @@ pub const Ctx = struct {
     _query: []const u8,
     _header: []const http1.IterasiHeader.Pasangan,
     _param: []const router.Param,
+    _layanan: *const layanan_mod.Daftar,
     _isi: ?[]const u8 = null,
     _terkirim: bool = false,
+
+    /// Layanan bertipe `P` (sebuah tipe penunjuk), untuk handler yang
+    /// memegang `*Ctx` dan karena itu tidak lewat pencocokan argumen.
+    /// Null kalau belum didaftarkan — di lapisan bertipe, kasus ini sudah
+    /// tersaring saat `dengarkan()`.
+    pub fn layanan(self: *const Ctx, comptime P: type) ?P {
+        return self._layanan.ambil(P);
+    }
 
     // ---- sisi permintaan ----
 
@@ -82,9 +92,15 @@ pub const Ctx = struct {
 
     /// Parse isi permintaan sebagai JSON menjadi `T`. Hasilnya hidup di
     /// Arena request — `keep` per field kalau perlu lebih lama.
+    ///
+    /// Field bertipe `Str` ikut distempel umur request, jadi memakainya
+    /// setelah request selesai tertangkap jebakan debug seperti Str yang
+    /// lain (ADR 0004).
     pub fn json(self: *Ctx, comptime T: type) !T {
         const b = (try self.isi()).lihat();
-        return std.json.parseFromSliceLeaky(T, self._arena, b, .{});
+        var nilai = try std.json.parseFromSliceLeaky(T, self._arena, b, .{});
+        str_mod.stempel(&nilai, self._umur);
+        return nilai;
     }
 
     // ---- sisi jawaban ----
@@ -92,6 +108,16 @@ pub const Ctx = struct {
     pub fn balas(self: *Ctx, status: u16, tipe_konten: []const u8, isi_balasan: []const u8) !void {
         std.debug.assert(!self._terkirim); // satu request satu jawaban
         self._terkirim = true;
+        // Handler tidak perlu tahu ini HEAD: ia merakit jawaban seperti
+        // biasa, dan yang tidak boleh ikut terkirim disaring di sini.
+        if (self.metode == .HEAD) return http1.tulisResponsTanpaIsi(
+            self._out,
+            status,
+            http1.frasaStatus(status),
+            tipe_konten,
+            isi_balasan.len,
+            self._permintaan.keep_alive,
+        );
         try http1.tulisRespons(
             self._out,
             status,

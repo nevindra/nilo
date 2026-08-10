@@ -2,7 +2,7 @@
 
 An HTTP framework for Zig, aimed at people coming from Go or Node.
 
-> **Status: stage 2 of 5 (the `Ctx` layer) — routing with path params, query params, request headers, JSON in/out, the per-request arena, and `Str` with its debug-build lifetime trap. Typed handlers (stage 3) are not here yet: handlers currently take `*Ctx`.**
+> **Status: stage 3 of 5 (the typed layer) — typed handlers, services matched by type, and failure functions, on top of the stage-2 `Ctx` layer. Still missing: middleware and the four built-ins (stage 4), chunked bodies, percent-decoding, and `HEAD` routes have to be registered explicitly rather than falling back to `GET`.**
 > `zfast` is a working name and may change.
 
 ## Documents
@@ -13,29 +13,50 @@ An HTTP framework for Zig, aimed at people coming from Go or Node.
 
 *Design notes are currently written in Indonesian.*
 
-## What it's meant to look like
+## What it looks like
 
 ```zig
+const gagal = zfast.gagal;
+
 const User = struct { id: u32, name: zfast.Str };
 
 fn getUser(db: *Db, id: u32) !User {
     return db.find(id) orelse
-        http.notFound("user {d} not found", .{id});
+        gagal.notFound("user {d} not found", .{id});
 }
 
-app.get("/users/:id", getUser);
+var app = zfast.App.init(gpa);
+try app.daftarkan(&db);
+try app.get("/users/:id", getUser);
+try app.dengarkan(.{});
 ```
 
-A handler is an ordinary function: it takes only what it needs and returns data. Which means you can test it without starting a server.
+A handler is an ordinary function: it takes only what it needs and returns data. Which means you can test it without starting a server, and without a fake HTTP request.
 
 ```zig
 test "getUser" {
     var fake = Db.fake(.{ .id = 7 });
     try expectEqual(7, (try getUser(&fake, 7)).id);
+    try expectError(error.Gagal, getUser(&fake, 99));
 }
 ```
 
-When you need full control — streaming, large uploads — the handler simply asks for a `*Ctx`.
+Arguments are matched at compile time, by one rule: **a pointer is a service, a value is request data.**
+
+| Argument | What zfast passes in |
+|---|---|
+| `*Ctx` | the raw request — the way out when you need full control |
+| `*Db`, `*const Config` | a service, matched by its type |
+| `u32`, `Str`, `bool`, an enum | a path param, in the order they appear in the pattern |
+| a struct | the request body, parsed from JSON |
+
+The return value becomes the response: `void` → empty 200, `Str`/`[]const u8` → `text/plain`, anything else → JSON. Wrap it in `Jawaban(T)` when the status isn't 200.
+
+Getting any of this wrong stops the compiler with a message that names the route and tells you what to do about it — never a runtime surprise. Asking for a service you forgot to register stops `dengarkan()` before the socket opens.
+
+When you need full control — streaming, large uploads — the handler simply asks for a `*Ctx`. Both layers are the same layer: the typed one compiles down into `Ctx` calls.
+
+*The public API is in Indonesian where the concept is zfast's own (`balasJson`, `dengarkan`, `daftarkan`) and in English where the HTTP world already has a word (`get`, `post`, `Str`, `keep`).*
 
 ## Principles
 
