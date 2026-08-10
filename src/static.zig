@@ -123,6 +123,25 @@ pub const LoadError = error{
     StaticReadFailed,
 };
 
+/// Which of these failures `load` has already put into words, so `App` can
+/// stop the process on them instead of letting the error reach `main` and
+/// print a stack trace through zfast's own files on top of the answer
+/// (ADR 0002). The same rule `bulkhead.explained` states for `listen()`.
+///
+/// `OutOfMemory` is not on the list: nothing explained it, and there is
+/// nothing useful to say about it that the error name does not.
+pub fn explained(err: anyerror) bool {
+    return switch (err) {
+        error.StaticDirNotFound,
+        error.StaticFileTooLarge,
+        error.StaticSetTooLarge,
+        error.StaticUrlTooLong,
+        error.StaticReadFailed,
+        => true,
+        else => false,
+    };
+}
+
 /// One file for `fromMemory` — bytes that are already here rather than on
 /// a disk. `url` and `bytes` are copied; `content_type` and `cache_control`
 /// are borrowed and have to outlive the Set, exactly as a loaded Set
@@ -222,7 +241,13 @@ pub fn load(
     var walker = try dir.walk(gpa);
     defer walker.deinit();
 
-    while (walker.next(io) catch return error.StaticReadFailed) |entry| {
+    while (walker.next(io) catch |err| {
+        std.log.err(
+            "zfast: static directory \"{s}\" could not be walked ({s})",
+            .{ dir_path, @errorName(err) },
+        );
+        return error.StaticReadFailed;
+    }) |entry| {
         if (entry.kind != .file) continue;
         if (!options.dotfiles and hasDotSegment(entry.path)) {
             skipped_dotfiles += 1;
@@ -283,7 +308,13 @@ pub fn load(
 
     if (options.spa_fallback.len > 0) {
         var buf: [max_url]u8 = undefined;
-        const url = join(&buf, url_prefix, options.spa_fallback) orelse return error.StaticUrlTooLong;
+        const url = join(&buf, url_prefix, options.spa_fallback) orelse {
+            std.log.err(
+                "zfast: the SPA fallback URL \"{s}\" + \"{s}\" is longer than {d} bytes",
+                .{ url_prefix, options.spa_fallback, max_url },
+            );
+            return error.StaticUrlTooLong;
+        };
         set.fallback = set.lookup(url) orelse {
             std.log.err(
                 "zfast: the SPA fallback \"{s}\" is not in \"{s}\" — " ++

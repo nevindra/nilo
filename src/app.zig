@@ -137,6 +137,13 @@ pub const App = struct {
     ///
     /// Routes win over static files, so an explicit `app.get("/index.html", …)`
     /// still gets its way.
+    ///
+    /// A directory that cannot be loaded says why in one line and stops the
+    /// process, for the reason `listen()` and `route()` do: the sentence
+    /// naming the missing directory is the whole answer, and letting the
+    /// error travel back to `main` prints a stack trace through zfast's own
+    /// files on top of it (ADR 0002). `tryStatic` is the same call with the
+    /// error as a value.
     pub fn static(self: *App, url_prefix: []const u8, dir_path: []const u8) !void {
         try self.staticWith(url_prefix, dir_path, .{});
     }
@@ -144,6 +151,27 @@ pub const App = struct {
     /// `static`, with the caching, index and single-page-app options spelled
     /// out. See `static.Options`.
     pub fn staticWith(
+        self: *App,
+        url_prefix: []const u8,
+        dir_path: []const u8,
+        opts: static_mod.Options,
+    ) !void {
+        self.tryStaticWith(url_prefix, dir_path, opts) catch |err| {
+            if (static_mod.explained(err)) std.process.exit(1);
+            return err;
+        };
+    }
+
+    /// `static`, for a caller that would rather handle a missing directory
+    /// than have the process stopped under it — a test, or a program with a
+    /// fallback. The one-line explanation still goes to the log; what
+    /// changes is that the error comes back as a value.
+    pub fn tryStatic(self: *App, url_prefix: []const u8, dir_path: []const u8) !void {
+        return self.tryStaticWith(url_prefix, dir_path, .{});
+    }
+
+    /// `staticWith`, with the error as a value. See `tryStatic`.
+    pub fn tryStaticWith(
         self: *App,
         url_prefix: []const u8,
         dir_path: []const u8,
@@ -725,6 +753,19 @@ pub fn Group(comptime prefix: []const u8) type {
             opts: static_mod.Options,
         ) !void {
             return self.app.staticWith(comptime joined(prefix, url_prefix), dir_path, opts);
+        }
+
+        pub fn tryStatic(self: Self, comptime url_prefix: []const u8, dir_path: []const u8) !void {
+            return self.app.tryStatic(comptime joined(prefix, url_prefix), dir_path);
+        }
+
+        pub fn tryStaticWith(
+            self: Self,
+            comptime url_prefix: []const u8,
+            dir_path: []const u8,
+            opts: static_mod.Options,
+        ) !void {
+            return self.app.tryStaticWith(comptime joined(prefix, url_prefix), dir_path, opts);
         }
     };
 }
@@ -2550,14 +2591,27 @@ test "a route of your own at the docs path still wins" {
 test "a single-page app serving everything does not swallow the document" {
     // The setup most likely to want an API description is also the one that
     // would hide it: an SPA fallback answers for every path there is.
+    var files = try TmpFiles.init(testing.allocator, &.{
+        .{ "index.html", "<h1>app</h1>" },
+    });
+    defer files.deinit(testing.allocator);
+
     var app = App.init(testing.allocator);
     defer app.deinit();
     app.docs(.{ .title = "Behind an SPA" });
-    try app.staticWith("/", "examples/spa/public", .{ .spa_fallback = "index.html" });
+    try app.tryStaticWith("/", files.path, .{ .spa_fallback = "index.html" });
 
     var h = Harness.init();
     defer h.deinit();
     try h.ready(&app);
+
+    // The fallback really does answer for every path, which is the premise
+    // this test exists for rather than an aside.
+    try testing.expect(std.mem.indexOf(
+        u8,
+        h.send(&app, "GET /whatever/deep HTTP/1.1\r\n\r\n").response,
+        "<h1>app</h1>",
+    ) != null);
 
     const spec = h.send(&app, "GET /openapi.json HTTP/1.1\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, spec.response, "Content-Type: application/json") != null);

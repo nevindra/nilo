@@ -445,13 +445,16 @@ Stop it, or pass `.port = …` to listen() with a free one.
 error: service *main.Db was never registered, but 4 routes need it
 ("/users", "/users/:id", "/admin/stats", …) — call app.provide() before app.listen()
 
+error: zfast: static directory "public" could not be opened (FileNotFound) —
+the path is relative to the working directory the server runs in
+
 warning: std.log will block the event loop. Add to your root source file:
 pub const std_options_debug_io = zfast.debug_io;
 ```
 
 That line is the whole answer, so it is also the last thing on the screen: `listen()` stops the process there rather than returning an error, which would print a stack trace through zfast's own files on top of it. Which file inside the engine noticed the port was taken is not your problem.
 
-If you would rather handle it — a test, or a program that falls back to another port — `tryListen()` is the same call with the error coming back as a value.
+If you would rather handle it — a test, or a program that falls back to another port — `tryListen()`, `tryRoute()` and `tryStatic()` are the same calls with the error coming back as a value.
 
 ## Stopping
 
