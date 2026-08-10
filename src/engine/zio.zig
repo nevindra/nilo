@@ -385,6 +385,25 @@ pub fn monotonicNanos() u64 {
 /// handler holding one still testable as an ordinary function (ADR 0003).
 pub const Mutex = zio.Mutex;
 
+/// Run a blocking call on the Engine's thread pool, parking this fiber
+/// until it comes back, so the other fibers sharing this thread keep
+/// running (ADR 0014).
+///
+/// Allocates nothing — the arguments and the result live on the calling
+/// fiber's stack. Outside a fiber the call simply runs inline, which is
+/// what keeps a handler that uses it testable as an ordinary function.
+pub const blocking = zio.blockInPlace;
+
+/// Wait, without stopping the thread. `error.Canceled` if the request was
+/// cancelled while waiting — the same failure `Mutex.lock` has, and it maps
+/// to a 503 already.
+///
+/// Outside a fiber this really does sleep, rather than returning at once,
+/// so a test measuring a timeout still measures one.
+pub fn sleep(ms: u64) error{Canceled}!void {
+    return zio.sleep(.fromMilliseconds(ms));
+}
+
 // ---- the per-request slot (see ADR 0007) ----
 //
 // zio runs each connection in its own fiber, and many fibers share one OS

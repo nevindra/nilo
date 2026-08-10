@@ -58,6 +58,10 @@ _Avoid_: dependency, state, context value, DI container
 A piece of work that runs before and after a handler, operates at the Ctx layer, and produces no value for the handler.
 _Avoid_: filter, interceptor, hook, guard
 
+**Blocking**:
+Waiting on the operating system from inside a handler — a database driver, a file, a call out to another service. Many requests share one OS thread, so doing it directly stops all of them; `zfast.blocking` hands the call to a pool of real threads instead, and only the one request waits.
+_Avoid_: offload, thread pool, async, await
+
 **Fail function**:
 A function callable from anywhere to stop a request with a given status and message, without having to hold a Ctx.
 _Avoid_: abort, throw, bail

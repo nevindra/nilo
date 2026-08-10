@@ -74,6 +74,16 @@ The benchmark script has lived in the repo since stage 1, even unrun in anger, s
 - **`address` was IPv4 only** — `parseIp4`, so `"::1"` was refused by a message that did not mention IPv6 existed. Now `parseIp`.
 - **`Ctx` was undocumented.** The README called it "the way out when you need full control" without once saying what it could do, so the first guess at a method name was a compile error. Its surface is a table in the README now — and the two things it cannot do, streaming a response and a body over 1 MB, are written down as limits rather than left to be discovered.
 
+8. ~~**A third pass, from the outside, reading the docs as instructions.**~~ *Done.* Stage 6 found what writing handlers exposes and stage 7 what running them exposes. This one followed the README literally — copying each snippet into a fresh project and compiling it — and found that the documentation had drifted from the code in places where the code was right.
+
+- **A handler that waits stalls every other request on its thread, and nothing said so.** The largest gap in v1, and the only one on this list that is a design hole rather than a wrong sentence. Measured at 1.7 seconds of latency inflicted on a request that had nothing to wait for. `zfast.blocking` and `zfast.sleep` are the way out, the README states the general rule, and the reasoning is in [ADR 0014](./adr/0014-handlers-must-not-block-the-thread.md). It had been hiding behind ADR 0011, which described the mutex instance of it correctly and left the rule itself unwritten.
+- **The README and all three examples described the two root-file lines backwards**, saying `std_options` was what kept `std.log` off the event loop when it is `std_options_debug_io`. The startup warnings stage 6 added had it right, so the framework was contradicting its own documentation — and the docs are what people follow.
+- **The README's timing middleware could not compile.** It used `std.time.milliTimestamp`, which Zig 0.16 does not have. The Engine's monotonic clock was in the Bulkhead but not exported, so there was no way to write a timing middleware at all. Now `zfast.monotonicNanos`.
+- **The README's shutdown example failed at startup.** `fn quit(app: *zfast.App)` is shown as an ordinary handler, and it is — but `*zfast.App` is a Service like any other and the example never called `provide`. Copying it verbatim got `service *app.App was never registered`.
+- **A duplicate route said its piece and then printed a stack trace anyway.** Stage 7 fixed exactly this for `listen()` and missed `app.get`, which returned `error.DuplicateRoute` into the user's `try`. Now it stops the process the way `listen()` does, with `tryRoute` for a caller that wants the value.
+- **A 204 and a 304 both carried `Content-Length: 0`.** Forbidden outright on a 204 (RFC 9112 §6.2), and on a 304 it announces that the resource the client already holds is empty. Both statuses are now framed as what they are: responses that end at the blank line.
+- **`std.log.info("{s}", .{c.path()})` — the first thing anybody writes — was a compile error from inside `std.Io.Writer`**, naming neither zfast nor the fix. `Str` has a `format` method now, so `{f}` works.
+
 ## Risks
 
 | Risk | How it is handled |

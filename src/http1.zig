@@ -333,6 +333,17 @@ pub fn staticResponse(
     );
 }
 
+/// A status defined to carry no body at all, whatever the handler passed.
+///
+/// These are not "a response that happens to be empty" — RFC 9112 §6.3 ends
+/// them at the blank line regardless of what the head says, so writing
+/// `Content-Length: 0` is not a harmless nicety. On a 204 it is forbidden
+/// outright (§6.2); on a 304 it is worse than that, because it announces
+/// that the resource the client already holds is empty.
+pub fn bodyless(status: u16) bool {
+    return status == 204 or status == 304 or (status >= 100 and status < 200);
+}
+
 /// The cold path, for responses whose contents are only known at runtime.
 /// `extra` are headers a handler or middleware added; the framework's own
 /// three go out first and `extra` may not repeat them.
@@ -346,7 +357,10 @@ pub fn writeResponse(
     extra: []const Header,
 ) !void {
     try writeHead(out, status, phrase, content_type, body.len, keep_alive, extra);
-    try out.writeAll(body);
+    // A body under a bodyless status would be read as the start of the next
+    // request on this connection, which is how a response-splitting bug
+    // begins. The head already said there is none.
+    if (!bodyless(status)) try out.writeAll(body);
     try out.flush();
 }
 
@@ -394,10 +408,18 @@ fn writeHead(
     extra: []const Header,
 ) !void {
     try writeStatusLine(out, status, phrase);
-    try out.print(
-        "Content-Type: {s}\r\nContent-Length: {d}\r\nConnection: {s}\r\n",
-        .{ content_type, body_len, if (keep_alive) "keep-alive" else "close" },
-    );
+    if (bodyless(status)) {
+        // No Content-Length: see `bodyless`. Content-Type still goes out on
+        // a 304, which is describing a representation the client already
+        // has, but not on a 204, where there is no representation at all.
+        if (status == 304) try out.print("Content-Type: {s}\r\n", .{content_type});
+        try out.print("Connection: {s}\r\n", .{if (keep_alive) "keep-alive" else "close"});
+    } else {
+        try out.print(
+            "Content-Type: {s}\r\nContent-Length: {d}\r\nConnection: {s}\r\n",
+            .{ content_type, body_len, if (keep_alive) "keep-alive" else "close" },
+        );
+    }
     for (extra) |h| try out.print("{s}: {s}\r\n", .{ h.name, h.value });
     try out.writeAll("\r\n");
 }
@@ -558,6 +580,42 @@ test "writeResponseHeadOnly matches writeResponse's head but sends no body" {
     try writeResponseHeadOnly(&head, 200, "OK", "text/plain", "hello\n".len, true, &.{});
 
     try testing.expectEqualStrings(full.buffered()[0 .. full.buffered().len - "hello\n".len], head.buffered());
+}
+
+test "a 204 carries neither Content-Length nor Content-Type" {
+    var buf: [256]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buf);
+    try writeResponse(&out, 204, "No Content", "text/plain", "", true, &.{
+        .{ .name = "Allow", .value = "GET, HEAD" },
+    });
+    try testing.expectEqualStrings(
+        "HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\nAllow: GET, HEAD\r\n\r\n",
+        out.buffered(),
+    );
+}
+
+test "a 304 keeps its Content-Type but drops the Content-Length" {
+    var buf: [256]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buf);
+    try writeResponse(&out, 304, "Not Modified", "text/css; charset=utf-8", "", true, &.{
+        .{ .name = "ETag", .value = "\"abc\"" },
+    });
+    try testing.expectEqualStrings(
+        "HTTP/1.1 304 Not Modified\r\nContent-Type: text/css; charset=utf-8\r\n" ++
+            "Connection: keep-alive\r\nETag: \"abc\"\r\n\r\n",
+        out.buffered(),
+    );
+}
+
+test "a body handed to a bodyless status is dropped rather than framed wrong" {
+    // Nothing in zfast does this, but a handler reaching for `c.send(204, …)`
+    // with contents would otherwise leave bytes on the connection that the
+    // next request would be read out of.
+    var buf: [256]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buf);
+    try writeResponse(&out, 204, "No Content", "text/plain", "leftovers", true, &.{});
+    try testing.expect(std.mem.endsWith(u8, out.buffered(), "\r\n\r\n"));
+    try testing.expect(std.mem.indexOf(u8, out.buffered(), "leftovers") == null);
 }
 
 test "extra headers go out after the framework's own" {

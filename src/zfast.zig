@@ -7,8 +7,16 @@ pub const Str = @import("str.zig").Str;
 pub const Method = @import("http1.zig").Method;
 pub const Options = @import("bulkhead.zig").Options;
 
-/// Wire this into your root file so `std.log` does not block the event
-/// loop: `pub const std_options_debug_io = zfast.debug_io;`
+/// One of the two root-file lines, and the one that keeps `std.log` from
+/// blocking the event loop:
+///
+/// ```zig
+/// pub const std_options_debug_io = zfast.debug_io;
+/// ```
+///
+/// Note which is which — `debug_io` goes into `std_options_debug_io`, and
+/// `std_options` below goes into `std_options`. The two are easy to write
+/// the wrong way round, and each fixes a different symptom.
 ///
 /// `listen()` says so at startup if it is missing, because the symptom
 /// otherwise is a server that is merely slow.
@@ -49,6 +57,32 @@ pub const std_options: std.Options = .{
 /// ```
 pub const Mutex = @import("bulkhead.zig").Mutex;
 
+/// Run a blocking call without stopping the thread it is on.
+///
+/// Many requests share one OS thread, so a handler that blocks stops all of
+/// them — a database driver, `std.fs`, `std.http.Client`, anything that
+/// waits on a syscall. Hand it to this instead and only the one request
+/// waits (ADR 0014):
+///
+/// ```zig
+/// fn getUser(db: *Db, id: u32) !User {
+///     return zfast.blocking(Db.query, .{ db, id });
+/// }
+/// ```
+///
+/// The return value is whatever the function returns, errors included. It
+/// allocates nothing, and outside a running server it simply calls the
+/// function — so a handler using it is still testable as an ordinary
+/// function (ADR 0003).
+pub const blocking = @import("bulkhead.zig").blocking;
+
+/// Wait, without stopping the thread. `std.Thread.sleep` would park every
+/// other request sharing it; this parks only this one.
+///
+/// Fails with `error.Canceled` if the request went away while waiting,
+/// which maps to a 503 the way `Mutex.lock` does.
+pub const sleep = @import("bulkhead.zig").sleep;
+
 /// Fail functions — `fail.notFound("no user {d}", .{id})` and friends,
 /// callable from anywhere (ADR 0005).
 pub const fail = @import("fail.zig");
@@ -71,6 +105,26 @@ pub const Query = @import("typed.zig").Query;
 
 pub const Middleware = @import("middleware.zig").Middleware;
 pub const Next = @import("middleware.zig").Next;
+
+/// A monotonic clock reading in nanoseconds, for measuring how long
+/// something took.
+///
+/// Zig 0.16's `std.time` carries only constants — no `milliTimestamp`, no
+/// `Timer` — and the Engine keeps a clock anyway, so timing a request looks
+/// like this rather than like a syscall of your own:
+///
+/// ```zig
+/// fn timing(c: *zfast.Ctx, next: zfast.Next) !void {
+///     const started = zfast.monotonicNanos();
+///     try next.run(c);
+///     const took_us = (zfast.monotonicNanos() - started) / std.time.ns_per_us;
+///     std.log.info("{f} took {d}µs", .{ c.path(), took_us });
+/// }
+/// ```
+///
+/// Monotonic, so it is the right thing for a duration and the wrong thing
+/// for a date: it counts from an arbitrary point, not from the epoch.
+pub const monotonicNanos = @import("bulkhead.zig").monotonicNanos;
 
 /// Built-in middleware.
 pub const logger = @import("logger.zig");
@@ -120,6 +174,43 @@ test "a Mutex still works with no Engine under it, so guarded handlers stay test
     lock.unlock();
     try std.testing.expect(lock.tryLock());
     lock.unlock();
+}
+
+fn doubleOrFail(n: u32) !u32 {
+    if (n == 0) return fail.badRequest("zero is not a number to double", .{});
+    return n * 2;
+}
+
+test "blocking runs the call, keeps its errors, and needs no Engine under it" {
+    // Outside a server this runs inline, which is the property that keeps a
+    // handler using `blocking` testable as an ordinary function (ADR 0003).
+    try std.testing.expectEqual(@as(u32, 42), try blocking(doubleOrFail, .{21}));
+    try std.testing.expectError(error.Failed, blocking(doubleOrFail, .{0}));
+}
+
+test "a fail function inside blocking reaches the request that made the call" {
+    // The half of ADR 0014 that has to be got right: on a real server the
+    // call runs on a pool worker, which is not the fiber the failure box is
+    // bound to, so `blocking` carries the slot across. Here there is no
+    // fiber at all and the fallback stands in for one — enough to hold the
+    // wiring, while the cross-thread half is what the server itself proves.
+    const bulkhead = @import("bulkhead.zig");
+
+    var in_flight = fail.InFlight{};
+    in_flight.startRequest("GET", "/users/9");
+    const previous = bulkhead.setFallbackSlot(&in_flight);
+    defer _ = bulkhead.setFallbackSlot(previous);
+
+    try std.testing.expectError(error.Failed, blocking(doubleOrFail, .{0}));
+    try std.testing.expectEqual(@as(u16, 400), in_flight.failure.status);
+    try std.testing.expectEqualStrings(
+        "zero is not a number to double",
+        in_flight.failure.message(),
+    );
+
+    // And the slot the call was handed is put back, so it cannot leak into
+    // whatever this thread picks up next.
+    try std.testing.expect(bulkhead.slot() == @as(*anyopaque, @ptrCast(&in_flight)));
 }
 
 test {

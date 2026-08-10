@@ -71,6 +71,17 @@ pub const Str = struct {
         return static(try std.json.innerParseFromValue([]const u8, gpa, source, options));
     }
 
+    /// Print the contents: `std.log.info("{f}", .{c.path()})`.
+    ///
+    /// `{s}` cannot be made to work — Zig reserves it for byte slices, and a
+    /// Str is a struct — so it is `{f}` here and `{s}` with `.view()`. Worth
+    /// the four lines anyway: logging the path is the first thing anybody
+    /// writes, and without this the answer was a compile error from inside
+    /// `std.Io.Writer` naming neither zfast nor the fix.
+    pub fn format(self: Str, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        return w.writeAll(self.view());
+    }
+
     /// Borrow the contents. Only valid while the request is still running —
     /// to hold on to it for longer, use `.keep()`.
     pub fn view(self: Str) []const u8 {
@@ -188,6 +199,14 @@ test "keep copies into the caller's memory" {
     defer testing.allocator.free(copy);
     lifetime.end();
     try testing.expectEqualStrings("hello", copy);
+}
+
+test "a Str prints with {f}, and printing a dead one still trips the trap" {
+    var lifetime = Lifetime{};
+    const s = Str.fromRequest("/users/42", &lifetime);
+
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("path=/users/42", try std.fmt.bufPrint(&buf, "path={f}", .{s}));
 }
 
 test "int" {

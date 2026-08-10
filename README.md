@@ -8,11 +8,10 @@ An HTTP framework for Zig, aimed at people coming from Go or Node.
 ```zig
 const zfast = @import("zfast");
 
-// Two lines of wiring, once, in your root file. The first keeps `std.log`
-// from blocking the event loop; the second keeps the engine's debug
-// chatter out of your logs. `listen()` names whichever one is missing.
-pub const std_options = zfast.std_options;
-pub const std_options_debug_io = zfast.debug_io;
+// Two lines of wiring, once, in your root file. `listen()` names whichever
+// one is missing.
+pub const std_options = zfast.std_options; // keeps the engine's debug chatter out of your logs
+pub const std_options_debug_io = zfast.debug_io; // keeps `std.log` off the event loop
 
 fn getUser(db: *Db, id: u32) !User {
     return db.find(id) orelse zfast.fail.notFound("no user {d}", .{id});
@@ -199,9 +198,10 @@ Any other error a handler returns goes through a mapping table — `error.Invali
 
 ```zig
 fn timing(c: *zfast.Ctx, next: zfast.Next) !void {
-    const started = std.time.milliTimestamp();
+    const started = zfast.monotonicNanos();
     try next.run(c);
-    std.log.info("{s} took {d}ms", .{ c.path().view(), std.time.milliTimestamp() - started });
+    const took_us = (zfast.monotonicNanos() - started) / std.time.ns_per_us;
+    std.log.info("{f} took {d}µs", .{ c.path(), took_us });
 }
 
 try app.use(zfast.logger.standard);
@@ -281,6 +281,44 @@ fn addUser(store: *Store, incoming: NewUser) !User {
 
 It still works with no server running, so a handler that takes the lock is still testable as a plain function. See [ADR 0011](./docs/adr/0011-shared-services-need-a-lock-from-the-bulkhead.md).
 
+## Handlers must not block
+
+`zfast.Mutex` is one case of a rule that runs through everything: **many requests share one OS thread, so a handler that waits stops all of them.** Not just the request doing the waiting — every other request that happens to be on that thread, including ones that had no work left to do.
+
+It is easy to measure. One handler sitting in `nanosleep` for two seconds, and a second request asking for a route that does nothing:
+
+```
+$ curl localhost:8787/slow &        # 2 seconds of blocking
+$ curl -w '%{time_total}\n' localhost:8787/                   
+1.701                               # ...paid by a request that had nothing to wait for
+```
+
+The way out is `zfast.blocking`, which hands the call to a pool of real threads and parks only this request:
+
+```zig
+fn getUser(db: *Db, id: u32) !User {
+    return zfast.blocking(Db.query, .{ db, id });   // instead of db.query(id)
+}
+```
+
+Same arguments, same return value, errors included. It allocates nothing, and outside a running server it just calls the function — so the handler is still an ordinary function a test can call.
+
+What needs wrapping is anything that waits on the operating system:
+
+| | |
+|---|---|
+| a database driver — `libpq`, SQLite, a socket you opened yourself | `zfast.blocking` |
+| `std.fs` — reading or writing a file | `zfast.blocking` |
+| `std.http.Client`, or any call out to another service | `zfast.blocking` |
+| a `std.Thread.Mutex`, semaphore, or channel from `std` | `zfast.Mutex` |
+| sleeping, backing off, waiting out a rate limit | `try zfast.sleep(ms)` |
+
+Pure computation does not need it — parsing, JSON, a hash, a loop over a slice. Those are using the thread, not waiting on it. A *long* computation is a different problem, and `zfast.blocking` handles that one too.
+
+`zfast.sleep` fails with `error.Canceled` if the request went away while waiting, the same way `Mutex.lock` does, and that maps to a 503 already.
+
+Nothing forces any of this — Zig has no way to mark a function as blocking, so a handler that calls the driver directly still compiles and still works. It just takes the rest of its thread down with it under load. See [ADR 0014](./docs/adr/0014-handlers-must-not-block-the-thread.md).
+
 ## A note on panics
 
 Zig cannot recover from a panic: an integer overflow or an out-of-bounds index takes the whole process down, every in-flight connection with it. There is no `recover` middleware because there cannot be one — see [ADR 0008](./docs/adr/0008-no-recover-middleware.md).
@@ -329,13 +367,16 @@ What happens in between is the part that matters for a deploy. The server stops 
 
 A handler that runs past `.shutdown_grace_ms` (10 seconds by default) is cut off, with a line in the log saying how many were. Pressing Ctrl-C a second time skips the waiting entirely.
 
-`app.shutdown()` is safe from any thread and from inside a handler, so an admin endpoint that stops the server is an ordinary handler:
+`app.shutdown()` is safe from any thread and from inside a handler, so an admin endpoint that stops the server is an ordinary handler. The App is a service like any other, so hand it to itself first:
 
 ```zig
 fn quit(app: *zfast.App) []const u8 {
     app.shutdown();
     return "going down\n";
 }
+
+try app.provide(&app);          // …or `*zfast.App was never registered` at startup
+try app.post("/admin/quit", quit);
 ```
 
 ## Tuning

@@ -25,10 +25,16 @@
 //!   Service with mutable state needs one; and `std.Thread.Mutex` is the
 //!   wrong tool, because blocking the thread also stops every other fiber
 //!   sharing it — including, possibly, the one holding the lock.
+//! - `blocking`/`sleep` — the general form of that same problem. A handler
+//!   that calls anything blocking stops every other request sharing its
+//!   thread, and the Engine is the only layer that knows how to wait
+//!   without doing that (ADR 0014).
 //!
 //! The Reader/Writer handed to the handler are plain std types
 //! (`*std.Io.Reader`, `*std.Io.Writer`), so the HTTP layer has no idea
 //! which Engine is behind them.
+
+const std = @import("std");
 
 const engine = @import("engine/zio.zig");
 
@@ -47,6 +53,33 @@ pub const bindSlot = engine.bindSlot;
 pub const unbindSlot = engine.unbindSlot;
 pub const monotonicNanos = engine.monotonicNanos;
 pub const Mutex = engine.Mutex;
+pub const sleep = engine.sleep;
+
+/// Run a blocking call on the Engine's thread pool, parking this fiber
+/// until it comes back (ADR 0014).
+///
+/// The slot travels with it. Without that, a fail function called inside
+/// the blocking call would find no request — the worker is a plain thread,
+/// not the fiber the slot is bound to — and `fail.notFound(…)` inside a
+/// database query would quietly become a 500 instead of a 404. Carrying it
+/// is safe because this is a hand-off, not sharing: the fiber is parked for
+/// exactly as long as the worker is running, so only one of them is ever
+/// looking at the InFlight.
+pub fn blocking(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) ReturnType(func) {
+    const Args = @TypeOf(args);
+    const Carrier = struct {
+        fn run(carried: ?*anyopaque, inner: Args) ReturnType(func) {
+            const previous = setFallbackSlot(carried);
+            defer _ = setFallbackSlot(previous);
+            return @call(.auto, func, inner);
+        }
+    };
+    return engine.blocking(Carrier.run, .{ slot(), args });
+}
+
+fn ReturnType(comptime func: anytype) type {
+    return @typeInfo(@TypeOf(func)).@"fn".return_type orelse void;
+}
 
 /// A fallback for use outside the Engine: unit tests call App directly,
 /// with no fiber, so `engine.slot()` is always null there. On a real

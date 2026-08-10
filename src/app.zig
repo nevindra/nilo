@@ -156,7 +156,30 @@ pub const App = struct {
     /// handler has — `fn (*Ctx) !void` or a typed handler — the
     /// compile-time engine stitches it into a Ctx handler, so there is
     /// only ever one request path.
+    ///
+    /// A route that collides with one already registered says so in one
+    /// line and stops the process, for the same reason `listen()` does:
+    /// letting the error travel back to `main` prints a stack trace through
+    /// zfast's own files on top of the answer, and which file inside the
+    /// framework noticed the collision is not the user's problem (ADR
+    /// 0002). `tryRoute` is the same call with the error as a value.
     pub fn route(
+        self: *App,
+        method: http1.Method,
+        comptime pattern: []const u8,
+        comptime handler: anytype,
+    ) !void {
+        self.tryRoute(method, pattern, handler) catch |err| {
+            if (err == error.DuplicateRoute) std.process.exit(1);
+            return err;
+        };
+    }
+
+    /// `route`, for a caller that would rather handle a collision than have
+    /// the process stopped under it — a test, or a program building its
+    /// routes from a list. The one-line explanation still goes to the log;
+    /// what changes is that the error comes back as a value.
+    pub fn tryRoute(
         self: *App,
         method: http1.Method,
         comptime pattern: []const u8,
@@ -1393,12 +1416,19 @@ test "the same route registered twice is refused, naming the one already there" 
     defer app.deinit();
     try app.get("/users/:id", getUser);
 
-    // The message goes to std.log.err, which the test runner counts as a
-    // failure — so what is checked here is the refusal itself. The wording
-    // lives in `App.route`, and the shape rule is covered in router.zig.
+    // Neither form can be called here: `app.get` stops the process the way
+    // `listen()` does, and `tryRoute` reaches the same `std.log.err`, which
+    // Zig's test runner counts as a failed test whatever `logFn` says. So
+    // what is checked is the detection the refusal is built on. The wording
+    // lives in `App.tryRoute`, and the shape rule in router.zig.
     try testing.expect(app.router.conflicting(.GET, "/users/:name") != null);
     try testing.expect(app.router.conflicting(.GET, "/users/me") == null);
     try testing.expectEqual(@as(usize, 1), app.router.routes.items.len);
+
+    // A route that does not collide still goes in, so the check above is
+    // not simply refusing everything.
+    try app.tryRoute(.GET, "/users/me", testQuiet);
+    try testing.expectEqual(@as(usize, 2), app.router.routes.items.len);
 }
 
 fn greet(name: Str) Str {

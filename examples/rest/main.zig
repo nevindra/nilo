@@ -16,11 +16,10 @@ const std = @import("std");
 const zfast = @import("zfast");
 const fail = zfast.fail;
 
-// The two lines every zfast root file wants: one keeps `std.log` from
-// blocking the event loop, the other keeps the Engine's debug chatter out
-// of your logs. `listen()` says so at startup if either is missing.
-pub const std_options = zfast.std_options;
-pub const std_options_debug_io = zfast.debug_io;
+// The two lines every zfast root file wants. `listen()` says so at startup
+// if either is missing.
+pub const std_options = zfast.std_options; // keeps the Engine's debug chatter out of your logs
+pub const std_options_debug_io = zfast.debug_io; // keeps `std.log` from blocking the event loop
 pub const panic = zfast.panic;
 
 const User = struct {
