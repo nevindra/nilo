@@ -65,6 +65,34 @@ pub const App = struct {
         self.router.deinit();
     }
 
+    /// Everything registered through the returned value sits under
+    /// `prefix` — routes, middleware, static files and further groups
+    /// (ADR 0015).
+    ///
+    /// ```zig
+    /// const api = app.group("/api/v1");
+    /// try api.use(requireToken);            // only /api/v1/…
+    /// try api.get("/users/:id", getUser);   // → /api/v1/users/:id
+    /// ```
+    ///
+    /// It is also how a plugin is written, because a plugin is nothing more
+    /// than a function that takes one of these:
+    ///
+    /// ```zig
+    /// fn health(g: anytype) !void {
+    ///     try g.get("/healthz", ok);
+    /// }
+    ///
+    /// try health(app.group("/internal"));
+    /// ```
+    ///
+    /// The prefix is compile-time text, so the pattern the route is
+    /// registered under is one literal — the same thing you would have
+    /// typed, and the same thing every error message quotes back at you.
+    pub fn group(self: *App, comptime prefix: []const u8) Group(prefix) {
+        return .{ .app = self };
+    }
+
     /// Add a middleware that runs on every route.
     ///
     /// Order against route registration does not matter — chains are
@@ -502,6 +530,166 @@ pub const App = struct {
         return null;
     }
 };
+
+/// One prefix and everything registered beneath it — what `app.group()`
+/// hands back (ADR 0015).
+///
+/// The prefix is a compile-time parameter rather than a field, because the
+/// route patterns have to be joined while compiling: `typed.wrap` reads the
+/// pattern to work out what the handler's arguments mean, and a pattern
+/// assembled at runtime would arrive too late for that.
+///
+/// Every method here forwards to the same one on `App` with the prefix
+/// already on the front, so a group adds no layer to the request path and
+/// nothing to `App`'s state. It is a way of typing less that disappears
+/// entirely by the time the server runs.
+pub fn Group(comptime prefix: []const u8) type {
+    comptime checkPrefix(prefix);
+
+    return struct {
+        const Self = @This();
+
+        app: *App,
+
+        /// A group inside this one. `app.group("/api").group("/v1")` and
+        /// `app.group("/api/v1")` are the same thing.
+        pub fn group(self: Self, comptime sub: []const u8) Group(prefix ++ sub) {
+            return .{ .app = self.app };
+        }
+
+        /// Middleware on everything in this group — `app.useOn(prefix, …)`,
+        /// without repeating the prefix.
+        pub fn use(self: Self, middleware: mw.Middleware) !void {
+            if (prefix.len == 0) return self.app.use(middleware);
+            return self.app.useOn(prefix, middleware);
+        }
+
+        /// Middleware on part of this group, `sub` being relative to it.
+        pub fn useOn(self: Self, comptime sub: []const u8, middleware: mw.Middleware) !void {
+            const full = comptime joined(prefix, sub);
+            if (full.len == 0) return self.app.use(middleware);
+            return self.app.useOn(full, middleware);
+        }
+
+        /// A service. Groups do not scope services — a `*Db` is a `*Db` to
+        /// the whole App (ADR 0006) — but a plugin that brings its own has
+        /// to be able to register it without being handed the App as well.
+        pub fn provide(self: Self, ptr: anytype) !void {
+            return self.app.provide(ptr);
+        }
+
+        pub fn get(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
+            return self.app.get(comptime joined(prefix, pattern), handler);
+        }
+
+        pub fn post(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
+            return self.app.post(comptime joined(prefix, pattern), handler);
+        }
+
+        pub fn put(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
+            return self.app.put(comptime joined(prefix, pattern), handler);
+        }
+
+        pub fn delete(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
+            return self.app.delete(comptime joined(prefix, pattern), handler);
+        }
+
+        pub fn patch(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
+            return self.app.patch(comptime joined(prefix, pattern), handler);
+        }
+
+        pub fn head(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
+            return self.app.head(comptime joined(prefix, pattern), handler);
+        }
+
+        pub fn options(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
+            return self.app.options(comptime joined(prefix, pattern), handler);
+        }
+
+        pub fn route(
+            self: Self,
+            method: http1.Method,
+            comptime pattern: []const u8,
+            comptime handler: anytype,
+        ) !void {
+            return self.app.route(method, comptime joined(prefix, pattern), handler);
+        }
+
+        pub fn tryRoute(
+            self: Self,
+            method: http1.Method,
+            comptime pattern: []const u8,
+            comptime handler: anytype,
+        ) !void {
+            return self.app.tryRoute(method, comptime joined(prefix, pattern), handler);
+        }
+
+        pub fn static(self: Self, comptime url_prefix: []const u8, dir_path: []const u8) !void {
+            return self.app.static(comptime joined(prefix, url_prefix), dir_path);
+        }
+
+        pub fn staticWith(
+            self: Self,
+            comptime url_prefix: []const u8,
+            dir_path: []const u8,
+            opts: static_mod.Options,
+        ) !void {
+            return self.app.staticWith(comptime joined(prefix, url_prefix), dir_path, opts);
+        }
+    };
+}
+
+/// A group prefix is literal text with a leading slash and no trailing one.
+fn checkPrefix(comptime prefix: []const u8) void {
+    comptime {
+        // The root group, which is what a plugin mounted at the top gets.
+        if (prefix.len == 0) return;
+
+        if (prefix[0] != '/') @compileError(
+            "zfast: the group prefix \"" ++ prefix ++ "\" does not start with a slash.\n" ++
+                "  Write `app.group(\"/" ++ prefix ++ "\")` — a prefix is the front of a path, " ++
+                "and a path always begins with one.",
+        );
+        if (prefix[prefix.len - 1] == '/') @compileError(
+            "zfast: the group prefix \"" ++ prefix ++ "\" ends with a slash.\n" ++
+                "  Drop it: `app.group(\"" ++ prefix[0 .. prefix.len - 1] ++ "\")`. The patterns " ++
+                "registered inside bring their own leading slash, and two would make " ++
+                "\"" ++ prefix ++ "/users\".",
+        );
+        if (std.mem.indexOfAny(u8, prefix, ":*") != null) @compileError(
+            "zfast: the group prefix \"" ++ prefix ++ "\" has a `:` or a `*` in it, and a group " ++
+                "prefix is literal text.\n" ++
+                "  The reason is `use`: middleware on a group is scoped by comparing the front of " ++
+                "the request path against the prefix, and \"" ++ prefix ++ "\" is not the front " ++
+                "of any real path — so every middleware on this group would quietly never run.\n" ++
+                "  Put the param in the route patterns instead: " ++
+                "`app.get(\"" ++ prefix ++ "/…\", …)`.",
+        );
+    }
+}
+
+/// `"/api" + "/users/:id"` → `"/api/users/:id"`, and `"/api" + "/"` →
+/// `"/api"` rather than a pattern with a trailing slash in it.
+fn joined(comptime prefix: []const u8, comptime pattern: []const u8) []const u8 {
+    comptime {
+        if (pattern.len == 0) @compileError(
+            "zfast: a route pattern inside the group \"" ++ prefix ++ "\" cannot be empty.\n" ++
+                "  Use \"/\" for the group's own path.",
+        );
+        if (pattern[0] != '/') @compileError(
+            "zfast: the route pattern \"" ++ pattern ++ "\" inside the group \"" ++ prefix ++
+                "\" does not start with a slash.\n" ++
+                "  Patterns inside a group are written the same way as outside one, relative to " ++
+                "the prefix: `\"/" ++ pattern ++ "\"` registers " ++
+                "\"" ++ prefix ++ "/" ++ pattern ++ "\".",
+        );
+        // The group's own path. Joining plainly would give "/api/", which
+        // matches the same requests but reads back wrong in every error
+        // message and in the generated documentation.
+        if (prefix.len > 0 and std.mem.eql(u8, pattern, "/")) return prefix;
+        return prefix ++ pattern;
+    }
+}
 
 /// Step over a body the handler never read, and say whether the
 /// connection is still usable afterwards. A body that cannot be stepped
@@ -2066,6 +2254,167 @@ test "the request path stays inside its allocation budget" {
     // Raising this number needs a reason; lowering it is welcome.
     try testing.expectEqual(@as(usize, 3), counting.allocs);
     try testing.expectEqual(@as(usize, 0), counting.resizes);
+}
+
+// ---- groups and plugins (ADR 0015) ----
+
+/// A plugin: an ordinary function that registers into whatever group it is
+/// handed. Taking `anytype` rather than a named type is what lets the same
+/// function be mounted at any prefix, or at none.
+fn healthPlugin(g: anytype) !void {
+    try g.get("/healthz", plainOk);
+    try g.get("/readyz", plainOk);
+}
+
+test "a group puts its prefix on every route inside it" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+
+    const api = app.group("/api/v1");
+    try api.get("/users", plainOk);
+    try api.post("/users", plainOk);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    try testing.expect(std.mem.startsWith(
+        u8,
+        h.send(&app, "GET /api/v1/users HTTP/1.1\r\n\r\n").response,
+        "HTTP/1.1 200 OK\r\n",
+    ));
+    // And the unprefixed path is not a route, which is the other half of
+    // what "the prefix is on every route" means.
+    try testing.expect(std.mem.startsWith(
+        u8,
+        h.send(&app, "GET /users HTTP/1.1\r\n\r\n").response,
+        "HTTP/1.1 404 Not Found\r\n",
+    ));
+}
+
+test "a group's own path is the prefix, with no trailing slash left on it" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+
+    const api = app.group("/api");
+    try api.get("/", plainOk);
+
+    // Registered as "/api", not "/api/" — the two match the same requests,
+    // but only one of them reads correctly in an error message or in the
+    // generated documentation.
+    try testing.expectEqualStrings("/api", app.router.routes.items[0].pattern);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    try testing.expect(std.mem.startsWith(
+        u8,
+        h.send(&app, "GET /api HTTP/1.1\r\n\r\n").response,
+        "HTTP/1.1 200 OK\r\n",
+    ));
+}
+
+test "use on a group scopes the middleware to the group" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+
+    const api = app.group("/api");
+    try api.use(tagInner);
+    try api.get("/thing", plainOk);
+    try app.get("/health", plainOk);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const inside = h.send(&app, "GET /api/thing HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, inside.response, "X-Inner: yes") != null);
+
+    const outside = h.send(&app, "GET /health HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, outside.response, "X-Inner") == null);
+}
+
+test "groups nest, and nesting is the same as writing the prefix out" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+
+    const v1 = app.group("/api").group("/v1");
+    try v1.get("/users/:id", plainOk);
+
+    try testing.expectEqualStrings("/api/v1/users/:id", app.router.routes.items[0].pattern);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    try testing.expect(std.mem.startsWith(
+        u8,
+        h.send(&app, "GET /api/v1/users/7 HTTP/1.1\r\n\r\n").response,
+        "HTTP/1.1 200 OK\r\n",
+    ));
+}
+
+test "a plugin is a function taking a group, and mounts wherever it is put" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+
+    // The same function, twice, at two prefixes — which is the thing a
+    // group buys that repeating the prefix by hand does not.
+    try healthPlugin(app.group("/internal"));
+    try healthPlugin(app.group("/admin"));
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    for ([_][]const u8{
+        "GET /internal/healthz HTTP/1.1\r\n\r\n",
+        "GET /internal/readyz HTTP/1.1\r\n\r\n",
+        "GET /admin/healthz HTTP/1.1\r\n\r\n",
+        "GET /admin/readyz HTTP/1.1\r\n\r\n",
+    }) |request| {
+        try testing.expect(std.mem.startsWith(
+            u8,
+            h.send(&app, request).response,
+            "HTTP/1.1 200 OK\r\n",
+        ));
+    }
+}
+
+test "a group at the root registers exactly what it was given" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+
+    // What a plugin mounted at the top gets. `use` here has to mean every
+    // route rather than every route under "", which is not a prefix.
+    const root = app.group("");
+    try root.use(tagInner);
+    try healthPlugin(root);
+
+    try testing.expectEqualStrings("/healthz", app.router.routes.items[0].pattern);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /healthz HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "X-Inner: yes") != null);
+}
+
+test "a duplicate route inside a group is still refused, naming the joined path" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+
+    const api = app.group("/api");
+    try api.get("/users/:id", plainOk);
+
+    // Checked through the detection rather than the refusal, for the reason
+    // the test above this one gives: both forms of the refusal reach a
+    // `std.log.err` that Zig's test runner reads as a failure.
+    //
+    // A prefix is not a namespace — it is text on the front — so the
+    // collision is against the joined pattern and nothing else (ADR 0013).
+    try testing.expect(app.router.conflicting(.GET, "/api/users/:name") != null);
+    try testing.expect(app.router.conflicting(.GET, "/users/:id") == null);
 }
 
 // ---- resolved values (ADR 0016) ----

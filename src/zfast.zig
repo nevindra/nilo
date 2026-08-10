@@ -2,6 +2,12 @@
 //! vocabulary is in CONTEXT.md, its design decisions in docs/adr/.
 
 pub const App = @import("app.zig").App;
+
+/// What `app.group("/api/v1")` hands back: one prefix and everything
+/// registered beneath it. Named here so a plugin can spell out the type it
+/// takes instead of using `anytype`.
+pub const Group = @import("app.zig").Group;
+
 pub const Ctx = @import("ctx.zig").Ctx;
 pub const Str = @import("str.zig").Str;
 pub const Method = @import("http1.zig").Method;
