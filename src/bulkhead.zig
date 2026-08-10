@@ -18,6 +18,11 @@
 //! - `monotonicNanos` — a monotonic clock. Zig 0.16's `std.time` carries
 //!   only constants, and the Engine already keeps a clock, so the logger
 //!   asks for it here rather than reaching for a syscall of its own.
+//! - `Mutex` — a lock that parks the unit of work rather than the OS
+//!   thread under it. Handlers run concurrently on several threads, so a
+//!   Service with mutable state needs one; and `std.Thread.Mutex` is the
+//!   wrong tool, because blocking the thread also stops every other fiber
+//!   sharing it — including, possibly, the one holding the lock.
 //!
 //! The Reader/Writer handed to the handler are plain std types
 //! (`*std.Io.Reader`, `*std.Io.Writer`), so the HTTP layer has no idea
@@ -34,6 +39,7 @@ pub const binding_unset = engine.binding_unset;
 pub const bindSlot = engine.bindSlot;
 pub const unbindSlot = engine.unbindSlot;
 pub const monotonicNanos = engine.monotonicNanos;
+pub const Mutex = engine.Mutex;
 
 /// A fallback for use outside the Engine: unit tests call App directly,
 /// with no fiber, so `engine.slot()` is always null there. On a real

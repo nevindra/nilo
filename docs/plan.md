@@ -18,11 +18,12 @@ Worth being honest about from the start: GoFiber is not Go's performance champio
 - Typed handlers on top of the Ctx layer
 - JSON in and out
 - A middleware chain
-- Three built-in middlewares: logger, CORS, static files
+- Two built-in middlewares — logger and CORS — plus static files, which turned out to be a terminal handler rather than a middleware because it needs state ([ADR 0010](./adr/0010-static-files-are-held-in-memory.md))
 - Response headers on `Ctx` — a prerequisite for CORS, see [ADR 0009](./adr/0009-middleware-is-an-onion-of-ctx-functions.md)
 
 **Rejected until v2** — and these rejections matter as much as the acceptances
 
+- Range requests, `sendfile`, and serving a file too big to hold in memory ([ADR 0010](./adr/0010-static-files-are-held-in-memory.md)).
 - A `recover` middleware. It was in this list until stage 4's design work established that Zig cannot recover from a panic at all, and that what people actually want from it has been in the request loop since stage 3. Not deferred — impossible. See [ADR 0008](./adr/0008-no-recover-middleware.md).
 - Route groups. `app.use(prefix, mw)` covers the case that matters; groups only save repeating the prefix.
 - Handing values from middleware to handlers. The concrete gap this leaves is auth resolving a user, and it is the thing a request-scoped value concept has to solve in v2 ([ADR 0009](./adr/0009-middleware-is-an-onion-of-ctx-functions.md)).
@@ -39,10 +40,15 @@ The latest stable release only, on one branch. The users being aimed at download
 1. ~~**A skeleton that runs.**~~ *Done.* Accept connections through zio, parse HTTP/1.1, return "hello". No framework yet. The one goal: get the Bulkhead shaped correctly.
 2. ~~**The `Ctx` layer.**~~ *Done.* Router, params, JSON, the request arena, `Str`. At this point it is usable, benchmarkable, and releasable if it came to that.
 3. ~~**The typed layer.**~~ *Done.* The compile-time engine, matching services by type, fail functions. Decisions born here: [ADR 0006](./adr/0006-services-via-a-runtime-registry.md) and [ADR 0007](./adr/0007-failure-box-bound-to-the-fiber.md).
-4. **Middleware and the built-ins.** *Mostly done.* Designed up front in [ADR 0008](./adr/0008-no-recover-middleware.md) and [ADR 0009](./adr/0009-middleware-is-an-onion-of-ctx-functions.md). Response headers on `Ctx`, the onion chain, `use`/`useOn`, logger, CORS, and the panic handler that names the in-flight request are in. **Static files are the one thing left**, and they are held up on a decision rather than on work — see below.
-5. **Documentation and examples.** For this particular audience, documentation is not a supplement — it is the product.
+4. ~~**Middleware and the built-ins.**~~ *Done.* Designed up front in [ADR 0008](./adr/0008-no-recover-middleware.md) and [ADR 0009](./adr/0009-middleware-is-an-onion-of-ctx-functions.md). Response headers on `Ctx`, the onion chain, `use`/`useOn`, logger, CORS, and the panic handler that names the in-flight request. Static files came last and needed a decision of their own: [ADR 0010](./adr/0010-static-files-are-held-in-memory.md).
+5. ~~**Documentation and examples.**~~ *Done.* For this particular audience, documentation is not a supplement — it is the product. Three runnable examples under `examples/`, each built and tested by `zig build test` so none of them can rot unnoticed.
 
-Two things in the v1 scope belong to neither stage and are still outstanding: **chunked bodies** (currently refused honestly with a 501) and **percent-decoding** (`/search?q=hello%20world` still reads raw). The second one is small and will embarrass us on day one, so it goes in before stage 5.
+The two v1 items that belonged to no stage are in as well: **chunked bodies** (read, discarded, and rejected with a 400 when the sizes and the stream come apart) and **percent-decoding** of path params and query values.
+
+Two things turned up while writing the examples, which is what examples are for:
+
+- A Service with mutable state is shared across executor threads and had no correct way to be locked. Fixed by adding one item to the Bulkhead: [ADR 0011](./adr/0011-shared-services-need-a-lock-from-the-bulkhead.md).
+- Restarting the server failed with `AddressInUse` every time, because `SO_REUSEADDR` was off. During development that is every restart. Now on by default.
 
 The benchmark script has lived in the repo since stage 1, even unrun in anger, so that when a measuring machine turns up it is one command away instead of a new project.
 
@@ -55,15 +61,16 @@ The benchmark script has lived in the repo since stage 1, even unrun in anger, s
 | The "high performance" claim has nothing behind it yet | No numbers in the README until there is a measuring machine |
 | The `Str` guarantee cannot be complete | The debug-build trap has to exist from day one |
 | `std.json` may not be fast enough, and it sits on the hot path of the chosen metric | A custom serialiser for the small-JSON path is likely needed; measure first |
-| Static files are deeper than they look (range requests, caching, sendfile) | Do it last in v1, or push it to v2 if things get tight |
+| ~~Static files are deeper than they look (range requests, caching, sendfile)~~ *Cleared.* Serving from memory kept v1's version small, and caching came along free with it | Range requests and `sendfile` are v2, and arrive as an addition rather than a rewrite ([ADR 0010](./adr/0010-static-files-are-held-in-memory.md)) |
+| A Service is shared across executor threads, and nothing makes a user notice | `zfast.Mutex` from the Bulkhead, in the README and in the example everyone copies. Nothing forces it — Zig has no ownership tracking to force it with ([ADR 0011](./adr/0011-shared-services-need-a-lock-from-the-bulkhead.md)) |
 | A panic in any handler takes the whole process down, and Go people will assume otherwise | Cannot be fixed in Zig. Say it plainly in the docs, recommend `ReleaseSafe` and a supervisor, and log which request was in flight ([ADR 0008](./adr/0008-no-recover-middleware.md)) |
 
 ## Still open
 
 - **The name.** `zfast` is a working name. The `z-` prefix is crowded in the Zig ecosystem already (`zap`, `zzz`, `zon`, a dozen `zig-*`), so it is easy to confuse. The module name has to be easy to change without touching user code.
 - **Where to measure.** Still nothing. Stage 3 did get run under `wrk` on a shared Linux VM, but only to confirm the server does not fall over and no responses get crossed — a shared machine cannot be used to compare numbers, so none were kept and none went into the README. Until there is a quiet machine, [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md) is not active and every conflict goes to DX.
-- **The router algorithm.** Invisible to users, so there is no DX conflict here — pure work, to be decided with numbers later.
-- **What "static files" means.** Reading a file with `std.fs` blocks the OS thread, and with fibers that stalls every other connection sharing it — which would wreck the p99 metric under exactly the load the metric exists to measure. Doing it properly means adding file IO to the Bulkhead contract, which is a much larger obligation than the slot or the clock: every future Engine would have to provide it. The cheaper alternative is serving from memory (`@embedFile`, or a directory read once at startup), which needs no Bulkhead change, cannot be path-traversed because the file set is fixed, and is faster besides — at the price of not being able to serve a file that does not fit in RAM. Range requests, `ETag`, and `sendfile` are v2 either way.
+- **The router algorithm.** Invisible to users, so there is no DX conflict here — pure work, to be decided with numbers later. The static file lookup is already a binary search; the router is still a linear scan.
+- **Reloading static files without a restart.** For a build-output directory this does not matter, since deployment restarts anyway. For local development it is a real annoyance and wants a watch option in v2.
 
 ## Metrics
 

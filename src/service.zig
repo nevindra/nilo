@@ -78,7 +78,7 @@ pub const Registry = struct {
         }
         try self.entries.append(self.gpa, .{
             .type_name = type_name,
-            .ptr = @constCast(@ptrCast(ptr)),
+            .ptr = @ptrCast(@constCast(ptr)),
             .is_const = info.is_const,
         });
     }

@@ -1,0 +1,53 @@
+:root {
+  color-scheme: light dark;
+  --ink: #16161d;
+  --dim: #6b6b76;
+}
+
+body {
+  margin: 0;
+  font: 16px/1.6 ui-sans-serif, system-ui, sans-serif;
+  color: var(--ink);
+}
+
+main {
+  max-width: 34rem;
+  margin: 4rem auto;
+  padding: 0 1.25rem;
+}
+
+h1 {
+  font-size: 1.5rem;
+  letter-spacing: -0.01em;
+}
+
+.hint {
+  color: var(--dim);
+  font-size: 0.9rem;
+}
+
+ul {
+  list-style: none;
+  padding: 0;
+}
+
+li {
+  padding: 0.6rem 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--dim) 25%, transparent);
+}
+
+li.done {
+  color: var(--dim);
+  text-decoration: line-through;
+}
+
+li.error {
+  color: #b3261e;
+}
+
+code {
+  font-size: 0.85em;
+  background: color-mix(in srgb, var(--dim) 15%, transparent);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}

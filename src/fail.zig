@@ -145,6 +145,7 @@ pub fn statusFor(err: anyerror) u16 {
 
         error.NotFound, error.FileNotFound => 404,
 
+        error.BadChunk,
         error.InvalidCharacter,
         error.Overflow,
         error.InvalidNumber,
@@ -162,7 +163,6 @@ pub fn statusFor(err: anyerror) u16 {
         error.Forbidden => 403,
         error.Conflict => 409,
         error.BodyTooLarge => 413,
-        error.ChunkedNotSupported => 501,
         error.Timeout, error.Canceled => 503,
 
         else => 500,

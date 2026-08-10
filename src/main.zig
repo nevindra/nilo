@@ -1,17 +1,14 @@
-//! The stage-3 example App (the typed layer) — and the benchmark target
-//! at the same time: a routed GET with a path param returning ~1KB of
-//! JSON over keep-alive (the primary metric in docs/plan.md).
+//! The benchmark target: a routed GET with a path param returning ~1KB of
+//! JSON over keep-alive, which is the primary metric in docs/plan.md.
 //!
-//! Note the shape of the handlers: ordinary functions taking a service
-//! and a path param, returning data. No `Ctx` except where full control
-//! is genuinely needed.
+//! Deliberately minimal — anything installed here would end up being
+//! measured. The examples worth reading are in `examples/`.
 
 const std = @import("std");
-const zfast = @import("zfast.zig");
-const bulkhead = @import("bulkhead.zig");
+const zfast = @import("zfast");
 const fail = zfast.fail;
 
-pub const std_options_debug_io = bulkhead.debug_io;
+pub const std_options_debug_io = zfast.debug_io;
 
 /// A panic still takes the process down — Zig cannot recover (ADR 0008) —
 /// but this makes it say which request was being served when it happened.
@@ -79,8 +76,4 @@ test "getUser" {
     var db = Db{ .max_id = 10 };
     try std.testing.expectEqual(@as(u32, 7), (try getUser(&db, 7)).id);
     try std.testing.expectError(error.Failed, getUser(&db, 99));
-}
-
-test {
-    _ = @import("zfast.zig");
 }

@@ -289,12 +289,18 @@ fn paramValue(comptime P: type, c: *const Ctx, comptime name: []const u8) !P {
             return fail.badRequest(":{s} has to be a whole number, not \"{s}\"", .{ name, text }),
         .float => std.fmt.parseFloat(P, text) catch
             return fail.badRequest(":{s} has to be a number, not \"{s}\"", .{ name, text }),
-        .bool => if (std.mem.eql(u8, text, "true")) true else if (std.mem.eql(u8, text, "false")) false else
+        .bool => boolFrom(text) orelse
             return fail.badRequest(":{s} has to be true or false, not \"{s}\"", .{ name, text }),
         .@"enum" => std.meta.stringToEnum(P, text) orelse
             return fail.badRequest(":{s} is not one of the known choices: \"{s}\"", .{ name, text }),
         else => comptime unreachable,
     };
+}
+
+fn boolFrom(text: []const u8) ?bool {
+    if (std.mem.eql(u8, text, "true")) return true;
+    if (std.mem.eql(u8, text, "false")) return false;
+    return null;
 }
 
 fn sendResult(c: *Ctx, result: anytype) !void {

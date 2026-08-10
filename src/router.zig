@@ -55,6 +55,17 @@ pub const Router = struct {
     }
 
     pub fn match(self: *const Router, method: http1.Method, path: []const u8) ?Match {
+        if (self.matchExact(method, path)) |m| return m;
+        // A HEAD nobody registered is answered by the GET route: the head of
+        // a HEAD response has to be what a GET would have sent anyway, and
+        // the body is dropped on the way out (Ctx.send). Making people
+        // register both would mean every health check and every link
+        // checker gets a 404 from a route that plainly exists.
+        if (method == .HEAD) return self.matchExact(.GET, path);
+        return null;
+    }
+
+    fn matchExact(self: *const Router, method: http1.Method, path: []const u8) ?Match {
         for (self.routes.items) |route| {
             if (route.method != method) continue;
             var result = Match{ .handler = route.handler, .chain = route.chain };
@@ -127,6 +138,20 @@ test "path params are captured" {
     try testing.expect(r.match(.GET, "/users") == null);
     try testing.expect(r.match(.GET, "/users/42/posts") == null);
     try testing.expect(r.match(.GET, "/users//posts/9") == null);
+}
+
+test "HEAD falls back to the GET route, and an explicit one still wins" {
+    var r = Router.init(testing.allocator);
+    defer r.deinit();
+    try r.add(.GET, "/page", testHandler);
+
+    try testing.expect(r.match(.HEAD, "/page").?.handler == &testHandler);
+    try testing.expect(r.match(.HEAD, "/absent") == null);
+    // The fallback never reaches for anything but GET.
+    try testing.expect(r.match(.POST, "/page") == null);
+
+    try r.add(.HEAD, "/page", otherHandler);
+    try testing.expect(r.match(.HEAD, "/page").?.handler == &otherHandler);
 }
 
 test "the first matching route wins" {

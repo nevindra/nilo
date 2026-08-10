@@ -1,6 +1,6 @@
-//! App — one self-contained HTTP application: a set of routes and
-//! services (middleware comes in stage 4). It wires the Bulkhead, the
-//! HTTP/1.1 parser, the Router, the request arena, and Ctx into one thing.
+//! App — one self-contained HTTP application: its routes, services,
+//! middleware and static files. It wires the Bulkhead, the HTTP/1.1
+//! parser, the Router, the request arena, and Ctx into one thing.
 //!
 //! `handleRequest` is deliberately separate from the Engine: all it needs
 //! is a `std.Io.Reader`/`Writer`, so every bit of App's HTTP behaviour can
@@ -17,6 +17,7 @@ const typed = @import("typed.zig");
 const fail = @import("fail.zig");
 const mw = @import("middleware.zig");
 const cors = @import("cors.zig");
+const static_mod = @import("static.zig");
 
 const Ctx = ctx_mod.Ctx;
 
@@ -32,6 +33,9 @@ pub const App = struct {
     requirements: std.ArrayList(service_mod.Requirement) = .empty,
     /// Middleware registrations, in the order `use` was called.
     scoped: std.ArrayList(mw.Scoped) = .empty,
+    /// Directories loaded into memory by `static`, searched only when no
+    /// route matched (ADR 0010).
+    static_sets: std.ArrayList(static_mod.Set) = .empty,
 
     pub fn init(gpa: std.mem.Allocator) App {
         return .{
@@ -43,6 +47,8 @@ pub const App = struct {
 
     pub fn deinit(self: *App) void {
         self.freeChains();
+        for (self.static_sets.items) |*s| s.deinit();
+        self.static_sets.deinit(self.gpa);
         self.scoped.deinit(self.gpa);
         self.requirements.deinit(self.gpa);
         self.services.deinit();
@@ -66,6 +72,39 @@ pub const App = struct {
     pub fn useOn(self: *App, prefix: []const u8, middleware: mw.Middleware) !void {
         std.debug.assert(prefix.len > 0 and prefix[0] == '/');
         try self.scoped.append(self.gpa, .{ .prefix = prefix, .middleware = middleware });
+    }
+
+    /// Serve the contents of `dir_path` under `url_prefix`.
+    ///
+    /// The directory is read into memory here and now, before anything is
+    /// being served — nothing touches the disk on the request path (ADR
+    /// 0010). `dir_path` is relative to the working directory the server
+    /// runs in.
+    ///
+    /// ```zig
+    /// try app.static("/", "public");
+    /// ```
+    ///
+    /// Routes win over static files, so an explicit `app.get("/index.html", …)`
+    /// still gets its way.
+    pub fn static(self: *App, url_prefix: []const u8, dir_path: []const u8) !void {
+        try self.staticWith(url_prefix, dir_path, .{});
+    }
+
+    /// `static`, with the caching, index and single-page-app options spelled
+    /// out. See `static.Options`.
+    pub fn staticWith(
+        self: *App,
+        url_prefix: []const u8,
+        dir_path: []const u8,
+        opts: static_mod.Options,
+    ) !void {
+        const set = try static_mod.load(self.gpa, url_prefix, dir_path, opts);
+        errdefer {
+            var mutable = set;
+            mutable.deinit();
+        }
+        try self.static_sets.append(self.gpa, set);
     }
 
     /// Register a service. `ptr` must outlive the App. Its order relative
@@ -236,6 +275,7 @@ pub const App = struct {
 
         const qmark = std.mem.indexOfScalar(u8, r.target, '?');
         const path = if (qmark) |i| r.target[0..i] else r.target;
+        const raw_query = if (qmark) |i| r.target[i + 1 ..] else "";
 
         // From here on the panic handler can name what was being served
         // (ADR 0008). Both slices live in the request arena.
@@ -249,7 +289,8 @@ pub const App = struct {
             ._out = out,
             ._request = &r,
             ._path = path,
-            ._query = if (qmark) |i| r.target[i + 1 ..] else "",
+            ._query = raw_query,
+            ._query_params = ctx_mod.parseQuery(arena, raw_query) catch return false,
             ._headers = header_list.items,
             ._params = &.{},
             ._services = &self.services,
@@ -261,19 +302,32 @@ pub const App = struct {
         // need them. What changes is only the innermost call (ADR 0009).
         var chain: []const mw.Middleware = &.{};
         var terminal: mw.CtxHandler = notFoundHandler;
-        var unmatched_chain = false;
 
-        if (self.router.match(c.method, path)) |match| {
-            c._params = match.params[0..match.n_params];
+        // Held in a variable of this scope on purpose: `c` borrows the
+        // params out of it, and they have to outlive the branch below.
+        var matched = self.router.match(c.method, path);
+
+        if (matched) |*match| {
+            // Decoded here rather than before matching: `%2F` is a slash of
+            // data, and a router that saw it as a separator would let a
+            // request reach a route it does not name.
+            const params = match.params[0..match.n_params];
+            ctx_mod.decodeParams(arena, params) catch return false;
+            c._params = params;
             chain = match.chain;
             terminal = match.handler;
-        } else if (self.scoped.items.len > 0) {
-            // Nothing precomputed for a path with no route, so this one is
-            // built per request — the 404 path is cold enough to afford it.
-            chain = mw.chainFor(self.gpa, self.scoped.items, path) catch &.{};
-            unmatched_chain = chain.len > 0;
+        } else {
+            // Nothing was precomputed for a path with no route, so the
+            // chain is built here — out of the request arena, which costs
+            // about as much as the pointer to it.
+            if (self.scoped.items.len > 0) {
+                chain = mw.chainFor(arena, self.scoped.items, path) catch &.{};
+            }
+            if (self.findStatic(c.method, path)) |file| {
+                c._static_file = file;
+                terminal = serveStaticFile;
+            }
         }
-        defer if (unmatched_chain) self.gpa.free(chain);
 
         (mw.Next{ .rest = chain, .handler = terminal }).run(&c) catch |err| {
             // A half-sent response cannot be taken back, so the connection
@@ -286,27 +340,71 @@ pub const App = struct {
             // Nothing sent yet: this is a clean failure. A body nobody read
             // still has to be discarded so the connection can be reused —
             // a 404 from a fail function is a normal way to live, not a
-            // reason to drop keep-alive.
-            if (c._body == null) http1.discardBody(in, &r) catch return false;
+            // reason to drop keep-alive. If it cannot be discarded the
+            // answer still goes out; only the connection is given up.
+            const reusable = drain(&c, in, &r);
             sendFailure(&c, failure, err) catch return false;
-            return r.keep_alive;
+            return reusable;
         };
 
         // A body the handler did not read is discarded so the next request
         // on this connection starts at the right byte.
-        if (c._body == null) http1.discardBody(in, &r) catch return false;
+        const reusable = drain(&c, in, &r);
 
         if (!c._sent) {
             sendDirect(&c, 200, "") catch return false;
         }
-        return r.keep_alive;
+        return reusable;
+    }
+
+    /// The static file `path` names, if any set holds one. Only GET and
+    /// HEAD: a POST to a `.css` is a mistake, and answering it with the
+    /// stylesheet would hide that.
+    fn findStatic(self: *const App, method: http1.Method, path: []const u8) ?*const static_mod.File {
+        if (method != .GET and method != .HEAD) return null;
+        for (self.static_sets.items) |*set| {
+            if (set.find(path)) |file| return file;
+        }
+        return null;
     }
 };
+
+/// Step over a body the handler never read, and say whether the
+/// connection is still usable afterwards. A body that cannot be stepped
+/// over — a chunked one whose sizes do not add up — leaves the stream at
+/// an unknown byte, so the connection has to go; the response, though, is
+/// still owed and still sent.
+fn drain(c: *Ctx, in: *std.Io.Reader, r: *const http1.Request) bool {
+    if (!r.keep_alive or c._stream_desynced) return false;
+    if (c._body != null) return true;
+    http1.discardBody(in, r, ctx_mod.max_body) catch return false;
+    return true;
+}
 
 /// The innermost call when no route matched. It is a normal handler so
 /// that middleware wraps a 404 exactly as it wraps anything else.
 fn notFoundHandler(c: *Ctx) anyerror!void {
     try c.sendText(404, "not found\n");
+}
+
+/// Answer with a file loaded at startup. Also a normal handler, so a
+/// static response goes through the same middleware as everything else —
+/// CORS included, which is what an asset served to another origin needs.
+fn serveStaticFile(c: *Ctx) anyerror!void {
+    const file = c._static_file.?;
+
+    try c.setHeader("ETag", file.etag);
+    if (file.cache_control.len > 0) try c.setHeader("Cache-Control", file.cache_control);
+
+    // The ETag was computed when the file was read, so a repeat visitor
+    // costs a comparison and a head — no body, no work.
+    if (c.header("If-None-Match")) |sent| {
+        if (static_mod.etagMatches(sent.view(), file.etag)) {
+            return c.send(304, file.content_type, "");
+        }
+    }
+
+    try c.send(200, file.content_type, file.bytes);
 }
 
 fn sendFinal(out: *std.Io.Writer, response: []const u8) void {
@@ -1041,6 +1139,230 @@ test "CORS with a named origin also sends Vary" {
     try testing.expect(std.mem.indexOf(u8, result.response, "Access-Control-Allow-Origin: https://example.com") != null);
     try testing.expect(std.mem.indexOf(u8, result.response, "Vary: Origin") != null);
     try testing.expect(std.mem.indexOf(u8, result.response, "Access-Control-Allow-Credentials: true") != null);
+}
+
+// ---- stage 5: percent-decoding, chunked bodies, static files ----
+
+fn echoParamAndQuery(c: *Ctx) anyerror!void {
+    var buf: [256]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buf, "{s}|{s}", .{
+        c.param("name").?.view(),
+        if (c.query("q")) |q| q.view() else "-",
+    });
+    try c.sendText(200, text);
+}
+
+test "path params and query values arrive decoded" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/hello/:name", echoParamAndQuery);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const spaced = h.send(&app, "GET /hello/wati%20sari?q=caf%C3%A9+latte HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, spaced.response, "wati sari|café latte"));
+
+    // An encoded slash is one character of data. Had the target been
+    // decoded before matching, this would have been three segments and
+    // would not have matched /hello/:name at all.
+    const slashed = h.send(&app, "GET /hello/a%2Fb HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, slashed.response, "a/b|-"));
+}
+
+fn echoBody(c: *Ctx) anyerror!void {
+    try c.sendText(200, (try c.body()).view());
+}
+
+test "a chunked body reaches the handler and keep-alive survives it" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/echo", echoBody);
+    try app.get("/after", plainOk);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(
+        &app,
+        "POST /echo HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n" ++
+            "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
+    );
+    try testing.expect(std.mem.endsWith(u8, result.response, "hello world"));
+    try testing.expect(result.keep_alive);
+}
+
+test "a chunked body nobody read is still stepped over" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/ignore", testQuiet);
+
+    var h = Harness.init();
+    defer h.deinit();
+    // Two requests down one connection: the second only parses if the
+    // first body was consumed to exactly the right byte.
+    var in = std.Io.Reader.fixed(
+        "POST /ignore HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n" ++
+            "GET /ignore HTTP/1.1\r\n\r\n",
+    );
+    var out = std.Io.Writer.fixed(&h.buf);
+    try testing.expect(app.handleRequest(h.arena.allocator(), &h.lifetime, &h.in_flight, &in, &out));
+
+    const next = try http1.readRequest(&in);
+    try testing.expectEqualStrings("/ignore", next.target);
+}
+
+test "a chunked body whose sizes do not add up gets a 400, not silence" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/echo", echoBody);
+
+    var h = Harness.init();
+    defer h.deinit();
+    // Says 5 bytes, then does not put a CRLF where one has to be.
+    const result = h.send(
+        &app,
+        "POST /echo HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhelloXX\r\n0\r\n\r\n",
+    );
+
+    // The stream is at an unknown byte now, so the connection goes — but
+    // the client is still told why rather than having the door shut on it.
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 400 Bad Request\r\n"));
+    try testing.expect(!result.keep_alive);
+}
+
+test "HEAD with no HEAD route falls back to the GET one" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/page", plainOk);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "HEAD /page HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "Content-Length: 7\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, result.response, "\r\n\r\n")); // no body
+}
+
+/// A directory of real files on disk, written for one test and removed
+/// after it. Returned as a path relative to the working directory, which
+/// is what `app.static` takes.
+const TmpFiles = struct {
+    tmp: std.testing.TmpDir,
+    path: []u8,
+
+    fn init(gpa: std.mem.Allocator, files: []const [2][]const u8) !TmpFiles {
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        errdefer tmp.cleanup();
+        for (files) |entry| {
+            if (std.fs.path.dirname(entry[0])) |sub| try tmp.dir.createDirPath(std.testing.io, sub);
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = entry[0], .data = entry[1] });
+        }
+        return .{
+            .tmp = tmp,
+            .path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path}),
+        };
+    }
+
+    fn deinit(self: *TmpFiles, gpa: std.mem.Allocator) void {
+        gpa.free(self.path);
+        self.tmp.cleanup();
+    }
+};
+
+test "static files: content type, ETag, 304, index and the dotfile that is not served" {
+    var files = try TmpFiles.init(testing.allocator, &.{
+        .{ "index.html", "<h1>home</h1>" },
+        .{ "app.css", "body{}" },
+        .{ "docs/index.html", "<h1>docs</h1>" },
+        .{ ".env", "SECRET=1" },
+    });
+    defer files.deinit(testing.allocator);
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.static("/", files.path);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const css = h.send(&app, "GET /app.css HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, css.response, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(std.mem.indexOf(u8, css.response, "Content-Type: text/css; charset=utf-8") != null);
+    try testing.expect(std.mem.indexOf(u8, css.response, "Cache-Control: public, max-age=3600") != null);
+    try testing.expect(std.mem.endsWith(u8, css.response, "body{}"));
+
+    // A directory path picks up its index.html.
+    const home = h.send(&app, "GET / HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, home.response, "<h1>home</h1>"));
+    const docs = h.send(&app, "GET /docs/ HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, docs.response, "<h1>docs</h1>"));
+
+    // A dotfile that found its way into the directory is not published.
+    const dotfile = h.send(&app, "GET /.env HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, dotfile.response, "HTTP/1.1 404"));
+
+    // The ETag the last response carried, handed back, costs no body.
+    const etag = app.findStatic(.GET, "/app.css").?.etag;
+    var request_buf: [256]u8 = undefined;
+    const conditional = std.fmt.bufPrint(
+        &request_buf,
+        "GET /app.css HTTP/1.1\r\nIf-None-Match: {s}\r\n\r\n",
+        .{etag},
+    ) catch unreachable;
+    const not_modified = h.send(&app, conditional);
+    try testing.expect(std.mem.startsWith(u8, not_modified.response, "HTTP/1.1 304 Not Modified\r\n"));
+    try testing.expect(std.mem.indexOf(u8, not_modified.response, "body{}") == null);
+}
+
+test "static files: routes win, a prefix scopes, and middleware still wraps" {
+    var files = try TmpFiles.init(testing.allocator, &.{
+        .{ "app.js", "console.log(1)" },
+        .{ "index.html", "spa" },
+    });
+    defer files.deinit(testing.allocator);
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(cors.permissive);
+    try app.staticWith("/assets", files.path, .{ .spa_fallback = "index.html" });
+    try app.get("/assets/app.js", plainOk); // deliberately shadows the file
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    // A route beats a file of the same name.
+    const shadowed = h.send(&app, "GET /assets/app.js HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, shadowed.response, "handler"));
+
+    // The SPA fallback catches a deep link under the prefix — and CORS,
+    // registered as ordinary middleware, wraps the static response too.
+    const deep = h.send(&app, "GET /assets/users/42 HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, deep.response, "spa"));
+    try testing.expect(std.mem.indexOf(u8, deep.response, "Access-Control-Allow-Origin: *") != null);
+
+    // Outside the prefix nothing is claimed.
+    const outside = h.send(&app, "GET /users/42 HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, outside.response, "HTTP/1.1 404"));
+}
+
+test "static files: HEAD gives the head, POST is not answered with the file" {
+    var files = try TmpFiles.init(testing.allocator, &.{.{ "logo.svg", "<svg/>" }});
+    defer files.deinit(testing.allocator);
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.static("/", files.path);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const headed = h.send(&app, "HEAD /logo.svg HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, headed.response, "Content-Length: 6\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, headed.response, "\r\n\r\n"));
+
+    const posted = h.send(&app, "POST /logo.svg HTTP/1.1\r\nContent-Length: 0\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, posted.response, "HTTP/1.1 404"));
 }
 
 test "the in-flight request is readable, which is what the panic handler uses" {

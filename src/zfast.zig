@@ -7,6 +7,26 @@ pub const Str = @import("str.zig").Str;
 pub const Method = @import("http1.zig").Method;
 pub const Options = @import("bulkhead.zig").Options;
 
+/// Wire this into your root file so `std.log` does not block the event
+/// loop: `pub const std_options_debug_io = zfast.debug_io;`
+pub const debug_io = @import("bulkhead.zig").debug_io;
+
+/// A lock for a Service that gets written to. Handlers run concurrently on
+/// several OS threads, so shared mutable state needs one — and this is the
+/// one to use rather than `std.Thread.Mutex`, which stops the whole thread
+/// and every other request being served on it.
+///
+/// ```zig
+/// const Store = struct {
+///     lock: zfast.Mutex = .init,
+///     users: std.ArrayList(User) = .empty,
+/// };
+///
+/// try store.lock.lock();
+/// defer store.lock.unlock();
+/// ```
+pub const Mutex = @import("bulkhead.zig").Mutex;
+
 /// Fail functions — `fail.notFound("no user {d}", .{id})` and friends,
 /// callable from anywhere (ADR 0005).
 pub const fail = @import("fail.zig");
@@ -20,6 +40,10 @@ pub const Next = @import("middleware.zig").Next;
 /// Built-in middleware.
 pub const logger = @import("logger.zig");
 pub const cors = @import("cors.zig");
+
+/// Static files, held in memory (ADR 0010). Used through `app.static()`;
+/// the module itself is here for its `Options`.
+pub const static = @import("static.zig");
 
 /// Opt in to a panic message that names the request that was in flight,
 /// by putting this in your root source file:
@@ -54,9 +78,20 @@ fn panicNamingRequest(msg: []const u8, first_trace_addr: ?usize) noreturn {
 
 const std = @import("std");
 
+test "a Mutex still works with no Engine under it, so guarded handlers stay testable" {
+    var lock: Mutex = .init;
+    try lock.lock();
+    try std.testing.expect(!lock.tryLock());
+    lock.unlock();
+    try std.testing.expect(lock.tryLock());
+    lock.unlock();
+}
+
 test {
     _ = @import("str.zig");
+    _ = @import("percent.zig");
     _ = @import("http1.zig");
+    _ = @import("static.zig");
     _ = @import("router.zig");
     _ = @import("fail.zig");
     _ = @import("service.zig");

@@ -2,33 +2,40 @@
 
 An HTTP framework for Zig, aimed at people coming from Go or Node.
 
-> **Status: stage 4 of 5 — middleware, response headers, and the logger and CORS built-ins, on top of the typed layer. Still missing: static file serving, chunked bodies, percent-decoding, and `HEAD` routes have to be registered explicitly rather than falling back to `GET`.**
+> **Status: v1 feature-complete, unreleased.** Routing, typed handlers, JSON, middleware, logger, CORS, static files, chunked bodies. Not yet benchmarked on a quiet machine, so there are no performance claims here.
 > `zfast` is a working name and may change.
 
-## Documents
-
-- [`CONTEXT.md`](./CONTEXT.md) — project vocabulary
-- [`docs/plan.md`](./docs/plan.md) — v1 scope, build order, risks
-- [`docs/adr/`](./docs/adr/) — design decisions and the reasoning behind them
-
-## What it looks like
-
 ```zig
-const fail = zfast.fail;
-
-const User = struct { id: u32, name: zfast.Str };
+const zfast = @import("zfast");
 
 fn getUser(db: *Db, id: u32) !User {
-    return db.find(id) orelse fail.notFound("no user {d}", .{id});
+    return db.find(id) orelse zfast.fail.notFound("no user {d}", .{id});
 }
 
-var app = zfast.App.init(gpa);
-try app.provide(&db);
-try app.get("/users/:id", getUser);
-try app.listen(.{});
+pub fn main() !void {
+    var app = zfast.App.init(gpa);
+    defer app.deinit();
+
+    try app.provide(&db);
+    try app.use(zfast.logger.standard);
+    try app.get("/users/:id", getUser);
+    try app.static("/", "public");
+
+    try app.listen(.{});
+}
 ```
 
-A handler is an ordinary function: it takes only what it needs and returns data. Which means you can test it without starting a server, and without a fake HTTP request.
+Three runnable examples live in [`examples/`](./examples/):
+
+```
+zig build run-hello    # the smallest thing that serves
+zig build run-rest     # a service, JSON in and out, auth middleware
+zig build run-spa      # a single-page app's files next to its API
+```
+
+## Handlers are ordinary functions
+
+A handler takes only what it needs and returns data. Which means you can test it without starting a server, and without a fake HTTP request.
 
 ```zig
 test "getUser" {
@@ -53,6 +60,16 @@ Getting any of this wrong stops the compiler with a message that names the route
 
 When you need full control — streaming, large uploads — the handler simply asks for a `*Ctx`. Both layers are the same layer: the typed one compiles down into `Ctx` calls.
 
+## Errors
+
+`fail.notFound(...)` and friends can be called from anywhere, with no `Ctx` in hand:
+
+```zig
+return db.find(id) orelse fail.notFound("no user {d}", .{id});
+```
+
+Any other error a handler returns goes through a mapping table — `error.InvalidCharacter` is a 400, `error.Timeout` a 503 — and anything unrecognised becomes a 500 whose error name is logged but not sent to the client. Either way the connection stays alive: a 404 is a normal thing to answer, not a reason to hang up.
+
 ## Middleware
 
 ```zig
@@ -70,13 +87,49 @@ try app.useOn("/api", requireToken);
 
 An onion: everything before `next.run(c)` happens on the way in, everything after on the way out. Not calling `next` at all ends the chain, which is all a rejecting auth middleware has to do. Returning an error goes down exactly the same path a failing handler does.
 
-Registration order between `use` and `get` doesn't matter — chains are resolved when `listen()` is called, so middleware registered after a route still applies to it.
+Registration order between `use` and `get` doesn't matter — chains are resolved when `listen()` is called, so middleware registered after a route still applies to it. Middleware also runs when nothing matched, so your logger sees 404s and CORS can answer a preflight for a path that has no route.
+
+## Static files
+
+```zig
+try app.static("/", "public");
+
+try app.staticWith("/assets", "dist", .{
+    .cache_control = "public, max-age=31536000, immutable",
+    .spa_fallback = "index.html",
+});
+```
+
+The directory is read into memory when the server starts, so nothing touches the disk while requests are being served ([ADR 0010](./docs/adr/0010-static-files-are-held-in-memory.md)). Each file gets an ETag at load, so a repeat visit is a 304 with no body. Path traversal isn't possible, because there is no path to resolve — just a name looked up in a fixed list. Dotfiles are skipped unless you ask for them.
+
+`spa_fallback` is what makes a browser reload on `/users/42` reach your client-side router instead of a 404.
+
+The limit: a file that doesn't fit in memory can't be served. Range requests and `sendfile` are v2.
+
+## Services are shared across threads
+
+Handlers run concurrently on several OS threads. A service you only read from is fine as-is. One that gets written to needs a lock — and it needs **`zfast.Mutex`**, not `std.Thread.Mutex`, because that one blocks the whole thread and every other request being served on it:
+
+```zig
+const Store = struct {
+    lock: zfast.Mutex = .init,
+    users: std.ArrayList(User) = .empty,
+};
+
+fn addUser(store: *Store, incoming: NewUser) !User {
+    try store.lock.lock();
+    defer store.lock.unlock();
+    ...
+}
+```
+
+It still works with no server running, so a handler that takes the lock is still testable as a plain function. See [ADR 0011](./docs/adr/0011-shared-services-need-a-lock-from-the-bulkhead.md).
 
 ## A note on panics
 
 Zig cannot recover from a panic: an integer overflow or an out-of-bounds index takes the whole process down, every in-flight connection with it. There is no `recover` middleware because there cannot be one — see [ADR 0008](./docs/adr/0008-no-recover-middleware.md).
 
-Handler *errors* are a different thing and are already handled: they become a response, and the connection stays alive. For the rest, run `ReleaseSafe` in production (in `ReleaseFast` an overflow is undefined behaviour instead of a loud crash) behind a supervisor that restarts. Adding
+Handler *errors* are a different thing and are already handled, as above. For the rest, run `ReleaseSafe` in production (in `ReleaseFast` an overflow is undefined behaviour instead of a loud crash) behind a supervisor that restarts. Adding
 
 ```zig
 pub const panic = zfast.panic;
@@ -87,6 +140,16 @@ to your root file makes the crash say which request caused it:
 ```
 thread 589880 panic: integer overflow (while handling GET /boom/50)
 ```
+
+## What isn't in v1
+
+WebSocket and SSE, TLS, sessions, templates, route groups, auth contents, range requests, and middleware handing values to handlers. Each is listed with its reason in [`docs/plan.md`](./docs/plan.md); the ones that are refusals rather than backlog are in [`docs/adr/`](./docs/adr/).
+
+## Documents
+
+- [`CONTEXT.md`](./CONTEXT.md) — project vocabulary
+- [`docs/plan.md`](./docs/plan.md) — v1 scope, build order, risks
+- [`docs/adr/`](./docs/adr/) — design decisions and the reasoning behind them
 
 ## Principles
 

@@ -12,7 +12,9 @@ const std = @import("std");
 const http1 = @import("http1.zig");
 const router = @import("router.zig");
 const service_mod = @import("service.zig");
+const static_mod = @import("static.zig");
 const str_mod = @import("str.zig");
+const percent = @import("percent.zig");
 const Str = str_mod.Str;
 
 /// The ceiling on a request body read into the arena. A per-App limit
@@ -28,11 +30,21 @@ pub const Ctx = struct {
     _out: *std.Io.Writer,
     _request: *const http1.Request,
     _path: []const u8,
+    /// The query string as it arrived, still encoded. `_query_params` is
+    /// the decoded form and is what `query()` reads.
     _query: []const u8,
+    _query_params: []const router.Param = &.{},
     _headers: []const http1.HeaderIterator.Pair,
     _params: []const router.Param,
     _services: *const service_mod.Registry,
+    /// Set by App when the path names a file in a static set, so the
+    /// terminal handler does not have to look it up a second time.
+    _static_file: ?*const static_mod.File = null,
     _body: ?[]const u8 = null,
+    /// Set when reading the body went wrong in a way that leaves the
+    /// connection at an unknown byte. App reads it and does not reuse the
+    /// connection.
+    _stream_desynced: bool = false,
     _sent: bool = false,
     /// The status actually sent, once something has been. 0 until then.
     _status: u16 = 0,
@@ -53,6 +65,7 @@ pub const Ctx = struct {
     }
 
     /// A path param from the route pattern: `/users/:id` → `param("id")`.
+    /// Percent-decoded, so `/users/wati%20sari` gives `wati sari`.
     pub fn param(self: *const Ctx, name: []const u8) ?Str {
         for (self._params) |p| {
             if (std.mem.eql(u8, p.name, name)) return Str.fromRequest(p.value, self._lifetime);
@@ -60,16 +73,12 @@ pub const Ctx = struct {
         return null;
     }
 
-    /// A query param: `/search?word=zig` → `query("word")`.
-    /// Note: percent-decoding is not in yet.
+    /// A query param, percent-decoded: `/search?q=hello%20world` →
+    /// `query("q")` is `hello world`. A `+` counts as a space, the way an
+    /// HTML form encodes one.
     pub fn query(self: *const Ctx, name: []const u8) ?Str {
-        var pairs = std.mem.splitScalar(u8, self._query, '&');
-        while (pairs.next()) |p| {
-            const equals = std.mem.indexOfScalar(u8, p, '=') orelse p.len;
-            if (std.mem.eql(u8, p[0..equals], name)) {
-                const value = if (equals < p.len) p[equals + 1 ..] else "";
-                return Str.fromRequest(value, self._lifetime);
-            }
+        for (self._query_params) |p| {
+            if (std.mem.eql(u8, p.name, name)) return Str.fromRequest(p.value, self._lifetime);
         }
         return null;
     }
@@ -82,14 +91,27 @@ pub const Ctx = struct {
         return null;
     }
 
-    /// The whole request body, read once into the request arena.
+    /// The whole request body, read once into the request arena. Chunked
+    /// and Content-Length look the same from here — the handler asks for
+    /// the body, not for the way it arrived.
     pub fn body(self: *Ctx) !Str {
         if (self._body == null) {
-            if (self._request.chunked) return error.ChunkedNotSupported;
-            if (self._request.content_length > max_body) return error.BodyTooLarge;
-            const b = try self._arena.alloc(u8, @intCast(self._request.content_length));
-            try self._in.readSliceAll(b);
-            self._body = b;
+            if (self._request.chunked) {
+                self._body = http1.readChunkedBody(self._in, self._arena, max_body) catch |err| {
+                    // The chunk sizes and the stream have come apart, so
+                    // where this body ends is now a guess. Reading on and
+                    // hoping to land on the next request is exactly how a
+                    // smuggled request gets through — even when the bytes
+                    // happen to line up, which they sometimes will.
+                    self._stream_desynced = true;
+                    return err;
+                };
+            } else {
+                if (self._request.content_length > max_body) return error.BodyTooLarge;
+                const b = try self._arena.alloc(u8, @intCast(self._request.content_length));
+                try self._in.readSliceAll(b);
+                self._body = b;
+            }
         }
         return Str.fromRequest(self._body.?, self._lifetime);
     }
@@ -170,3 +192,57 @@ pub const Ctx = struct {
         try self.send(status, "application/json", b);
     }
 };
+
+/// Split a query string into decoded name/value pairs, in the request
+/// arena. Called once per request that has one; a request without a `?`
+/// never gets here and pays nothing.
+///
+/// Splitting happens before decoding, so a `%26` inside a value stays an
+/// `&` of data instead of becoming a pair separator.
+pub fn parseQuery(arena: std.mem.Allocator, raw: []const u8) ![]const router.Param {
+    if (raw.len == 0) return &.{};
+
+    var list: std.ArrayList(router.Param) = .empty;
+    var pairs = std.mem.splitScalar(u8, raw, '&');
+    while (pairs.next()) |pair| {
+        if (pair.len == 0) continue; // "a=1&&b=2" and a trailing "&"
+        const equals = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
+        try list.append(arena, .{
+            .name = try percent.decode(arena, pair[0..equals], true),
+            .value = if (equals < pair.len)
+                try percent.decode(arena, pair[equals + 1 ..], true)
+            else
+                "",
+        });
+    }
+    return list.items;
+}
+
+/// Decode the path params a match produced, in place in the match's own
+/// array. Only a value that actually carries an escape allocates.
+pub fn decodeParams(arena: std.mem.Allocator, params: []router.Param) !void {
+    for (params) |*p| p.value = try percent.decode(arena, p.value, false);
+}
+
+const testing = std.testing;
+
+test "query pairs are split first, then decoded" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const params = try parseQuery(arena.allocator(), "q=hello%20world&tag=a%26b&plus=a+b&bare&empty=");
+    try testing.expectEqual(@as(usize, 5), params.len);
+    try testing.expectEqualStrings("hello world", params[0].value);
+    // Encoded as %26, so it is one value containing an ampersand — not the
+    // separator between two pairs.
+    try testing.expectEqualStrings("a&b", params[1].value);
+    try testing.expectEqualStrings("a b", params[2].value);
+    try testing.expectEqualStrings("", params[3].value);
+    try testing.expectEqualStrings("", params[4].value);
+}
+
+test "an empty query string parses to nothing" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqual(@as(usize, 0), (try parseQuery(arena.allocator(), "")).len);
+}

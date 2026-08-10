@@ -1,6 +1,5 @@
-//! HTTP/1.1 parser: request line, headers, keep-alive, and discarding a
-//! Content-Length body. Chunked comes in a later stage (it is in the v1
-//! scope); for now it is rejected honestly.
+//! HTTP/1.1 parser: request line, headers, keep-alive, and reading or
+//! discarding a body — Content-Length or chunked.
 //!
 //! The hot path is zero-copy: the whole head (request line + headers) is
 //! waited for until it is complete in the reader's buffer, its end is
@@ -65,9 +64,84 @@ pub fn readRequest(in: *std.Io.Reader) !Request {
 
 /// Discard a request body nobody read, so the keep-alive connection is
 /// clean for the next request.
-pub fn discardBody(in: *std.Io.Reader, r: *const Request) !void {
-    if (r.chunked) return error.ChunkedNotSupported;
+///
+/// `limit` bounds a chunked body only: a Content-Length body announces its
+/// own size up front, while a chunked one could otherwise be streamed at us
+/// forever by a client that has worked out we will sit here reading it.
+pub fn discardBody(in: *std.Io.Reader, r: *const Request, limit: u64) !void {
+    if (r.chunked) return discardChunkedBody(in, limit);
     if (r.content_length > 0) try in.discardAll64(r.content_length);
+}
+
+// ---- chunked transfer encoding ----
+//
+// `5\r\nhello\r\n0\r\n\r\n` — a size in hex, that many bytes, repeat, and a
+// zero-sized chunk ends it. What comes after the last chunk is trailers:
+// headers held back until the body was finished. zfast reads them only far
+// enough to get past them, because a trailer arrives after the handler has
+// already been given the body, so there is nothing left to do with it.
+
+/// Read a chunked body into one contiguous slice from `gpa`.
+pub fn readChunkedBody(in: *std.Io.Reader, gpa: std.mem.Allocator, limit: usize) ![]const u8 {
+    var body: std.ArrayList(u8) = .empty;
+    while (true) {
+        const size = try readChunkSize(in);
+        if (size == 0) break;
+        if (size > limit - body.items.len) return error.BodyTooLarge;
+        const dst = try body.addManyAsSlice(gpa, @intCast(size));
+        try in.readSliceAll(dst);
+        try endOfChunk(in);
+    }
+    try skipTrailers(in);
+    return body.items;
+}
+
+pub fn discardChunkedBody(in: *std.Io.Reader, limit: u64) !void {
+    var seen: u64 = 0;
+    while (true) {
+        const size = try readChunkSize(in);
+        if (size == 0) break;
+        seen += size;
+        if (seen > limit) return error.BodyTooLarge;
+        try in.discardAll64(size);
+        try endOfChunk(in);
+    }
+    try skipTrailers(in);
+}
+
+/// The size line of a chunk. Anything after a `;` is a chunk extension —
+/// nobody sends them, but the size in front of one is still a valid size.
+fn readChunkSize(in: *std.Io.Reader) !u64 {
+    const line = takeLine(in) catch return error.BadChunk;
+    const end = std.mem.indexOfScalar(u8, line, ';') orelse line.len;
+    const digits = std.mem.trim(u8, line[0..end], " \t");
+    if (digits.len == 0) return error.BadChunk;
+    return std.fmt.parseInt(u64, digits, 16) catch error.BadChunk;
+}
+
+/// A chunk's data is followed by its own CRLF. Anything else means the
+/// stream and the sizes have drifted apart, and everything read after that
+/// point would be someone else's bytes.
+fn endOfChunk(in: *std.Io.Reader) !void {
+    const line = takeLine(in) catch return error.BadChunk;
+    if (line.len != 0) return error.BadChunk;
+}
+
+fn skipTrailers(in: *std.Io.Reader) !void {
+    while (true) {
+        // A client that closes straight after the last chunk has still
+        // sent a complete body; there is nothing to gain by failing here.
+        const line = takeLine(in) catch |err| switch (err) {
+            error.EndOfStream => return,
+            else => return err,
+        };
+        if (line.len == 0) return;
+    }
+}
+
+fn takeLine(in: *std.Io.Reader) ![]const u8 {
+    const raw = try in.takeDelimiterInclusive('\n');
+    return trimCR(raw[0 .. raw.len - 1]);
 }
 
 pub const Header = struct { name: []const u8, value: []const u8 };
@@ -317,7 +391,7 @@ test "Content-Length is read and the body is discarded" {
     const r = try readRequest(&in);
     try testing.expectEqualStrings("POST", r.method);
     try testing.expectEqual(@as(u64, 5), r.content_length);
-    try discardBody(&in, &r);
+    try discardBody(&in, &r, 1024);
     try testing.expectEqualStrings("GET", try in.take(3));
 }
 
@@ -345,11 +419,66 @@ test "a head with no end does not produce a half parse" {
     try testing.expectError(error.HeadTooLong, readRequest(&in));
 }
 
-test "transfer-encoding chunked is detected and rejected by discardBody" {
-    var in = std.Io.Reader.fixed("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n");
+test "a chunked body is reassembled" {
+    var in = std.Io.Reader.fixed(
+        "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n" ++
+            "5\r\nhello\r\n1\r\n \r\n5\r\nworld\r\n0\r\n\r\nGET",
+    );
     const r = try readRequest(&in);
     try testing.expect(r.chunked);
-    try testing.expectError(error.ChunkedNotSupported, discardBody(&in, &r));
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const body = try readChunkedBody(&in, arena.allocator(), 1024);
+    try testing.expectEqualStrings("hello world", body);
+    // The connection is left exactly at the next request.
+    try testing.expectEqualStrings("GET", try in.take(3));
+}
+
+test "chunk extensions and trailers are stepped over" {
+    var in = std.Io.Reader.fixed(
+        "4;name=value\r\nzfas\r\n0\r\nX-Checksum: abc\r\n\r\nNEXT",
+    );
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings("zfas", try readChunkedBody(&in, arena.allocator(), 1024));
+    try testing.expectEqualStrings("NEXT", try in.take(4));
+}
+
+test "a chunked body nobody read is discarded so the connection survives" {
+    var in = std.Io.Reader.fixed(
+        "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n" ++
+            "3\r\nabc\r\n0\r\n\r\nGET /next HTTP/1.1\r\n\r\n",
+    );
+    const r = try readRequest(&in);
+    try discardBody(&in, &r, 1024);
+    const next = try readRequest(&in);
+    try testing.expectEqualStrings("/next", next.target);
+}
+
+test "a chunked body over the limit is refused rather than swallowed" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var in = std.Io.Reader.fixed("5\r\nhello\r\n0\r\n\r\n");
+    try testing.expectError(error.BodyTooLarge, readChunkedBody(&in, arena.allocator(), 4));
+
+    var discarding = std.Io.Reader.fixed("5\r\nhello\r\n0\r\n\r\n");
+    try testing.expectError(error.BodyTooLarge, discardChunkedBody(&discarding, 4));
+}
+
+test "a size that is not hex, or data that does not end where it said" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var bad_size = std.Io.Reader.fixed("zz\r\nhello\r\n0\r\n\r\n");
+    try testing.expectError(error.BadChunk, readChunkedBody(&bad_size, arena.allocator(), 1024));
+
+    // Says 5 bytes, then does not put a CRLF where one has to be. Trusting
+    // the size past that point would hand the next request someone else's
+    // bytes — the shape of a smuggled request.
+    var drifted = std.Io.Reader.fixed("5\r\nhelloXX\r\n0\r\n\r\n");
+    try testing.expectError(error.BadChunk, readChunkedBody(&drifted, arena.allocator(), 1024));
 }
 
 test "a broken request line" {

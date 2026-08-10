@@ -43,7 +43,7 @@ One self-contained HTTP application: a set of routes, middleware, and services. 
 _Avoid_: Server, Router, Engine
 
 **Service**:
-A long-lived thing registered once when the App is built — a database connection, config, a logger — then asked for by handlers according to its type.
+A long-lived thing registered once when the App is built — a database connection, config, a logger — then asked for by handlers according to its type. Shared across every request being served at once, so one that gets written to needs a `zfast.Mutex`.
 _Avoid_: dependency, state, context value, DI container
 
 **Middleware**:
@@ -53,3 +53,7 @@ _Avoid_: filter, interceptor, hook, guard
 **Fail function**:
 A function callable from anywhere to stop a request with a given status and message, without having to hold a Ctx.
 _Avoid_: abort, throw, bail
+
+**Static set**:
+One directory read into memory when the App is built, and answered from without touching the disk again. Not a middleware: it holds state, so it is a terminal handler the middleware chain wraps like any other.
+_Avoid_: file server, asset middleware, public dir

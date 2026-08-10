@@ -10,6 +10,12 @@ pub const debug_io = zio.debug_io;
 pub const Options = struct {
     address: []const u8 = "127.0.0.1",
     port: u16 = 8787,
+    /// On by default so that stopping the server and starting it again
+    /// works. Without it, connections left in TIME_WAIT hold the port and
+    /// the restart fails with `AddressInUse` — which, during development,
+    /// is every single restart. It does not let two servers share a port:
+    /// a second listener on the same address is still refused.
+    reuse_address: bool = true,
 };
 
 /// Run `handler(state, in, out)` for every accepted connection, each in
@@ -23,7 +29,7 @@ pub fn serve(gpa: std.mem.Allocator, options: Options, state: anytype, comptime 
     defer rt.deinit();
 
     const addr = try zio.net.IpAddress.parseIp4(options.address, options.port);
-    const server = try addr.listen(.{});
+    const server = try addr.listen(.{ .reuse_address = options.reuse_address });
     defer server.close();
 
     std.log.info("zfast listening on {f}", .{server.socket.address});
@@ -66,6 +72,11 @@ pub fn serve(gpa: std.mem.Allocator, options: Options, state: anytype, comptime 
 pub fn monotonicNanos() u64 {
     return @intCast(zio.Timestamp.now(.monotonic).toNanoseconds());
 }
+
+/// A lock that parks the fiber rather than the OS thread under it. Also
+/// works from a plain thread with no fiber at all, which is what makes a
+/// handler holding one still testable as an ordinary function (ADR 0003).
+pub const Mutex = zio.Mutex;
 
 // ---- the per-request slot (see ADR 0007) ----
 //
