@@ -2068,6 +2068,192 @@ test "the request path stays inside its allocation budget" {
     try testing.expectEqual(@as(usize, 0), counting.resizes);
 }
 
+// ---- resolved values (ADR 0016) ----
+//
+// The gap ADR 0009 wrote down and left open: middleware can refuse a
+// request but cannot hand the handler the user it just looked up. These
+// tests are that gap closed, end to end through a real request.
+
+/// Counts its lookups, because "how many times did this run" is the whole
+/// question for the memoisation below.
+const Sessions = struct {
+    rows: []const struct { token: []const u8, user_id: u32 } = &.{},
+    lookups: usize = 0,
+
+    fn userFor(self: *Sessions, token: []const u8) ?u32 {
+        self.lookups += 1;
+        for (self.rows) |row| {
+            if (std.mem.eql(u8, row.token, token)) return row.user_id;
+        }
+        return null;
+    }
+};
+
+const SignedIn = struct {
+    pub const zfast_resolve = authenticateRequest;
+
+    id: u32,
+};
+
+fn authenticateRequest(c: *Ctx, sessions: *Sessions) !SignedIn {
+    const token = c.header("Authorization") orelse
+        return fail.unauthorized("this endpoint needs an Authorization header", .{});
+    return .{
+        .id = sessions.userFor(token.view()) orelse
+            return fail.unauthorized("that token is not valid", .{}),
+    };
+}
+
+fn whoAmI(user: SignedIn) !UserOut {
+    return .{ .id = user.id, .name = "wati" };
+}
+
+/// The other half of the pattern: middleware guards a whole prefix, and the
+/// handler behind it still gets the value as an argument.
+fn requireSignedIn(c: *Ctx, next: mw.Next) anyerror!void {
+    _ = try c.resolve(SignedIn);
+    try next.run(c);
+}
+
+test "a handler asks for the signed-in user by writing it in its arguments" {
+    var sessions = Sessions{ .rows = &.{.{ .token = "t0k", .user_id = 7 }} };
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&sessions);
+    try app.get("/me", whoAmI);
+    try app.checkServices();
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /me HTTP/1.1\r\nAuthorization: t0k\r\n\r\n");
+
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "{\"id\":7,\"name\":\"wati\"}") != null);
+}
+
+test "a resolver that refuses answers its own status and the handler never runs" {
+    var sessions = Sessions{ .rows = &.{.{ .token = "t0k", .user_id = 7 }} };
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&sessions);
+    try app.get("/me", whoAmI);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const no_header = h.send(&app, "GET /me HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, no_header.response, "HTTP/1.1 401 Unauthorized\r\n"));
+    try testing.expect(std.mem.indexOf(u8, no_header.response, "needs an Authorization header") != null);
+
+    const wrong = h.send(&app, "GET /me HTTP/1.1\r\nAuthorization: nope\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, wrong.response, "HTTP/1.1 401 Unauthorized\r\n"));
+    // Refusing a request is a normal thing to do, not a reason to hang up.
+    try testing.expect(wrong.keep_alive);
+}
+
+test "a middleware and the handler behind it resolve the user once between them" {
+    // Without memoisation this is the shape that quietly doubles every
+    // authenticated request's database work: the guard looks the user up to
+    // decide, and the handler looks the same user up to answer.
+    var sessions = Sessions{ .rows = &.{.{ .token = "t0k", .user_id = 7 }} };
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&sessions);
+    try app.useOn("/me", requireSignedIn);
+    try app.get("/me", whoAmI);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /me HTTP/1.1\r\nAuthorization: t0k\r\n\r\n");
+
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 OK\r\n"));
+    try testing.expectEqual(@as(usize, 1), sessions.lookups);
+}
+
+test "what one request resolved does not leak into the next on the same connection" {
+    var sessions = Sessions{ .rows = &.{
+        .{ .token = "wati", .user_id = 7 },
+        .{ .token = "budi", .user_id = 9 },
+    } };
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&sessions);
+    try app.get("/me", whoAmI);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const first = h.send(&app, "GET /me HTTP/1.1\r\nAuthorization: wati\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, first.response, "\"id\":7") != null);
+
+    // Same connection, different token. The cache lives in the request
+    // arena and the arena is reset between requests, so this is the second
+    // user and not the first one again — which would be the worst bug this
+    // feature could have.
+    const second = h.send(&app, "GET /me HTTP/1.1\r\nAuthorization: budi\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, second.response, "\"id\":9") != null);
+    try testing.expectEqual(@as(usize, 2), sessions.lookups);
+}
+
+test "a service only a resolver needs is still caught before serving" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    // `*Sessions` appears nowhere in whoAmI's arguments — only inside the
+    // resolver behind `SignedIn`. Missing it has to stop `listen()` all the
+    // same (ADR 0006), or the first authenticated request finds out instead.
+    try app.get("/me", whoAmI);
+
+    // Through the predicate rather than `checkServices()`, which logs the
+    // gap before failing — and a test counting those logs reads as a failed
+    // suite. Same check, no stderr.
+    const missing = app.missingService().?;
+    try testing.expectEqualStrings(@typeName(Sessions), missing.type_name);
+    try testing.expectEqualStrings("/me", missing.route);
+}
+
+test "a route that resolves nothing still costs what it always did" {
+    // ADR 0018's rule, as a test: a feature nobody used must not show up on
+    // the request path. `_resolved` starts empty and allocates only when
+    // something is put in it, so this is the same budget as before.
+    var db = Db{ .rows = &.{.{ .id = 7, .name = "wati" }} };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    try app.get("/users/:id", getUser);
+    try app.resolveChains();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var counting = budget.Counting{ .child = arena.allocator() };
+    var lifetime = str_mod.Lifetime{};
+    var in_flight = fail.InFlight{};
+    var buf: [4096]u8 = undefined;
+
+    const send = struct {
+        fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
+            var in = std.Io.Reader.fixed("GET /users/7 HTTP/1.1\r\nHost: x\r\n\r\n");
+            var out = std.Io.Writer.fixed(b);
+            _ = a.handleRequest(gpa, l, f, &in, &out);
+            l.end();
+        }
+    }.once;
+
+    for (0..3) |_| {
+        send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+        _ = arena.reset(.{ .retain_with_limit = arena_keep });
+    }
+    counting.reset();
+    send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+
+    // Two here rather than three: no CORS, so no response header list.
+    try testing.expectEqual(@as(usize, 2), counting.allocs);
+}
+
 test "the in-flight request is readable, which is what the panic handler uses" {
     var app = App.init(testing.allocator);
     defer app.deinit();

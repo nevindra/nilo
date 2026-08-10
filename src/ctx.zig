@@ -26,6 +26,17 @@ pub const max_body = 1024 * 1024;
 /// bigger response simply grows past it.
 pub const json_hint = 512;
 
+/// One resolved value, kept for the rest of the request that asked for it.
+///
+/// Keyed by type name rather than by anything cleverer for the same reason
+/// the service registry is (ADR 0006): the list is two entries long in
+/// practice, and `@typeName` is normally the very same literal, so finding
+/// one is a pointer compare.
+const Resolved = struct {
+    type_name: []const u8,
+    value: *anyopaque,
+};
+
 pub const Ctx = struct {
     method: http1.Method,
 
@@ -64,6 +75,9 @@ pub const Ctx = struct {
     /// The status actually sent, once something has been. 0 until then.
     _status: u16 = 0,
     _extra_headers: std.ArrayList(http1.Header) = .empty,
+    /// Resolved values already worked out for this request (ADR 0016).
+    /// Stays empty — and costs nothing — on a request that asks for none.
+    _resolved: std.ArrayList(Resolved) = .empty,
 
     /// The service of type `P` (a pointer type), for handlers that hold a
     /// `*Ctx` and so do not go through argument matching. Null if it was
@@ -71,6 +85,61 @@ pub const Ctx = struct {
     /// out by `listen()`.
     pub fn service(self: *const Ctx, comptime P: type) ?P {
         return self._services.get(P);
+    }
+
+    /// The resolved value of type `V` for this request — worked out now if
+    /// nobody has asked yet, and handed back as-is if they have (ADR 0016).
+    ///
+    /// A handler gets these by writing the type in its argument list and
+    /// never calls this. What it is here for is middleware, which has no
+    /// argument list to write in:
+    ///
+    /// ```zig
+    /// fn requireAdmin(c: *zfast.Ctx, next: zfast.Next) !void {
+    ///     const user = try c.resolve(CurrentUser);
+    ///     if (!user.is_admin) return zfast.fail.forbidden("admins only", .{});
+    ///     try next.run(c);
+    /// }
+    /// ```
+    ///
+    /// The handler behind that middleware can then take a `CurrentUser` of
+    /// its own without authenticating a second time.
+    pub fn resolve(self: *Ctx, comptime V: type) !V {
+        // Imported here rather than at the top of the file: resolve.zig
+        // needs Ctx, and asking for it from inside the function body keeps
+        // the two out of each other's way.
+        return @import("resolve.zig").value(V, self);
+    }
+
+    /// The resolved value of type `V` if this request has already worked one
+    /// out. zfast's own; users go through `resolve`.
+    pub fn cachedResolved(self: *const Ctx, comptime V: type) ?V {
+        const wanted = @typeName(V);
+        for (self._resolved.items) |entry| {
+            if (entry.type_name.ptr != wanted.ptr and !std.mem.eql(u8, entry.type_name, wanted))
+                continue;
+            return @as(*const V, @ptrCast(@alignCast(entry.value))).*;
+        }
+        return null;
+    }
+
+    /// Remember a resolved value for the rest of this request. zfast's own.
+    ///
+    /// The value is copied into the request arena, so it dies with the
+    /// request exactly as every `Str` inside it does.
+    pub fn cacheResolved(self: *Ctx, comptime V: type, resolved: V) !void {
+        const box = try self._arena.create(V);
+        box.* = resolved;
+        // Two is the shape this has in practice — a user, and something
+        // worked out from the user — so the list is sized for that once
+        // rather than grown twice.
+        if (self._resolved.capacity == 0) {
+            try self._resolved.ensureTotalCapacity(self._arena, 2);
+        }
+        try self._resolved.append(self._arena, .{
+            .type_name = @typeName(V),
+            .value = @ptrCast(box),
+        });
     }
 
     // ---- the request side ----

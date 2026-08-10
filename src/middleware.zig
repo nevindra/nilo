@@ -17,9 +17,11 @@
 //! the same path a failing handler does, fail functions and mapping table
 //! included (ADR 0005), so there is only ever one error path.
 //!
-//! Middleware deliberately cannot hand a value to the handler
-//! (CONTEXT.md). The gap that leaves — auth resolving a user — is what a
-//! request-scoped value concept has to solve in v2.
+//! Middleware still produces no value for the handler, and it no longer
+//! needs to: the thing it used to be asked for — auth resolving a user — is
+//! a resolved value now (ADR 0016). A middleware guards, a resolved value
+//! provides, and `c.resolve(T)` is how a guard reads one without making the
+//! handler behind it work the same thing out twice.
 
 const std = @import("std");
 const Ctx = @import("ctx.zig").Ctx;

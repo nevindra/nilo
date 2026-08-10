@@ -16,7 +16,8 @@
 //! | `u32`, `Str`, `bool`, a float, an enum | a path param, in the order `:name` (and a trailing `*`) appears in the pattern |
 //! | `Query(T)`            | the query string, read into a struct of yours |
 //! | `std.mem.Allocator`   | the request arena, freed when the request ends |
-//! | a struct              | the request body, parsed from JSON         |
+//! | a type carrying `zfast_resolve` | a resolved value, worked out from the request (ADR 0016) |
+//! | any other struct      | the request body, parsed from JSON         |
 //!
 //! The return value becomes the response: `void` → empty 200,
 //! `Str`/`[]const u8` → text/plain, anything else → JSON. Wrap it in
@@ -36,6 +37,7 @@ const router = @import("router.zig");
 const service_mod = @import("service.zig");
 const fail = @import("fail.zig");
 const str_mod = @import("str.zig");
+const resolve = @import("resolve.zig");
 
 const Ctx = ctx_mod.Ctx;
 const Str = str_mod.Str;
@@ -107,6 +109,9 @@ const Role = union(enum) {
     /// The request arena, for a handler that has to build something that
     /// outlives its own stack frame — a `Location` header, usually.
     arena,
+    /// A value zfast works out from the request before the handler runs —
+    /// the signed-in user, usually (ADR 0016).
+    resolved,
 };
 
 /// Turn `f` into an ordinary `Ctx` handler. `pattern` comes along so the
@@ -133,6 +138,7 @@ pub fn wrap(comptime pattern: []const u8, comptime f: anytype) router.CtxHandler
                     .body => args[i] = try c.json(P),
                     .query => args[i] = .{ .value = try queryValue(P.zfast_query, c) },
                     .arena => args[i] = c._arena,
+                    .resolved => args[i] = try resolve.value(P, c),
                 }
             }
             return sendResult(c, @call(.auto, f, args));
@@ -151,8 +157,15 @@ pub fn requirements(comptime pattern: []const u8, comptime f: anytype) []const s
 
         var list: []const service_mod.Requirement = &.{};
         for (params, 0..) |p, i| {
-            if (roles[i] != .service) continue;
-            list = list ++ [_]service_mod.Requirement{service_mod.requirementFor(p.type.?, pattern)};
+            switch (roles[i]) {
+                .service => list = list ++
+                    [_]service_mod.Requirement{service_mod.requirementFor(p.type.?, pattern)},
+                // A service used by nothing but a resolver still has to be
+                // caught by `listen()`, or the first request to an
+                // authenticated route finds it instead (ADR 0016).
+                .resolved => list = list ++ resolve.requirements(p.type.?, pattern),
+                else => {},
+            }
         }
         return list;
     }
@@ -230,6 +243,12 @@ fn rolesOf(
                     query_seen = true;
                     checkQueryFields(pattern, P.zfast_query, i);
                 },
+                // Checked here, at the first place anybody names the type,
+                // rather than deep inside the call that works it out. The
+                // message names the resolver rather than the route: the
+                // mistake belongs to the type, and would greet every route
+                // that asked for it.
+                .resolved => resolve.check(P),
                 else => {},
             }
         }
@@ -256,6 +275,10 @@ fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Rol
     if (P == Str) return .{ .param = 0 };
     if (P == std.mem.Allocator) return .arena;
     if (comptime hasNamedDecl(P, "zfast_query")) return .query;
+    // Before the `.@"struct" => .body` below, which would otherwise swallow
+    // it: a resolved value is a struct too, and the marker is what tells the
+    // two apart (ADR 0016).
+    if (comptime resolve.isResolved(P)) return .resolved;
 
     return switch (@typeInfo(P)) {
         .int, .float, .bool, .@"enum" => .{ .param = 0 },

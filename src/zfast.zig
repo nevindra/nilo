@@ -221,6 +221,7 @@ test {
     _ = @import("router.zig");
     _ = @import("fail.zig");
     _ = @import("service.zig");
+    _ = @import("resolve.zig");
     _ = @import("middleware.zig");
     _ = @import("typed.zig");
     _ = @import("ctx.zig");
