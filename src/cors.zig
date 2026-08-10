@@ -11,9 +11,11 @@
 //! Configured at compile time, so the header strings are all constants and
 //! nothing is formatted per request.
 //!
-//! Headers go out through `c.setHeader` before the handler runs, because a
-//! response is flushed the moment it is sent and there is nothing left to
-//! add afterwards (ADR 0009).
+//! Headers go out before the handler runs, because a response is flushed
+//! the moment it is sent and there is nothing left to add afterwards (ADR
+//! 0009). They go out through `setStaticHeader`: every value here is a
+//! compile-time constant, so copying it into the request arena would be
+//! work with nothing to show for it.
 
 const std = @import("std");
 const Ctx = @import("ctx.zig").Ctx;
@@ -51,27 +53,27 @@ pub fn with(comptime options: Options) mw.Middleware {
 
     return struct {
         fn run(c: *Ctx, next: mw.Next) anyerror!void {
-            try c.setHeader("Access-Control-Allow-Origin", options.origin);
+            try c.setStaticHeader("Access-Control-Allow-Origin", options.origin);
 
             // A response that varies by origin must say so, or a shared
             // cache will hand one origin's response to another.
             if (comptime !std.mem.eql(u8, options.origin, "*")) {
-                try c.setHeader("Vary", "Origin");
+                try c.setStaticHeader("Vary", "Origin");
             }
             if (comptime options.credentials) {
-                try c.setHeader("Access-Control-Allow-Credentials", "true");
+                try c.setStaticHeader("Access-Control-Allow-Credentials", "true");
             }
             if (comptime options.expose.len > 0) {
-                try c.setHeader("Access-Control-Expose-Headers", options.expose);
+                try c.setStaticHeader("Access-Control-Expose-Headers", options.expose);
             }
 
             // A preflight is answered here and never reaches the handler —
             // there is no route for it to reach.
             if (c.method == .OPTIONS and c.header("Access-Control-Request-Method") != null) {
-                try c.setHeader("Access-Control-Allow-Methods", options.methods);
-                try c.setHeader("Access-Control-Allow-Headers", options.headers);
+                try c.setStaticHeader("Access-Control-Allow-Methods", options.methods);
+                try c.setStaticHeader("Access-Control-Allow-Headers", options.headers);
                 if (comptime options.max_age > 0) {
-                    try c.setHeader("Access-Control-Max-Age", max_age_text);
+                    try c.setStaticHeader("Access-Control-Max-Age", max_age_text);
                 }
                 return c.send(204, "text/plain", "");
             }

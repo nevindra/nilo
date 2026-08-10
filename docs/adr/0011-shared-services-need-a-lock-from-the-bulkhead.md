@@ -6,7 +6,9 @@ The example has a `Store` service holding an `ArrayList` of users and a `POST /u
 
 ## What was wrong
 
-zio runs one executor per CPU core by default, and fibers are spread across them. So two handlers can be inside the same Service at the same moment, on two different OS threads. Nothing in zfast serialises them — the request arena is per request, the fail slot is per fiber, and a Service is by definition shared. That is correct and deliberate, but it means **a Service with mutable state needs a lock, and until now zfast gave users no way to say so.**
+Handlers run on several OS threads at once, so two of them can be inside the same Service at the same moment.
+
+That last sentence was not true when this ADR was first written, and finding out why is part of the decision. zio's own default is **one** executor — the right default for a library that might be embedded in somebody else's thread, and the wrong one for a server process, which would otherwise leave every core but one idle. zfast now asks for one executor per core (`Options.threads`), which makes the concurrency real and this ADR necessary rather than merely prudent. Nothing in zfast serialises them — the request arena is per request, the fail slot is per fiber, and a Service is by definition shared. That is correct and deliberate, but it means **a Service with mutable state needs a lock, and until now zfast gave users no way to say so.**
 
 Worse, the obvious answer is wrong. `std.Thread.Mutex` blocks the OS thread. Under a fiber runtime the thread is running many other connections, so blocking it stalls all of them. If the fiber holding the lock is parked waiting on I/O and can only be resumed by that same thread, nothing gets unstuck. A framework whose documented Service pattern deadlocks under load is not one to ship.
 
@@ -40,4 +42,6 @@ Because the correct implementation depends entirely on the Engine. A threaded En
 - The Bulkhead contract grows by one item. Every future Engine has to supply a lock. This is a small obligation compared to file IO (ADR 0010), and unlike file IO it is needed by *every* application, not by one feature.
 - The documentation has to say plainly that **handlers run concurrently across OS threads**. People coming from Node in particular will assume otherwise, and the assumption is silent until it is a corrupted list under load.
 - Nothing forces the lock. A Service with mutable state and no lock still compiles and still races. Catching that would need ownership tracking Zig does not have; the honest answer is to say so in the docs and put the lock in the example everyone copies.
+- Running on every core makes the per-fiber failure slot (ADR 0007) load-bearing in a way it was not before: fibers now really do move between threads. Re-verified under load once the threads were real — **0 crossed responses out of 1,008,130**, where a thread-local would have leaked one request's message into another's response.
+- `Options.threads` exists so a single-threaded run is still one line away, for anyone who wants the old behaviour while they audit their Services.
 - `zfast.RwLock`, condition variables and channels are all sitting there in zio unexposed. They stay unexposed until something needs them — the Bulkhead grows one item at a time, for a reason each time.

@@ -18,8 +18,15 @@ const fail = @import("fail.zig");
 const mw = @import("middleware.zig");
 const cors = @import("cors.zig");
 const static_mod = @import("static.zig");
+const budget = @import("budget.zig");
 
 const Ctx = ctx_mod.Ctx;
+
+/// How much of a connection's request arena survives between requests.
+/// Big enough that an ordinary request never allocates twice on the same
+/// connection, small enough that one large upload does not leave that
+/// connection sitting on the memory for good.
+const arena_keep = 16 * 1024;
 
 const RESPONSE_400 = http1.staticResponse(400, "Bad Request", "text/plain", "malformed request\n", false);
 const RESPONSE_431 = http1.staticResponse(431, "Request Header Fields Too Large", "text/plain", "head too long\n", false);
@@ -225,9 +232,15 @@ pub const App = struct {
         while (true) {
             const keep_going = self.handleRequest(arena.allocator(), &lifetime, &in_flight, in, out);
             // The request is done: every Str of its goes stale, then the
-            // bag is emptied in one go without giving up its capacity.
+            // bag is emptied in one go.
+            //
+            // Capacity is kept, but only up to a point. Keeping all of it
+            // means one 1MB upload leaves that connection holding a
+            // megabyte for as long as it stays open, and a few thousand
+            // idle keep-alive connections that each once saw a big request
+            // add up to memory nobody can account for.
             lifetime.end();
-            _ = arena.reset(.retain_capacity);
+            _ = arena.reset(.{ .retain_with_limit = arena_keep });
             if (!keep_going) return;
         }
     }
@@ -269,10 +282,6 @@ pub const App = struct {
             return false;
         };
 
-        var header_list: std.ArrayList(http1.HeaderIterator.Pair) = .empty;
-        var iter = http1.HeaderIterator.from(request_head);
-        while (iter.next()) |pair| header_list.append(arena, pair) catch return false;
-
         const qmark = std.mem.indexOfScalar(u8, r.target, '?');
         const path = if (qmark) |i| r.target[0..i] else r.target;
         const raw_query = if (qmark) |i| r.target[i + 1 ..] else "";
@@ -291,7 +300,7 @@ pub const App = struct {
             ._path = path,
             ._query = raw_query,
             ._query_params = ctx_mod.parseQuery(arena, raw_query) catch return false,
-            ._headers = header_list.items,
+            ._head = request_head,
             ._params = &.{},
             ._services = &self.services,
         };
@@ -393,8 +402,10 @@ fn notFoundHandler(c: *Ctx) anyerror!void {
 fn serveStaticFile(c: *Ctx) anyerror!void {
     const file = c._static_file.?;
 
-    try c.setHeader("ETag", file.etag);
-    if (file.cache_control.len > 0) try c.setHeader("Cache-Control", file.cache_control);
+    // Both belong to the loaded file, which outlives every request, so
+    // there is nothing to copy.
+    try c.setStaticHeader("ETag", file.etag);
+    if (file.cache_control.len > 0) try c.setStaticHeader("Cache-Control", file.cache_control);
 
     // The ETag was computed when the file was read, so a repeat visitor
     // costs a comparison and a head — no body, no work.
@@ -1363,6 +1374,60 @@ test "static files: HEAD gives the head, POST is not answered with the file" {
 
     const posted = h.send(&app, "POST /logo.svg HTTP/1.1\r\nContent-Length: 0\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, posted.response, "HTTP/1.1 404"));
+}
+
+// A number that is the same on every machine, unlike requests per second
+// on a shared VM (docs/plan.md, "Where to measure"). It will not tell you
+// how fast the server is, but it does notice the day somebody puts an
+// allocation back onto the path everything goes down.
+test "the request path stays inside its allocation budget" {
+    var db = Db{ .rows = &.{.{ .id = 7, .name = "wati" }} };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    try app.get("/users/:id", getUser);
+    try app.use(cors.permissive);
+    try app.resolveChains();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var counting = budget.Counting{ .child = arena.allocator() };
+    var lifetime = str_mod.Lifetime{};
+    var in_flight = fail.InFlight{};
+    var buf: [4096]u8 = undefined;
+
+    // The shape of the primary metric: a routed GET with a path param
+    // answering JSON, on a keep-alive connection, with CORS installed.
+    const request = "GET /users/7 HTTP/1.1\r\nHost: example.dev\r\nUser-Agent: wrk\r\n" ++
+        "Accept: */*\r\nAccept-Encoding: gzip\r\nConnection: keep-alive\r\n\r\n";
+
+    const send = struct {
+        fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
+            var in = std.Io.Reader.fixed(request);
+            var out = std.Io.Writer.fixed(b);
+            _ = a.handleRequest(gpa, l, f, &in, &out);
+            l.end();
+        }
+    }.once;
+
+    // Warm the arena first: growing it is a cost of the connection's first
+    // request, not of the path being measured.
+    for (0..3) |_| {
+        send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+        _ = arena.reset(.{ .retain_with_limit = arena_keep });
+    }
+
+    counting.reset();
+    send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+
+    // Three, and what each one is for:
+    //   1. the request head, copied so its Strs outlive the read buffer
+    //   2. the list of response headers CORS adds
+    //   3. the JSON body
+    // All three are bump allocations into an arena that is already warm.
+    // Raising this number needs a reason; lowering it is welcome.
+    try testing.expectEqual(@as(usize, 3), counting.allocs);
+    try testing.expectEqual(@as(usize, 0), counting.resizes);
 }
 
 test "the in-flight request is readable, which is what the panic handler uses" {

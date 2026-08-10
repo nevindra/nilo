@@ -16,6 +16,32 @@ pub const Options = struct {
     /// is every single restart. It does not let two servers share a port:
     /// a second listener on the same address is still refused.
     reuse_address: bool = true,
+
+    /// How many OS threads run fibers. 0 means one per core.
+    ///
+    /// zio's own default is a single executor. That is the right default
+    /// for a library that might be embedded in someone else's thread, and
+    /// the wrong one for a server process, which would otherwise leave
+    /// every core but one idle.
+    ///
+    /// The consequence is that handlers really do run at the same time on
+    /// different threads, so a Service that gets written to needs
+    /// `zfast.Mutex` (ADR 0011). Set this to 1 and that stops being true —
+    /// but so does using the machine.
+    threads: u8 = 0,
+
+    /// Bytes of the connection's read buffer. It doubles as the ceiling on
+    /// the size of a request head: a head that does not fit is answered
+    /// with 431.
+    read_buffer: usize = 8 * 1024,
+
+    /// Bytes of the connection's write buffer. A response that fits in it
+    /// leaves as one write; a bigger one is split across several.
+    ///
+    /// Together with `read_buffer` this is most of what an idle connection
+    /// costs, so it is worth turning down for a server holding many
+    /// connections open and up for one serving large responses.
+    write_buffer: usize = 4 * 1024,
 };
 
 /// Run `handler(state, in, out)` for every accepted connection, each in
@@ -25,31 +51,38 @@ pub const Options = struct {
 /// `fn (@TypeOf(state), *std.Io.Reader, *std.Io.Writer) void`.
 pub fn serve(gpa: std.mem.Allocator, options: Options, state: anytype, comptime handler: anytype) !void {
     const State = @TypeOf(state);
-    const rt = try zio.Runtime.init(gpa, .{});
+    const threads: u8 = if (options.threads > 0)
+        options.threads
+    else
+        @intCast(@min(std.Thread.getCpuCount() catch 1, 255));
+
+    const rt = try zio.Runtime.init(gpa, .{ .executors = .exact(threads) });
     defer rt.deinit();
 
     const addr = try zio.net.IpAddress.parseIp4(options.address, options.port);
     const server = try addr.listen(.{ .reuse_address = options.reuse_address });
     defer server.close();
 
-    std.log.info("zfast listening on {f}", .{server.socket.address});
+    std.log.info("zfast listening on {f} across {d} thread(s)", .{ server.socket.address, threads });
 
     const Conn = struct {
-        fn run(st: State, stream: zio.net.Stream) void {
+        fn run(st: State, stream: zio.net.Stream, conn_gpa: std.mem.Allocator, sizes: Options) void {
             defer stream.close();
 
             // One response = one flush = one segment; Nagle would only add
             // latency without saving anything, so it is turned off.
             stream.socket.setNoDelay(true) catch {};
 
-            // The read buffer doubles as the ceiling on request head size
-            // (431 if it is exceeded). The write buffer is big enough for a
-            // response head plus a body the size of the primary metric
-            // (~1KB of JSON).
-            var read_buf: [8 * 1024]u8 = undefined;
-            var write_buf: [4 * 1024]u8 = undefined;
-            var reader = stream.reader(&read_buf);
-            var writer = stream.writer(&write_buf);
+            // Allocated rather than put on the fiber stack, so the sizes can
+            // be an option instead of a constant. Twice per connection, not
+            // per request — next to a connection's lifetime it is nothing.
+            const read_buf = conn_gpa.alloc(u8, sizes.read_buffer) catch return;
+            defer conn_gpa.free(read_buf);
+            const write_buf = conn_gpa.alloc(u8, sizes.write_buffer) catch return;
+            defer conn_gpa.free(write_buf);
+
+            var reader = stream.reader(read_buf);
+            var writer = stream.writer(write_buf);
 
             handler(st, &reader.interface, &writer.interface);
         }
@@ -61,7 +94,7 @@ pub fn serve(gpa: std.mem.Allocator, options: Options, state: anytype, comptime 
     while (true) {
         const stream = try server.accept(.{});
         errdefer stream.close();
-        try group.spawn(Conn.run, .{ state, stream });
+        try group.spawn(Conn.run, .{ state, stream, gpa, options });
     }
 }
 

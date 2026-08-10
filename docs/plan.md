@@ -80,3 +80,12 @@ What counts as "fast" for zfast:
 - **Secondary:** memory per idle connection.
 
 p99 is counted too, so that winning on throughput while stalling the tail requests does not count. One consequence is binding already: keep-alive is the main path, and there must be no stop-the-world allocation in the middle of a request.
+
+### What can be measured without a quiet machine
+
+Requests per second is the number that needs a machine nobody else is using. Two others do not, and both are now recorded:
+
+- **Allocations per request: 3** on the primary metric's shape, with CORS installed — the head copied so its `Str`s outlive the read buffer, the response header list, and the JSON body. All three are bump allocations into an arena that is already warm; none is a syscall or a lock. Held there by a test (`the request path stays inside its allocation budget`), so putting a fourth back needs a reason. It was 6.
+- **Memory per idle connection: ~21 KB** with the default buffers, measured as the RSS difference across 1,000 held-open keep-alive connections. About 4 KB of that is the read and write buffers, which `Options.read_buffer` / `write_buffer` turn down: at 2 KB each the figure is ~17 KB. Most of what is left is the fiber's own stack, which is zio's to hand out.
+
+Neither says how fast the server is. Both notice when it gets worse, which is what is available until there is somewhere honest to measure.

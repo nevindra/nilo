@@ -141,6 +141,26 @@ to your root file makes the crash say which request caused it:
 thread 589880 panic: integer overflow (while handling GET /boom/50)
 ```
 
+## Tuning
+
+`listen()` takes the knobs that change how the server uses the machine:
+
+```zig
+try app.listen(.{
+    .address = "0.0.0.0",
+    .port = 8080,
+    .threads = 0,           // 0 = one per core
+    .read_buffer = 8 * 1024,  // also the ceiling on a request head (431 past it)
+    .write_buffer = 4 * 1024,
+});
+```
+
+The two buffers are most of what an idle connection costs, so turn them down for a server holding a lot of connections open and up for one sending large responses. Measured on a 2-core Linux box across 1,000 held-open connections: **~21 KB per idle connection** with the defaults, **~17 KB** at 2 KB each.
+
+On the request path, a routed GET returning JSON with CORS installed makes **three allocations**, all of them bump allocations into a request arena that is already warm. A test holds it there.
+
+No requests-per-second figures, on purpose: that number needs a machine nobody else is using, and there isn't one yet ([`docs/plan.md`](./docs/plan.md)).
+
 ## What isn't in v1
 
 WebSocket and SSE, TLS, sessions, templates, route groups, auth contents, range requests, and middleware handing values to handlers. Each is listed with its reason in [`docs/plan.md`](./docs/plan.md); the ones that are refusals rather than backlog are in [`docs/adr/`](./docs/adr/).

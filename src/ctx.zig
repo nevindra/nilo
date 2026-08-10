@@ -21,6 +21,10 @@ const Str = str_mod.Str;
 /// comes later; for now, one number that makes sense.
 pub const max_body = 1024 * 1024;
 
+/// The size `sendJson` reserves before serialising. Not a limit — a
+/// bigger response simply grows past it.
+pub const json_hint = 512;
+
 pub const Ctx = struct {
     method: http1.Method,
 
@@ -34,7 +38,10 @@ pub const Ctx = struct {
     /// the decoded form and is what `query()` reads.
     _query: []const u8,
     _query_params: []const router.Param = &.{},
-    _headers: []const http1.HeaderIterator.Pair,
+    /// The whole request head, request line included. Headers are read out
+    /// of it on demand rather than collected up front — most handlers ask
+    /// for none, and the ones that ask, ask for two.
+    _head: []const u8,
     _params: []const router.Param,
     _services: *const service_mod.Registry,
     /// Set by App when the path names a file in a static set, so the
@@ -84,8 +91,14 @@ pub const Ctx = struct {
     }
 
     /// A request header, name matched case-insensitively.
+    ///
+    /// Read straight out of the head each time rather than from a list
+    /// built in advance. A list would mean an allocation on every request
+    /// including the many that never look at a header at all, to save a
+    /// scan of a few hundred bytes on the few that look twice.
     pub fn header(self: *const Ctx, name: []const u8) ?Str {
-        for (self._headers) |h| {
+        var headers = http1.HeaderIterator.from(self._head);
+        while (headers.next()) |h| {
             if (std.ascii.eqlIgnoreCase(h.name, name)) return Str.fromRequest(h.value, self._lifetime);
         }
         return null;
@@ -142,18 +155,39 @@ pub const Ctx = struct {
     /// the case of Content-Length it is a request-smuggling bug.
     /// Content-Type is chosen through `send` instead.
     pub fn setHeader(self: *Ctx, name: []const u8, value: []const u8) !void {
-        if (http1.isReservedHeader(name)) return error.ReservedHeader;
-        const owned = http1.Header{
+        return self.putHeader(.{
             .name = try self._arena.dupe(u8, name),
             .value = try self._arena.dupe(u8, value),
-        };
+        });
+    }
+
+    /// `setHeader` for text that already outlives the request — a literal,
+    /// or something a Service owns — so nothing is copied.
+    ///
+    /// This is what the built-in middleware use: CORS's header values are
+    /// compile-time constants and a static file's ETag belongs to the file,
+    /// so copying either into the request arena is work with no purpose.
+    ///
+    /// Hand it something built on the stack and the response goes out with
+    /// whatever those bytes have become. When in doubt, `setHeader`.
+    pub fn setStaticHeader(self: *Ctx, name: []const u8, value: []const u8) !void {
+        return self.putHeader(.{ .name = name, .value = value });
+    }
+
+    fn putHeader(self: *Ctx, entry: http1.Header) !void {
+        if (http1.isReservedHeader(entry.name)) return error.ReservedHeader;
         for (self._extra_headers.items) |*h| {
-            if (std.ascii.eqlIgnoreCase(h.name, name)) {
-                h.* = owned; // last one wins, rather than sending both
+            if (std.ascii.eqlIgnoreCase(h.name, entry.name)) {
+                h.* = entry; // last one wins, rather than sending both
                 return;
             }
         }
-        try self._extra_headers.append(self._arena, owned);
+        // Room for a few in one go: CORS alone sets two or three, and
+        // growing one at a time would mean an allocation for each.
+        if (self._extra_headers.capacity == 0) {
+            try self._extra_headers.ensureTotalCapacity(self._arena, 4);
+        }
+        try self._extra_headers.append(self._arena, entry);
     }
 
     pub fn send(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8) !void {
@@ -187,9 +221,15 @@ pub const Ctx = struct {
     }
 
     /// Serialise `value` to JSON (through the request arena) and send it.
+    ///
+    /// The buffer starts at `json_hint` rather than at nothing, so a
+    /// response of ordinary size is assembled in one allocation instead of
+    /// a handful of doublings. Overshooting costs nothing: the arena is
+    /// emptied when the request ends either way.
     pub fn sendJson(self: *Ctx, status: u16, value: anytype) !void {
-        const b = try std.json.Stringify.valueAlloc(self._arena, value, .{});
-        try self.send(status, "application/json", b);
+        var out: std.Io.Writer.Allocating = try .initCapacity(self._arena, json_hint);
+        try std.json.Stringify.value(value, .{}, &out.writer);
+        try self.send(status, "application/json", out.written());
     }
 };
 
