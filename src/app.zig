@@ -18,6 +18,7 @@ const fail = @import("fail.zig");
 const mw = @import("middleware.zig");
 const cors = @import("cors.zig");
 const static_mod = @import("static.zig");
+const openapi = @import("openapi.zig");
 const budget = @import("budget.zig");
 
 const Ctx = ctx_mod.Ctx;
@@ -43,6 +44,15 @@ pub const App = struct {
     /// Directories loaded into memory by `static`, searched only when no
     /// route matched (ADR 0010).
     static_sets: std.ArrayList(static_mod.Set) = .empty,
+    /// What each route's signature says about it, collected as routes are
+    /// registered and turned into an OpenAPI document by `listen()` if
+    /// `docs()` asked for one (ADR 0017).
+    operations: std.ArrayList(openapi.Operation) = .empty,
+    docs_options: ?openapi.Options = null,
+    /// The generated document and its reader page, held the way a loaded
+    /// directory is so that ETags and 304s arrive without a second code
+    /// path. Null until `listen()` builds it.
+    docs_set: ?static_mod.Set = null,
     /// Set when the server should stop. Read by the Engine's accept loop
     /// and by every connection between requests.
     stop: bulkhead.Stop = .{},
@@ -57,6 +67,8 @@ pub const App = struct {
 
     pub fn deinit(self: *App) void {
         self.freeChains();
+        if (self.docs_set) |*set| set.deinit();
+        self.operations.deinit(self.gpa);
         for (self.static_sets.items) |*s| s.deinit();
         self.static_sets.deinit(self.gpa);
         self.scoped.deinit(self.gpa);
@@ -231,6 +243,32 @@ pub const App = struct {
 
         try self.requirements.appendSlice(self.gpa, comptime typed.requirements(pattern, handler));
         try self.router.add(method, pattern, comptime typed.wrap(pattern, handler));
+
+        // Read from the same argument list `wrap` just read, so the
+        // description of an endpoint and the code that serves it cannot
+        // drift apart (ADR 0017). Comptime data, so what is appended here is
+        // one struct of slices pointing at read-only memory.
+        var op = comptime typed.operation(pattern, handler);
+        op.method = method;
+        try self.operations.append(self.gpa, op);
+    }
+
+    /// Serve a description of this API, worked out from the handler
+    /// signatures (ADR 0017).
+    ///
+    /// ```zig
+    /// app.docs(.{ .title = "Orders", .version = "2.0.0" });
+    /// ```
+    ///
+    /// The document lands at `/openapi.json` and a page for reading it at
+    /// `/docs`. Both are built when `listen()` resolves the routes, so it
+    /// does not matter whether this is called before or after them — the
+    /// same order-independence `use` and `get` have (ADR 0009).
+    ///
+    /// Routes win over both paths, so registering a `/docs` of your own
+    /// still gets its way.
+    pub fn docs(self: *App, opts: openapi.Options) void {
+        self.docs_options = opts;
     }
 
     /// The first requirement that is not met, or null if every handler got
@@ -298,6 +336,51 @@ pub const App = struct {
         for (self.router.routes.items) |*r| {
             r.chain = try mw.chainFor(self.gpa, self.scoped.items, r.pattern);
         }
+        try self.buildDocs();
+    }
+
+    /// Turn the collected operations into the document and its reader page.
+    /// Here rather than in `docs()` because every route has to be registered
+    /// first, and here rather than on the request path because the answer
+    /// cannot change once the server is running.
+    fn buildDocs(self: *App) !void {
+        if (self.docs_set) |*set| {
+            set.deinit();
+            self.docs_set = null;
+        }
+        const opts = self.docs_options orelse return;
+
+        var document: std.Io.Writer.Allocating = .init(self.gpa);
+        defer document.deinit();
+        try openapi.write(&document.writer, self.operations.items, .{
+            .title = opts.title,
+            .version = opts.version,
+            .description = opts.description,
+        });
+
+        var page: std.Io.Writer.Allocating = .init(self.gpa);
+        defer page.deinit();
+
+        var entries: [2]static_mod.Entry = undefined;
+        var n: usize = 0;
+        entries[n] = .{
+            .url = opts.path,
+            .bytes = document.written(),
+            .content_type = "application/json",
+        };
+        n += 1;
+
+        if (opts.ui_path.len > 0) {
+            try openapi.writeReaderPage(&page.writer, opts.title, opts.path);
+            entries[n] = .{
+                .url = opts.ui_path,
+                .bytes = page.written(),
+                .content_type = "text/html; charset=utf-8",
+            };
+            n += 1;
+        }
+
+        self.docs_set = try static_mod.fromMemory(self.gpa, entries[0..n]);
     }
 
     fn freeChains(self: *App) void {
@@ -524,6 +607,13 @@ pub const App = struct {
     /// stylesheet would hide that.
     fn findStatic(self: *const App, method: http1.Method, path: []const u8) ?*const static_mod.File {
         if (method != .GET and method != .HEAD) return null;
+        // Asked before the loaded directories, not after. A single-page app
+        // served from `/` with an `index.html` fallback answers for every
+        // path there is, and it would swallow `/openapi.json` whole —
+        // which is exactly the setup most likely to want the document.
+        if (self.docs_set) |*set| {
+            if (set.find(path)) |file| return file;
+        }
         for (self.static_sets.items) |*set| {
             if (set.find(path)) |file| return file;
         }
@@ -2254,6 +2344,240 @@ test "the request path stays inside its allocation budget" {
     // Raising this number needs a reason; lowering it is welcome.
     try testing.expectEqual(@as(usize, 3), counting.allocs);
     try testing.expectEqual(@as(usize, 0), counting.resizes);
+}
+
+// ---- the generated API description (ADR 0017) ----
+
+const DocUser = struct { id: u32, name: Str, admin: bool = false };
+const DocNewUser = struct { name: Str, age: ?u32 = null, plan: enum { free, paid } };
+const DocSearch = struct {
+    q: Str,
+    page: u32 = 1,
+    sort: enum { newest, oldest } = .newest,
+    tag: ?Str = null,
+};
+
+fn docGetUser(_: *Db, id: u32) !DocUser {
+    return .{ .id = id, .name = undefined };
+}
+fn docListUsers(_: *Db, _: typed.Query(DocSearch)) ![]const DocUser {
+    return &.{};
+}
+fn docCreateUser(_: *Db, _: DocNewUser) !typed.Response(DocUser) {
+    return undefined;
+}
+fn docDeleteUser(_: *Db, _: u32) !void {}
+fn docServeFile(rest: Str) Str {
+    return rest;
+}
+
+/// Build an app with one of everything and hand back its document.
+fn docsFor(app: *App) ![]const u8 {
+    try app.resolveChains();
+    const set = app.docs_set.?;
+    for (set.files) |f| {
+        if (std.mem.eql(u8, f.url, "/openapi.json")) return f.bytes;
+    }
+    return error.NoDocument;
+}
+
+test "the document describes what the signatures say" {
+    var db = Db{ .rows = &.{} };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    app.docs(.{ .title = "Orders", .version = "2.1.0" });
+
+    const api = app.group("/api/v1");
+    try api.get("/users/:id", docGetUser);
+    try api.delete("/users/:id", docDeleteUser);
+    try api.get("/users", docListUsers);
+    try api.post("/users", docCreateUser);
+    try app.get("/files/*", docServeFile);
+
+    const json = try docsFor(&app);
+
+    try testing.expect(std.mem.startsWith(u8, json, "{\"openapi\":\"3.1.0\","));
+    try testing.expect(std.mem.indexOf(u8, json, "\"title\":\"Orders\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"version\":\"2.1.0\"") != null);
+
+    // A `:id` becomes `{id}`, and the two verbs on it share one path entry.
+    const users_id = std.mem.indexOf(u8, json, "\"/api/v1/users/{id}\":{").?;
+    const next_path = std.mem.indexOf(u8, json[users_id..], "\"/api/v1/users\"").?;
+    const entry = json[users_id..][0..next_path];
+    try testing.expect(std.mem.indexOf(u8, entry, "\"get\":") != null);
+    try testing.expect(std.mem.indexOf(u8, entry, "\"delete\":") != null);
+
+    // The path param's type came from the handler's argument, not a guess.
+    try testing.expect(std.mem.indexOf(
+        u8,
+        json,
+        "\"name\":\"id\",\"in\":\"path\",\"required\":true,\"schema\":{\"type\":\"integer\"}",
+    ) != null);
+
+    // A catch-all has no OpenAPI spelling, so it is `{path}` in both places.
+    try testing.expect(std.mem.indexOf(u8, json, "\"/files/{path}\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"name\":\"path\",\"in\":\"path\"") != null);
+
+    // The query struct, with a default meaning "not required".
+    try testing.expect(std.mem.indexOf(u8, json, "\"name\":\"q\",\"in\":\"query\",\"required\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"name\":\"page\",\"in\":\"query\",\"required\":false") != null);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        json,
+        "\"name\":\"sort\",\"in\":\"query\",\"required\":false,\"schema\":" ++
+            "{\"type\":\"string\",\"enum\":[\"newest\",\"oldest\"]}",
+    ) != null);
+
+    // The body, from the struct argument.
+    try testing.expect(std.mem.indexOf(u8, json, "\"requestBody\":{\"required\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"plan\":{\"type\":\"string\",\"enum\":[\"free\",\"paid\"]}") != null);
+
+    // A handler returning `Response(T)` chooses its status at runtime, so
+    // the document says `default` instead of claiming one.
+    try testing.expect(std.mem.indexOf(u8, json, "\"responses\":{\"default\":") != null);
+    // One returning a plain value always answers 200, so it says so.
+    try testing.expect(std.mem.indexOf(u8, json, "\"responses\":{\"200\":") != null);
+
+    // A route with something to convert can be refused before the handler
+    // runs, and the document admits it.
+    try testing.expect(std.mem.indexOf(u8, json, "\"400\":") != null);
+}
+
+test "the document is valid JSON, all of it" {
+    var db = Db{ .rows = &.{} };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    app.docs(.{ .title = "A \"quoted\" name", .description = "line one\nline two" });
+
+    try app.get("/users/:id", docGetUser);
+    try app.get("/users", docListUsers);
+    try app.post("/users", docCreateUser);
+    try app.delete("/users/:id", docDeleteUser);
+    try app.get("/files/*", docServeFile);
+    try app.get("/", plainOk);
+
+    const json = try docsFor(&app);
+
+    // The assertions above check the shape a phrase at a time; this checks
+    // that the whole thing parses, which is what a client generator will do
+    // to it. Escaping is deliberately given something to escape.
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+    defer parsed.deinit();
+
+    const paths = parsed.value.object.get("paths").?.object;
+    try testing.expectEqual(@as(usize, 4), paths.count());
+    try testing.expect(paths.contains("/users/{id}"));
+    try testing.expect(paths.contains("/files/{path}"));
+    try testing.expect(paths.contains("/"));
+
+    const on_users_id = paths.get("/users/{id}").?.object;
+    try testing.expectEqual(@as(usize, 2), on_users_id.count());
+    try testing.expectEqualStrings(
+        "getUsersId",
+        on_users_id.get("get").?.object.get("operationId").?.string,
+    );
+
+    try testing.expectEqualStrings(
+        "A \"quoted\" name",
+        parsed.value.object.get("info").?.object.get("title").?.string,
+    );
+}
+
+test "docs can be asked for before or after the routes, and both pages appear" {
+    var db = Db{ .rows = &.{} };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+
+    // After the routes this time — the order-independence `use` and `get`
+    // already have (ADR 0009).
+    try app.get("/users/:id", docGetUser);
+    app.docs(.{ .title = "Late", .ui_path = "/reference" });
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const spec = h.send(&app, "GET /openapi.json HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, spec.response, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(std.mem.indexOf(u8, spec.response, "Content-Type: application/json") != null);
+    try testing.expect(std.mem.indexOf(u8, spec.response, "\"title\":\"Late\"") != null);
+    // Served as a file, so it arrives with an ETag like any other.
+    try testing.expect(std.mem.indexOf(u8, spec.response, "ETag: ") != null);
+
+    const page = h.send(&app, "GET /reference HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, page.response, "Content-Type: text/html") != null);
+    try testing.expect(std.mem.indexOf(u8, page.response, "data-url=\"/openapi.json\"") != null);
+}
+
+test "no docs asked for, no documents served" {
+    var db = Db{ .rows = &.{} };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    try app.get("/users/:id", docGetUser);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    try testing.expect(app.docs_set == null);
+    try testing.expect(std.mem.startsWith(
+        u8,
+        h.send(&app, "GET /openapi.json HTTP/1.1\r\n\r\n").response,
+        "HTTP/1.1 404 Not Found\r\n",
+    ));
+}
+
+test "a route of your own at the docs path still wins" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    app.docs(.{ .ui_path = "/docs" });
+    try app.get("/docs", plainOk);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    // Routes are matched before anything static is looked at, docs included
+    // — so this is the handler, not the reader page.
+    const result = h.send(&app, "GET /docs HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, result.response, "handler"));
+}
+
+test "a single-page app serving everything does not swallow the document" {
+    // The setup most likely to want an API description is also the one that
+    // would hide it: an SPA fallback answers for every path there is.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    app.docs(.{ .title = "Behind an SPA" });
+    try app.staticWith("/", "examples/spa/public", .{ .spa_fallback = "index.html" });
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const spec = h.send(&app, "GET /openapi.json HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, spec.response, "Content-Type: application/json") != null);
+    try testing.expect(std.mem.indexOf(u8, spec.response, "\"title\":\"Behind an SPA\"") != null);
+}
+
+test "rebuilding the document twice does not leak the first one" {
+    var db = Db{ .rows = &.{} };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    app.docs(.{});
+    try app.get("/users/:id", docGetUser);
+
+    // `resolveChains` is what `listen()` calls, and a test — or a program
+    // that listens twice — can reach it more than once.
+    try app.resolveChains();
+    try app.resolveChains();
+    try app.resolveChains();
+    try testing.expect(app.docs_set != null);
 }
 
 // ---- groups and plugins (ADR 0015) ----

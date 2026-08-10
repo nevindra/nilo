@@ -38,6 +38,7 @@ const service_mod = @import("service.zig");
 const fail = @import("fail.zig");
 const str_mod = @import("str.zig");
 const resolve = @import("resolve.zig");
+const openapi = @import("openapi.zig");
 
 const Ctx = ctx_mod.Ctx;
 const Str = str_mod.Str;
@@ -169,6 +170,117 @@ pub fn requirements(comptime pattern: []const u8, comptime f: anytype) []const s
         }
         return list;
     }
+}
+
+/// What this route's signature says about it, for the generated API
+/// description (ADR 0017). Read from the very same argument list `wrap`
+/// reads, which is the whole point: there is one contract, not a contract
+/// and a description of it that can drift apart.
+/// The verb is not in here: `App.route` takes it as an ordinary runtime
+/// argument, so the caller fills it in on the value this hands back.
+/// Everything else is settled while compiling.
+pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Operation {
+    comptime {
+        const Fn = fnTypeOf(pattern, @TypeOf(f));
+        const params = @typeInfo(Fn).@"fn".params;
+        const roles = rolesOf(pattern, params);
+
+        // Named by the pattern and typed by whichever argument claimed
+        // them. A `*Ctx` handler claims none, and text is what a path param
+        // is until somebody converts it.
+        var path_params: []const openapi.Param = &.{};
+        for (patternParamNames(pattern), 0..) |name, nth| {
+            var schema = openapi.schemaOf(Str);
+            for (params, 0..) |p, i| switch (roles[i]) {
+                .param => |claimed| if (claimed == nth) {
+                    schema = openapi.schemaOf(p.type.?);
+                },
+                else => {},
+            };
+            path_params = path_params ++ [_]openapi.Param{.{ .name = name, .schema = schema }};
+        }
+
+        var query: []const openapi.Field = &.{};
+        var body: ?*const openapi.Schema = null;
+        // Whether zfast can refuse this request before the handler runs.
+        // Not a guess — it is exactly the routes with something to convert.
+        var can_reject = false;
+
+        for (params, 0..) |p, i| switch (roles[i]) {
+            .param => can_reject = can_reject or p.type.? != Str,
+            .query => {
+                query = queryFields(p.type.?.zfast_query);
+                can_reject = true;
+            },
+            .body => {
+                body = openapi.schemaOf(p.type.?);
+                can_reject = true;
+            },
+            else => {},
+        };
+
+        return .{
+            .method = .other, // filled in by the caller, which knows the verb
+            .pattern = pattern,
+            .params = path_params,
+            .query = query,
+            .body = body,
+            .answer = answerOf(Fn),
+            .can_reject = can_reject,
+        };
+    }
+}
+
+fn queryFields(comptime T: type) []const openapi.Field {
+    comptime {
+        var out: []const openapi.Field = &.{};
+        for (@typeInfo(T).@"struct".fields) |f| {
+            out = out ++ [_]openapi.Field{.{
+                .name = f.name,
+                .schema = openapi.schemaOf(f.type),
+                // Absent is allowed when there is a default to fall back to,
+                // or when the field is optional and absent means null — the
+                // same two exemptions `queryValue` applies at runtime.
+                .required = f.default_value_ptr == null and @typeInfo(f.type) != .optional,
+            }};
+        }
+        return out;
+    }
+}
+
+/// What the return type says the response will be. The mapping is the one
+/// `sendResult` performs, read the other way round.
+fn answerOf(comptime Fn: type) openapi.Answer {
+    comptime {
+        const empty = openapi.Answer{ .status = 200, .content_type = "", .schema = null };
+
+        const Returned = @typeInfo(Fn).@"fn".return_type orelse return empty;
+        const V = switch (@typeInfo(Returned)) {
+            .error_union => |u| u.payload,
+            else => Returned,
+        };
+        if (V == void) return empty;
+
+        if (hasNamedDecl(V, "zfast_response")) {
+            const Inner = V.zfast_response;
+            // The status of a `Response(T)` is a field the handler fills in,
+            // so it is not knowable here. Saying "default" is the truth;
+            // claiming 200 for a route that answers 201 would not be.
+            if (Inner == void) return .{ .status = null, .content_type = "", .schema = null };
+            return .{
+                .status = null,
+                .content_type = contentTypeFor(Inner),
+                .schema = openapi.schemaOf(Inner),
+            };
+        }
+
+        return .{ .status = 200, .content_type = contentTypeFor(V), .schema = openapi.schemaOf(V) };
+    }
+}
+
+fn contentTypeFor(comptime T: type) []const u8 {
+    if (T == Str or T == []const u8 or T == []u8) return "text/plain";
+    return "application/json";
 }
 
 // ---- the compile-time side ----

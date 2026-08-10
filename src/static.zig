@@ -123,6 +123,61 @@ pub const LoadError = error{
     StaticReadFailed,
 };
 
+/// One file for `fromMemory` — bytes that are already here rather than on
+/// a disk. `url` and `bytes` are copied; `content_type` and `cache_control`
+/// are borrowed and have to outlive the Set, exactly as a loaded Set
+/// borrows them from its Options.
+pub const Entry = struct {
+    url: []const u8,
+    bytes: []const u8,
+    content_type: []const u8,
+    cache_control: []const u8 = "no-cache",
+};
+
+/// A Set built from bytes already in memory instead of from a directory.
+///
+/// What this is for is the generated API description (ADR 0017), which is a
+/// file in every way that matters: fixed once the routes are known, worth an
+/// ETag, and a repeat visit should be a 304. Going through the same Set that
+/// serves `public/` means all of that arrives without a second code path,
+/// and without a new field on `Ctx`.
+///
+/// The prefix is `/`, so the Set is asked about every path that reached the
+/// static layer and answers only for the URLs it was given.
+pub fn fromMemory(gpa: std.mem.Allocator, entries: []const Entry) !Set {
+    var set = Set{
+        .gpa = gpa,
+        .prefix = try gpa.dupe(u8, "/"),
+        .files = &.{},
+        .fallback = null,
+        .index = "",
+    };
+    errdefer set.deinit();
+
+    set.files = try gpa.alloc(File, entries.len);
+    // Emptied before anything can fail, so that `deinit` on the way out of a
+    // half-built Set frees what exists and steps over what does not — an
+    // empty slice is nothing to free.
+    for (set.files) |*file| file.* = .{
+        .url = &.{},
+        .bytes = &.{},
+        .etag = &.{},
+        .content_type = "",
+        .cache_control = "",
+    };
+
+    for (entries, set.files) |entry, *file| {
+        file.url = try gpa.dupe(u8, entry.url);
+        file.bytes = try gpa.dupe(u8, entry.bytes);
+        file.etag = try etagFor(gpa, entry.bytes);
+        file.content_type = entry.content_type;
+        file.cache_control = entry.cache_control;
+    }
+
+    std.mem.sort(File, set.files, {}, lessByUrl);
+    return set;
+}
+
 /// Read `dir_path` into memory, mapping every file in it to a URL under
 /// `url_prefix`. Called before `listen()`, so the blocking reads here
 /// happen while nothing is being served.

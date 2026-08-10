@@ -140,6 +140,11 @@ pub const cors = @import("cors.zig");
 /// the module itself is here for its `Options`.
 pub const static = @import("static.zig");
 
+/// The API description, worked out from the handler signatures (ADR 0017).
+/// Switched on with `app.docs(.{ .title = "…" })`; the module is here for
+/// its `Options` and for the `Schema` a test might want to look at.
+pub const openapi = @import("openapi.zig");
+
 /// Opt in to a panic message that names the request that was in flight,
 /// by putting this in your root source file:
 ///
@@ -228,6 +233,7 @@ test {
     _ = @import("fail.zig");
     _ = @import("service.zig");
     _ = @import("resolve.zig");
+    _ = @import("openapi.zig");
     _ = @import("middleware.zig");
     _ = @import("typed.zig");
     _ = @import("ctx.zig");
