@@ -183,18 +183,32 @@ pub const HeaderIterator = struct {
 /// then return a slice of it without copying and without advancing the
 /// reader. The caller decides when to `in.toss(head.len)`.
 pub fn readHead(in: *std.Io.Reader) ![]const u8 {
+    // Where the search got to last time round. Without it, a client that
+    // dribbles the head in a byte at a time makes the server rescan
+    // everything it has already seen on every single read: an 8 KB head
+    // delivered that way costs ~33 million byte comparisons instead of
+    // 8 thousand. That is not a slow server, that is a lever.
+    //
+    // `buffered()` is a logical view — `fillMore` may shuffle the bytes to
+    // the front of the buffer, but it moves the start with them, so an
+    // index into it stays pointing at the same byte.
+    var scanned: usize = 0;
     while (true) {
         const buf = in.buffered();
-        if (findEndOfHead(buf)) |end| return buf[0..end];
+        if (findEndOfHead(buf, scanned)) |end| return buf[0..end];
+        // Back up by one less than the longest delimiter, so one split
+        // across two reads is still found.
+        scanned = buf.len -| 3;
         if (buf.len >= in.buffer.len) return error.HeadTooLong;
         try in.fillMore();
     }
 }
 
 /// The index just past the blank line that ends the head, if it is
-/// complete. Accepts CRLF as well as a bare LF.
-fn findEndOfHead(buf: []const u8) ?usize {
-    var i: usize = 0;
+/// complete. Accepts CRLF as well as a bare LF. Starts at `from`, which
+/// the caller advances as the head arrives in pieces.
+fn findEndOfHead(buf: []const u8, from: usize) ?usize {
+    var i: usize = from;
     while (std.mem.indexOfScalarPos(u8, buf, i, '\n')) |nl| {
         if (nl + 1 < buf.len and buf[nl + 1] == '\n') return nl + 2;
         if (nl + 2 < buf.len and buf[nl + 1] == '\r' and buf[nl + 2] == '\n') return nl + 3;

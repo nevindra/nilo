@@ -69,7 +69,7 @@ The benchmark script has lived in the repo since stage 1, even unrun in anger, s
 
 - **The name.** `zfast` is a working name. The `z-` prefix is crowded in the Zig ecosystem already (`zap`, `zzz`, `zon`, a dozen `zig-*`), so it is easy to confuse. The module name has to be easy to change without touching user code.
 - **Where to measure.** Still nothing. Stage 3 did get run under `wrk` on a shared Linux VM, but only to confirm the server does not fall over and no responses get crossed — a shared machine cannot be used to compare numbers, so none were kept and none went into the README. Until there is a quiet machine, [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md) is not active and every conflict goes to DX.
-- **The router algorithm.** Invisible to users, so there is no DX conflict here — pure work, to be decided with numbers later. The static file lookup is already a binary search; the router is still a linear scan.
+- **The router algorithm.** Still a linear scan, and which structure replaces it — radix tree, per-method buckets, something else — needs numbers nobody has yet. What the scan *costs* did not need numbers: it used to re-split the request path once per route, which is a different kind of wrong from "linear". Patterns are now split at registration and the path once per request, and a route with a different segment count is rejected on an integer compare. Measured in-process, worst case with the wanted route last: **3.7× at 50 routes, 1.4× at 5**. Never slower, so it does not owe the benchmark anything.
 - **Reloading static files without a restart.** For a build-output directory this does not matter, since deployment restarts anyway. For local development it is a real annoyance and wants a watch option in v2.
 
 ## Metrics
@@ -89,3 +89,8 @@ Requests per second is the number that needs a machine nobody else is using. Two
 - **Memory per idle connection: ~21 KB** with the default buffers, measured as the RSS difference across 1,000 held-open keep-alive connections. About 4 KB of that is the read and write buffers, which `Options.read_buffer` / `write_buffer` turn down: at 2 KB each the figure is ~17 KB. Most of what is left is the fiber's own stack, which is zio's to hand out.
 
 Neither says how fast the server is. Both notice when it gets worse, which is what is available until there is somewhere honest to measure.
+
+A third kind of number needs no machine at all: how the work grows. Two places were growing wrong, and both were fixed on that basis rather than on a benchmark.
+
+- **Finding the end of a request head** restarted from byte zero on every read. A head arriving in one packet cost one pass; the same head dribbled in a byte at a time cost a pass per byte — quadratic, and reachable by any client that chooses to be slow. It now resumes where it left off.
+- **Route matching** re-split the request path for every route it tried. See "Still open" above.
