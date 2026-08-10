@@ -2,7 +2,7 @@
 
 An HTTP framework for Zig, aimed at people coming from Go or Node.
 
-> **Status: stage 1 of 5 ("rangka jalan") — accepts connections through the Mesin boundary, parses HTTP/1.1, and answers "hello". No framework layer yet.**
+> **Status: stage 2 of 5 (the `Ctx` layer) — routing with path params, query params, request headers, JSON in/out, the per-request arena, and `Str` with its debug-build lifetime trap. Typed handlers (stage 3) are not here yet: handlers currently take `*Ctx`.**
 > `zfast` is a working name and may change.
 
 ## Documents

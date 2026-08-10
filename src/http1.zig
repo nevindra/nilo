@@ -12,6 +12,21 @@
 
 const std = @import("std");
 
+pub const Metode = enum {
+    GET,
+    HEAD,
+    POST,
+    PUT,
+    DELETE,
+    PATCH,
+    OPTIONS,
+    lain,
+};
+
+pub fn metodeDari(nama: []const u8) Metode {
+    return std.meta.stringToEnum(Metode, nama) orelse .lain;
+}
+
 pub const GalatParse = error{
     BarisPermintaanRusak,
     HeaderRusak,
@@ -54,9 +69,35 @@ pub fn buangIsi(in: *std.Io.Reader, p: *const Permintaan) !void {
     if (p.panjang_isi > 0) try in.discardAll64(p.panjang_isi);
 }
 
+/// Iterasi semua header di sebuah kepala (baris permintaan dilewati),
+/// untuk lapisan yang perlu menyimpan seluruh header, bukan cuma yang
+/// dipakai parser.
+pub const IterasiHeader = struct {
+    baris: std.mem.SplitIterator(u8, .scalar),
+
+    pub const Pasangan = struct { nama: []const u8, nilai: []const u8 };
+
+    pub fn dari(kepala: []const u8) IterasiHeader {
+        var baris = std.mem.splitScalar(u8, kepala, '\n');
+        _ = baris.next(); // baris permintaan
+        return .{ .baris = baris };
+    }
+
+    pub fn next(self: *IterasiHeader) ?Pasangan {
+        const baris = potongCR(self.baris.next() orelse return null);
+        if (baris.len == 0) return null;
+        const titik_dua = std.mem.indexOfScalar(u8, baris, ':') orelse return null;
+        return .{
+            .nama = baris[0..titik_dua],
+            .nilai = std.mem.trim(u8, baris[titik_dua + 1 ..], " \t"),
+        };
+    }
+};
+
 /// Tunggu sampai satu kepala utuh (sampai baris kosong) ada di buffer,
 /// lalu kembalikan slice-nya tanpa menyalin dan tanpa memajukan reader.
-fn bacaKepala(in: *std.Io.Reader) ![]const u8 {
+/// Pemanggil yang memutuskan kapan `in.toss(kepala.len)`.
+pub fn bacaKepala(in: *std.Io.Reader) ![]const u8 {
     while (true) {
         const buf = in.buffered();
         if (cariAkhirKepala(buf)) |akhir| return buf[0..akhir];
@@ -136,6 +177,31 @@ pub fn terapkanHeader(baris: []const u8, p: *Permintaan) GalatParse!void {
         },
         else => {},
     }
+}
+
+pub fn frasaStatus(status: u16) []const u8 {
+    return switch (status) {
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        304 => "Not Modified",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        409 => "Conflict",
+        413 => "Content Too Large",
+        422 => "Unprocessable Content",
+        429 => "Too Many Requests",
+        431 => "Request Header Fields Too Large",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        503 => "Service Unavailable",
+        else => "",
+    };
 }
 
 /// Rakit respons lengkap sebagai konstanta saat kompilasi — untuk respons

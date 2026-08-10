@@ -12,11 +12,13 @@ pub const Opsi = struct {
     port: u16 = 8787,
 };
 
-/// Fungsi yang mengurus satu koneksi sampai selesai. Reader/Writer sudah
-/// ber-buffer; Penangan tidak perlu tahu socket di baliknya.
-pub const Penangan = fn (in: *std.Io.Reader, out: *std.Io.Writer) void;
-
-pub fn layani(gpa: std.mem.Allocator, opsi: Opsi, comptime penangan: Penangan) !void {
+/// Jalankan `penangan(state, in, out)` untuk tiap koneksi yang diterima,
+/// masing-masing di fiber-nya sendiri, sampai koneksinya selesai.
+/// Reader/Writer sudah ber-buffer; penangan tidak perlu tahu socket di
+/// baliknya. `penangan` harus `fn (@TypeOf(state), *std.Io.Reader,
+/// *std.Io.Writer) void`.
+pub fn layani(gpa: std.mem.Allocator, opsi: Opsi, state: anytype, comptime penangan: anytype) !void {
+    const State = @TypeOf(state);
     const rt = try zio.Runtime.init(gpa, .{});
     defer rt.deinit();
 
@@ -27,7 +29,7 @@ pub fn layani(gpa: std.mem.Allocator, opsi: Opsi, comptime penangan: Penangan) !
     std.log.info("zfast mendengarkan di {f}", .{server.socket.address});
 
     const Koneksi = struct {
-        fn urus(stream: zio.net.Stream) void {
+        fn urus(st: State, stream: zio.net.Stream) void {
             defer stream.close();
 
             // Satu respons = satu flush = satu segmen; Nagle cuma nambah
@@ -42,7 +44,7 @@ pub fn layani(gpa: std.mem.Allocator, opsi: Opsi, comptime penangan: Penangan) !
             var pembaca = stream.reader(&buf_baca);
             var penulis = stream.writer(&buf_tulis);
 
-            penangan(&pembaca.interface, &penulis.interface);
+            penangan(st, &pembaca.interface, &penulis.interface);
         }
     };
 
@@ -52,6 +54,6 @@ pub fn layani(gpa: std.mem.Allocator, opsi: Opsi, comptime penangan: Penangan) !
     while (true) {
         const stream = try server.accept(.{});
         errdefer stream.close();
-        try group.spawn(Koneksi.urus, .{stream});
+        try group.spawn(Koneksi.urus, .{ state, stream });
     }
 }

@@ -1,54 +1,48 @@
-//! Rangka jalan (tahap 1 di docs/rencana.md): terima koneksi lewat Sekat,
-//! parse HTTP/1.1, balas "hello". Belum ada framework — tujuan satu-satunya
-//! adalah memastikan Sekat terbentuk dengan benar.
+//! Contoh App tahap 2 (lapisan Ctx) — sekaligus sasaran benchmark:
+//! GET terute dengan path param yang mengembalikan JSON ~1KB, keep-alive
+//! (metrik utama di docs/rencana.md).
 
 const std = @import("std");
+const zfast = @import("zfast.zig");
 const sekat = @import("sekat.zig");
-const http1 = @import("http1.zig");
 
 pub const std_options_debug_io = sekat.debug_io;
 
-// Respons yang isinya tetap dirakit sekali saat kompilasi; jalur panasnya
-// tinggal satu writeAll + satu flush, tanpa formatting.
-const HELLO_LANJUT = http1.responsStatis(200, "OK", "text/plain", "hello\n", true);
-const HELLO_TUTUP = http1.responsStatis(200, "OK", "text/plain", "hello\n", false);
-const RUSAK = http1.responsStatis(400, "Bad Request", "text/plain", "permintaan rusak\n", false);
-const KEPANJANGAN = http1.responsStatis(431, "Request Header Fields Too Large", "text/plain", "kepala kepanjangan\n", false);
-const CHUNKED = http1.responsStatis(501, "Not Implemented", "text/plain", "chunked belum didukung\n", false);
+const User = struct {
+    id: u32,
+    nama: []const u8,
+    email: []const u8,
+    bio: []const u8,
+};
+
+// Payload dibikin ~1KB supaya angka benchmark-nya sesuai metrik.
+const bio_contoh = "Penggemar sistem yang menulis Zig sebelum sarapan. " ** 18;
+
+fn getUser(c: *zfast.Ctx) !void {
+    const id = (c.param("id").?).angka(u32) catch
+        return c.balasTeks(400, "id harus angka\n");
+    try c.balasJson(200, User{
+        .id = id,
+        .nama = "Tester Terute",
+        .email = "tester@contoh.dev",
+        .bio = bio_contoh,
+    });
+}
+
+fn sehat(c: *zfast.Ctx) !void {
+    try c.balasTeks(200, "hidup\n");
+}
 
 pub fn main() !void {
-    try sekat.layani(std.heap.smp_allocator, .{}, layaniKoneksi);
-}
+    var app = zfast.App.init(std.heap.smp_allocator);
+    defer app.deinit();
 
-fn layaniKoneksi(in: *std.Io.Reader, out: *std.Io.Writer) void {
-    while (true) {
-        const p = http1.bacaPermintaan(in) catch |err| {
-            switch (err) {
-                // Koneksi keep-alive yang ditutup klien di antara dua
-                // request: jalan pulang yang normal, bukan galat.
-                error.EndOfStream, error.ReadFailed => {},
-                error.KepalaKepanjangan => balasTerakhir(out, KEPANJANGAN),
-                else => balasTerakhir(out, RUSAK),
-            }
-            return;
-        };
+    try app.get("/users/:id", getUser);
+    try app.get("/sehat", sehat);
 
-        http1.buangIsi(in, &p) catch return balasTerakhir(out, CHUNKED);
-
-        if (p.keep_alive) {
-            out.writeAll(HELLO_LANJUT) catch return;
-            out.flush() catch return;
-        } else {
-            return balasTerakhir(out, HELLO_TUTUP);
-        }
-    }
-}
-
-fn balasTerakhir(out: *std.Io.Writer, respons: []const u8) void {
-    out.writeAll(respons) catch return;
-    out.flush() catch return;
+    try app.dengarkan(.{});
 }
 
 test {
-    _ = http1;
+    _ = @import("zfast.zig");
 }

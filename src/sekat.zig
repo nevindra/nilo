@@ -7,19 +7,19 @@
 //!
 //! Kontrak untuk sebuah Mesin:
 //! - `Opsi` — alamat dan port tempat mendengarkan.
-//! - `Penangan` — fungsi yang menerima satu koneksi sebagai pasangan
-//!   `*std.Io.Reader` / `*std.Io.Writer` dan mengurusnya sampai selesai.
-//! - `layani(gpa, opsi, penangan)` — mendengarkan, menerima koneksi,
-//!   dan menjalankan `penangan` untuk tiap koneksi secara konkuren.
+//! - `layani(gpa, opsi, state, penangan)` — mendengarkan, menerima
+//!   koneksi, dan menjalankan `penangan(state, in, out)` untuk tiap
+//!   koneksi secara konkuren sampai koneksi selesai. `state` dibawa
+//!   apa adanya (biasanya `*App`).
 //! - `debug_io` — dipasang ke `std_options_debug_io` supaya `std.log`
 //!   tidak memblokir event loop.
 //!
-//! Reader/Writer yang diberikan ke Penangan adalah tipe std murni, jadi
-//! lapisan HTTP tidak tahu Mesin apa yang ada di baliknya.
+//! Reader/Writer yang diberikan ke penangan adalah tipe std murni
+//! (`*std.Io.Reader`, `*std.Io.Writer`), jadi lapisan HTTP tidak tahu
+//! Mesin apa yang ada di baliknya.
 
 const mesin = @import("mesin/zio.zig");
 
 pub const Opsi = mesin.Opsi;
-pub const Penangan = mesin.Penangan;
 pub const layani = mesin.layani;
 pub const debug_io = mesin.debug_io;
