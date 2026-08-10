@@ -18,10 +18,14 @@ Worth being honest about from the start: GoFiber is not Go's performance champio
 - Typed handlers on top of the Ctx layer
 - JSON in and out
 - A middleware chain
-- Four built-in middlewares: logger, CORS, recover, static files
+- Three built-in middlewares: logger, CORS, static files
+- Response headers on `Ctx` — a prerequisite for CORS, see [ADR 0009](./adr/0009-middleware-is-an-onion-of-ctx-functions.md)
 
 **Rejected until v2** — and these rejections matter as much as the acceptances
 
+- A `recover` middleware. It was in this list until stage 4's design work established that Zig cannot recover from a panic at all, and that what people actually want from it has been in the request loop since stage 3. Not deferred — impossible. See [ADR 0008](./adr/0008-no-recover-middleware.md).
+- Route groups. `app.use(prefix, mw)` covers the case that matters; groups only save repeating the prefix.
+- Handing values from middleware to handlers. The concrete gap this leaves is auth resolving a user, and it is the thing a request-scoped value concept has to solve in v2 ([ADR 0009](./adr/0009-middleware-is-an-onion-of-ctx-functions.md)).
 - Auth (the mechanism is provided, the contents are not — exactly like Fiber)
 - WebSocket and SSE. Long-lived connections have a completely different memory model from request-response; the request arena does not apply there, and forcing it would wreck a design that is currently tidy.
 - Template engine, sessions, TLS
@@ -35,8 +39,10 @@ The latest stable release only, on one branch. The users being aimed at download
 1. ~~**A skeleton that runs.**~~ *Done.* Accept connections through zio, parse HTTP/1.1, return "hello". No framework yet. The one goal: get the Bulkhead shaped correctly.
 2. ~~**The `Ctx` layer.**~~ *Done.* Router, params, JSON, the request arena, `Str`. At this point it is usable, benchmarkable, and releasable if it came to that.
 3. ~~**The typed layer.**~~ *Done.* The compile-time engine, matching services by type, fail functions. Decisions born here: [ADR 0006](./adr/0006-services-via-a-runtime-registry.md) and [ADR 0007](./adr/0007-failure-box-bound-to-the-fiber.md).
-4. **Middleware and the four built-ins.**
+4. **Middleware and the built-ins.** Designed up front in [ADR 0008](./adr/0008-no-recover-middleware.md) and [ADR 0009](./adr/0009-middleware-is-an-onion-of-ctx-functions.md); the order of work is response headers on `Ctx` first (CORS is blocked on it), then the chain, then logger and CORS, then static files last.
 5. **Documentation and examples.** For this particular audience, documentation is not a supplement — it is the product.
+
+Two things in the v1 scope belong to neither stage and are still outstanding: **chunked bodies** (currently refused honestly with a 501) and **percent-decoding** (`/search?q=hello%20world` still reads raw). The second one is small and will embarrass us on day one, so it goes in before stage 5.
 
 The benchmark script has lived in the repo since stage 1, even unrun in anger, so that when a measuring machine turns up it is one command away instead of a new project.
 
@@ -50,6 +56,7 @@ The benchmark script has lived in the repo since stage 1, even unrun in anger, s
 | The `Str` guarantee cannot be complete | The debug-build trap has to exist from day one |
 | `std.json` may not be fast enough, and it sits on the hot path of the chosen metric | A custom serialiser for the small-JSON path is likely needed; measure first |
 | Static files are deeper than they look (range requests, caching, sendfile) | Do it last in v1, or push it to v2 if things get tight |
+| A panic in any handler takes the whole process down, and Go people will assume otherwise | Cannot be fixed in Zig. Say it plainly in the docs, recommend `ReleaseSafe` and a supervisor, and log which request was in flight ([ADR 0008](./adr/0008-no-recover-middleware.md)) |
 
 ## Still open
 
