@@ -9,7 +9,29 @@ pub const Options = @import("bulkhead.zig").Options;
 
 /// Wire this into your root file so `std.log` does not block the event
 /// loop: `pub const std_options_debug_io = zfast.debug_io;`
+///
+/// `listen()` says so at startup if it is missing, because the symptom
+/// otherwise is a server that is merely slow.
 pub const debug_io = @import("bulkhead.zig").debug_io;
+
+/// The other half of the wiring: `pub const std_options = zfast.std_options;`
+///
+/// All it does is turn the Engine's debug chatter down to warnings. Without
+/// it a debug build opens with `debug(zio): Spawning worker thread 1` and
+/// buries your own logs — the Engine is an implementation detail, so it
+/// should not be the first thing anybody sees.
+///
+/// To keep your own settings, start from this one:
+///
+/// ```zig
+/// pub const std_options: std.Options = .{
+///     .log_level = .debug,
+///     .log_scope_levels = zfast.std_options.log_scope_levels,
+/// };
+/// ```
+pub const std_options: std.Options = .{
+    .log_scope_levels = &.{.{ .scope = .zio, .level = .warn }},
+};
 
 /// A lock for a Service that gets written to. Handlers run concurrently on
 /// several OS threads, so shared mutable state needs one — and this is the
@@ -31,8 +53,21 @@ pub const Mutex = @import("bulkhead.zig").Mutex;
 /// callable from anywhere (ADR 0005).
 pub const fail = @import("fail.zig");
 
-/// A response with a status other than 200: `Response(User){ .status = 201, … }`.
+/// A response with a status other than 200, headers of its own, or both:
+/// `Response(User){ .status = 201, .headers = …, .value = user }`.
 pub const Response = @import("typed.zig").Response;
+
+/// One response header, as `Response.headers` takes them.
+pub const Header = @import("typed.zig").Header;
+
+/// The query string, read into a struct of yours — the named counterpart
+/// to a positional path param.
+///
+/// ```zig
+/// const Search = struct { q: Str, page: u32 = 1, tag: ?Str = null };
+/// fn search(params: zfast.Query(Search)) ![]const Item { … }
+/// ```
+pub const Query = @import("typed.zig").Query;
 
 pub const Middleware = @import("middleware.zig").Middleware;
 pub const Next = @import("middleware.zig").Next;

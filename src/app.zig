@@ -159,6 +159,22 @@ pub const App = struct {
         comptime pattern: []const u8,
         comptime handler: anytype,
     ) !void {
+        comptime router_mod.validatePattern(pattern);
+
+        // Registering the same path twice is not a small mistake: the
+        // second handler never runs, and nothing about the running server
+        // says so. Caught here, where both patterns can be named.
+        if (self.router.conflicting(method, pattern)) |existing| {
+            std.log.err(
+                "the route \"{s} {s}\" answers the same requests as \"{s}\", which is already " ++
+                    "registered — whichever came second would never run. Drop one, or give them " ++
+                    "different paths. (Param names do not tell two routes apart: \"/users/:id\" " ++
+                    "and \"/users/:name\" are the same route.)",
+                .{ @tagName(method), pattern, existing },
+            );
+            return error.DuplicateRoute;
+        }
+
         try self.requirements.appendSlice(self.gpa, comptime typed.requirements(pattern, handler));
         try self.router.add(method, pattern, comptime typed.wrap(pattern, handler));
     }
@@ -212,6 +228,7 @@ pub const App = struct {
 
     /// Listen and serve until the process is stopped.
     pub fn listen(self: *App, options_: bulkhead.Options) !void {
+        checkRootWiring();
         try self.checkServices();
         try self.resolveChains();
         try bulkhead.serve(self.gpa, options_, self, handleConnection);
@@ -383,6 +400,25 @@ pub const App = struct {
 /// over — a chunked one whose sizes do not add up — leaves the stream at
 /// an unknown byte, so the connection has to go; the response, though, is
 /// still owed and still sent.
+/// Two lines belong in a zfast root source file, and forgetting either one
+/// fails quietly — the sort of quiet that costs an afternoon. Without
+/// `std_options_debug_io`, `std.log` writes to stderr the blocking way and
+/// parks the whole event loop behind it; without `std_options`, the
+/// Engine's own debug lines bury yours. Neither can be set from a library,
+/// so the next best thing is to say so once, by name, at startup.
+fn checkRootWiring() void {
+    if (comptime !@hasDecl(@import("root"), "std_options_debug_io")) std.log.warn(
+        "std.log will block the event loop. Add to your root source file: " ++
+            "pub const std_options_debug_io = zfast.debug_io;",
+        .{},
+    );
+    if (comptime std.log.logEnabled(.debug, .zio)) std.log.warn(
+        "the Engine's debug lines are switched on and will drown out your own. Add to your " ++
+            "root source file: pub const std_options = zfast.std_options;",
+        .{},
+    );
+}
+
 fn drain(c: *Ctx, in: *std.Io.Reader, r: *const http1.Request) bool {
     if (!r.keep_alive or c._stream_desynced) return false;
     if (c._body != null) return true;
@@ -488,12 +524,24 @@ const Harness = struct {
     lifetime: str_mod.Lifetime = .{},
     in_flight: fail.InFlight = .{},
     buf: [4096]u8 = undefined,
+    restore_log_level: std.log.Level,
 
     fn init() Harness {
-        return .{ .arena = std.heap.ArenaAllocator.init(testing.allocator) };
+        // Several tests below drive a handler into failure on purpose, and
+        // App logs each one — correctly, but to the test runner's stderr,
+        // where it makes a passing suite print `failed command`. The lines
+        // are the behaviour under test, not news, so they are turned off
+        // for as long as the harness is up.
+        const previous = testing.log_level;
+        testing.log_level = .err;
+        return .{
+            .arena = std.heap.ArenaAllocator.init(testing.allocator),
+            .restore_log_level = previous,
+        };
     }
 
     fn deinit(self: *Harness) void {
+        testing.log_level = self.restore_log_level;
         self.arena.deinit();
     }
 
@@ -791,6 +839,179 @@ test "broken JSON goes through the mapping table and becomes a 400" {
 
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 400 Bad Request\r\n"));
     try testing.expect(result.keep_alive);
+}
+
+const Sort = enum { newest, oldest };
+
+const SearchParams = struct {
+    q: Str,
+    page: u32 = 1,
+    sort: Sort = .newest,
+    tag: ?Str = null,
+};
+
+fn search(params: typed.Query(SearchParams)) !struct {
+    q: []const u8,
+    page: u32,
+    sort: Sort,
+    tag: ?[]const u8,
+} {
+    const p = params.value;
+    return .{
+        .q = p.q.view(),
+        .page = p.page,
+        .sort = p.sort,
+        .tag = if (p.tag) |t| t.view() else null,
+    };
+}
+
+test "Query(T) fills from the query string: defaults, optionals, decoding" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/search", search);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    // Only the required field given: the rest fall back to their defaults.
+    const bare = h.send(&app, "GET /search?q=zig HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, bare.response, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(std.mem.indexOf(
+        u8,
+        bare.response,
+        "{\"q\":\"zig\",\"page\":1,\"sort\":\"newest\",\"tag\":null}",
+    ) != null);
+
+    // Everything given, and percent-decoded on the way in like a path param.
+    const full = h.send(&app, "GET /search?q=hello%20world&page=3&sort=oldest&tag=a+b HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(
+        u8,
+        full.response,
+        "{\"q\":\"hello world\",\"page\":3,\"sort\":\"oldest\",\"tag\":\"a b\"}",
+    ) != null);
+}
+
+test "a query param that is missing or malformed is a 400 that says which one" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/search", search);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    // No default and not optional, so absent is the client's mistake.
+    const missing = h.send(&app, "GET /search HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, missing.response, "HTTP/1.1 400 Bad Request\r\n"));
+    try testing.expect(std.mem.indexOf(u8, missing.response, "?q is required") != null);
+
+    const not_a_number = h.send(&app, "GET /search?q=zig&page=soon HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, not_a_number.response, "HTTP/1.1 400"));
+    try testing.expect(std.mem.indexOf(
+        u8,
+        not_a_number.response,
+        "?page has to be a whole number, not \"soon\"",
+    ) != null);
+
+    // An enum says what it would have accepted, rather than only refusing.
+    const bad_enum = h.send(&app, "GET /search?q=zig&sort=sideways HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, bad_enum.response, "HTTP/1.1 400"));
+    try testing.expect(std.mem.indexOf(u8, bad_enum.response, "newest, oldest") != null);
+
+    // The connection survives all of it: a 400 is an answer, not a hang-up.
+    try testing.expect(missing.keep_alive and not_a_number.keep_alive and bad_enum.keep_alive);
+}
+
+fn createWithLocation() typed.Response(UserOut) {
+    return .{
+        .status = 201,
+        .headers = &.{
+            .{ .name = "Location", .value = "/users/7" },
+            .{ .name = "X-Made-By", .value = "zfast" },
+        },
+        .value = .{ .id = 7, .name = "wati" },
+    };
+}
+
+test "Response(T) carries headers of its own, without reaching for a Ctx" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/users", createWithLocation);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "POST /users HTTP/1.1\r\nContent-Length: 0\r\n\r\n");
+
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 201 Created\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "Location: /users/7\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, result.response, "X-Made-By: zfast\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, result.response, "{\"id\":7,\"name\":\"wati\"}") != null);
+}
+
+fn createInArena(arena: std.mem.Allocator, id: u32) !typed.Response(UserOut) {
+    return .{
+        .status = 201,
+        .headers = &.{.{
+            .name = "Location",
+            .value = try std.fmt.allocPrint(arena, "/users/{d}", .{id}),
+        }},
+        .value = .{ .id = id, .name = "made" },
+    };
+}
+
+test "a handler can ask for the request arena to build a header in" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/users/:id", createInArena);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "POST /users/42 HTTP/1.1\r\nContent-Length: 0\r\n\r\n");
+
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 201 Created\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "Location: /users/42\r\n") != null);
+
+    // The arena is reset between requests, so a second one is not looking
+    // at what the first left behind.
+    const again = h.send(&app, "POST /users/7 HTTP/1.1\r\nContent-Length: 0\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, again.response, "Location: /users/7\r\n") != null);
+}
+
+fn serveAnything(rest: Str) Str {
+    return rest;
+}
+
+test "a catch-all route hands the rest of the path to the handler" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/files/*", serveAnything);
+    try app.get("/files/readme", plainOk);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const deep = h.send(&app, "GET /files/css/site.css HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, deep.response, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(std.mem.endsWith(u8, deep.response, "css/site.css"));
+
+    // A literal route still wins over the catch-all it sits inside.
+    const literal = h.send(&app, "GET /files/readme HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, literal.response, "handler"));
+
+    const nothing = h.send(&app, "GET /elsewhere HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, nothing.response, "HTTP/1.1 404"));
+}
+
+test "the same route registered twice is refused, naming the one already there" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/users/:id", getUser);
+
+    // The message goes to std.log.err, which the test runner counts as a
+    // failure — so what is checked here is the refusal itself. The wording
+    // lives in `App.route`, and the shape rule is covered in router.zig.
+    try testing.expect(app.router.conflicting(.GET, "/users/:name") != null);
+    try testing.expect(app.router.conflicting(.GET, "/users/me") == null);
+    try testing.expectEqual(@as(usize, 1), app.router.routes.items.len);
 }
 
 fn greet(name: Str) Str {

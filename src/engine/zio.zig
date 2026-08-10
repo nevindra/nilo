@@ -44,6 +44,38 @@ pub const Options = struct {
     write_buffer: usize = 4 * 1024,
 };
 
+/// Why the server never got as far as listening. Kept as a value so the
+/// message and the error can be produced in two different places.
+const StartupFailure = enum {
+    bad_address,
+    in_use,
+    not_permitted,
+    unavailable,
+    other,
+
+    fn toError(self: StartupFailure) anyerror {
+        return switch (self) {
+            .bad_address => error.BadAddress,
+            .in_use => error.AddressInUse,
+            .not_permitted => error.PermissionDenied,
+            .unavailable => error.AddressNotAvailable,
+            .other => error.CannotListen,
+        };
+    }
+};
+
+/// Matched on the error's name rather than on `error.AddressInUse`,
+/// because the Engine infers this error set and which members it has
+/// varies by platform — naming one that does not exist on macOS would
+/// break the build there rather than improve a message.
+fn classifyListenFailure(name: []const u8) StartupFailure {
+    if (std.mem.eql(u8, name, "AddressInUse")) return .in_use;
+    if (std.mem.eql(u8, name, "PermissionDenied")) return .not_permitted;
+    if (std.mem.eql(u8, name, "AccessDenied")) return .not_permitted;
+    if (std.mem.eql(u8, name, "AddressNotAvailable")) return .unavailable;
+    return .other;
+}
+
 /// Run `handler(state, in, out)` for every accepted connection, each in
 /// its own fiber, until that connection is done. The Reader/Writer are
 /// already buffered; the handler does not need to know there is a socket
@@ -59,8 +91,56 @@ pub fn serve(gpa: std.mem.Allocator, options: Options, state: anytype, comptime 
     const rt = try zio.Runtime.init(gpa, .{ .executors = .exact(threads) });
     defer rt.deinit();
 
-    const addr = try zio.net.IpAddress.parseIp4(options.address, options.port);
-    const server = try addr.listen(.{ .reuse_address = options.reuse_address });
+    // Failing to take the port is the most common way a server does not
+    // start, and it used to arrive as a stack trace three files deep in the
+    // Engine. What the person running it needs is the port number and what
+    // to do next — so the reason travels back as a value, and the error is
+    // made fresh below. Going through a value is what resets the error
+    // return trace: the one that gets printed then starts in zfast, not in
+    // zio's completion queue (ADR 0002 — the Engine is not the user's
+    // business, in a crash log least of all).
+    var why: StartupFailure = .other;
+
+    const maybe_addr: ?zio.net.IpAddress =
+        zio.net.IpAddress.parseIp4(options.address, options.port) catch |err| bad: {
+            std.log.err(
+                "\"{s}\" is not an address zfast can listen on ({s}). It wants a plain IPv4 " ++
+                    "address: \"127.0.0.1\" for this machine only, \"0.0.0.0\" for every interface.",
+                .{ options.address, @errorName(err) },
+            );
+            why = .bad_address;
+            break :bad null;
+        };
+    const addr = maybe_addr orelse return why.toError();
+
+    const maybe_server: ?zio.net.Server =
+        addr.listen(.{ .reuse_address = options.reuse_address }) catch |err| failed: {
+            why = classifyListenFailure(@errorName(err));
+            switch (why) {
+                .in_use => std.log.err(
+                    "port {d} is already in use — something else is listening on {s}:{d}. " ++
+                        "Stop it, or pass `.port = …` to listen() with a free one.",
+                    .{ options.port, options.address, options.port },
+                ),
+                .not_permitted => std.log.err(
+                    "not allowed to listen on port {d}. Ports below 1024 need root; " ++
+                        "8080 or 8787 do not.",
+                    .{options.port},
+                ),
+                .unavailable => std.log.err(
+                    "no interface on this machine has the address {s}, so nothing can listen " ++
+                        "on it. \"127.0.0.1\" reaches this machine only, \"0.0.0.0\" every " ++
+                        "interface.",
+                    .{options.address},
+                ),
+                else => std.log.err(
+                    "could not listen on {s}:{d}: {s}",
+                    .{ options.address, options.port, @errorName(err) },
+                ),
+            }
+            break :failed null;
+        };
+    const server = maybe_server orelse return why.toError();
     defer server.close();
 
     std.log.info("zfast listening on {f} across {d} thread(s)", .{ server.socket.address, threads });

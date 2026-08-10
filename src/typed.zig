@@ -13,12 +13,15 @@
 //! |-----------------------|--------------------------------------------|
 //! | `*Ctx`                | the raw request — the way out when you need full control |
 //! | `*Db`, `*const Cfg`   | a service, matched by its type             |
-//! | `u32`, `Str`, `bool`, an enum | a path param, in the order `:name` appears in the pattern |
+//! | `u32`, `Str`, `bool`, a float, an enum | a path param, in the order `:name` (and a trailing `*`) appears in the pattern |
+//! | `Query(T)`            | the query string, read into a struct of yours |
+//! | `std.mem.Allocator`   | the request arena, freed when the request ends |
 //! | a struct              | the request body, parsed from JSON         |
 //!
 //! The return value becomes the response: `void` → empty 200,
 //! `Str`/`[]const u8` → text/plain, anything else → JSON. Wrap it in
-//! `Response(T)` when the status is not 200.
+//! `Response(T)` when the status is not 200, or when the response carries
+//! headers of its own.
 //!
 //! Zig does not keep argument names, so path params are matched **by
 //! position**, not by name. Every mismatch — the param count, a type that
@@ -28,6 +31,7 @@
 
 const std = @import("std");
 const ctx_mod = @import("ctx.zig");
+const http1 = @import("http1.zig");
 const router = @import("router.zig");
 const service_mod = @import("service.zig");
 const fail = @import("fail.zig");
@@ -36,18 +40,58 @@ const str_mod = @import("str.zig");
 const Ctx = ctx_mod.Ctx;
 const Str = str_mod.Str;
 
-/// A response with a status other than 200.
+/// A response with a status other than 200, headers of its own, or both.
 ///
 /// ```zig
 /// fn createUser(incoming: NewUser) !Response(User) {
-///     return .{ .status = 201, .value = ... };
+///     return .{
+///         .status = 201,
+///         .headers = &.{.{ .name = "Location", .value = "/users/7" }},
+///         .value = created,
+///     };
 /// }
 /// ```
+///
+/// The headers are copied on the way out, exactly as `Ctx.setHeader` does,
+/// so a value built in the request arena is safe to hand over. The ones the
+/// framework writes itself — Content-Type, Content-Length, Connection — are
+/// refused here too; the content type follows from the return type.
 pub fn Response(comptime T: type) type {
     return struct {
         pub const zfast_response = T;
 
         status: u16 = 200,
+        headers: []const Header = &.{},
+        value: T,
+    };
+}
+
+/// One header on a `Response`.
+pub const Header = http1.Header;
+
+/// The query string, read into a struct of your own — the counterpart to a
+/// path param, for the things that are named rather than positional.
+///
+/// ```zig
+/// const Search = struct {
+///     q: Str,             // required: absent is a 400
+///     page: u32 = 1,      // a default is what "absent" means
+///     tag: ?Str = null,   // optional: absent is null
+/// };
+///
+/// fn search(params: Query(Search)) ![]const Item {
+///     ... params.value.page ...
+/// }
+/// ```
+///
+/// Field names are the query names, and the field types are converted and
+/// checked the same way path params are — `?page=x` on a `u32` is a 400
+/// saying so, not a 500. A plain struct argument is still the request body;
+/// this wrapper is what tells the two apart at a glance.
+pub fn Query(comptime T: type) type {
+    return struct {
+        pub const zfast_query = T;
+
         value: T,
     };
 }
@@ -59,6 +103,10 @@ const Role = union(enum) {
     /// Index of the path param in the route pattern, by position.
     param: usize,
     body,
+    query,
+    /// The request arena, for a handler that has to build something that
+    /// outlives its own stack frame — a `Location` header, usually.
+    arena,
 };
 
 /// Turn `f` into an ordinary `Ctx` handler. `pattern` comes along so the
@@ -83,6 +131,8 @@ pub fn wrap(comptime pattern: []const u8, comptime f: anytype) router.CtxHandler
                         ),
                     .param => |nth| args[i] = try paramValue(P, c, param_names[nth]),
                     .body => args[i] = try c.json(P),
+                    .query => args[i] = .{ .value = try queryValue(P.zfast_query, c) },
+                    .arena => args[i] = c._arena,
                 }
             }
             return sendResult(c, @call(.auto, f, args));
@@ -145,6 +195,7 @@ fn rolesOf(
         var roles: [params.len]Role = undefined;
         var used: usize = 0;
         var body_seen = false;
+        var query_seen = false;
         var wants_ctx = false;
 
         for (params, 0..) |p, i| {
@@ -168,6 +219,16 @@ fn rolesOf(
                             " is a service, ask for it as a pointer: `*" ++ @typeName(P) ++ "`.",
                     );
                     body_seen = true;
+                },
+                .query => {
+                    if (query_seen) @compileError(
+                        "zfast: the handler for route \"" ++ pattern ++ "\" asks for the query " ++
+                            "string twice (argument " ++ num(i + 1) ++ ").\n" ++
+                            "  A request has one query string. Put every field in a single struct " ++
+                            "and ask for that.",
+                    );
+                    query_seen = true;
+                    checkQueryFields(pattern, P.zfast_query, i);
                 },
                 else => {},
             }
@@ -193,6 +254,8 @@ fn rolesOf(
 fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Role {
     if (P == *Ctx or P == *const Ctx) return .ctx;
     if (P == Str) return .{ .param = 0 };
+    if (P == std.mem.Allocator) return .arena;
+    if (comptime hasNamedDecl(P, "zfast_query")) return .query;
 
     return switch (@typeInfo(P)) {
         .int, .float, .bool, .@"enum" => .{ .param = 0 },
@@ -219,17 +282,60 @@ fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Rol
             "zfast: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
                 "\" is a " ++ @typeName(P) ++ ".\n" ++
                 "  A path param on a route that matched is always present, so an optional means " ++
-                "nothing here. For things that may be absent — query params, headers — ask for a " ++
-                "`*Ctx` and use `c.query(\"…\")`.",
+                "nothing here.\n" ++
+                "  A query param is the thing that may be absent, and there an optional is " ++
+                "exactly right: put the field in a struct and ask for `zfast.Query(That)`.",
         ),
 
         else => @compileError(
             "zfast: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
                 "\" is a " ++ @typeName(P) ++ ", which zfast does not recognise.\n" ++
                 "  What you can ask for: `*Ctx`, a pointer to a service (`*Db`), a path param " ++
-                "(`u32`, `zfast.Str`, `bool`, an enum), or one struct for the request body.",
+                "(`u32`, `zfast.Str`, `bool`, an enum), `zfast.Query(T)` for the query string, " ++
+                "a `std.mem.Allocator` for the request arena, or one struct for the request body.",
         ),
     };
+}
+
+/// Every field of a `Query(T)` struct has to be something a query value can
+/// actually be turned into. Checked here so the message names the field
+/// rather than landing somewhere inside the conversion.
+fn checkQueryFields(comptime pattern: []const u8, comptime T: type, comptime i: usize) void {
+    comptime {
+        const info = switch (@typeInfo(T)) {
+            .@"struct" => |s| s,
+            else => @compileError(
+                "zfast: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
+                    "\" is a `Query(" ++ @typeName(T) ++ ")`, but " ++ @typeName(T) ++
+                    " is not a struct.\n" ++
+                    "  The query string is read into a struct: one field per query param.",
+            ),
+        };
+
+        if (info.fields.len == 0) @compileError(
+            "zfast: the `Query(" ++ @typeName(T) ++ ")` on route \"" ++ pattern ++
+                "\" has no fields, so it would read nothing.\n" ++
+                "  Add one field per query param you want: `page: u32 = 1`.",
+        );
+
+        for (info.fields) |f| {
+            const Inner = switch (@typeInfo(f.type)) {
+                .optional => |o| o.child,
+                else => f.type,
+            };
+            if (Inner == Str) continue;
+            switch (@typeInfo(Inner)) {
+                .int, .float, .bool, .@"enum" => {},
+                else => @compileError(
+                    "zfast: the field `" ++ f.name ++ ": " ++ @typeName(f.type) ++ "` of the " ++
+                        "`Query(" ++ @typeName(T) ++ ")` on route \"" ++ pattern ++
+                        "\" is not something a query value can become.\n" ++
+                        "  A query param arrives as text, so a field is a `zfast.Str`, a number, " ++
+                        "a `bool`, or an enum — optionally wrapped in `?` when it may be absent.",
+                ),
+            }
+        }
+    }
 }
 
 fn tooFewPatternParams(
@@ -249,13 +355,15 @@ fn tooFewPatternParams(
         " is a service — ask for it as a pointer: `*" ++ @typeName(P) ++ "`.";
 }
 
-/// The name of every `:param` in the pattern, in order of appearance.
+/// The name of everything the pattern captures, in order of appearance:
+/// each `:param`, and a trailing `*` under the name `"*"`.
 fn patternParamNames(comptime pattern: []const u8) []const []const u8 {
     comptime {
         var names: []const []const u8 = &.{};
         var segs = std.mem.splitScalar(u8, pattern, '/');
         while (segs.next()) |s| {
             if (s.len > 1 and s[0] == ':') names = names ++ [_][]const u8{s[1..]};
+            if (std.mem.eql(u8, s, router.wildcard)) names = names ++ [_][]const u8{router.wildcard};
         }
         return names;
     }
@@ -281,20 +389,64 @@ fn paramValue(comptime P: type, c: *const Ctx, comptime name: []const u8) !P {
     // rather than a panic.
     const s = c.param(name) orelse
         return fail.internal("path param :{s} was not filled in by the router", .{name});
+    return convert(P, s, ":" ++ name);
+}
+
+/// Read the query string into `T`. A field that is absent falls back to its
+/// default, or to null if it is optional; one with neither is required, and
+/// saying so is a 400 rather than a surprise zero.
+fn queryValue(comptime T: type, c: *const Ctx) !T {
+    var out: T = undefined;
+    inline for (@typeInfo(T).@"struct".fields) |f| {
+        const label = "?" ++ f.name;
+        if (c.query(f.name)) |s| {
+            const Inner = switch (@typeInfo(f.type)) {
+                .optional => |o| o.child,
+                else => f.type,
+            };
+            @field(out, f.name) = try convert(Inner, s, label);
+        } else if (f.defaultValue()) |default| {
+            @field(out, f.name) = default;
+        } else if (@typeInfo(f.type) == .optional) {
+            @field(out, f.name) = null;
+        } else {
+            return fail.badRequest("{s} is required", .{label});
+        }
+    }
+    return out;
+}
+
+/// Turn one piece of request text into the type the handler asked for.
+/// `label` is how it is named back to the client — `:id` for a path param,
+/// `?page` for a query one — so the same message serves both.
+fn convert(comptime P: type, s: Str, comptime label: []const u8) !P {
     if (P == Str) return s;
 
     const text = s.view();
     return switch (@typeInfo(P)) {
         .int => std.fmt.parseInt(P, text, 10) catch
-            return fail.badRequest(":{s} has to be a whole number, not \"{s}\"", .{ name, text }),
+            return fail.badRequest(label ++ " has to be a whole number, not \"{s}\"", .{text}),
         .float => std.fmt.parseFloat(P, text) catch
-            return fail.badRequest(":{s} has to be a number, not \"{s}\"", .{ name, text }),
+            return fail.badRequest(label ++ " has to be a number, not \"{s}\"", .{text}),
         .bool => boolFrom(text) orelse
-            return fail.badRequest(":{s} has to be true or false, not \"{s}\"", .{ name, text }),
+            return fail.badRequest(label ++ " has to be true or false, not \"{s}\"", .{text}),
         .@"enum" => std.meta.stringToEnum(P, text) orelse
-            return fail.badRequest(":{s} is not one of the known choices: \"{s}\"", .{ name, text }),
+            return fail.badRequest(
+                label ++ " is not one of the known choices ({s}): \"{s}\"",
+                .{ comptime enumChoices(P), text },
+            ),
         else => comptime unreachable,
     };
+}
+
+/// The names of an enum's values, for the message that says what was
+/// expected. Built once at compile time.
+fn enumChoices(comptime E: type) []const u8 {
+    comptime {
+        var names: []const []const u8 = &.{};
+        for (@typeInfo(E).@"enum".fields) |f| names = names ++ [_][]const u8{f.name};
+        return join(names, ", ");
+    }
 }
 
 fn boolFrom(text: []const u8) ?bool {
@@ -309,7 +461,13 @@ fn sendResult(c: *Ctx, result: anytype) !void {
     const T = @TypeOf(value);
 
     if (T == void) return;
-    if (comptime hasNamedDecl(T, "zfast_response")) return sendValue(c, value.status, value.value);
+    if (comptime hasNamedDecl(T, "zfast_response")) {
+        // Copied rather than borrowed, the same as `Ctx.setHeader`: a
+        // handler assembling a header value has the request arena to build
+        // it in, and should not have to think about which of the two it is.
+        for (value.headers) |h| try c.setHeader(h.name, h.value);
+        return sendValue(c, value.status, value.value);
+    }
     return sendValue(c, 200, value);
 }
 

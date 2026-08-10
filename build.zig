@@ -55,8 +55,18 @@ pub fn build(b: *std.Build) void {
     });
     b.step("profile", "Time the pieces of one request").dependOn(&b.addRunArtifact(profile).step);
 
+    // The library's tests run under their own root, which silences logging
+    // — several of them drive a request into failure on purpose, and the
+    // stderr that produces makes a passing suite print `failed command`.
+    const lib_tests = b.createModule(.{
+        .root_source_file = b.path("src/test_root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zio", .module = zio.module("zio") }},
+    });
+
     const test_step = b.step("test", "Run all tests");
-    for ([_]*std.Build.Module{ zfast, bench }) |module| {
+    for ([_]*std.Build.Module{ lib_tests, bench }) |module| {
         const tests = b.addTest(.{ .root_module = module });
         test_step.dependOn(&b.addRunArtifact(tests).step);
     }

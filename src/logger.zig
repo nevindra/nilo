@@ -36,7 +36,7 @@ pub fn with(comptime options: Options) mw.Middleware {
             // logger that swallowed it would change behaviour just by
             // being installed.
             next.run(c) catch |err| {
-                log(c, statusOf(err), microsSince(started), @errorName(err));
+                log(c, statusOf(err), microsSince(started), nameOf(err));
                 return err;
             };
 
@@ -64,6 +64,18 @@ pub fn with(comptime options: Options) mw.Middleware {
             }
         }
     }.run;
+}
+
+/// The error worth naming on the log line, or null when there is none.
+///
+/// `error.Failed` is the sentinel every fail function returns — it carries
+/// no information the status code does not already carry, so a line reading
+/// `404 error=Failed` is one column of noise on the most ordinary answer a
+/// server gives. The message the fail function was given is what matters,
+/// and that has already gone to the client.
+fn nameOf(err: anyerror) ?[]const u8 {
+    if (err == fail.Error.Failed) return null;
+    return @errorName(err);
 }
 
 /// What App is about to answer with. Asking `fail` rather than working it

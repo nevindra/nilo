@@ -2,11 +2,17 @@
 
 An HTTP framework for Zig, aimed at people coming from Go or Node.
 
-> **Status: v1 feature-complete, unreleased.** Routing, typed handlers, JSON, middleware, logger, CORS, static files, chunked bodies. Not yet benchmarked on a quiet machine, so there are no performance claims here.
+> **Status: v1 feature-complete, unreleased.** Routing with path params, query params and catch-alls; typed handlers, JSON, middleware, logger, CORS, static files, chunked bodies. Not yet benchmarked on a quiet machine, so there are no performance claims here.
 > `zfast` is a working name and may change.
 
 ```zig
 const zfast = @import("zfast");
+
+// Two lines of wiring, once, in your root file. The first keeps `std.log`
+// from blocking the event loop; the second keeps the engine's debug
+// chatter out of your logs. `listen()` names whichever one is missing.
+pub const std_options = zfast.std_options;
+pub const std_options_debug_io = zfast.debug_io;
 
 fn getUser(db: *Db, id: u32) !User {
     return db.find(id) orelse zfast.fail.notFound("no user {d}", .{id});
@@ -29,7 +35,7 @@ Three runnable examples live in [`examples/`](./examples/):
 
 ```
 zig build run-hello    # the smallest thing that serves
-zig build run-rest     # a service, JSON in and out, auth middleware
+zig build run-rest     # a service, JSON in and out, query params, auth middleware
 zig build run-spa      # a single-page app's files next to its API
 ```
 
@@ -51,14 +57,59 @@ Arguments are matched at compile time, by one rule: **a pointer is a service, a 
 |---|---|
 | `*Ctx` | the raw request — the way out when you need full control |
 | `*Db`, `*const Config` | a service, matched by its type |
-| `u32`, `Str`, `bool`, an enum | a path param, in the order they appear in the pattern |
+| `u32`, `f64`, `Str`, `bool`, an enum | a path param, in the order they appear in the pattern |
+| `Query(T)` | the query string, read into a struct of yours |
+| `std.mem.Allocator` | the request arena, freed when the request ends |
 | a struct | the request body, parsed from JSON |
 
-The return value becomes the response: `void` → empty 200, `Str`/`[]const u8` → `text/plain`, anything else → JSON. Wrap it in `Response(T)` when the status isn't 200.
+The return value becomes the response: `void` → empty 200, `Str`/`[]const u8` → `text/plain`, anything else → JSON. Wrap it in `Response(T)` when the status isn't 200, or when the response carries headers of its own:
+
+```zig
+fn createUser(db: *Db, arena: std.mem.Allocator, incoming: NewUser) !Response(User) {
+    const created = try db.add(incoming);
+    return .{
+        .status = 201,
+        .headers = &.{.{
+            .name = "Location",
+            .value = try std.fmt.allocPrint(arena, "/users/{d}", .{created.id}),
+        }},
+        .value = created,
+    };
+}
+```
+
+A `std.mem.Allocator` argument is the request arena — the thing to build a header value in, since it lives exactly as long as the response needs it to and is thrown away afterwards. Nothing to free.
 
 Getting any of this wrong stops the compiler with a message that names the route and tells you what to do about it — never a runtime surprise. Asking for a service you forgot to register stops `listen()` before the socket opens.
 
 When you need full control — streaming, large uploads — the handler simply asks for a `*Ctx`. Both layers are the same layer: the typed one compiles down into `Ctx` calls.
+
+## Query params
+
+A path param is positional; a query param is named and may be missing. So it arrives as a struct, one field per param:
+
+```zig
+const Search = struct {
+    q: Str,             // no default: absent is a 400 saying which one
+    page: u32 = 1,      // a default is what "absent" means
+    sort: Sort = .newest,
+    tag: ?Str = null,   // optional: absent is null
+};
+
+fn search(db: *Db, params: Query(Search)) ![]const Item {
+    return db.search(params.value.q.view(), params.value.page);
+}
+```
+
+The types are checked before your handler runs, so the answers to a client that gets it wrong are already written:
+
+```
+?q is required
+?page has to be a whole number, not "soon"
+?sort is not one of the known choices (newest, oldest): "sideways"
+```
+
+Values arrive percent-decoded, with `+` counting as a space the way an HTML form sends one. `Query(Search)` is an ordinary struct, so a test builds one directly — `listUsers(&db, .{ .value = .{ .page = 2 } })` — and never touches a query string.
 
 ## Errors
 
@@ -88,6 +139,25 @@ try app.useOn("/api", requireToken);
 An onion: everything before `next.run(c)` happens on the way in, everything after on the way out. Not calling `next` at all ends the chain, which is all a rejecting auth middleware has to do. Returning an error goes down exactly the same path a failing handler does.
 
 Registration order between `use` and `get` doesn't matter — chains are resolved when `listen()` is called, so middleware registered after a route still applies to it. Middleware also runs when nothing matched, so your logger sees 404s and CORS can answer a preflight for a path that has no route.
+
+## Routes
+
+```zig
+try app.get("/users/:id", getUser);   // one segment, typed and converted
+try app.get("/users/new", newForm);   // a literal always wins over :id
+try app.get("/files/*", serveFile);   // the rest of the path, as c.param("*")
+```
+
+Order doesn't matter here either. `/users/new` beats `/users/:id` beats `/files/*` because it is more specific, not because of where it sits in your `main` — the same rule `use` and `get` already follow.
+
+Registering the same path twice is refused rather than quietly ignored, because the second handler would never run and nothing about the running server would say so. Param names don't tell two routes apart: `/users/:id` and `/users/:name` answer the same requests, so they collide.
+
+```
+error: the route "GET /users/:name" answers the same requests as "/users/:id",
+which is already registered — whichever came second would never run.
+```
+
+A pattern that can't work — no leading slash, a `:` with no name, a `*` that isn't last, the same param name twice — is a build error naming the route, not something you find out at startup.
 
 ## Static files
 
@@ -140,6 +210,23 @@ to your root file makes the crash say which request caused it:
 ```
 thread 589880 panic: integer overflow (while handling GET /boom/50)
 ```
+
+## When it won't start
+
+Everything that can stop a server before the socket opens says so in one line, in words, with the fix in it:
+
+```
+error: port 8787 is already in use — something else is listening on 127.0.0.1:8787.
+Stop it, or pass `.port = …` to listen() with a free one.
+
+error: the handler for route "/x" needs service *main.Db, which was never
+registered — call app.provide() before app.listen()
+
+warning: std.log will block the event loop. Add to your root source file:
+pub const std_options_debug_io = zfast.debug_io;
+```
+
+No stack trace through the engine's internals: which file inside zio noticed the port was taken is not your problem.
 
 ## Tuning
 

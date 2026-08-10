@@ -5,9 +5,10 @@
 //! zig build run-rest
 //!
 //! curl localhost:8787/users
+//! curl 'localhost:8787/users?sort=name&limit=1'  # query params, typed
 //! curl localhost:8787/users/1
 //! curl localhost:8787/users/999                 # 404 with a message
-//! curl -X POST localhost:8787/users -d '{"name":"wati","email":"wati@example.dev"}'
+//! curl -i -X POST localhost:8787/users -d '{"name":"wati","email":"wati@example.dev"}'
 //! curl -H 'X-Token: let-me-in' localhost:8787/admin/stats
 //! ```
 
@@ -15,6 +16,10 @@ const std = @import("std");
 const zfast = @import("zfast");
 const fail = zfast.fail;
 
+// The two lines every zfast root file wants: one keeps `std.log` from
+// blocking the event loop, the other keeps the Engine's debug chatter out
+// of your logs. `listen()` says so at startup if either is missing.
+pub const std_options = zfast.std_options;
 pub const std_options_debug_io = zfast.debug_io;
 pub const panic = zfast.panic;
 
@@ -76,10 +81,34 @@ const Store = struct {
 // request data, and the return value is the response. None of them mention
 // HTTP, which is why every one of them is testable without a server.
 
-fn listUsers(store: *Store) ![]const User {
+/// The query string, read into a struct. A field with a default is
+/// optional and a field without one is required; either way the type is
+/// checked before the handler runs, so `?limit=soon` is a 400 that says so
+/// rather than something to remember to guard against.
+const Listing = struct {
+    sort: enum { id, name } = .id,
+    limit: usize = 100,
+};
+
+fn listUsers(store: *Store, arena: std.mem.Allocator, listing: zfast.Query(Listing)) ![]const User {
     try store.lock.lock();
     defer store.lock.unlock();
-    return store.users.items;
+
+    // Copied into the request arena rather than sorted where it lies: this
+    // Service is shared by every request being served at once, and one
+    // asking for `?sort=name` has no business reordering it for the rest.
+    // The copy is thrown away with the request.
+    const page = store.users.items[0..@min(listing.value.limit, store.users.items.len)];
+    const out = try arena.dupe(User, page);
+
+    if (listing.value.sort == .name) {
+        std.mem.sort(User, out, {}, struct {
+            fn lessThan(_: void, a: User, b: User) bool {
+                return std.mem.lessThan(u8, a.name, b.name);
+            }
+        }.lessThan);
+    }
+    return out;
 }
 
 fn getUser(store: *Store, id: u32) !User {
@@ -92,16 +121,26 @@ const NewUser = struct {
 };
 
 /// A struct argument is the request body, parsed from JSON. `Response(T)`
-/// is how a handler answers with a status other than 200.
-fn createUser(store: *Store, incoming: NewUser) !zfast.Response(User) {
+/// is how a handler answers with a status other than 200, headers of its
+/// own, or — as here — both. A `Location` on a 201 is the reason it needs
+/// to be both, and it does not cost a drop down to `*Ctx` to get one.
+fn createUser(store: *Store, arena: std.mem.Allocator, incoming: NewUser) !zfast.Response(User) {
     if (incoming.name.len() == 0) return fail.unprocessable("name must not be empty", .{});
     if (std.mem.indexOfScalar(u8, incoming.email.view(), '@') == null) {
         return fail.unprocessable("\"{s}\" is not an email address", .{incoming.email.view()});
     }
 
+    const created = try store.add(incoming.name.view(), incoming.email.view());
     return .{
         .status = 201,
-        .value = try store.add(incoming.name.view(), incoming.email.view()),
+        .headers = &.{.{
+            .name = "Location",
+            // A `std.mem.Allocator` argument is the request arena: it lives
+            // exactly long enough to build a header with, and is thrown
+            // away with the request. Nothing to free.
+            .value = try std.fmt.allocPrint(arena, "/users/{d}", .{created.id}),
+        }},
+        .value = created,
     };
 }
 
@@ -167,19 +206,50 @@ test "createUser refuses a body that does not make sense" {
     var store = Store{ .gpa = testing.allocator };
     defer store.deinit();
 
-    try testing.expectError(error.Failed, createUser(&store, .{
+    // The handler asks for the request arena, so the test hands it one.
+    // Still no server and no fake request — an allocator is an argument
+    // like any other.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    try testing.expectError(error.Failed, createUser(&store, scratch, .{
         .name = .static(""),
         .email = .static("wati@example.dev"),
     }));
-    try testing.expectError(error.Failed, createUser(&store, .{
+    try testing.expectError(error.Failed, createUser(&store, scratch, .{
         .name = .static("wati"),
         .email = .static("not-an-email"),
     }));
 
-    const created = try createUser(&store, .{
+    const created = try createUser(&store, scratch, .{
         .name = .static("wati"),
         .email = .static("wati@example.dev"),
     });
     try testing.expectEqual(@as(u16, 201), created.status);
     try testing.expectEqualStrings("wati", created.value.name);
+    try testing.expectEqualStrings("Location", created.headers[0].name);
+    try testing.expectEqualStrings("/users/1", created.headers[0].value);
+}
+
+test "listUsers reads its options from the query struct" {
+    var store = Store{ .gpa = testing.allocator };
+    defer store.deinit();
+    _ = try store.add("wati", "wati@example.dev");
+    _ = try store.add("budi", "budi@example.dev");
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    // A `Query(T)` is an ordinary struct too, so a test builds one and
+    // never touches a query string.
+    const by_name = try listUsers(&store, scratch, .{ .value = .{ .sort = .name } });
+    try testing.expectEqualStrings("budi", by_name[0].name);
+
+    const just_one = try listUsers(&store, scratch, .{ .value = .{ .limit = 1 } });
+    try testing.expectEqual(@as(usize, 1), just_one.len);
+
+    // Sorting a copy, so the Service every other request shares is as it was.
+    try testing.expectEqualStrings("wati", store.users.items[0].name);
 }

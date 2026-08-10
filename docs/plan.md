@@ -45,6 +45,17 @@ The latest stable release only, on one branch. The users being aimed at download
 
 The two v1 items that belonged to no stage are in as well: **chunked bodies** (read, discarded, and rejected with a 400 when the sizes and the stream come apart) and **percent-decoding** of path params and query values.
 
+6. ~~**A pass over the developer experience.**~~ *Done.* The framework was used from a fresh project, the way somebody who had just found it would, and the gaps that turned up were the ones only writing the code finds:
+
+- **Query params had no typed form**, though "Router: path params, query params" has been in the v1 scope since stage 1. Half of it had been built. Now `Query(T)` ([ADR 0012](./adr/0012-the-query-string-is-a-struct-of-your-own.md)).
+- **`Response(T)` could not carry headers**, so a 201 with a `Location` — the most ordinary thing a POST does — meant dropping to `*Ctx` and giving up the whole typed layer to get one header out.
+- **A handler had no allocator.** Found while writing the `Location` example: the header value has to outlive the handler's stack frame, and nothing gave it anywhere to live. A `std.mem.Allocator` argument is now the request arena.
+- **Route patterns were checked with `std.debug.assert`**, so `app.get("users", …)` — a missing slash — was `reached unreachable code` at startup, and undefined behaviour in `ReleaseFast`. The pattern is `comptime`; every one of these is a build error now.
+- **Registration order silently decided which route won**, and a duplicate route was accepted without a word ([ADR 0013](./adr/0013-the-most-specific-route-wins-and-duplicates-are-refused.md)).
+- **`AddressInUse` printed a stack trace through zio's internals** — the single most common way a server fails to start, answered with a tour of the Engine. ADR 0002 says the Engine is not the user's business; a crash log is where that matters most.
+- **The two root-file wiring lines were undocumented**, and forgetting either failed quietly: `std.log` blocking the event loop looks like a slow server, and the Engine's debug output looks like your own logs are missing. `listen()` now names whichever one is absent.
+- **`zig build test` printed `failed command` on a passing suite**, because Zig's build runner reads any stderr from a test binary as failure. Tests run under their own root now, with logging off.
+
 Two things turned up while writing the examples, which is what examples are for:
 
 - A Service with mutable state is shared across executor threads and had no correct way to be locked. Fixed by adding one item to the Bulkhead: [ADR 0011](./adr/0011-shared-services-need-a-lock-from-the-bulkhead.md).
@@ -69,7 +80,7 @@ The benchmark script has lived in the repo since stage 1, even unrun in anger, s
 
 - **The name.** `zfast` is a working name. The `z-` prefix is crowded in the Zig ecosystem already (`zap`, `zzz`, `zon`, a dozen `zig-*`), so it is easy to confuse. The module name has to be easy to change without touching user code.
 - **Where to measure.** Still nothing. Stage 3 did get run under `wrk` on a shared Linux VM, but only to confirm the server does not fall over and no responses get crossed — a shared machine cannot be used to compare numbers, so none were kept and none went into the README. Until there is a quiet machine, [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md) is not active and every conflict goes to DX.
-- **The router algorithm.** Still a linear scan, and which structure replaces it — radix tree, per-method buckets, something else — needs numbers nobody has yet. What the scan *costs* did not need numbers: it used to re-split the request path once per route, which is a different kind of wrong from "linear". Patterns are now split at registration and the path once per request, and a route with a different segment count is rejected on an integer compare. Measured in-process, worst case with the wanted route last: **3.7× at 50 routes, 1.4× at 5**. Never slower, so it does not owe the benchmark anything.
+- **The router algorithm.** Still a linear scan, and which structure replaces it — radix tree, per-method buckets, something else — needs numbers nobody has yet. What the scan *costs* did not need numbers: it used to re-split the request path once per route, which is a different kind of wrong from "linear". Patterns are now split at registration and the path once per request, and a route with a different segment count is rejected on an integer compare. Measured in-process, worst case with the wanted route last: **3.7× at 50 routes, 1.4× at 5**. Never slower, so it does not owe the benchmark anything. Whatever replaces it has to keep specificity ordering, which is a property of the structure rather than a cost added to it ([ADR 0013](./adr/0013-the-most-specific-route-wins-and-duplicates-are-refused.md)).
 - **Reloading static files without a restart.** For a build-output directory this does not matter, since deployment restarts anyway. For local development it is a real annoyance and wants a watch option in v2.
 
 ## Metrics
@@ -95,16 +106,18 @@ Neither says how fast the server is. Both notice when it gets worse, which is wh
 `zig build profile` times the pieces of one request against in-memory buffers — the inside view, where `bench/bench.sh` is the outside one. The end-to-end figure wobbles by a third on a busy box and is not worth quoting; the proportions hold, and they were a surprise:
 
 ```
-  read the head                  86ns   11.3%
-  parse the head                145ns   18.9%
-  copy the head to the arena     25ns    3.3%
-  match the route                40ns    5.2%
-  serialise the body            102ns   13.3%
-  write the response             74ns    9.7%
-  arena alloc + reset            20ns    2.7%
+  read the head                  76ns   12.8%
+  parse the head                132ns   22.2%
+  copy the head to the arena     24ns    4.1%
+  match the route                65ns   11.0%
+  serialise the body             97ns   16.4%
+  write the response             70ns   11.9%
+  arena alloc + reset            20ns    3.4%
 ```
 
-Reading and parsing the head is the largest single thing a request does, and it had never been looked at as a cost. Route matching, which had, is 5%. The remaining third is the glue: building the `Ctx`, walking the middleware chain, matching handler arguments, decoding path params.
+Reading and parsing the head is the largest single thing a request does, and it had never been looked at as a cost. The remaining third is the glue: building the `Ctx`, walking the middleware chain, matching handler arguments, decoding path params.
+
+Route matching went **39ns → 52ns** (best of eight runs, same machine, minutes apart) when the router stopped returning the first match and started returning the most specific one. That is about 2% of a request, spent on making registration order stop mattering and on catch-all routes; ADR 0001 puts the bar at 10%, so this is a trade it had already made. The full accounting, including two attempts at winning it back, is in [ADR 0013](./adr/0013-the-most-specific-route-wins-and-duplicates-are-refused.md).
 
 What this says about where to look next: `std.json` at 13% is the one thing on this list with no ceiling on how much better it could get, and plan.md has been flagging it as a risk since stage 1. The rest is close enough to the floor that the next real gain is architectural, not local.
 

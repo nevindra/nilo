@@ -33,8 +33,16 @@ The act of copying a Str into longer-lived memory, so it is safe to hold after t
 _Avoid_: dupe, clone, copy, to_owned
 
 **Request arena**:
-The bag of memory belonging to one request. All of it is thrown away at once when the request finishes, and users never touch it directly.
+The bag of memory belonging to one request. All of it is thrown away at once when the request finishes. A handler that has to build something outliving its own stack frame — a `Location` header, usually — asks for it as a `std.mem.Allocator` argument.
 _Avoid_: request allocator, pool, scratch
+
+**Query struct**:
+A struct of the caller's own, one field per query param, asked for as `Query(T)`. Field names are the param names, and a field's default is what "absent" means. The named counterpart to a positional path param.
+_Avoid_: query bag, params map, extractor
+
+**Catch-all**:
+A `*` as the last segment of a pattern, matching the whole rest of the path and handing it over under the name `*`. Always loses to a route that spells the path out.
+_Avoid_: wildcard route, splat, glob
 
 ### Assembly
 

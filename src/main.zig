@@ -8,6 +8,7 @@ const std = @import("std");
 const zfast = @import("zfast");
 const fail = zfast.fail;
 
+pub const std_options = zfast.std_options;
 pub const std_options_debug_io = zfast.debug_io;
 
 /// A panic still takes the process down — Zig cannot recover (ADR 0008) —
