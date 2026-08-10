@@ -24,6 +24,7 @@ Worth being honest about from the start: GoFiber is not Go's performance champio
 **Rejected until v2** — and these rejections matter as much as the acceptances
 
 - Range requests, `sendfile`, and serving a file too big to hold in memory ([ADR 0010](./adr/0010-static-files-are-held-in-memory.md)).
+- Writing a response in pieces, and reading a body larger than `Ctx.max_body` (1 MB). Both are the same missing thing — a request whose bytes do not all have to exist at once — and both would need the request arena to stop being the answer to where memory comes from. Written down as limits in the README rather than left for somebody to find with a 413.
 - A `recover` middleware. It was in this list until stage 4's design work established that Zig cannot recover from a panic at all, and that what people actually want from it has been in the request loop since stage 3. Not deferred — impossible. See [ADR 0008](./adr/0008-no-recover-middleware.md).
 - Route groups. `app.use(prefix, mw)` covers the case that matters; groups only save repeating the prefix.
 - Handing values from middleware to handlers. The concrete gap this leaves is auth resolving a user, and it is the thing a request-scoped value concept has to solve in v2 ([ADR 0009](./adr/0009-middleware-is-an-onion-of-ctx-functions.md)).
@@ -62,6 +63,16 @@ Two things turned up while writing the examples, which is what examples are for:
 - Restarting the server failed with `AddressInUse` every time, because `SO_REUSEADDR` was off. During development that is every restart. Now on by default.
 
 The benchmark script has lived in the repo since stage 1, even unrun in anger, so that when a measuring machine turns up it is one command away instead of a new project.
+
+7. ~~**A second pass, from the outside.**~~ *Done.* The framework was installed into an empty project again — `zig fetch`, a `build.zig`, an API — and driven with curl the way somebody evaluating it would. Stage 6 found the gaps that show up while writing handlers; these are the ones that only show up while *running* them.
+
+- **A body that did not fit was answered with `Bad Request` and nothing else.** A query param has always got `?page has to be a whole number, not "soon"`; the same mistake one layer down got four words. The server knew — `error=UnknownField` was right there in the log — and did not say. The body is now diagnosed against the struct it was supposed to become, and the field is named. The second parse this costs is paid only by a request that was already going to be refused.
+- **A wrong verb on a real path was a 404**, so `DELETE /users` on a path with a `GET` and a `POST` on it said "not found" — which sends you hunting for a route registration bug that is not there. Now a 405 with `Allow`, and an `OPTIONS` nobody registered is answered rather than refused.
+- **There was no way to stop a server.** `listen()` blocked forever and the only exit was a signal killing the process mid-response. Now `App.shutdown()`, plus SIGINT and SIGTERM by default: stop accepting, finish what is in flight, say `Connection: close` on the way out. What is waited on is requests, not connections — waiting on connections put the full grace period behind every idle browser tab, which was the first version of this and was worse than nothing.
+- **The one-line startup messages were still followed by a stack trace**, because `listen()` returned the error and Zig prints a trace for an error reaching `main`. Stage 6 got the trace out of zio; it was still touring zfast. `listen()` now stops the process after saying why, and `tryListen()` is there for a caller that wants the value instead.
+- **A forgotten `provide()` printed once per route**, so five routes sharing a `*Db` printed the same sentence and the same fix five times. One line per service now, naming the routes.
+- **`address` was IPv4 only** — `parseIp4`, so `"::1"` was refused by a message that did not mention IPv6 existed. Now `parseIp`.
+- **`Ctx` was undocumented.** The README called it "the way out when you need full control" without once saying what it could do, so the first guess at a method name was a compile error. Its surface is a table in the README now — and the two things it cannot do, streaming a response and a body over 1 MB, are written down as limits rather than left to be discovered.
 
 ## Risks
 

@@ -15,6 +15,7 @@ const service_mod = @import("service.zig");
 const static_mod = @import("static.zig");
 const str_mod = @import("str.zig");
 const percent = @import("percent.zig");
+const fail = @import("fail.zig");
 const Str = str_mod.Str;
 
 /// The ceiling on a request body read into the arena. A per-App limit
@@ -47,6 +48,13 @@ pub const Ctx = struct {
     /// Set by App when the path names a file in a static set, so the
     /// terminal handler does not have to look it up a second time.
     _static_file: ?*const static_mod.File = null,
+    /// The methods that do answer this path, when the one asked for does
+    /// not. Set by App only on the way to a 405, which is the one answer
+    /// that has to list them.
+    _allowed: router.MethodSet = .initEmpty(),
+    /// Set while the server is stopping, so a response can say so. Null
+    /// when App is driven directly by a test, where nothing is stopping.
+    _stopping: ?*const std.atomic.Value(bool) = null,
     _body: ?[]const u8 = null,
     /// Set when reading the body went wrong in a way that leaves the
     /// connection at an unknown byte. App reads it and does not reuse the
@@ -137,9 +145,24 @@ pub const Ctx = struct {
     /// other Str (ADR 0004).
     pub fn json(self: *Ctx, comptime T: type) !T {
         const b = (try self.body()).view();
-        var value = try std.json.parseFromSliceLeaky(T, self._arena, b, .{});
+        var value = std.json.parseFromSliceLeaky(T, self._arena, b, .{}) catch |err|
+            return describeBadBody(T, self._arena, b, err);
         str_mod.stamp(&value, self._lifetime);
         return value;
+    }
+
+    /// Whether this connection is offered for another request.
+    ///
+    /// Checked when the response is written rather than when the request
+    /// was read, because a stop can land in between — a handler that was
+    /// halfway through when Ctrl-C was pressed still finishes, and the
+    /// answer it sends has to admit that the socket is about to go. A
+    /// client told `keep-alive` by a process that is leaving spends its
+    /// next request finding out otherwise.
+    pub fn keepAlive(self: *const Ctx) bool {
+        if (!self._request.keep_alive) return false;
+        const stopping = self._stopping orelse return true;
+        return !stopping.load(.acquire);
     }
 
     // ---- the response side ----
@@ -202,7 +225,7 @@ pub const Ctx = struct {
             http1.statusPhrase(status),
             content_type,
             response_body.len,
-            self._request.keep_alive,
+            self.keepAlive(),
             self._extra_headers.items,
         );
         try http1.writeResponse(
@@ -211,7 +234,7 @@ pub const Ctx = struct {
             http1.statusPhrase(status),
             content_type,
             response_body,
-            self._request.keep_alive,
+            self.keepAlive(),
             self._extra_headers.items,
         );
     }
@@ -232,6 +255,174 @@ pub const Ctx = struct {
         try self.send(status, "application/json", out.written());
     }
 };
+
+// ---- saying what is wrong with a request body ----
+//
+// A query param that does not fit gets `?page has to be a whole number, not
+// "soon"`. A body field that does not fit used to get `Bad Request`, and
+// nothing else — same framework, same request, two completely different
+// standards. What follows closes that gap.
+//
+// std.json reports `error.UnknownField` without saying which field, and
+// that name is the whole of what the person holding the curl command needs.
+// So on the failure path — and only there — the body is read a second time
+// as a plain `std.json.Value` and compared against `T` field by field.
+// Paying for a second parse to explain a request that was already going to
+// be refused is a trade worth making; a body that parses never comes here.
+
+/// Turn a failed body parse into a 400 that names what is wrong with it,
+/// falling back to `err` when nothing here can do better.
+///
+/// Only the top level is described. A field inside a nested object that
+/// does not fit still becomes a plain 400 — naming it would mean walking
+/// two shapes at once, for the least common of these mistakes.
+fn describeBadBody(
+    comptime T: type,
+    arena: std.mem.Allocator,
+    body: []const u8,
+    err: anyerror,
+) anyerror {
+    // Anything but a struct is somebody using `Ctx.json` directly for a
+    // list or a number, where there are no field names to talk about.
+    if (@typeInfo(T) != .@"struct") return err;
+
+    if (std.mem.trim(u8, body, " \t\r\n").len == 0) return fail.badRequest(
+        "the request body is empty. This endpoint expects a JSON object with: {s}",
+        .{comptime fieldList(T)},
+    );
+
+    // Read again with no shape to satisfy. If even this fails, the text is
+    // not JSON at all, and where it stopped making sense is the useful part.
+    var scanner = std.json.Scanner.initCompleteInput(arena, body);
+    defer scanner.deinit();
+    var diagnostics: std.json.Diagnostics = .{};
+    scanner.enableDiagnostics(&diagnostics);
+
+    const dynamic = std.json.parseFromTokenSourceLeaky(
+        std.json.Value,
+        arena,
+        &scanner,
+        .{},
+    ) catch return fail.badRequest(
+        "the request body is not valid JSON — it stops making sense at line {d}, column {d}",
+        .{ diagnostics.getLine(), diagnostics.getColumn() },
+    );
+
+    if (dynamic != .object) return fail.badRequest(
+        "the request body has to be a JSON object with: {s} — this is {s}",
+        .{ comptime fieldList(T), kindOf(dynamic) },
+    );
+    const object = dynamic.object;
+
+    // Something the body carries that the endpoint has no room for. Almost
+    // always a typo, which is why the known names go out with it.
+    //
+    // Asked before "what is missing", because a typo is both at once —
+    // `{"nme":"wati"}` has an unknown `nme` and is missing `name` — and of
+    // those two true sentences, the one quoting what was actually typed is
+    // the one that ends the search.
+    var it = object.iterator();
+    while (it.next()) |entry| {
+        const name = entry.key_ptr.*;
+        if (!hasField(T, name)) return fail.badRequest(
+            "the request body has a field \"{s}\" this endpoint does not know. It takes: {s}",
+            .{ name, comptime fieldList(T) },
+        );
+    }
+
+    // Something the endpoint needs that the body does not carry. A field
+    // with a default is what "absent" is allowed to mean, so it is exempt —
+    // the same rule a query struct follows.
+    inline for (@typeInfo(T).@"struct".fields) |f| {
+        if (f.default_value_ptr == null and !object.contains(f.name)) return fail.badRequest(
+            "the request body is missing \"{s}\" ({s})",
+            .{ f.name, comptime expectedOf(f.type) },
+        );
+    }
+
+    // Everything is present and nothing is spare, so a value is the wrong
+    // shape for the field it landed in.
+    inline for (@typeInfo(T).@"struct".fields) |f| {
+        if (object.get(f.name)) |given| {
+            if (!fits(f.type, given)) return fail.badRequest(
+                "\"{s}\" has to be {s}, not {s}",
+                .{ f.name, comptime expectedOf(f.type), kindOf(given) },
+            );
+        }
+    }
+
+    return err;
+}
+
+/// What a JSON value is, in the words an error message wants.
+fn kindOf(value: std.json.Value) []const u8 {
+    return switch (value) {
+        .null => "null",
+        .bool => "true or false",
+        .integer, .float, .number_string => "a number",
+        .string => "text",
+        .array => "a list",
+        .object => "an object",
+    };
+}
+
+/// What a field will accept, in those same words.
+fn expectedOf(comptime T: type) []const u8 {
+    comptime {
+        if (T == Str) return "text";
+        return switch (@typeInfo(T)) {
+            .optional => |o| expectedOf(o.child) ++ " or null",
+            .bool => "true or false",
+            .int, .comptime_int => "a whole number",
+            .float, .comptime_float => "a number",
+            .@"enum" => |e| blk: {
+                var out: []const u8 = "one of ";
+                for (e.fields, 0..) |f, i| out = out ++ (if (i == 0) "" else ", ") ++ f.name;
+                break :blk out;
+            },
+            .@"struct" => "an object",
+            .pointer => |p| if (p.size == .slice and p.child == u8) "text" else "a list",
+            else => "something this endpoint understands",
+        };
+    }
+}
+
+/// The field names of `T`, for saying what the endpoint does take.
+fn fieldList(comptime T: type) []const u8 {
+    comptime {
+        var out: []const u8 = "";
+        for (@typeInfo(T).@"struct".fields, 0..) |f, i| {
+            out = out ++ (if (i == 0) "" else ", ") ++ f.name;
+            if (f.default_value_ptr != null) out = out ++ " (optional)";
+        }
+        return out;
+    }
+}
+
+fn hasField(comptime T: type, name: []const u8) bool {
+    inline for (@typeInfo(T).@"struct".fields) |f| {
+        if (std.mem.eql(u8, f.name, name)) return true;
+    }
+    return false;
+}
+
+/// Whether a JSON value could have become a `T`. Loose on purpose: it is
+/// only ever asked about a parse std.json has already refused, so its job is
+/// to find the field that explains the refusal, not to re-decide it.
+fn fits(comptime T: type, value: std.json.Value) bool {
+    if (T == Str) return value == .string;
+    return switch (@typeInfo(T)) {
+        .optional => |o| value == .null or fits(o.child, value),
+        .bool => value == .bool,
+        .int, .float => value == .integer or value == .float or value == .number_string,
+        // A string that is not one of the names is the whole reason an enum
+        // field fails, so the tag has to be checked and not just the kind.
+        .@"enum" => value == .string and std.meta.stringToEnum(T, value.string) != null,
+        .@"struct" => value == .object,
+        .pointer => |p| if (p.size == .slice and p.child == u8) value == .string else value == .array,
+        else => true,
+    };
+}
 
 /// Split a query string into decoded name/value pairs, in the request
 /// arena. Called once per request that has one; a request without a `?`

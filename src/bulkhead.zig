@@ -6,10 +6,12 @@
 //!
 //! The contract an Engine has to meet:
 //! - `Options` — the address and port to listen on.
-//! - `serve(gpa, options, state, handler)` — listen, accept connections,
-//!   and run `handler(state, in, out)` for each one concurrently until
-//!   that connection is done. `state` is carried through as-is (normally
-//!   `*App`).
+//! - `serve(gpa, options, stop, state, handler)` — listen, accept
+//!   connections, and run `handler(state, in, out)` for each one
+//!   concurrently until that connection is done. `state` is carried through
+//!   as-is (normally `*App`). Returns when `stop` is set.
+//! - `Stop`/`explained` — the flag that ends `serve`, and which startup
+//!   failures it has already explained in words.
 //! - `debug_io` — wired into `std_options_debug_io` so that `std.log`
 //!   does not block the event loop.
 //! - `Binding`/`bindSlot`/`unbindSlot`/`slot` — one pointer bound to the
@@ -33,6 +35,11 @@ const engine = @import("engine/zio.zig");
 pub const Options = engine.Options;
 pub const serve = engine.serve;
 pub const debug_io = engine.debug_io;
+
+/// The "please stop" flag `serve` watches, and `explained` for saying which
+/// startup failures have already been put into words.
+pub const Stop = engine.Stop;
+pub const explained = engine.explained;
 
 pub const Binding = engine.Binding;
 pub const binding_unset = engine.binding_unset;

@@ -43,6 +43,9 @@ pub const App = struct {
     /// Directories loaded into memory by `static`, searched only when no
     /// route matched (ADR 0010).
     static_sets: std.ArrayList(static_mod.Set) = .empty,
+    /// Set when the server should stop. Read by the Engine's accept loop
+    /// and by every connection between requests.
+    stop: bulkhead.Stop = .{},
 
     pub fn init(gpa: std.mem.Allocator) App {
         return .{
@@ -194,12 +197,39 @@ pub const App = struct {
     /// than at three in the morning (ADR 0006).
     pub fn checkServices(self: *const App) error{MissingService}!void {
         if (self.missingService() == null) return;
-        for (self.requirements.items) |r| {
+
+        // One message per missing service, not one per route that wanted
+        // it. Five routes sharing a `*Db` is the normal shape of an app, so
+        // forgetting to provide it used to print the same sentence — and
+        // the same fix — five times over.
+        for (self.requirements.items, 0..) |r, i| {
             if (self.services.has(r)) continue;
+            if (alreadyReported(self.requirements.items[0..i], r)) continue;
+
+            var routes: [3][]const u8 = undefined;
+            var n: usize = 0;
+            var total: usize = 0;
+            for (self.requirements.items) |other| {
+                if (!sameService(other, r)) continue;
+                total += 1;
+                if (n < routes.len) {
+                    routes[n] = other.route;
+                    n += 1;
+                }
+            }
+
             std.log.err(
-                "the handler for route \"{s}\" needs service {s}{s}, which was never registered " ++
+                "service {s}{s} was never registered, but {d} route{s} need{s} it ({f}{s}) " ++
                     "— call app.provide() before app.listen()",
-                .{ r.route, if (r.needs_mutable) "*" else "*const ", r.type_name },
+                .{
+                    if (r.needs_mutable) "*" else "*const ",
+                    r.type_name,
+                    total,
+                    if (total == 1) "" else "s",
+                    if (total == 1) "s" else "",
+                    RouteList{ .routes = routes[0..n] },
+                    if (total > n) ", …" else "",
+                },
             );
         }
         return error.MissingService;
@@ -226,12 +256,40 @@ pub const App = struct {
         }
     }
 
-    /// Listen and serve until the process is stopped.
+    /// Listen and serve until the server is stopped — by Ctrl-C, by a
+    /// SIGTERM from whatever is supervising the process, or by `shutdown()`.
+    /// Returns once the requests still in flight have finished.
+    ///
+    /// A server that cannot start says why in one line and stops the
+    /// process there. That is the whole point of those messages: letting
+    /// the error travel back to `main` instead would print a stack trace
+    /// through zfast's own files on top of the answer (ADR 0002). Use
+    /// `tryListen` to get the error as a value and no message.
     pub fn listen(self: *App, options_: bulkhead.Options) !void {
+        self.tryListen(options_) catch |err| {
+            if (bulkhead.explained(err) or err == error.MissingService) std.process.exit(1);
+            return err;
+        };
+    }
+
+    /// `listen`, for a caller that would rather handle a startup failure
+    /// than have the process stopped under it — a test, or a program that
+    /// falls back to another port. The one-line explanations still go to
+    /// the log; what changes is that the error comes back as a value.
+    pub fn tryListen(self: *App, options_: bulkhead.Options) !void {
         checkRootWiring();
         try self.checkServices();
         try self.resolveChains();
-        try bulkhead.serve(self.gpa, options_, self, handleConnection);
+        try bulkhead.serve(self.gpa, options_, &self.stop, self, handleConnection);
+    }
+
+    /// Stop the server: `listen()` stops accepting, connections finish the
+    /// request they are on and close, and `listen()` returns.
+    ///
+    /// Safe to call from any thread, and from a handler — a `/admin/quit`
+    /// route is an ordinary handler that calls this.
+    pub fn shutdown(self: *App) void {
+        self.stop.request();
     }
 
     fn handleConnection(self: *App, in: *std.Io.Reader, out: *std.Io.Writer) void {
@@ -290,6 +348,13 @@ pub const App = struct {
             }
             return false;
         };
+        // From here there is a request to answer, and a stop has to wait for
+        // it. Not before: until the head arrived this connection was parked
+        // in a read, holding no work, and counting that as something to wait
+        // on would put the whole grace period behind every idle browser tab.
+        _ = self.stop.in_flight.fetchAdd(1, .acq_rel);
+        defer _ = self.stop.in_flight.fetchSub(1, .acq_rel);
+
         const request_head = arena.dupe(u8, raw_head) catch return false;
         in.toss(raw_head.len);
 
@@ -298,6 +363,7 @@ pub const App = struct {
             sendFinal(out, RESPONSE_400);
             return false;
         };
+
 
         const qmark = std.mem.indexOfScalar(u8, r.target, '?');
         const path = if (qmark) |i| r.target[0..i] else r.target;
@@ -320,6 +386,13 @@ pub const App = struct {
             ._head = request_head,
             ._params = &.{},
             ._services = &self.services,
+            // Stopping: this one still gets answered — a request already on
+            // the wire is not the client's fault — but the answer says
+            // `Connection: close` so the client opens a fresh connection
+            // next time, to a server that is still there. Dropping a
+            // keep-alive connection without a word is how a deploy turns
+            // into a handful of failed requests nobody can reproduce.
+            ._stopping = &self.stop.requested,
         };
 
         // A request that matched no route still runs the middleware: a
@@ -352,6 +425,18 @@ pub const App = struct {
             if (self.findStatic(c.method, path)) |file| {
                 c._static_file = file;
                 terminal = serveStaticFile;
+            } else {
+                // No route for this method, but the path itself is spelled
+                // out by routes under other methods. "There is nothing
+                // here" and "there is something here, but not for that
+                // verb" are different answers, and a 404 for the second one
+                // sends you looking for a registration bug that is not
+                // there.
+                const allowed = self.router.allowedFor(path);
+                if (allowed.count() > 0) {
+                    c._allowed = allowed;
+                    terminal = methodNotAllowedHandler;
+                }
             }
         }
 
@@ -419,8 +504,33 @@ fn checkRootWiring() void {
     );
 }
 
+/// Two requirements naming the same service, whatever route each came from.
+fn sameService(a: service_mod.Requirement, b: service_mod.Requirement) bool {
+    return a.needs_mutable == b.needs_mutable and std.mem.eql(u8, a.type_name, b.type_name);
+}
+
+fn alreadyReported(earlier: []const service_mod.Requirement, r: service_mod.Requirement) bool {
+    for (earlier) |e| {
+        if (sameService(e, r)) return true;
+    }
+    return false;
+}
+
+/// `"/users", "/users/:id"` — the routes that wanted a service, for the
+/// message saying nobody provided it.
+const RouteList = struct {
+    routes: []const []const u8,
+
+    pub fn format(self: RouteList, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        for (self.routes, 0..) |route, i| {
+            if (i > 0) try w.writeAll(", ");
+            try w.print("\"{s}\"", .{route});
+        }
+    }
+};
+
 fn drain(c: *Ctx, in: *std.Io.Reader, r: *const http1.Request) bool {
-    if (!r.keep_alive or c._stream_desynced) return false;
+    if (!c.keepAlive() or c._stream_desynced) return false;
     if (c._body != null) return true;
     http1.discardBody(in, r, ctx_mod.max_body) catch return false;
     return true;
@@ -430,6 +540,50 @@ fn drain(c: *Ctx, in: *std.Io.Reader, r: *const http1.Request) bool {
 /// that middleware wraps a 404 exactly as it wraps anything else.
 fn notFoundHandler(c: *Ctx) anyerror!void {
     try c.sendText(404, "not found\n");
+}
+
+/// The innermost call when the path is registered but not for this method.
+///
+/// A normal handler too, so a 405 carries whatever headers the middleware
+/// added — CORS included, since a browser has to be able to read the answer
+/// to see what went wrong.
+fn methodNotAllowedHandler(c: *Ctx) anyerror!void {
+    // Built in the request arena, which outlives the response it is written
+    // into, so there is nothing for `setHeader` to copy.
+    const allow = try allowList(c._arena, c._allowed);
+    try c.setStaticHeader("Allow", allow);
+
+    // An OPTIONS asking what a path supports is answered rather than
+    // refused: that is the question the method exists for, and the `Allow`
+    // header above is the answer. A preflight never gets this far — CORS
+    // middleware handles those before any handler runs.
+    if (c.method == .OPTIONS) return c.send(204, "text/plain", "");
+
+    var buf: [160]u8 = undefined;
+    const body = std.fmt.bufPrint(
+        &buf,
+        "{s} is not allowed here. This path answers: {s}\n",
+        .{ @tagName(c.method), allow },
+    ) catch "method not allowed\n";
+    try c.sendText(405, body);
+}
+
+/// `GET, HEAD, POST` — an `Allow` header's value, in the order the methods
+/// are declared so that two runs of the same server say the same thing.
+fn allowList(arena: std.mem.Allocator, allowed: router_mod.MethodSet) ![]const u8 {
+    var out: std.Io.Writer.Allocating = try .initCapacity(arena, 48);
+    var first = true;
+    inline for (@typeInfo(http1.Method).@"enum".fields) |f| {
+        const method: http1.Method = @enumFromInt(f.value);
+        // `other` is not a method anybody can register, so it has no
+        // business being offered as one.
+        if (method != .other and allowed.contains(method)) {
+            if (!first) try out.writer.writeAll(", ");
+            try out.writer.writeAll(f.name);
+            first = false;
+        }
+    }
+    return out.written();
 }
 
 /// Answer with a file loaded at startup. Also a normal handler, so a
@@ -467,7 +621,7 @@ fn sendFinal(out: *std.Io.Writer, response: []const u8) void {
 fn sendDirect(c: *Ctx, status: u16, body: []const u8) !void {
     c._sent = true;
     c._status = status;
-    const keep_alive = c._request.keep_alive;
+    const keep_alive = c.keepAlive();
     if (c.method == .HEAD) return http1.writeResponseHeadOnly(
         c._out,
         status,
@@ -828,7 +982,7 @@ test "a JSON body that breaks a rule becomes a 422 via a fail function" {
     try testing.expect(std.mem.indexOf(u8, result.response, "name must not be empty") != null);
 }
 
-test "broken JSON goes through the mapping table and becomes a 400" {
+test "broken JSON is a 400 that says where it stopped making sense" {
     var app = App.init(testing.allocator);
     defer app.deinit();
     try app.post("/users", createUser);
@@ -838,7 +992,240 @@ test "broken JSON goes through the mapping table and becomes a 400" {
     const result = h.send(&app, "POST /users HTTP/1.1\r\nContent-Length: 5\r\n\r\n{name");
 
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 400 Bad Request\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "not valid JSON") != null);
+    try testing.expect(std.mem.indexOf(u8, result.response, "line 1, column 2") != null);
     try testing.expect(result.keep_alive);
+}
+
+// The point of what follows: a query param that does not fit has always
+// been answered with the name of the param and what was wrong with it. A
+// body field used to get `Bad Request` and nothing else. These are the same
+// standard, applied to the other half of the request.
+
+const Signup = struct {
+    name: Str,
+    age: u32,
+    plan: enum { free, paid } = .free,
+    nickname: ?Str = null,
+};
+
+fn signup(incoming: Signup) !struct { name: []const u8 } {
+    return .{ .name = incoming.name.view() };
+}
+
+fn signupResponse(h: *Harness, app: *App, body: []const u8) []const u8 {
+    var head_buf: [128]u8 = undefined;
+    const head = std.fmt.bufPrint(
+        &head_buf,
+        "POST /signup HTTP/1.1\r\nContent-Length: {d}\r\n\r\n",
+        .{body.len},
+    ) catch unreachable;
+    var request_buf: [512]u8 = undefined;
+    const request = std.fmt.bufPrint(&request_buf, "{s}{s}", .{ head, body }) catch unreachable;
+    return h.send(app, request).response;
+}
+
+test "a body field that does not fit is a 400 naming the field, like a query param" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/signup", signup);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const cases = [_]struct { body: []const u8, says: []const u8 }{
+        // Something the endpoint needs that is not there. A field with a
+        // default is exempt: that is what "absent" is allowed to mean.
+        .{ .body = "{\"name\":\"wati\"}", .says = "missing \"age\"" },
+        // A typo, which is what an unknown field almost always is — so the
+        // names it could have been go out with the complaint.
+        .{ .body = "{\"nme\":\"wati\",\"age\":7}", .says = "field \"nme\" this endpoint does not know" },
+        // Present, but the wrong shape for where it landed.
+        .{ .body = "{\"name\":123,\"age\":7}", .says = "\"name\" has to be text, not a number" },
+        .{ .body = "{\"name\":\"wati\",\"age\":\"soon\"}", .says = "\"age\" has to be a whole number, not text" },
+        // An enum says which names it knows, the way a query param does.
+        .{ .body = "{\"name\":\"w\",\"age\":7,\"plan\":\"gold\"}", .says = "\"plan\" has to be one of free, paid" },
+        // An optional field takes null, but not anything at all.
+        .{ .body = "{\"name\":\"w\",\"age\":7,\"nickname\":9}", .says = "\"nickname\" has to be text or null" },
+        // Valid JSON of the wrong kind entirely.
+        .{ .body = "[1,2,3]", .says = "has to be a JSON object" },
+        // No body at all — the commonest way a first curl goes wrong.
+        .{ .body = "", .says = "the request body is empty" },
+    };
+
+    for (cases) |case| {
+        const response = signupResponse(&h, &app, case.body);
+        try testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 400 Bad Request\r\n"));
+        testing.expect(std.mem.indexOf(u8, response, case.says) != null) catch |err| {
+            std.debug.print("body {s}\n  wanted: {s}\n  got:    {s}\n", .{ case.body, case.says, response });
+            return err;
+        };
+    }
+}
+
+test "a body that fits still parses, so the diagnosis costs the happy path nothing" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/signup", signup);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const response = signupResponse(&h, &app, "{\"name\":\"wati\",\"age\":7,\"plan\":\"paid\"}");
+
+    try testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(std.mem.indexOf(u8, response, "{\"name\":\"wati\"}") != null);
+}
+
+// ---- 405 ----
+
+fn testEchoOptions(c: *Ctx) anyerror!void {
+    try c.sendText(200, "mine");
+}
+
+test "a path registered under another method is a 405 with Allow, not a 404" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/users", testQuiet);
+    try app.post("/users", testQuiet);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "DELETE /users HTTP/1.1\r\nHost: x\r\n\r\n");
+
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 405 Method Not Allowed\r\n"));
+    // HEAD is in there without anybody registering one, because the GET
+    // route already answers it.
+    try testing.expect(std.mem.indexOf(u8, result.response, "Allow: GET, HEAD, POST\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, result.response, "DELETE is not allowed here") != null);
+    // A wrong verb is a normal thing to answer, not a reason to hang up.
+    try testing.expect(result.keep_alive);
+}
+
+test "a path nothing is registered under is still a 404" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/users", testQuiet);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "DELETE /nowhere HTTP/1.1\r\nHost: x\r\n\r\n");
+
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 404 Not Found\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "Allow:") == null);
+}
+
+test "a 405 knows about params and catch-alls, not just literal paths" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/users/:id", testQuiet);
+    try app.patch("/files/*", testQuiet);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const on_param = h.send(&app, "PUT /users/42 HTTP/1.1\r\nHost: x\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, on_param.response, "HTTP/1.1 405 Method Not Allowed\r\n"));
+    try testing.expect(std.mem.indexOf(u8, on_param.response, "Allow: GET, HEAD\r\n") != null);
+
+    const on_catch_all = h.send(&app, "POST /files/a/b/c.txt HTTP/1.1\r\nHost: x\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, on_catch_all.response, "HTTP/1.1 405 Method Not Allowed\r\n"));
+    try testing.expect(std.mem.indexOf(u8, on_catch_all.response, "Allow: PATCH\r\n") != null);
+}
+
+test "an OPTIONS asking what a path supports is answered, not refused" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/users", testQuiet);
+    try app.post("/users", testQuiet);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "OPTIONS /users HTTP/1.1\r\nHost: x\r\n\r\n");
+
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 204 No Content\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "Allow: GET, HEAD, POST\r\n") != null);
+}
+
+test "a route registered for the method still wins over the 405" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/users", testQuiet);
+    try app.options("/users", testEchoOptions);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "OPTIONS /users HTTP/1.1\r\nHost: x\r\n\r\n");
+
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "mine") != null);
+    // The framework's own Allow is not bolted onto an answer somebody else
+    // wrote.
+    try testing.expect(std.mem.indexOf(u8, result.response, "Allow:") == null);
+}
+
+test "middleware wraps a 405 the way it wraps everything else" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/users", testQuiet);
+    try app.use(tagOuter);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "DELETE /users HTTP/1.1\r\nHost: x\r\n\r\n");
+
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 405 Method Not Allowed\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "X-Order: outer\r\n") != null);
+}
+
+// ---- stopping ----
+
+test "once a stop is asked for, a connection answers what it has and closes" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/users", testQuiet);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const before = h.send(&app, "GET /users HTTP/1.1\r\nHost: x\r\n\r\n");
+    try testing.expect(before.keep_alive);
+    try testing.expect(std.mem.indexOf(u8, before.response, "Connection: keep-alive\r\n") != null);
+
+    app.shutdown();
+
+    // Still answered — a request already on the wire is not the client's
+    // fault. What changes is that the connection is not offered again.
+    const after = h.send(&app, "GET /users HTTP/1.1\r\nHost: x\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, after.response, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(std.mem.indexOf(u8, after.response, "Connection: close\r\n") != null);
+    try testing.expect(!after.keep_alive);
+}
+
+/// A handler that stops the server is an ordinary handler — which is what
+/// an `/admin/quit` route is.
+fn quitHandler(c: *Ctx) anyerror!void {
+    c.service(*App).?.shutdown();
+    try c.sendText(200, "going down\n");
+}
+
+test "a stop that lands mid-request still answers it, and says the socket is going" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&app);
+    try app.get("/quit", quitHandler);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /quit HTTP/1.1\r\nHost: x\r\n\r\n");
+
+    // The request arrived before the stop and is answered in full. Whether
+    // the connection lives on is decided when the response is written, not
+    // when the head was read, which is the only way this can be right.
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "going down") != null);
+    try testing.expect(std.mem.indexOf(u8, result.response, "Connection: close\r\n") != null);
+    try testing.expect(!result.keep_alive);
 }
 
 const Sort = enum { newest, oldest };

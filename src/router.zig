@@ -33,6 +33,10 @@ pub const Param = struct {
     value: []const u8,
 };
 
+/// The methods some route answers a given path with — what `allowedFor`
+/// returns, and what an `Allow` header is written from.
+pub const MethodSet = std.EnumSet(http1.Method);
+
 pub const Match = struct {
     handler: CtxHandler,
     /// The middleware wrapping this route, resolved once at `listen()`.
@@ -211,6 +215,42 @@ pub const Router = struct {
         // checker gets a 404 from a route that plainly exists.
         if (method == .HEAD) return self.matchExact(.GET, trimmed, parts);
         return null;
+    }
+
+    /// The methods that answer this path, whatever the request asked for.
+    ///
+    /// Empty means no route spells this path out at all, which is a 404. A
+    /// set with something in it and the requested method not in it is the
+    /// difference between "there is nothing here" and "there is something
+    /// here, but not for that verb" — a 405, and the `Allow` header that
+    /// has to come with it.
+    ///
+    /// Only reached once the ordinary match has already failed, so walking
+    /// every route a second time costs nothing on the path that matters.
+    pub fn allowedFor(self: *const Router, path: []const u8) MethodSet {
+        var allowed: MethodSet = .initEmpty();
+
+        var buf: [max_segments][]const u8 = undefined;
+        const parts = split(trimSlashes(path), &buf) orelse return allowed;
+
+        for (self.routes.items) |*route| {
+            if (allowed.contains(route.method)) continue;
+            if (answers(route, parts)) allowed.insert(route.method);
+        }
+
+        // A HEAD is answered by the GET route, so a path with a GET on it
+        // allows HEAD whether or not anybody registered one (see `match`).
+        if (allowed.contains(.GET)) allowed.insert(.HEAD);
+        return allowed;
+    }
+
+    /// Whether this route answers this path, method aside — the length rule
+    /// `matchExact` applies before it looks at any text, and then the text.
+    fn answers(route: *const Route, parts: []const []const u8) bool {
+        if (route.wildcard_tail) {
+            if (parts.len + 1 < route.segments.len) return false;
+        } else if (route.segments.len != parts.len) return false;
+        return matches(route, parts);
     }
 
     /// The best match, not the first one. `/users/new` and `/users/:id` can

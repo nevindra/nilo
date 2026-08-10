@@ -3,11 +3,17 @@
 //! The only file in zfast allowed to name zio. See ADR 0002.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zio = @import("zio");
 
 pub const debug_io = zio.debug_io;
 
 pub const Options = struct {
+    /// An IPv4 or IPv6 address in the usual notation: `"127.0.0.1"` and
+    /// `"::1"` for this machine only, `"0.0.0.0"` and `"::"` for every
+    /// interface. A host name is not resolved — this is the address to bind
+    /// to, and a name would make which interface it lands on a lookup's
+    /// business rather than yours.
     address: []const u8 = "127.0.0.1",
     port: u16 = 8787,
     /// On by default so that stopping the server and starting it again
@@ -42,7 +48,140 @@ pub const Options = struct {
     /// costs, so it is worth turning down for a server holding many
     /// connections open and up for one serving large responses.
     write_buffer: usize = 4 * 1024,
+
+    /// Stop on Ctrl-C (SIGINT) and on SIGTERM, which is what a container
+    /// runtime or a supervisor sends when it wants the process to go.
+    ///
+    /// On by default because the alternative is worse in both directions:
+    /// during development, a server that ignores Ctrl-C has to be hunted
+    /// down with `kill`; in production, a deploy that sends SIGTERM would
+    /// otherwise kill requests mid-response. Turn it off if the surrounding
+    /// program installs handlers of its own — then call `App.shutdown()`
+    /// from them.
+    stop_on_signal: bool = true,
+
+    /// How long a stop waits for requests already in flight before giving
+    /// up on them. 0 means don't wait.
+    ///
+    /// Long enough for an ordinary request to finish, short enough that a
+    /// deploy is not held up by one slow handler. What is waited on is
+    /// requests being answered, not connections held open: a browser tab
+    /// parked on a keep-alive connection is holding no work, so Ctrl-C does
+    /// not spend a single millisecond of this on it.
+    shutdown_grace_ms: u32 = 10_000,
 };
+
+/// The flag that turns "please stop" into a server that has stopped.
+///
+/// It lives here rather than in `App` because stopping is the Engine's
+/// business — it owns the accept loop that has to notice. `App` holds one
+/// and hands it to `serve`; `App.shutdown()` sets it.
+pub const Stop = struct {
+    requested: std.atomic.Value(bool) = .init(false),
+    /// Requests being answered right now — what a stop waits for.
+    ///
+    /// Requests, not connections. A connection between two keep-alive
+    /// requests is parked in a read that will not return until the client
+    /// sends something, and waiting on it would mean every idle browser tab
+    /// adding the full grace period to a Ctrl-C. It is holding no work, so
+    /// it is closed rather than waited for; `Connection: close` on the last
+    /// response and a listener that has stopped accepting are both already
+    /// telling that client where to go next.
+    ///
+    /// Kept by `App`, which is the only thing that knows when a request
+    /// starts and stops.
+    in_flight: std.atomic.Value(u32) = .init(0),
+
+    /// Safe from any thread, and from a signal handler — one atomic store
+    /// is all it does.
+    pub fn request(self: *Stop) void {
+        self.requested.store(true, .release);
+    }
+
+    pub fn isRequested(self: *const Stop) bool {
+        return self.requested.load(.acquire);
+    }
+};
+
+/// How often the accept loop looks up to see whether a stop was asked for.
+///
+/// Polling rather than waking the loop directly: a signal handler may not
+/// touch a wait queue, and closing the listening socket out from under a
+/// pending `accept` is a use-after-free waiting to happen. One timer per
+/// server, five times a second, is not a cost worth avoiding — and a fifth
+/// of a second is below what anybody notices after pressing Ctrl-C.
+const accept_poll_ms = 200;
+
+/// How often a stop looks to see whether the last request has finished.
+/// Shorter than the accept poll: by the time this runs somebody is waiting
+/// for the process to go, and an ordinary request finishes in less time
+/// than one of these.
+const drain_poll_ms = 20;
+
+/// Whether `serve` already said, in words, why the server did not start.
+///
+/// `App.listen()` stops the process on these instead of returning them: the
+/// message is the whole answer, and letting the error travel up to `main`
+/// would print a stack trace through zfast on top of it (ADR 0002 — the
+/// Engine is not the user's business, in a crash log least of all).
+pub fn explained(err: anyerror) bool {
+    return switch (err) {
+        error.BadAddress,
+        error.AddressInUse,
+        error.PermissionDenied,
+        error.AddressNotAvailable,
+        error.CannotListen,
+        => true,
+        else => false,
+    };
+}
+
+// ---- stopping on a signal ----
+//
+// A signal handler may do almost nothing safely, so it does almost nothing:
+// one atomic store into the `Stop` below. The accept loop is what notices.
+
+var signal_target: std.atomic.Value(?*Stop) = .init(null);
+
+/// The signal number as this platform's `Sigaction` hands it over — an enum
+/// on Linux, a plain integer elsewhere. Read off `Sigaction` rather than
+/// spelled out, so it stays right wherever this is built.
+const SigNum = @typeInfo(@typeInfo(@typeInfo(
+    @FieldType(@FieldType(std.posix.Sigaction, "handler"), "handler"),
+).optional.child).pointer.child).@"fn".params[0].type.?;
+
+fn onStopSignal(_: SigNum) callconv(.c) void {
+    const stop = signal_target.load(.acquire) orelse return;
+    // A second Ctrl-C means the person has stopped waiting for the graceful
+    // part. 130 is the shell's convention for "killed by SIGINT".
+    if (stop.isRequested()) std.process.exit(130);
+    stop.request();
+}
+
+/// What was handling these before, so the previous arrangement is put back
+/// when `serve` returns. A library that leaves its own handlers installed
+/// after it is done has changed the program behind its back.
+var previous_int: std.posix.Sigaction = undefined;
+var previous_term: std.posix.Sigaction = undefined;
+
+fn installStopSignals(stop: *Stop) void {
+    if (builtin.os.tag == .windows) return;
+    signal_target.store(stop, .release);
+    const action = std.posix.Sigaction{
+        .handler = .{ .handler = onStopSignal },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.INT, &action, &previous_int);
+    std.posix.sigaction(std.posix.SIG.TERM, &action, &previous_term);
+}
+
+fn restoreStopSignals() void {
+    if (builtin.os.tag == .windows) return;
+    std.posix.sigaction(std.posix.SIG.INT, &previous_int, null);
+    std.posix.sigaction(std.posix.SIG.TERM, &previous_term, null);
+    signal_target.store(null, .release);
+}
 
 /// Why the server never got as far as listening. Kept as a value so the
 /// message and the error can be produced in two different places.
@@ -81,7 +220,17 @@ fn classifyListenFailure(name: []const u8) StartupFailure {
 /// already buffered; the handler does not need to know there is a socket
 /// behind them. `handler` must be
 /// `fn (@TypeOf(state), *std.Io.Reader, *std.Io.Writer) void`.
-pub fn serve(gpa: std.mem.Allocator, options: Options, state: anytype, comptime handler: anytype) !void {
+///
+/// Returns when `stop` is set — by a signal, or by somebody calling
+/// `App.shutdown()` — once the connections still being served have
+/// finished or the grace period has run out.
+pub fn serve(
+    gpa: std.mem.Allocator,
+    options: Options,
+    stop: *Stop,
+    state: anytype,
+    comptime handler: anytype,
+) !void {
     const State = @TypeOf(state);
     const threads: u8 = if (options.threads > 0)
         options.threads
@@ -102,10 +251,11 @@ pub fn serve(gpa: std.mem.Allocator, options: Options, state: anytype, comptime 
     var why: StartupFailure = .other;
 
     const maybe_addr: ?zio.net.IpAddress =
-        zio.net.IpAddress.parseIp4(options.address, options.port) catch |err| bad: {
+        zio.net.IpAddress.parseIp(options.address, options.port) catch |err| bad: {
             std.log.err(
-                "\"{s}\" is not an address zfast can listen on ({s}). It wants a plain IPv4 " ++
-                    "address: \"127.0.0.1\" for this machine only, \"0.0.0.0\" for every interface.",
+                "\"{s}\" is not an address zfast can listen on ({s}). It wants an IP address, " ++
+                    "not a host name: \"127.0.0.1\" or \"::1\" for this machine only, " ++
+                    "\"0.0.0.0\" or \"::\" for every interface.",
                 .{ options.address, @errorName(err) },
             );
             why = .bad_address;
@@ -169,12 +319,56 @@ pub fn serve(gpa: std.mem.Allocator, options: Options, state: anytype, comptime 
     };
 
     var group: zio.Group = .init;
+    // Whatever is still running when the grace period is over is cut off
+    // here. By then it has had its chance.
     defer group.cancel();
 
-    while (true) {
-        const stream = try server.accept(.{});
+    if (options.stop_on_signal) installStopSignals(stop);
+    defer if (options.stop_on_signal) restoreStopSignals();
+
+    while (!stop.isRequested()) {
+        const stream = server.accept(.{ .timeout = .fromMilliseconds(accept_poll_ms) }) catch |err| {
+            // The wait ran out, which is the loop's chance to look at the
+            // stop flag rather than anything having gone wrong.
+            if (err == error.Timeout) continue;
+            return err;
+        };
         errdefer stream.close();
         try group.spawn(Conn.run, .{ state, stream, gpa, options });
+    }
+
+    drain(stop, options.shutdown_grace_ms);
+}
+
+/// Having stopped accepting, let the requests still being answered finish.
+///
+/// Connections sitting idle between keep-alive requests are not waited for
+/// — see `Stop.in_flight`. They are closed by the `group.cancel()` above,
+/// which is what the client is already being told to expect.
+fn drain(stop: *const Stop, grace_ms: u32) void {
+    var waited: u32 = 0;
+    while (true) {
+        const busy = stop.in_flight.load(.acquire);
+        if (busy == 0) {
+            std.log.info("zfast stopped", .{});
+            return;
+        }
+        if (waited >= grace_ms) {
+            std.log.warn(
+                "zfast stopped with {d} request(s) still unanswered after {d}ms — they were cut " ++
+                    "off. Pass `.shutdown_grace_ms = …` to listen() if handlers need longer.",
+                .{ busy, grace_ms },
+            );
+            return;
+        }
+        if (waited == 0) std.log.info(
+            "zfast stopping: {d} request(s) still being answered, waiting up to {d}ms",
+            .{ busy, grace_ms },
+        );
+
+        const step = @min(drain_poll_ms, grace_ms - waited);
+        zio.sleep(.fromMilliseconds(step)) catch return;
+        waited += step;
     }
 }
 
