@@ -1,86 +1,86 @@
-//! Router: mencocokkan metode + jalur ke penangan, dengan path param
-//! bergaya `/users/:id`.
+//! Router: matches method + path to a handler, with `/users/:id` style
+//! path params.
 //!
-//! Algoritmanya pemindaian linear per rute, segmen demi segmen. Ini
-//! sengaja: algoritma router tidak terlihat pengguna dan diputuskan
-//! dengan angka nanti (docs/rencana.md, "Belum diputuskan").
+//! The algorithm is a linear scan over the routes, segment by segment.
+//! That is deliberate: the router algorithm is invisible to users and
+//! gets decided with numbers later (docs/plan.md, "Still open").
 
 const std = @import("std");
 const http1 = @import("http1.zig");
 const Ctx = @import("ctx.zig").Ctx;
 
-pub const PenanganCtx = *const fn (*Ctx) anyerror!void;
+pub const CtxHandler = *const fn (*Ctx) anyerror!void;
 
-pub const maks_param = 8;
+pub const max_params = 8;
 
 pub const Param = struct {
-    nama: []const u8,
-    nilai: []const u8,
+    name: []const u8,
+    value: []const u8,
 };
 
-pub const Kecocokan = struct {
-    penangan: PenanganCtx,
-    param: [maks_param]Param = undefined,
-    n_param: usize = 0,
+pub const Match = struct {
+    handler: CtxHandler,
+    params: [max_params]Param = undefined,
+    n_params: usize = 0,
 };
 
-const Rute = struct {
-    metode: http1.Metode,
-    pola: []const u8,
-    penangan: PenanganCtx,
+const Route = struct {
+    method: http1.Method,
+    pattern: []const u8,
+    handler: CtxHandler,
 };
 
 pub const Router = struct {
     gpa: std.mem.Allocator,
-    rute: std.ArrayList(Rute) = .empty,
+    routes: std.ArrayList(Route) = .empty,
 
     pub fn init(gpa: std.mem.Allocator) Router {
         return .{ .gpa = gpa };
     }
 
     pub fn deinit(self: *Router) void {
-        self.rute.deinit(self.gpa);
+        self.routes.deinit(self.gpa);
     }
 
-    /// `pola` harus hidup selama Router hidup (biasanya literal).
-    pub fn tambah(self: *Router, metode: http1.Metode, pola: []const u8, penangan: PenanganCtx) !void {
-        std.debug.assert(pola.len > 0 and pola[0] == '/');
-        std.debug.assert(std.mem.count(u8, pola, ":") <= maks_param);
-        try self.rute.append(self.gpa, .{ .metode = metode, .pola = pola, .penangan = penangan });
+    /// `pattern` must outlive the Router (normally a literal).
+    pub fn add(self: *Router, method: http1.Method, pattern: []const u8, handler: CtxHandler) !void {
+        std.debug.assert(pattern.len > 0 and pattern[0] == '/');
+        std.debug.assert(std.mem.count(u8, pattern, ":") <= max_params);
+        try self.routes.append(self.gpa, .{ .method = method, .pattern = pattern, .handler = handler });
     }
 
-    pub fn cocok(self: *const Router, metode: http1.Metode, jalur: []const u8) ?Kecocokan {
-        for (self.rute.items) |rute| {
-            if (rute.metode != metode) continue;
-            var hasil = Kecocokan{ .penangan = rute.penangan };
-            if (cocokPola(rute.pola, jalur, &hasil)) return hasil;
+    pub fn match(self: *const Router, method: http1.Method, path: []const u8) ?Match {
+        for (self.routes.items) |route| {
+            if (route.method != method) continue;
+            var result = Match{ .handler = route.handler };
+            if (matchPattern(route.pattern, path, &result)) return result;
         }
         return null;
     }
 
-    fn cocokPola(pola: []const u8, jalur: []const u8, hasil: *Kecocokan) bool {
-        var seg_pola = std.mem.splitScalar(u8, potongMiring(pola), '/');
-        var seg_jalur = std.mem.splitScalar(u8, potongMiring(jalur), '/');
+    fn matchPattern(pattern: []const u8, path: []const u8, result: *Match) bool {
+        var pat_segs = std.mem.splitScalar(u8, trimSlashes(pattern), '/');
+        var path_segs = std.mem.splitScalar(u8, trimSlashes(path), '/');
 
         while (true) {
-            const p = seg_pola.next();
-            const j = seg_jalur.next();
-            if (p == null and j == null) return true;
-            if (p == null or j == null) return false;
+            const p = pat_segs.next();
+            const s = path_segs.next();
+            if (p == null and s == null) return true;
+            if (p == null or s == null) return false;
 
             if (p.?.len > 0 and p.?[0] == ':') {
-                if (j.?.len == 0) return false;
-                hasil.param[hasil.n_param] = .{ .nama = p.?[1..], .nilai = j.? };
-                hasil.n_param += 1;
-            } else if (!std.mem.eql(u8, p.?, j.?)) {
+                if (s.?.len == 0) return false;
+                result.params[result.n_params] = .{ .name = p.?[1..], .value = s.? };
+                result.n_params += 1;
+            } else if (!std.mem.eql(u8, p.?, s.?)) {
                 return false;
             }
         }
     }
 
-    /// "/a/b/" dan "/a/b" dianggap jalur yang sama.
-    fn potongMiring(jalur: []const u8) []const u8 {
-        var s = jalur;
+    /// "/a/b/" and "/a/b" count as the same path.
+    fn trimSlashes(path: []const u8) []const u8 {
+        var s = path;
         if (s.len > 0 and s[0] == '/') s = s[1..];
         if (s.len > 0 and s[s.len - 1] == '/') s = s[0 .. s.len - 1];
         return s;
@@ -89,47 +89,47 @@ pub const Router = struct {
 
 const testing = std.testing;
 
-fn penanganUji(_: *Ctx) anyerror!void {}
-fn penanganLain(_: *Ctx) anyerror!void {}
+fn testHandler(_: *Ctx) anyerror!void {}
+fn otherHandler(_: *Ctx) anyerror!void {}
 
-test "rute statis dan metode" {
+test "static routes and methods" {
     var r = Router.init(testing.allocator);
     defer r.deinit();
-    try r.tambah(.GET, "/sehat", penanganUji);
+    try r.add(.GET, "/health", testHandler);
 
-    try testing.expect(r.cocok(.GET, "/sehat") != null);
-    try testing.expect(r.cocok(.POST, "/sehat") == null);
-    try testing.expect(r.cocok(.GET, "/lain") == null);
-    try testing.expect(r.cocok(.GET, "/sehat/") != null);
+    try testing.expect(r.match(.GET, "/health") != null);
+    try testing.expect(r.match(.POST, "/health") == null);
+    try testing.expect(r.match(.GET, "/other") == null);
+    try testing.expect(r.match(.GET, "/health/") != null);
 }
 
-test "path param tertangkap" {
+test "path params are captured" {
     var r = Router.init(testing.allocator);
     defer r.deinit();
-    try r.tambah(.GET, "/users/:id", penanganUji);
-    try r.tambah(.GET, "/users/:id/posts/:post", penanganLain);
+    try r.add(.GET, "/users/:id", testHandler);
+    try r.add(.GET, "/users/:id/posts/:post", otherHandler);
 
-    const k = r.cocok(.GET, "/users/42").?;
-    try testing.expectEqual(@as(usize, 1), k.n_param);
-    try testing.expectEqualStrings("id", k.param[0].nama);
-    try testing.expectEqualStrings("42", k.param[0].nilai);
+    const m = r.match(.GET, "/users/42").?;
+    try testing.expectEqual(@as(usize, 1), m.n_params);
+    try testing.expectEqualStrings("id", m.params[0].name);
+    try testing.expectEqualStrings("42", m.params[0].value);
 
-    const k2 = r.cocok(.GET, "/users/7/posts/99").?;
-    try testing.expectEqual(@as(usize, 2), k2.n_param);
-    try testing.expectEqualStrings("99", k2.param[1].nilai);
-    try testing.expect(k2.penangan == &penanganLain);
+    const m2 = r.match(.GET, "/users/7/posts/99").?;
+    try testing.expectEqual(@as(usize, 2), m2.n_params);
+    try testing.expectEqualStrings("99", m2.params[1].value);
+    try testing.expect(m2.handler == &otherHandler);
 
-    try testing.expect(r.cocok(.GET, "/users") == null);
-    try testing.expect(r.cocok(.GET, "/users/42/posts") == null);
-    try testing.expect(r.cocok(.GET, "/users//posts/9") == null);
+    try testing.expect(r.match(.GET, "/users") == null);
+    try testing.expect(r.match(.GET, "/users/42/posts") == null);
+    try testing.expect(r.match(.GET, "/users//posts/9") == null);
 }
 
-test "rute pertama yang cocok menang" {
+test "the first matching route wins" {
     var r = Router.init(testing.allocator);
     defer r.deinit();
-    try r.tambah(.GET, "/users/aku", penanganUji);
-    try r.tambah(.GET, "/users/:id", penanganLain);
+    try r.add(.GET, "/users/me", testHandler);
+    try r.add(.GET, "/users/:id", otherHandler);
 
-    try testing.expect(r.cocok(.GET, "/users/aku").?.penangan == &penanganUji);
-    try testing.expect(r.cocok(.GET, "/users/42").?.penangan == &penanganLain);
+    try testing.expect(r.match(.GET, "/users/me").?.handler == &testHandler);
+    try testing.expect(r.match(.GET, "/users/42").?.handler == &otherHandler);
 }

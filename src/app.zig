@@ -1,743 +1,742 @@
-//! App — satu aplikasi HTTP yang berdiri sendiri: kumpulan Rute dan
-//! Layanan (Middleware menyusul di tahap 4). Merangkai Sekat, parser
-//! HTTP/1.1, Router, Arena request, dan Ctx menjadi satu.
+//! App — one self-contained HTTP application: a set of routes and
+//! services (middleware comes in stage 4). It wires the Bulkhead, the
+//! HTTP/1.1 parser, the Router, the request arena, and Ctx into one thing.
 //!
-//! `urusSatuRequest` sengaja terpisah dari Mesin: ia hanya butuh
-//! `std.Io.Reader`/`Writer`, jadi seluruh perilaku HTTP App bisa diuji
-//! dengan buffer di memori, tanpa menyalakan server.
+//! `handleRequest` is deliberately separate from the Engine: all it needs
+//! is a `std.Io.Reader`/`Writer`, so every bit of App's HTTP behaviour can
+//! be tested against in-memory buffers, without starting a server.
 
 const std = @import("std");
-const sekat = @import("sekat.zig");
+const bulkhead = @import("bulkhead.zig");
 const http1 = @import("http1.zig");
 const router_mod = @import("router.zig");
 const ctx_mod = @import("ctx.zig");
 const str_mod = @import("str.zig");
-const layanan_mod = @import("layanan.zig");
-const bertipe = @import("bertipe.zig");
-const gagal = @import("gagal.zig");
+const service_mod = @import("service.zig");
+const typed = @import("typed.zig");
+const fail = @import("fail.zig");
 
 const Ctx = ctx_mod.Ctx;
 
-const RESPONS_400 = http1.responsStatis(400, "Bad Request", "text/plain", "permintaan rusak\n", false);
-const RESPONS_431 = http1.responsStatis(431, "Request Header Fields Too Large", "text/plain", "kepala kepanjangan\n", false);
+const RESPONSE_400 = http1.staticResponse(400, "Bad Request", "text/plain", "malformed request\n", false);
+const RESPONSE_431 = http1.staticResponse(431, "Request Header Fields Too Large", "text/plain", "head too long\n", false);
 
 pub const App = struct {
     gpa: std.mem.Allocator,
     router: router_mod.Router,
-    layanan: layanan_mod.Daftar,
-    /// Layanan yang diminta handler, dikumpulkan saat rute didaftarkan
-    /// dan dicek sekali di `dengarkan()` (ADR 0006).
-    kebutuhan: std.ArrayList(layanan_mod.Kebutuhan) = .empty,
+    services: service_mod.Registry,
+    /// The services handlers asked for, collected as routes are registered
+    /// and checked once in `listen()` (ADR 0006).
+    requirements: std.ArrayList(service_mod.Requirement) = .empty,
 
     pub fn init(gpa: std.mem.Allocator) App {
         return .{
             .gpa = gpa,
             .router = router_mod.Router.init(gpa),
-            .layanan = layanan_mod.Daftar.init(gpa),
+            .services = service_mod.Registry.init(gpa),
         };
     }
 
     pub fn deinit(self: *App) void {
-        self.kebutuhan.deinit(self.gpa);
-        self.layanan.deinit();
+        self.requirements.deinit(self.gpa);
+        self.services.deinit();
         self.router.deinit();
     }
 
-    /// Daftarkan sebuah Layanan. `ptr` harus hidup selama App hidup.
-    /// Urutannya bebas terhadap pendaftaran rute; yang penting semuanya
-    /// selesai sebelum `dengarkan()`.
-    pub fn daftarkan(self: *App, ptr: anytype) !void {
-        try self.layanan.tambah(ptr);
+    /// Register a service. `ptr` must outlive the App. Its order relative
+    /// to route registration does not matter; all that matters is that it
+    /// happens before `listen()`.
+    pub fn provide(self: *App, ptr: anytype) !void {
+        try self.services.add(ptr);
     }
 
-    pub fn get(self: *App, comptime pola: []const u8, comptime penangan: anytype) !void {
-        try self.rute(.GET, pola, penangan);
+    pub fn get(self: *App, comptime pattern: []const u8, comptime handler: anytype) !void {
+        try self.route(.GET, pattern, handler);
     }
 
-    pub fn post(self: *App, comptime pola: []const u8, comptime penangan: anytype) !void {
-        try self.rute(.POST, pola, penangan);
+    pub fn post(self: *App, comptime pattern: []const u8, comptime handler: anytype) !void {
+        try self.route(.POST, pattern, handler);
     }
 
-    pub fn put(self: *App, comptime pola: []const u8, comptime penangan: anytype) !void {
-        try self.rute(.PUT, pola, penangan);
+    pub fn put(self: *App, comptime pattern: []const u8, comptime handler: anytype) !void {
+        try self.route(.PUT, pattern, handler);
     }
 
-    pub fn delete(self: *App, comptime pola: []const u8, comptime penangan: anytype) !void {
-        try self.rute(.DELETE, pola, penangan);
+    pub fn delete(self: *App, comptime pattern: []const u8, comptime handler: anytype) !void {
+        try self.route(.DELETE, pattern, handler);
     }
 
-    pub fn patch(self: *App, comptime pola: []const u8, comptime penangan: anytype) !void {
-        try self.rute(.PATCH, pola, penangan);
+    pub fn patch(self: *App, comptime pattern: []const u8, comptime handler: anytype) !void {
+        try self.route(.PATCH, pattern, handler);
     }
 
-    pub fn head(self: *App, comptime pola: []const u8, comptime penangan: anytype) !void {
-        try self.rute(.HEAD, pola, penangan);
+    pub fn head(self: *App, comptime pattern: []const u8, comptime handler: anytype) !void {
+        try self.route(.HEAD, pattern, handler);
     }
 
-    pub fn options(self: *App, comptime pola: []const u8, comptime penangan: anytype) !void {
-        try self.rute(.OPTIONS, pola, penangan);
+    pub fn options(self: *App, comptime pattern: []const u8, comptime handler: anytype) !void {
+        try self.route(.OPTIONS, pattern, handler);
     }
 
-    /// Semua pendaftaran rute lewat sini. Handler apa pun bentuknya —
-    /// `fn (*Ctx) !void` maupun Handler bertipe — dijahit ke penangan Ctx
-    /// oleh mesin comptime, jadi jalur requestnya cuma satu.
-    pub fn rute(
+    /// Every route registration goes through here. Whatever shape the
+    /// handler has — `fn (*Ctx) !void` or a typed handler — the
+    /// compile-time engine stitches it into a Ctx handler, so there is
+    /// only ever one request path.
+    pub fn route(
         self: *App,
-        metode: http1.Metode,
-        comptime pola: []const u8,
-        comptime penangan: anytype,
+        method: http1.Method,
+        comptime pattern: []const u8,
+        comptime handler: anytype,
     ) !void {
-        try self.kebutuhan.appendSlice(self.gpa, comptime bertipe.kebutuhan(pola, penangan));
-        try self.router.tambah(metode, pola, comptime bertipe.bungkus(pola, penangan));
+        try self.requirements.appendSlice(self.gpa, comptime typed.requirements(pattern, handler));
+        try self.router.add(method, pattern, comptime typed.wrap(pattern, handler));
     }
 
-    /// Kebutuhan Layanan pertama yang belum terpenuhi, atau null kalau
-    /// semua handler kebagian apa yang mereka minta.
-    pub fn layananKurang(self: *const App) ?layanan_mod.Kebutuhan {
-        for (self.kebutuhan.items) |k| {
-            if (!self.layanan.punya(k)) return k;
+    /// The first requirement that is not met, or null if every handler got
+    /// what it asked for.
+    pub fn missingService(self: *const App) ?service_mod.Requirement {
+        for (self.requirements.items) |r| {
+            if (!self.services.has(r)) return r;
         }
         return null;
     }
 
-    /// Sama seperti `layananKurang`, tapi mencatat semua yang kurang ke
-    /// log lalu gagal. Dipanggil otomatis oleh `dengarkan()` — inilah yang
-    /// membuat Layanan yang lupa didaftarkan ketahuan sebelum satu request
-    /// pun dilayani, bukan jam tiga pagi (ADR 0006).
-    pub fn periksaLayanan(self: *const App) error{LayananBelumDidaftarkan}!void {
-        if (self.layananKurang() == null) return;
-        for (self.kebutuhan.items) |k| {
-            if (self.layanan.punya(k)) continue;
+    /// Like `missingService`, but logs everything that is missing and then
+    /// fails. Called automatically by `listen()` — this is what makes a
+    /// forgotten service show up before a single request is served, rather
+    /// than at three in the morning (ADR 0006).
+    pub fn checkServices(self: *const App) error{MissingService}!void {
+        if (self.missingService() == null) return;
+        for (self.requirements.items) |r| {
+            if (self.services.has(r)) continue;
             std.log.err(
-                "handler rute \"{s}\" minta Layanan {s}{s} yang belum didaftarkan " ++
-                    "— panggil app.daftarkan() sebelum app.dengarkan()",
-                .{ k.rute, if (k.perlu_ubah) "*" else "*const ", k.tipe },
+                "the handler for route \"{s}\" needs service {s}{s}, which was never registered " ++
+                    "— call app.provide() before app.listen()",
+                .{ r.route, if (r.needs_mutable) "*" else "*const ", r.type_name },
             );
         }
-        return error.LayananBelumDidaftarkan;
+        return error.MissingService;
     }
 
-    /// Mendengarkan dan melayani sampai proses dihentikan.
-    pub fn dengarkan(self: *App, opsi: sekat.Opsi) !void {
-        try self.periksaLayanan();
-        try sekat.layani(self.gpa, opsi, self, urusKoneksi);
+    /// Listen and serve until the process is stopped.
+    pub fn listen(self: *App, options_: bulkhead.Options) !void {
+        try self.checkServices();
+        try bulkhead.serve(self.gpa, options_, self, handleConnection);
     }
 
-    fn urusKoneksi(self: *App, in: *std.Io.Reader, out: *std.Io.Writer) void {
+    fn handleConnection(self: *App, in: *std.Io.Reader, out: *std.Io.Writer) void {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
-        var umur = str_mod.Umur{};
+        var lifetime = str_mod.Lifetime{};
 
-        // Kotak Fungsi gagal diikat ke fiber ini sekali, lalu dipakai
-        // ulang tiap request di koneksi yang sama (ADR 0007).
-        var kotak = gagal.Kotak{};
-        var ikatan = sekat.ikatan_kosong;
-        sekat.ikatSlot(&ikatan, &kotak);
-        defer sekat.lepasSlot(&ikatan);
+        // The fail-function Failure is bound to this fiber once, then
+        // reused by every request on the same connection (ADR 0007).
+        var failure = fail.Failure{};
+        var binding = bulkhead.binding_unset;
+        bulkhead.bindSlot(&binding, &failure);
+        defer bulkhead.unbindSlot(&binding);
 
         while (true) {
-            const lanjut = self.urusSatuRequest(arena.allocator(), &umur, &kotak, in, out);
-            // Request selesai: semua Str-nya basi, lalu kantongnya
-            // dikosongkan sekaligus tanpa melepas kapasitasnya.
-            umur.selesai();
+            const keep_going = self.handleRequest(arena.allocator(), &lifetime, &failure, in, out);
+            // The request is done: every Str of its goes stale, then the
+            // bag is emptied in one go without giving up its capacity.
+            lifetime.end();
             _ = arena.reset(.retain_capacity);
-            if (!lanjut) return;
+            if (!keep_going) return;
         }
     }
 
-    /// Urus tepat satu request dari `in`, tulis jawabannya ke `out`.
-    /// Mengembalikan true kalau koneksi boleh dipakai untuk request
-    /// berikutnya.
-    pub fn urusSatuRequest(
+    /// Handle exactly one request from `in`, writing the answer to `out`.
+    /// Returns true if the connection may be used for another request.
+    pub fn handleRequest(
         self: *App,
         arena: std.mem.Allocator,
-        umur: *str_mod.Umur,
-        kotak: *gagal.Kotak,
+        lifetime: *str_mod.Lifetime,
+        failure: *fail.Failure,
         in: *std.Io.Reader,
         out: *std.Io.Writer,
     ) bool {
-        kotak.kosongkan();
-        // Di server sungguhan slot fiber sudah terpasang dan menang;
-        // ini yang membuat Fungsi gagal tetap bekerja saat App dipanggil
-        // langsung dari tes, tanpa Mesin di bawahnya.
-        const slot_lama = sekat.pasangSlotCadangan(kotak);
-        defer _ = sekat.pasangSlotCadangan(slot_lama);
+        failure.clear();
+        // On a real server the fiber slot is already installed and wins;
+        // this is what keeps fail functions working when App is called
+        // straight from a test, with no Engine underneath.
+        const prev_slot = bulkhead.setFallbackSlot(failure);
+        defer _ = bulkhead.setFallbackSlot(prev_slot);
 
-        // Kepala disalin ke Arena request supaya semua Str dari request
-        // ini tetap sah sekalipun buffer koneksi terisi ulang (misalnya
-        // saat membaca isi). Satu memcpy kecil, dibayar sekali.
-        const kepala_mentah = http1.bacaKepala(in) catch |err| {
+        // The head is copied into the request arena so every Str from this
+        // request stays valid even once the connection buffer is refilled
+        // (when reading the body, say). One small memcpy, paid once.
+        const raw_head = http1.readHead(in) catch |err| {
             switch (err) {
                 error.EndOfStream, error.ReadFailed => {},
-                error.KepalaKepanjangan => balasTerakhir(out, RESPONS_431),
+                error.HeadTooLong => sendFinal(out, RESPONSE_431),
             }
             return false;
         };
-        const kepala = arena.dupe(u8, kepala_mentah) catch return false;
-        in.toss(kepala_mentah.len);
+        const request_head = arena.dupe(u8, raw_head) catch return false;
+        in.toss(raw_head.len);
 
-        var p = http1.Permintaan{};
-        http1.parseKepala(kepala, &p) catch {
-            balasTerakhir(out, RESPONS_400);
+        var r = http1.Request{};
+        http1.parseHead(request_head, &r) catch {
+            sendFinal(out, RESPONSE_400);
             return false;
         };
 
-        var daftar_header: std.ArrayList(http1.IterasiHeader.Pasangan) = .empty;
-        var iter = http1.IterasiHeader.dari(kepala);
-        while (iter.next()) |pasangan| daftar_header.append(arena, pasangan) catch return false;
+        var header_list: std.ArrayList(http1.HeaderIterator.Pair) = .empty;
+        var iter = http1.HeaderIterator.from(request_head);
+        while (iter.next()) |pair| header_list.append(arena, pair) catch return false;
 
-        const tanya = std.mem.indexOfScalar(u8, p.target, '?');
-        const jalur = if (tanya) |i| p.target[0..i] else p.target;
+        const qmark = std.mem.indexOfScalar(u8, r.target, '?');
+        const path = if (qmark) |i| r.target[0..i] else r.target;
 
         var c = Ctx{
-            .metode = http1.metodeDari(p.metode),
+            .method = http1.methodFrom(r.method),
             ._arena = arena,
-            ._umur = umur,
+            ._lifetime = lifetime,
             ._in = in,
             ._out = out,
-            ._permintaan = &p,
-            ._jalur = jalur,
-            ._query = if (tanya) |i| p.target[i + 1 ..] else "",
-            ._header = daftar_header.items,
-            ._param = &.{},
-            ._layanan = &self.layanan,
+            ._request = &r,
+            ._path = path,
+            ._query = if (qmark) |i| r.target[i + 1 ..] else "",
+            ._headers = header_list.items,
+            ._params = &.{},
+            ._services = &self.services,
         };
 
-        const kecocokan = self.router.cocok(c.metode, jalur) orelse {
-            http1.buangIsi(in, &p) catch return false;
-            balasLangsung(out, c.metode, 404, "tidak ditemukan\n", p.keep_alive) catch return false;
-            return p.keep_alive;
+        const match = self.router.match(c.method, path) orelse {
+            http1.discardBody(in, &r) catch return false;
+            sendDirect(out, c.method, 404, "not found\n", r.keep_alive) catch return false;
+            return r.keep_alive;
         };
-        c._param = kecocokan.param[0..kecocokan.n_param];
+        c._params = match.params[0..match.n_params];
 
-        kecocokan.penangan(&c) catch |err| {
-            // Jawaban yang sudah separuh terkirim tidak bisa ditarik, jadi
-            // koneksinya ditutup: request berikutnya di koneksi yang sama
-            // akan membaca sisa byte yang tidak jelas.
-            if (c._terkirim) {
-                std.log.warn("penangan {s} {s} gagal setelah menjawab: {s}", .{ @tagName(c.metode), jalur, @errorName(err) });
+        match.handler(&c) catch |err| {
+            // A half-sent response cannot be taken back, so the connection
+            // is closed: the next request on it would read leftover bytes
+            // of unclear provenance.
+            if (c._sent) {
+                std.log.warn("handler {s} {s} failed after answering: {s}", .{ @tagName(c.method), path, @errorName(err) });
                 return false;
             }
-            // Belum menjawab: ini kegagalan yang rapi. Isi yang belum
-            // dibaca tetap harus dibuang supaya koneksinya bisa dipakai
-            // lagi — 404 dari Fungsi gagal adalah jalan hidup yang normal,
-            // bukan alasan memutus keep-alive.
-            if (c._isi == null) http1.buangIsi(in, &p) catch return false;
-            balasGagal(out, kotak, err, c.metode, jalur, p.keep_alive) catch return false;
-            return p.keep_alive;
+            // Nothing sent yet: this is a clean failure. A body nobody read
+            // still has to be discarded so the connection can be reused —
+            // a 404 from a fail function is a normal way to live, not a
+            // reason to drop keep-alive.
+            if (c._body == null) http1.discardBody(in, &r) catch return false;
+            sendFailure(out, failure, err, c.method, path, r.keep_alive) catch return false;
+            return r.keep_alive;
         };
 
-        // Isi yang tidak dibaca penangan dibuang supaya request
-        // berikutnya di koneksi ini mulai dari byte yang benar.
-        if (c._isi == null) http1.buangIsi(in, &p) catch return false;
+        // A body the handler did not read is discarded so the next request
+        // on this connection starts at the right byte.
+        if (c._body == null) http1.discardBody(in, &r) catch return false;
 
-        if (!c._terkirim) {
-            balasLangsung(out, c.metode, 200, "", p.keep_alive) catch return false;
+        if (!c._sent) {
+            sendDirect(out, c.method, 200, "", r.keep_alive) catch return false;
         }
-        return p.keep_alive;
+        return r.keep_alive;
     }
 };
 
-fn balasTerakhir(out: *std.Io.Writer, respons: []const u8) void {
-    out.writeAll(respons) catch return;
+fn sendFinal(out: *std.Io.Writer, response: []const u8) void {
+    out.writeAll(response) catch return;
     out.flush() catch return;
 }
 
-/// Jawaban yang dirakit App sendiri — 404 rute tak dikenal, 200 kosong,
-/// jawaban gagal — di luar `Ctx.balas`. Sama seperti di sana, isi tidak
-/// ikut terkirim untuk HEAD.
-fn balasLangsung(
+/// Responses App assembles itself — a 404 for an unknown route, an empty
+/// 200, a failure response — outside of `Ctx.send`. As there, the body
+/// does not go out for a HEAD.
+fn sendDirect(
     out: *std.Io.Writer,
-    metode: http1.Metode,
+    method: http1.Method,
     status: u16,
-    isi: []const u8,
+    body: []const u8,
     keep_alive: bool,
 ) !void {
-    if (metode == .HEAD) return http1.tulisResponsTanpaIsi(
+    if (method == .HEAD) return http1.writeResponseHeadOnly(
         out,
         status,
-        http1.frasaStatus(status),
+        http1.statusPhrase(status),
         "text/plain",
-        isi.len,
+        body.len,
         keep_alive,
     );
-    try http1.tulisRespons(out, status, http1.frasaStatus(status), "text/plain", isi, keep_alive);
+    try http1.writeResponse(out, status, http1.statusPhrase(status), "text/plain", body, keep_alive);
 }
 
-/// Ubah kegagalan handler menjadi respons. Pesan dari Fungsi gagal
-/// dipakai kalau ada; kalau tidak, errornya dipetakan lewat tabel dan
-/// yang tidak dikenali jadi 500 sambil dicatat dengan nama errornya
-/// (ADR 0005).
-fn balasGagal(
+/// Turn a handler failure into a response. A fail function's message is
+/// used if there is one; otherwise the error goes through the mapping
+/// table, and anything unrecognised becomes a 500 logged with its error
+/// name (ADR 0005).
+fn sendFailure(
     out: *std.Io.Writer,
-    kotak: *const gagal.Kotak,
+    failure: *const fail.Failure,
     err: anyerror,
-    metode: http1.Metode,
-    jalur: []const u8,
+    method: http1.Method,
+    path: []const u8,
     keep_alive: bool,
 ) !void {
-    var buf: [gagal.maks_pesan + 1]u8 = undefined;
+    var buf: [fail.max_message + 1]u8 = undefined;
 
-    const status: u16, const pesan: []const u8 = if (kotak.ada())
-        .{ kotak.status, kotak.pesan() }
+    const status: u16, const message: []const u8 = if (failure.isSet())
+        .{ failure.status, failure.message() }
     else blk: {
-        const s = gagal.statusUntuk(err);
+        const s = fail.statusFor(err);
         if (s == 500) {
-            std.log.warn("penangan {s} {s} gagal: {s}", .{ @tagName(metode), jalur, @errorName(err) });
-            // Nama error internal tidak dibocorkan ke klien; yang mau
-            // pesan yang enak dibaca memakai Fungsi gagal.
-            break :blk .{ s, "galat di server" };
+            std.log.warn("handler {s} {s} failed: {s}", .{ @tagName(method), path, @errorName(err) });
+            // Internal error names are not leaked to the client; anyone who
+            // wants a readable message uses a fail function.
+            break :blk .{ s, "internal server error" };
         }
-        break :blk .{ s, http1.frasaStatus(s) };
+        break :blk .{ s, http1.statusPhrase(s) };
     };
 
-    // Baris pesan diakhiri newline supaya enak dibaca di curl.
-    const isi = std.fmt.bufPrint(&buf, "{s}\n", .{pesan}) catch pesan;
-    try balasLangsung(out, metode, status, isi, keep_alive);
+    // The message line ends in a newline so it reads nicely under curl.
+    const body = std.fmt.bufPrint(&buf, "{s}\n", .{message}) catch message;
+    try sendDirect(out, method, status, body, keep_alive);
 }
 
-// ---- tes: seluruh perilaku HTTP tanpa menyalakan server ----
+// ---- tests: all of App's HTTP behaviour, without starting a server ----
 
 const testing = std.testing;
+const Str = str_mod.Str;
 
-const Uji = struct {
+const Harness = struct {
     arena: std.heap.ArenaAllocator,
-    umur: str_mod.Umur = .{},
-    kotak: gagal.Kotak = .{},
+    lifetime: str_mod.Lifetime = .{},
+    failure: fail.Failure = .{},
     buf: [4096]u8 = undefined,
 
-    fn init() Uji {
+    fn init() Harness {
         return .{ .arena = std.heap.ArenaAllocator.init(testing.allocator) };
     }
 
-    fn deinit(self: *Uji) void {
+    fn deinit(self: *Harness) void {
         self.arena.deinit();
     }
 
-    fn kirim(self: *Uji, app: *App, permintaan: []const u8) struct { balasan: []const u8, lanjut: bool } {
-        var in = std.Io.Reader.fixed(permintaan);
+    fn send(self: *Harness, app: *App, request: []const u8) struct { response: []const u8, keep_alive: bool } {
+        var in = std.Io.Reader.fixed(request);
         var out = std.Io.Writer.fixed(&self.buf);
-        const lanjut = app.urusSatuRequest(self.arena.allocator(), &self.umur, &self.kotak, &in, &out);
-        self.umur.selesai();
+        const keep_alive = app.handleRequest(self.arena.allocator(), &self.lifetime, &self.failure, &in, &out);
+        self.lifetime.end();
         _ = self.arena.reset(.retain_capacity);
-        return .{ .balasan = out.buffered(), .lanjut = lanjut };
+        return .{ .response = out.buffered(), .keep_alive = keep_alive };
     }
 };
 
-fn ujiGetUser(c: *Ctx) anyerror!void {
-    const id = try c.param("id").?.angka(u32);
-    try c.balasJson(200, .{ .id = id, .nama = "tester" });
+fn testGetUser(c: *Ctx) anyerror!void {
+    const id = try c.param("id").?.int(u32);
+    try c.sendJson(200, .{ .id = id, .name = "tester" });
 }
 
-fn ujiEchoJson(c: *Ctx) anyerror!void {
-    const Masuk = struct { pesan: []const u8 };
-    const masuk = try c.json(Masuk);
-    try c.balasJson(201, .{ .gema = masuk.pesan });
+fn testEchoJson(c: *Ctx) anyerror!void {
+    const Incoming = struct { message: []const u8 };
+    const incoming = try c.json(Incoming);
+    try c.sendJson(201, .{ .echo = incoming.message });
 }
 
-fn ujiMeledak(_: *Ctx) anyerror!void {
-    return error.SengajaMeledak;
+fn testExplode(_: *Ctx) anyerror!void {
+    return error.DeliberateExplosion;
 }
 
-fn ujiDiam(_: *Ctx) anyerror!void {}
+fn testQuiet(_: *Ctx) anyerror!void {}
 
-test "GET dengan path param membalas JSON dan koneksi lanjut" {
+test "a GET with a path param answers JSON and the connection continues" {
     var app = App.init(testing.allocator);
     defer app.deinit();
-    try app.get("/users/:id", ujiGetUser);
+    try app.get("/users/:id", testGetUser);
 
-    var uji = Uji.init();
-    defer uji.deinit();
-    const hasil = uji.kirim(&app, "GET /users/42 HTTP/1.1\r\nHost: x\r\n\r\n");
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /users/42 HTTP/1.1\r\nHost: x\r\n\r\n");
 
-    try testing.expect(hasil.lanjut);
-    try testing.expect(std.mem.startsWith(u8, hasil.balasan, "HTTP/1.1 200 OK\r\n"));
-    try testing.expect(std.mem.indexOf(u8, hasil.balasan, "Content-Type: application/json") != null);
-    try testing.expect(std.mem.indexOf(u8, hasil.balasan, "{\"id\":42,\"nama\":\"tester\"}") != null);
+    try testing.expect(result.keep_alive);
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "Content-Type: application/json") != null);
+    try testing.expect(std.mem.indexOf(u8, result.response, "{\"id\":42,\"name\":\"tester\"}") != null);
 }
 
-test "POST JSON masuk, JSON keluar" {
+test "POST JSON in, JSON out" {
     var app = App.init(testing.allocator);
     defer app.deinit();
-    try app.post("/gema", ujiEchoJson);
+    try app.post("/echo", testEchoJson);
 
-    var uji = Uji.init();
-    defer uji.deinit();
-    const isi = "{\"pesan\":\"halo\"}";
-    var permintaan_buf: [256]u8 = undefined;
-    const permintaan = std.fmt.bufPrint(&permintaan_buf, "POST /gema HTTP/1.1\r\nContent-Length: {d}\r\n\r\n{s}", .{ isi.len, isi }) catch unreachable;
-    const hasil = uji.kirim(&app, permintaan);
+    var h = Harness.init();
+    defer h.deinit();
+    const body = "{\"message\":\"hello\"}";
+    var request_buf: [256]u8 = undefined;
+    const request = std.fmt.bufPrint(&request_buf, "POST /echo HTTP/1.1\r\nContent-Length: {d}\r\n\r\n{s}", .{ body.len, body }) catch unreachable;
+    const result = h.send(&app, request);
 
-    try testing.expect(std.mem.startsWith(u8, hasil.balasan, "HTTP/1.1 201 Created\r\n"));
-    try testing.expect(std.mem.indexOf(u8, hasil.balasan, "{\"gema\":\"halo\"}") != null);
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 201 Created\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "{\"echo\":\"hello\"}") != null);
 }
 
-test "rute tak dikenal membalas 404 dan isi tetap terbuang" {
+test "an unknown route answers 404 and the body is still discarded" {
     var app = App.init(testing.allocator);
     defer app.deinit();
-    try app.get("/ada", ujiDiam);
+    try app.get("/here", testQuiet);
 
-    var uji = Uji.init();
-    defer uji.deinit();
-    const hasil = uji.kirim(&app, "POST /tidak-ada HTTP/1.1\r\nContent-Length: 4\r\n\r\nxxxxGET /ada HTTP/1.1\r\n\r\n");
-    try testing.expect(hasil.lanjut);
-    try testing.expect(std.mem.startsWith(u8, hasil.balasan, "HTTP/1.1 404 Not Found\r\n"));
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "POST /nowhere HTTP/1.1\r\nContent-Length: 4\r\n\r\nxxxxGET /here HTTP/1.1\r\n\r\n");
+    try testing.expect(result.keep_alive);
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 404 Not Found\r\n"));
 }
 
-test "error yang tak dikenali jadi 500, tapi koneksi tetap hidup" {
+test "an unrecognised error becomes a 500, but the connection stays alive" {
     var app = App.init(testing.allocator);
     defer app.deinit();
-    try app.get("/meledak", ujiMeledak);
+    try app.get("/explode", testExplode);
 
-    var uji = Uji.init();
-    defer uji.deinit();
-    const hasil = uji.kirim(&app, "GET /meledak HTTP/1.1\r\n\r\n");
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /explode HTTP/1.1\r\n\r\n");
 
-    try testing.expect(std.mem.startsWith(u8, hasil.balasan, "HTTP/1.1 500 Internal Server Error\r\n"));
-    // Belum ada satu byte pun jawaban yang terkirim saat handler gagal,
-    // jadi koneksinya masih bersih dan boleh dipakai lagi.
-    try testing.expect(hasil.lanjut);
-    // Nama error internal tidak ikut bocor ke klien.
-    try testing.expect(std.mem.indexOf(u8, hasil.balasan, "SengajaMeledak") == null);
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 500 Internal Server Error\r\n"));
+    // Not a single byte of a response had gone out when the handler
+    // failed, so the connection is still clean and may be reused.
+    try testing.expect(result.keep_alive);
+    // The internal error name does not leak to the client.
+    try testing.expect(std.mem.indexOf(u8, result.response, "DeliberateExplosion") == null);
 }
 
-test "handler yang gagal setelah menjawab menutup koneksi" {
-    const Sebagian = struct {
-        fn urus(c: *Ctx) anyerror!void {
-            try c.balasTeks(200, "separuh");
-            return error.SengajaMeledak;
+test "a handler that fails after answering closes the connection" {
+    const Partial = struct {
+        fn run(c: *Ctx) anyerror!void {
+            try c.sendText(200, "half");
+            return error.DeliberateExplosion;
         }
     };
 
     var app = App.init(testing.allocator);
     defer app.deinit();
-    try app.get("/separuh", Sebagian.urus);
+    try app.get("/half", Partial.run);
 
-    var uji = Uji.init();
-    defer uji.deinit();
-    const hasil = uji.kirim(&app, "GET /separuh HTTP/1.1\r\n\r\n");
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /half HTTP/1.1\r\n\r\n");
 
-    try testing.expect(std.mem.startsWith(u8, hasil.balasan, "HTTP/1.1 200 OK\r\n"));
-    try testing.expect(!hasil.lanjut);
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(!result.keep_alive);
 }
 
-test "penangan diam membalas 200 kosong" {
+test "a quiet handler answers an empty 200" {
     var app = App.init(testing.allocator);
     defer app.deinit();
-    try app.get("/diam", ujiDiam);
+    try app.get("/quiet", testQuiet);
 
-    var uji = Uji.init();
-    defer uji.deinit();
-    const hasil = uji.kirim(&app, "GET /diam HTTP/1.1\r\n\r\n");
-    try testing.expect(hasil.lanjut);
-    try testing.expect(std.mem.startsWith(u8, hasil.balasan, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 0\r\n"));
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /quiet HTTP/1.1\r\n\r\n");
+    try testing.expect(result.keep_alive);
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 0\r\n"));
 }
 
-fn ujiHeaderDanQuery(c: *Ctx) anyerror!void {
-    try testing.expectEqualStrings("zig", c.query("kata").?.lihat());
-    try testing.expectEqualStrings("", c.query("kosong").?.lihat());
-    try testing.expect(c.query("tidak-ada") == null);
-    try testing.expectEqualStrings("rahasia", c.header("X-Token").?.lihat());
-    try testing.expectEqualStrings("rahasia", c.header("x-token").?.lihat());
-    try c.balasTeks(200, "oke");
+fn testHeaderAndQuery(c: *Ctx) anyerror!void {
+    try testing.expectEqualStrings("zig", c.query("word").?.view());
+    try testing.expectEqualStrings("", c.query("empty").?.view());
+    try testing.expect(c.query("absent") == null);
+    try testing.expectEqualStrings("secret", c.header("X-Token").?.view());
+    try testing.expectEqualStrings("secret", c.header("x-token").?.view());
+    try c.sendText(200, "ok");
 }
 
-test "query dan header terbaca dari Ctx" {
+test "query params and headers are readable from Ctx" {
     var app = App.init(testing.allocator);
     defer app.deinit();
-    try app.get("/cari", ujiHeaderDanQuery);
+    try app.get("/search", testHeaderAndQuery);
 
-    var uji = Uji.init();
-    defer uji.deinit();
-    const hasil = uji.kirim(&app, "GET /cari?kata=zig&kosong= HTTP/1.1\r\nX-Token: rahasia\r\n\r\n");
-    try testing.expect(std.mem.startsWith(u8, hasil.balasan, "HTTP/1.1 200"));
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /search?word=zig&empty= HTTP/1.1\r\nX-Token: secret\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200"));
 }
 
-// ---- tahap 3: Handler bertipe, Layanan, Fungsi gagal ----
-
-const Str = str_mod.Str;
+// ---- stage 3: typed handlers, services, fail functions ----
 
 const Db = struct {
-    baris: []const User,
+    rows: []const Row,
 
-    const User = struct { id: u32, nama: []const u8 };
+    const Row = struct { id: u32, name: []const u8 };
 
-    fn cari(self: *const Db, id: u32) ?User {
-        for (self.baris) |u| {
-            if (u.id == id) return u;
+    fn find(self: *const Db, id: u32) ?Row {
+        for (self.rows) |row| {
+            if (row.id == id) return row;
         }
         return null;
     }
 };
 
-const Jawab = struct { id: u32, nama: []const u8 };
+const UserOut = struct { id: u32, name: []const u8 };
 
-/// Bentuk yang dikejar sejak README: fungsi biasa, tanpa `Ctx`, tanpa
-/// HTTP palsu, dengan Layanan yang diminta lewat tipenya.
-fn getUser(db: *Db, id: u32) !Jawab {
-    const u = db.cari(id) orelse return gagal.notFound("user {d} tidak ditemukan", .{id});
-    return .{ .id = u.id, .nama = u.nama };
+/// The shape the README has been promising: an ordinary function, no
+/// `Ctx`, no fake HTTP, with the service asked for by its type.
+fn getUser(db: *Db, id: u32) !UserOut {
+    const row = db.find(id) orelse return fail.notFound("no user {d}", .{id});
+    return .{ .id = row.id, .name = row.name };
 }
 
-test "handler bertipe: Layanan dan path param dicocokkan lewat tipe" {
-    var db = Db{ .baris = &.{.{ .id = 7, .nama = "wati" }} };
+test "typed handler: service and path param matched by type" {
+    var db = Db{ .rows = &.{.{ .id = 7, .name = "wati" }} };
 
     var app = App.init(testing.allocator);
     defer app.deinit();
-    try app.daftarkan(&db);
+    try app.provide(&db);
     try app.get("/users/:id", getUser);
-    try app.periksaLayanan();
+    try app.checkServices();
 
-    var uji = Uji.init();
-    defer uji.deinit();
-    const hasil = uji.kirim(&app, "GET /users/7 HTTP/1.1\r\n\r\n");
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /users/7 HTTP/1.1\r\n\r\n");
 
-    try testing.expect(hasil.lanjut);
-    try testing.expect(std.mem.startsWith(u8, hasil.balasan, "HTTP/1.1 200 OK\r\n"));
-    try testing.expect(std.mem.indexOf(u8, hasil.balasan, "Content-Type: application/json") != null);
-    try testing.expect(std.mem.indexOf(u8, hasil.balasan, "{\"id\":7,\"nama\":\"wati\"}") != null);
+    try testing.expect(result.keep_alive);
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "Content-Type: application/json") != null);
+    try testing.expect(std.mem.indexOf(u8, result.response, "{\"id\":7,\"name\":\"wati\"}") != null);
 }
 
-// Nilai jual utamanya (ADR 0003): handler diuji sebagai fungsi biasa,
-// tanpa menyalakan server dan tanpa HTTP palsu.
-test "handler bertipe bisa diuji sebagai fungsi biasa" {
-    var db = Db{ .baris = &.{.{ .id = 7, .nama = "wati" }} };
+// The main selling point (ADR 0003): a handler is tested as an ordinary
+// function, without starting a server and without fake HTTP.
+test "a typed handler can be tested as an ordinary function" {
+    var db = Db{ .rows = &.{.{ .id = 7, .name = "wati" }} };
 
     try testing.expectEqual(@as(u32, 7), (try getUser(&db, 7)).id);
-    try testing.expectError(error.Gagal, getUser(&db, 99));
+    try testing.expectError(error.Failed, getUser(&db, 99));
 }
 
-test "Fungsi gagal jadi status dan pesannya, koneksi tetap hidup" {
-    var db = Db{ .baris = &.{} };
+test "a fail function becomes its status and message, connection stays alive" {
+    var db = Db{ .rows = &.{} };
 
     var app = App.init(testing.allocator);
     defer app.deinit();
-    try app.daftarkan(&db);
+    try app.provide(&db);
     try app.get("/users/:id", getUser);
 
-    var uji = Uji.init();
-    defer uji.deinit();
-    const hasil = uji.kirim(&app, "GET /users/99 HTTP/1.1\r\n\r\n");
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /users/99 HTTP/1.1\r\n\r\n");
 
-    try testing.expect(std.mem.startsWith(u8, hasil.balasan, "HTTP/1.1 404 Not Found\r\n"));
-    try testing.expect(std.mem.indexOf(u8, hasil.balasan, "user 99 tidak ditemukan") != null);
-    try testing.expect(hasil.lanjut);
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 404 Not Found\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "no user 99") != null);
+    try testing.expect(result.keep_alive);
 }
 
-test "path param yang bukan angka jadi 400 dengan pesan yang jelas" {
-    var db = Db{ .baris = &.{} };
+test "a path param that is not a number becomes a 400 with a clear message" {
+    var db = Db{ .rows = &.{} };
 
     var app = App.init(testing.allocator);
     defer app.deinit();
-    try app.daftarkan(&db);
+    try app.provide(&db);
     try app.get("/users/:id", getUser);
 
-    var uji = Uji.init();
-    defer uji.deinit();
-    const hasil = uji.kirim(&app, "GET /users/abc HTTP/1.1\r\n\r\n");
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /users/abc HTTP/1.1\r\n\r\n");
 
-    try testing.expect(std.mem.startsWith(u8, hasil.balasan, "HTTP/1.1 400 Bad Request\r\n"));
-    try testing.expect(std.mem.indexOf(u8, hasil.balasan, ":id harus bilangan bulat") != null);
-    try testing.expect(hasil.lanjut);
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 400 Bad Request\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, ":id has to be a whole number") != null);
+    try testing.expect(result.keep_alive);
 }
 
-test "Kotak gagal tidak bocor ke request berikutnya di koneksi yang sama" {
-    var db = Db{ .baris = &.{.{ .id = 7, .nama = "wati" }} };
+test "the Failure does not leak into the next request on the same connection" {
+    var db = Db{ .rows = &.{.{ .id = 7, .name = "wati" }} };
 
     var app = App.init(testing.allocator);
     defer app.deinit();
-    try app.daftarkan(&db);
+    try app.provide(&db);
     try app.get("/users/:id", getUser);
 
-    var uji = Uji.init();
-    defer uji.deinit();
+    var h = Harness.init();
+    defer h.deinit();
 
-    const gagal_dulu = uji.kirim(&app, "GET /users/99 HTTP/1.1\r\n\r\n");
-    try testing.expect(std.mem.startsWith(u8, gagal_dulu.balasan, "HTTP/1.1 404"));
+    const failed_first = h.send(&app, "GET /users/99 HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, failed_first.response, "HTTP/1.1 404"));
 
-    const lalu_berhasil = uji.kirim(&app, "GET /users/7 HTTP/1.1\r\n\r\n");
-    try testing.expect(std.mem.startsWith(u8, lalu_berhasil.balasan, "HTTP/1.1 200 OK\r\n"));
-    try testing.expect(std.mem.indexOf(u8, lalu_berhasil.balasan, "tidak ditemukan") == null);
+    const then_succeeded = h.send(&app, "GET /users/7 HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, then_succeeded.response, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(std.mem.indexOf(u8, then_succeeded.response, "no user") == null);
 }
 
-const UserBaru = struct { nama: Str };
+const NewUser = struct { name: Str };
 
-fn buatUser(masuk: UserBaru) !bertipe.Jawaban(Jawab) {
-    if (masuk.nama.panjang() == 0) return gagal.unprocessable("nama tidak boleh kosong", .{});
-    return .{ .status = 201, .nilai = .{ .id = 1, .nama = masuk.nama.lihat() } };
+fn createUser(incoming: NewUser) !typed.Response(UserOut) {
+    if (incoming.name.len() == 0) return fail.unprocessable("name must not be empty", .{});
+    return .{ .status = 201, .value = .{ .id = 1, .name = incoming.name.view() } };
 }
 
-test "isi JSON masuk sebagai struct, Jawaban(T) menentukan statusnya" {
+test "a JSON body comes in as a struct, Response(T) sets the status" {
     var app = App.init(testing.allocator);
     defer app.deinit();
-    try app.post("/users", buatUser);
+    try app.post("/users", createUser);
 
-    var uji = Uji.init();
-    defer uji.deinit();
-    const hasil = uji.kirim(&app, "POST /users HTTP/1.1\r\nContent-Length: 16\r\n\r\n{\"nama\":\"wati\"}\r\n");
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "POST /users HTTP/1.1\r\nContent-Length: 16\r\n\r\n{\"name\":\"wati\"}\r\n");
 
-    try testing.expect(std.mem.startsWith(u8, hasil.balasan, "HTTP/1.1 201 Created\r\n"));
-    try testing.expect(std.mem.indexOf(u8, hasil.balasan, "{\"id\":1,\"nama\":\"wati\"}") != null);
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 201 Created\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "{\"id\":1,\"name\":\"wati\"}") != null);
 }
 
-test "isi JSON yang tidak lolos aturan jadi 422 lewat Fungsi gagal" {
+test "a JSON body that breaks a rule becomes a 422 via a fail function" {
     var app = App.init(testing.allocator);
     defer app.deinit();
-    try app.post("/users", buatUser);
+    try app.post("/users", createUser);
 
-    var uji = Uji.init();
-    defer uji.deinit();
-    const hasil = uji.kirim(&app, "POST /users HTTP/1.1\r\nContent-Length: 12\r\n\r\n{\"nama\":\"\"}\n");
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "POST /users HTTP/1.1\r\nContent-Length: 12\r\n\r\n{\"name\":\"\"}\n");
 
-    try testing.expect(std.mem.startsWith(u8, hasil.balasan, "HTTP/1.1 422 Unprocessable Content\r\n"));
-    try testing.expect(std.mem.indexOf(u8, hasil.balasan, "nama tidak boleh kosong") != null);
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 422 Unprocessable Content\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "name must not be empty") != null);
 }
 
-test "JSON rusak dipetakan tabel error jadi 400" {
+test "broken JSON goes through the mapping table and becomes a 400" {
     var app = App.init(testing.allocator);
     defer app.deinit();
-    try app.post("/users", buatUser);
+    try app.post("/users", createUser);
 
-    var uji = Uji.init();
-    defer uji.deinit();
-    const hasil = uji.kirim(&app, "POST /users HTTP/1.1\r\nContent-Length: 5\r\n\r\n{nama");
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "POST /users HTTP/1.1\r\nContent-Length: 5\r\n\r\n{name");
 
-    try testing.expect(std.mem.startsWith(u8, hasil.balasan, "HTTP/1.1 400 Bad Request\r\n"));
-    try testing.expect(hasil.lanjut);
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 400 Bad Request\r\n"));
+    try testing.expect(result.keep_alive);
 }
 
-fn salamStr(nama: Str) Str {
-    return nama;
+fn greet(name: Str) Str {
+    return name;
 }
 
-fn hitung(a: i32, b: i32) i64 {
+fn multiply(a: i32, b: i32) i64 {
     return @as(i64, a) * b;
 }
 
-const Warna = enum { merah, hijau, biru };
+const Colour = enum { red, green, blue };
 
-fn pilihWarna(w: Warna, terang: bool) []const u8 {
-    return if (terang) @tagName(w) else "gelap";
+fn pickColour(c: Colour, bright: bool) []const u8 {
+    return if (bright) @tagName(c) else "dark";
 }
 
-test "path param bertipe Str, angka, enum, dan bool" {
+test "path params typed as Str, a number, an enum, and a bool" {
     var app = App.init(testing.allocator);
     defer app.deinit();
-    try app.get("/salam/:nama", salamStr);
-    try app.get("/kali/:a/:b", hitung);
-    try app.get("/warna/:w/:terang", pilihWarna);
+    try app.get("/greet/:name", greet);
+    try app.get("/times/:a/:b", multiply);
+    try app.get("/colour/:c/:bright", pickColour);
 
-    var uji = Uji.init();
-    defer uji.deinit();
+    var h = Harness.init();
+    defer h.deinit();
 
-    const salam = uji.kirim(&app, "GET /salam/wati HTTP/1.1\r\n\r\n");
-    try testing.expect(std.mem.indexOf(u8, salam.balasan, "Content-Type: text/plain") != null);
-    try testing.expect(std.mem.endsWith(u8, salam.balasan, "wati"));
+    const greeting = h.send(&app, "GET /greet/wati HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, greeting.response, "Content-Type: text/plain") != null);
+    try testing.expect(std.mem.endsWith(u8, greeting.response, "wati"));
 
-    const kali = uji.kirim(&app, "GET /kali/6/7 HTTP/1.1\r\n\r\n");
-    try testing.expect(std.mem.endsWith(u8, kali.balasan, "42"));
+    const product = h.send(&app, "GET /times/6/7 HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, product.response, "42"));
 
-    const warna = uji.kirim(&app, "GET /warna/hijau/true HTTP/1.1\r\n\r\n");
-    try testing.expect(std.mem.endsWith(u8, warna.balasan, "hijau"));
+    const colour = h.send(&app, "GET /colour/green/true HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, colour.response, "green"));
 
-    const salah = uji.kirim(&app, "GET /warna/ungu/true HTTP/1.1\r\n\r\n");
-    try testing.expect(std.mem.startsWith(u8, salah.balasan, "HTTP/1.1 400 Bad Request\r\n"));
-    try testing.expect(std.mem.indexOf(u8, salah.balasan, ":w bukan pilihan yang dikenal") != null);
+    const wrong = h.send(&app, "GET /colour/purple/true HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, wrong.response, "HTTP/1.1 400 Bad Request\r\n"));
+    try testing.expect(std.mem.indexOf(u8, wrong.response, ":c is not one of the known choices") != null);
 }
 
-test "Layanan yang belum didaftarkan tertangkap sebelum melayani" {
+test "a service that was never registered is caught before serving" {
     var app = App.init(testing.allocator);
     defer app.deinit();
-    try app.get("/users/:id", getUser); // butuh *Db, tapi tidak didaftarkan
+    try app.get("/users/:id", getUser); // needs *Db, which is not provided
 
-    // `dengarkan()` memanggil `periksaLayanan()`, yang mencatat tiap
-    // kekurangan ke log lalu gagal. Di sini dicek lewat predikatnya
-    // supaya tesnya tidak ikut menghitung log error itu sebagai kegagalan.
-    const kurang = app.layananKurang().?;
-    try testing.expectEqualStrings("/users/:id", kurang.rute);
-    try testing.expectEqualStrings(@typeName(Db), kurang.tipe);
-    try testing.expect(kurang.perlu_ubah);
+    // `listen()` calls `checkServices()`, which logs each gap and then
+    // fails. Here it is checked through the predicate instead, so the test
+    // does not count those error logs as a failure.
+    const missing = app.missingService().?;
+    try testing.expectEqualStrings("/users/:id", missing.route);
+    try testing.expectEqualStrings(@typeName(Db), missing.type_name);
+    try testing.expect(missing.needs_mutable);
 }
 
-fn pakaiKonfigurasi(cfg: *const Konfigurasi, c: *Ctx) !void {
-    try c.balasTeks(200, if (cfg.debug) "debug" else "rilis");
+const Config = struct { debug: bool };
+
+fn showMode(cfg: *const Config, c: *Ctx) !void {
+    try c.sendText(200, if (cfg.debug) "debug" else "release");
 }
 
-const Konfigurasi = struct { debug: bool };
-
-test "Layanan const dan *Ctx boleh diminta bersamaan" {
-    const cfg = Konfigurasi{ .debug = true };
-
-    var app = App.init(testing.allocator);
-    defer app.deinit();
-    try app.daftarkan(&cfg);
-    try app.get("/mode", pakaiKonfigurasi);
-    try app.periksaLayanan();
-
-    var uji = Uji.init();
-    defer uji.deinit();
-    const hasil = uji.kirim(&app, "GET /mode HTTP/1.1\r\n\r\n");
-    try testing.expect(std.mem.endsWith(u8, hasil.balasan, "debug"));
-}
-
-fn hanyaCtx(c: *Ctx) !void {
-    // Handler `*Ctx` boleh mengabaikan path param di pola; ia mengambil
-    // sendiri yang ia butuhkan.
-    try c.balasTeks(200, c.param("id").?.lihat());
-}
-
-test "HEAD memberi kepala yang sama dengan GET, tanpa isi" {
-    var db = Db{ .baris = &.{.{ .id = 7, .nama = "wati" }} };
+test "a const service and a *Ctx can be asked for together" {
+    const cfg = Config{ .debug = true };
 
     var app = App.init(testing.allocator);
     defer app.deinit();
-    try app.daftarkan(&db);
+    try app.provide(&cfg);
+    try app.get("/mode", showMode);
+    try app.checkServices();
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /mode HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, result.response, "debug"));
+}
+
+test "HEAD gives the same head as GET, with no body" {
+    var db = Db{ .rows = &.{.{ .id = 7, .name = "wati" }} };
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
     try app.get("/users/:id", getUser);
     try app.head("/users/:id", getUser);
 
-    var uji = Uji.init();
-    defer uji.deinit();
+    var h = Harness.init();
+    defer h.deinit();
 
-    const get = uji.kirim(&app, "GET /users/7 HTTP/1.1\r\n\r\n");
-    const kepala_get = get.balasan[0 .. std.mem.indexOf(u8, get.balasan, "\r\n\r\n").? + 4];
+    const got = h.send(&app, "GET /users/7 HTTP/1.1\r\n\r\n");
+    const got_head = got.response[0 .. std.mem.indexOf(u8, got.response, "\r\n\r\n").? + 4];
 
-    const head = uji.kirim(&app, "HEAD /users/7 HTTP/1.1\r\n\r\n");
+    const headed = h.send(&app, "HEAD /users/7 HTTP/1.1\r\n\r\n");
 
-    // Kepalanya identik — termasuk Content-Length yang menyebut panjang
-    // isi seandainya dikirim — tapi tidak ada satu byte isi pun.
-    try testing.expectEqualStrings(kepala_get, head.balasan);
-    try testing.expect(std.mem.indexOf(u8, head.balasan, "Content-Length: 22\r\n") != null);
-    try testing.expect(head.lanjut);
+    // The head is identical — including the Content-Length naming the
+    // length of the body it would have sent — but not one byte of body.
+    try testing.expectEqualStrings(got_head, headed.response);
+    try testing.expect(std.mem.indexOf(u8, headed.response, "Content-Length: 22\r\n") != null);
+    try testing.expect(headed.keep_alive);
 }
 
-test "HEAD ke rute tak dikenal dan ke jalur gagal juga tanpa isi" {
-    var db = Db{ .baris = &.{} };
+test "HEAD on an unknown route and on the failure path is also body-less" {
+    var db = Db{ .rows = &.{} };
 
     var app = App.init(testing.allocator);
     defer app.deinit();
-    try app.daftarkan(&db);
+    try app.provide(&db);
     try app.head("/users/:id", getUser);
 
-    var uji = Uji.init();
-    defer uji.deinit();
+    var h = Harness.init();
+    defer h.deinit();
 
-    const gagal_404 = uji.kirim(&app, "HEAD /users/99 HTTP/1.1\r\n\r\n");
-    try testing.expect(std.mem.startsWith(u8, gagal_404.balasan, "HTTP/1.1 404 Not Found\r\n"));
-    try testing.expect(std.mem.endsWith(u8, gagal_404.balasan, "\r\n\r\n"));
-    try testing.expect(std.mem.indexOf(u8, gagal_404.balasan, "tidak ditemukan\n") == null);
+    const failed = h.send(&app, "HEAD /users/99 HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, failed.response, "HTTP/1.1 404 Not Found\r\n"));
+    try testing.expect(std.mem.endsWith(u8, failed.response, "\r\n\r\n"));
+    try testing.expect(std.mem.indexOf(u8, failed.response, "no user 99") == null);
 
-    const tak_terute = uji.kirim(&app, "HEAD /entah HTTP/1.1\r\n\r\n");
-    try testing.expect(std.mem.startsWith(u8, tak_terute.balasan, "HTTP/1.1 404 Not Found\r\n"));
-    try testing.expect(std.mem.endsWith(u8, tak_terute.balasan, "\r\n\r\n"));
+    const unrouted = h.send(&app, "HEAD /nowhere HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, unrouted.response, "HTTP/1.1 404 Not Found\r\n"));
+    try testing.expect(std.mem.endsWith(u8, unrouted.response, "\r\n\r\n"));
 }
 
-test "handler *Ctx tidak wajib mendeklarasikan path param" {
+fn ctxOnly(c: *Ctx) !void {
+    // A `*Ctx` handler may ignore the path params in the pattern; it
+    // fetches whichever ones it needs itself.
+    try c.sendText(200, c.param("id").?.view());
+}
+
+test "a *Ctx handler need not declare the path params" {
     var app = App.init(testing.allocator);
     defer app.deinit();
-    try app.get("/mentah/:id/:lain", hanyaCtx);
+    try app.get("/raw/:id/:other", ctxOnly);
 
-    var uji = Uji.init();
-    defer uji.deinit();
-    const hasil = uji.kirim(&app, "GET /mentah/42/x HTTP/1.1\r\n\r\n");
-    try testing.expect(std.mem.endsWith(u8, hasil.balasan, "42"));
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /raw/42/x HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, result.response, "42"));
 }

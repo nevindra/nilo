@@ -1,18 +1,19 @@
-//! Parser HTTP/1.1 tahap rangka: baris permintaan, header, keep-alive,
-//! dan pembuangan isi ber-Content-Length. Chunked menyusul di tahap
-//! berikutnya (lingkup v1), untuk sekarang ditolak dengan jujur.
+//! HTTP/1.1 parser: request line, headers, keep-alive, and discarding a
+//! Content-Length body. Chunked comes in a later stage (it is in the v1
+//! scope); for now it is rejected honestly.
 //!
-//! Jalur panasnya zero-copy: seluruh kepala (baris permintaan + header)
-//! ditunggu sampai utuh di buffer reader, dicari ujungnya sekali, lalu
-//! di-parse di tempat. `Permintaan` hanya menyimpan slice ke buffer itu —
-//! tidak ada satu byte pun yang disalin dan tidak ada alokasi.
+//! The hot path is zero-copy: the whole head (request line + headers) is
+//! waited for until it is complete in the reader's buffer, its end is
+//! found once, and then it is parsed in place. `Request` only holds
+//! slices into that buffer — not a single byte is copied and nothing is
+//! allocated.
 //!
-//! Lapisan ini hanya melihat `std.Io.Reader`/`std.Io.Writer`, tidak tahu
-//! Mesin apa yang ada di baliknya.
+//! This layer only ever sees `std.Io.Reader`/`std.Io.Writer`, so it has
+//! no idea which Engine is underneath it.
 
 const std = @import("std");
 
-pub const Metode = enum {
+pub const Method = enum {
     GET,
     HEAD,
     POST,
@@ -20,95 +21,94 @@ pub const Metode = enum {
     DELETE,
     PATCH,
     OPTIONS,
-    lain,
+    other,
 };
 
-pub fn metodeDari(nama: []const u8) Metode {
-    return std.meta.stringToEnum(Metode, nama) orelse .lain;
+pub fn methodFrom(name: []const u8) Method {
+    return std.meta.stringToEnum(Method, name) orelse .other;
 }
 
-pub const GalatParse = error{
-    BarisPermintaanRusak,
-    HeaderRusak,
-    VersiTidakDidukung,
+pub const ParseError = error{
+    BadRequestLine,
+    BadHeader,
+    UnsupportedVersion,
 };
 
-pub const Permintaan = struct {
-    /// Slice ke buffer reader. Berlaku sampai pembacaan berikutnya dari
-    /// koneksi yang sama (termasuk `buangIsi`) — setelah itu isinya bisa
-    /// tertimpa. Umur yang lebih panjang datang di tahap 2 lewat Arena
-    /// request dan `Str` (ADR 0004).
-    metode: []const u8 = "",
+pub const Request = struct {
+    /// Slices into the reader's buffer. Valid until the next read from the
+    /// same connection (including `discardBody`) — after that the contents
+    /// may be overwritten. Longer lifetimes come from the request arena and
+    /// `Str` (ADR 0004).
+    method: []const u8 = "",
     target: []const u8 = "",
 
-    /// 0 untuk HTTP/1.0, 1 untuk HTTP/1.1.
-    versi_minor: u1 = 1,
+    /// 0 for HTTP/1.0, 1 for HTTP/1.1.
+    minor_version: u1 = 1,
     keep_alive: bool = true,
-    panjang_isi: u64 = 0,
+    content_length: u64 = 0,
     chunked: bool = false,
 };
 
-/// Baca satu kepala permintaan lengkap dari reader dan parse di tempat.
-/// Isi (body) belum dibaca; panggil `buangIsi` setelahnya.
+/// Read one complete request head from the reader and parse it in place.
+/// The body is not read yet; call `discardBody` afterwards.
 ///
-/// `error.KepalaKepanjangan` berarti kepala tidak muat di buffer reader —
-/// jawab dengan 431. `error.EndOfStream` sebelum byte pertama adalah
-/// koneksi keep-alive yang ditutup klien: jalan pulang normal.
-pub fn bacaPermintaan(in: *std.Io.Reader) !Permintaan {
-    const kepala = try bacaKepala(in);
-    var p = Permintaan{};
-    try parseKepala(kepala, &p);
-    in.toss(kepala.len);
-    return p;
+/// `error.HeadTooLong` means the head does not fit in the reader's buffer
+/// — answer with 431. `error.EndOfStream` before the first byte is a
+/// keep-alive connection the client closed: a normal way home.
+pub fn readRequest(in: *std.Io.Reader) !Request {
+    const head = try readHead(in);
+    var r = Request{};
+    try parseHead(head, &r);
+    in.toss(head.len);
+    return r;
 }
 
-/// Buang isi permintaan yang tidak dipakai, supaya koneksi keep-alive
-/// bersih untuk permintaan berikutnya.
-pub fn buangIsi(in: *std.Io.Reader, p: *const Permintaan) !void {
-    if (p.chunked) return error.ChunkedBelumDidukung;
-    if (p.panjang_isi > 0) try in.discardAll64(p.panjang_isi);
+/// Discard a request body nobody read, so the keep-alive connection is
+/// clean for the next request.
+pub fn discardBody(in: *std.Io.Reader, r: *const Request) !void {
+    if (r.chunked) return error.ChunkedNotSupported;
+    if (r.content_length > 0) try in.discardAll64(r.content_length);
 }
 
-/// Iterasi semua header di sebuah kepala (baris permintaan dilewati),
-/// untuk lapisan yang perlu menyimpan seluruh header, bukan cuma yang
-/// dipakai parser.
-pub const IterasiHeader = struct {
-    baris: std.mem.SplitIterator(u8, .scalar),
+/// Iterate every header in a head (the request line is skipped), for
+/// layers that need all the headers, not just the ones the parser uses.
+pub const HeaderIterator = struct {
+    lines: std.mem.SplitIterator(u8, .scalar),
 
-    pub const Pasangan = struct { nama: []const u8, nilai: []const u8 };
+    pub const Pair = struct { name: []const u8, value: []const u8 };
 
-    pub fn dari(kepala: []const u8) IterasiHeader {
-        var baris = std.mem.splitScalar(u8, kepala, '\n');
-        _ = baris.next(); // baris permintaan
-        return .{ .baris = baris };
+    pub fn from(head: []const u8) HeaderIterator {
+        var lines = std.mem.splitScalar(u8, head, '\n');
+        _ = lines.next(); // the request line
+        return .{ .lines = lines };
     }
 
-    pub fn next(self: *IterasiHeader) ?Pasangan {
-        const baris = potongCR(self.baris.next() orelse return null);
-        if (baris.len == 0) return null;
-        const titik_dua = std.mem.indexOfScalar(u8, baris, ':') orelse return null;
+    pub fn next(self: *HeaderIterator) ?Pair {
+        const line = trimCR(self.lines.next() orelse return null);
+        if (line.len == 0) return null;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return null;
         return .{
-            .nama = baris[0..titik_dua],
-            .nilai = std.mem.trim(u8, baris[titik_dua + 1 ..], " \t"),
+            .name = line[0..colon],
+            .value = std.mem.trim(u8, line[colon + 1 ..], " \t"),
         };
     }
 };
 
-/// Tunggu sampai satu kepala utuh (sampai baris kosong) ada di buffer,
-/// lalu kembalikan slice-nya tanpa menyalin dan tanpa memajukan reader.
-/// Pemanggil yang memutuskan kapan `in.toss(kepala.len)`.
-pub fn bacaKepala(in: *std.Io.Reader) ![]const u8 {
+/// Wait until one complete head (up to the blank line) is in the buffer,
+/// then return a slice of it without copying and without advancing the
+/// reader. The caller decides when to `in.toss(head.len)`.
+pub fn readHead(in: *std.Io.Reader) ![]const u8 {
     while (true) {
         const buf = in.buffered();
-        if (cariAkhirKepala(buf)) |akhir| return buf[0..akhir];
-        if (buf.len >= in.buffer.len) return error.KepalaKepanjangan;
+        if (findEndOfHead(buf)) |end| return buf[0..end];
+        if (buf.len >= in.buffer.len) return error.HeadTooLong;
         try in.fillMore();
     }
 }
 
-/// Indeks tepat setelah baris kosong pengakhir kepala, kalau sudah utuh.
-/// Menerima CRLF maupun LF telanjang.
-fn cariAkhirKepala(buf: []const u8) ?usize {
+/// The index just past the blank line that ends the head, if it is
+/// complete. Accepts CRLF as well as a bare LF.
+fn findEndOfHead(buf: []const u8) ?usize {
     var i: usize = 0;
     while (std.mem.indexOfScalarPos(u8, buf, i, '\n')) |nl| {
         if (nl + 1 < buf.len and buf[nl + 1] == '\n') return nl + 2;
@@ -118,68 +118,68 @@ fn cariAkhirKepala(buf: []const u8) ?usize {
     return null;
 }
 
-pub fn parseKepala(kepala: []const u8, p: *Permintaan) GalatParse!void {
-    var baris_iter = std.mem.splitScalar(u8, kepala, '\n');
+pub fn parseHead(head: []const u8, r: *Request) ParseError!void {
+    var lines = std.mem.splitScalar(u8, head, '\n');
 
-    const baris_pertama = potongCR(baris_iter.next() orelse return error.BarisPermintaanRusak);
-    try parseBarisPermintaan(baris_pertama, p);
+    const first = trimCR(lines.next() orelse return error.BadRequestLine);
+    try parseRequestLine(first, r);
 
-    while (baris_iter.next()) |baris_mentah| {
-        const baris = potongCR(baris_mentah);
-        if (baris.len == 0) return;
-        try terapkanHeader(baris, p);
+    while (lines.next()) |raw| {
+        const line = trimCR(raw);
+        if (line.len == 0) return;
+        try applyHeader(line, r);
     }
 }
 
-pub fn parseBarisPermintaan(baris: []const u8, p: *Permintaan) GalatParse!void {
-    const spasi1 = std.mem.indexOfScalar(u8, baris, ' ') orelse return error.BarisPermintaanRusak;
-    const spasi2 = std.mem.indexOfScalarPos(u8, baris, spasi1 + 1, ' ') orelse return error.BarisPermintaanRusak;
+pub fn parseRequestLine(line: []const u8, r: *Request) ParseError!void {
+    const sp1 = std.mem.indexOfScalar(u8, line, ' ') orelse return error.BadRequestLine;
+    const sp2 = std.mem.indexOfScalarPos(u8, line, sp1 + 1, ' ') orelse return error.BadRequestLine;
 
-    const metode = baris[0..spasi1];
-    const target = baris[spasi1 + 1 .. spasi2];
-    const versi = baris[spasi2 + 1 ..];
-    if (metode.len == 0 or target.len == 0) return error.BarisPermintaanRusak;
+    const method = line[0..sp1];
+    const target = line[sp1 + 1 .. sp2];
+    const version = line[sp2 + 1 ..];
+    if (method.len == 0 or target.len == 0) return error.BadRequestLine;
 
-    if (std.mem.eql(u8, versi, "HTTP/1.1")) {
-        p.versi_minor = 1;
-        p.keep_alive = true;
-    } else if (std.mem.eql(u8, versi, "HTTP/1.0")) {
-        p.versi_minor = 0;
-        p.keep_alive = false;
+    if (std.mem.eql(u8, version, "HTTP/1.1")) {
+        r.minor_version = 1;
+        r.keep_alive = true;
+    } else if (std.mem.eql(u8, version, "HTTP/1.0")) {
+        r.minor_version = 0;
+        r.keep_alive = false;
     } else {
-        return error.VersiTidakDidukung;
+        return error.UnsupportedVersion;
     }
 
-    p.metode = metode;
-    p.target = target;
+    r.method = method;
+    r.target = target;
 }
 
-pub fn terapkanHeader(baris: []const u8, p: *Permintaan) GalatParse!void {
-    const titik_dua = std.mem.indexOfScalar(u8, baris, ':') orelse return error.HeaderRusak;
-    const nama = baris[0..titik_dua];
-    const nilai = std.mem.trim(u8, baris[titik_dua + 1 ..], " \t");
+pub fn applyHeader(line: []const u8, r: *Request) ParseError!void {
+    const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.BadHeader;
+    const name = line[0..colon];
+    const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
 
-    // Urut dari yang paling sering muncul; panjang nama dicek dulu supaya
-    // perbandingan case-insensitive hampir selalu cuma satu kali.
-    switch (nama.len) {
-        "connection".len => if (std.ascii.eqlIgnoreCase(nama, "connection")) {
-            if (std.ascii.eqlIgnoreCase(nilai, "close")) {
-                p.keep_alive = false;
-            } else if (std.ascii.eqlIgnoreCase(nilai, "keep-alive")) {
-                p.keep_alive = true;
+    // Ordered by how often they show up; the name length is checked first
+    // so the case-insensitive compare almost always runs just once.
+    switch (name.len) {
+        "connection".len => if (std.ascii.eqlIgnoreCase(name, "connection")) {
+            if (std.ascii.eqlIgnoreCase(value, "close")) {
+                r.keep_alive = false;
+            } else if (std.ascii.eqlIgnoreCase(value, "keep-alive")) {
+                r.keep_alive = true;
             }
         },
-        "content-length".len => if (std.ascii.eqlIgnoreCase(nama, "content-length")) {
-            p.panjang_isi = std.fmt.parseInt(u64, nilai, 10) catch return error.HeaderRusak;
+        "content-length".len => if (std.ascii.eqlIgnoreCase(name, "content-length")) {
+            r.content_length = std.fmt.parseInt(u64, value, 10) catch return error.BadHeader;
         },
-        "transfer-encoding".len => if (std.ascii.eqlIgnoreCase(nama, "transfer-encoding")) {
-            if (std.ascii.indexOfIgnoreCase(nilai, "chunked") != null) p.chunked = true;
+        "transfer-encoding".len => if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
+            if (std.ascii.indexOfIgnoreCase(value, "chunked") != null) r.chunked = true;
         },
         else => {},
     }
 }
 
-pub fn frasaStatus(status: u16) []const u8 {
+pub fn statusPhrase(status: u16) []const u8 {
     return switch (status) {
         200 => "OK",
         201 => "Created",
@@ -204,151 +204,164 @@ pub fn frasaStatus(status: u16) []const u8 {
     };
 }
 
-/// Rakit respons lengkap sebagai konstanta saat kompilasi — untuk respons
-/// yang isinya tetap, menulisnya jadi satu `writeAll` tanpa formatting.
-pub fn responsStatis(
+/// Assemble a whole response as a compile-time constant — for responses
+/// with fixed contents, this turns writing one into a single `writeAll`
+/// with no formatting.
+pub fn staticResponse(
     comptime status: u16,
-    comptime frasa: []const u8,
-    comptime tipe_konten: []const u8,
-    comptime isi: []const u8,
+    comptime phrase: []const u8,
+    comptime content_type: []const u8,
+    comptime body: []const u8,
     comptime keep_alive: bool,
 ) []const u8 {
     return std.fmt.comptimePrint(
         "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: {s}\r\n\r\n{s}",
-        .{ status, frasa, tipe_konten, isi.len, if (keep_alive) "keep-alive" else "close", isi },
+        .{ status, phrase, content_type, body.len, if (keep_alive) "keep-alive" else "close", body },
     );
 }
 
-/// Jalur dingin untuk respons yang isinya baru diketahui saat berjalan.
-pub fn tulisRespons(
+/// The cold path, for responses whose contents are only known at runtime.
+pub fn writeResponse(
     out: *std.Io.Writer,
     status: u16,
-    frasa: []const u8,
-    tipe_konten: []const u8,
-    isi: []const u8,
+    phrase: []const u8,
+    content_type: []const u8,
+    body: []const u8,
     keep_alive: bool,
 ) !void {
-    try tulisKepala(out, status, frasa, tipe_konten, isi.len, keep_alive);
-    try out.writeAll(isi);
+    try writeHead(out, status, phrase, content_type, body.len, keep_alive);
+    try out.writeAll(body);
     try out.flush();
 }
 
-/// Jawaban untuk HEAD: kepalanya harus sama persis dengan jawaban GET —
-/// termasuk `Content-Length` yang menyebut panjang isi seandainya
-/// dikirim — tapi isinya sendiri tidak ikut.
-pub fn tulisResponsTanpaIsi(
+/// The response to a HEAD: the head has to be byte-for-byte what a GET
+/// would have produced — including the `Content-Length` naming the length
+/// of the body it would have sent — but the body itself does not follow.
+pub fn writeResponseHeadOnly(
     out: *std.Io.Writer,
     status: u16,
-    frasa: []const u8,
-    tipe_konten: []const u8,
-    panjang_isi: usize,
+    phrase: []const u8,
+    content_type: []const u8,
+    body_len: usize,
     keep_alive: bool,
 ) !void {
-    try tulisKepala(out, status, frasa, tipe_konten, panjang_isi, keep_alive);
+    try writeHead(out, status, phrase, content_type, body_len, keep_alive);
     try out.flush();
 }
 
-fn tulisKepala(
+fn writeHead(
     out: *std.Io.Writer,
     status: u16,
-    frasa: []const u8,
-    tipe_konten: []const u8,
-    panjang_isi: usize,
+    phrase: []const u8,
+    content_type: []const u8,
+    body_len: usize,
     keep_alive: bool,
 ) !void {
     try out.print(
         "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: {s}\r\n\r\n",
-        .{ status, frasa, tipe_konten, panjang_isi, if (keep_alive) "keep-alive" else "close" },
+        .{ status, phrase, content_type, body_len, if (keep_alive) "keep-alive" else "close" },
     );
 }
 
-fn potongCR(baris: []const u8) []const u8 {
-    return if (baris.len > 0 and baris[baris.len - 1] == '\r') baris[0 .. baris.len - 1] else baris;
+fn trimCR(line: []const u8) []const u8 {
+    return if (line.len > 0 and line[line.len - 1] == '\r') line[0 .. line.len - 1] else line;
 }
 
 const testing = std.testing;
 
-test "GET sederhana HTTP/1.1 default keep-alive" {
-    var in = std.Io.Reader.fixed("GET /halo HTTP/1.1\r\nHost: contoh\r\n\r\n");
-    const p = try bacaPermintaan(&in);
-    try testing.expectEqualStrings("GET", p.metode);
-    try testing.expectEqualStrings("/halo", p.target);
-    try testing.expect(p.keep_alive);
-    try testing.expectEqual(@as(u64, 0), p.panjang_isi);
+test "a plain HTTP/1.1 GET defaults to keep-alive" {
+    var in = std.Io.Reader.fixed("GET /hello HTTP/1.1\r\nHost: example\r\n\r\n");
+    const r = try readRequest(&in);
+    try testing.expectEqualStrings("GET", r.method);
+    try testing.expectEqualStrings("/hello", r.target);
+    try testing.expect(r.keep_alive);
+    try testing.expectEqual(@as(u64, 0), r.content_length);
 }
 
-test "HTTP/1.0 default tutup, keep-alive kalau diminta" {
+test "HTTP/1.0 defaults to close, keep-alive when asked for" {
     var in = std.Io.Reader.fixed("GET / HTTP/1.0\r\n\r\n");
-    const p = try bacaPermintaan(&in);
-    try testing.expect(!p.keep_alive);
+    const r = try readRequest(&in);
+    try testing.expect(!r.keep_alive);
 
     var in2 = std.Io.Reader.fixed("GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n");
-    const p2 = try bacaPermintaan(&in2);
-    try testing.expect(p2.keep_alive);
+    const r2 = try readRequest(&in2);
+    try testing.expect(r2.keep_alive);
 }
 
-test "Connection: close mematikan keep-alive" {
+test "Connection: close turns keep-alive off" {
     var in = std.Io.Reader.fixed("GET / HTTP/1.1\r\nConnection: close\r\n\r\n");
-    const p = try bacaPermintaan(&in);
-    try testing.expect(!p.keep_alive);
+    const r = try readRequest(&in);
+    try testing.expect(!r.keep_alive);
 }
 
-test "Content-Length terbaca dan isi terbuang" {
-    var in = std.Io.Reader.fixed("POST /kirim HTTP/1.1\r\nContent-Length: 5\r\n\r\nhalo!GET");
-    const p = try bacaPermintaan(&in);
-    try testing.expectEqualStrings("POST", p.metode);
-    try testing.expectEqual(@as(u64, 5), p.panjang_isi);
-    try buangIsi(&in, &p);
+test "Content-Length is read and the body is discarded" {
+    var in = std.Io.Reader.fixed("POST /send HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloGET");
+    const r = try readRequest(&in);
+    try testing.expectEqualStrings("POST", r.method);
+    try testing.expectEqual(@as(u64, 5), r.content_length);
+    try discardBody(&in, &r);
     try testing.expectEqualStrings("GET", try in.take(3));
 }
 
-test "dua permintaan beruntun di satu koneksi" {
-    var in = std.Io.Reader.fixed("GET /satu HTTP/1.1\r\n\r\nGET /dua HTTP/1.1\r\nConnection: close\r\n\r\n");
-    const p1 = try bacaPermintaan(&in);
-    try testing.expectEqualStrings("/satu", p1.target);
-    const p2 = try bacaPermintaan(&in);
-    try testing.expectEqualStrings("/dua", p2.target);
-    try testing.expect(!p2.keep_alive);
+test "two requests back to back on one connection" {
+    var in = std.Io.Reader.fixed("GET /one HTTP/1.1\r\n\r\nGET /two HTTP/1.1\r\nConnection: close\r\n\r\n");
+    const r1 = try readRequest(&in);
+    try testing.expectEqualStrings("/one", r1.target);
+    const r2 = try readRequest(&in);
+    try testing.expectEqualStrings("/two", r2.target);
+    try testing.expect(!r2.keep_alive);
 }
 
-test "baris LF telanjang tetap diterima" {
-    var in = std.Io.Reader.fixed("GET / HTTP/1.1\nHost: contoh\n\n");
-    const p = try bacaPermintaan(&in);
-    try testing.expectEqualStrings("GET", p.metode);
+test "bare LF line endings are still accepted" {
+    var in = std.Io.Reader.fixed("GET / HTTP/1.1\nHost: example\n\n");
+    const r = try readRequest(&in);
+    try testing.expectEqualStrings("GET", r.method);
 }
 
-test "kepala tanpa ujung tidak menghasilkan parse separuh" {
-    // Pada Reader.fixed, buffer persis seukuran data, jadi kepala yang tak
-    // kunjung berujung terdeteksi sebagai buffer penuh. Di koneksi
-    // sungguhan dengan buffer lapang, kasus yang sama berujung
-    // error.EndOfStream saat klien menutup koneksi.
-    var in = std.Io.Reader.fixed("GET / HTTP/1.1\r\nHost: contoh\r\n");
-    try testing.expectError(error.KepalaKepanjangan, bacaPermintaan(&in));
+test "a head with no end does not produce a half parse" {
+    // With Reader.fixed the buffer is exactly the size of the data, so a
+    // head that never ends is detected as a full buffer. On a real
+    // connection with a roomy buffer, the same case ends in
+    // error.EndOfStream when the client closes.
+    var in = std.Io.Reader.fixed("GET / HTTP/1.1\r\nHost: example\r\n");
+    try testing.expectError(error.HeadTooLong, readRequest(&in));
 }
 
-test "transfer-encoding chunked terdeteksi dan ditolak buangIsi" {
+test "transfer-encoding chunked is detected and rejected by discardBody" {
     var in = std.Io.Reader.fixed("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n");
-    const p = try bacaPermintaan(&in);
-    try testing.expect(p.chunked);
-    try testing.expectError(error.ChunkedBelumDidukung, buangIsi(&in, &p));
+    const r = try readRequest(&in);
+    try testing.expect(r.chunked);
+    try testing.expectError(error.ChunkedNotSupported, discardBody(&in, &r));
 }
 
-test "baris permintaan rusak" {
-    var p = Permintaan{};
-    try testing.expectError(error.BarisPermintaanRusak, parseBarisPermintaan("GET /", &p));
-    try testing.expectError(error.VersiTidakDidukung, parseBarisPermintaan("GET / HTTP/2.0", &p));
-    try testing.expectError(error.VersiTidakDidukung, parseBarisPermintaan("GET / HTTP/1.1 x", &p));
+test "a broken request line" {
+    var r = Request{};
+    try testing.expectError(error.BadRequestLine, parseRequestLine("GET /", &r));
+    try testing.expectError(error.UnsupportedVersion, parseRequestLine("GET / HTTP/2.0", &r));
+    try testing.expectError(error.UnsupportedVersion, parseRequestLine("GET / HTTP/1.1 x", &r));
 }
 
-test "header tanpa titik dua" {
-    var p = Permintaan{};
-    try testing.expectError(error.HeaderRusak, terapkanHeader("Host tanpa-titik-dua", &p));
+test "a header with no colon" {
+    var r = Request{};
+    try testing.expectError(error.BadHeader, applyHeader("Host no-colon", &r));
 }
 
-test "responsStatis dan tulisRespons menghasilkan byte yang sama" {
-    const statis = comptime responsStatis(200, "OK", "text/plain", "hello\n", true);
+test "staticResponse and writeResponse produce the same bytes" {
+    const fixed = comptime staticResponse(200, "OK", "text/plain", "hello\n", true);
     var buf: [256]u8 = undefined;
     var out = std.Io.Writer.fixed(&buf);
-    try tulisRespons(&out, 200, "OK", "text/plain", "hello\n", true);
-    try testing.expectEqualStrings(statis, out.buffered());
+    try writeResponse(&out, 200, "OK", "text/plain", "hello\n", true);
+    try testing.expectEqualStrings(fixed, out.buffered());
+}
+
+test "writeResponseHeadOnly matches writeResponse's head but sends no body" {
+    var full_buf: [256]u8 = undefined;
+    var full = std.Io.Writer.fixed(&full_buf);
+    try writeResponse(&full, 200, "OK", "text/plain", "hello\n", true);
+
+    var head_buf: [256]u8 = undefined;
+    var head = std.Io.Writer.fixed(&head_buf);
+    try writeResponseHeadOnly(&head, 200, "OK", "text/plain", "hello\n".len, true);
+
+    try testing.expectEqualStrings(full.buffered()[0 .. full.buffered().len - "hello\n".len], head.buffered());
 }

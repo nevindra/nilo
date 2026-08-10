@@ -1,265 +1,267 @@
-//! Str — teks yang berasal dari sebuah request (ADR 0004).
+//! Str — text that came from a request (ADR 0004).
 //!
-//! Hidupnya hanya selama request berjalan, karena byte-nya milik Arena
-//! request. Isinya tidak bisa diambil tanpa memanggil sesuatu secara
-//! sadar: `.lihat()` untuk meminjam selama request, `.keep()` untuk
-//! menyalin ke memori berumur panjang.
+//! It lives only as long as the request does, because its bytes belong to
+//! the request arena. You cannot get at the contents without asking for
+//! them: `.view()` borrows for the duration of the request, `.keep()`
+//! copies into longer-lived memory.
 //!
-//! Jaminannya tidak bisa penuh — Zig tidak punya sistem kepemilikan.
-//! Karena itu build debug menyematkan penanda umur: memakai Str setelah
-//! request-nya selesai berhenti keras di laptop, bukan crash acak di
-//! produksi. Build rilis membuang penanda ini, nol biaya.
+//! The guarantee cannot be complete — Zig has no ownership system. So
+//! debug builds attach a lifetime marker: using a Str after its request
+//! has finished stops hard on your laptop instead of crashing at random
+//! in production. Release builds drop the marker entirely, at no cost.
 
 const std = @import("std");
 const builtin = @import("builtin");
 
-pub const jebakan_aktif = builtin.mode == .Debug;
+pub const trap_enabled = builtin.mode == .Debug;
 
-/// Penanda umur satu Arena request. Satu per koneksi, dinaikkan setiap
-/// request selesai; semua Str dari request lama langsung basi.
-pub const Umur = struct {
-    gen: Gen = if (jebakan_aktif) 0 else {},
+/// Lifetime marker for one request arena. One per connection, bumped
+/// every time a request finishes; every Str from the old request goes
+/// stale at once.
+pub const Lifetime = struct {
+    gen: Gen = if (trap_enabled) 0 else {},
 
-    const Gen = if (jebakan_aktif) u32 else void;
+    const Gen = if (trap_enabled) u32 else void;
 
-    pub fn selesai(self: *Umur) void {
-        if (jebakan_aktif) self.gen +%= 1;
+    pub fn end(self: *Lifetime) void {
+        if (trap_enabled) self.gen +%= 1;
     }
 };
 
 pub const Str = struct {
-    _byte: []const u8,
-    _penanda: Penanda,
+    _bytes: []const u8,
+    _marker: Marker,
 
-    const Penanda = if (jebakan_aktif) ?struct { hidup: *const u32, gen: u32 } else void;
+    const Marker = if (trap_enabled) ?struct { gen_ptr: *const u32, gen: u32 } else void;
 
-    /// Str yang terikat umur sebuah request. Dipakai internal zfast.
-    pub fn dariRequest(byte: []const u8, umur: *const Umur) Str {
+    /// A Str tied to a request's lifetime. Used internally by zfast.
+    pub fn fromRequest(bytes: []const u8, lifetime: *const Lifetime) Str {
         return .{
-            ._byte = byte,
-            ._penanda = if (jebakan_aktif) .{ .hidup = &umur.gen, .gen = umur.gen } else {},
+            ._bytes = bytes,
+            ._marker = if (trap_enabled) .{ .gen_ptr = &lifetime.gen, .gen = lifetime.gen } else {},
         };
     }
 
-    /// Str tanpa penanda umur, untuk literal di unit test handler.
-    /// Tidak pernah dianggap basi.
-    pub fn statis(byte: []const u8) Str {
-        return .{ ._byte = byte, ._penanda = if (jebakan_aktif) null else {} };
+    /// A Str with no lifetime marker, for literals in handler unit tests.
+    /// Never considered stale.
+    pub fn static(bytes: []const u8) Str {
+        return .{ ._bytes = bytes, ._marker = if (trap_enabled) null else {} };
     }
 
-    // ---- lewat JSON ----
+    // ---- travelling through JSON ----
     //
-    // Supaya `struct { nama: Str }` bisa dipakai sebagai isi masuk maupun
-    // jawaban keluar, bukan cuma `[]const u8` telanjang yang justru
-    // dihindari ADR 0004.
+    // So that `struct { name: Str }` works as an incoming body as well as
+    // an outgoing response, instead of the bare `[]const u8` that ADR 0004
+    // exists to avoid.
 
-    /// Keluar sebagai string JSON biasa, bukan sebagai objek berisi
-    /// field internal.
+    /// Goes out as a plain JSON string, not as an object of internal
+    /// fields.
     pub fn jsonStringify(self: Str, jw: anytype) !void {
-        try jw.write(self.lihat());
+        try jw.write(self.view());
     }
 
-    /// Masuk dari string JSON. Penandanya belum terpasang di sini —
-    /// parser tidak tahu request mana yang sedang berjalan — jadi App
-    /// memanggil `stempel` setelah parse selesai.
-    pub fn jsonParse(gpa: std.mem.Allocator, sumber: anytype, opsi: std.json.ParseOptions) !Str {
-        return statis(try std.json.innerParse([]const u8, gpa, sumber, opsi));
+    /// Comes in from a JSON string. The marker is not attached here — the
+    /// parser has no idea which request is running — so App calls `stamp`
+    /// once parsing is done.
+    pub fn jsonParse(gpa: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Str {
+        return static(try std.json.innerParse([]const u8, gpa, source, options));
     }
 
-    pub fn jsonParseFromValue(gpa: std.mem.Allocator, sumber: std.json.Value, opsi: std.json.ParseOptions) !Str {
-        return statis(try std.json.innerParseFromValue([]const u8, gpa, sumber, opsi));
+    pub fn jsonParseFromValue(gpa: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !Str {
+        return static(try std.json.innerParseFromValue([]const u8, gpa, source, options));
     }
 
-    /// Pinjam isinya. Hanya berlaku selama request-nya masih berjalan —
-    /// untuk menyimpan lebih lama, pakai `.keep()`.
-    pub fn lihat(self: Str) []const u8 {
-        self.pastikanHidup();
-        return self._byte;
+    /// Borrow the contents. Only valid while the request is still running —
+    /// to hold on to it for longer, use `.keep()`.
+    pub fn view(self: Str) []const u8 {
+        self.assertAlive();
+        return self._bytes;
     }
 
-    /// Salin ke memori berumur panjang milik pemanggil, supaya aman
-    /// disimpan setelah request selesai. Pemanggil yang membebaskan.
+    /// Copy into longer-lived memory owned by the caller, so it is safe to
+    /// hold after the request finishes. The caller frees it.
     pub fn keep(self: Str, gpa: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
-        self.pastikanHidup();
-        return gpa.dupe(u8, self._byte);
+        self.assertAlive();
+        return gpa.dupe(u8, self._bytes);
     }
 
-    pub fn panjang(self: Str) usize {
-        self.pastikanHidup();
-        return self._byte.len;
+    pub fn len(self: Str) usize {
+        self.assertAlive();
+        return self._bytes.len;
     }
 
-    pub fn sama(self: Str, dengan: []const u8) bool {
-        return std.mem.eql(u8, self.lihat(), dengan);
+    pub fn eql(self: Str, other: []const u8) bool {
+        return std.mem.eql(u8, self.view(), other);
     }
 
-    /// Parse sebagai bilangan basis 10.
-    pub fn angka(self: Str, comptime T: type) std.fmt.ParseIntError!T {
-        return std.fmt.parseInt(T, self.lihat(), 10);
+    /// Parse as a base-10 integer.
+    pub fn int(self: Str, comptime T: type) std.fmt.ParseIntError!T {
+        return std.fmt.parseInt(T, self.view(), 10);
     }
 
-    /// Apakah penanda umurnya masih berlaku. Hanya ada saat jebakan
-    /// aktif; dipakai di tes.
-    pub fn hidup(self: Str) bool {
-        comptime std.debug.assert(jebakan_aktif);
-        const p = self._penanda orelse return true;
-        return p.hidup.* == p.gen;
+    /// Whether the lifetime marker is still valid. Only exists while the
+    /// trap is enabled; used in tests.
+    pub fn alive(self: Str) bool {
+        comptime std.debug.assert(trap_enabled);
+        const m = self._marker orelse return true;
+        return m.gen_ptr.* == m.gen;
     }
 
-    fn pastikanHidup(self: Str) void {
-        if (jebakan_aktif) {
-            if (!self.hidup()) @panic(
-                "Str dipakai setelah request-nya selesai. " ++
-                    "Data request mati bersama request; salin dengan .keep() " ++
-                    "selama handler masih berjalan kalau perlu disimpan.",
+    fn assertAlive(self: Str) void {
+        if (trap_enabled) {
+            if (!self.alive()) @panic(
+                "Str used after its request finished. Request data dies with " ++
+                    "the request; copy it with .keep() while the handler is still " ++
+                    "running if you need to hold on to it.",
             );
         }
     }
 };
 
-/// Pasang penanda umur `umur` ke semua Str di dalam `nilai` (sebuah
-/// penunjuk). Dipakai App setelah mem-parse isi request: hasil parse
-/// hidup di Arena request, jadi Str di dalamnya harus ikut mati saat
-/// request selesai.
+/// Attach the lifetime marker `lifetime` to every Str inside `value` (a
+/// pointer). Used by App after parsing a request body: the parse result
+/// lives in the request arena, so the Strs inside it have to die when the
+/// request does.
 ///
-/// Yang ditelusuri: Str, field struct, isi optional, elemen array, dan
-/// elemen slice yang bisa diubah. Slice `const` dan union dilewati —
-/// Str di sana tetap jalan, hanya saja jebakan debug tidak menjaganya.
-pub fn stempel(nilai: anytype, umur: *const Umur) void {
-    if (!jebakan_aktif) return;
-    stempelDalam(nilai, umur, 8);
+/// What gets walked: Str, struct fields, the payload of an optional,
+/// array elements, and the elements of a mutable slice. Const slices and
+/// unions are skipped — Strs there still work, they just don't get the
+/// debug trap watching over them.
+pub fn stamp(value: anytype, lifetime: *const Lifetime) void {
+    if (!trap_enabled) return;
+    stampInner(value, lifetime, 8);
 }
 
-fn stempelDalam(nilai: anytype, umur: *const Umur, comptime sisa: u8) void {
-    if (sisa == 0) return;
-    const T = @typeInfo(@TypeOf(nilai)).pointer.child;
-    if (comptime !mengandungStr(T, sisa)) return;
+fn stampInner(value: anytype, lifetime: *const Lifetime, comptime depth: u8) void {
+    if (depth == 0) return;
+    const T = @typeInfo(@TypeOf(value)).pointer.child;
+    if (comptime !containsStr(T, depth)) return;
 
     if (T == Str) {
-        nilai._penanda = .{ .hidup = &umur.gen, .gen = umur.gen };
+        value._marker = .{ .gen_ptr = &lifetime.gen, .gen = lifetime.gen };
         return;
     }
     switch (@typeInfo(T)) {
         .@"struct" => |s| inline for (s.fields) |f| {
-            stempelDalam(&@field(nilai, f.name), umur, sisa - 1);
+            stampInner(&@field(value, f.name), lifetime, depth - 1);
         },
-        .optional => if (nilai.*) |*isi| stempelDalam(isi, umur, sisa - 1),
-        .array => for (nilai) |*elemen| stempelDalam(elemen, umur, sisa - 1),
+        .optional => if (value.*) |*payload| stampInner(payload, lifetime, depth - 1),
+        .array => for (value) |*item| stampInner(item, lifetime, depth - 1),
         .pointer => |p| switch (p.size) {
-            .slice => if (!p.is_const) for (nilai.*) |*elemen| stempelDalam(elemen, umur, sisa - 1),
+            .slice => if (!p.is_const) for (value.*) |*item| stampInner(item, lifetime, depth - 1),
             else => {},
         },
         else => {},
     }
 }
 
-/// Apakah `T` mungkin memuat Str di dalamnya. Tipe yang tidak memuat Str
-/// sama sekali — mayoritas — tidak menghasilkan kode apa pun.
-fn mengandungStr(comptime T: type, comptime sisa: u8) bool {
-    if (sisa == 0) return false;
+/// Whether `T` could hold a Str anywhere inside it. Types that hold none
+/// at all — most of them — generate no code.
+fn containsStr(comptime T: type, comptime depth: u8) bool {
+    if (depth == 0) return false;
     if (T == Str) return true;
     return switch (@typeInfo(T)) {
         .@"struct" => |s| for (s.fields) |f| {
-            if (mengandungStr(f.type, sisa - 1)) break true;
+            if (containsStr(f.type, depth - 1)) break true;
         } else false,
-        .optional => |o| mengandungStr(o.child, sisa - 1),
-        .array => |a| mengandungStr(a.child, sisa - 1),
-        .pointer => |p| p.size == .slice and !p.is_const and mengandungStr(p.child, sisa - 1),
+        .optional => |o| containsStr(o.child, depth - 1),
+        .array => |a| containsStr(a.child, depth - 1),
+        .pointer => |p| p.size == .slice and !p.is_const and containsStr(p.child, depth - 1),
         else => false,
     };
 }
 
 const testing = std.testing;
 
-test "lihat dan sama" {
-    var umur = Umur{};
-    const s = Str.dariRequest("halo", &umur);
-    try testing.expectEqualStrings("halo", s.lihat());
-    try testing.expect(s.sama("halo"));
-    try testing.expect(!s.sama("lain"));
+test "view and eql" {
+    var lifetime = Lifetime{};
+    const s = Str.fromRequest("hello", &lifetime);
+    try testing.expectEqualStrings("hello", s.view());
+    try testing.expect(s.eql("hello"));
+    try testing.expect(!s.eql("other"));
 }
 
-test "keep menyalin ke memori pemanggil" {
-    var umur = Umur{};
-    const s = Str.dariRequest("halo", &umur);
-    const salinan = try s.keep(testing.allocator);
-    defer testing.allocator.free(salinan);
-    umur.selesai();
-    try testing.expectEqualStrings("halo", salinan);
+test "keep copies into the caller's memory" {
+    var lifetime = Lifetime{};
+    const s = Str.fromRequest("hello", &lifetime);
+    const copy = try s.keep(testing.allocator);
+    defer testing.allocator.free(copy);
+    lifetime.end();
+    try testing.expectEqualStrings("hello", copy);
 }
 
-test "angka" {
-    var umur = Umur{};
-    try testing.expectEqual(@as(u32, 42), try Str.dariRequest("42", &umur).angka(u32));
-    try testing.expectError(error.InvalidCharacter, Str.dariRequest("4x", &umur).angka(u32));
+test "int" {
+    var lifetime = Lifetime{};
+    try testing.expectEqual(@as(u32, 42), try Str.fromRequest("42", &lifetime).int(u32));
+    try testing.expectError(error.InvalidCharacter, Str.fromRequest("4x", &lifetime).int(u32));
 }
 
-test "penanda umur basi setelah request selesai" {
-    if (!jebakan_aktif) return;
-    var umur = Umur{};
-    const s = Str.dariRequest("halo", &umur);
-    try testing.expect(s.hidup());
-    umur.selesai();
-    try testing.expect(!s.hidup());
+test "the marker goes stale once the request finishes" {
+    if (!trap_enabled) return;
+    var lifetime = Lifetime{};
+    const s = Str.fromRequest("hello", &lifetime);
+    try testing.expect(s.alive());
+    lifetime.end();
+    try testing.expect(!s.alive());
 }
 
-test "Str statis tidak pernah basi" {
-    if (!jebakan_aktif) return;
-    const s = Str.statis("literal");
-    try testing.expect(s.hidup());
-    try testing.expectEqualStrings("literal", s.lihat());
+test "a static Str never goes stale" {
+    if (!trap_enabled) return;
+    const s = Str.static("literal");
+    try testing.expect(s.alive());
+    try testing.expectEqualStrings("literal", s.view());
 }
 
-test "Str keluar sebagai string JSON biasa" {
-    var umur = Umur{};
-    const Pesan = struct { nama: Str, umur_tahun: u8 };
+test "Str goes out as a plain JSON string" {
+    var lifetime = Lifetime{};
+    const Message = struct { name: Str, age: u8 };
     const json = try std.json.Stringify.valueAlloc(
         testing.allocator,
-        Pesan{ .nama = Str.dariRequest("wati", &umur), .umur_tahun = 30 },
+        Message{ .name = Str.fromRequest("wati", &lifetime), .age = 30 },
         .{},
     );
     defer testing.allocator.free(json);
-    try testing.expectEqualStrings("{\"nama\":\"wati\",\"umur_tahun\":30}", json);
+    try testing.expectEqualStrings("{\"name\":\"wati\",\"age\":30}", json);
 }
 
-test "Str masuk dari JSON lalu distempel umur request" {
+test "Str comes in from JSON and gets stamped with the request lifetime" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var umur = Umur{};
+    var lifetime = Lifetime{};
 
-    const Masuk = struct { nama: Str, tag: []Str };
-    var nilai = try std.json.parseFromSliceLeaky(
-        Masuk,
+    const Incoming = struct { name: Str, tags: []Str };
+    var value = try std.json.parseFromSliceLeaky(
+        Incoming,
         arena.allocator(),
-        "{\"nama\":\"wati\",\"tag\":[\"a\",\"b\"]}",
+        "{\"name\":\"wati\",\"tags\":[\"a\",\"b\"]}",
         .{},
     );
-    stempel(&nilai, &umur);
+    stamp(&value, &lifetime);
 
-    try testing.expectEqualStrings("wati", nilai.nama.lihat());
-    try testing.expectEqualStrings("b", nilai.tag[1].lihat());
+    try testing.expectEqualStrings("wati", value.name.view());
+    try testing.expectEqualStrings("b", value.tags[1].view());
 
-    if (!jebakan_aktif) return;
-    umur.selesai();
-    try testing.expect(!nilai.nama.hidup());
-    try testing.expect(!nilai.tag[1].hidup()); // ikut basi sampai ke dalam slice
+    if (!trap_enabled) return;
+    lifetime.end();
+    try testing.expect(!value.name.alive());
+    try testing.expect(!value.tags[1].alive()); // goes stale inside the slice too
 }
 
-test "stempel tidak menyentuh tipe tanpa Str" {
-    var umur = Umur{};
-    var polos = struct { a: u32, b: [2]f64 }{ .a = 1, .b = .{ 2, 3 } };
-    stempel(&polos, &umur);
-    try testing.expectEqual(@as(u32, 1), polos.a);
+test "stamp leaves types without a Str alone" {
+    var lifetime = Lifetime{};
+    var plain = struct { a: u32, b: [2]f64 }{ .a = 1, .b = .{ 2, 3 } };
+    stamp(&plain, &lifetime);
+    try testing.expectEqual(@as(u32, 1), plain.a);
 }
 
-test "stempel menembus optional dan struct bersarang" {
-    if (!jebakan_aktif) return;
-    var umur = Umur{};
-    const Dalam = struct { teks: Str };
-    var nilai = struct { mungkin: ?Dalam }{ .mungkin = .{ .teks = Str.statis("halo") } };
-    stempel(&nilai, &umur);
+test "stamp reaches through optionals and nested structs" {
+    if (!trap_enabled) return;
+    var lifetime = Lifetime{};
+    const Inner = struct { text: Str };
+    var value = struct { maybe: ?Inner }{ .maybe = .{ .text = Str.static("hello") } };
+    stamp(&value, &lifetime);
 
-    try testing.expect(nilai.mungkin.?.teks.hidup());
-    umur.selesai();
-    try testing.expect(!nilai.mungkin.?.teks.hidup());
+    try testing.expect(value.maybe.?.text.alive());
+    lifetime.end();
+    try testing.expect(!value.maybe.?.text.alive());
 }

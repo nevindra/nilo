@@ -1,32 +1,33 @@
 #!/usr/bin/env bash
-# Skrip benchmark zfast — ada di repo sejak tahap 1 (lihat docs/rencana.md)
-# supaya saat mesin ukur tersedia ia tinggal satu perintah, bukan proyek baru.
+# zfast's benchmark script — in the repo since stage 1 (see docs/plan.md)
+# so that when a measuring machine turns up it is one command away instead
+# of a new project.
 #
-# Metrik (docs/rencana.md):
-#   Utama    : request/detik DAN p99, GET terute dengan path param yang
-#              mengembalikan JSON ~1KB, keep-alive, tanpa pipelining.
-#   Sekunder : memori per koneksi menganggur (belum diukur skrip ini).
+# Metrics (docs/plan.md):
+#   Primary   : requests/second AND p99, on a routed GET with a path param
+#               returning ~1KB of JSON, keep-alive, no pipelining.
+#   Secondary : memory per idle connection (not measured by this script).
 #
-# Sasarannya rute contoh di src/main.zig: GET /users/:id yang mengembalikan
-# JSON ~1KB. Jalankan servernya dulu dengan `zig build -Doptimize=ReleaseFast`
-# lalu `./zig-out/bin/zfast-hello`.
+# The target is the example route in src/main.zig: GET /users/:id returning
+# ~1KB of JSON. Start the server first with
+# `zig build -Doptimize=ReleaseFast` then `./zig-out/bin/zfast-hello`.
 #
-# Uji kebocoran pesan Fungsi gagal di bawah beban ada terpisah di
-# bench/campur.lua (lihat ADR 0007) — itu uji kebenaran, bukan kecepatan.
+# The load test for fail-function message leakage lives separately in
+# bench/mixed.lua (see ADR 0007) — that one tests correctness, not speed.
 
 set -euo pipefail
 
 URL="${1:-http://127.0.0.1:8787/users/42}"
-DURASI="${DURASI:-30s}"
-KONEKSI="${KONEKSI:-64}"
-THREAD="${THREAD:-4}"
+DURATION="${DURATION:-30s}"
+CONNECTIONS="${CONNECTIONS:-64}"
+THREADS="${THREADS:-4}"
 
 if command -v wrk >/dev/null; then
-    # wrk memakai keep-alive secara default dan tidak melakukan pipelining.
-    exec wrk -t"$THREAD" -c"$KONEKSI" -d"$DURASI" --latency "$URL"
+    # wrk uses keep-alive by default and does not pipeline.
+    exec wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" --latency "$URL"
 elif command -v oha >/dev/null; then
-    exec oha -z "$DURASI" -c "$KONEKSI" --no-tui "$URL"
+    exec oha -z "$DURATION" -c "$CONNECTIONS" --no-tui "$URL"
 else
-    echo "butuh wrk atau oha. contoh pasang: sudo apt install wrk" >&2
+    echo "needs wrk or oha. to install, e.g.: sudo apt install wrk" >&2
     exit 1
 fi

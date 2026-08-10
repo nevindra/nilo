@@ -25,9 +25,9 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
-    b.step("run", "Jalankan server hello").dependOn(&run_cmd.step);
+    b.step("run", "Run the example server").dependOn(&run_cmd.step);
 
-    const tes = b.addTest(.{ .root_module = mod });
-    const run_tes = b.addRunArtifact(tes);
-    b.step("test", "Jalankan semua tes").dependOn(&run_tes.step);
+    const tests = b.addTest(.{ .root_module = mod });
+    const run_tests = b.addRunArtifact(tests);
+    b.step("test", "Run all tests").dependOn(&run_tests.step);
 }
