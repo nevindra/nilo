@@ -2,7 +2,7 @@
 
 An HTTP framework for Zig, aimed at people coming from Go or Node.
 
-> **Status: v1 feature-complete, unreleased.** Routing with path params, query params and catch-alls; typed handlers, JSON, middleware, logger, CORS, static files, chunked bodies. Not yet benchmarked on a quiet machine, so there are no performance claims here.
+> **Status: v1 feature-complete, v2 in progress, unreleased.** Routing with path params, query params and catch-alls; typed handlers, JSON, middleware, logger, CORS, static files, chunked bodies. v2 has added resolved values, route groups and plugins, and an OpenAPI document generated from the handler signatures. Not yet benchmarked on a quiet machine, so there are no performance claims here.
 > `zfast` is a working name and may change.
 
 ```zig
@@ -85,7 +85,8 @@ Arguments are matched at compile time, by one rule: **a pointer is a service, a 
 | `u32`, `f64`, `Str`, `bool`, an enum | a path param, in the order they appear in the pattern |
 | `Query(T)` | the query string, read into a struct of yours |
 | `std.mem.Allocator` | the request arena, freed when the request ends |
-| a struct | the request body, parsed from JSON |
+| a type with `zfast_resolve` | a value worked out from the request — the signed-in user, usually |
+| any other struct | the request body, parsed from JSON |
 
 The return value becomes the response: `void` → empty 200, `Str`/`[]const u8` → `text/plain`, anything else → JSON. Wrap it in `Response(T)` when the status isn't 200, or when the response carries headers of its own:
 
@@ -127,6 +128,7 @@ Reading the request:
 | `c.body()` | the whole body, read once into the request arena |
 | `c.json(T)` | the body, parsed as JSON into `T` |
 | `c.service(*Db)` | a registered service, for a handler that took no typed arguments |
+| `c.resolve(CurrentUser)` | a resolved value, for middleware — which has no argument list to ask in |
 
 Answering:
 
@@ -183,6 +185,103 @@ the request body is empty. This endpoint expects a JSON object with: title, done
 ```
 
 A field with a default is what "absent" is allowed to mean, exactly as in a query struct. Working out which of these to say costs a second parse, which is paid only by a request that was already going to be refused.
+
+## The signed-in user, and anything else worked out per request
+
+Some things a handler needs are neither a service nor request data: they are worked out *from* the request. Authentication is the whole genre. So the type says how it is worked out, and a handler asks for it by writing it in its argument list:
+
+```zig
+const CurrentUser = struct {
+    pub const zfast_resolve = authenticate;   // ← the whole wiring
+
+    id: u32,
+    name: Str,
+};
+
+fn authenticate(c: *zfast.Ctx, db: *Db) !CurrentUser {
+    const token = c.header("Authorization") orelse
+        return fail.unauthorized("this endpoint needs a token", .{});
+    return db.userForToken(token.view()) orelse
+        return fail.unauthorized("that token is not valid", .{});
+}
+
+fn me(user: CurrentUser) !Profile {
+    return .{ .id = user.id, .name = user.name };
+}
+```
+
+No registration step, nothing added to `main`. A resolver that fails goes down the same path a failing handler does, so `fail.unauthorized` is how it refuses. And `me` is still an ordinary function: `me(.{ .id = 7, .name = … })` in a test.
+
+A resolver takes a `*Ctx`, a service, a `std.mem.Allocator`, and **other resolved values** — that last one being how `Admin` gets built out of `CurrentUser` instead of out of a second copy of the auth code. It can't take a path param or the body: a resolver belongs to the request, not to a route, and the same `CurrentUser` serves `/me` and `/orders/:id`. Ask for a `*Ctx` if you need one.
+
+It's worked out **once per request**, which matters as soon as you also want to guard a whole prefix:
+
+```zig
+fn requireAdmin(c: *zfast.Ctx, next: zfast.Next) !void {
+    const user = try c.resolve(CurrentUser);
+    if (!user.is_admin) return fail.forbidden("admins only", .{});
+    try next.run(c);
+}
+
+try app.useOn("/admin", requireAdmin);
+fn stats(user: CurrentUser) !Stats { … }   // the same user, not a second lookup
+```
+
+Which one to reach for: **middleware enforces, a resolved value provides.** Only routes that name a resolved value get it, so it's the wrong tool for securing a prefix — a handler that forgets the argument simply isn't authenticated. `useOn` is what makes a rule apply whether the handler cooperates or not, and `c.resolve` is how the two meet. See [ADR 0016](./docs/adr/0016-resolved-values-are-declared-by-their-type.md).
+
+## Groups, and plugins
+
+A group is one prefix and everything under it:
+
+```zig
+const api = app.group("/api/v1");
+try api.use(requireToken);              // only /api/v1/…
+try api.get("/users/:id", getUser);     // → /api/v1/users/:id
+try api.group("/admin").get("/stats", stats);
+```
+
+The prefix is compile-time text joined onto each pattern, so the route registered is the one literal you'd have typed, and it's what every error message quotes back. A group leaves nothing behind at runtime.
+
+A plugin is an ordinary function that takes one. There's no plugin type and nothing to register:
+
+```zig
+fn metrics(g: anytype) !void {
+    try g.get("/metrics", scrape);
+    try g.use(countRequests);
+}
+
+try metrics(app.group("/internal"));
+```
+
+Because it's handed the group rather than the App, the same function mounts at any prefix, or at two.
+
+A prefix is literal text — `app.group("/orgs/:org")` is a compile error. Middleware is scoped by comparing the front of the request path against the prefix, and `/orgs/:org` is the front of no real path, so every middleware on that group would quietly never run. Put the param in the route patterns.
+
+## Documentation, from the signatures
+
+You already wrote the contract. One line serves it:
+
+```zig
+app.docs(.{ .title = "Orders", .version = "2.1.0" });
+```
+
+An OpenAPI 3.1 document at `/openapi.json`, and a page for reading it at `/docs`. Both are built when `listen()` runs, so it doesn't matter whether this line comes before or after your routes.
+
+Nothing is annotated and nothing is kept in step, because there's nothing to keep in step — `fn getUser(db: *Db, id: u32) !User` is read by exactly the same pass that decides what to pass in:
+
+```json
+"/users/{id}": { "get": {
+  "operationId": "getUsersId",
+  "parameters": [{"name":"id","in":"path","required":true,"schema":{"type":"integer"}}],
+  "responses": {"200": {"content": {"application/json": {"schema": … User … }}}}
+}}
+```
+
+A `Query(T)` becomes the query parameters, with a defaulted field marked not-required. A struct argument becomes the request body. An enum becomes the list of its names.
+
+What it won't do is claim what your signature doesn't say. A handler returning `Response(T)` picks its status at runtime, so the document says `default` rather than guessing `200`. A type with no JSON shape is `{}` — "anything", which is true. A handler that takes a `*Ctx` and digs the body out by hand documents nothing, which is an accurate description of what it told anybody.
+
+The document is served from memory like a static file, so it arrives with an ETag and a repeat visit is a 304, and it costs the request path nothing. The `/docs` page pulls its viewer from a CDN — set `.ui_path = ""` to turn it off; the document itself never needs the network. See [ADR 0017](./docs/adr/0017-the-api-description-comes-from-the-signatures.md).
 
 ## Errors
 
@@ -403,9 +502,11 @@ On the request path, a routed GET returning JSON with CORS installed makes **thr
 
 No requests-per-second figures, on purpose: that number needs a machine nobody else is using, and there isn't one yet ([`docs/plan.md`](./docs/plan.md)).
 
-## What isn't in v1
+## What isn't here yet
 
-WebSocket and SSE, TLS, sessions, templates, route groups, auth contents, range requests, streamed responses, bodies over 1 MB, and middleware handing values to handlers. Each is listed with its reason in [`docs/plan.md`](./docs/plan.md); the ones that are refusals rather than backlog are in [`docs/adr/`](./docs/adr/).
+WebSocket and SSE, TLS, sessions, templates, auth contents, range requests, streamed responses, and bodies over 1 MB.
+
+Most of that list is one missing decision rather than several: the request arena is currently the only answer to where memory comes from, and none of streaming, large bodies, or long-lived connections fits inside it. That decision is the next stage. Each item is listed with its reason in [`docs/plan.md`](./docs/plan.md); the ones that are refusals rather than backlog are in [`docs/adr/`](./docs/adr/).
 
 ## Documents
 
@@ -415,6 +516,18 @@ WebSocket and SSE, TLS, sessions, templates, route groups, auth contents, range 
 
 ## Principles
 
-Developer experience comes first; performance is pursued as long as it doesn't make life harder for the user. The reasoning is in [ADR 0001](./docs/adr/0001-dx-wins-below-the-10-percent-threshold.md).
+Developer experience comes first; performance is pursued as long as it doesn't make life harder for the user ([ADR 0001](./docs/adr/0001-dx-wins-below-the-10-percent-threshold.md)).
+
+That trade has a budget, and it isn't one number ([ADR 0018](./docs/adr/0018-the-trade-budget-has-three-axes.md)):
+
+| | |
+|---|---|
+| Throughput and p99 | DX wins below 10% |
+| Allocations per request | a hard invariant — currently 3, held by a test |
+| Memory per idle connection | a hard invariant — every feature states its cost |
+
+Throughput is elastic and the bottom two aren't: an extra allocation isn't 10% slower on average, it's fine a million times and then it's the tail. Those two rows are what lets zfast say "low memory" at all.
+
+Where the design is borrowed from — FastAPI for the signature, Elysia for resolved values and plugins, nginx and TigerBeetle for the memory discipline, Elm for the error messages — is [ADR 0015](./docs/adr/0015-what-zfast-borrows-and-from-whom.md).
 
 There are no benchmark numbers yet, so there are no performance claims here.

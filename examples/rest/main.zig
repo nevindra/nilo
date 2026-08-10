@@ -1,5 +1,6 @@
 //! A small REST API: a Service holding state, typed handlers, JSON in and
-//! out, fail functions, and a middleware of your own.
+//! out, fail functions, a middleware of your own, a resolved value, a group,
+//! and the API description that falls out of all of it.
 //!
 //! ```
 //! zig build run-rest
@@ -9,7 +10,13 @@
 //! curl localhost:8787/users/1
 //! curl localhost:8787/users/999                 # 404 with a message
 //! curl -i -X POST localhost:8787/users -d '{"name":"wati","email":"wati@example.dev"}'
-//! curl -H 'X-Token: let-me-in' localhost:8787/admin/stats
+//!
+//! curl localhost:8787/admin/stats                    # 401: no token
+//! curl -H 'X-Token: read-only' localhost:8787/admin/stats   # 403: not an admin
+//! curl -H 'X-Token: let-me-in' localhost:8787/admin/stats   # and in
+//!
+//! curl localhost:8787/openapi.json               # written from the signatures
+//! open localhost:8787/docs                       # ...and a page for reading it
 //! ```
 
 const std = @import("std");
@@ -143,18 +150,60 @@ fn createUser(store: *Store, arena: std.mem.Allocator, incoming: NewUser) !zfast
     };
 }
 
-fn stats(store: *Store) struct { users: usize } {
-    return .{ .users = store.users.items.len };
+// ---- who is asking ----
+
+/// A resolved value: worked out from the request before the handler runs,
+/// once per request, and shared by everyone who asks for it. The type says
+/// how it is worked out — that `zfast_resolve` line is the entire wiring,
+/// and there is nothing to register in `main`.
+const Caller = struct {
+    pub const zfast_resolve = identify;
+
+    name: []const u8,
+    admin: bool,
+};
+
+/// Real code looks this up in a database, in which case the resolver takes
+/// a `*Store` alongside the `*Ctx` and zfast passes it in. A missing
+/// `provide` for it would stop the server at startup, even though no
+/// handler mentions it.
+const known_tokens = [_]struct { token: []const u8, name: []const u8, admin: bool }{
+    .{ .token = "let-me-in", .name = "wati", .admin = true },
+    .{ .token = "read-only", .name = "budi", .admin = false },
+};
+
+fn identify(c: *zfast.Ctx) !Caller {
+    const token = c.header("X-Token") orelse
+        return fail.unauthorized("this endpoint needs an X-Token header", .{});
+    for (known_tokens) |known| {
+        if (token.eql(known.token)) return .{ .name = known.name, .admin = known.admin };
+    }
+    return fail.forbidden("that token is not one of ours", .{});
+}
+
+/// A handler asks for the caller by writing it in its argument list. No
+/// `Ctx`, no header parsing, and — as ever — still an ordinary function a
+/// test can call.
+fn stats(store: *Store, caller: Caller) struct { users: usize, asked_by: []const u8 } {
+    return .{ .users = store.users.items.len, .asked_by = caller.name };
 }
 
 // ---- middleware ----
 
-/// A middleware that does not call `next.run(c)` ends the chain. That is
-/// all rejecting a request takes.
-fn requireToken(c: *zfast.Ctx, next: zfast.Next) !void {
-    const token = c.header("X-Token") orelse
-        return fail.unauthorized("this endpoint needs an X-Token header", .{});
-    if (!token.eql("let-me-in")) return fail.forbidden("that token is not one of ours", .{});
+/// Middleware enforces, a resolved value provides, and this is the pair.
+///
+/// The guard runs on everything under its prefix whether or not the handler
+/// cooperates — which a resolved value cannot do, since only routes that
+/// name one get it. `c.resolve` is how a middleware reads the value without
+/// an argument list to ask in, and because it is worked out once per
+/// request, the `stats` handler behind this does not identify the caller a
+/// second time.
+///
+/// A middleware that does not call `next.run(c)` ends the chain. That is all
+/// rejecting a request takes.
+fn requireAdmin(c: *zfast.Ctx, next: zfast.Next) !void {
+    const caller = try c.resolve(Caller);
+    if (!caller.admin) return fail.forbidden("{s} is not an admin", .{caller.name});
     return next.run(c);
 }
 
@@ -171,16 +220,27 @@ pub fn main() !void {
 
     try app.provide(&store);
 
+    // An OpenAPI document at /openapi.json and a page for it at /docs,
+    // written from the handler signatures below. Nothing is annotated,
+    // because there is nothing to annotate: the description is read off the
+    // same argument lists zfast already reads to call them.
+    app.docs(.{ .title = "Users", .version = "1.0.0" });
+
     // Registration order between `use` and `get` does not matter; the
     // chains are put together when `listen()` runs.
     try app.use(zfast.logger.standard);
     try app.use(zfast.cors.permissive);
-    try app.useOn("/admin", requireToken);
 
     try app.get("/users", listUsers);
     try app.get("/users/:id", getUser);
     try app.post("/users", createUser);
-    try app.get("/admin/stats", stats);
+
+    // A group: one prefix, written once, carrying both the routes under it
+    // and the middleware that guards them. A function taking one of these
+    // instead of the App is a plugin, mountable at any prefix you like.
+    const admin = app.group("/admin");
+    try admin.use(requireAdmin);
+    try admin.get("/stats", stats);
 
     try app.listen(.{});
 }
@@ -251,4 +311,17 @@ test "listUsers reads its options from the query struct" {
 
     // Sorting a copy, so the Service every other request shares is as it was.
     try testing.expectEqualStrings("wati", store.users.items[0].name);
+}
+
+test "a handler behind auth is still an ordinary function" {
+    var store = Store{ .gpa = testing.allocator };
+    defer store.deinit();
+    _ = try store.add("wati", "wati@example.dev");
+
+    // The point worth making: a resolved value is an argument like any
+    // other, so testing an authenticated endpoint means building a `Caller`
+    // — not a request, not a token, and not a running server.
+    const answer = stats(&store, .{ .name = "wati", .admin = true });
+    try testing.expectEqual(@as(usize, 1), answer.users);
+    try testing.expectEqualStrings("wati", answer.asked_by);
 }

@@ -29,6 +29,14 @@ A specification that lies is worse than none, so the places where a Zig signatur
 
 What it does claim, it claims because the type said so: `:id` on a handler taking `u32` is an integer, a query field with a default is not required, an enum is the list of its names, `?T` is `anyOf [T, null]`.
 
+### The one thing it gets wrong, and why it is left wrong
+
+**An authenticated endpoint is documented as needing nothing.** A handler taking a `CurrentUser` requires an `Authorization` header, and the document does not say so — because a resolver is an opaque function, and the header it reads is a line of Zig inside it, not something in a type.
+
+Documenting it would mean either the resolved type declaring its own security scheme (a second thing to keep in step with the resolver, which is the drift this whole ADR exists to avoid) or reading the resolver's body, which is not something a compiler will do.
+
+So it is a known hole rather than an oversight, recorded in `docs/plan.md`. The document describes the *shape* of a request accurately and is silent on who may make one, and that is better than a made-up `securitySchemes` block that nothing enforces.
+
 ## The reader page pulls from a CDN
 
 The document is self-contained; the page that renders it is one `<script>` from jsdelivr. Bundling a viewer would put a few hundred kilobytes of somebody else's JavaScript in this repository, and writing one would be a second project.

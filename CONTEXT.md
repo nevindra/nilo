@@ -22,6 +22,10 @@ _Avoid_: Context, Request context, c
 An ordinary function that takes only what it needs and returns data. zfast matches its arguments while compiling. This is zfast's face to its users.
 _Avoid_: magic handler, extractor, auto handler
 
+**Resolved value**:
+Something zfast works out from the request before the handler runs — the signed-in user, usually. The type itself says how, by carrying the function that does it, and a handler asks for one by writing it in its argument list. Worked out once per request and shared by everyone who asks.
+_Avoid_: extension, request-scoped state, locals, context value, extractor
+
 ### Data
 
 **Str**:
@@ -55,8 +59,20 @@ A long-lived thing registered once when the App is built — a database connecti
 _Avoid_: dependency, state, context value, DI container
 
 **Middleware**:
-A piece of work that runs before and after a handler, operates at the Ctx layer, and produces no value for the handler.
+A piece of work that runs before and after a handler, operates at the Ctx layer, and produces no value for the handler. Middleware enforces; a Resolved value provides.
 _Avoid_: filter, interceptor, hook, guard
+
+**Group**:
+One path prefix and everything registered beneath it — routes, middleware, static files, further groups. The prefix is compile-time text joined onto each pattern, so a Group leaves nothing behind at runtime.
+_Avoid_: router, scope, mount, namespace
+
+**Plugin**:
+An ordinary function that takes a Group and registers into it. There is no plugin type and no registration protocol; that a plugin can be mounted at any prefix, or twice, follows from being handed the Group rather than the App.
+_Avoid_: extension, module, add-on, middleware bundle
+
+**API description**:
+The OpenAPI document zfast writes from the handler signatures. Not maintained alongside the code — read off the same argument list the compile-time engine reads, and built once when the server starts.
+_Avoid_: schema, spec file, swagger, annotations
 
 **Blocking**:
 Waiting on the operating system from inside a handler — a database driver, a file, a call out to another service. Many requests share one OS thread, so doing it directly stops all of them; `zfast.blocking` hands the call to a pool of real threads instead, and only the one request waits.

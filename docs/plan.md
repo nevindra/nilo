@@ -5,9 +5,11 @@ Decisions that are already binding live in [`docs/adr/`](./adr/); the vocabulary
 
 ## Where this sits
 
-The model is **GoFiber**: the feel of Express, a fast engine underneath. It is aimed at Go and Node people giving Zig a try.
+Through v1 the model was **GoFiber**: the feel of Express, a fast engine underneath, aimed at Go and Node people giving Zig a try. That got v1 built, and it is no longer the model — v1 overtook Fiber in the two places that decide everything above `Ctx`, so from v2 the architecture comes from elsewhere and Fiber stays only as the tone. Where each piece is borrowed from, and why, is [ADR 0015](./adr/0015-what-zfast-borrows-and-from-whom.md).
 
-Worth being honest about from the start: GoFiber is not Go's performance champion — the fast part is fasthttp underneath it. Fiber wins on *comfort*. Taking Fiber as the model means what we are chasing is **"http.zig for Go people"**, not the benchmark crown. See [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md).
+The audience does not change: people coming from Go and Node. What changes is the claim being chased. v1 chased "http.zig for Go people". v2 chases **"the signature is the whole contract"** — a handler you can read, test as a plain function, and get documentation from, on a server whose memory you can put a number on.
+
+Still not the benchmark crown. See [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md), now the first row of the three-axis budget in [ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md).
 
 ## v1 scope
 
@@ -26,8 +28,8 @@ Worth being honest about from the start: GoFiber is not Go's performance champio
 - Range requests, `sendfile`, and serving a file too big to hold in memory ([ADR 0010](./adr/0010-static-files-are-held-in-memory.md)).
 - Writing a response in pieces, and reading a body larger than `Ctx.max_body` (1 MB). Both are the same missing thing — a request whose bytes do not all have to exist at once — and both would need the request arena to stop being the answer to where memory comes from. Written down as limits in the README rather than left for somebody to find with a 413.
 - A `recover` middleware. It was in this list until stage 4's design work established that Zig cannot recover from a panic at all, and that what people actually want from it has been in the request loop since stage 3. Not deferred — impossible. See [ADR 0008](./adr/0008-no-recover-middleware.md).
-- Route groups. `app.use(prefix, mw)` covers the case that matters; groups only save repeating the prefix.
-- Handing values from middleware to handlers. The concrete gap this leaves is auth resolving a user, and it is the thing a request-scoped value concept has to solve in v2 ([ADR 0009](./adr/0009-middleware-is-an-onion-of-ctx-functions.md)).
+- ~~Route groups.~~ *Landed in v2.* The v1 reasoning — "groups only save repeating the prefix" — was right about groups as a naming convenience and wrong about them as a packaging unit, which is what a plugin needs. See "v2" below.
+- ~~Handing values from middleware to handlers.~~ *Landed in v2*, as resolved values rather than as the request-scoped map this line was imagining ([ADR 0016](./adr/0016-resolved-values-are-declared-by-their-type.md)).
 - Auth (the mechanism is provided, the contents are not — exactly like Fiber)
 - WebSocket and SSE. Long-lived connections have a completely different memory model from request-response; the request arena does not apply there, and forcing it would wreck a design that is currently tidy.
 - Template engine, sessions, TLS
@@ -83,6 +85,33 @@ The benchmark script has lived in the repo since stage 1, even unrun in anger, s
 - **A duplicate route said its piece and then printed a stack trace anyway.** Stage 7 fixed exactly this for `listen()` and missed `app.get`, which returned `error.DuplicateRoute` into the user's `try`. Now it stops the process the way `listen()` does, with `tryRoute` for a caller that wants the value.
 - **A 204 and a 304 both carried `Content-Length: 0`.** Forbidden outright on a 204 (RFC 9112 §6.2), and on a 304 it announces that the resource the client already holds is empty. Both statuses are now framed as what they are: responses that end at the blank line.
 - **`std.log.info("{s}", .{c.path()})` — the first thing anybody writes — was a compile error from inside `std.Io.Writer`**, naming neither zfast nor the fix. `Str` has a `format` method now, so `{f}` works.
+
+## v2
+
+The direction was settled first, in [ADR 0015](./adr/0015-what-zfast-borrows-and-from-whom.md), because three of v1's deferrals were deferred for want of a decided shape rather than for want of work.
+
+### Landed
+
+- **Resolved values** ([ADR 0016](./adr/0016-resolved-values-are-declared-by-their-type.md)). The gap ADR 0009 wrote into its own consequences: middleware can refuse a request but cannot hand the handler the user it just looked up. A type now declares how it is worked out, a handler asks for it by writing it in its argument list, and the chain is settled while compiling — no type map, nothing looked up by string. Worked out once per request, so a guard on a prefix and the handler behind it do not authenticate twice.
+- **Groups and plugins** ([ADR 0015](./adr/0015-what-zfast-borrows-and-from-whom.md)). ADR 0009 deferred groups on the grounds that they only save repeating a prefix, which is true of a group as a naming convenience and false of one as a packaging unit. `app.group("/api/v1")` carries routes, middleware and static files; a plugin is an ordinary function that takes one, so it can be mounted anywhere, or twice.
+- **The API description** ([ADR 0017](./adr/0017-the-api-description-comes-from-the-signatures.md)). `app.docs(.{ … })` and there is an OpenAPI 3.1 document at `/openapi.json`, read off the same argument list the compile-time engine reads. Served as a file, so it gets an ETag and a 304 for free (ADR 0010) and adds nothing to the request path.
+- **The trade budget, sharpened** ([ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md)). ADR 0001's one 10% rule is now three: throughput may slip 10% for DX, while allocations per request and memory per idle connection are hard invariants. That split is what "low memory" is allowed to mean.
+
+### Not started
+
+Everything left is engine-shaped rather than DX-shaped, and every item on this list needs the same thing first: **the request arena has to stop being the only answer to where memory comes from.** That is one decision, not five, and it is what the next stage is.
+
+- Writing a response in pieces, and reading a body larger than `Ctx.max_body` (1 MB).
+- Range requests and `sendfile`, and serving a file too big to hold in memory ([ADR 0010](./adr/0010-static-files-are-held-in-memory.md)).
+- WebSocket and SSE. A long-lived connection has a completely different memory model from request-response; Phoenix Channels is the shape to borrow (ADR 0015) — a socket gets its own lifecycle and its own state rather than being forced through the request arena.
+- Reloading static files without a restart. A development annoyance rather than a design hole.
+- TLS, sessions, templates.
+
+### Open, from the work that has landed
+
+- **The linker cannot drop what nobody uses.** The API description costs +43 KB on the hello example whether or not `docs()` is called, because the switch is a runtime `null` check ([ADR 0017](./adr/0017-the-api-description-comes-from-the-signatures.md)). Fixing it properly needs a build option that a `zig fetch` dependent has to thread through, which is a worse ergonomic problem than the one it solves. Recorded, not solved.
+- **The API description is silent about authentication.** A handler taking a `CurrentUser` needs an `Authorization` header, and the document does not say so — the header is a line of Zig inside the resolver, not something in a type ([ADR 0017](./adr/0017-the-api-description-comes-from-the-signatures.md)). Whatever fixes this must not become a second thing to keep in step with the resolver, which is the drift the generated document exists to avoid.
+- **A group prefix cannot carry a param.** `app.group("/orgs/:org")` is refused, because `use` scopes middleware by comparing the front of the request path against the prefix and `/orgs/:org` is the front of no real path — so every middleware on such a group would quietly never run. Making it work means teaching middleware scoping to match patterns rather than prefixes.
 
 ## Risks
 
