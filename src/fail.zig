@@ -58,11 +58,34 @@ pub const Failure = struct {
     }
 };
 
+/// Everything zfast tracks about the request this fiber is serving. It is
+/// what the Bulkhead slot points at, so anything reachable from anywhere —
+/// a fail function, the panic handler (ADR 0008) — finds it here.
+pub const InFlight = struct {
+    failure: Failure = .{},
+
+    /// The request line, for the panic handler. Slices into the request
+    /// arena, so valid for exactly as long as the request is.
+    method: []const u8 = "",
+    path: []const u8 = "",
+
+    pub fn startRequest(self: *InFlight, method: []const u8, path: []const u8) void {
+        self.failure.clear();
+        self.method = method;
+        self.path = path;
+    }
+};
+
+/// What this fiber is serving, or null outside a request.
+pub fn inFlight() ?*InFlight {
+    const p = bulkhead.slot() orelse return null;
+    return @ptrCast(@alignCast(p));
+}
+
 /// The Failure belonging to the request currently running, or null when
 /// there is no request.
 pub fn current() ?*Failure {
-    const p = bulkhead.slot() orelse return null;
-    return @ptrCast(@alignCast(p));
+    return &(inFlight() orelse return null).failure;
 }
 
 /// Stop the request with any status.
@@ -103,6 +126,14 @@ pub fn tooManyRequests(comptime fmt: []const u8, args: anytype) Error {
 /// anything in it that outsiders should not see.
 pub fn internal(comptime fmt: []const u8, args: anytype) Error {
     return status(500, fmt, args);
+}
+
+/// The status a failed request will actually answer with: whatever a fail
+/// function asked for, otherwise the mapping table. App uses this to build
+/// the response; the logger middleware uses it to report the status
+/// without having to guess the same thing twice.
+pub fn resolveStatus(failure: *const Failure, err: anyerror) u16 {
+    return if (failure.isSet()) failure.status else statusFor(err);
 }
 
 /// Ordinary Zig errors coming from anywhere — a database, a parser, an

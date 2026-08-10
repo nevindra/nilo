@@ -34,6 +34,9 @@ pub const Ctx = struct {
     _services: *const service_mod.Registry,
     _body: ?[]const u8 = null,
     _sent: bool = false,
+    /// The status actually sent, once something has been. 0 until then.
+    _status: u16 = 0,
+    _extra_headers: std.ArrayList(http1.Header) = .empty,
 
     /// The service of type `P` (a pointer type), for handlers that hold a
     /// `*Ctx` and so do not go through argument matching. Null if it was
@@ -106,9 +109,35 @@ pub const Ctx = struct {
 
     // ---- the response side ----
 
+    /// Add a response header. Set it before sending — a response is
+    /// flushed the moment it is sent, so there is nothing left to change
+    /// afterwards (ADR 0009).
+    ///
+    /// `name` and `value` are copied into the request arena, so passing a
+    /// value you built on the stack is safe. Setting a header the
+    /// framework writes itself — Content-Type, Content-Length, Connection
+    /// — is refused: a response carrying two of those is malformed, and in
+    /// the case of Content-Length it is a request-smuggling bug.
+    /// Content-Type is chosen through `send` instead.
+    pub fn setHeader(self: *Ctx, name: []const u8, value: []const u8) !void {
+        if (http1.isReservedHeader(name)) return error.ReservedHeader;
+        const owned = http1.Header{
+            .name = try self._arena.dupe(u8, name),
+            .value = try self._arena.dupe(u8, value),
+        };
+        for (self._extra_headers.items) |*h| {
+            if (std.ascii.eqlIgnoreCase(h.name, name)) {
+                h.* = owned; // last one wins, rather than sending both
+                return;
+            }
+        }
+        try self._extra_headers.append(self._arena, owned);
+    }
+
     pub fn send(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8) !void {
         std.debug.assert(!self._sent); // one request, one response
         self._sent = true;
+        self._status = status;
         // A handler need not know this is a HEAD: it assembles a response
         // as usual, and what must not go out is filtered here.
         if (self.method == .HEAD) return http1.writeResponseHeadOnly(
@@ -118,6 +147,7 @@ pub const Ctx = struct {
             content_type,
             response_body.len,
             self._request.keep_alive,
+            self._extra_headers.items,
         );
         try http1.writeResponse(
             self._out,
@@ -126,6 +156,7 @@ pub const Ctx = struct {
             content_type,
             response_body,
             self._request.keep_alive,
+            self._extra_headers.items,
         );
     }
 

@@ -15,6 +15,8 @@ const str_mod = @import("str.zig");
 const service_mod = @import("service.zig");
 const typed = @import("typed.zig");
 const fail = @import("fail.zig");
+const mw = @import("middleware.zig");
+const cors = @import("cors.zig");
 
 const Ctx = ctx_mod.Ctx;
 
@@ -28,6 +30,8 @@ pub const App = struct {
     /// The services handlers asked for, collected as routes are registered
     /// and checked once in `listen()` (ADR 0006).
     requirements: std.ArrayList(service_mod.Requirement) = .empty,
+    /// Middleware registrations, in the order `use` was called.
+    scoped: std.ArrayList(mw.Scoped) = .empty,
 
     pub fn init(gpa: std.mem.Allocator) App {
         return .{
@@ -38,9 +42,30 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        self.freeChains();
+        self.scoped.deinit(self.gpa);
         self.requirements.deinit(self.gpa);
         self.services.deinit();
         self.router.deinit();
+    }
+
+    /// Add a middleware that runs on every route.
+    ///
+    /// Order against route registration does not matter — chains are
+    /// resolved in `listen()`. Order among `use`/`useOn` calls is the run
+    /// order (ADR 0009).
+    pub fn use(self: *App, middleware: mw.Middleware) !void {
+        try self.scoped.append(self.gpa, .{ .prefix = "", .middleware = middleware });
+    }
+
+    /// Add a middleware that runs only on routes under `prefix`.
+    ///
+    /// ```zig
+    /// try app.useOn("/api", requireToken);
+    /// ```
+    pub fn useOn(self: *App, prefix: []const u8, middleware: mw.Middleware) !void {
+        std.debug.assert(prefix.len > 0 and prefix[0] == '/');
+        try self.scoped.append(self.gpa, .{ .prefix = prefix, .middleware = middleware });
     }
 
     /// Register a service. `ptr` must outlive the App. Its order relative
@@ -118,9 +143,31 @@ pub const App = struct {
         return error.MissingService;
     }
 
+    /// Work out which middleware wraps each route, once. Called by
+    /// `listen()`; separate so tests can drive it without a server.
+    ///
+    /// Doing this here rather than when each route is registered is what
+    /// makes `use` and `get` order-independent — Fiber's most reported
+    /// gotcha is middleware registered after a route silently not applying
+    /// to it (ADR 0009).
+    pub fn resolveChains(self: *App) !void {
+        self.freeChains();
+        for (self.router.routes.items) |*r| {
+            r.chain = try mw.chainFor(self.gpa, self.scoped.items, r.pattern);
+        }
+    }
+
+    fn freeChains(self: *App) void {
+        for (self.router.routes.items) |*r| {
+            if (r.chain.len > 0) self.gpa.free(r.chain);
+            r.chain = &.{};
+        }
+    }
+
     /// Listen and serve until the process is stopped.
     pub fn listen(self: *App, options_: bulkhead.Options) !void {
         try self.checkServices();
+        try self.resolveChains();
         try bulkhead.serve(self.gpa, options_, self, handleConnection);
     }
 
@@ -129,15 +176,15 @@ pub const App = struct {
         defer arena.deinit();
         var lifetime = str_mod.Lifetime{};
 
-        // The fail-function Failure is bound to this fiber once, then
-        // reused by every request on the same connection (ADR 0007).
-        var failure = fail.Failure{};
+        // What this fiber is serving is bound to it once, then reused by
+        // every request on the same connection (ADR 0007).
+        var in_flight = fail.InFlight{};
         var binding = bulkhead.binding_unset;
-        bulkhead.bindSlot(&binding, &failure);
+        bulkhead.bindSlot(&binding, &in_flight);
         defer bulkhead.unbindSlot(&binding);
 
         while (true) {
-            const keep_going = self.handleRequest(arena.allocator(), &lifetime, &failure, in, out);
+            const keep_going = self.handleRequest(arena.allocator(), &lifetime, &in_flight, in, out);
             // The request is done: every Str of its goes stale, then the
             // bag is emptied in one go without giving up its capacity.
             lifetime.end();
@@ -152,15 +199,16 @@ pub const App = struct {
         self: *App,
         arena: std.mem.Allocator,
         lifetime: *str_mod.Lifetime,
-        failure: *fail.Failure,
+        in_flight: *fail.InFlight,
         in: *std.Io.Reader,
         out: *std.Io.Writer,
     ) bool {
-        failure.clear();
+        const failure = &in_flight.failure;
+        in_flight.startRequest("", "");
         // On a real server the fiber slot is already installed and wins;
         // this is what keeps fail functions working when App is called
         // straight from a test, with no Engine underneath.
-        const prev_slot = bulkhead.setFallbackSlot(failure);
+        const prev_slot = bulkhead.setFallbackSlot(in_flight);
         defer _ = bulkhead.setFallbackSlot(prev_slot);
 
         // The head is copied into the request arena so every Str from this
@@ -189,6 +237,10 @@ pub const App = struct {
         const qmark = std.mem.indexOfScalar(u8, r.target, '?');
         const path = if (qmark) |i| r.target[0..i] else r.target;
 
+        // From here on the panic handler can name what was being served
+        // (ADR 0008). Both slices live in the request arena.
+        in_flight.startRequest(r.method, path);
+
         var c = Ctx{
             .method = http1.methodFrom(r.method),
             ._arena = arena,
@@ -203,14 +255,27 @@ pub const App = struct {
             ._services = &self.services,
         };
 
-        const match = self.router.match(c.method, path) orelse {
-            http1.discardBody(in, &r) catch return false;
-            sendDirect(out, c.method, 404, "not found\n", r.keep_alive) catch return false;
-            return r.keep_alive;
-        };
-        c._params = match.params[0..match.n_params];
+        // A request that matched no route still runs the middleware: a
+        // logger that cannot see 404s and a CORS that cannot answer a
+        // preflight for an unknown path are both useless exactly when you
+        // need them. What changes is only the innermost call (ADR 0009).
+        var chain: []const mw.Middleware = &.{};
+        var terminal: mw.CtxHandler = notFoundHandler;
+        var unmatched_chain = false;
 
-        match.handler(&c) catch |err| {
+        if (self.router.match(c.method, path)) |match| {
+            c._params = match.params[0..match.n_params];
+            chain = match.chain;
+            terminal = match.handler;
+        } else if (self.scoped.items.len > 0) {
+            // Nothing precomputed for a path with no route, so this one is
+            // built per request — the 404 path is cold enough to afford it.
+            chain = mw.chainFor(self.gpa, self.scoped.items, path) catch &.{};
+            unmatched_chain = chain.len > 0;
+        }
+        defer if (unmatched_chain) self.gpa.free(chain);
+
+        (mw.Next{ .rest = chain, .handler = terminal }).run(&c) catch |err| {
             // A half-sent response cannot be taken back, so the connection
             // is closed: the next request on it would read leftover bytes
             // of unclear provenance.
@@ -223,7 +288,7 @@ pub const App = struct {
             // a 404 from a fail function is a normal way to live, not a
             // reason to drop keep-alive.
             if (c._body == null) http1.discardBody(in, &r) catch return false;
-            sendFailure(out, failure, err, c.method, path, r.keep_alive) catch return false;
+            sendFailure(&c, failure, err) catch return false;
             return r.keep_alive;
         };
 
@@ -232,68 +297,76 @@ pub const App = struct {
         if (c._body == null) http1.discardBody(in, &r) catch return false;
 
         if (!c._sent) {
-            sendDirect(out, c.method, 200, "", r.keep_alive) catch return false;
+            sendDirect(&c, 200, "") catch return false;
         }
         return r.keep_alive;
     }
 };
+
+/// The innermost call when no route matched. It is a normal handler so
+/// that middleware wraps a 404 exactly as it wraps anything else.
+fn notFoundHandler(c: *Ctx) anyerror!void {
+    try c.sendText(404, "not found\n");
+}
 
 fn sendFinal(out: *std.Io.Writer, response: []const u8) void {
     out.writeAll(response) catch return;
     out.flush() catch return;
 }
 
-/// Responses App assembles itself — a 404 for an unknown route, an empty
-/// 200, a failure response — outside of `Ctx.send`. As there, the body
-/// does not go out for a HEAD.
-fn sendDirect(
-    out: *std.Io.Writer,
-    method: http1.Method,
-    status: u16,
-    body: []const u8,
-    keep_alive: bool,
-) !void {
-    if (method == .HEAD) return http1.writeResponseHeadOnly(
-        out,
+/// Responses App assembles itself — an empty 200, a failure response —
+/// outside of `Ctx.send`. As there, the body does not go out for a HEAD,
+/// and headers middleware added still go out: an error response that
+/// silently drops its CORS headers is one a browser refuses to show, which
+/// is the worst possible moment to lose them.
+fn sendDirect(c: *Ctx, status: u16, body: []const u8) !void {
+    c._sent = true;
+    c._status = status;
+    const keep_alive = c._request.keep_alive;
+    if (c.method == .HEAD) return http1.writeResponseHeadOnly(
+        c._out,
         status,
         http1.statusPhrase(status),
         "text/plain",
         body.len,
         keep_alive,
+        c._extra_headers.items,
     );
-    try http1.writeResponse(out, status, http1.statusPhrase(status), "text/plain", body, keep_alive);
+    try http1.writeResponse(
+        c._out,
+        status,
+        http1.statusPhrase(status),
+        "text/plain",
+        body,
+        keep_alive,
+        c._extra_headers.items,
+    );
 }
 
 /// Turn a handler failure into a response. A fail function's message is
 /// used if there is one; otherwise the error goes through the mapping
 /// table, and anything unrecognised becomes a 500 logged with its error
 /// name (ADR 0005).
-fn sendFailure(
-    out: *std.Io.Writer,
-    failure: *const fail.Failure,
-    err: anyerror,
-    method: http1.Method,
-    path: []const u8,
-    keep_alive: bool,
-) !void {
+fn sendFailure(c: *Ctx, failure: *const fail.Failure, err: anyerror) !void {
     var buf: [fail.max_message + 1]u8 = undefined;
 
-    const status: u16, const message: []const u8 = if (failure.isSet())
-        .{ failure.status, failure.message() }
-    else blk: {
-        const s = fail.statusFor(err);
-        if (s == 500) {
-            std.log.warn("handler {s} {s} failed: {s}", .{ @tagName(method), path, @errorName(err) });
+    const status = fail.resolveStatus(failure, err);
+    const message: []const u8 = if (failure.isSet()) failure.message() else blk: {
+        if (status == 500) {
+            std.log.warn(
+                "handler {s} {s} failed: {s}",
+                .{ @tagName(c.method), c._path, @errorName(err) },
+            );
             // Internal error names are not leaked to the client; anyone who
             // wants a readable message uses a fail function.
-            break :blk .{ s, "internal server error" };
+            break :blk "internal server error";
         }
-        break :blk .{ s, http1.statusPhrase(s) };
+        break :blk http1.statusPhrase(status);
     };
 
     // The message line ends in a newline so it reads nicely under curl.
     const body = std.fmt.bufPrint(&buf, "{s}\n", .{message}) catch message;
-    try sendDirect(out, method, status, body, keep_alive);
+    try sendDirect(c, status, body);
 }
 
 // ---- tests: all of App's HTTP behaviour, without starting a server ----
@@ -304,7 +377,7 @@ const Str = str_mod.Str;
 const Harness = struct {
     arena: std.heap.ArenaAllocator,
     lifetime: str_mod.Lifetime = .{},
-    failure: fail.Failure = .{},
+    in_flight: fail.InFlight = .{},
     buf: [4096]u8 = undefined,
 
     fn init() Harness {
@@ -315,10 +388,16 @@ const Harness = struct {
         self.arena.deinit();
     }
 
+    /// Resolve middleware chains the way `listen()` would, then send.
+    fn ready(self: *Harness, app: *App) !void {
+        _ = self;
+        try app.resolveChains();
+    }
+
     fn send(self: *Harness, app: *App, request: []const u8) struct { response: []const u8, keep_alive: bool } {
         var in = std.Io.Reader.fixed(request);
         var out = std.Io.Writer.fixed(&self.buf);
-        const keep_alive = app.handleRequest(self.arena.allocator(), &self.lifetime, &self.failure, &in, &out);
+        const keep_alive = app.handleRequest(self.arena.allocator(), &self.lifetime, &self.in_flight, &in, &out);
         self.lifetime.end();
         _ = self.arena.reset(.retain_capacity);
         return .{ .response = out.buffered(), .keep_alive = keep_alive };
@@ -739,4 +818,242 @@ test "a *Ctx handler need not declare the path params" {
     defer h.deinit();
     const result = h.send(&app, "GET /raw/42/x HTTP/1.1\r\n\r\n");
     try testing.expect(std.mem.endsWith(u8, result.response, "42"));
+}
+
+// ---- stage 4: response headers and middleware ----
+
+fn setsHeaders(c: *Ctx) anyerror!void {
+    try c.setHeader("X-One", "1");
+    try c.setHeader("X-Two", "2");
+    try c.sendText(200, "ok");
+}
+
+test "extra response headers are written after the framework's own" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/h", setsHeaders);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /h HTTP/1.1\r\n\r\n");
+    try testing.expectEqualStrings(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n" ++
+            "Connection: keep-alive\r\nX-One: 1\r\nX-Two: 2\r\n\r\nok",
+        result.response,
+    );
+}
+
+fn reservedHeader(c: *Ctx) anyerror!void {
+    try testing.expectError(error.ReservedHeader, c.setHeader("Content-Length", "999"));
+    try testing.expectError(error.ReservedHeader, c.setHeader("connection", "close"));
+    // Setting the same header twice replaces it rather than sending both.
+    try c.setHeader("X-Once", "first");
+    try c.setHeader("x-once", "second");
+    try c.sendText(200, "ok");
+}
+
+test "framework-owned headers are refused, repeats replace" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/h", reservedHeader);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /h HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, result.response, "x-once: second") != null);
+    try testing.expect(std.mem.indexOf(u8, result.response, "first") == null);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, result.response, "Content-Length:"));
+}
+
+fn tagOuter(c: *Ctx, next: mw.Next) anyerror!void {
+    try c.setHeader("X-Order", "outer");
+    try next.run(c);
+}
+
+fn tagInner(c: *Ctx, next: mw.Next) anyerror!void {
+    try c.setHeader("X-Inner", "yes");
+    try next.run(c);
+}
+
+fn rejectingMiddleware(_: *Ctx, _: mw.Next) anyerror!void {
+    return fail.unauthorized("no token", .{});
+}
+
+fn answeringMiddleware(c: *Ctx, _: mw.Next) anyerror!void {
+    try c.sendText(200, "from middleware");
+}
+
+fn plainOk(c: *Ctx) anyerror!void {
+    try c.sendText(200, "handler");
+}
+
+test "middleware wraps the handler and can set response headers" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(tagOuter);
+    try app.get("/x", plainOk);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /x HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, result.response, "X-Order: outer") != null);
+    try testing.expect(std.mem.endsWith(u8, result.response, "handler"));
+}
+
+test "use and get can be registered in either order" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    // Route first, middleware second — Fiber's classic gotcha, where the
+    // middleware would silently never run.
+    try app.get("/x", plainOk);
+    try app.use(tagOuter);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /x HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, result.response, "X-Order: outer") != null);
+}
+
+test "a prefix scopes middleware to the routes under it" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.useOn("/api", tagInner);
+    try app.get("/api/thing", plainOk);
+    try app.get("/health", plainOk);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const on = h.send(&app, "GET /api/thing HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, on.response, "X-Inner: yes") != null);
+
+    const off = h.send(&app, "GET /health HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, off.response, "X-Inner") == null);
+}
+
+test "middleware that answers short-circuits the handler" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(answeringMiddleware);
+    try app.get("/x", plainOk);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /x HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, result.response, "from middleware"));
+}
+
+test "middleware failing goes through the same path as a handler failing" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.useOn("/api", rejectingMiddleware);
+    try app.get("/api/secret", plainOk);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /api/secret HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 401 Unauthorized\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "no token") != null);
+    try testing.expect(result.keep_alive);
+}
+
+test "middleware runs even when no route matched" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(tagOuter);
+    try app.get("/known", plainOk);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /nowhere HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 404 Not Found\r\n"));
+    // A logger has to be able to see 404s, and CORS has to answer
+    // preflights for paths with no route (ADR 0009).
+    try testing.expect(std.mem.indexOf(u8, result.response, "X-Order: outer") != null);
+}
+
+test "CORS adds its headers and answers a preflight" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(cors.permissive);
+    try app.get("/x", plainOk);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const normal = h.send(&app, "GET /x HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, normal.response, "Access-Control-Allow-Origin: *") != null);
+    try testing.expect(std.mem.endsWith(u8, normal.response, "handler"));
+
+    // A preflight on a path with no OPTIONS route is still answered.
+    const preflight = h.send(
+        &app,
+        "OPTIONS /x HTTP/1.1\r\nAccess-Control-Request-Method: POST\r\n\r\n",
+    );
+    try testing.expect(std.mem.startsWith(u8, preflight.response, "HTTP/1.1 204 No Content\r\n"));
+    try testing.expect(std.mem.indexOf(u8, preflight.response, "Access-Control-Allow-Methods:") != null);
+    try testing.expect(std.mem.indexOf(u8, preflight.response, "Access-Control-Allow-Headers:") != null);
+}
+
+fn alwaysFails(_: *Ctx) anyerror!void {
+    return fail.notFound("nope", .{});
+}
+
+test "headers middleware set survive onto a failure response" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(cors.permissive);
+    try app.get("/gone", alwaysFails);
+    try app.get("/quiet2", testQuiet);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    // An error response that quietly dropped its CORS headers is one the
+    // browser refuses to show — the worst moment to lose them.
+    const failed = h.send(&app, "GET /gone HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, failed.response, "HTTP/1.1 404 Not Found\r\n"));
+    try testing.expect(std.mem.indexOf(u8, failed.response, "Access-Control-Allow-Origin: *") != null);
+
+    // Same for the empty 200 App fills in when a handler sends nothing.
+    const quiet = h.send(&app, "GET /quiet2 HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, quiet.response, "Access-Control-Allow-Origin: *") != null);
+}
+
+test "CORS with a named origin also sends Vary" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(cors.with(.{ .origin = "https://example.com", .credentials = true }));
+    try app.get("/x", plainOk);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /x HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, result.response, "Access-Control-Allow-Origin: https://example.com") != null);
+    try testing.expect(std.mem.indexOf(u8, result.response, "Vary: Origin") != null);
+    try testing.expect(std.mem.indexOf(u8, result.response, "Access-Control-Allow-Credentials: true") != null);
+}
+
+test "the in-flight request is readable, which is what the panic handler uses" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/known", plainOk);
+
+    var h = Harness.init();
+    defer h.deinit();
+    _ = h.send(&app, "GET /known HTTP/1.1\r\n\r\n");
+
+    // App records these before running the chain, so a panic anywhere
+    // inside it can name the request (ADR 0008).
+    try testing.expectEqualStrings("GET", h.in_flight.method);
+    try testing.expectEqualStrings("/known", h.in_flight.path);
 }

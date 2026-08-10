@@ -7,9 +7,11 @@
 
 const std = @import("std");
 const http1 = @import("http1.zig");
+const middleware = @import("middleware.zig");
 const Ctx = @import("ctx.zig").Ctx;
 
-pub const CtxHandler = *const fn (*Ctx) anyerror!void;
+pub const CtxHandler = middleware.CtxHandler;
+pub const Middleware = middleware.Middleware;
 
 pub const max_params = 8;
 
@@ -20,14 +22,17 @@ pub const Param = struct {
 
 pub const Match = struct {
     handler: CtxHandler,
+    /// The middleware wrapping this route, resolved once at `listen()`.
+    chain: []const Middleware = &.{},
     params: [max_params]Param = undefined,
     n_params: usize = 0,
 };
 
-const Route = struct {
+pub const Route = struct {
     method: http1.Method,
     pattern: []const u8,
     handler: CtxHandler,
+    chain: []const Middleware = &.{},
 };
 
 pub const Router = struct {
@@ -52,7 +57,7 @@ pub const Router = struct {
     pub fn match(self: *const Router, method: http1.Method, path: []const u8) ?Match {
         for (self.routes.items) |route| {
             if (route.method != method) continue;
-            var result = Match{ .handler = route.handler };
+            var result = Match{ .handler = route.handler, .chain = route.chain };
             if (matchPattern(route.pattern, path, &result)) return result;
         }
         return null;

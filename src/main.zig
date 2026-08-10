@@ -13,6 +13,10 @@ const fail = zfast.fail;
 
 pub const std_options_debug_io = bulkhead.debug_io;
 
+/// A panic still takes the process down — Zig cannot recover (ADR 0008) —
+/// but this makes it say which request was being served when it happened.
+pub const panic = zfast.panic;
+
 const User = struct {
     id: u32,
     name: []const u8,
@@ -54,6 +58,15 @@ pub fn main() !void {
     defer app.deinit();
 
     try app.provide(&db);
+
+    // Middleware order is the order registered; where the routes are
+    // registered relative to this does not matter (ADR 0009).
+    //
+    // `logger.standard` is deliberately absent: this same binary is the
+    // benchmark target, and a log line per request would measure the
+    // logger rather than the framework. Add it in a real app.
+    try app.use(zfast.cors.permissive);
+
     try app.get("/users/:id", getUser);
     try app.get("/health", health);
 

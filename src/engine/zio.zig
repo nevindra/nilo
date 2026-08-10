@@ -59,6 +59,14 @@ pub fn serve(gpa: std.mem.Allocator, options: Options, state: anytype, comptime 
     }
 }
 
+/// A monotonic clock reading in nanoseconds, for measuring how long
+/// something took. Zig 0.16's `std.time` has no clock of its own, and the
+/// Engine owns one anyway, so it comes through the Bulkhead like
+/// everything else.
+pub fn monotonicNanos() u64 {
+    return @intCast(zio.Timestamp.now(.monotonic).toNanoseconds());
+}
+
 // ---- the per-request slot (see ADR 0007) ----
 //
 // zio runs each connection in its own fiber, and many fibers share one OS

@@ -70,12 +70,23 @@ pub fn discardBody(in: *std.Io.Reader, r: *const Request) !void {
     if (r.content_length > 0) try in.discardAll64(r.content_length);
 }
 
+pub const Header = struct { name: []const u8, value: []const u8 };
+
+/// Headers the framework writes itself. A response carrying two of any of
+/// these is not merely untidy — a duplicated `Content-Length` is the
+/// classic request-smuggling bug — so `Ctx.setHeader` refuses them.
+pub fn isReservedHeader(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, "content-type") or
+        std.ascii.eqlIgnoreCase(name, "content-length") or
+        std.ascii.eqlIgnoreCase(name, "connection");
+}
+
 /// Iterate every header in a head (the request line is skipped), for
 /// layers that need all the headers, not just the ones the parser uses.
 pub const HeaderIterator = struct {
     lines: std.mem.SplitIterator(u8, .scalar),
 
-    pub const Pair = struct { name: []const u8, value: []const u8 };
+    pub const Pair = Header;
 
     pub fn from(head: []const u8) HeaderIterator {
         var lines = std.mem.splitScalar(u8, head, '\n');
@@ -221,6 +232,8 @@ pub fn staticResponse(
 }
 
 /// The cold path, for responses whose contents are only known at runtime.
+/// `extra` are headers a handler or middleware added; the framework's own
+/// three go out first and `extra` may not repeat them.
 pub fn writeResponse(
     out: *std.Io.Writer,
     status: u16,
@@ -228,8 +241,9 @@ pub fn writeResponse(
     content_type: []const u8,
     body: []const u8,
     keep_alive: bool,
+    extra: []const Header,
 ) !void {
-    try writeHead(out, status, phrase, content_type, body.len, keep_alive);
+    try writeHead(out, status, phrase, content_type, body.len, keep_alive, extra);
     try out.writeAll(body);
     try out.flush();
 }
@@ -244,8 +258,9 @@ pub fn writeResponseHeadOnly(
     content_type: []const u8,
     body_len: usize,
     keep_alive: bool,
+    extra: []const Header,
 ) !void {
-    try writeHead(out, status, phrase, content_type, body_len, keep_alive);
+    try writeHead(out, status, phrase, content_type, body_len, keep_alive, extra);
     try out.flush();
 }
 
@@ -256,11 +271,14 @@ fn writeHead(
     content_type: []const u8,
     body_len: usize,
     keep_alive: bool,
+    extra: []const Header,
 ) !void {
     try out.print(
-        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: {s}\r\n\r\n",
+        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: {s}\r\n",
         .{ status, phrase, content_type, body_len, if (keep_alive) "keep-alive" else "close" },
     );
+    for (extra) |h| try out.print("{s}: {s}\r\n", .{ h.name, h.value });
+    try out.writeAll("\r\n");
 }
 
 fn trimCR(line: []const u8) []const u8 {
@@ -350,18 +368,39 @@ test "staticResponse and writeResponse produce the same bytes" {
     const fixed = comptime staticResponse(200, "OK", "text/plain", "hello\n", true);
     var buf: [256]u8 = undefined;
     var out = std.Io.Writer.fixed(&buf);
-    try writeResponse(&out, 200, "OK", "text/plain", "hello\n", true);
+    try writeResponse(&out, 200, "OK", "text/plain", "hello\n", true, &.{});
     try testing.expectEqualStrings(fixed, out.buffered());
 }
 
 test "writeResponseHeadOnly matches writeResponse's head but sends no body" {
     var full_buf: [256]u8 = undefined;
     var full = std.Io.Writer.fixed(&full_buf);
-    try writeResponse(&full, 200, "OK", "text/plain", "hello\n", true);
+    try writeResponse(&full, 200, "OK", "text/plain", "hello\n", true, &.{});
 
     var head_buf: [256]u8 = undefined;
     var head = std.Io.Writer.fixed(&head_buf);
-    try writeResponseHeadOnly(&head, 200, "OK", "text/plain", "hello\n".len, true);
+    try writeResponseHeadOnly(&head, 200, "OK", "text/plain", "hello\n".len, true, &.{});
 
     try testing.expectEqualStrings(full.buffered()[0 .. full.buffered().len - "hello\n".len], head.buffered());
+}
+
+test "extra headers go out after the framework's own" {
+    var buf: [256]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buf);
+    try writeResponse(&out, 200, "OK", "text/plain", "hi", true, &.{
+        .{ .name = "Access-Control-Allow-Origin", .value = "*" },
+        .{ .name = "Vary", .value = "Origin" },
+    });
+    try testing.expectEqualStrings(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n" ++
+            "Connection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\nVary: Origin\r\n\r\nhi",
+        out.buffered(),
+    );
+}
+
+test "the framework's own headers are reserved" {
+    try testing.expect(isReservedHeader("Content-Length"));
+    try testing.expect(isReservedHeader("content-type"));
+    try testing.expect(isReservedHeader("CONNECTION"));
+    try testing.expect(!isReservedHeader("Vary"));
 }
