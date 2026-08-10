@@ -2,7 +2,7 @@
 
 An HTTP framework for Zig, aimed at people coming from Go or Node.
 
-> **Status: design stage. No code yet.**
+> **Status: stage 1 of 5 ("rangka jalan") — accepts connections through the Mesin boundary, parses HTTP/1.1, and answers "hello". No framework layer yet.**
 > `zfast` is a working name and may change.
 
 ## Documents
