@@ -30,8 +30,15 @@ pub fn layani(gpa: std.mem.Allocator, opsi: Opsi, comptime penangan: Penangan) !
         fn urus(stream: zio.net.Stream) void {
             defer stream.close();
 
-            var buf_baca: [16 * 1024]u8 = undefined;
-            var buf_tulis: [16 * 1024]u8 = undefined;
+            // Satu respons = satu flush = satu segmen; Nagle cuma nambah
+            // latensi tanpa ada yang dihemat, jadi dimatikan.
+            stream.socket.setNoDelay(true) catch {};
+
+            // Buffer baca sekaligus plafon ukuran kepala permintaan (431
+            // kalau lewat). Buffer tulis cukup untuk kepala respons + body
+            // seukuran metrik utama (~1KB JSON).
+            var buf_baca: [8 * 1024]u8 = undefined;
+            var buf_tulis: [4 * 1024]u8 = undefined;
             var pembaca = stream.reader(&buf_baca);
             var penulis = stream.writer(&buf_tulis);
 
