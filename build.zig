@@ -42,6 +42,19 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
     b.step("run", "Run the benchmark server").dependOn(&b.addRunArtifact(exe).step);
 
+    // Where the time inside one request goes. Not a test: a number that
+    // moves with the weather has no business failing a build.
+    const profile = b.addExecutable(.{
+        .name = "zfast-profile",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/profile.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{.{ .name = "zio", .module = zio.module("zio") }},
+        }),
+    });
+    b.step("profile", "Time the pieces of one request").dependOn(&b.addRunArtifact(profile).step);
+
     const test_step = b.step("test", "Run all tests");
     for ([_]*std.Build.Module{ zfast, bench }) |module| {
         const tests = b.addTest(.{ .root_module = module });

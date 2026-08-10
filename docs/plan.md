@@ -90,6 +90,26 @@ Requests per second is the number that needs a machine nobody else is using. Two
 
 Neither says how fast the server is. Both notice when it gets worse, which is what is available until there is somewhere honest to measure.
 
+### Where the time inside a request goes
+
+`zig build profile` times the pieces of one request against in-memory buffers — the inside view, where `bench/bench.sh` is the outside one. The end-to-end figure wobbles by a third on a busy box and is not worth quoting; the proportions hold, and they were a surprise:
+
+```
+  read the head                  86ns   11.3%
+  parse the head                145ns   18.9%
+  copy the head to the arena     25ns    3.3%
+  match the route                40ns    5.2%
+  serialise the body            102ns   13.3%
+  write the response             74ns    9.7%
+  arena alloc + reset            20ns    2.7%
+```
+
+Reading and parsing the head is the largest single thing a request does, and it had never been looked at as a cost. Route matching, which had, is 5%. The remaining third is the glue: building the `Ctx`, walking the middleware chain, matching handler arguments, decoding path params.
+
+What this says about where to look next: `std.json` at 13% is the one thing on this list with no ceiling on how much better it could get, and plan.md has been flagging it as a risk since stage 1. The rest is close enough to the floor that the next real gain is architectural, not local.
+
+### How the work grows
+
 A third kind of number needs no machine at all: how the work grows. Two places were growing wrong, and both were fixed on that basis rather than on a benchmark.
 
 - **Finding the end of a request head** restarted from byte zero on every read. A head arriving in one packet cost one pass; the same head dribbled in a byte at a time cost a pass per byte — quadratic, and reachable by any client that chooses to be slow. It now resumes where it left off.

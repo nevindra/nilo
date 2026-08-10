@@ -253,29 +253,43 @@ pub fn parseRequestLine(line: []const u8, r: *Request) ParseError!void {
     r.target = target;
 }
 
+/// Only three header names change how the request is read. Every other
+/// one is still checked for a colon — a line without one is malformed and
+/// is not going to be quietly accepted — but nothing past the name is
+/// touched, because the parser has no use for it.
+///
+/// The name length is looked at before the name itself, so a request full
+/// of `Accept`, `Cookie` and `User-Agent` costs one integer compare each
+/// rather than three case-insensitive string compares and a trim.
 pub fn applyHeader(line: []const u8, r: *Request) ParseError!void {
     const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.BadHeader;
     const name = line[0..colon];
-    const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
 
-    // Ordered by how often they show up; the name length is checked first
-    // so the case-insensitive compare almost always runs just once.
     switch (name.len) {
-        "connection".len => if (std.ascii.eqlIgnoreCase(name, "connection")) {
+        "connection".len => {
+            if (!std.ascii.eqlIgnoreCase(name, "connection")) return;
+            const value = headerValue(line, colon);
             if (std.ascii.eqlIgnoreCase(value, "close")) {
                 r.keep_alive = false;
             } else if (std.ascii.eqlIgnoreCase(value, "keep-alive")) {
                 r.keep_alive = true;
             }
         },
-        "content-length".len => if (std.ascii.eqlIgnoreCase(name, "content-length")) {
-            r.content_length = std.fmt.parseInt(u64, value, 10) catch return error.BadHeader;
+        "content-length".len => {
+            if (!std.ascii.eqlIgnoreCase(name, "content-length")) return;
+            r.content_length = std.fmt.parseInt(u64, headerValue(line, colon), 10) catch
+                return error.BadHeader;
         },
-        "transfer-encoding".len => if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
-            if (std.ascii.indexOfIgnoreCase(value, "chunked") != null) r.chunked = true;
+        "transfer-encoding".len => {
+            if (!std.ascii.eqlIgnoreCase(name, "transfer-encoding")) return;
+            if (std.ascii.indexOfIgnoreCase(headerValue(line, colon), "chunked") != null) r.chunked = true;
         },
         else => {},
     }
+}
+
+fn headerValue(line: []const u8, colon: usize) []const u8 {
+    return std.mem.trim(u8, line[colon + 1 ..], " \t");
 }
 
 pub fn statusPhrase(status: u16) []const u8 {
@@ -352,6 +366,24 @@ pub fn writeResponseHeadOnly(
     try out.flush();
 }
 
+/// The whole first line, assembled at compile time for every status the
+/// framework knows. A response then starts with one `writeAll` of a
+/// constant instead of formatting an integer and pasting three pieces
+/// together — and the status and its phrase cannot drift apart, because
+/// there is only one of them.
+fn statusLine(comptime status: u16) []const u8 {
+    return std.fmt.comptimePrint("HTTP/1.1 {d} {s}\r\n", .{ status, statusPhrase(status) });
+}
+
+fn writeStatusLine(out: *std.Io.Writer, status: u16, phrase: []const u8) !void {
+    switch (status) {
+        inline 200, 201, 204, 301, 302, 304, 400, 401, 403, 404, 405, 409, 413, 422, 429, 431, 500, 501, 503 => |s| {
+            return out.writeAll(comptime statusLine(s));
+        },
+        else => return out.print("HTTP/1.1 {d} {s}\r\n", .{ status, phrase }),
+    }
+}
+
 fn writeHead(
     out: *std.Io.Writer,
     status: u16,
@@ -361,9 +393,10 @@ fn writeHead(
     keep_alive: bool,
     extra: []const Header,
 ) !void {
+    try writeStatusLine(out, status, phrase);
     try out.print(
-        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: {s}\r\n",
-        .{ status, phrase, content_type, body_len, if (keep_alive) "keep-alive" else "close" },
+        "Content-Type: {s}\r\nContent-Length: {d}\r\nConnection: {s}\r\n",
+        .{ content_type, body_len, if (keep_alive) "keep-alive" else "close" },
     );
     for (extra) |h| try out.print("{s}: {s}\r\n", .{ h.name, h.value });
     try out.writeAll("\r\n");
