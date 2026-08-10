@@ -106,6 +106,10 @@ fn createUser(db: *Db, arena: std.mem.Allocator, incoming: NewUser) !Response(Us
 
 A `std.mem.Allocator` argument is the request arena — the thing to build a header value in, since it lives exactly as long as the response needs it to and is thrown away afterwards. Nothing to free.
 
+> **Known bug, don't ship this one yet.** The snippet above is a use-after-return in `ReleaseSafe` and `ReleaseFast`. `headers` is a slice, and `&.{…}` holding a value computed at runtime is a temporary in the handler's own stack frame — so the slice dangles the moment the handler returns. With literal values only it is fine, because Zig puts those in static memory, which is what hid it.
+>
+> Until `Response(T)` is changed to own its headers, use `c.setHeader("Location", …)` for a computed header. That copies into the request arena straight away and has never had the problem. The full diagnosis is in [`docs/plan.md`](./docs/plan.md).
+
 Getting any of this wrong stops the compiler with a message that names the route and tells you what to do about it — never a runtime surprise. Asking for a service you forgot to register stops `listen()` before the socket opens.
 
 When you need full control — a header the typed layer has no argument for, a body you want to look at before parsing — the handler simply asks for a `*Ctx`. Both layers are the same layer: the typed one compiles down into `Ctx` calls, and a handler can take a `*Ctx` alongside its typed arguments.

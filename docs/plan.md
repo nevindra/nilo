@@ -113,6 +113,48 @@ Everything left is engine-shaped rather than DX-shaped, and every item on this l
 - **The API description is silent about authentication.** A handler taking a `CurrentUser` needs an `Authorization` header, and the document does not say so — the header is a line of Zig inside the resolver, not something in a type ([ADR 0017](./adr/0017-the-api-description-comes-from-the-signatures.md)). Whatever fixes this must not become a second thing to keep in step with the resolver, which is the drift the generated document exists to avoid.
 - **A group prefix cannot carry a param.** `app.group("/orgs/:org")` is refused, because `use` scopes middleware by comparing the front of the request path against the prefix and `/orgs/:org` is the front of no real path — so every middleware on such a group would quietly never run. Making it work means teaching middleware scoping to match patterns rather than prefixes.
 
+## Known bug: `Response(T).headers` dangles when a value is computed
+
+Found while running the suite in `ReleaseSafe` and `ReleaseFast` during v2. **It is a v1 bug, present since stage 6**, and it is the most important thing on this page.
+
+```zig
+return .{
+    .status = 201,
+    .headers = &.{.{
+        .name = "Location",
+        .value = try std.fmt.allocPrint(arena, "/users/{d}", .{created.id}),
+    }},
+    .value = created,
+};
+```
+
+`headers` is a `[]const Header`. When every part of that literal is comptime-known, Zig promotes the array to static memory and the slice is valid for ever. When any part is not — and a `Location` header never is — the array is a **temporary in the handler's own stack frame**, and returning a slice of it is a use-after-return. `sendResult` reads it after the frame is gone.
+
+In `Debug` the bytes happen to still be there, so every test passes. In `ReleaseSafe` and `ReleaseFast` it is a segfault.
+
+Two tests fail on it today, and they are exactly the two that compute a header value:
+
+- `app.test.a handler can ask for the request arena to build a header in`
+- `main.test.createUser refuses a body that does not make sense` (the rest example)
+
+The test that passes — `Response(T) carries headers of its own` — uses literal values only, which is what hid this.
+
+### Why this is bad beyond the two tests
+
+It is in the README's flagship `Response(T)` example, it is in the rest example, and `ReleaseSafe` is the mode the README tells people to deploy in (ADR 0008). Stage 6 added `Response.headers` specifically so a 201 with a `Location` would not need a `*Ctx`; that is the exact shape that breaks.
+
+### What fixing it means
+
+There is no fix that keeps `&.{…}` with a runtime value, because the lifetime is the problem and not the contents — `sendResult` cannot copy from a pointer that is already dangling when it receives it. So `Response(T)` has to own its headers by value, which is a public API change. The shape that keeps the ergonomics closest:
+
+```zig
+.headers = .of(&.{.{ .name = "Location", .value = … }}),
+```
+
+where `Headers` is a small inline array and `of` copies the temporary while it is still alive. The cost is a cap on how many headers a `Response` can carry, and a slightly noisier line.
+
+Not done here, because picking that cap and changing a public API is a decision worth making deliberately rather than at the end of a long session. `c.setHeader(…)` is the workaround in the meantime and has never had this problem — it copies into the request arena immediately.
+
 ## Risks
 
 | Risk | How it is handled |
@@ -124,6 +166,7 @@ Everything left is engine-shaped rather than DX-shaped, and every item on this l
 | `std.json` may not be fast enough, and it sits on the hot path of the chosen metric | A custom serialiser for the small-JSON path is likely needed; measure first |
 | ~~Static files are deeper than they look (range requests, caching, sendfile)~~ *Cleared.* Serving from memory kept v1's version small, and caching came along free with it | Range requests and `sendfile` are v2, and arrive as an addition rather than a rewrite ([ADR 0010](./adr/0010-static-files-are-held-in-memory.md)) |
 | A Service is shared across executor threads, and nothing makes a user notice | `zfast.Mutex` from the Bulkhead, in the README and in the example everyone copies. Nothing forces it — Zig has no ownership tracking to force it with ([ADR 0011](./adr/0011-shared-services-need-a-lock-from-the-bulkhead.md)) |
+| The suite is only ever run in `Debug`, and a lifetime bug can pass there and crash in release | Not handled, and it cost one: see "Known bug" above. `zig build test` should run in `ReleaseSafe` too, and that is cheap to add once the bug it would have caught is fixed |
 | A panic in any handler takes the whole process down, and Go people will assume otherwise | Cannot be fixed in Zig. Say it plainly in the docs, recommend `ReleaseSafe` and a supervisor, and log which request was in flight ([ADR 0008](./adr/0008-no-recover-middleware.md)) |
 
 ## Still open
