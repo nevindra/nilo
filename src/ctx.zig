@@ -9,6 +9,7 @@
 //! users.
 
 const std = @import("std");
+const body_mod = @import("body.zig");
 const http1 = @import("http1.zig");
 const router = @import("router.zig");
 const service_mod = @import("service.zig");
@@ -68,6 +69,9 @@ pub const Ctx = struct {
     /// when App is driven directly by a test, where nothing is stopping.
     _stopping: ?*const std.atomic.Value(bool) = null,
     _body: ?[]const u8 = null,
+    /// Set when the handler asked to read the body in pieces, and how far it
+    /// got. App reads it to discard whatever is left (ADR 0020).
+    _incoming: ?body_mod.Progress = null,
     /// Set when reading the body went wrong in a way that leaves the
     /// connection at an unknown byte. App reads it and does not reuse the
     /// connection.
@@ -212,6 +216,43 @@ pub const Ctx = struct {
             }
         }
         return Str.fromRequest(self._body.?, self._lifetime);
+    }
+
+    /// The request body, read in pieces rather than all at once — for the
+    /// ones too big to hold (ADR 0020).
+    ///
+    /// ```zig
+    /// var incoming = try c.bodyStream();
+    /// var buf: [64 * 1024]u8 = undefined;
+    /// while (try incoming.read(&buf)) |part| try file.writeAll(part);
+    /// ```
+    ///
+    /// Memory is the buffer you pass in and nothing else: this allocates
+    /// not one byte, where `body()` reads the whole thing into the request
+    /// arena and refuses past a megabyte. Content-Length and chunked look
+    /// the same from here, as they do to `body()`.
+    ///
+    /// A body left half-read is fine — App discards the rest so the
+    /// connection is clean for the next request.
+    pub fn bodyStream(self: *Ctx) !body_mod.Body {
+        return self.bodyStreamWith(.{});
+    }
+
+    /// `bodyStream`, with a different ceiling on how much body to accept.
+    pub fn bodyStreamWith(self: *Ctx, options: body_mod.Options) !body_mod.Body {
+        // Asking twice would hand out two readers into one stream, and the
+        // second would get whatever the first left.
+        std.debug.assert(self._body == null and self._incoming == null);
+
+        // A Content-Length says up front how big it is, so a body over the
+        // limit is refused before a byte of it is read. A chunked one has to
+        // be counted as it arrives.
+        if (!self._request.chunked and self._request.content_length > options.max_bytes) {
+            return error.BodyTooLarge;
+        }
+
+        self._incoming = .start(self._request, options.max_bytes);
+        return .init(self._in, &self._incoming.?);
     }
 
     /// Parse the request body as JSON into `T`. The result lives in the

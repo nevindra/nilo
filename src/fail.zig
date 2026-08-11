@@ -118,6 +118,12 @@ pub fn unprocessable(comptime fmt: []const u8, args: anytype) Error {
     return status(422, fmt, args);
 }
 
+/// A 413, for a request body bigger than the endpoint will take. What
+/// `c.bodyStream()` refusing a `Content-Length` wants to become (ADR 0020).
+pub fn tooLarge(comptime fmt: []const u8, args: anytype) Error {
+    return status(413, fmt, args);
+}
+
 pub fn tooManyRequests(comptime fmt: []const u8, args: anytype) Error {
     return status(429, fmt, args);
 }

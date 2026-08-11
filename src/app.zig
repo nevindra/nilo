@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const bulkhead = @import("bulkhead.zig");
+const body_mod = @import("body.zig");
 const http1 = @import("http1.zig");
 const router_mod = @import("router.zig");
 const ctx_mod = @import("ctx.zig");
@@ -875,6 +876,16 @@ const RouteList = struct {
 fn drain(c: *Ctx, in: *std.Io.Reader, r: *const http1.Request) bool {
     if (!c.keepAlive() or c._stream_desynced) return false;
     if (c._body != null) return true;
+    // The handler read the body in pieces and may have stopped part way —
+    // a `while (try incoming.read(…))` that breaks early is an ordinary
+    // thing to write. What is left of it goes here, so the next request on
+    // this connection starts where it should (ADR 0020).
+    if (c._incoming) |*progress| {
+        if (progress.finished()) return true;
+        var rest = body_mod.Body.init(in, progress);
+        rest.discardRest() catch return false;
+        return true;
+    }
     http1.discardBody(in, r, ctx_mod.max_body) catch return false;
     return true;
 }
@@ -3277,4 +3288,143 @@ test "a shutdown asks a stream to wind up rather than cutting it off" {
     // And the connection is not offered for another request, because the
     // server is going away.
     try testing.expect(!result.keep_alive);
+}
+
+// ---- request bodies read in pieces (ADR 0020) ----
+
+/// Counts the body rather than holding it, which is the point: this handler
+/// works the same for eleven bytes and eleven gigabytes.
+fn weighBody(c: *Ctx) anyerror!void {
+    var incoming = try c.bodyStream();
+    var buf: [8]u8 = undefined;
+    var total: u64 = 0;
+    var pieces: u32 = 0;
+    while (try incoming.read(&buf)) |part| {
+        total += part.len;
+        pieces += 1;
+    }
+    try c.sendJson(200, .{ .bytes = total, .pieces = pieces, .said = incoming.size() });
+}
+
+/// Reads the first few bytes and loses interest. App has to leave the
+/// connection at the next request anyway.
+fn peekBody(c: *Ctx) anyerror!void {
+    var incoming = try c.bodyStream();
+    var buf: [4]u8 = undefined;
+    const first = (try incoming.read(&buf)) orelse "";
+    try c.sendText(200, first);
+}
+
+test "a body read in pieces arrives whole, and says how big it said it was" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/weigh", weighBody);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "POST /weigh HTTP/1.1\r\nContent-Length: 20\r\n\r\nabcdefghijklmnopqrst");
+
+    // Twenty bytes through an eight-byte buffer: three reads, and the
+    // handler never held more than eight of them.
+    try testing.expect(std.mem.indexOf(u8, result.response, "{\"bytes\":20,\"pieces\":3,\"said\":20}") != null);
+    try testing.expect(result.keep_alive);
+}
+
+test "a chunked body read in pieces says nothing about its size" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/weigh", weighBody);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(
+        &app,
+        "POST /weigh HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n" ++
+            "5\r\nhello\r\n7\r\n, world\r\n0\r\n\r\n",
+    );
+
+    // Twelve bytes of body, and `said` is null: a chunked body announces no
+    // length, which is the whole reason it exists.
+    try testing.expect(std.mem.indexOf(u8, result.response, "{\"bytes\":12,\"pieces\":2,\"said\":null}") != null);
+}
+
+test "a body the handler stopped reading is discarded, and the connection continues" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/peek", peekBody);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(
+        &app,
+        "POST /peek HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n" ++
+            "5\r\nhello\r\n7\r\n, world\r\n0\r\n\r\n",
+    );
+
+    try testing.expect(std.mem.endsWith(u8, result.response, "hell"));
+    // Eight bytes of body were never read and the connection is still
+    // offered: App finished what the handler started.
+    try testing.expect(result.keep_alive);
+}
+
+test "a Content-Length past the ceiling is refused before a byte is read" {
+    const refuse = struct {
+        fn run(c: *Ctx) anyerror!void {
+            var incoming = c.bodyStreamWith(.{ .max_bytes = 8 }) catch
+                return fail.tooLarge("that upload is bigger than this endpoint takes", .{});
+            var buf: [8]u8 = undefined;
+            while (try incoming.read(&buf)) |_| {}
+            try c.sendText(200, "took it");
+        }
+    }.run;
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/upload", refuse);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "POST /upload HTTP/1.1\r\nContent-Length: 20\r\n\r\nabcdefghijklmnopqrst");
+
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 413"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "bigger than this endpoint takes") != null);
+    // The body was never read, but it is still discarded, so the connection
+    // is usable — a 413 is an answer, not a reason to hang up.
+    try testing.expect(result.keep_alive);
+}
+
+test "a body read in pieces allocates nothing" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/weigh", weighBody);
+    try app.resolveChains();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var counting = budget.Counting{ .child = arena.allocator() };
+    var lifetime = str_mod.Lifetime{};
+    var in_flight = fail.InFlight{};
+    var buf: [4096]u8 = undefined;
+
+    const request = "POST /weigh HTTP/1.1\r\nContent-Length: 200\r\n\r\n" ++ ("x" ** 200);
+    const send = struct {
+        fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
+            var in = std.Io.Reader.fixed(request);
+            var out = std.Io.Writer.fixed(b);
+            _ = a.handleRequest(gpa, l, f, &in, &out);
+            l.end();
+        }
+    }.once;
+
+    for (0..3) |_| {
+        send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+        _ = arena.reset(.{ .retain_with_limit = arena_keep });
+    }
+    counting.reset();
+    send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+
+    // Two: the request head, and the JSON answer. Two hundred bytes of body
+    // went past in twenty-five reads and not one of them allocated —
+    // `c.body()` would have made it three and held the lot.
+    try testing.expectEqual(@as(usize, 2), counting.allocs);
 }

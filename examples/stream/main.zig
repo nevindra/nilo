@@ -5,7 +5,8 @@
 //!
 //! ```
 //! curl localhost:8787/report.csv
-//! curl -N localhost:8787/tokens      # -N, or curl buffers it for you
+//! curl -N localhost:8787/tokens               # -N, or curl buffers it for you
+//! curl --data-binary @big.iso localhost:8787/upload
 //! open http://localhost:8787/
 //! ```
 
@@ -75,6 +76,25 @@ const poem = [_][]const u8{
     "finished",
 };
 
+/// The other direction: a body too big to hold, read in pieces.
+///
+/// `c.body()` would read the whole thing into the request arena and refuse
+/// past a megabyte, which is right for JSON and wrong for a file. This
+/// allocates nothing at all — the 64 KB below is the only memory involved,
+/// and it is on this function's own stack.
+fn upload(c: *zfast.Ctx) !Receipt {
+    var incoming = c.bodyStreamWith(.{ .max_bytes = 8 * 1024 * 1024 }) catch
+        return zfast.fail.tooLarge("this endpoint takes up to 8 MB", .{});
+
+    var digest = std.hash.Crc32.init();
+    var buf: [64 * 1024]u8 = undefined;
+    while (try incoming.read(&buf)) |part| digest.update(part);
+
+    return .{ .bytes = incoming.seen(), .crc32 = digest.final() };
+}
+
+const Receipt = struct { bytes: u64, crc32: u32 };
+
 /// A service, so the report has somewhere to get its numbers. Read-only, so
 /// it needs no lock — see the rest example for the other case.
 const Meter = struct {
@@ -120,6 +140,7 @@ pub fn main() !void {
     try app.get("/", page);
     try app.get("/report.csv", report);
     try app.get("/tokens", tokens);
+    try app.post("/upload", upload);
 
     try app.listen(.{});
 }
@@ -173,4 +194,30 @@ test "the token stream is an event stream, and says when it is done" {
     // The last event has the shape of a result, so a client can tell
     // "finished" from "the connection dropped".
     try testing.expect(std.mem.endsWith(u8, events, "event: done\ndata: {\"tokens\":26}\n\n"));
+}
+
+test "an upload is read in pieces, and the whole of it is seen" {
+    var app = zfast.App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/upload", upload);
+
+    var client = try zfast.testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    // Bigger than the 64 KB buffer the handler reads through, so this really
+    // does go round the loop more than once.
+    const payload = try testing.allocator.alloc(u8, 200_000);
+    defer testing.allocator.free(payload);
+    for (payload, 0..) |*byte, i| byte.* = @truncate(i);
+
+    const answer = try client.post(&app, "/upload", payload);
+    try testing.expectEqual(@as(u16, 200), answer.status);
+
+    var expected: [64]u8 = undefined;
+    const line = try std.fmt.bufPrint(
+        &expected,
+        "{{\"bytes\":200000,\"crc32\":{d}}}",
+        .{std.hash.Crc32.hash(payload)},
+    );
+    try testing.expectEqualStrings(line, answer.body);
 }

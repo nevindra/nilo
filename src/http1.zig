@@ -111,7 +111,7 @@ pub fn discardChunkedBody(in: *std.Io.Reader, limit: u64) !void {
 
 /// The size line of a chunk. Anything after a `;` is a chunk extension —
 /// nobody sends them, but the size in front of one is still a valid size.
-fn readChunkSize(in: *std.Io.Reader) !u64 {
+pub fn readChunkSize(in: *std.Io.Reader) !u64 {
     const line = takeLine(in) catch return error.BadChunk;
     const end = std.mem.indexOfScalar(u8, line, ';') orelse line.len;
     const digits = std.mem.trim(u8, line[0..end], " \t");
@@ -122,12 +122,12 @@ fn readChunkSize(in: *std.Io.Reader) !u64 {
 /// A chunk's data is followed by its own CRLF. Anything else means the
 /// stream and the sizes have drifted apart, and everything read after that
 /// point would be someone else's bytes.
-fn endOfChunk(in: *std.Io.Reader) !void {
+pub fn endOfChunk(in: *std.Io.Reader) !void {
     const line = takeLine(in) catch return error.BadChunk;
     if (line.len != 0) return error.BadChunk;
 }
 
-fn skipTrailers(in: *std.Io.Reader) !void {
+pub fn skipTrailers(in: *std.Io.Reader) !void {
     while (true) {
         // A client that closes straight after the last chunk has still
         // sent a complete body; there is nothing to gain by failing here.

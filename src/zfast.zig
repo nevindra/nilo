@@ -112,6 +112,10 @@ pub const Stream = @import("stream.zig").Stream;
 /// A stream of server-sent events, from `c.events()`.
 pub const Events = @import("stream.zig").Events;
 
+/// A request body read in pieces, from `c.bodyStream()` — for the ones too
+/// big to hold in the request arena (ADR 0020).
+pub const Body = @import("body.zig").Body;
+
 /// One message on an event stream: `.{ .name = "token", .data = text }`.
 pub const Event = @import("stream.zig").Event;
 
@@ -254,6 +258,7 @@ test {
     _ = @import("resolve.zig");
     _ = @import("openapi.zig");
     _ = @import("stream.zig");
+    _ = @import("body.zig");
     _ = @import("testing.zig");
     _ = @import("middleware.zig");
     _ = @import("typed.zig");

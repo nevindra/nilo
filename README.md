@@ -56,12 +56,13 @@ const exe = b.addExecutable(.{
 
 `zig build run`, and the paragraph at the top of this file is a working server.
 
-Three runnable examples live in [`examples/`](./examples/):
+Four runnable examples live in [`examples/`](./examples/):
 
 ```
 zig build run-hello    # the smallest thing that serves
 zig build run-rest     # a service, JSON in and out, query params, auth middleware
 zig build run-spa      # a single-page app's files next to its API
+zig build run-stream   # a streamed report, an event stream, an upload
 ```
 
 ## Handlers are ordinary functions
@@ -127,7 +128,8 @@ Reading the request:
 | `c.param("id")` | a path param, percent-decoded — `null` if the pattern has no such name |
 | `c.query("q")` | a query param, percent-decoded, `+` counting as a space |
 | `c.header("X-Token")` | a request header, name matched case-insensitively |
-| `c.body()` | the whole body, read once into the request arena |
+| `c.body()` | the whole body, read once into the request arena — up to 1 MB |
+| `c.bodyStream()` | the body in pieces, for the ones too big to hold |
 | `c.json(T)` | the body, parsed as JSON into `T` |
 | `c.service(*Db)` | a registered service, for a handler that took no typed arguments |
 | `c.resolve(CurrentUser)` | a resolved value, for middleware — which has no argument list to ask in |
@@ -146,7 +148,7 @@ Answering:
 
 One request gets one response: a response is flushed the moment it is sent, so there is nothing left to change afterwards. `Content-Type`, `Content-Length`, `Transfer-Encoding` and `Connection` are the framework's to write and setting them is refused — a response carrying two of any of those is malformed.
 
-The limit worth knowing: a body is read whole, up to 1 MB, so this is not the layer for a large upload. That one is v2 ([`docs/plan.md`](./docs/plan.md)).
+`c.body()` is read whole and refused past a megabyte; `c.bodyStream()` is the one for a file.
 
 ## Query params
 
@@ -189,6 +191,30 @@ the request body is empty. This endpoint expects a JSON object with: title, done
 ```
 
 A field with a default is what "absent" is allowed to mean, exactly as in a query struct. Working out which of these to say costs a second parse, which is paid only by a request that was already going to be refused.
+
+### Bodies too big to hold
+
+A struct argument and `c.body()` both read the whole body into the request arena, and refuse past a megabyte. That is right for JSON and wrong for a file, so a body can also be read in pieces:
+
+```zig
+fn upload(c: *zfast.Ctx, store: *Store) !Receipt {
+    var incoming = c.bodyStreamWith(.{ .max_bytes = 8 * 1024 * 1024 }) catch
+        return zfast.fail.tooLarge("this endpoint takes up to 8 MB", .{});
+
+    var buf: [64 * 1024]u8 = undefined;
+    while (try incoming.read(&buf)) |part| try store.append(part);
+
+    return .{ .bytes = incoming.seen() };
+}
+```
+
+The 64 KB above is the only memory involved — **this allocates nothing at all**, not even the one buffer a response stream takes, because a body reader has somewhere to put bytes already. Content-Length and chunked look the same from here, exactly as they do to `c.body()`: a handler asks for the body, not for the way it arrived.
+
+Measured on the streaming example: 5 × (a 3 MB upload plus a 50,000-row streamed report) moved the server's RSS by **72 KB**.
+
+`max_bytes` has a default of 64 MB and there has to be a number, because a chunked body announces no size and "however much they send" is a client's decision about your memory. A `Content-Length` past the ceiling is refused before a byte is read.
+
+A body left half-read is fine — zfast discards the rest so the connection is clean for the next request. `incoming.reader` is a plain `std.Io.Reader` for handing to something in the standard library, and `incoming.writeTo(w)` pumps the lot into a writer in one call.
 
 ## Answers written in pieces
 
@@ -581,7 +607,7 @@ No requests-per-second figures, on purpose: that number needs a machine nobody e
 
 ## What isn't here yet
 
-WebSocket, TLS, sessions, templates, range requests, and bodies over 1 MB.
+WebSocket, TLS, sessions, templates, and range requests.
 
 There are also no deadlines of any kind — no read, header or write timeout — so a client that opens a connection and then goes quiet parks a fiber until TCP gives up on it. That is the largest hole on this list and it wants one decision about deadlines rather than a knob per feature.
 

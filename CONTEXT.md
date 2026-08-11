@@ -52,6 +52,10 @@ _Avoid_: wildcard route, splat, glob
 A response written in pieces because its length is not known when the head goes out. Held by the handler, not returned by it. Nothing is allocated per piece, and `finish` is what says where the body ends.
 _Avoid_: chunked response, writer, body writer
 
+**Body reader**:
+A request body taken in pieces rather than held whole, for the ones too big for the request arena. Bounded by the buffer the handler passes in, and allocates nothing. A body left half-read is finished off by zfast, so the connection stays usable.
+_Avoid_: upload stream, multipart, file handle
+
 **Event stream**:
 A Stream carrying server-sent events — one long response a browser reads with `EventSource`. Each event is flushed on its own, and `live` is how the handler learns the server wants to stop.
 _Avoid_: SSE channel, subscription, push, socket

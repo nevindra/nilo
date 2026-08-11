@@ -97,13 +97,13 @@ The direction was settled first, in [ADR 0015](./adr/0015-what-zfast-borrows-and
 - **The API description** ([ADR 0017](./adr/0017-the-api-description-comes-from-the-signatures.md)). `app.docs(.{ … })` and there is an OpenAPI 3.1 document at `/openapi.json`, read off the same argument list the compile-time engine reads. Served as a file, so it gets an ETag and a 304 for free (ADR 0010) and adds nothing to the request path.
 - **The trade budget, sharpened** ([ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md)). ADR 0001's one 10% rule is now three: throughput may slip 10% for DX, while allocations per request and memory per idle connection are hard invariants. That split is what "low memory" is allowed to mean.
 - **Answers written in pieces, and server-sent events** ([ADR 0020](./adr/0020-a-request-that-lasts-is-still-one-request.md)). `c.stream(200, "text/csv")` for a body whose length nobody knows yet, `c.events()` for a stream a browser watches. Nothing is allocated per piece — held there by a test that sends 200 of them and counts two allocations for the whole request. A shutdown with a client mid-stream took 204 ms and the client got its closing event.
+- **Request bodies read in pieces** ([ADR 0020](./adr/0020-a-request-that-lasts-is-still-one-request.md)). `c.bodyStream()` for a body too big to hold: bounded by the buffer the handler passes in, and it allocates nothing at all. Measured on the streaming example, five rounds of a 3 MB upload plus a 50,000-row streamed report moved RSS by 72 KB.
 - **A test client** (`zfast.testing.Client`). A handler that returns a value is tested by calling it; one that *writes* its answer needs somewhere to write to. This is that somewhere, and it undoes chunk framing so a test asserts on what the client would see.
 
 ### Not started
 
 The remaining list was written as "one decision about where memory comes from". That turned out to be too tidy — the honest version is in [ADR 0020](./adr/0020-a-request-that-lasts-is-still-one-request.md), which asks instead what a `Ctx` means when the handler holding it has been running for twenty minutes. Streaming needed that answer. Range requests needed nothing at all.
 
-- Reading a body larger than `Ctx.max_body` (1 MB). The mirror image of streaming and the place the arena really does bite: the whole body is read into it today.
 - Range requests, and serving a file too big to hold in memory ([ADR 0010](./adr/0010-static-files-are-held-in-memory.md)). A range is a slice of memory plus two headers; `sendfile` is the part that contradicts ADR 0010 and wants its own argument.
 - WebSocket. The connection stops being HTTP after the handshake, so it needs a handler shape of its own on top of everything above.
 - Reloading static files without a restart. A development annoyance rather than a design hole.
