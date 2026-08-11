@@ -116,7 +116,8 @@ it is rather than how to use it:
   nobody has decided yet
 - [`docs/history.md`](./docs/history.md) — how 0.1.0 got built, and what has
   been measured
-- [`CHANGELOG.md`](./CHANGELOG.md) — what changed, per release
+- [`CHANGELOG.md`](./CHANGELOG.md) — what changed, per release. Empty until
+  there is a release to change from
 
 ## Not here yet
 
