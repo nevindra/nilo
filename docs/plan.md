@@ -99,6 +99,7 @@ The direction was settled first, in [ADR 0015](./adr/0015-what-zfast-borrows-and
 - **Answers written in pieces, and server-sent events** ([ADR 0020](./adr/0020-a-request-that-lasts-is-still-one-request.md)). `c.stream(200, "text/csv")` for a body whose length nobody knows yet, `c.events()` for a stream a browser watches. Nothing is allocated per piece — held there by a test that sends 200 of them and counts two allocations for the whole request. A shutdown with a client mid-stream took 204 ms and the client got its closing event.
 - **Request bodies read in pieces** ([ADR 0020](./adr/0020-a-request-that-lasts-is-still-one-request.md)). `c.bodyStream()` for a body too big to hold: bounded by the buffer the handler passes in, and it allocates nothing at all. Measured on the streaming example, five rounds of a 3 MB upload plus a 50,000-row streamed report moved RSS by 72 KB.
 - **Range requests** ([ADR 0021](./adr/0021-a-range-is-a-slice-and-two-headers.md)). Listed for two stages as blocked on the same memory decision as streaming, and blocked on nothing: a file is already in memory, so a range is a slice and two headers. The work was all in the parser, where every edge case is a way to serve the wrong bytes silently.
+- **WebSocket** ([ADR 0022](./adr/0022-a-websocket-is-a-handler-that-does-not-return.md)). `c.upgrade()`, and the handler owns the loop — so it takes services by type and sits behind the same middleware as everything else. Verified against a real client: text, binary, UTF-8, fragments reassembled, ping answered, close echoed, and a message past the buffer refused with 1009.
 - **A test client** (`zfast.testing.Client`). A handler that returns a value is tested by calling it; one that *writes* its answer needs somewhere to write to. This is that somewhere, and it undoes chunk framing so a test asserts on what the client would see.
 
 ### Not started
@@ -106,7 +107,8 @@ The direction was settled first, in [ADR 0015](./adr/0015-what-zfast-borrows-and
 The remaining list was written as "one decision about where memory comes from". That turned out to be too tidy — the honest version is in [ADR 0020](./adr/0020-a-request-that-lasts-is-still-one-request.md), which asks instead what a `Ctx` means when the handler holding it has been running for twenty minutes. Streaming needed that answer. Range requests needed nothing at all.
 
 - `sendfile`, and serving a file too big to hold in memory ([ADR 0010](./adr/0010-static-files-are-held-in-memory.md)). This is the part that contradicts ADR 0010 rather than extending it, and wants its own argument.
-- WebSocket. The connection stops being HTTP after the handshake, so it needs a handler shape of its own on top of everything above.
+- **Sending to a WebSocket a handler does not hold.** A connection's write buffer belongs to the fiber serving it, so broadcasting needs a per-socket outbox with its own lock rather than a loop over a list ([ADR 0022](./adr/0022-a-websocket-is-a-handler-that-does-not-return.md)). Phoenix Channels is the shape, and it is a project rather than a function.
+- `permessage-deflate`. Negotiated in the handshake, and a compressor per connection is memory that has not been budgeted.
 - Reloading static files without a restart. A development annoyance rather than a design hole.
 - TLS, sessions, templates.
 

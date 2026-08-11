@@ -2,7 +2,7 @@
 
 An HTTP framework for Zig, aimed at people coming from Go or Node.
 
-> **Status: v1 feature-complete, v2 in progress, unreleased.** Routing with path params, query params and catch-alls; typed handlers, JSON, middleware, logger, CORS, static files, chunked bodies. v2 has added resolved values, route groups and plugins, an OpenAPI document generated from the handler signatures, answers written in pieces — streamed responses and server-sent events — bodies read in pieces, and range requests. Not yet benchmarked on a quiet machine, so there are no performance claims here.
+> **Status: v1 feature-complete, v2 in progress, unreleased.** Routing with path params, query params and catch-alls; typed handlers, JSON, middleware, logger, CORS, static files, chunked bodies. v2 has added resolved values, route groups and plugins, an OpenAPI document generated from the handler signatures, answers written in pieces — streamed responses and server-sent events — bodies read in pieces, range requests, and WebSocket. Not yet benchmarked on a quiet machine, so there are no performance claims here.
 > `zfast` is a working name and may change.
 
 ```zig
@@ -56,13 +56,14 @@ const exe = b.addExecutable(.{
 
 `zig build run`, and the paragraph at the top of this file is a working server.
 
-Four runnable examples live in [`examples/`](./examples/):
+Five runnable examples live in [`examples/`](./examples/):
 
 ```
 zig build run-hello    # the smallest thing that serves
 zig build run-rest     # a service, JSON in and out, query params, auth middleware
 zig build run-spa      # a single-page app's files next to its API
 zig build run-stream   # a streamed report, an event stream, an upload
+zig build run-chat     # a WebSocket, browser page included
 ```
 
 ## Handlers are ordinary functions
@@ -145,6 +146,7 @@ Answering:
 | `c.setStaticHeader(name, value)` | the same, for text that already outlives the request (a literal), so nothing is copied |
 | `c.stream(200, "text/csv")` | a response written in pieces, when its length isn't known yet |
 | `c.events()` | a stream of server-sent events |
+| `c.upgrade()` | turn the connection into a WebSocket |
 
 One request gets one response: a response is flushed the moment it is sent, so there is nothing left to change afterwards. `Content-Type`, `Content-Length`, `Transfer-Encoding` and `Connection` are the framework's to write and setting them is refused — a response carrying two of any of those is malformed.
 
@@ -283,6 +285,40 @@ try testing.expectEqualStrings("id,name\n1,wati\n", try answer.text(&buf));
 ```
 
 `answer.text()` undoes the chunk framing, `answer.header(name)` is case-insensitive, and `answer.keep_alive` says whether the connection could have carried another request. None of it is on the request path.
+
+## WebSocket
+
+A WebSocket handler is a handler. It takes services by type, sits behind the same middleware, and is registered with `app.get` like everything else — the only difference is that it doesn't return for a while:
+
+```zig
+fn chat(c: *zfast.Ctx, room: *Room) !void {
+    var socket = try c.upgrade();
+    var buf: [16 * 1024]u8 = undefined;
+    while (try socket.receive(&buf)) |message| {
+        try socket.send(message.kind, message.data);
+    }
+}
+```
+
+zfast does the handshake, the frame headers, the masking, the fragment reassembly and the closing handshake. Ping and pong are answered inside `receive`, so a handler never writes those three branches.
+
+**The buffer you pass to `receive` is the message ceiling** — there is no second limit to contradict it. A frame announcing more than it holds is refused before a byte of its payload is read, with a `1009`. Nothing is allocated per message.
+
+`receive` returns null both when the client closes politely and when it simply vanishes — a tab closed, a network gone. That's the most common way a WebSocket ends, so it isn't an error to write a branch for; `socket.closedCleanly()` tells them apart afterwards.
+
+| | |
+|---|---|
+| `socket.send(kind, data)` | one message, `.text` or `.binary` |
+| `socket.sendText(text)` / `sendBinary(bytes)` | the shorthands |
+| `socket.ping(data)` | for a proxy that drops quiet connections |
+| `socket.close(.normal, "")` | close, saying why — safe to call twice |
+| `socket.live()` | false once the server is stopping, exactly as a stream's is |
+
+Everything protocol-wrong is refused with the right close code before the error comes back — an unmasked frame or a reserved bit is `1002`, text that isn't valid UTF-8 is `1007`, too big is `1009` — because a connection dropped without a close frame looks to the other end like a crash.
+
+What isn't here: **sending to a socket you don't hold.** A connection's write buffer belongs to the fiber serving it, so broadcasting needs a per-socket outbox with its own lock rather than a loop over a list. [ADR 0022](./docs/adr/0022-a-websocket-is-a-handler-that-does-not-return.md) says why that's recorded rather than half-built. Also absent: `permessage-deflate`, and any deadline — a client that opens a socket and never speaks holds a fiber until TCP gives up.
+
+`zig build run-chat` is a working one, browser page included.
 
 ## The signed-in user, and anything else worked out per request
 
@@ -627,7 +663,7 @@ No requests-per-second figures, on purpose: that number needs a machine nobody e
 
 ## What isn't here yet
 
-WebSocket, TLS, sessions, templates, and `sendfile`.
+TLS, sessions, templates, `sendfile`, and broadcasting to WebSockets a handler doesn't hold.
 
 There are also no deadlines of any kind — no read, header or write timeout — so a client that opens a connection and then goes quiet parks a fiber until TCP gives up on it. That is the largest hole on this list and it wants one decision about deadlines rather than a knob per feature.
 

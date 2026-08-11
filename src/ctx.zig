@@ -16,6 +16,7 @@ const service_mod = @import("service.zig");
 const static_mod = @import("static.zig");
 const stream_mod = @import("stream.zig");
 const str_mod = @import("str.zig");
+const websocket = @import("websocket.zig");
 const percent = @import("percent.zig");
 const fail = @import("fail.zig");
 const Str = str_mod.Str;
@@ -441,6 +442,66 @@ pub const Ctx = struct {
     /// `Cache-Control: no-cache` so nothing stores it, and
     /// `X-Accel-Buffering: no` so an nginx in front does not hold the events
     /// back waiting for a buffer to fill.
+    /// Turn this request into a WebSocket connection (ADR 0022).
+    ///
+    /// ```zig
+    /// fn echo(c: *zfast.Ctx) !void {
+    ///     var socket = try c.upgrade();
+    ///     var buf: [4096]u8 = undefined;
+    ///     while (try socket.receive(&buf)) |message| {
+    ///         try socket.send(message.kind, message.data);
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// A request that is not asking to be upgraded is refused with a 400
+    /// saying which part is missing, rather than left to fail as framing
+    /// nobody can read.
+    ///
+    /// After this the connection is no longer HTTP and cannot carry another
+    /// request, which zfast arranges — the handler only has to return.
+    pub fn upgrade(self: *Ctx) !websocket.Socket {
+        return self.upgradeWith(.{});
+    }
+
+    /// `upgrade`, agreeing to a sub-protocol.
+    pub fn upgradeWith(self: *Ctx, options: websocket.Options) !websocket.Socket {
+        std.debug.assert(!self._sent); // one request, one response
+
+        if (self.method != .GET) {
+            return fail.badRequest("a WebSocket handshake has to be a GET, not a {s}", .{@tagName(self.method)});
+        }
+        if (!websocket.isUpgrade(self._head)) {
+            return fail.badRequest(
+                "this endpoint is a WebSocket; the request needs Upgrade: websocket and Connection: Upgrade",
+                .{},
+            );
+        }
+        const version = self.header("Sec-WebSocket-Version") orelse
+            return fail.badRequest("the handshake is missing Sec-WebSocket-Version", .{});
+        // 13 is the only version there has ever been in the published RFC.
+        if (!std.mem.eql(u8, version.view(), "13")) {
+            return fail.badRequest(
+                "this server speaks WebSocket version 13, and the request asked for \"{s}\"",
+                .{version.view()},
+            );
+        }
+        const key = self.header("Sec-WebSocket-Key") orelse
+            return fail.badRequest("the handshake is missing Sec-WebSocket-Key", .{});
+
+        // From here the answer is written, so nothing above may fail.
+        self._sent = true;
+        self._status = 101;
+        // The connection stops being HTTP at the blank line below, so it can
+        // never carry another request.
+        self._force_close = true;
+
+        const answer = websocket.accept(key.view());
+        try websocket.writeAcceptance(self._out, &answer, options.protocol);
+
+        return .{ ._in = self._in, ._out = self._out, ._stopping = self._stopping };
+    }
+
     pub fn events(self: *Ctx) !stream_mod.Events {
         try self.setStaticHeader("Cache-Control", "no-cache");
         try self.setStaticHeader("X-Accel-Buffering", "no");

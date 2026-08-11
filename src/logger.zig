@@ -36,7 +36,13 @@ pub fn with(comptime options: Options) mw.Middleware {
             // logger that swallowed it would change behaviour just by
             // being installed.
             next.run(c) catch |err| {
-                log(c, statusOf(err), microsSince(started), nameOf(err));
+                // An answer already on the wire cannot be taken back, so
+                // that is the status this request had — whatever the error
+                // would have mapped to. A WebSocket handler failing after
+                // its 101, or a stream failing mid-body, used to be logged
+                // as a 500 nobody sent.
+                const status = if (c._sent) c._status else statusOf(err);
+                log(c, status, microsSince(started), nameOf(err));
                 return err;
             };
 

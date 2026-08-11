@@ -116,6 +116,12 @@ pub const Events = @import("stream.zig").Events;
 /// big to hold in the request arena (ADR 0020).
 pub const Body = @import("body.zig").Body;
 
+/// An open WebSocket connection, from `c.upgrade()` (ADR 0022).
+pub const Socket = @import("websocket.zig").Socket;
+
+/// Everything else WebSocket: `Message`, `Kind`, `Close`, `Options`.
+pub const websocket = @import("websocket.zig");
+
 /// One message on an event stream: `.{ .name = "token", .data = text }`.
 pub const Event = @import("stream.zig").Event;
 
@@ -260,6 +266,7 @@ test {
     _ = @import("stream.zig");
     _ = @import("body.zig");
     _ = @import("range.zig");
+    _ = @import("websocket.zig");
     _ = @import("testing.zig");
     _ = @import("middleware.zig");
     _ = @import("typed.zig");

@@ -3594,3 +3594,84 @@ test "a HEAD with a range gets the head a GET would have, and no body" {
     try testing.expect(std.mem.indexOf(u8, head.response, "Content-Length: 5\r\n") != null);
     try testing.expect(std.mem.endsWith(u8, head.response, "\r\n\r\n"));
 }
+
+// ---- WebSocket (ADR 0022) ----
+
+fn echoSocket(c: *Ctx) anyerror!void {
+    var socket = try c.upgrade();
+    var buf: [1024]u8 = undefined;
+    while (try socket.receive(&buf)) |message| {
+        try socket.send(message.kind, message.data);
+    }
+}
+
+const upgrade_request = "GET /ws HTTP/1.1\r\nHost: x\r\n" ++
+    "Upgrade: websocket\r\nConnection: Upgrade\r\n" ++
+    "Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+
+test "a WebSocket handshake is answered with the key every client checks" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/ws", echoSocket);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, upgrade_request);
+
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 101 Switching Protocols\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "Upgrade: websocket\r\n") != null);
+    // The answer from RFC 6455 §1.3 for that key.
+    try testing.expect(std.mem.indexOf(
+        u8,
+        result.response,
+        "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n",
+    ) != null);
+
+    // The connection has stopped being HTTP, so it cannot carry another
+    // request whatever anybody asked for.
+    try testing.expect(!result.keep_alive);
+}
+
+test "a message sent over the upgraded connection comes back" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/ws", echoSocket);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    // The handshake and one masked text frame in the same buffer, which is
+    // how a client that starts talking immediately looks on the wire.
+    const frame = "\x81\x85\x37\xfa\x21\x3d\x7f\x9f\x4d\x51\x58"; // "Hello"
+    const result = h.send(&app, upgrade_request ++ frame);
+
+    const after_head = std.mem.indexOf(u8, result.response, "\r\n\r\n").? + 4;
+    // 0x81 = FIN + text, 0x05 = five bytes, no mask bit: a server never masks.
+    try testing.expectEqualStrings("\x81\x05Hello", result.response[after_head..]);
+}
+
+test "a request that is not asking to be upgraded is told which part is missing" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/ws", echoSocket);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const plain = h.send(&app, "GET /ws HTTP/1.1\r\nHost: x\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, plain.response, "HTTP/1.1 400"));
+    try testing.expect(std.mem.indexOf(u8, plain.response, "Upgrade: websocket") != null);
+
+    const no_version = h.send(
+        &app,
+        "GET /ws HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+    );
+    try testing.expect(std.mem.indexOf(u8, no_version.response, "missing Sec-WebSocket-Version") != null);
+
+    const wrong_version = h.send(
+        &app,
+        "GET /ws HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" ++
+            "Sec-WebSocket-Version: 8\r\nSec-WebSocket-Key: x\r\n\r\n",
+    );
+    try testing.expect(std.mem.indexOf(u8, wrong_version.response, "speaks WebSocket version 13") != null);
+}
