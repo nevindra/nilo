@@ -178,30 +178,74 @@ p99 is counted too, so that winning on throughput while stalling the tail reques
 
 Requests per second is the number that needs a machine nobody else is using. Two others do not, and both are now recorded:
 
-- **Allocations per request: 3** on the primary metric's shape, with CORS installed — the head copied so its `Str`s outlive the read buffer, the response header list, and the JSON body. All three are bump allocations into an arena that is already warm; none is a syscall or a lock. Held there by a test (`the request path stays inside its allocation budget`), so putting a fourth back needs a reason. It was 6.
+- **Allocations per request: 1** on the primary metric's shape, with CORS installed — the JSON body, and nothing else. A bump allocation into an arena that is already warm; not a syscall and not a lock. Held there by a test (`the request path stays inside its allocation budget`), so putting a second back needs a reason. It was 6, then 3, and the two that went in the 0.1.0 optimisation pass were the copy of the request head (a request with no body does not need one) and the response header list (the first four live in the `Ctx`).
 - **Memory per idle connection: ~21 KB** with the default buffers, measured as the RSS difference across 1,000 held-open keep-alive connections. About 4 KB of that is the read and write buffers, which `Options.read_buffer` / `write_buffer` turn down: at 2 KB each the figure is ~17 KB. Most of what is left is the fiber's own stack, which is zio's to hand out.
 
 Neither says how fast the server is. Both notice when it gets worse, which is what is available until there is somewhere honest to measure.
 
 ### Where the time inside a request goes
 
-`zig build profile` times the pieces of one request against in-memory buffers — the inside view, where `bench/bench.sh` is the outside one. The end-to-end figure wobbles by a third on a busy box and is not worth quoting; the proportions hold, and they were a surprise:
+`zig build profile` times the pieces of one request against in-memory buffers — the inside view, where `bench/bench.sh` is the outside one. Each row is the best of five runs, warmed first.
 
 ```
-  read the head                  76ns   12.8%
-  parse the head                132ns   22.2%
-  copy the head to the arena     24ns    4.1%
-  match the route                65ns   11.0%
-  serialise the body             97ns   16.4%
-  write the response             70ns   11.9%
-  arena alloc + reset            20ns    3.4%
+  read the head                  17ns    3.0%
+  parse the head                 98ns   16.8%
+  copy the head to the arena     27ns    4.6%
+  match the route                41ns    7.2%
+  serialise the body            165ns   28.4%
+  write the response             87ns   15.1%
+  arena alloc + reset            20ns    3.5%
 ```
 
-Reading and parsing the head is the largest single thing a request does, and it had never been looked at as a cost. The remaining third is the glue: building the `Ctx`, walking the middleware chain, matching handler arguments, decoding path params.
+Reading and parsing the head is no longer the largest single thing a request does; serialising the body is. Both of those sentences are new, and the reason is in "the optimisation pass" below. The remaining quarter is the glue: building the `Ctx`, walking the middleware chain, matching handler arguments, decoding path params.
+
+**Two things about this table were wrong for the whole of v1 and v2, and both flattered the framework.**
+
+The first: the end-to-end figure it divides by was the very first loop the program ran, so it paid for a cold arena, a cold instruction cache and a CPU that had not clocked up. On this machine that made it 1343ns where the warmed figure was 643ns — so *every percentage in the table was understated by about half*. `bestOf` warms and takes the best of five now.
+
+The second is worse, because it is what hid a microsecond. This file profiled a 25-byte `{id,name}` payload while `main.zig` — the benchmark target, the thing the primary metric is defined on — answered with a kilobyte. The row that said `serialise the body 97ns 16.4%` was measuring a response the server never sends. Profiled on the payload the server really sends, `std.json` took **1038ns**: more than everything else in the request put together, and invisible for two versions because the profiler and the target disagreed about what a response looks like. A profiler measuring a different payload from the thing being profiled is worse than no profiler.
 
 Route matching went **39ns → 52ns** (best of eight runs, same machine, minutes apart) when the router stopped returning the first match and started returning the most specific one. That is about 2% of a request, spent on making registration order stop mattering and on catch-all routes; ADR 0001 puts the bar at 10%, so this is a trade it had already made. The full accounting, including two attempts at winning it back, is in [ADR 0013](./adr/0013-the-most-specific-route-wins-and-duplicates-are-refused.md).
 
-What this says about where to look next: `std.json` at 13% is the one thing on this list with no ceiling on how much better it could get, and it has been flagged as a risk since the first stage. The rest is close enough to the floor that the next real gain is architectural, not local.
+### The optimisation pass before 0.1.0
+
+Everything above had been measured but never *acted* on. This pass did the acting, and the method mattered as much as the result: each change was A/B'd end to end against a build of the previous commit, best of five runs of 1.5M requests, on five request shapes at once — because a change that helps a 121-byte head can hurt a 556-byte one, and only measuring both catches it. Three ideas that looked good in the abstract were measured and dropped (see the end).
+
+The five shapes, before and after, in nanoseconds per request:
+
+| Shape | Before | After | |
+|---|---|---|---|
+| **Primary metric — routed GET, path param, ~1KB JSON, CORS** | **1684** | **605** | **−64%** |
+| GET, small head (121B), small JSON | 658 | 430 | −35% |
+| GET, browser head (556B, 13 headers), small JSON | 872 | 559 | −36% |
+| GET, `Query(T)` struct from three params | 712 | 569 | −20% |
+| GET, literal route, text out | 398 | 309 | −22% |
+| POST, JSON body in, JSON out | 992 | 808 | −19% |
+| *(floor: `*Ctx` handler, no typed layer)* | 436 | 307 | −30% |
+
+What did it, in order of how much it was worth:
+
+- **A JSON writer generated from the type** (`src/json.zig`), which is where the −64% comes from. Two things were slow about `std.json` for a response: it writes each brace, quoted field name and colon through the writer separately, and it escapes a string a byte at a time. So the constant parts of the output are one comptime string per field now, and a string is scanned 32 bytes at a time for the three characters JSON cannot carry — the run in between goes out whole, and almost every string has no such character at all. On the primary metric's payload, **1038ns → 126ns**; on a small one, 75ns → 22ns. The output is byte-for-byte what `std.json` writes, which is not a hope: `covers()` decides while compiling which types this path may touch, anything else falls back unchanged, floats are handed to `std.json` field by field rather than reimplemented, and the tests hold the two against each other value by value. Two things `std.json` does that are easy to get wrong were found this way and left to it: a `[N]u8` is a *string* to it, not a list of numbers, and a type with its own `jsonStringify` has the last word.
+
+- **A request head walked once instead of once per line per delimiter** (`src/scan.zig`, used by `http1.parseHead`). Finding the end of the head called `std.mem.indexOfScalar` once per header line, and parsing it called it twice more; each call is a pass that restarts, with its own preamble, every twenty bytes. Now a block is loaded, compared against the byte, and the positions are read off a bitmask — two delimiters for one load. The colons are handled *as a mask* rather than walked: for each line the colons inside it are isolated with a shift and an `and`, which answers both "is there one at all", which is what makes a malformed line a 400, and "where is the first", which is what names the header. Walking them instead cost 70ns on a browser's head, because a header *value* is full of colons and none of them is interesting. Finding the end: **183ns → 51ns**. Parsing: **303ns → 163ns**.
+
+- **The request head is no longer copied when nothing will read it again.** Every `Str` from a request points into the head, and the head sits in the connection's read buffer, so it was copied into the arena on principle. But only a *read* can overwrite it — and a GET has no body to read and no protocol taking the socket over. So the copy is made only for a request that will read again, which `Request.readsMore` answers. Worth 19ns on a small head and 77ns on a browser's, plus one of the three allocations. What keeps it from becoming the next ADR 0019 is `Ctx.aboutToRead`: every path that reads from the connection calls it, and it fails loudly in a debug build if this decision said there would be no such path. `Request.upgrade` is deliberately looser than `websocket.isUpgrade`, so it cannot be the narrower of the two.
+
+- **The first four response headers live in the `Ctx`.** An `ArrayList` meant an arena allocation on every request that had any middleware at all, for something that fits in 128 bytes of a struct already on the stack. CORS sets one to three; a static file two. The fifth spills, and then the spill is the whole list.
+
+- **The query string is walked once too**, with `&` and `=` found together the way the head's newlines and colons are, and the `&`s counted up front so the list is one allocation rather than one per doubling. `?q=hello%20world&sort=newest&page=3`: **263ns → 191ns**. Percent-decoding also went from three passes to one — and a `%` that is not a real escape now costs nothing at all, where it used to allocate a byte-for-byte copy.
+
+**What was measured and dropped**, because it is worth the same as what landed:
+
+- **Filtering header lines by their first byte alone**, skipping the colon scan entirely. It was the fastest thing tried — 255ns → 137ns on a browser's head — and it silently accepts a header line with no colon in it, which this parser explicitly promises not to do. The mask version keeps the check and gets most of the win.
+- **Shrinking `Match`.** It is 288 bytes, almost all of it room for eight path params, and it is returned by value. Cutting `max_params` to 2 to measure the copy was worth about 10ns — real, and not worth a public limit or a refactor.
+- **A larger `json_hint`**, so a ~1KB response fits without growing. No measurable difference: the arena extends the most recent allocation in place, so the growth was nearly free already. A documented constant should not change without a number behind it.
+
+**What it cost the binary: 5,680 bytes**, measured the way the v2 figure below was — the hello example, stripped `ReleaseFast`, 1,052,248 → 1,057,928. Half a percent, for a generated writer and a scanner, on an example that returns text and never serialises anything. Worth saying rather than leaving to be discovered, since v2's 21 KB got a section of its own.
+
+The three-axis budget in [ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md) came through this intact. Throughput went up rather than down, allocations per request went 3 → 1, and memory per idle connection did not move — `Ctx` grew by 136 bytes for the inline headers, and it lives on the fiber stack for the duration of a request, not on a connection sitting idle.
+
+What this says about where to look next: `parse the head` at 17% and `write the response` at 15% are now the two largest, and both are closer to their floor than `std.json` ever was. The next real gain is architectural — the linear route scan ([`roadmap.md`](./roadmap.md)) — not local.
 
 ### Where the time goes on a connection that lasts
 

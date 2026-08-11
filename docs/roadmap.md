@@ -72,9 +72,14 @@ Things that are wrong or missing today, with what fixing them would take.
   case with the wanted route last. Whatever replaces it has to keep specificity
   ordering, which is a property of the structure rather than a cost added to it
   ([ADR 0013](./adr/0013-the-most-specific-route-wins-and-duplicates-are-refused.md)).
-- **`std.json` sits on the hot path** of the metric that matters, at 13% of a
-  request. It is the one thing on the profile with no ceiling on how much better
-  it could get. Measure before replacing.
+- ~~**`std.json` sits on the hot path** of the metric that matters, at 13% of a
+  request.~~ *Done, and it was not 13% — it was 63%.* The profile had been taken
+  on a 25-byte payload while the benchmark target answered a kilobyte, and
+  `std.json` spends its time escaping strings a byte at a time. `src/json.zig`
+  generates a writer from the response type instead, producing byte-for-byte the
+  same output; 1038ns → 126ns on that payload. What is left of `std.json` on the
+  request path is float formatting and the types the generated writer declines to
+  touch.
 
 ## Not coming
 
@@ -116,4 +121,5 @@ pattern too.
 | The `Str` guarantee cannot be complete | The debug-build staleness trap, on from day one ([ADR 0004](./adr/0004-request-arena-and-the-str-type.md)) |
 | A Service is shared across threads and nothing makes a user notice | `zfast.Mutex`, in the guide and in the example everyone copies. Nothing forces it — Zig has no ownership tracking to force it with ([ADR 0011](./adr/0011-shared-services-need-a-lock-from-the-bulkhead.md)) |
 | A panic in any handler takes the whole process down, and Go people will assume otherwise | Cannot be fixed in Zig. Said plainly in the docs, `ReleaseSafe` and a supervisor recommended, and the in-flight request named in the crash ([ADR 0008](./adr/0008-no-recover-middleware.md)) |
-| `std.json` may not be fast enough, and it sits on the hot path | A custom serialiser for the small-JSON path is likely needed; measure first |
+| ~~`std.json` may not be fast enough, and it sits on the hot path~~ *Bit, and was fixed.* It was worse than this line imagined, and hid behind a profile taken on the wrong payload | `src/json.zig`, a writer generated from the response type, with `std.json` as the fallback and the tests asserting the two produce identical bytes |
+| A response could differ from what `std.json` would have written, now that something else usually writes it | `covers()` decides while compiling which types the generated writer may touch, and it errs narrow: a tuple, a `[N]u8`, a type with its own `jsonStringify`, anything unrecognised, all fall back. Floats are handed to `std.json` field by field rather than reimplemented |

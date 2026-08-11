@@ -70,9 +70,17 @@ The first release. Needs Zig 0.16.
 
 ### Measured
 
-- **3 allocations** per request on a routed GET returning JSON with CORS
-  installed, held there by a test.
+- **1 allocation** per request on a routed GET returning JSON with CORS
+  installed — the JSON body, and nothing else. Held there by a test.
 - **~21 KB** per idle connection with the default buffers; ~17 KB at 2 KB each.
+- The request path was profiled and optimised shape by shape before the release:
+  the primary metric — a routed GET with a path param answering ~1KB of JSON —
+  went **1684ns → 605ns**, and no shape measured got slower. Mostly a JSON writer
+  generated from the response type (`std.json` was spending more on the payload
+  than the rest of the request put together) and a request head walked once
+  rather than once per line per delimiter. The full accounting, including the
+  three ideas that were measured and dropped, is in
+  [`docs/history.md`](./docs/history.md).
 - No requests-per-second figures, on purpose: that needs a machine nobody else is
   using, and there isn't one yet.
 
