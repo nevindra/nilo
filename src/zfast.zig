@@ -257,6 +257,7 @@ test {
     _ = @import("str.zig");
     _ = @import("percent.zig");
     _ = @import("http1.zig");
+    _ = @import("scan.zig");
     _ = @import("static.zig");
     _ = @import("router.zig");
     _ = @import("fail.zig");
