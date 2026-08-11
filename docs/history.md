@@ -203,6 +203,27 @@ Route matching went **39ns → 52ns** (best of eight runs, same machine, minutes
 
 What this says about where to look next: `std.json` at 13% is the one thing on this list with no ceiling on how much better it could get, and it has been flagged as a risk since the first stage. The rest is close enough to the floor that the next real gain is architectural, not local.
 
+### Where the time goes on a connection that lasts
+
+The profile above is one request-response, which was the whole of zfast when it was written. Everything v2 added is shaped the other way round — one request, then work per message, per piece or per kilobyte — and none of it had been timed at all. Against in-memory buffers, so there is no kernel in these:
+
+```
+  websocket: frame overhead           27ns
+  websocket: receive 16 KiB          821ns   20.6 GB/s
+  websocket: send 16 KiB             438ns   37.4 GB/s
+  stream: 200 pieces                3216ns
+  stream: one piece                   16ns
+  sse: 200 events                  11880ns
+  sse: one event                      59ns
+  body: 1 MiB, Content-Length      38378ns   27.3 GB/s
+  body: 1 MiB, chunked 8 KiB       36342ns   28.9 GB/s
+  range: parse one                   109ns
+```
+
+The point of putting a throughput next to a duration is that one loop doing something silly is invisible in nanoseconds and obvious in gigabytes per second. `receive` first measured **2.6 GB/s against 33 GB/s** for `send` — the same 16 KiB, the same copy, with unmasking as the only difference. RFC 6455's `byte ^= key[i % 4]` is a byte at a time; the key repeats every four bytes, so the whole thing is one XOR against a repeating pattern and therefore a vector operation. 6,451ns → 821ns, and the chat example's binary got 920 bytes smaller.
+
+The other rows are near enough to memcpy that there is nothing in them: a body is bounded by the copy it has to make, and a stream piece is 16ns of formatting.
+
 ### How the work grows
 
 A third kind of number needs no machine at all: how the work grows. Two places were growing wrong, and both were fixed on that basis rather than on a benchmark.

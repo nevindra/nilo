@@ -56,6 +56,16 @@ Things that are wrong or missing today, with what fixing them would take.
   latency.** One line per request is the contract, and a stream's line arrives
   when the stream ends. Time to first byte is a different number and wants a
   different feature.
+- **The request head is walked twice.** `readHead` scans the incoming bytes
+  for the blank line that ends the head, then `parseHead` walks the same
+  bytes again splitting them into lines. Together that is **34% of a
+  request** — 12% reading, 22% parsing, the two largest items on the
+  profile. One pass that recorded line boundaries while it searched for the
+  terminator would do both, and it is the only place left where the request
+  path does obviously redundant work. It is also the piece that has to
+  handle a head arriving a byte at a time without going quadratic, which is
+  why it has not been touched: the current version is correct and resumes
+  where it left off, and a rewrite risks the one thing nobody wants wrong.
 - **The router is still a linear scan.** Which structure replaces it — radix
   tree, per-method buckets, something else — needs numbers nobody has yet. What
   the scan costs was measured in-process: 3.7× at 50 routes, 1.4× at 5, worst
