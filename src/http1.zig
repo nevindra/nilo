@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const scan = @import("scan.zig");
+const bulkhead = @import("bulkhead.zig");
 
 pub const Method = enum {
     GET,
@@ -72,7 +73,7 @@ pub fn readsMore(r: *const Request) bool {
 /// — answer with 431. `error.EndOfStream` before the first byte is a
 /// keep-alive connection the client closed: a normal way home.
 pub fn readRequest(in: *std.Io.Reader) !Request {
-    const head = try readHead(in);
+    const head = try readHead(in, .off);
     var r = Request{};
     try parseHead(head, &r);
     in.toss(head.len);
@@ -205,7 +206,16 @@ pub const HeaderIterator = struct {
 /// Wait until one complete head (up to the blank line) is in the buffer,
 /// then return a slice of it without copying and without advancing the
 /// reader. The caller decides when to `in.toss(head.len)`.
-pub fn readHead(in: *std.Io.Reader) ![]const u8 {
+///
+/// Two different waits happen in here and they want very different limits,
+/// which is why the deadlines come in rather than being set by the caller.
+/// Until the first byte arrives the client is merely idle — a browser
+/// holding a keep-alive connection open is doing nothing wrong, and it may
+/// do it for a minute. From the first byte on, the clock is the header
+/// deadline: an absolute one, shared by every read, because a client
+/// sending a byte at a time satisfies any per-read limit forever
+/// (ADR 0023). The caller arms the idle limit; this arms the switch.
+pub fn readHead(in: *std.Io.Reader, deadlines: bulkhead.Deadlines) ![]const u8 {
     // Where the search got to last time round. Without it, a client that
     // dribbles the head in a byte at a time makes the server rescan
     // everything it has already seen on every single read: an 8 KB head
@@ -216,6 +226,7 @@ pub fn readHead(in: *std.Io.Reader) ![]const u8 {
     // the front of the buffer, but it moves the start with them, so an
     // index into it stays pointing at the same byte.
     var scanned: usize = 0;
+    var counting = false;
     while (true) {
         const buf = in.buffered();
         if (findEndOfHead(buf, scanned)) |end| return buf[0..end];
@@ -223,6 +234,14 @@ pub fn readHead(in: *std.Io.Reader) ![]const u8 {
         // across two reads is still found.
         scanned = buf.len -| 3;
         if (buf.len >= in.buffer.len) return error.HeadTooLong;
+        // Something arrived and it was not a whole head, so this client is
+        // now mid-request rather than idle. Armed once: re-arming per read
+        // would restart the deadline every time a byte turned up, which is
+        // the bug this is here to prevent.
+        if (!counting and buf.len > 0) {
+            deadlines.armHeader();
+            counting = true;
+        }
         try in.fillMore();
     }
 }

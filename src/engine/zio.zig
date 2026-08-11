@@ -49,6 +49,48 @@ pub const Options = struct {
     /// connections open and up for one serving large responses.
     write_buffer: usize = 4 * 1024,
 
+    // ---- deadlines (ADR 0023) ----
+    //
+    // Zero turns any one of these off. All four off is what zfast did
+    // before 0.1.0, and it meant a client could hold a fiber by opening a
+    // connection and saying nothing.
+
+    /// How long a client has to finish sending a request head, counted from
+    /// its first byte. Not per read — for the whole head, which is what
+    /// makes it a limit at all: a client dribbling one byte a second is
+    /// inside any per-read limit and never finishes.
+    ///
+    /// Ten seconds is far more than a real client needs on a real link, and
+    /// the cost of being wrong is a 408 to somebody on a bad connection who
+    /// will retry.
+    header_timeout_ms: u32 = 10_000,
+    /// How long a connection may sit between one request and the next
+    /// before it is closed.
+    ///
+    /// This is the number that decides how much memory idle clients hold —
+    /// about 21 KB each with the default buffers — so a server with many
+    /// visitors and few of them active wants it lower than a server with a
+    /// handful of chatty ones. Above what browsers hold a connection for on
+    /// their own (Chrome and Firefox let go at around a minute), so in
+    /// practice the client is normally the one that closes.
+    idle_timeout_ms: u32 = 75_000,
+    /// How long any single read of a request body may take.
+    ///
+    /// Per read, not for the whole body: how long a legitimate body takes
+    /// depends on its size and the client's line, and a server cannot put a
+    /// number on either in advance. A client that stops sending halfway
+    /// through can be caught without guessing at that.
+    body_timeout_ms: u32 = 30_000,
+    /// How long any single write to the client may take.
+    ///
+    /// The answer to a client that asks for something and then stops
+    /// reading: the socket's buffers fill, the next write blocks, and
+    /// without this it blocks for as long as TCP takes to give up. It is
+    /// also what bounds a server-sent event stream whose reader has walked
+    /// away — the write fails, the handler gets an error, the fiber
+    /// unwinds.
+    write_timeout_ms: u32 = 30_000,
+
     /// Stop on Ctrl-C (SIGINT) and on SIGTERM, which is what a container
     /// runtime or a supervisor sends when it wants the process to go.
     ///
@@ -215,11 +257,64 @@ fn classifyListenFailure(name: []const u8) StartupFailure {
     return .other;
 }
 
-/// Run `handler(state, in, out)` for every accepted connection, each in
-/// its own fiber, until that connection is done. The Reader/Writer are
-/// already buffered; the handler does not need to know there is a socket
-/// behind them. `handler` must be
-/// `fn (@TypeOf(state), *std.Io.Reader, *std.Io.Writer) void`.
+/// The time limits of one connection, as the Engine can act on them.
+///
+/// zio keeps a timeout on the reader and on the writer and applies it to
+/// every operation, so putting a limit on the next read is a field store
+/// rather than a timer, a watchdog fiber, or anything else with a cost.
+/// The names are plain on purpose: the Bulkhead is what turns zfast's
+/// policy into calls on these, and this file is not allowed to know what
+/// that policy is (ADR 0002).
+pub const Clocks = struct {
+    reader: *zio.net.Stream.Reader,
+    writer: *zio.net.Stream.Writer,
+
+    pub fn readNoLimit(self: *Clocks) void {
+        self.reader.setTimeout(.none);
+    }
+
+    pub fn readWithinMs(self: *Clocks, ms: u32) void {
+        self.reader.setTimeout(.fromMilliseconds(ms));
+    }
+
+    /// A limit shared by every read until it is changed, given as a reading
+    /// of the same monotonic clock `monotonicNanos` returns.
+    pub fn readByNanos(self: *Clocks, ns: u64) void {
+        self.reader.setTimeout(.{ .deadline = .fromNanoseconds(ns) });
+    }
+
+    pub fn writeNoLimit(self: *Clocks) void {
+        self.writer.setTimeout(.none);
+    }
+
+    pub fn writeWithinMs(self: *Clocks, ms: u32) void {
+        self.writer.setTimeout(.fromMilliseconds(ms));
+    }
+
+    pub fn writeByNanos(self: *Clocks, ns: u64) void {
+        self.writer.setTimeout(.{ .deadline = .fromNanoseconds(ns) });
+    }
+
+    /// Whether a read or write ran out of time, as opposed to the
+    /// connection having broken.
+    ///
+    /// Both reach the HTTP layer as `error.ReadFailed`/`error.WriteFailed`,
+    /// because that is all a `std.Io` interface can say; the reason is kept
+    /// on the side, here. zio does not clear it, so this only means
+    /// anything asked directly after the operation that failed — which is
+    /// the only place zfast asks, and then the connection is closed.
+    pub fn timedOut(self: *const Clocks) bool {
+        if (self.reader.err) |err| if (err == error.Timeout) return true;
+        if (self.writer.err) |err| if (err == error.Timeout) return true;
+        return false;
+    }
+};
+
+/// Run `handler(state, in, out, clocks)` for every accepted connection,
+/// each in its own fiber, until that connection is done. The Reader/Writer
+/// are already buffered; the handler does not need to know there is a
+/// socket behind them. `handler` must be
+/// `fn (@TypeOf(state), *std.Io.Reader, *std.Io.Writer, *Clocks) void`.
 ///
 /// Returns when `stop` is set — by a signal, or by somebody calling
 /// `App.shutdown()` — once the connections still being served have
@@ -313,8 +408,9 @@ pub fn serve(
 
             var reader = stream.reader(read_buf);
             var writer = stream.writer(write_buf);
+            var clocks = Clocks{ .reader = &reader, .writer = &writer };
 
-            handler(st, &reader.interface, &writer.interface);
+            handler(st, &reader.interface, &writer.interface, &clocks);
         }
     };
 

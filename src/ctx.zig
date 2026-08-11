@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const body_mod = @import("body.zig");
+const bulkhead = @import("bulkhead.zig");
 const http1 = @import("http1.zig");
 const json_mod = @import("json.zig");
 const router = @import("router.zig");
@@ -70,6 +71,11 @@ pub const Ctx = struct {
     /// the connection for again, which is most of them — see the copy in
     /// `App.handleRequest`, and `aboutToRead` for what keeps it honest.
     _head_borrowed: bool = false,
+    /// This connection's time limits (ADR 0023). Every path that reads from
+    /// the connection arms the one that applies to it first; `.off` — which
+    /// is the default, and what a test driving App directly gets — makes
+    /// every one of those calls do nothing.
+    _deadlines: bulkhead.Deadlines = .off,
     _params: []const router.Param,
     _services: *const service_mod.Registry,
     /// Set by App when the path names a file in a static set, so the
@@ -231,6 +237,13 @@ pub const Ctx = struct {
     /// somebody a `Str` full of the next request's bytes.
     fn aboutToRead(self: *const Ctx) void {
         std.debug.assert(!self._head_borrowed);
+        // Here for the same reason the assert is, rather than at each call
+        // site: a read nobody put a clock on is a fiber a client can park
+        // by going quiet (ADR 0023). One choke point means a new way to
+        // read from the connection gets its limit without anybody
+        // remembering to give it one. A WebSocket takes the limit back off,
+        // once it is the thing doing the reading.
+        self._deadlines.armBody();
     }
 
     pub fn body(self: *Ctx) !Str {
@@ -567,6 +580,16 @@ pub const Ctx = struct {
 
         const answer = websocket.accept(key.view());
         try websocket.writeAcceptance(self._out, &answer, options.protocol);
+
+        // A WebSocket is allowed to sit quiet. A chat tab with nobody typing
+        // is working correctly, and the read limit that protects the HTTP
+        // side would close it in half a minute. What is worth catching here
+        // is a client that has gone away without saying so, and the answer
+        // to that is a ping it does not answer — a WebSocket feature, with a
+        // frame to send and a reply to wait for, rather than a deadline
+        // (ADR 0023). Writes keep their limit: they are how the server finds
+        // out the client stopped listening.
+        self._deadlines.readForever();
 
         return .{ ._in = self._in, ._out = self._out, ._stopping = self._stopping };
     }

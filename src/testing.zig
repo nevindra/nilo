@@ -150,6 +150,8 @@ pub const Client = struct {
             &self.in_flight,
             &in,
             &out,
+            // There is no socket here, so there is nothing to time out.
+            .off,
         );
         // One request, then everything it allocated goes — exactly as a
         // connection does between requests.

@@ -33,6 +33,11 @@ const arena_keep = 16 * 1024;
 
 const RESPONSE_400 = http1.staticResponse(400, "Bad Request", "text/plain", "malformed request\n", false);
 const RESPONSE_431 = http1.staticResponse(431, "Request Header Fields Too Large", "text/plain", "head too long\n", false);
+/// Sent when a request head started arriving and then stopped (ADR 0023).
+/// Not when a keep-alive connection simply sat idle: that client has not
+/// asked for anything, and a status answering nothing is noise a proxy has
+/// to decide what to do with.
+const RESPONSE_408 = http1.staticResponse(408, "Request Timeout", "text/plain", "request head timed out\n", false);
 
 pub const App = struct {
     gpa: std.mem.Allocator,
@@ -456,10 +461,20 @@ pub const App = struct {
         self.stop.request();
     }
 
-    fn handleConnection(self: *App, in: *std.Io.Reader, out: *std.Io.Writer) void {
+    fn handleConnection(
+        self: *App,
+        in: *std.Io.Reader,
+        out: *std.Io.Writer,
+        deadlines: bulkhead.Deadlines,
+    ) void {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         var lifetime = str_mod.Lifetime{};
+
+        // Once for the connection. Nothing in a response changes how long a
+        // single write may take, so nothing re-arms it — including a stream
+        // that writes for an hour, where each write is still one write.
+        deadlines.armWrite();
 
         // What this fiber is serving is bound to it once, then reused by
         // every request on the same connection (ADR 0007).
@@ -469,7 +484,12 @@ pub const App = struct {
         defer bulkhead.unbindSlot(&binding);
 
         while (true) {
-            const keep_going = self.handleRequest(arena.allocator(), &lifetime, &in_flight, in, out);
+            // Waiting for the next request to start is the idle limit, not
+            // the header one. Re-armed every time round: a connection that
+            // has just served a request is idle again from now, not from
+            // whenever it was accepted.
+            deadlines.armIdle();
+            const keep_going = self.handleRequest(arena.allocator(), &lifetime, &in_flight, in, out, deadlines);
             // The request is done: every Str of its goes stale, then the
             // bag is emptied in one go.
             //
@@ -493,6 +513,7 @@ pub const App = struct {
         in_flight: *fail.InFlight,
         in: *std.Io.Reader,
         out: *std.Io.Writer,
+        deadlines: bulkhead.Deadlines,
     ) bool {
         const failure = &in_flight.failure;
         in_flight.startRequest("", "");
@@ -502,9 +523,18 @@ pub const App = struct {
         const prev_slot = bulkhead.setFallbackSlot(in_flight);
         defer _ = bulkhead.setFallbackSlot(prev_slot);
 
-        const raw_head = http1.readHead(in) catch |err| {
+        const raw_head = http1.readHead(in, deadlines) catch |err| {
             switch (err) {
-                error.EndOfStream, error.ReadFailed => {},
+                error.EndOfStream => {},
+                // A timeout arrives as a read failure like any other, so
+                // which one it was has to be asked (ADR 0023). The bytes
+                // that did turn up are still buffered, and they are what
+                // separates the two cases worth telling apart: a client
+                // halfway through a head gets a 408, a connection that sat
+                // idle without asking for anything is just closed.
+                error.ReadFailed => if (deadlines.timedOut() and in.buffered().len > 0) {
+                    sendFinal(out, RESPONSE_408);
+                },
                 error.HeadTooLong => sendFinal(out, RESPONSE_431),
             }
             return false;
@@ -568,6 +598,7 @@ pub const App = struct {
             ._query_params = ctx_mod.parseQuery(arena, raw_query) catch return false,
             ._head = request_head,
             ._head_borrowed = borrowed,
+            ._deadlines = deadlines,
             ._params = &.{},
             ._services = &self.services,
             // Stopping: this one still gets answered — a request already on
@@ -629,7 +660,18 @@ pub const App = struct {
             // is closed: the next request on it would read leftover bytes
             // of unclear provenance.
             if (c._sent) {
-                std.log.warn("handler {s} {s} failed after answering: {s}", .{ @tagName(c.method), path, @errorName(err) });
+                // A write that ran out of time is the ordinary way a
+                // response to a client that stopped reading ends, and
+                // "handler failed" sends whoever reads the log looking for a
+                // bug in a handler that did nothing wrong (ADR 0023).
+                if (deadlines.timedOut()) {
+                    std.log.warn(
+                        "{s} {s}: gave up writing after {d}ms — the client stopped reading",
+                        .{ @tagName(c.method), path, deadlines.write_ms },
+                    );
+                } else {
+                    std.log.warn("handler {s} {s} failed after answering: {s}", .{ @tagName(c.method), path, @errorName(err) });
+                }
                 return false;
             }
             // Nothing sent yet: this is a clean failure. A body nobody read
@@ -904,17 +946,29 @@ const RouteList = struct {
 fn drain(c: *Ctx, in: *std.Io.Reader, r: *const http1.Request) bool {
     if (!c.keepAlive() or c._stream_desynced) return false;
     if (c._body != null) return true;
+    // Reading here as well as in the handler, so the clock goes on here as
+    // well (ADR 0023). Without it these reads would inherit whatever limit
+    // was last set — the header deadline, which by now has passed — and a
+    // client with a body left to send would have its connection dropped for
+    // no reason. Only where something is really read, though: arming it on a
+    // GET would leave a limit meant for a body sitting on a connection that
+    // is about to go idle instead.
+    //
     // The handler read the body in pieces and may have stopped part way —
     // a `while (try incoming.read(…))` that breaks early is an ordinary
     // thing to write. What is left of it goes here, so the next request on
     // this connection starts where it should (ADR 0020).
     if (c._incoming) |*progress| {
         if (progress.finished()) return true;
+        c._deadlines.armBody();
         var rest = body_mod.Body.init(in, progress);
         rest.discardRest() catch return false;
         return true;
     }
-    http1.discardBody(in, r, ctx_mod.max_body) catch return false;
+    if (http1.readsMore(r)) {
+        c._deadlines.armBody();
+        http1.discardBody(in, r, ctx_mod.max_body) catch return false;
+    }
     return true;
 }
 
@@ -1147,7 +1201,7 @@ const Harness = struct {
     fn send(self: *Harness, app: *App, request: []const u8) struct { response: []const u8, keep_alive: bool } {
         var in = std.Io.Reader.fixed(request);
         var out = std.Io.Writer.fixed(&self.buf);
-        const keep_alive = app.handleRequest(self.arena.allocator(), &self.lifetime, &self.in_flight, &in, &out);
+        const keep_alive = app.handleRequest(self.arena.allocator(), &self.lifetime, &self.in_flight, &in, &out, .off);
         self.lifetime.end();
         _ = self.arena.reset(.retain_capacity);
         return .{ .response = out.buffered(), .keep_alive = keep_alive };
@@ -2306,7 +2360,7 @@ test "a chunked body nobody read is still stepped over" {
             "GET /ignore HTTP/1.1\r\n\r\n",
     );
     var out = std.Io.Writer.fixed(&h.buf);
-    try testing.expect(app.handleRequest(h.arena.allocator(), &h.lifetime, &h.in_flight, &in, &out));
+    try testing.expect(app.handleRequest(h.arena.allocator(), &h.lifetime, &h.in_flight, &in, &out, .off));
 
     const next = try http1.readRequest(&in);
     try testing.expectEqualStrings("/ignore", next.target);
@@ -2495,7 +2549,7 @@ test "the request path stays inside its allocation budget" {
         fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
             var in = std.Io.Reader.fixed(request);
             var out = std.Io.Writer.fixed(b);
-            _ = a.handleRequest(gpa, l, f, &in, &out);
+            _ = a.handleRequest(gpa, l, f, &in, &out, .off);
             l.end();
         }
     }.once;
@@ -2637,7 +2691,7 @@ test "a request with a body copies the head, so its Strs survive reading it" {
 
         var conn = Trickle.init(wire, per_read, &read_buf);
         var out = std.Io.Writer.fixed(&out_buf);
-        _ = app.handleRequest(arena.allocator(), &lifetime, &in_flight, &conn.reader, &out);
+        _ = app.handleRequest(arena.allocator(), &lifetime, &in_flight, &conn.reader, &out, .off);
 
         try testing.expect(std.mem.startsWith(u8, out.buffered(), "HTTP/1.1 200"));
         try testing.expect(std.mem.endsWith(u8, out.buffered(), "example.dev|hello world|/echo"));
@@ -2677,7 +2731,7 @@ test "a head arriving a byte at a time is still parsed, and its Strs are sound" 
 
         var conn = Trickle.init(wire, per_read, &read_buf);
         var out = std.Io.Writer.fixed(&out_buf);
-        _ = app.handleRequest(arena.allocator(), &lifetime, &in_flight, &conn.reader, &out);
+        _ = app.handleRequest(arena.allocator(), &lifetime, &in_flight, &conn.reader, &out, .off);
 
         try testing.expect(std.mem.endsWith(
             u8,
@@ -2724,11 +2778,294 @@ test "two requests on one trickling connection do not borrow each other's head" 
             &in_flight,
             &conn.reader,
             &out,
+            .off,
         ));
         try testing.expect(std.mem.endsWith(u8, out.buffered(), want));
         lifetime.end();
         _ = arena.reset(.{ .retain_with_limit = arena_keep });
     }
+}
+
+// ---- deadlines (ADR 0023) ----
+//
+// What is tested here is the policy: which limit the request path asks for,
+// when, how many times, and what it sends when one runs out. What zio does
+// once it has a limit is zio's, and it is checked by hand against a real
+// socket rather than pretended at here — the numbers from that run are in
+// the ADR. A fake makes the difference between an absolute header deadline
+// and a per-read one visible, which no amount of waiting on a real socket
+// would make *quick* to check.
+
+/// A `Deadlines` that writes down what it was asked to do instead of doing
+/// it.
+const Recorded = struct {
+    const Call = struct { side: bulkhead.Side, limit: bulkhead.Limit };
+
+    calls: [16]Call = undefined,
+    n: usize = 0,
+    /// What `timedOut()` answers — the fake stands in for the socket here
+    /// too, since a fake reader cannot really run out of time.
+    timed_out: bool = false,
+
+    /// A `Deadlines` carrying real numbers and this recorder's behaviour.
+    fn with(self: *Recorded, limits: bulkhead.Deadlines) bulkhead.Deadlines {
+        var d = limits;
+        d.target = self;
+        d.vtable = &vtable;
+        return d;
+    }
+
+    const vtable: bulkhead.Deadlines.VTable = .{ .limit = record, .timedOut = wasTimeout };
+
+    fn record(target: ?*anyopaque, side: bulkhead.Side, l: bulkhead.Limit) void {
+        const self: *Recorded = @ptrCast(@alignCast(target.?));
+        if (self.n == self.calls.len) return;
+        self.calls[self.n] = .{ .side = side, .limit = l };
+        self.n += 1;
+    }
+
+    fn wasTimeout(target: ?*anyopaque) bool {
+        const self: *const Recorded = @ptrCast(@alignCast(target.?));
+        return self.timed_out;
+    }
+
+    fn lastRead(self: *const Recorded) ?bulkhead.Limit {
+        var i = self.n;
+        while (i > 0) {
+            i -= 1;
+            if (self.calls[i].side == .read) return self.calls[i].limit;
+        }
+        return null;
+    }
+
+    fn countReads(self: *const Recorded, tag: @typeInfo(bulkhead.Limit).@"union".tag_type.?) usize {
+        var found: usize = 0;
+        for (self.calls[0..self.n]) |call| {
+            if (call.side == .read and call.limit == tag) found += 1;
+        }
+        return found;
+    }
+};
+
+/// The four numbers a server runs with, small and distinct so a test can
+/// tell from the value alone which limit was asked for.
+const test_limits: bulkhead.Deadlines = .{
+    .header_ms = 700,
+    .idle_ms = 900,
+    .body_ms = 1100,
+    .write_ms = 1300,
+};
+
+/// `Trickle`, except that when it runs out it fails the way a socket that
+/// ran out of time does — `error.ReadFailed`, with the reason kept
+/// elsewhere — rather than reporting a clean end of stream.
+const Stalling = struct {
+    rest: []const u8,
+    per_read: usize,
+    reader: std.Io.Reader,
+
+    fn init(source: []const u8, per_read: usize, buffer: []u8) Stalling {
+        return .{
+            .rest = source,
+            .per_read = per_read,
+            .reader = .{
+                .vtable = &.{ .stream = stream },
+                .buffer = buffer,
+                .end = 0,
+                .seek = 0,
+            },
+        };
+    }
+
+    fn stream(
+        r: *std.Io.Reader,
+        w: *std.Io.Writer,
+        limit: std.Io.Limit,
+    ) std.Io.Reader.StreamError!usize {
+        const self: *Stalling = @alignCast(@fieldParentPtr("reader", r));
+        if (self.rest.len == 0) return error.ReadFailed;
+        const dest = limit.slice(try w.writableSliceGreedy(1));
+        const n = @min(@min(dest.len, self.per_read), self.rest.len);
+        @memcpy(dest[0..n], self.rest[0..n]);
+        self.rest = self.rest[n..];
+        w.advance(n);
+        return n;
+    }
+};
+
+const Deadline = struct {
+    app: App,
+    arena: std.heap.ArenaAllocator,
+    lifetime: str_mod.Lifetime = .{},
+    in_flight: fail.InFlight = .{},
+    clock: Recorded = .{},
+    out_buf: [4096]u8 = undefined,
+    read_buf: [512]u8 = undefined,
+
+    fn init() Deadline {
+        return .{
+            .app = App.init(testing.allocator),
+            .arena = std.heap.ArenaAllocator.init(testing.allocator),
+        };
+    }
+
+    fn deinit(self: *Deadline) void {
+        self.app.deinit();
+        self.arena.deinit();
+    }
+
+    /// One request over a connection that hands `wire` over `per_read` bytes
+    /// at a time and then stops dead.
+    fn stall(self: *Deadline, wire: []const u8, per_read: usize) struct {
+        response: []const u8,
+        keep_alive: bool,
+    } {
+        var conn = Stalling.init(wire, per_read, &self.read_buf);
+        var out = std.Io.Writer.fixed(&self.out_buf);
+        const keep_alive = self.app.handleRequest(
+            self.arena.allocator(),
+            &self.lifetime,
+            &self.in_flight,
+            &conn.reader,
+            &out,
+            self.clock.with(test_limits),
+        );
+        return .{ .response = out.buffered(), .keep_alive = keep_alive };
+    }
+};
+
+test "a head that starts arriving and then stops is answered with 408" {
+    var d = Deadline.init();
+    defer d.deinit();
+    try d.app.get("/", struct {
+        fn run(c: *Ctx) anyerror!void {
+            try c.sendText(200, "should never run");
+        }
+    }.run);
+    try d.app.resolveChains();
+    d.clock.timed_out = true;
+
+    // A head with no blank line: the client said something and then went
+    // quiet, which is the slowloris shape.
+    const sent = d.stall("GET / HTTP/1.1\r\nHost: example.dev\r\n", 8);
+
+    try testing.expect(std.mem.startsWith(u8, sent.response, "HTTP/1.1 408"));
+    try testing.expect(!sent.keep_alive);
+}
+
+test "a connection that goes quiet without asking for anything is closed without a word" {
+    // The other half of the 408 decision. Nothing was asked, so there is
+    // nothing to answer, and a status here would be a proxy's problem
+    // rather than a client's answer.
+    var d = Deadline.init();
+    defer d.deinit();
+    try d.app.resolveChains();
+    d.clock.timed_out = true;
+
+    const sent = d.stall("", 8);
+
+    try testing.expectEqual(@as(usize, 0), sent.response.len);
+    try testing.expect(!sent.keep_alive);
+}
+
+test "a connection that breaks mid-head is closed without a 408 as well" {
+    // Same failure, different reason: the client is gone, not slow. A 408
+    // would be written into a socket nobody is holding.
+    var d = Deadline.init();
+    defer d.deinit();
+    try d.app.resolveChains();
+    d.clock.timed_out = false;
+
+    const sent = d.stall("GET / HTTP/1.1\r\nHost: example.dev\r\n", 8);
+
+    try testing.expectEqual(@as(usize, 0), sent.response.len);
+}
+
+test "the header deadline is set once, however many reads the head takes" {
+    // The whole reason the header limit is an absolute deadline rather than a
+    // per-read one. A client sending a byte at a time drives dozens of reads
+    // through here; if any of them re-armed the limit, it would move the
+    // finish line forward every time and never be reached — which is the
+    // attack, not the defence.
+    var d = Deadline.init();
+    defer d.deinit();
+    try d.app.get("/x", struct {
+        fn run(c: *Ctx) anyerror!void {
+            try c.sendText(200, "ok");
+        }
+    }.run);
+    try d.app.resolveChains();
+
+    const sent = d.stall("GET /x HTTP/1.1\r\nHost: example.dev\r\nAccept: */*\r\n\r\n", 1);
+    try testing.expect(std.mem.startsWith(u8, sent.response, "HTTP/1.1 200"));
+
+    // Once for the whole head, and as a deadline rather than a duration.
+    try testing.expectEqual(@as(usize, 1), d.clock.countReads(.by_ns));
+    try testing.expectEqual(@as(usize, 0), d.clock.countReads(.within_ms));
+}
+
+test "a head that arrives whole still starts the header clock" {
+    // The ordinary case: one read brings everything. `readHead` finds the
+    // terminator on the first look and never has to wait again, so nothing is
+    // armed at all — the read that mattered was the idle one, and the
+    // connection loop armed that before calling in.
+    var d = Deadline.init();
+    defer d.deinit();
+    try d.app.get("/x", struct {
+        fn run(c: *Ctx) anyerror!void {
+            try c.sendText(200, "ok");
+        }
+    }.run);
+    try d.app.resolveChains();
+
+    const sent = d.stall("GET /x HTTP/1.1\r\nHost: example.dev\r\n\r\n", 1024);
+
+    try testing.expect(std.mem.startsWith(u8, sent.response, "HTTP/1.1 200"));
+    try testing.expectEqual(@as(usize, 0), d.clock.countReads(.by_ns));
+}
+
+test "reading a body puts the body's limit on it, not the head's" {
+    // The head's deadline has passed by the time a handler asks for the body,
+    // so a body read that inherited it would fail at once.
+    var d = Deadline.init();
+    defer d.deinit();
+    try d.app.post("/echo", struct {
+        fn run(c: *Ctx) anyerror!void {
+            try c.sendText(200, (try c.body()).view());
+        }
+    }.run);
+    try d.app.resolveChains();
+
+    const sent = d.stall(
+        "POST /echo HTTP/1.1\r\nHost: example.dev\r\nContent-Length: 5\r\n\r\nhello",
+        3,
+    );
+
+    try testing.expect(std.mem.endsWith(u8, sent.response, "hello"));
+    try testing.expectEqual(bulkhead.Limit{ .within_ms = test_limits.body_ms }, d.clock.lastRead().?);
+}
+
+test "a WebSocket is allowed to sit quiet once the handshake is done" {
+    // A chat tab with nobody typing is working correctly, and the limit that
+    // protects the HTTP side would close it. Writes keep theirs.
+    var d = Deadline.init();
+    defer d.deinit();
+    try d.app.get("/ws", struct {
+        fn run(c: *Ctx) anyerror!void {
+            _ = try c.upgrade();
+        }
+    }.run);
+    try d.app.resolveChains();
+
+    const sent = d.stall(
+        "GET /ws HTTP/1.1\r\nHost: example.dev\r\nUpgrade: websocket\r\n" ++
+            "Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n" ++
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+        1024,
+    );
+
+    try testing.expect(std.mem.startsWith(u8, sent.response, "HTTP/1.1 101"));
+    try testing.expectEqual(bulkhead.Limit.none, d.clock.lastRead().?);
 }
 
 // ---- the generated API description (ADR 0017) ----
@@ -3309,7 +3646,7 @@ test "a route that resolves nothing still costs what it always did" {
         fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
             var in = std.Io.Reader.fixed("GET /users/7 HTTP/1.1\r\nHost: x\r\n\r\n");
             var out = std.Io.Writer.fixed(b);
-            _ = a.handleRequest(gpa, l, f, &in, &out);
+            _ = a.handleRequest(gpa, l, f, &in, &out, .off);
             l.end();
         }
     }.once;
@@ -3477,7 +3814,7 @@ test "a stream allocates once, however many pieces it writes" {
         fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
             var in = std.Io.Reader.fixed("GET /many HTTP/1.1\r\nHost: x\r\n\r\n");
             var out = std.Io.Writer.fixed(b);
-            _ = a.handleRequest(gpa, l, f, &in, &out);
+            _ = a.handleRequest(gpa, l, f, &in, &out, .off);
             l.end();
         }
     }.once;
@@ -3688,7 +4025,7 @@ test "a body read in pieces allocates nothing" {
         fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
             var in = std.Io.Reader.fixed(request);
             var out = std.Io.Writer.fixed(b);
-            _ = a.handleRequest(gpa, l, f, &in, &out);
+            _ = a.handleRequest(gpa, l, f, &in, &out, .off);
             l.end();
         }
     }.once;
@@ -3916,7 +4253,7 @@ test "a WebSocket allocates nothing per message, however many it carries" {
         fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
             var in = std.Io.Reader.fixed(conversation);
             var out = std.Io.Writer.fixed(b);
-            _ = a.handleRequest(gpa, l, f, &in, &out);
+            _ = a.handleRequest(gpa, l, f, &in, &out, .off);
             l.end();
         }
     }.once;
