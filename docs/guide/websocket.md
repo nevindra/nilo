@@ -91,7 +91,11 @@ writers under load, which is a corrupt stream rather than a slow one — so it i
 recorded rather than half-built
 ([ADR 0022](../adr/0022-a-websocket-is-a-handler-that-does-not-return.md)).
 
-Also absent: `permessage-deflate`, and any deadline — a client that opens a
-socket and never speaks holds a fiber until TCP gives up.
+Also absent: `permessage-deflate`, and any read deadline. A socket is allowed to
+sit quiet — a chat tab with nobody typing is working correctly — so what catches
+a client that vanished is the write limit, on the next thing the server sends it.
+A ping it fails to answer is what would catch one nobody writes to, and that is a
+feature this doesn't have yet
+([ADR 0023](../adr/0023-a-deadline-belongs-to-an-operation-not-to-a-request.md)).
 
 `zig build run-chat` is a working one, browser page included.

@@ -53,6 +53,14 @@ literal; the type is `zfast.Group("/api")`.
 | `reuse_address` | `true` |
 | `stop_on_signal` | `true` — Ctrl-C and SIGTERM |
 | `shutdown_grace_ms` | `10_000` |
+| `header_timeout_ms` | `10_000` — the whole head, from its first byte |
+| `idle_timeout_ms` | `75_000` — a connection between requests |
+| `body_timeout_ms` | `30_000` — any one read of a body |
+| `write_timeout_ms` | `30_000` — any one write to the client |
+
+Each of the four bounds one wait for the network, not a request, so a long
+upload or an hour-long stream is not hurried by any of them. `0` turns one off.
+See [Deploying](./guide/deploying.md#deadlines).
 
 ## Handler arguments
 

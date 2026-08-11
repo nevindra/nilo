@@ -6,31 +6,23 @@ binding are in [`adr/`](./adr/).
 
 ## Next
 
-In order. The first one is not close to the others in importance.
+In order.
 
-1. **Deadlines.** There is no read timeout, no header timeout, no write timeout.
-   A client that opens a connection and goes quiet parks a fiber until TCP gives
-   up, and streaming makes that easy to do on purpose: open an event stream,
-   never read it, hold a fiber. This is the largest hole in the project. It wants
-   one decision about deadlines — where they are set, what a handler sees when one
-   fires, whether a stream can extend its own — rather than a knob bolted onto
-   each feature. [ADR 0020](./adr/0020-a-request-that-lasts-is-still-one-request.md)
-   records it and declines to solve it.
-2. **Sending to a WebSocket a handler does not hold.** A connection's write
+1. **Sending to a WebSocket a handler does not hold.** A connection's write
    buffer belongs to the fiber serving it, so broadcasting needs a per-socket
    outbox with its own lock rather than a loop over a list
    ([ADR 0022](./adr/0022-a-websocket-is-a-handler-that-does-not-return.md)).
    Phoenix Channels is the shape, and it is a project rather than a function.
-3. **Somewhere honest to measure.** Until there is a machine nobody else is
+2. **Somewhere honest to measure.** Until there is a machine nobody else is
    using, [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md) is not
    active and every conflict goes to DX. `bench/bench.sh` has been in the repo
    since the first stage so that when the machine turns up it is one command away.
-4. **Reloading static files without a restart.** A development annoyance rather
+3. **Reloading static files without a restart.** A development annoyance rather
    than a design hole: a deploy restarts anyway. Wants a watch option.
-5. **`sendfile`, and serving a file too big to hold in memory.** This is the part
+4. **`sendfile`, and serving a file too big to hold in memory.** This is the part
    that contradicts [ADR 0010](./adr/0010-static-files-are-held-in-memory.md)
    rather than extending it, so it wants its own argument before any code.
-6. **`permessage-deflate`.** Negotiated in the handshake, and a compressor per
+5. **`permessage-deflate`.** Negotiated in the handshake, and a compressor per
    connection is memory that has not been budgeted.
 
 ## Known gaps
@@ -56,16 +48,13 @@ Things that are wrong or missing today, with what fixing them would take.
   latency.** One line per request is the contract, and a stream's line arrives
   when the stream ends. Time to first byte is a different number and wants a
   different feature.
-- **The request head is walked twice.** `readHead` scans the incoming bytes
-  for the blank line that ends the head, then `parseHead` walks the same
-  bytes again splitting them into lines. Together that is **34% of a
-  request** — 12% reading, 22% parsing, the two largest items on the
-  profile. One pass that recorded line boundaries while it searched for the
-  terminator would do both, and it is the only place left where the request
-  path does obviously redundant work. It is also the piece that has to
-  handle a head arriving a byte at a time without going quadratic, which is
-  why it has not been touched: the current version is correct and resumes
-  where it left off, and a rewrite risks the one thing nobody wants wrong.
+- ~~**The request head is walked twice**, which together is 34% of a
+  request.~~ *Done.* Both walks read 32 bytes at a time now, and the colons
+  are handled as a bitmask rather than searched for line by line — a head has
+  one colon per header that matters and a great many that do not. Finding the
+  end went 183ns → 51ns and parsing 303ns → 163ns. It is still two passes:
+  merging them would mean recording line boundaries during a scan that has to
+  resume where it left off, and the two passes cost 214ns between them.
 - **The router is still a linear scan.** Which structure replaces it — radix
   tree, per-method buckets, something else — needs numbers nobody has yet. What
   the scan costs was measured in-process: 3.7× at 50 routes, 1.4× at 5, worst
@@ -123,3 +112,5 @@ pattern too.
 | A panic in any handler takes the whole process down, and Go people will assume otherwise | Cannot be fixed in Zig. Said plainly in the docs, `ReleaseSafe` and a supervisor recommended, and the in-flight request named in the crash ([ADR 0008](./adr/0008-no-recover-middleware.md)) |
 | ~~`std.json` may not be fast enough, and it sits on the hot path~~ *Bit, and was fixed.* It was worse than this line imagined, and hid behind a profile taken on the wrong payload | `src/json.zig`, a writer generated from the response type, with `std.json` as the fallback and the tests asserting the two produce identical bytes |
 | A response could differ from what `std.json` would have written, now that something else usually writes it | `covers()` decides while compiling which types the generated writer may touch, and it errs narrow: a tuple, a `[N]u8`, a type with its own `jsonStringify`, anything unrecognised, all fall back. Floats are handed to `std.json` field by field rather than reimplemented |
+| Deadlines are on by default, so a client on a genuinely bad link could be cut off where it used to be served | The numbers are generous and each bounds one wait rather than a whole request, so nothing legitimate and slow — a big upload, an hour-long stream — is hurried by any of them ([ADR 0023](./adr/0023-a-deadline-belongs-to-an-operation-not-to-a-request.md)) |
+| A WebSocket has no read limit, so a client that vanishes without a FIN holds a fiber | Caught by the write limit as soon as the server sends anything. A connection nobody writes to is not, and the answer to that is a ping it fails to answer — a WebSocket feature with its own design, not a number in `Options` |

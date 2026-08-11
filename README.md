@@ -8,8 +8,7 @@ An HTTP framework for Zig, aimed at people coming from Go or Node.
 > range requests, and WebSocket. Needs Zig 0.16.
 >
 > Not benchmarked on a quiet machine yet, so there are no performance claims
-> here — and there are [no timeouts](#not-here-yet), so put a reverse proxy in
-> front. `zfast` is a working name and may change before 1.0.
+> here. `zfast` is a working name and may change before 1.0.
 
 ```zig
 const zfast = @import("zfast");
@@ -121,12 +120,7 @@ it is rather than how to use it:
 
 ## Not here yet
 
-**There are no deadlines of any kind** — no read, header or write timeout. A
-client that opens a connection and then goes quiet parks a fiber until TCP gives
-up on it. That is the largest hole there is, so put zfast behind a reverse proxy
-that has timeouts until it's filled.
-
-Also absent: TLS, sessions, templates, `sendfile`, `permessage-deflate`, and
+Absent: TLS, sessions, templates, `sendfile`, `permessage-deflate`, and
 broadcasting to WebSockets a handler doesn't hold. Each with its reason in
 [`docs/roadmap.md`](./docs/roadmap.md); the ones that are refusals rather than
 backlog are in [`docs/adr/`](./docs/adr/).
@@ -142,7 +136,7 @@ That trade has a budget, and it isn't one number
 | | |
 |---|---|
 | Throughput and p99 | DX wins below 10% |
-| Allocations per request | a hard invariant — currently 3, held by a test |
+| Allocations per request | a hard invariant — currently 1, held by a test |
 | Memory per idle connection | a hard invariant — every feature states its cost |
 
 Throughput is elastic and the bottom two aren't: an extra allocation isn't 10%

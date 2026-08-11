@@ -274,3 +274,33 @@ A third kind of number needs no machine at all: how the work grows. Two places w
 
 - **Finding the end of a request head** restarted from byte zero on every read. A head arriving in one packet cost one pass; the same head dribbled in a byte at a time cost a pass per byte — quadratic, and reachable by any client that chooses to be slow. It now resumes where it left off.
 - **Route matching** re-split the request path for every route it tried, which is a different kind of wrong from "linear". Patterns are split at registration now and the path once per request, and a route with a different segment count is rejected on an integer compare. Measured in-process, worst case with the wanted route last: **3.7× at 50 routes, 1.4× at 5**. Never slower, so the linear scan does not owe the benchmark anything — replacing it is still open ([`roadmap.md`](./roadmap.md)).
+
+## After 0.1.0: deadlines
+
+The one thing 0.1.0 shipped without that made it unsafe to expose directly. `nc host 8787`, say nothing, and a fiber was parked until TCP gave up — minutes, from one laptop, with no tool and no bandwidth.
+
+The decision it needed is in [ADR 0023](./adr/0023-a-deadline-belongs-to-an-operation-not-to-a-request.md), and it went the other way from where it looked like it was going. Not a deadline per request: **a limit on one wait for the network.** A request deadline would have had to kill a stream that runs for an hour and a 4 GB upload on a domestic line, both of which are working correctly, and implementing it honestly would have meant interrupting a handler — which Zig cannot do safely, the same fact that rules out a `recover` middleware.
+
+Four limits, then, on four different waits: the head, an idle connection, one read of a body, one write to the client. The subtle one is the head, and it is the whole defence: it is an *absolute* deadline shared by every read, because a client sending one byte a second satisfies a per-read limit of any size forever and never finishes. A test counts the arming rather than trusting the comment.
+
+Measured against the real server on a real socket, with the limits turned down to 1000ms (2000ms idle) so a check takes seconds:
+
+```
+  a healthy request                        200 in 10ms
+  two requests on one keep-alive           both 200
+  a head that stops halfway                408 at 1001ms
+  a head at one byte every 300ms           408 at 1201ms
+  an idle keep-alive connection            closed at 2000ms, nothing written
+  a body that stops halfway                connection released at 1002ms
+  80,000 answers asked for, none read      closed at 1116ms
+```
+
+The last row is the one ADR 0020 could not answer. Before this, that client held a fiber in a blocked write for as long as the kernel allowed.
+
+Two things about how it was built are worth keeping.
+
+**The Engine needed nothing new.** zio already keeps a timeout on its reader and its writer and applies it to every operation, so putting a limit on the next read is a field store — no timer, no watchdog fiber, nothing per connection. What the Bulkhead added was the split: `engine.Clocks` can apply a limit and has no idea why, `bulkhead.Deadlines` knows why and has no idea how.
+
+**That split is also the test seam, and it is why the tests are quick.** `Deadlines` reaches its target through a vtable, so a test hands `App` one that writes down what it was asked for instead of doing it. "The header deadline is armed once, however many reads the head takes" is then a counting assertion that runs in a millisecond — where a socket test would have to wait out a real deadline to prove a negative. What zio does with a limit once it has one is checked by hand; the table above is that run.
+
+One wart the tests found: `drain` was arming the body limit on requests that had no body, which left a limit meant for a body sitting on a connection about to go idle. And one log line got fixed on the way past — `handler GET /users/7 failed after answering: WriteFailed` sends whoever reads it hunting for a bug in a handler that did nothing wrong, so when the write ran out of time it now says the client stopped reading.

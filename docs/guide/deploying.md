@@ -42,6 +42,11 @@ try app.listen(.{
     .reuse_address = true,
     .shutdown_grace_ms = 10_000,
     .stop_on_signal = true,   // off if your program handles signals itself
+
+    .header_timeout_ms = 10_000,  // first byte of a head to the blank line
+    .idle_timeout_ms = 75_000,    // a connection between requests
+    .body_timeout_ms = 30_000,    // any one read of a body
+    .write_timeout_ms = 30_000,   // any one write to the client
 });
 ```
 
@@ -58,8 +63,32 @@ reason for `zfast.Mutex` — and also removes the reason to have a machine with
 more than one core. See [Services](./services.md).
 
 On the request path, a routed GET returning JSON with CORS installed makes
-**three allocations**, all of them bump allocations into a request arena that is
-already warm. A test holds it there.
+**one allocation** — the JSON body, and nothing else. A test holds it there.
+
+## Deadlines
+
+The four `_timeout_ms` knobs above bound how long the server waits on a client,
+and they are on by default. Zero turns one off.
+
+They are limits on one wait for the network, not on a request
+([ADR 0023](../adr/0023-a-deadline-belongs-to-an-operation-not-to-a-request.md)),
+which is what makes them safe to leave on: a stream that runs for an hour, a
+WebSocket, and a 4 GB upload are all requests, and none of them is hurried by
+any of this. What gets cut off is a client that has stopped talking.
+
+`header_timeout_ms` is the one that matters most, and it is the one that is not
+per read: the whole head has that long from its first byte, so a client sending
+one byte a second is caught rather than granted an extension every time. It ends
+in a 408. An idle keep-alive connection that has asked for nothing is closed
+without a status — there is nothing to answer.
+
+`idle_timeout_ms` is the knob whose real units are memory: an idle connection
+costs about 21 KB, so a server with many visitors and few of them active wants
+this lower than the default.
+
+A WebSocket has no read limit once the handshake is done — a chat tab with
+nobody typing is working correctly. Its writes keep theirs, which is how the
+server finds out the client is gone.
 
 No requests-per-second figures, on purpose: that number needs a machine nobody
 else is using, and there isn't one yet ([`../roadmap.md`](../roadmap.md)).
@@ -136,13 +165,7 @@ try app.post("/admin/quit", quit);
 
 ## What isn't here yet
 
-**No deadlines of any kind** — no read, header or write timeout. A client that
-opens a connection and then goes quiet parks a fiber until TCP gives up on it,
-and a WebSocket makes that cheap to do on purpose. This is the largest hole on
-the list, and it wants one decision about deadlines rather than a knob per
-feature. Put zfast behind a reverse proxy that has timeouts until then.
-
-Also absent: **TLS** (terminate it in front), sessions, templates, `sendfile`,
+**TLS** (terminate it in front), sessions, templates, `sendfile`,
 `permessage-deflate`, and broadcasting to WebSockets a handler doesn't hold.
 
 Each item is listed with its reason in [`../roadmap.md`](../roadmap.md); the ones

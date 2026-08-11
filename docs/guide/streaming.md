@@ -97,8 +97,10 @@ One fiber each, which v1 measured at **~21 KB**: 10,000 open streams is about
 210 MB, before anything of yours. That is the number to plan around, and turning
 `read_buffer` and `write_buffer` down in `listen()` takes it to ~17 KB.
 
-There are no deadlines — a client that opens a stream and reads nothing holds its
-fiber until TCP gives up. See [Deploying](./deploying.md#what-isnt-here-yet).
+A client that opens a stream and then stops reading is cut off by
+`write_timeout_ms`, which bounds one write rather than the whole response — so a
+stream sending an event a minute is inside the limit however long it runs. See
+[Deploying](./deploying.md#deadlines).
 
 ## Testing one
 
