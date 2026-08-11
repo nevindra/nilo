@@ -344,10 +344,39 @@ pub const Socket = struct {
     }
 };
 
+/// How many bytes are unmasked per instruction. The key is four bytes, so it
+/// tiles any multiple of four exactly; 32 is two SSE registers or one AVX2
+/// one, and LLVM splits it for whatever the target actually has.
+const unmask_lanes = 32;
+
 /// Undo the client's masking, in place. `offset` is how far into the message
 /// these bytes are, so the key lines up across a payload read in pieces.
+///
+/// The obvious loop — one XOR per byte, `key[i % 4]` — is what the RFC
+/// describes, and it runs at about a fourteenth of the speed of copying the
+/// same bytes. For a 16 KiB message that was the entire cost of receiving
+/// one: 6.4µs, against 0.5µs to send the same message back. Since the key
+/// repeats every four bytes, the whole thing is one XOR against a repeating
+/// pattern, which is a vector operation rather than a loop.
 fn unmask(data: []u8, key: [4]u8, offset: usize) void {
-    for (data, offset..) |*byte, i| byte.* ^= key[i % 4];
+    // Where these bytes sit in the message decides which byte of the key
+    // lines up with the first of them.
+    var rotated: [4]u8 = undefined;
+    inline for (0..4) |k| rotated[k] = key[(k +% offset) & 3];
+
+    var i: usize = 0;
+    if (data.len >= unmask_lanes) {
+        var tile: [unmask_lanes]u8 = undefined;
+        inline for (0..unmask_lanes) |k| tile[k] = rotated[k & 3];
+        const pattern: @Vector(unmask_lanes, u8) = tile;
+
+        while (i + unmask_lanes <= data.len) : (i += unmask_lanes) {
+            const block: @Vector(unmask_lanes, u8) = data[i..][0..unmask_lanes].*;
+            data[i..][0..unmask_lanes].* = block ^ pattern;
+        }
+    }
+    // The tail, which is shorter than one vector by definition.
+    while (i < data.len) : (i += 1) data[i] ^= rotated[i & 3];
 }
 
 // ---- the handshake ----
@@ -447,7 +476,7 @@ const Peer = struct {
 
         const start = self.to_server.items.len;
         try self.to_server.appendSlice(gpa, payload);
-        unmask(self.to_server.items[start..], key, 0);
+        maskLikeTheRfc(self.to_server.items[start..], key, 0);
     }
 
     /// A frame with the mask bit off, which no real client may send.
@@ -468,6 +497,59 @@ const Peer = struct {
         return self.out.buffered();
     }
 };
+
+/// RFC 6455 §5.3 transformed-octet-i, written the way the RFC writes it:
+/// one byte at a time, no cleverness. Every test masks with this and lets
+/// `unmask` undo it, so what is being checked is agreement with the spec.
+///
+/// Masking with `unmask` itself — which is what these tests used to do — is
+/// no check at all. XOR is its own inverse, so a completely broken `unmask`
+/// still round-trips against itself, and every test here passed.
+fn maskLikeTheRfc(data: []u8, key: [4]u8, offset: usize) void {
+    for (data, offset..) |*byte, i| byte.* ^= key[i % 4];
+}
+
+test "unmask agrees with the RFC at every length around a vector boundary" {
+    // The lanes are what a length has to be checked against: one short of a
+    // block, exactly a block, one past it, and the same around two blocks.
+    const lengths = [_]usize{ 0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 32, 33, 63, 64, 65, 127, 1000 };
+    const key = [4]u8{ 0x37, 0xfa, 0x21, 0x3d };
+
+    var original: [1000]u8 = undefined;
+    for (&original, 0..) |*b, i| b.* = @truncate(i *% 31 +% 7);
+
+    for (lengths) |len| {
+        // And at every alignment of the key, which is what `offset` decides
+        // when a payload arrives in more than one piece.
+        for (0..4) |offset| {
+            var masked: [1000]u8 = undefined;
+            @memcpy(masked[0..len], original[0..len]);
+            maskLikeTheRfc(masked[0..len], key, offset);
+
+            unmask(masked[0..len], key, offset);
+            try testing.expectEqualSlices(u8, original[0..len], masked[0..len]);
+        }
+    }
+}
+
+test "unmask picks up mid-message where the previous piece left off" {
+    // The property `offset` exists for: two calls over halves of a payload
+    // must produce what one call over the whole of it does.
+    const key = [4]u8{ 0x01, 0x02, 0x03, 0x04 };
+    var whole: [70]u8 = undefined;
+    for (&whole, 0..) |*b, i| b.* = @truncate(i);
+    var split = whole;
+
+    maskLikeTheRfc(&whole, key, 0);
+    maskLikeTheRfc(&split, key, 0);
+
+    unmask(&whole, key, 0);
+    // 33 is deliberately not a multiple of four or of the vector width.
+    unmask(split[0..33], key, 0);
+    unmask(split[33..], key, 33);
+
+    try testing.expectEqualSlices(u8, &whole, &split);
+}
 
 test "the handshake answer is the one every client checks" {
     // The example from RFC 6455 §1.3, which every implementation is tested
