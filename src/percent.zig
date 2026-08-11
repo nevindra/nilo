@@ -16,11 +16,37 @@ const std = @import("std");
 /// Whether `raw` has anything to decode. The common case — it does not —
 /// answers in one scan and allocates nothing.
 pub fn needed(raw: []const u8, plus_as_space: bool) bool {
-    for (raw) |ch| {
-        if (ch == '%') return true;
-        if (plus_as_space and ch == '+') return true;
+    return scan(raw, plus_as_space).anything;
+}
+
+/// What one pass over `raw` learns: whether there is anything to do at all,
+/// and how long the result will be if there is.
+const Shape = struct {
+    anything: bool,
+    decoded_len: usize,
+};
+
+/// The single pass the three questions below used to take three of. Deciding
+/// whether to decode, measuring the result and decoding it were a scan each,
+/// and the first two are the same walk.
+fn scan(raw: []const u8, plus_as_space: bool) Shape {
+    var escapes: usize = 0;
+    var plus = false;
+    var i: usize = 0;
+    while (i < raw.len) {
+        if (raw[i] == '%' and escapeAt(raw, i) != null) {
+            escapes += 1;
+            i += 3;
+            continue;
+        }
+        if (plus_as_space and raw[i] == '+') plus = true;
+        i += 1;
     }
-    return false;
+    return .{
+        .anything = escapes > 0 or plus,
+        // Each escape is three bytes in and one out.
+        .decoded_len = raw.len - escapes * 2,
+    };
 }
 
 /// The decoded form of `raw`, allocated from `gpa` only when there is
@@ -30,23 +56,19 @@ pub fn needed(raw: []const u8, plus_as_space: bool) bool {
 /// forms have encoded it that way since 1995. It must stay off for path
 /// params, where a `+` is a plain `+`.
 pub fn decode(gpa: std.mem.Allocator, raw: []const u8, plus_as_space: bool) ![]const u8 {
-    if (!needed(raw, plus_as_space)) return raw;
-    // Measured first so the allocation is exactly the right size: a buffer
-    // freed at a different length than it was taken at is a bug the
-    // debug allocator catches and a release one does not.
-    const buf = try gpa.alloc(u8, decodedLen(raw));
+    const shape = scan(raw, plus_as_space);
+    if (!shape.anything) return raw;
+    // Sized from the pass that has just been made, so the allocation is
+    // exactly right: a buffer freed at a different length than it was taken at
+    // is a bug the debug allocator catches and a release one does not.
+    const buf = try gpa.alloc(u8, shape.decoded_len);
     return decodeInto(buf, raw, plus_as_space);
 }
 
 /// How many bytes `raw` decodes to. A `+` is one byte either way, so
 /// `plus_as_space` does not come into it.
 pub fn decodedLen(raw: []const u8) usize {
-    var n: usize = 0;
-    var i: usize = 0;
-    while (i < raw.len) : (n += 1) {
-        i += if (escapeAt(raw, i) != null) 3 else 1;
-    }
-    return n;
+    return scan(raw, false).decoded_len;
 }
 
 /// The byte a `%XX` at `i` stands for, or null if there is no complete
@@ -122,13 +144,20 @@ test "plus is a space in a query and a plus in a path" {
 }
 
 test "a broken escape stays literal rather than becoming a 400" {
-    for ([_][]const u8{ "100%", "50%2", "%zz", "%2" }) |raw| {
+    // And costs nothing: a `%` that is not the start of a real escape leaves
+    // nothing to decode, so the same bytes come back rather than a copy of
+    // them. `needed` used to say yes to any `%` at all and hand back an
+    // identical copy — correct, and an allocation for no reason on a URL with
+    // a stray percent sign in it.
+    for ([_][]const u8{ "100%", "50%2", "%zz", "%2", "%" }) |raw| {
+        try testing.expect(!needed(raw, false));
         const out = try decoded(raw, false);
-        defer testing.allocator.free(out);
+        try testing.expectEqual(raw.ptr, out.ptr);
         try testing.expectEqualStrings(raw, out);
     }
 
-    // Broken and valid together: only the valid one decodes.
+    // Broken and valid together: only the valid one decodes, and that one does
+    // need a buffer of its own.
     const both = try decoded("%zz%20", false);
     defer testing.allocator.free(both);
     try testing.expectEqualStrings("%zz ", both);
