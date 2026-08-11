@@ -2,7 +2,7 @@
 
 ADR 0001 says: **the comfort of writing code wins, unless it costs more than 10%.** That rule got v1 built and none of it is being taken back. What v2 needs is for it to say *10% of what*, because "performance" is three different numbers and they do not recover in the same way.
 
-The metrics section of `docs/plan.md` already separated them; this ADR turns that separation into the rule.
+The metrics section of `docs/history.md` already separated them; this ADR turns that separation into the rule.
 
 ## The three axes
 
@@ -43,4 +43,4 @@ The insistence on measuring is not pedantry. That +14 KB was first reported as +
 - ADR 0001 is not superseded. Its rule is now the first row of a table, and its reasoning about the audience is unchanged.
 - The 10% row is still inactive: there is no machine to measure throughput on, so every conflict on that axis still goes to DX automatically. The other two rows *are* active, have been since v1, and are the only budget currently enforced by anything.
 - Two v2 features were built to this: resolved values allocate nothing on a route that asks for none, and the OpenAPI document is built at `listen()` rather than per request. Neither moved the allocation count, and a test records the count for a route that resolves nothing so that a future change cannot move it quietly.
-- Making the linker able to drop unused features needs a build option that a `zig fetch` dependent has to thread through. That is a worse ergonomic problem than the one it solves, so it stays open in `docs/plan.md` rather than being decided here.
+- Making the linker able to drop unused features needs a build option that a `zig fetch` dependent has to thread through. That is a worse ergonomic problem than the one it solves, so it stays open in `docs/roadmap.md` rather than being decided here.

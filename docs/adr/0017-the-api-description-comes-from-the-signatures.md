@@ -35,7 +35,7 @@ What it does claim, it claims because the type said so: `:id` on a handler takin
 
 Documenting it would mean either the resolved type declaring its own security scheme (a second thing to keep in step with the resolver, which is the drift this whole ADR exists to avoid) or reading the resolver's body, which is not something a compiler will do.
 
-So it is a known hole rather than an oversight, recorded in `docs/plan.md`. The document describes the *shape* of a request accurately and is silent on who may make one, and that is better than a made-up `securitySchemes` block that nothing enforces.
+So it is a known hole rather than an oversight, recorded in `docs/roadmap.md`. The document describes the *shape* of a request accurately and is silent on who may make one, and that is better than a made-up `securitySchemes` block that nothing enforces.
 
 ## The reader page pulls from a CDN
 
@@ -55,7 +55,7 @@ Two of ADR 0018's three axes are untouched, and the third is not:
 
 Stripped `ReleaseFast` binaries, measured against the commit before this landed: hello 1,030,792 → 1,044,840 bytes, rest 1,167,576 → 1,201,768. The difference between the two is route count, which is what the description is made of.
 
-That last row is the honest cost and it breaks the nginx rule ADR 0015 quoted approvingly ("a module is either compiled in or absent"). `resolveChains()` reaches `buildDocs`, which reaches the writer, so the linker cannot drop it — the switch is a runtime `null` check, not a compile-time one. It is accepted at 1.4% of a binary, and making it genuinely absent needs a build option that a `zig fetch` dependent has to thread through. Recorded in `docs/plan.md` as open rather than settled.
+That last row is the honest cost and it breaks the nginx rule ADR 0015 quoted approvingly ("a module is either compiled in or absent"). `resolveChains()` reaches `buildDocs`, which reaches the writer, so the linker cannot drop it — the switch is a runtime `null` check, not a compile-time one. It is accepted at 1.4% of a binary, and making it genuinely absent needs a build option that a `zig fetch` dependent has to thread through. Recorded in `docs/roadmap.md` as open rather than settled.
 
 ### It was +43 KB, and 88% of that was a sort
 

@@ -75,7 +75,7 @@ Two cases where "write the body in pieces" is not available, decided here so the
 
 ## What is deliberately not decided here
 
-- **No write timeout.** A client that opens an SSE stream and stops reading parks a fiber until TCP gives up on it, which can be minutes. That is a denial-of-service shape and zfast has no answer for it today. It belongs with read timeouts and header timeouts, which are also missing, and all three want one ADR about deadlines rather than a knob bolted onto streaming. Recorded in `docs/plan.md`.
+- **No write timeout.** A client that opens an SSE stream and stops reading parks a fiber until TCP gives up on it, which can be minutes. That is a denial-of-service shape and zfast has no answer for it today. It belongs with read timeouts and header timeouts, which are also missing, and all three want one ADR about deadlines rather than a knob bolted onto streaming. Recorded in `docs/roadmap.md`.
 - **Backpressure beyond the socket's.** Writing blocks the fiber when the write buffer is full, which is backpressure in the only sense that matters here. A queue with a policy — drop oldest, drop newest, disconnect — is what a pub/sub layer wants, and zfast is not one.
 - **A typed shape for streaming.** A handler that streams asks for a `*Ctx`. Whether there is a `Stream(T)` return type that reads as well as `Response(T)` does is a real question, and it is a better question once there is a stream to look at.
 

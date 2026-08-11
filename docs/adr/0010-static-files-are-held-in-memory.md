@@ -4,7 +4,7 @@ Static file serving is the last of the three built-in middlewares in the v1 scop
 
 ## Why "just call std.fs" is not available
 
-Reading a file with the standard library blocks the OS thread it runs on. Under zio that thread is running many fibers, so a single handler waiting on a disk read stops every other connection sharing it. The project measures itself on **p99 as well as throughput** (docs/plan.md), specifically so that stalling the tail does not get to look like a win. A blocking read on the request path would wreck exactly the number the metric exists to protect, under exactly the load it exists to measure.
+Reading a file with the standard library blocks the OS thread it runs on. Under zio that thread is running many fibers, so a single handler waiting on a disk read stops every other connection sharing it. The project measures itself on **p99 as well as throughput** (docs/history.md), specifically so that stalling the tail does not get to look like a win. A blocking read on the request path would wreck exactly the number the metric exists to protect, under exactly the load it exists to measure.
 
 So the real choice was never "disk or memory". It was:
 

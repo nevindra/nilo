@@ -1,5 +1,5 @@
 //! The benchmark target: a routed GET with a path param returning ~1KB of
-//! JSON over keep-alive, which is the primary metric in docs/plan.md.
+//! JSON over keep-alive, which is the primary metric in docs/history.md.
 //!
 //! Deliberately minimal — anything installed here would end up being
 //! measured. The examples worth reading are in `examples/`.

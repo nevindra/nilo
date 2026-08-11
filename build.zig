@@ -41,7 +41,7 @@ pub fn build(b: *std.Build) void {
     });
 
     // The benchmark target: a routed GET with a path param returning ~1KB
-    // of JSON, which is the primary metric in docs/plan.md.
+    // of JSON, which is the primary metric in docs/history.md.
     const bench = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,

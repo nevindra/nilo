@@ -18,7 +18,7 @@ fn search(c: *Ctx) !void {
 
 Ten lines of exactly the boilerplate the typed layer exists to remove — and, worse, taking a `*Ctx` gives up the typed return value and the typed path params too. Sorting and pagination are not edge cases; a listing endpoint without them is unusual. So the most ordinary thing a REST service does was the thing that pushed people out of the layer that makes zfast worth using.
 
-plan.md has had "Router: path params, query params" in the v1 scope since stage 1. Only half of it was built.
+`docs/history.md` records that "Router: path params, query params" in the v1 scope since stage 1. Only half of it was built.
 
 ## The decision
 

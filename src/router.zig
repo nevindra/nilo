@@ -2,8 +2,8 @@
 //! path params.
 //!
 //! Still a linear scan over the routes — which one to use instead gets
-//! decided with numbers, and there are none yet (docs/plan.md, "Still
-//! open"). What the scan costs, though, does not need numbers to reason
+//! decided with numbers, and there are none yet (docs/roadmap.md, "Known
+//! gaps"). What the scan costs, though, does not need numbers to reason
 //! about, and it used to cost too much: every route re-split the request
 //! path from scratch, so fifty routes meant fifty passes over it.
 //!

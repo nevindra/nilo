@@ -2440,9 +2440,9 @@ test "static files: HEAD gives the head, POST is not answered with the file" {
 }
 
 // A number that is the same on every machine, unlike requests per second
-// on a shared VM (docs/plan.md, "Where to measure"). It will not tell you
-// how fast the server is, but it does notice the day somebody puts an
-// allocation back onto the path everything goes down.
+// on a shared VM (docs/roadmap.md). It will not tell you how fast the
+// server is, but it does notice the day somebody puts an allocation back
+// onto the path everything goes down.
 test "the request path stays inside its allocation budget" {
     var db = Db{ .rows = &.{.{ .id = 7, .name = "wati" }} };
     var app = App.init(testing.allocator);

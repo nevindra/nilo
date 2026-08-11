@@ -31,7 +31,7 @@ Where it goes: the scan can no longer stop at the first hit, since a better matc
 
 The remainder is a handful of extra branches per route and a `Route` grown by three fields. One attempt at winning it back is worth recording: putting the catch-all case into the segment loop as a third branch cost about 30% of route matching on its own, and hoisting it out — the loop now sees the same two cases it saw before catch-alls existed — got that part back. Deciding the winner first and capturing afterwards was also tried, and was worse: a `Match` has room for eight params and runs to a few hundred bytes, so a second walk over three short segments is cheaper than moving one around.
 
-The linear scan itself is what plan.md has been flagging as unresolved since stage 1. When it is replaced with a real structure, specificity ordering is a property that structure has to carry, not a cost added on top of it.
+The linear scan itself is what has been flagged as unresolved since stage 1. When it is replaced with a real structure, specificity ordering is a property that structure has to carry, not a cost added on top of it.
 
 ## Why not sort at listen()
 

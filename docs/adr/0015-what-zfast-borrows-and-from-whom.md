@@ -1,6 +1,6 @@
 # What zfast borrows, and from whom
 
-`docs/plan.md` has said since stage 1 that **the model is GoFiber**. That was the right call for v1 and it is the wrong one for v2, so this ADR replaces it.
+`docs/history.md` records that, since stage 1, **the model is GoFiber**. That was the right call for v1 and it is the wrong one for v2, so this ADR replaces it.
 
 Fiber was chosen for a good reason: the audience is people coming from Go and Node, and Fiber is what "comfortable" looks like to them. What it is not is a design zfast can keep following, because v1 already overtook it in the two places that decide the shape of everything above `Ctx`:
 
@@ -49,11 +49,11 @@ Worth stating as a rule because v2 makes it harder: a chain of resolved values i
 ## What is deliberately not copied
 
 - **Rails, NestJS, Spring.** Convention-over-configuration plus runtime DI plus reflection. For this audience it reads as a framework that is hiding something, and every gram of it is paid at runtime.
-- **Batteries-included as a goal.** v1's rejections are worth as much as its acceptances (`docs/plan.md`), and that stays true.
+- **Batteries-included as a goal.** v1's rejections are worth as much as its acceptances (`docs/history.md`), and that stays true.
 
 ## Consequences
 
-- `docs/plan.md`'s "the model is GoFiber" is replaced by this document. The README's audience sentence does not change: still people coming from Go and Node.
+- "the model is GoFiber" is replaced by this document. The README's audience sentence does not change: still people coming from Go and Node.
 - Three v2 items now have a decided shape rather than an open question: resolved values, groups and plugins, and generated API documentation.
 - The claim being chased changes. v1 chased "http.zig for Go people". v2 chases **"the signature is the whole contract"** — a handler you can read, test as a plain function, and get documentation from, on a server whose memory you can put a number on.
-- What this ADR does *not* decide: streaming responses, bodies over 1 MB, WebSocket and SSE, range requests and `sendfile`. Those are engine-shaped rather than DX-shaped, they each need the request arena to stop being the only answer to where memory comes from, and none of them is waiting on a philosophy. They stay in `docs/plan.md` as work.
+- What this ADR does *not* decide: streaming responses, bodies over 1 MB, WebSocket and SSE, range requests and `sendfile`. Those are engine-shaped rather than DX-shaped, they each need the request arena to stop being the only answer to where memory comes from, and none of them is waiting on a philosophy. They stay on the roadmap as work.

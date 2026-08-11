@@ -1,9 +1,10 @@
-# zfast plan
+# How zfast was built
 
-A working document: the v1 scope, the build order, the risks, and the things deliberately left open.
-Decisions that are already binding live in [`docs/adr/`](./adr/); the vocabulary is in [`CONTEXT.md`](../CONTEXT.md).
+The record of how 0.1.0 got here: what was in scope, what order it was built in, what each pass from the outside found, and what has been measured. Kept because how a mistake hid is usually worth more than what the mistake was.
 
-## Where this sits
+What is coming next is in [`roadmap.md`](./roadmap.md). The decisions that are binding are in [`adr/`](./adr/); the vocabulary is in [`CONTEXT.md`](../CONTEXT.md).
+
+## Where it came from
 
 Through v1 the model was **GoFiber**: the feel of Express, a fast engine underneath, aimed at Go and Node people giving Zig a try. That got v1 built, and it is no longer the model — v1 overtook Fiber in the two places that decide everything above `Ctx`, so from v2 the architecture comes from elsewhere and Fiber stays only as the tone. Where each piece is borrowed from, and why, is [ADR 0015](./adr/0015-what-zfast-borrows-and-from-whom.md).
 
@@ -33,10 +34,6 @@ Still not the benchmark crown. See [ADR 0001](./adr/0001-dx-wins-below-the-10-pe
 - Auth (the mechanism is provided, the contents are not — exactly like Fiber)
 - WebSocket and SSE. Long-lived connections have a completely different memory model from request-response; the request arena does not apply there, and forcing it would wreck a design that is currently tidy.
 - Template engine, sessions, TLS
-
-## Zig version support
-
-The latest stable release only, on one branch. The users being aimed at download Zig, run `zig build`, and give up if it fails — they are not going to go hunting for the right branch. The consequence: every new Zig release brings a few awkward weeks, made worse by zio following a branch-per-version pattern too.
 
 ## Build order
 
@@ -102,24 +99,17 @@ The direction was settled first, in [ADR 0015](./adr/0015-what-zfast-borrows-and
 - **WebSocket** ([ADR 0022](./adr/0022-a-websocket-is-a-handler-that-does-not-return.md)). `c.upgrade()`, and the handler owns the loop — so it takes services by type and sits behind the same middleware as everything else. Verified against a real client: text, binary, UTF-8, fragments reassembled, ping answered, close echoed, and a message past the buffer refused with 1009.
 - **A test client** (`zfast.testing.Client`). A handler that returns a value is tested by calling it; one that *writes* its answer needs somewhere to write to. This is that somewhere, and it undoes chunk framing so a test asserts on what the client would see.
 
-### Not started
+### What was left, and why the reason was wrong
 
-The remaining list was written as "one decision about where memory comes from". That turned out to be too tidy — the honest version is in [ADR 0020](./adr/0020-a-request-that-lasts-is-still-one-request.md), which asks instead what a `Ctx` means when the handler holding it has been running for twenty minutes. Streaming needed that answer. Range requests needed nothing at all.
+The remaining list had been written as "one decision about where memory comes from". That turned out to be too tidy — the honest version is in [ADR 0020](./adr/0020-a-request-that-lasts-is-still-one-request.md), which asks instead what a `Ctx` means when the handler holding it has been running for twenty minutes. Streaming needed that answer. Range requests needed nothing at all, and had been sitting behind it for two stages.
 
-- `sendfile`, and serving a file too big to hold in memory ([ADR 0010](./adr/0010-static-files-are-held-in-memory.md)). This is the part that contradicts ADR 0010 rather than extending it, and wants its own argument.
-- **Sending to a WebSocket a handler does not hold.** A connection's write buffer belongs to the fiber serving it, so broadcasting needs a per-socket outbox with its own lock rather than a loop over a list ([ADR 0022](./adr/0022-a-websocket-is-a-handler-that-does-not-return.md)). Phoenix Channels is the shape, and it is a project rather than a function.
-- `permessage-deflate`. Negotiated in the handshake, and a compressor per connection is memory that has not been budgeted.
-- Reloading static files without a restart. A development annoyance rather than a design hole.
-- TLS, sessions, templates.
+What is still outstanding, and what it would take, is in [`roadmap.md`](./roadmap.md).
 
-### Open, from the work that has landed
+### What v2 cost the binary
 
-- **The linker cannot drop what nobody uses.** The API description costs +14 KB on the hello example and +34 KB on rest whether or not `docs()` is called, because the switch is a runtime `null` check ([ADR 0017](./adr/0017-the-api-description-comes-from-the-signatures.md)). It was +43 KB until the binary was actually read: 37 KB of it was one extra instantiation of `std.sort.block`, which `std.sort.pdq` replaces for free since URLs cannot tie. Fixing the rest needs a build option that a `zig fetch` dependent has to thread through, which is a worse ergonomic problem than the one it solves. Recorded, not solved.
-- **The API description is silent about authentication.** A handler taking a `CurrentUser` needs an `Authorization` header, and the document does not say so — the header is a line of Zig inside the resolver, not something in a type ([ADR 0017](./adr/0017-the-api-description-comes-from-the-signatures.md)). Whatever fixes this must not become a second thing to keep in step with the resolver, which is the drift the generated document exists to avoid.
-- **A group prefix cannot carry a param.** `app.group("/orgs/:org")` is refused, because `use` scopes middleware by comparing the front of the request path against the prefix and `/orgs/:org` is the front of no real path — so every middleware on such a group would quietly never run. Making it work means teaching middleware scoping to match patterns rather than prefixes.
-- **There are no deadlines anywhere.** No read timeout, no header timeout, no write timeout. A client that opens a connection and goes quiet parks a fiber until TCP gives up, which streaming makes easy to do on purpose: open an event stream, never read it, hold a fiber. This is now the largest hole in the project and it wants one ADR about deadlines rather than a knob bolted onto each feature ([ADR 0020](./adr/0020-a-request-that-lasts-is-still-one-request.md) records it and declines to solve it).
-- **v2 cost the hello example 21 KB of binary, and the linker cannot give it back.** 1,030,792 bytes before v2, 1,052,248 after — stripped `ReleaseFast`, measured. Reading the symbols says where it is *not*: the modules themselves are tiny (`openapi` 4.5 KB, `static` 1.6 KB, `body` 1.0 KB, `range` 118 bytes, and `websocket` 437 bytes in a binary that uses it). The rest is generics they wake up, which is the same lesson [ADR 0017](./adr/0017-the-api-description-comes-from-the-signatures.md) learned the expensive way. 2% of a binary for the whole of v2 is a fair trade; it is worth re-measuring rather than assuming next time.
-- **The logged duration of a streamed response is its lifetime, not its latency.** One line per request is the contract, and a stream's line arrives when the stream ends. Time to first byte is a different number and wants a different feature.
+**21 KB on the hello example, and the linker cannot give it back.** 1,030,792 bytes before, 1,052,248 after — stripped `ReleaseFast`, measured rather than estimated. Reading the symbols says where it is *not*: the modules themselves are tiny (`openapi` 4.5 KB, `static` 1.6 KB, `body` 1.0 KB, `range` 118 bytes, and `websocket` 437 bytes in a binary that uses it). The rest is the generics they wake up.
+
+That is the same lesson [ADR 0017](./adr/0017-the-api-description-comes-from-the-signatures.md) learned the expensive way. The API description was reported at +43 KB until the binary was actually read: 37 KB of it was one extra instantiation of `std.sort.block`, which `std.sort.pdq` replaces for free since URLs cannot tie. 2% of a binary for the whole of v2 is a fair trade — but the number to publish is the one that was read off the binary, not the one the diff suggested.
 
 ## ~~Known bug: `Response(T).headers` dangles when a value is computed~~ *Fixed*
 
@@ -165,28 +155,17 @@ No fix keeps `&.{…}` with a runtime value, because the lifetime is the problem
 
 The suite was 175 tests and green, and the bug was reachable from the front page of the README. `zig build test` now runs everything in `Debug` **and** `ReleaseSafe`, and `-Doptimize=` no longer changes that. A cold run went from about 7 seconds to about 90 seconds, almost all of it LLVM on the release side; a run with nothing changed is still about 6 seconds, because Zig caches per module. That is the price of the class of bug that only exists in one mode, and the mode it exists in is the one people deploy.
 
-## Risks
+## Risks that cleared
 
-| Risk | How it is handled |
-|---|---|
-| ~~The compile-time layer is the hardest and most fragile part~~ *Cleared.* The typed layer landed in stage 3 without needing its safety net | The `Ctx` layer underneath can be released on its own — that is the safety net, and it is deliberate |
-| zio is a one-person project; it could stop when Zig 0.17 lands | The Bulkhead, fitted from stage 1 rather than patched on later |
-| The "high performance" claim has nothing behind it yet | No numbers in the README until there is a measuring machine |
-| The `Str` guarantee cannot be complete | The debug-build trap has to exist from day one |
-| `std.json` may not be fast enough, and it sits on the hot path of the chosen metric | A custom serialiser for the small-JSON path is likely needed; measure first |
-| ~~Static files are deeper than they look (range requests, caching, sendfile)~~ *Cleared.* Serving from memory kept v1's version small, caching came along free with it, and range requests arrived in v2 as an addition rather than a rewrite | `sendfile` is the one part still outstanding, and it is the one that contradicts holding files in memory ([ADR 0010](./adr/0010-static-files-are-held-in-memory.md), [ADR 0021](./adr/0021-a-range-is-a-slice-and-two-headers.md)) |
-| A Service is shared across executor threads, and nothing makes a user notice | `zfast.Mutex` from the Bulkhead, in the README and in the example everyone copies. Nothing forces it — Zig has no ownership tracking to force it with ([ADR 0011](./adr/0011-shared-services-need-a-lock-from-the-bulkhead.md)) |
-| ~~The suite is only ever run in `Debug`, and a lifetime bug can pass there and crash in release~~ *Cleared, at a price.* It cost one bug first: see "Known bug" above | `zig build test` runs everything in `Debug` and in `ReleaseSafe`, and `-Doptimize=` cannot turn that off. A cold run is 90 seconds instead of 7 ([ADR 0019](./adr/0019-a-response-owns-its-headers.md)) |
-| A panic in any handler takes the whole process down, and Go people will assume otherwise | Cannot be fixed in Zig. Say it plainly in the docs, recommend `ReleaseSafe` and a supervisor, and log which request was in flight ([ADR 0008](./adr/0008-no-recover-middleware.md)) |
+Three of the ones written down at the start turned out not to bite, and it is worth saying why — a risk that clears for a reason is a design that held.
 
-## Still open
+- **"The compile-time layer is the hardest and most fragile part."** The safety net was that the `Ctx` layer underneath could be released on its own. The typed layer landed in stage 3 without needing it.
+- **"Static files are deeper than they look — range requests, caching, `sendfile`."** Serving from memory kept the first version small, caching came along free with it, and range requests arrived later as an addition rather than a rewrite ([ADR 0010](./adr/0010-static-files-are-held-in-memory.md), [ADR 0021](./adr/0021-a-range-is-a-slice-and-two-headers.md)). `sendfile` is the one part still outstanding, and it is the one that contradicts holding files in memory.
+- **"The suite is only ever run in `Debug`, and a lifetime bug can pass there and crash in release."** Cleared, at a price — it cost one bug first, the one above. `zig build test` runs everything in `Debug` and `ReleaseSafe` now, and `-Doptimize=` cannot turn that off.
 
-- **The name.** `zfast` is a working name. The `z-` prefix is crowded in the Zig ecosystem already (`zap`, `zzz`, `zon`, a dozen `zig-*`), so it is easy to confuse. The module name has to be easy to change without touching user code.
-- **Where to measure.** Still nothing. Stage 3 did get run under `wrk` on a shared Linux VM, but only to confirm the server does not fall over and no responses get crossed — a shared machine cannot be used to compare numbers, so none were kept and none went into the README. Until there is a quiet machine, [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md) is not active and every conflict goes to DX.
-- **The router algorithm.** Still a linear scan, and which structure replaces it — radix tree, per-method buckets, something else — needs numbers nobody has yet. What the scan *costs* did not need numbers: it used to re-split the request path once per route, which is a different kind of wrong from "linear". Patterns are now split at registration and the path once per request, and a route with a different segment count is rejected on an integer compare. Measured in-process, worst case with the wanted route last: **3.7× at 50 routes, 1.4× at 5**. Never slower, so it does not owe the benchmark anything. Whatever replaces it has to keep specificity ordering, which is a property of the structure rather than a cost added to it ([ADR 0013](./adr/0013-the-most-specific-route-wins-and-duplicates-are-refused.md)).
-- **Reloading static files without a restart.** For a build-output directory this does not matter, since deployment restarts anyway. For local development it is a real annoyance and wants a watch option in v2.
+The ones still standing are in [`roadmap.md`](./roadmap.md).
 
-## Metrics
+## What was measured
 
 What counts as "fast" for zfast:
 
@@ -222,11 +201,11 @@ Reading and parsing the head is the largest single thing a request does, and it 
 
 Route matching went **39ns → 52ns** (best of eight runs, same machine, minutes apart) when the router stopped returning the first match and started returning the most specific one. That is about 2% of a request, spent on making registration order stop mattering and on catch-all routes; ADR 0001 puts the bar at 10%, so this is a trade it had already made. The full accounting, including two attempts at winning it back, is in [ADR 0013](./adr/0013-the-most-specific-route-wins-and-duplicates-are-refused.md).
 
-What this says about where to look next: `std.json` at 13% is the one thing on this list with no ceiling on how much better it could get, and plan.md has been flagging it as a risk since stage 1. The rest is close enough to the floor that the next real gain is architectural, not local.
+What this says about where to look next: `std.json` at 13% is the one thing on this list with no ceiling on how much better it could get, and it has been flagged as a risk since the first stage. The rest is close enough to the floor that the next real gain is architectural, not local.
 
 ### How the work grows
 
 A third kind of number needs no machine at all: how the work grows. Two places were growing wrong, and both were fixed on that basis rather than on a benchmark.
 
 - **Finding the end of a request head** restarted from byte zero on every read. A head arriving in one packet cost one pass; the same head dribbled in a byte at a time cost a pass per byte — quadratic, and reachable by any client that chooses to be slow. It now resumes where it left off.
-- **Route matching** re-split the request path for every route it tried. See "Still open" above.
+- **Route matching** re-split the request path for every route it tried, which is a different kind of wrong from "linear". Patterns are split at registration now and the path once per request, and a route with a different segment count is rejected on an integer compare. Measured in-process, worst case with the wanted route last: **3.7× at 50 routes, 1.4× at 5**. Never slower, so the linear scan does not owe the benchmark anything — replacing it is still open ([`roadmap.md`](./roadmap.md)).

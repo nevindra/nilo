@@ -17,8 +17,11 @@
 //! And every file gets an ETag computed once at load, so a repeat visitor
 //! gets a 304 with no body and no work.
 //!
-//! What it cannot do is serve a file that does not fit in RAM. Range
-//! requests, `sendfile`, and reading from disk per request are v2.
+//! Range requests come along nearly free once the bytes are in memory — a
+//! range is a slice and two headers (ADR 0021). What this cannot do is
+//! serve a file that does not fit in RAM: `sendfile` and reading from disk
+//! per request contradict holding the tree in memory rather than extending
+//! it, and are on the roadmap with that argument still to have.
 
 const std = @import("std");
 
@@ -83,8 +86,8 @@ pub const Set = struct {
         if (self.lookup(path)) |f| return f;
 
         // "/docs/" means "/docs/index.html". A path with no trailing slash
-        // is left alone: redirecting it is the correct answer and that is a
-        // v2 job, so for now it simply is not a file.
+        // is left alone: redirecting it is the correct answer and nothing
+        // here redirects yet, so for now it simply is not a file.
         if (self.index.len > 0 and std.mem.endsWith(u8, path, "/")) {
             var buf: [max_url]u8 = undefined;
             if (join(&buf, path, self.index)) |with_index| {
