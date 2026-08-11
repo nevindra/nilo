@@ -24,6 +24,7 @@
 const std = @import("std");
 
 const http1 = @import("http1.zig");
+const json_mod = @import("json.zig");
 
 /// How much a stream buffers before a piece goes out on its own.
 ///
@@ -80,7 +81,7 @@ pub const Stream = struct {
     /// Serialise `value` as JSON into the stream. Nothing is allocated: the
     /// serialiser writes into the same buffer everything else does.
     pub fn json(self: *Stream, value: anytype) !void {
-        return std.json.Stringify.value(value, .{}, &self.writer);
+        return json_mod.write(&self.writer, value);
     }
 
     /// Push whatever has been written so far out to the client.
@@ -255,7 +256,7 @@ pub const Events = struct {
         const w = &self.stream.writer;
         if (name.len > 0) try w.print("event: {s}\n", .{name});
         try w.writeAll("data: ");
-        try std.json.Stringify.value(value, .{}, w);
+        try json_mod.write(w, value);
         try w.writeAll("\n\n");
         try self.stream.flush();
     }
