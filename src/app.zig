@@ -3650,6 +3650,52 @@ test "a message sent over the upgraded connection comes back" {
     try testing.expectEqualStrings("\x81\x05Hello", result.response[after_head..]);
 }
 
+test "a WebSocket allocates nothing per message, however many it carries" {
+    // The claim the docs make about `receive`, which nothing checked. A
+    // stream and a body reader each have a test like this one; the largest
+    // and longest-lived of the three had none, which is the wrong way round
+    // — a per-message allocation on a socket open for a day is a leak with
+    // a nicer name.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/ws", echoSocket);
+    try app.resolveChains();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var counting = budget.Counting{ .child = arena.allocator() };
+    var lifetime = str_mod.Lifetime{};
+    var in_flight = fail.InFlight{};
+    var buf: [8192]u8 = undefined;
+
+    // "Hello", masked, two hundred times over.
+    const frame = "\x81\x85\x37\xfa\x21\x3d\x7f\x9f\x4d\x51\x58";
+    const conversation = upgrade_request ++ frame ** 200;
+
+    const send = struct {
+        fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
+            var in = std.Io.Reader.fixed(conversation);
+            var out = std.Io.Writer.fixed(b);
+            _ = a.handleRequest(gpa, l, f, &in, &out);
+            l.end();
+        }
+    }.once;
+
+    for (0..3) |_| {
+        send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+        _ = arena.reset(.{ .retain_with_limit = arena_keep });
+    }
+    counting.reset();
+    send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+
+    // One: the request head. Not the handshake, not the frame headers, and
+    // not one of the two hundred messages — `receive` reads into the buffer
+    // the handler already owns, and a server frame is a ten-byte header
+    // written straight to the connection.
+    try testing.expectEqual(@as(usize, 1), counting.allocs);
+    try testing.expectEqual(@as(usize, 0), counting.resizes);
+}
+
 test "a request that is not asking to be upgraded is told which part is missing" {
     var app = App.init(testing.allocator);
     defer app.deinit();

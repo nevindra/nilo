@@ -118,6 +118,14 @@ pub const Stream = struct {
         self._open.* = null;
         if (open.chunked and !open.drop) try http1.writeLastChunk(self._out);
         try self._out.flush();
+
+        // Take the buffer away, so that anything written from here on has
+        // nowhere to sit and goes straight to `drain` — which is where the
+        // "you wrote to a finished stream" warning lives. Without this a
+        // short write after `finish` would be swallowed by the buffer and
+        // never reach it, which is the quietest possible way to lose data.
+        self.writer.buffer = &.{};
+        self.writer.end = 0;
     }
 
     /// Everything buffered leaves as one chunk. Called by the writer when
@@ -135,11 +143,27 @@ pub const Stream = struct {
         for (data[0 .. data.len - 1]) |slice| from_data += slice.len;
         from_data += pattern.len * splat;
 
-        // Nothing to say. A zero-length chunk is the one that ends a body,
-        // so writing one here would end the response early. A stream whose
-        // `finish` already ran is in the same position.
         const total = buffered.len + from_data;
-        const open = self._open.* orelse Open{ .chunked = false, .drop = true };
+
+        // A null record means `finish` has already run, so these bytes have
+        // nowhere to go: the body ended and the terminator is written. They
+        // are dropped either way — there is no correct way to reopen a
+        // finished body — but silently dropping what a handler wrote is how
+        // somebody spends an afternoon looking for the missing half of a
+        // report, so it says so once.
+        const open = self._open.* orelse {
+            if (total > 0) std.log.warn(
+                "zfast: {d} bytes were written to a stream after finish() — " ++
+                    "the body had already ended, so they were dropped",
+                .{total},
+            );
+            w.end = 0;
+            return from_data;
+        };
+
+        // Nothing to say. A zero-length chunk is the one that ends a body, so
+        // writing one here would end the response early. `drop` is a HEAD:
+        // the handler writes as usual and none of it goes out.
         if (total == 0 or open.drop) {
             w.end = 0;
             return from_data;
@@ -315,6 +339,26 @@ test "a chunked body frames each piece and ends with a zero" {
     try body.finish();
 
     try testing.expectEqualStrings("5\r\nhello\r\n5\r\nworld\r\n0\r\n\r\n", wire.written());
+}
+
+test "writing after finish adds nothing to a body that already ended" {
+    var wire: Wire = .{};
+    wire.init();
+    var body = wire.stream(true, false);
+
+    try body.writeAll("all of it");
+    try body.finish();
+
+    // Short enough to have fitted in the buffer, which is exactly the case
+    // that used to disappear without reaching `drain`. The terminator has
+    // already gone out and there is no reopening a finished body, so these
+    // bytes are dropped — but loudly, and without corrupting what a client
+    // has already been told is the whole response.
+    try body.writeAll("and a bit more");
+    try body.flush();
+    try body.finish(); // still safe to call twice
+
+    try testing.expectEqualStrings("9\r\nall of it\r\n0\r\n\r\n", wire.written());
 }
 
 test "an empty flush writes nothing, because a zero-length chunk ends the body" {

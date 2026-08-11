@@ -68,7 +68,8 @@ pub const Close = enum(u16) {
 pub const Error = error{
     /// The other end broke the framing rules. The connection is closed.
     ProtocolError,
-    /// A message bigger than `Options.max_message`.
+    /// A message longer than the buffer handed to `receive`, which is the
+    /// only ceiling there is. The connection is closed with a 1009.
     MessageTooBig,
     ReadFailed,
     WriteFailed,
