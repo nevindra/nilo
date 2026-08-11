@@ -139,13 +139,16 @@ fn createUser(store: *Store, arena: std.mem.Allocator, incoming: NewUser) !zfast
     const created = try store.add(incoming.name.view(), incoming.email.view());
     return .{
         .status = 201,
-        .headers = &.{.{
+        // `.of` copies the list into the response while it is still alive:
+        // written out here it belongs to this function's stack frame, and
+        // zfast reads the headers after this function has returned.
+        .headers = .of(&.{.{
             .name = "Location",
             // A `std.mem.Allocator` argument is the request arena: it lives
             // exactly long enough to build a header with, and is thrown
             // away with the request. Nothing to free.
             .value = try std.fmt.allocPrint(arena, "/users/{d}", .{created.id}),
-        }},
+        }}),
         .value = created,
     };
 }
@@ -287,8 +290,8 @@ test "createUser refuses a body that does not make sense" {
     });
     try testing.expectEqual(@as(u16, 201), created.status);
     try testing.expectEqualStrings("wati", created.value.name);
-    try testing.expectEqualStrings("Location", created.headers[0].name);
-    try testing.expectEqualStrings("/users/1", created.headers[0].value);
+    try testing.expectEqualStrings("Location", created.headers.view()[0].name);
+    try testing.expectEqualStrings("/users/1", created.headers.view()[0].value);
 }
 
 test "listUsers reads its options from the query struct" {

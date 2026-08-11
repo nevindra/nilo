@@ -193,7 +193,7 @@ pub fn fromMemory(gpa: std.mem.Allocator, entries: []const Entry) !Set {
         file.cache_control = entry.cache_control;
     }
 
-    std.mem.sort(File, set.files, {}, lessByUrl);
+    sortByUrl(set.files);
     return set;
 }
 
@@ -296,7 +296,7 @@ pub fn load(
 
     const owned = try files.toOwnedSlice(gpa);
     errdefer gpa.free(owned);
-    std.mem.sort(File, owned, {}, lessByUrl);
+    sortByUrl(owned);
 
     var set = Set{
         .gpa = gpa,
@@ -335,6 +335,15 @@ pub fn load(
 
 fn lessByUrl(_: void, a: File, b: File) bool {
     return std.mem.order(u8, a.url, b.url) == .lt;
+}
+
+/// URLs in a set are unique, so nothing can tie and a stable sort buys
+/// nothing. It costs plenty: `std.mem.sort` is an in-place stable merge, and
+/// one instantiation of it for `File` is 37 KB of machine code — which
+/// turned out to be 88% of what switching the API description on added to a
+/// binary, before anybody wrote any JSON ([ADR 0017](../docs/adr/0017-the-api-description-comes-from-the-signatures.md)).
+fn sortByUrl(files: []File) void {
+    std.sort.pdq(File, files, {}, lessByUrl);
 }
 
 /// Whether `path` sits under `prefix`, on a segment boundary — so a
@@ -513,7 +522,7 @@ fn fakeSet(gpa: std.mem.Allocator, prefix: []const u8, urls: []const []const u8)
             .cache_control = "",
         };
     }
-    std.mem.sort(File, files, {}, lessByUrl);
+    sortByUrl(files);
     return .{
         .gpa = gpa,
         .prefix = try gpa.dupe(u8, prefix),

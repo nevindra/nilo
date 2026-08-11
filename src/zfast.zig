@@ -100,6 +100,11 @@ pub const Response = @import("typed.zig").Response;
 /// One response header, as `Response.headers` takes them.
 pub const Header = @import("typed.zig").Header;
 
+/// The headers a `Response` carries, held by value: `.headers = .of(&.{…})`.
+/// Copying is the point — a list written in a handler dies with the handler
+/// (ADR 0019).
+pub const Headers = @import("typed.zig").Headers;
+
 /// The query string, read into a struct of yours — the named counterpart
 /// to a positional path param.
 ///

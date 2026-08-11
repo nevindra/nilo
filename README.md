@@ -95,10 +95,10 @@ fn createUser(db: *Db, arena: std.mem.Allocator, incoming: NewUser) !Response(Us
     const created = try db.add(incoming);
     return .{
         .status = 201,
-        .headers = &.{.{
+        .headers = .of(&.{.{
             .name = "Location",
             .value = try std.fmt.allocPrint(arena, "/users/{d}", .{created.id}),
-        }},
+        }}),
         .value = created,
     };
 }
@@ -106,9 +106,7 @@ fn createUser(db: *Db, arena: std.mem.Allocator, incoming: NewUser) !Response(Us
 
 A `std.mem.Allocator` argument is the request arena — the thing to build a header value in, since it lives exactly as long as the response needs it to and is thrown away afterwards. Nothing to free.
 
-> **Known bug, don't ship this one yet.** The snippet above is a use-after-return in `ReleaseSafe` and `ReleaseFast`. `headers` is a slice, and `&.{…}` holding a value computed at runtime is a temporary in the handler's own stack frame — so the slice dangles the moment the handler returns. With literal values only it is fine, because Zig puts those in static memory, which is what hid it.
->
-> Until `Response(T)` is changed to own its headers, use `c.setHeader("Location", …)` for a computed header. That copies into the request arena straight away and has never had the problem. The full diagnosis is in [`docs/plan.md`](./docs/plan.md).
+`.of(…)` is not decoration. A list written inside a handler belongs to that handler's stack frame, and zfast reads the headers after the handler has returned; `of` copies them into the response while the list is still there. Up to eight per response — a ninth is a compile error pointing at `c.setHeader`, which has no limit. [ADR 0019](./docs/adr/0019-a-response-owns-its-headers.md) has the whole story, including why the slice this replaced passed every test and crashed in release.
 
 Getting any of this wrong stops the compiler with a message that names the route and tells you what to do about it — never a runtime surprise. Asking for a service you forgot to register stops `listen()` before the socket opens.
 
@@ -285,7 +283,9 @@ A `Query(T)` becomes the query parameters, with a defaulted field marked not-req
 
 What it won't do is claim what your signature doesn't say. A handler returning `Response(T)` picks its status at runtime, so the document says `default` rather than guessing `200`. A type with no JSON shape is `{}` — "anything", which is true. A handler that takes a `*Ctx` and digs the body out by hand documents nothing, which is an accurate description of what it told anybody.
 
-The document is served from memory like a static file, so it arrives with an ETag and a repeat visit is a 304, and it costs the request path nothing. The `/docs` page pulls its viewer from a CDN — set `.ui_path = ""` to turn it off; the document itself never needs the network. See [ADR 0017](./docs/adr/0017-the-api-description-comes-from-the-signatures.md).
+The document is served from memory like a static file, so it arrives with an ETag and a repeat visit is a 304, and it costs the request path nothing. The `/docs` page pulls its viewer from a CDN — set `.ui_path = ""` to turn it off; the document itself never needs the network.
+
+What it does cost is binary size, and unconditionally: **+14 KB** on the hello example, **+34 KB** on rest, whether or not `docs()` is ever called. The linker can't see that nobody wants it. See [ADR 0017](./docs/adr/0017-the-api-description-comes-from-the-signatures.md).
 
 ## Errors
 

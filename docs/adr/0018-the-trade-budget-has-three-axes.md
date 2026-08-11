@@ -28,13 +28,15 @@ zfast can honestly say "low memory" only because of the bottom two rows. They ar
 
 v2 turned up an axis v1 never had to think about, and it is worth naming rather than quietly leaving out of the table.
 
-nginx's discipline, quoted approvingly in ADR 0015, is that a module is compiled in or absent. zfast is not currently able to honour that. The generated API description costs **+43 KB on the hello example whether or not `app.docs()` is called** (ADR 0017), because the switch is a runtime `null` check and the linker cannot see through it.
+nginx's discipline, quoted approvingly in ADR 0015, is that a module is compiled in or absent. zfast is not currently able to honour that. The generated API description costs **+14 KB on the hello example whether or not `app.docs()` is called** (ADR 0017), because the switch is a runtime `null` check and the linker cannot see through it.
 
 The rule adopted, which is weaker than nginx's and honest about being so:
 
-> A feature that cannot be dropped by the linker states its unconditional binary cost in its own ADR, with a measured number. No feature may cost unconditional *request-path* or *per-connection* cost — those two stay absent, not merely small.
+> A feature that cannot be dropped by the linker states its unconditional binary cost in its own ADR, as a measured number against a stripped `ReleaseFast` build — not an estimate, and not the size of the code that was written for it. No feature may cost unconditional *request-path* or *per-connection* cost; those two stay absent, not merely small.
 
-43 KB on a 1 MB static binary is a trade worth making once. It is not one worth making five times, so the number goes in the table each time and somebody gets to notice the day it stops being reasonable.
+The insistence on measuring is not pedantry. That +14 KB was first reported as +43 KB, and the difference was not the feature at all — it was one extra instantiation of `std.sort.block` that the feature made reachable, 37 KB of machine code for sorting two files. The number a feature costs in Zig is rarely the code you can see; it is whichever generic you woke up.
+
+14 KB on a 1 MB static binary is a trade worth making once. It is not one worth making five times, so the number goes in the table each time and somebody gets to notice the day it stops being reasonable.
 
 ## Consequences
 

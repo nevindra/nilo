@@ -1653,10 +1653,10 @@ test "a query param that is missing or malformed is a 400 that says which one" {
 fn createWithLocation() typed.Response(UserOut) {
     return .{
         .status = 201,
-        .headers = &.{
+        .headers = .of(&.{
             .{ .name = "Location", .value = "/users/7" },
             .{ .name = "X-Made-By", .value = "zfast" },
-        },
+        }),
         .value = .{ .id = 7, .name = "wati" },
     };
 }
@@ -1676,13 +1676,49 @@ test "Response(T) carries headers of its own, without reaching for a Ctx" {
     try testing.expect(std.mem.indexOf(u8, result.response, "{\"id\":7,\"name\":\"wati\"}") != null);
 }
 
+fn headersBuiltInAFrameThatDies(arena: std.mem.Allocator, id: u32) !typed.Headers {
+    return .of(&.{
+        .{ .name = "Location", .value = try std.fmt.allocPrint(arena, "/users/{d}", .{id}) },
+        .{ .name = "X-Made-By", .value = "zfast" },
+    });
+}
+
+/// Walks over the stack the frame above left behind, so that a `Headers`
+/// pointing back into it reads this rather than what it was given.
+fn scribbleOverTheStack() u64 {
+    var noise: [512]u8 = undefined;
+    for (&noise, 0..) |*byte, i| byte.* = @truncate(i *% 31 +% 7);
+    var total: u64 = 0;
+    for (noise) |byte| total += byte;
+    return total;
+}
+
+test "a Response's headers are copied out of the frame that wrote them" {
+    // This is the test the old `headers: []const Header` could not pass in a
+    // release build, and passed in Debug for a whole stage (ADR 0019).
+    var buffer: [64]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&buffer);
+    const headers = try headersBuiltInAFrameThatDies(fixed.allocator(), 42);
+
+    std.mem.doNotOptimizeAway(scribbleOverTheStack());
+
+    try testing.expectEqual(@as(usize, 2), headers.view().len);
+    try testing.expectEqualStrings("Location", headers.view()[0].name);
+    try testing.expectEqualStrings("/users/42", headers.view()[0].value);
+    try testing.expectEqualStrings("zfast", headers.view()[1].value);
+
+    // And a Response that says nothing about headers carries none.
+    const quiet: typed.Response(u8) = .{ .value = 1 };
+    try testing.expectEqual(@as(usize, 0), quiet.headers.view().len);
+}
+
 fn createInArena(arena: std.mem.Allocator, id: u32) !typed.Response(UserOut) {
     return .{
         .status = 201,
-        .headers = &.{.{
+        .headers = .of(&.{.{
             .name = "Location",
             .value = try std.fmt.allocPrint(arena, "/users/{d}", .{id}),
-        }},
+        }}),
         .value = .{ .id = id, .name = "made" },
     };
 }

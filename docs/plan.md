@@ -109,13 +109,13 @@ Everything left is engine-shaped rather than DX-shaped, and every item on this l
 
 ### Open, from the work that has landed
 
-- **The linker cannot drop what nobody uses.** The API description costs +43 KB on the hello example whether or not `docs()` is called, because the switch is a runtime `null` check ([ADR 0017](./adr/0017-the-api-description-comes-from-the-signatures.md)). Fixing it properly needs a build option that a `zig fetch` dependent has to thread through, which is a worse ergonomic problem than the one it solves. Recorded, not solved.
+- **The linker cannot drop what nobody uses.** The API description costs +14 KB on the hello example and +34 KB on rest whether or not `docs()` is called, because the switch is a runtime `null` check ([ADR 0017](./adr/0017-the-api-description-comes-from-the-signatures.md)). It was +43 KB until the binary was actually read: 37 KB of it was one extra instantiation of `std.sort.block`, which `std.sort.pdq` replaces for free since URLs cannot tie. Fixing the rest needs a build option that a `zig fetch` dependent has to thread through, which is a worse ergonomic problem than the one it solves. Recorded, not solved.
 - **The API description is silent about authentication.** A handler taking a `CurrentUser` needs an `Authorization` header, and the document does not say so — the header is a line of Zig inside the resolver, not something in a type ([ADR 0017](./adr/0017-the-api-description-comes-from-the-signatures.md)). Whatever fixes this must not become a second thing to keep in step with the resolver, which is the drift the generated document exists to avoid.
 - **A group prefix cannot carry a param.** `app.group("/orgs/:org")` is refused, because `use` scopes middleware by comparing the front of the request path against the prefix and `/orgs/:org` is the front of no real path — so every middleware on such a group would quietly never run. Making it work means teaching middleware scoping to match patterns rather than prefixes.
 
-## Known bug: `Response(T).headers` dangles when a value is computed
+## ~~Known bug: `Response(T).headers` dangles when a value is computed~~ *Fixed*
 
-Found while running the suite in `ReleaseSafe` and `ReleaseFast` during v2. **It is a v1 bug, present since stage 6**, and it is the most important thing on this page.
+Found while running the suite in `ReleaseSafe` and `ReleaseFast` during v2. **It was a v1 bug, present since stage 6.** Fixed by making a `Response` own its headers — `.headers = .of(&.{…})`, a breaking change to a public type ([ADR 0019](./adr/0019-a-response-owns-its-headers.md)). Kept here because how it hid matters more than what it was.
 
 ```zig
 return .{
@@ -130,30 +130,32 @@ return .{
 
 `headers` is a `[]const Header`. When every part of that literal is comptime-known, Zig promotes the array to static memory and the slice is valid for ever. When any part is not — and a `Location` header never is — the array is a **temporary in the handler's own stack frame**, and returning a slice of it is a use-after-return. `sendResult` reads it after the frame is gone.
 
-In `Debug` the bytes happen to still be there, so every test passes. In `ReleaseSafe` and `ReleaseFast` it is a segfault.
+In `Debug` the bytes happen to still be there, so every test passed. In `ReleaseSafe` and `ReleaseFast` it was a segfault.
 
-Two tests fail on it today, and they are exactly the two that compute a header value:
+Two tests failed on it, and they were exactly the two that compute a header value:
 
 - `app.test.a handler can ask for the request arena to build a header in`
 - `main.test.createUser refuses a body that does not make sense` (the rest example)
 
-The test that passes — `Response(T) carries headers of its own` — uses literal values only, which is what hid this.
+The test that passed — `Response(T) carries headers of its own` — uses literal values only, which is what hid this.
 
-### Why this is bad beyond the two tests
+### Why it was bad beyond the two tests
 
-It is in the README's flagship `Response(T)` example, it is in the rest example, and `ReleaseSafe` is the mode the README tells people to deploy in (ADR 0008). Stage 6 added `Response.headers` specifically so a 201 with a `Location` would not need a `*Ctx`; that is the exact shape that breaks.
+It was in the README's flagship `Response(T)` example, in the rest example, and `ReleaseSafe` is the mode the README tells people to deploy in (ADR 0008). Stage 6 added `Response.headers` specifically so a 201 with a `Location` would not need a `*Ctx`; that is the exact shape that broke.
 
-### What fixing it means
+### What fixing it took
 
-There is no fix that keeps `&.{…}` with a runtime value, because the lifetime is the problem and not the contents — `sendResult` cannot copy from a pointer that is already dangling when it receives it. So `Response(T)` has to own its headers by value, which is a public API change. The shape that keeps the ergonomics closest:
+No fix keeps `&.{…}` with a runtime value, because the lifetime is the problem and not the contents — `sendResult` cannot copy from a pointer that is already dangling when it receives it. So `Response(T)` owns its headers by value now, which is a breaking change to a public type:
 
 ```zig
 .headers = .of(&.{.{ .name = "Location", .value = … }}),
 ```
 
-where `Headers` is a small inline array and `of` copies the temporary while it is still alive. The cost is a cap on how many headers a `Response` can carry, and a slightly noisier line.
+`Headers` is an inline array of eight, and `of` copies the list at the call site while it is still alive. Taking the list as `anytype` rather than `[]const Header` keeps its length in the type, so a ninth header is a compile error naming both numbers instead of a truncation. Reading them back is `.view()`. `c.setHeader` never had the problem and still has no cap.
 
-Not done here, because picking that cap and changing a public API is a decision worth making deliberately rather than at the end of a long session. `c.setHeader(…)` is the workaround in the meantime and has never had this problem — it copies into the request arena immediately.
+### The finding underneath it
+
+The suite was 175 tests and green, and the bug was reachable from the front page of the README. `zig build test` now runs everything in `Debug` **and** `ReleaseSafe`, and `-Doptimize=` no longer changes that. A cold run went from about 7 seconds to about 90 seconds, almost all of it LLVM on the release side; a run with nothing changed is still about 6 seconds, because Zig caches per module. That is the price of the class of bug that only exists in one mode, and the mode it exists in is the one people deploy.
 
 ## Risks
 
@@ -166,7 +168,7 @@ Not done here, because picking that cap and changing a public API is a decision 
 | `std.json` may not be fast enough, and it sits on the hot path of the chosen metric | A custom serialiser for the small-JSON path is likely needed; measure first |
 | ~~Static files are deeper than they look (range requests, caching, sendfile)~~ *Cleared.* Serving from memory kept v1's version small, and caching came along free with it | Range requests and `sendfile` are v2, and arrive as an addition rather than a rewrite ([ADR 0010](./adr/0010-static-files-are-held-in-memory.md)) |
 | A Service is shared across executor threads, and nothing makes a user notice | `zfast.Mutex` from the Bulkhead, in the README and in the example everyone copies. Nothing forces it — Zig has no ownership tracking to force it with ([ADR 0011](./adr/0011-shared-services-need-a-lock-from-the-bulkhead.md)) |
-| The suite is only ever run in `Debug`, and a lifetime bug can pass there and crash in release | Not handled, and it cost one: see "Known bug" above. `zig build test` should run in `ReleaseSafe` too, and that is cheap to add once the bug it would have caught is fixed |
+| ~~The suite is only ever run in `Debug`, and a lifetime bug can pass there and crash in release~~ *Cleared, at a price.* It cost one bug first: see "Known bug" above | `zig build test` runs everything in `Debug` and in `ReleaseSafe`, and `-Doptimize=` cannot turn that off. A cold run is 90 seconds instead of 7 ([ADR 0019](./adr/0019-a-response-owns-its-headers.md)) |
 | A panic in any handler takes the whole process down, and Go people will assume otherwise | Cannot be fixed in Zig. Say it plainly in the docs, recommend `ReleaseSafe` and a supervisor, and log which request was in flight ([ADR 0008](./adr/0008-no-recover-middleware.md)) |
 
 ## Still open

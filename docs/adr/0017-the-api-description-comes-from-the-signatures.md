@@ -51,11 +51,19 @@ Two of ADR 0018's three axes are untouched, and the third is not:
 |---|---|
 | Allocations per request | **unchanged** — nothing here runs while a request is in flight |
 | Memory per idle connection | **unchanged** — no new field on `Ctx`, no per-connection state |
-| Binary size | **+43 KB** on the hello example, **+61 KB** on rest — *whether or not `docs()` is called* |
+| Binary size | **+14 KB** on the hello example, **+34 KB** on rest — *whether or not `docs()` is called* |
 
-That last row is the honest cost and it breaks the nginx rule ADR 0015 quoted approvingly ("a module is either compiled in or absent"). `resolveChains()` reaches `buildDocs`, which reaches the writer, so the linker cannot drop it — the switch is a runtime `null` check, not a compile-time one.
+Stripped `ReleaseFast` binaries, measured against the commit before this landed: hello 1,030,792 → 1,044,840 bytes, rest 1,167,576 → 1,201,768. The difference between the two is route count, which is what the description is made of.
 
-It is accepted for now on the grounds that 43 KB is about 4% of a 1 MB static binary, and that it buys the feature this whole stage is named after. Making it genuinely absent needs a build option that a `zig fetch` dependent has to thread through, which is a worse ergonomic problem than the one being solved. Recorded in `docs/plan.md` as open rather than settled.
+That last row is the honest cost and it breaks the nginx rule ADR 0015 quoted approvingly ("a module is either compiled in or absent"). `resolveChains()` reaches `buildDocs`, which reaches the writer, so the linker cannot drop it — the switch is a runtime `null` check, not a compile-time one. It is accepted at 1.4% of a binary, and making it genuinely absent needs a build option that a `zig fetch` dependent has to thread through. Recorded in `docs/plan.md` as open rather than settled.
+
+### It was +43 KB, and 88% of that was a sort
+
+The first measurement said +43,360 bytes on hello, and none of it made sense next to 4.5 KB of `openapi.*` symbols. Reading the binary said why: **one extra instantiation of `std.sort.block`, 37 KB of machine code**, pulled in because serving the document through `static.fromMemory` made the static layer's sort reachable in a program that loads no static files.
+
+`std.mem.sort` is an in-place *stable* merge sort. URLs in a set are unique, so nothing can tie and stability buys nothing at all. Swapping the three call sites to `std.sort.pdq` gave back 29 KB, in every binary that serves files as well as in this one.
+
+The general lesson is worth more than the 29 KB: in Zig, the size of a feature is often not the code you wrote for it but the generic it made reachable. `nm --size-sort -S` answers that in a second, and guessing does not.
 
 ## Consequences
 

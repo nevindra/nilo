@@ -35,7 +35,7 @@ For the "kenceng dan low memory" half, the framework not to copy is fasthttp. It
 
 The two worth copying both hold the same line:
 
-- **nginx**: memory for a request is taken from a pool and dropped in one go (v1's request arena is this), and **a module is either compiled in or absent**. In Zig that reads as: a v2 feature nobody calls must not cost a byte of binary, a field on `Ctx`, or a branch on the request path. Resolved values and the OpenAPI document are both built this way — a route that asks for neither runs exactly the code it ran before.
+- **nginx**: memory for a request is taken from a pool and dropped in one go (v1's request arena is this), and **a module is either compiled in or absent**. In Zig that reads as: a v2 feature nobody calls must not cost a byte of binary, a field on `Ctx`, or a branch on the request path. Resolved values honour all three. The OpenAPI document honours the last two and misses the first by 14 KB, which ADR 0018 records as a weaker rule rather than pretending otherwise — a route that asks for neither still runs exactly the code it ran before.
 - **TigerBeetle**: allocate at startup, then stop allocating, and put a number on every limit. That is what keeps p99 flat, and it is the discipline behind v1's "three allocations per request, held there by a test".
 
 This is what ADR 0018's per-axis budget is made of.
