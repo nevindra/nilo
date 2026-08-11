@@ -12,6 +12,7 @@
 const std = @import("std");
 const http1 = @import("http1.zig");
 const ctx_mod = @import("ctx.zig");
+const json_mod = @import("json.zig");
 const str_mod = @import("str.zig");
 const fail = @import("fail.zig");
 const clock = @import("bulkhead.zig").monotonicNanos;
@@ -25,15 +26,35 @@ const range = @import("range.zig");
 const rounds = 300_000;
 const arena_keep = 16 * 1024;
 
+/// How many times each measurement is repeated, with the best kept. A shared
+/// machine hands out a stolen timeslice now and then, and the mean carries it
+/// while the minimum does not.
+const reps = 5;
+
 /// The shape of the primary metric: a routed GET with a path param
 /// answering JSON, keep-alive, with CORS installed.
 const request = "GET /users/7 HTTP/1.1\r\nHost: example.dev\r\nUser-Agent: wrk\r\n" ++
     "Accept: */*\r\nAccept-Encoding: gzip\r\nConnection: keep-alive\r\n\r\n";
 
-const User = struct { id: u32, name: []const u8 };
+/// The payload `main.zig` really answers with. It matters that this is the
+/// same size, and for a long time it was not: this file profiled a 25-byte
+/// `{id,name}` while the benchmark target served a kilobyte, and the ~1µs
+/// `std.json` spent escaping that kilobyte was invisible for the whole of v1
+/// and v2 as a result. A profiler measuring a different payload from the
+/// thing being profiled is worse than no profiler.
+const bio = "A systems nerd who writes Zig before breakfast. " ** 19;
+
+const User = struct {
+    id: u32,
+    name: []const u8,
+    email: []const u8,
+    bio: []const u8,
+};
+
 const Db = struct {
     fn find(_: *Db, id: u32) ?User {
-        return if (id == 7) .{ .id = 7, .name = "wati" } else null;
+        if (id != 7) return null;
+        return .{ .id = 7, .name = "Routed Tester", .email = "tester@example.dev", .bio = bio };
     }
 };
 
@@ -43,102 +64,127 @@ fn getUser(db: *Db, id: u32) !User {
 
 var sink: usize = 0;
 
+/// Run `body` `rounds` times, `reps` times over, and return the quickest
+/// average. Warmed first, which is the part that used to be missing: the
+/// end-to-end figure was the very first loop in the program, so it paid for a
+/// cold arena, a cold instruction cache and a CPU that had not clocked up —
+/// and every percentage below was measured against that inflated number.
+fn bestOf(comptime body: fn () void) u64 {
+    for (0..rounds / 4) |_| body();
+    var best: u64 = std.math.maxInt(u64);
+    for (0..reps) |_| {
+        const started = clock();
+        for (0..rounds) |_| body();
+        const took = clock() - started;
+        if (took < best) best = took;
+    }
+    return best;
+}
+
+// The state each measurement below works against. At file scope because a
+// nested function in Zig captures nothing, and these have to be reachable from
+// the one-line bodies `bestOf` takes.
+var app: App = undefined;
+var arena: std.heap.ArenaAllocator = undefined;
+var lifetime = str_mod.Lifetime{};
+var in_flight = fail.InFlight{};
+var out_buf: [8192]u8 = undefined;
+var body_json: []const u8 = "";
+
+fn wholeRequest() void {
+    var in = std.Io.Reader.fixed(request);
+    var out = std.Io.Writer.fixed(&out_buf);
+    sink += @intFromBool(app.handleRequest(arena.allocator(), &lifetime, &in_flight, &in, &out));
+    lifetime.end();
+    _ = arena.reset(.{ .retain_with_limit = arena_keep });
+}
+
+fn readHeadOnly() void {
+    var in = std.Io.Reader.fixed(request);
+    sink += (http1.readHead(&in) catch unreachable).len;
+}
+
+fn parseHeadOnly() void {
+    var r = http1.Request{};
+    http1.parseHead(request, &r) catch unreachable;
+    sink += r.target.len;
+}
+
+fn copyHead() void {
+    sink += (arena.allocator().dupe(u8, request) catch unreachable).len;
+    _ = arena.reset(.{ .retain_with_limit = arena_keep });
+}
+
+fn matchRoute() void {
+    sink += (app.router.match(.GET, "/users/7") orelse unreachable).n_params;
+}
+
+fn serialiseBody() void {
+    var w = std.Io.Writer.Allocating.initCapacity(arena.allocator(), ctx_mod.json_hint) catch unreachable;
+    json_mod.write(&w.writer, Db.find(undefined, 7).?) catch unreachable;
+    sink += w.written().len;
+    _ = arena.reset(.{ .retain_with_limit = arena_keep });
+}
+
+fn writeTheResponse() void {
+    var out = std.Io.Writer.fixed(&out_buf);
+    http1.writeResponse(&out, 200, "OK", "application/json", body_json, true, &.{
+        .{ .name = "Access-Control-Allow-Origin", .value = "*" },
+    }) catch unreachable;
+    sink += out.buffered().len;
+}
+
+fn arenaRound() void {
+    sink += (arena.allocator().alloc(u8, 200) catch unreachable).len;
+    _ = arena.reset(.{ .retain_with_limit = arena_keep });
+}
+
 pub fn main() !void {
     var gpa_state = std.heap.DebugAllocator(.{}){};
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 
     var db = Db{};
-    var app = App.init(gpa);
+    app = App.init(gpa);
     defer app.deinit();
     try app.provide(&db);
     try app.get("/users/:id", getUser);
     try app.use(cors.permissive);
     try app.resolveChains();
 
-    var arena = std.heap.ArenaAllocator.init(gpa);
+    arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    var lifetime = str_mod.Lifetime{};
-    var in_flight = fail.InFlight{};
-    var buf: [4096]u8 = undefined;
 
-    var t = clock();
-    for (0..rounds) |_| {
-        var in = std.Io.Reader.fixed(request);
-        var out = std.Io.Writer.fixed(&buf);
-        sink += @intFromBool(app.handleRequest(arena.allocator(), &lifetime, &in_flight, &in, &out));
-        lifetime.end();
-        _ = arena.reset(.{ .retain_with_limit = arena_keep });
-    }
-    const whole = clock() - t;
+    // The real response body, so "write the response" is writing the number of
+    // bytes the server really writes.
+    var body_out: std.Io.Writer.Allocating = .init(gpa);
+    defer body_out.deinit();
+    try json_mod.write(&body_out.writer, db.find(7).?);
+    body_json = body_out.written();
 
-    t = clock();
-    for (0..rounds) |_| {
-        var in = std.Io.Reader.fixed(request);
-        sink += (try http1.readHead(&in)).len;
-    }
-    const read_head = clock() - t;
+    const whole = bestOf(wholeRequest);
 
-    t = clock();
-    for (0..rounds) |_| {
-        sink += (try arena.allocator().dupe(u8, request)).len;
-        _ = arena.reset(.{ .retain_with_limit = arena_keep });
-    }
-    const dupe = clock() - t;
-
-    t = clock();
-    for (0..rounds) |_| {
-        var r = http1.Request{};
-        try http1.parseHead(request, &r);
-        sink += r.target.len;
-    }
-    const parse_head = clock() - t;
-
-    t = clock();
-    for (0..rounds) |_| sink += (app.router.match(.GET, "/users/7") orelse unreachable).n_params;
-    const route = clock() - t;
-
-    const user = User{ .id = 7, .name = "wati" };
-    t = clock();
-    for (0..rounds) |_| {
-        var w = try std.Io.Writer.Allocating.initCapacity(arena.allocator(), ctx_mod.json_hint);
-        try std.json.Stringify.value(user, .{}, &w.writer);
-        sink += w.written().len;
-        _ = arena.reset(.{ .retain_with_limit = arena_keep });
-    }
-    const json = clock() - t;
-
-    t = clock();
-    for (0..rounds) |_| {
-        var out = std.Io.Writer.fixed(&buf);
-        try http1.writeResponse(&out, 200, "OK", "application/json", "{\"id\":7,\"name\":\"wati\"}", true, &.{
-            .{ .name = "Access-Control-Allow-Origin", .value = "*" },
-        });
-        sink += out.buffered().len;
-    }
-    const write = clock() - t;
-
-    t = clock();
-    for (0..rounds) |_| {
-        sink += (try arena.allocator().alloc(u8, 200)).len;
-        _ = arena.reset(.{ .retain_with_limit = arena_keep });
-    }
-    const arena_ns = clock() - t;
-
-    std.debug.print("{d} requests, {d}ns each end to end\n\n", .{ rounds, whole / rounds });
-    line("read the head", read_head, whole);
-    line("parse the head", parse_head, whole);
-    line("copy the head to the arena", dupe, whole);
-    line("match the route", route, whole);
-    line("serialise the body", json, whole);
-    line("write the response", write, whole);
-    line("arena alloc + reset", arena_ns, whole);
+    std.debug.print(
+        "{d} requests, {d}ns each end to end — a routed GET with a path param\n" ++
+            "answering {d} bytes of JSON over keep-alive, with CORS installed.\n\n",
+        .{ rounds, whole / rounds, body_json.len },
+    );
+    line("read the head", bestOf(readHeadOnly), whole);
+    line("parse the head", bestOf(parseHeadOnly), whole);
+    line("copy the head to the arena", bestOf(copyHead), whole);
+    line("match the route", bestOf(matchRoute), whole);
+    line("serialise the body", bestOf(serialiseBody), whole);
+    line("write the response", bestOf(writeTheResponse), whole);
+    line("arena alloc + reset", bestOf(arenaRound), whole);
     std.debug.print(
         \\
-        \\The end-to-end figure moves with whatever else the machine is doing;
-        \\the proportions do not. What is not listed — building the Ctx, the
-        \\middleware chain, matching handler arguments, decoding path params —
-        \\is the remainder.
+        \\Each row is the best of five runs, warmed first. What is not listed —
+        \\building the Ctx, the middleware chain, matching handler arguments,
+        \\decoding path params — is the remainder.
+        \\
+        \\"Copy the head to the arena" is charged to a request that has a body;
+        \\one without does not copy it at all, so on this shape that row is a
+        \\cost avoided rather than a cost paid.
         \\
     , .{});
 
