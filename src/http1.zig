@@ -149,9 +149,15 @@ pub const Header = struct { name: []const u8, value: []const u8 };
 /// Headers the framework writes itself. A response carrying two of any of
 /// these is not merely untidy — a duplicated `Content-Length` is the
 /// classic request-smuggling bug — so `Ctx.setHeader` refuses them.
+///
+/// `Transfer-Encoding` is on the list for the same reason and is worse: a
+/// response that announces chunked framing zfast is not applying is read by
+/// the client as a chunk size, and everything after that is somebody's
+/// guess. It is written only by `writeStreamHead`.
 pub fn isReservedHeader(name: []const u8) bool {
     return std.ascii.eqlIgnoreCase(name, "content-type") or
         std.ascii.eqlIgnoreCase(name, "content-length") or
+        std.ascii.eqlIgnoreCase(name, "transfer-encoding") or
         std.ascii.eqlIgnoreCase(name, "connection");
 }
 
@@ -362,6 +368,55 @@ pub fn writeResponse(
     // begins. The head already said there is none.
     if (!bodyless(status)) try out.writeAll(body);
     try out.flush();
+}
+
+// ---- writing a body whose length is not known yet ----
+
+/// The head of a streamed response. No `Content-Length`, because the point
+/// is that nobody knows it yet; instead one of the two ways HTTP has of
+/// saying where a body stops.
+///
+/// `chunked` is for an HTTP/1.1 client: each piece is framed with its own
+/// length and a zero-length one ends the body, so the connection survives to
+/// carry another request. HTTP/1.0 has no such framing, and the only thing
+/// left to mark the end of the body with is the end of the connection — so
+/// there `chunked` is false, `keep_alive` must be false with it, and the
+/// pieces go out unframed (ADR 0020).
+pub fn writeStreamHead(
+    out: *std.Io.Writer,
+    status: u16,
+    phrase: []const u8,
+    content_type: []const u8,
+    chunked: bool,
+    keep_alive: bool,
+    extra: []const Header,
+) !void {
+    try writeStatusLine(out, status, phrase);
+    try out.print("Content-Type: {s}\r\n", .{content_type});
+    if (chunked) try out.writeAll("Transfer-Encoding: chunked\r\n");
+    try out.print("Connection: {s}\r\n", .{if (keep_alive) "keep-alive" else "close"});
+    for (extra) |h| try out.print("{s}: {s}\r\n", .{ h.name, h.value });
+    try out.writeAll("\r\n");
+}
+
+/// One chunk: its length in hex, the bytes, and a CRLF of its own.
+///
+/// A zero-length chunk is the one that ends a body, so writing an empty one
+/// here would end the response early. There is nothing to say, so nothing is
+/// said.
+pub fn writeChunkHeader(out: *std.Io.Writer, len: usize) !void {
+    std.debug.assert(len > 0);
+    try out.print("{x}\r\n", .{len});
+}
+
+pub fn endChunk(out: *std.Io.Writer) !void {
+    try out.writeAll("\r\n");
+}
+
+/// The zero-length chunk that ends a chunked body, and the empty trailer
+/// section after it.
+pub fn writeLastChunk(out: *std.Io.Writer) !void {
+    try out.writeAll("0\r\n\r\n");
 }
 
 /// The response to a HEAD: the head has to be byte-for-byte what a GET

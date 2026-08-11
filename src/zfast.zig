@@ -105,6 +105,20 @@ pub const Header = @import("typed.zig").Header;
 /// (ADR 0019).
 pub const Headers = @import("typed.zig").Headers;
 
+/// A response written in pieces, from `c.stream(status, content_type)` —
+/// for a body whose length nobody knows when the head goes out (ADR 0020).
+pub const Stream = @import("stream.zig").Stream;
+
+/// A stream of server-sent events, from `c.events()`.
+pub const Events = @import("stream.zig").Events;
+
+/// One message on an event stream: `.{ .name = "token", .data = text }`.
+pub const Event = @import("stream.zig").Event;
+
+/// Driving a request into an App from a test, for the handlers that write
+/// their answer instead of returning it. Not part of a running server.
+pub const testing = @import("testing.zig");
+
 /// The query string, read into a struct of yours — the named counterpart
 /// to a positional path param.
 ///
@@ -239,6 +253,8 @@ test {
     _ = @import("service.zig");
     _ = @import("resolve.zig");
     _ = @import("openapi.zig");
+    _ = @import("stream.zig");
+    _ = @import("testing.zig");
     _ = @import("middleware.zig");
     _ = @import("typed.zig");
     _ = @import("ctx.zig");

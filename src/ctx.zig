@@ -13,6 +13,7 @@ const http1 = @import("http1.zig");
 const router = @import("router.zig");
 const service_mod = @import("service.zig");
 const static_mod = @import("static.zig");
+const stream_mod = @import("stream.zig");
 const str_mod = @import("str.zig");
 const percent = @import("percent.zig");
 const fail = @import("fail.zig");
@@ -72,6 +73,13 @@ pub const Ctx = struct {
     /// connection.
     _stream_desynced: bool = false,
     _sent: bool = false,
+    /// Set between `stream()` and the stream's `finish()`, which clears it.
+    /// App reads it to find a body nobody ended (ADR 0020).
+    _stream: ?stream_mod.Open = null,
+    /// Set when the response cannot share its connection with another
+    /// request whatever the client asked for — an unframed HTTP/1.0 stream,
+    /// where the end of the body *is* the end of the connection.
+    _force_close: bool = false,
     /// The status actually sent, once something has been. 0 until then.
     _status: u16 = 0,
     _extra_headers: std.ArrayList(http1.Header) = .empty,
@@ -229,6 +237,7 @@ pub const Ctx = struct {
     /// client told `keep-alive` by a process that is leaving spends its
     /// next request finding out otherwise.
     pub fn keepAlive(self: *const Ctx) bool {
+        if (self._force_close) return false;
         if (!self._request.keep_alive) return false;
         const stopping = self._stopping orelse return true;
         return !stopping.load(.acquire);
@@ -322,6 +331,79 @@ pub const Ctx = struct {
         var out: std.Io.Writer.Allocating = try .initCapacity(self._arena, json_hint);
         try std.json.Stringify.value(value, .{}, &out.writer);
         try self.send(status, "application/json", out.written());
+    }
+
+    // ---- answering in pieces ----
+
+    /// Start a response whose length is not known yet, and get back
+    /// something to write the pieces into (ADR 0020).
+    ///
+    /// ```zig
+    /// var body = try c.stream(200, "text/csv");
+    /// for (rows) |row| try body.print("{s},{d}\n", .{ row.name, row.total });
+    /// try body.finish();
+    /// ```
+    ///
+    /// The head goes out immediately, so every `setHeader` has to be called
+    /// before this. `finish()` is required: it writes the marker saying
+    /// where the body ends.
+    pub fn stream(self: *Ctx, status: u16, content_type: []const u8) !stream_mod.Stream {
+        return self.streamWith(status, content_type, .{});
+    }
+
+    /// `stream`, with the buffer size turned up or down.
+    pub fn streamWith(
+        self: *Ctx,
+        status: u16,
+        content_type: []const u8,
+        options: stream_mod.Options,
+    ) !stream_mod.Stream {
+        std.debug.assert(!self._sent); // one request, one response
+
+        // HTTP/1.0 has no chunked framing, so the end of the body can only
+        // be the end of the connection — which means this connection cannot
+        // carry another request whatever either side asked for.
+        const chunked = self._request.minor_version == 1;
+        if (!chunked) self._force_close = true;
+
+        self._sent = true;
+        self._status = status;
+        self._stream = .{ .chunked = chunked, .drop = self.method == .HEAD };
+
+        try http1.writeStreamHead(
+            self._out,
+            status,
+            http1.statusPhrase(status),
+            content_type,
+            chunked,
+            self.keepAlive(),
+            self._extra_headers.items,
+        );
+
+        // The one allocation a stream makes, made once. Everything written
+        // afterwards goes through this buffer and allocates nothing.
+        const buffer = try self._arena.alloc(u8, options.buffer);
+        return .init(buffer, self._out, self._stopping, &self._stream);
+    }
+
+    /// Start a stream of server-sent events — a `text/event-stream` a
+    /// browser reads with `new EventSource(url)`.
+    ///
+    /// ```zig
+    /// var events = try c.events();
+    /// while (events.live()) try events.send(.{ .name = "tick", .data = "." });
+    /// try events.close();
+    /// ```
+    ///
+    /// The two headers past the content type are what keep an event stream
+    /// working through the things between the handler and the browser:
+    /// `Cache-Control: no-cache` so nothing stores it, and
+    /// `X-Accel-Buffering: no` so an nginx in front does not hold the events
+    /// back waiting for a buffer to fill.
+    pub fn events(self: *Ctx) !stream_mod.Events {
+        try self.setStaticHeader("Cache-Control", "no-cache");
+        try self.setStaticHeader("X-Accel-Buffering", "no");
+        return .{ .stream = try self.stream(200, stream_mod.Events.content_type) };
     }
 };
 

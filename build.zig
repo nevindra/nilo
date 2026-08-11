@@ -4,6 +4,7 @@ const examples = [_]Example{
     .{ .name = "hello", .about = "The smallest thing that serves" },
     .{ .name = "rest", .about = "Typed handlers, a service, fail functions, middleware" },
     .{ .name = "spa", .about = "A single-page app's files plus a JSON API" },
+    .{ .name = "stream", .about = "A streamed report and a stream of events" },
 };
 
 const Example = struct { name: []const u8, about: []const u8 };

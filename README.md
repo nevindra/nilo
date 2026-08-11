@@ -2,7 +2,7 @@
 
 An HTTP framework for Zig, aimed at people coming from Go or Node.
 
-> **Status: v1 feature-complete, v2 in progress, unreleased.** Routing with path params, query params and catch-alls; typed handlers, JSON, middleware, logger, CORS, static files, chunked bodies. v2 has added resolved values, route groups and plugins, and an OpenAPI document generated from the handler signatures. Not yet benchmarked on a quiet machine, so there are no performance claims here.
+> **Status: v1 feature-complete, v2 in progress, unreleased.** Routing with path params, query params and catch-alls; typed handlers, JSON, middleware, logger, CORS, static files, chunked bodies. v2 has added resolved values, route groups and plugins, an OpenAPI document generated from the handler signatures, and answers written in pieces — streamed responses and server-sent events. Not yet benchmarked on a quiet machine, so there are no performance claims here.
 > `zfast` is a working name and may change.
 
 ```zig
@@ -141,10 +141,12 @@ Answering:
 | `c.send(200, "text/csv", bytes)` | a content type of your own |
 | `c.setHeader(name, value)` | a response header, copied — set it *before* sending |
 | `c.setStaticHeader(name, value)` | the same, for text that already outlives the request (a literal), so nothing is copied |
+| `c.stream(200, "text/csv")` | a response written in pieces, when its length isn't known yet |
+| `c.events()` | a stream of server-sent events |
 
-One request gets one response: a response is flushed the moment it is sent, so there is nothing left to change afterwards. `Content-Type`, `Content-Length` and `Connection` are the framework's to write and setting them is refused — a response carrying two of any of those is malformed.
+One request gets one response: a response is flushed the moment it is sent, so there is nothing left to change afterwards. `Content-Type`, `Content-Length`, `Transfer-Encoding` and `Connection` are the framework's to write and setting them is refused — a response carrying two of any of those is malformed.
 
-The limits worth knowing: a body is read whole, up to 1 MB, so this is not the layer for a large upload, and there is no way to write a response in pieces. Both are v2 ([`docs/plan.md`](./docs/plan.md)).
+The limit worth knowing: a body is read whole, up to 1 MB, so this is not the layer for a large upload. That one is v2 ([`docs/plan.md`](./docs/plan.md)).
 
 ## Query params
 
@@ -187,6 +189,74 @@ the request body is empty. This endpoint expects a JSON object with: title, done
 ```
 
 A field with a default is what "absent" is allowed to mean, exactly as in a query struct. Working out which of these to say costs a second parse, which is paid only by a request that was already going to be refused.
+
+## Answers written in pieces
+
+When the length of a response isn't known when the head goes out — a report being generated, a file being assembled, tokens from a model — the handler writes it instead of returning it:
+
+```zig
+fn report(c: *zfast.Ctx, db: *Db) !void {
+    var body = try c.stream(200, "text/csv");
+    for (db.rows()) |row| try body.print("{d},{s}\n", .{ row.id, row.name });
+    try body.finish();
+}
+```
+
+`Transfer-Encoding: chunked` is handled for you, the connection survives to carry another request, and an HTTP/1.0 client — which has no chunked encoding — gets the body unframed with `Connection: close`, because there the end of the body is the end of the connection.
+
+`body.writer` is a plain `std.Io.Writer`, so `body.json(value)` serialises straight into the response with nothing in between. **Nothing is allocated per piece** — one buffer when the stream opens, and that is all, however long it runs ([ADR 0020](./docs/adr/0020-a-request-that-lasts-is-still-one-request.md)).
+
+`finish()` is required: it writes the marker saying where the body ends. Forget it and zfast writes one so the connection stays usable, and logs that it had to.
+
+### Server-sent events
+
+```zig
+fn tokens(c: *zfast.Ctx, llm: *Llm) !void {
+    var events = try c.events();
+    while (events.live()) {
+        const token = llm.next() orelse break;
+        try events.send(.{ .name = "token", .data = token });
+    }
+    try events.json("done", .{ .finished = true });
+    try events.close();
+}
+```
+
+Every send flushes, so an event doesn't sit waiting for the one after it. `Cache-Control: no-cache` and `X-Accel-Buffering: no` go out with the head — the second is what stops an nginx in front holding the events back until a buffer fills.
+
+`events.live()` is the one to know about. It goes false when the server has been asked to stop, so a loop that checks it lets a deploy finish: measured with a client mid-stream, `Ctrl-C` to process exit took **204 ms**, and the client got the closing event rather than a dropped connection. A stream that ignores it holds the shutdown open for as long as it runs.
+
+The other way a stream ends needs no check: when the client goes away the next write fails, and the error unwinds the handler.
+
+| | |
+|---|---|
+| `events.send(.{ .name = …, .id = …, .data = … })` | one event; a `data` spanning lines becomes one `data:` per line |
+| `events.data(text)` | `data:` and nothing else |
+| `events.json(name, value)` | an event whose data is `value` as JSON |
+| `events.comment(text)` | a line the client ignores — for proxies that close a quiet connection |
+| `events.retry(millis)` | how long the browser waits before reconnecting |
+
+A browser reconnecting sends `Last-Event-ID`, which is an ordinary request header: `c.header("Last-Event-ID")`.
+
+The cost of holding streams open is one fiber each, which v1 measured at ~21 KB: 10,000 open streams is about 210 MB, before anything of yours. That is the number to plan around, and turning `read_buffer` and `write_buffer` down takes it to ~17 KB.
+
+### Testing a handler that writes its answer
+
+A handler that returns a value is tested by calling it. One that writes its answer needs somewhere to write to, so there is a client for that:
+
+```zig
+var client = try zfast.testing.Client.init(testing.allocator, .{});
+defer client.deinit();
+
+const answer = try client.get(&app, "/report.csv");
+try testing.expectEqual(@as(u16, 200), answer.status);
+try testing.expect(answer.chunked);
+
+var buf: [4096]u8 = undefined;
+try testing.expectEqualStrings("id,name\n1,wati\n", try answer.text(&buf));
+```
+
+`answer.text()` undoes the chunk framing, `answer.header(name)` is case-insensitive, and `answer.keep_alive` says whether the connection could have carried another request. None of it is on the request path.
 
 ## The signed-in user, and anything else worked out per request
 
@@ -511,9 +581,11 @@ No requests-per-second figures, on purpose: that number needs a machine nobody e
 
 ## What isn't here yet
 
-WebSocket and SSE, TLS, sessions, templates, auth contents, range requests, streamed responses, and bodies over 1 MB.
+WebSocket, TLS, sessions, templates, range requests, and bodies over 1 MB.
 
-Most of that list is one missing decision rather than several: the request arena is currently the only answer to where memory comes from, and none of streaming, large bodies, or long-lived connections fits inside it. That decision is the next stage. Each item is listed with its reason in [`docs/plan.md`](./docs/plan.md); the ones that are refusals rather than backlog are in [`docs/adr/`](./docs/adr/).
+There are also no deadlines of any kind — no read, header or write timeout — so a client that opens a connection and then goes quiet parks a fiber until TCP gives up on it. That is the largest hole on this list and it wants one decision about deadlines rather than a knob per feature.
+
+Each item is listed with its reason in [`docs/plan.md`](./docs/plan.md); the ones that are refusals rather than backlog are in [`docs/adr/`](./docs/adr/).
 
 ## Documents
 

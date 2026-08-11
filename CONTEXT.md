@@ -48,6 +48,14 @@ _Avoid_: query bag, params map, extractor
 A `*` as the last segment of a pattern, matching the whole rest of the path and handing it over under the name `*`. Always loses to a route that spells the path out.
 _Avoid_: wildcard route, splat, glob
 
+**Stream**:
+A response written in pieces because its length is not known when the head goes out. Held by the handler, not returned by it. Nothing is allocated per piece, and `finish` is what says where the body ends.
+_Avoid_: chunked response, writer, body writer
+
+**Event stream**:
+A Stream carrying server-sent events — one long response a browser reads with `EventSource`. Each event is flushed on its own, and `live` is how the handler learns the server wants to stop.
+_Avoid_: SSE channel, subscription, push, socket
+
 ### Assembly
 
 **App**:
@@ -85,3 +93,7 @@ _Avoid_: abort, throw, bail
 **Static set**:
 One directory read into memory when the App is built, and answered from without touching the disk again. Not a middleware: it holds state, so it is a terminal handler the middleware chain wraps like any other.
 _Avoid_: file server, asset middleware, public dir
+
+**Test client**:
+A stand-in for the other end of a connection, for testing a handler that writes its answer rather than returning one. Runs one request through the App with no server and no socket.
+_Avoid_: mock, fixture, test server, harness

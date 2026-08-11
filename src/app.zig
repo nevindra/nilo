@@ -627,6 +627,7 @@ pub const App = struct {
         if (!c._sent) {
             sendDirect(&c, 200, "") catch return false;
         }
+        if (c._stream != null) return endAbandonedStream(&c);
         return reusable;
     }
 
@@ -948,6 +949,27 @@ fn serveStaticFile(c: *Ctx) anyerror!void {
     }
 
     try c.send(200, file.content_type, file.bytes);
+}
+
+/// A handler opened a stream and returned without calling `finish()`.
+///
+/// The zero-length chunk is written here so the client is told where the
+/// body stopped instead of waiting for more, and so the connection is left
+/// in a state the next request can start from. What cannot be recovered is
+/// anything still in the stream's buffer — that lived in the handler's own
+/// frame and went with it — which is why this says so out loud rather than
+/// quietly tidying up (ADR 0020).
+fn endAbandonedStream(c: *Ctx) bool {
+    const open = c._stream.?;
+    c._stream = null;
+    std.log.warn(
+        "handler {s} {s} opened a stream and never finished it; " ++
+            "call stream.finish() — anything still buffered was lost",
+        .{ @tagName(c.method), c._path },
+    );
+    if (open.chunked and !open.drop) http1.writeLastChunk(c._out) catch return false;
+    c._out.flush() catch return false;
+    return c.keepAlive();
 }
 
 fn sendFinal(out: *std.Io.Writer, response: []const u8) void {
@@ -3030,4 +3052,229 @@ test "the in-flight request is readable, which is what the panic handler uses" {
     // inside it can name the request (ADR 0008).
     try testing.expectEqualStrings("GET", h.in_flight.method);
     try testing.expectEqualStrings("/known", h.in_flight.path);
+}
+
+// ---- responses written in pieces (ADR 0020) ----
+
+fn streamRows(c: *Ctx) anyerror!void {
+    var body = try c.stream(200, "text/csv");
+    for ([_][]const u8{ "wati", "budi", "sari" }, 1..) |name, id| {
+        try body.print("{d},{s}\n", .{ id, name });
+        // Flushed one at a time so the test sees the framing, and because
+        // this is what a report being watched actually wants.
+        try body.flush();
+    }
+    try body.finish();
+}
+
+fn streamAndForget(c: *Ctx) anyerror!void {
+    var body = try c.stream(200, "text/plain");
+    try body.writeAll("half a thought");
+    try body.flush();
+    // No finish(). App has to make the connection safe anyway.
+}
+
+fn streamAfterHeader(c: *Ctx) anyerror!void {
+    try c.setStaticHeader("X-Report", "quarterly");
+    var body = try c.stream(200, "text/plain");
+    try body.writeAll("ok");
+    try body.finish();
+}
+
+test "a streamed response is chunked, and the connection survives it" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/rows", streamRows);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /rows HTTP/1.1\r\nHost: x\r\n\r\n");
+
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "Transfer-Encoding: chunked\r\n") != null);
+    // No Content-Length: that is the whole reason to stream.
+    try testing.expect(std.mem.indexOf(u8, result.response, "Content-Length") == null);
+
+    const body = result.response[std.mem.indexOf(u8, result.response, "\r\n\r\n").? + 4 ..];
+    try testing.expectEqualStrings(
+        "7\r\n1,wati\n\r\n7\r\n2,budi\n\r\n7\r\n3,sari\n\r\n0\r\n\r\n",
+        body,
+    );
+    try testing.expect(result.keep_alive);
+}
+
+test "a stream to an HTTP/1.0 client is unframed and ends with the connection" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/rows", streamRows);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /rows HTTP/1.0\r\n\r\n");
+
+    // 1.0 has no chunked encoding, so the end of the body can only be the
+    // end of the connection — and the head has to say so.
+    try testing.expect(std.mem.indexOf(u8, result.response, "Transfer-Encoding") == null);
+    try testing.expect(std.mem.indexOf(u8, result.response, "Connection: close\r\n") != null);
+
+    const body = result.response[std.mem.indexOf(u8, result.response, "\r\n\r\n").? + 4 ..];
+    try testing.expectEqualStrings("1,wati\n2,budi\n3,sari\n", body);
+    try testing.expect(!result.keep_alive);
+}
+
+test "a HEAD of a streamed route gets the head a GET would have, and no body" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/rows", streamRows);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "HEAD /rows HTTP/1.1\r\n\r\n");
+
+    try testing.expect(std.mem.indexOf(u8, result.response, "Transfer-Encoding: chunked\r\n") != null);
+    const body = result.response[std.mem.indexOf(u8, result.response, "\r\n\r\n").? + 4 ..];
+    try testing.expectEqualStrings("", body);
+    try testing.expect(result.keep_alive);
+}
+
+test "headers set before a stream go out in its head" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/report", streamAfterHeader);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /report HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, result.response, "X-Report: quarterly\r\n") != null);
+}
+
+test "a stream nobody finished still leaves the connection usable" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/oops", streamAndForget);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /oops HTTP/1.1\r\n\r\n");
+
+    // App writes the terminator the handler forgot, so the client is told
+    // where the body stopped rather than waiting for more.
+    const body = result.response[std.mem.indexOf(u8, result.response, "\r\n\r\n").? + 4 ..];
+    try testing.expectEqualStrings("e\r\nhalf a thought\r\n0\r\n\r\n", body);
+    try testing.expect(result.keep_alive);
+}
+
+fn streamManyPieces(c: *Ctx) anyerror!void {
+    var body = try c.stream(200, "text/plain");
+    for (0..200) |i| {
+        try body.print("{d} ", .{i});
+        try body.flush();
+    }
+    try body.finish();
+}
+
+test "a stream allocates once, however many pieces it writes" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/many", streamManyPieces);
+    try app.resolveChains();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var counting = budget.Counting{ .child = arena.allocator() };
+    var lifetime = str_mod.Lifetime{};
+    var in_flight = fail.InFlight{};
+    var buf: [8192]u8 = undefined;
+
+    const send = struct {
+        fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
+            var in = std.Io.Reader.fixed("GET /many HTTP/1.1\r\nHost: x\r\n\r\n");
+            var out = std.Io.Writer.fixed(b);
+            _ = a.handleRequest(gpa, l, f, &in, &out);
+            l.end();
+        }
+    }.once;
+
+    for (0..3) |_| {
+        send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+        _ = arena.reset(.{ .retain_with_limit = arena_keep });
+    }
+    counting.reset();
+    send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+
+    // Two: the request head, and the stream's own buffer. Two hundred
+    // pieces went out between them and not one of them allocated — which is
+    // the promise ADR 0020 makes, and the reason a stream can run for a week.
+    try testing.expectEqual(@as(usize, 2), counting.allocs);
+    try testing.expectEqual(@as(usize, 0), counting.resizes);
+}
+
+// ---- server-sent events ----
+
+fn tickEvents(c: *Ctx) anyerror!void {
+    var events = try c.events();
+    try events.retry(2000);
+    try events.send(.{ .name = "tick", .id = "1", .data = "first" });
+    try events.json("state", .{ .open = true, .waiting = 2 });
+    try events.close();
+}
+
+test "an event stream carries its events, and the headers a proxy needs" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/events", tickEvents);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /events HTTP/1.1\r\n\r\n");
+
+    try testing.expect(std.mem.indexOf(u8, result.response, "Content-Type: text/event-stream\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, result.response, "Cache-Control: no-cache\r\n") != null);
+    // Without this an nginx in front holds the events back until a buffer
+    // fills, which for a token stream is the whole point gone.
+    try testing.expect(std.mem.indexOf(u8, result.response, "X-Accel-Buffering: no\r\n") != null);
+
+    // Each event is flushed on its own, so each is its own chunk — which is
+    // what makes them arrive one at a time rather than in a batch.
+    const body = result.response[std.mem.indexOf(u8, result.response, "\r\n\r\n").? + 4 ..];
+    try testing.expectEqualStrings(
+        "d\r\nretry: 2000\n\n\r\n" ++
+            "1f\r\nevent: tick\nid: 1\ndata: first\n\n\r\n" ++
+            "2e\r\nevent: state\ndata: {\"open\":true,\"waiting\":2}\n\n\r\n" ++
+            "0\r\n\r\n",
+        body,
+    );
+    try testing.expect(result.keep_alive);
+}
+
+fn streamUntilStopped(c: *Ctx) anyerror!void {
+    var events = try c.events();
+    var sent: usize = 0;
+    while (events.live()) : (sent += 1) {
+        try events.data("tick");
+        // A real handler waits for something; this one stops the server on
+        // its own so the loop has a way out.
+        if (sent == 1) c.service(*App).?.shutdown();
+    }
+    try events.close();
+}
+
+test "a shutdown asks a stream to wind up rather than cutting it off" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&app);
+    try app.get("/forever", streamUntilStopped);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /forever HTTP/1.1\r\n\r\n");
+
+    // Two events went out and the third was never started: `live()` went
+    // false, the loop ended, and the body was closed properly (ADR 0020).
+    const body = result.response[std.mem.indexOf(u8, result.response, "\r\n\r\n").? + 4 ..];
+    try testing.expectEqualStrings("c\r\ndata: tick\n\n\r\nc\r\ndata: tick\n\n\r\n0\r\n\r\n", body);
+
+    // And the connection is not offered for another request, because the
+    // server is going away.
+    try testing.expect(!result.keep_alive);
 }
