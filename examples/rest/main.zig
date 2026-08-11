@@ -8,8 +8,13 @@
 //! curl localhost:8787/users
 //! curl 'localhost:8787/users?sort=name&limit=1'  # query params, typed
 //! curl localhost:8787/users/1
-//! curl localhost:8787/users/999                 # 404 with a message
+//! curl localhost:8787/users/999                 # 404, because the handler returns ?User
 //! curl -i -X POST localhost:8787/users -d '{"name":"wati","email":"wati@example.dev"}'
+//! curl -X PUT localhost:8787/users/1 -d '{"name":"wati","email":"w@example.dev"}'
+//! curl -X PATCH localhost:8787/users/1 -d '{"nickname":"wat"}'   # set it
+//! curl -X PATCH localhost:8787/users/1 -d '{"nickname":null}'    # clear it
+//! curl -X PATCH localhost:8787/users/1 -d '{}'                   # leave it alone
+//! curl -i -X DELETE localhost:8787/users/1                       # 204
 //!
 //! curl localhost:8787/admin/stats                    # 401: no token
 //! curl -H 'X-Token: read-only' localhost:8787/admin/stats   # 403: not an admin
@@ -33,6 +38,8 @@ const User = struct {
     id: u32,
     name: []const u8,
     email: []const u8,
+    /// Nullable, which makes it the field a PATCH can sensibly clear.
+    nickname: ?[]const u8 = null,
 };
 
 /// A Service: built once in `main`, then asked for by any handler that
@@ -48,14 +55,24 @@ const Store = struct {
     users: std.ArrayList(User) = .empty,
     next_id: u32 = 1,
 
+    /// Everything a User owns, freed in one place — so adding a field means
+    /// changing one function rather than three.
+    fn free(self: *Store, user: User) void {
+        self.gpa.free(user.name);
+        self.gpa.free(user.email);
+        if (user.nickname) |n| self.gpa.free(n);
+    }
+
     fn deinit(self: *Store) void {
-        for (self.users.items) |u| {
-            self.gpa.free(u.name);
-            self.gpa.free(u.email);
-        }
+        for (self.users.items) |u| self.free(u);
         self.users.deinit(self.gpa);
     }
 
+    /// The rule that runs through all of this: **the Store owns its
+    /// strings.** What arrives in a request lives in the request arena and
+    /// is gone when the request ends, so anything kept is copied here. The
+    /// arguments are `[]const u8` rather than `Str` on purpose — a Service
+    /// that never names `Str` cannot accidentally store one.
     fn add(self: *Store, name: []const u8, email: []const u8) !User {
         try self.lock.lock();
         defer self.lock.unlock();
@@ -78,6 +95,45 @@ const Store = struct {
             if (u.id == id) return u;
         }
         return null;
+    }
+
+    /// Null when there is no such user, which is what the handler passes
+    /// straight back as the 404.
+    fn write(self: *Store, id: u32, name: []const u8, email: []const u8, nickname: ?[]const u8) !?User {
+        try self.lock.lock();
+        defer self.lock.unlock();
+
+        for (self.users.items) |*u| {
+            if (u.id != id) continue;
+            // Everything new is allocated before anything old is freed: an
+            // allocation that fails here leaves the row exactly as it was,
+            // rather than half-replaced and pointing at freed memory.
+            const new_name = try self.gpa.dupe(u8, name);
+            errdefer self.gpa.free(new_name);
+            const new_email = try self.gpa.dupe(u8, email);
+            errdefer self.gpa.free(new_email);
+            const new_nickname = if (nickname) |n| try self.gpa.dupe(u8, n) else null;
+
+            self.free(u.*);
+            u.name = new_name;
+            u.email = new_email;
+            u.nickname = new_nickname;
+            return u.*;
+        }
+        return null;
+    }
+
+    fn remove(self: *Store, id: u32) !bool {
+        try self.lock.lock();
+        defer self.lock.unlock();
+
+        for (self.users.items, 0..) |u, i| {
+            if (u.id != id) continue;
+            self.free(u);
+            _ = self.users.orderedRemove(i);
+            return true;
+        }
+        return false;
     }
 };
 
@@ -117,8 +173,13 @@ fn listUsers(store: *Store, arena: std.mem.Allocator, listing: zfast.Query(Listi
     return out;
 }
 
-fn getUser(store: *Store, id: u32) !User {
-    return store.find(id) orelse fail.notFound("no user {d}", .{id});
+/// `?User` is the whole 404: null goes out as one, and — because it is in
+/// the signature rather than in the body — the generated description says
+/// this endpoint answers 404. An `orelse fail.notFound(…)` says it better to
+/// a person and says nothing at all to a client generator; write that when
+/// the sentence is worth it, and you get both.
+fn getUser(store: *Store, id: u32) !?User {
+    return store.find(id);
 }
 
 const NewUser = struct {
@@ -126,19 +187,16 @@ const NewUser = struct {
     email: zfast.Str,
 };
 
-/// A struct argument is the request body, parsed from JSON. `Response(T)`
-/// is how a handler answers with a status other than 200, headers of its
-/// own, or — as here — both. A `Location` on a 201 is the reason it needs
-/// to be both, and it does not cost a drop down to `*Ctx` to get one.
-fn createUser(store: *Store, arena: std.mem.Allocator, incoming: NewUser) !zfast.Response(User) {
-    if (incoming.name.len() == 0) return fail.unprocessable("name must not be empty", .{});
-    if (std.mem.indexOfScalar(u8, incoming.email.view(), '@') == null) {
-        return fail.unprocessable("\"{s}\" is not an email address", .{incoming.email.view()});
-    }
+/// A struct argument is the request body, parsed from JSON. `Status(201, T)`
+/// is how a handler answers with a status other than 200 and headers of its
+/// own — the status is part of the type, so the API description names it
+/// instead of writing `default`. A `Location` on a 201 is the reason both
+/// halves are wanted, and neither costs a drop down to `*Ctx`.
+fn createUser(store: *Store, arena: std.mem.Allocator, incoming: NewUser) !zfast.Status(201, User) {
+    try checkUser(incoming);
 
     const created = try store.add(incoming.name.view(), incoming.email.view());
     return .{
-        .status = 201,
         // `.of` copies the list into the response while it is still alive:
         // written out here it belongs to this function's stack frame, and
         // zfast reads the headers after this function has returned.
@@ -151,6 +209,62 @@ fn createUser(store: *Store, arena: std.mem.Allocator, incoming: NewUser) !zfast
         }}),
         .value = created,
     };
+}
+
+/// The rules the types cannot state. A `fail` function is right here and
+/// stays invisible to the description — which is the honest limit of reading
+/// a contract off a signature, and why the description promises only what
+/// the signature settles.
+fn checkUser(incoming: NewUser) !void {
+    if (incoming.name.len() == 0) return fail.unprocessable("name must not be empty", .{});
+    if (std.mem.indexOfScalar(u8, incoming.email.view(), '@') == null) {
+        return fail.unprocessable("\"{s}\" is not an email address", .{incoming.email.view()});
+    }
+}
+
+/// PUT replaces the whole thing, so the body is the whole thing.
+fn replaceUser(store: *Store, id: u32, incoming: NewUser) !?User {
+    try checkUser(incoming);
+    return store.write(id, incoming.name.view(), incoming.email.view(), null);
+}
+
+/// PATCH changes part of it, and that is where `?T` runs out: with
+/// `nickname: ?Str = null`, the bodies `{}` and `{"nickname":null}` arrive
+/// identical, so "leave it alone" and "clear it" cannot be told apart.
+/// `Patch(T)` keeps all three answers.
+const EditUser = struct {
+    name: zfast.Patch(zfast.Str) = .absent,
+    email: zfast.Patch(zfast.Str) = .absent,
+    nickname: zfast.Patch(zfast.Str) = .absent,
+};
+
+fn editUser(store: *Store, id: u32, incoming: EditUser) !?User {
+    const current = store.find(id) orelse return null;
+
+    const name = switch (incoming.name) {
+        .absent => current.name,
+        .cleared => return fail.unprocessable("name must not be empty", .{}),
+        .value => |v| v.view(),
+    };
+    const email = switch (incoming.email) {
+        .absent => current.email,
+        .cleared => return fail.unprocessable("email must not be empty", .{}),
+        .value => |v| v.view(),
+    };
+    const nickname: ?[]const u8 = switch (incoming.nickname) {
+        .absent => current.nickname, // not mentioned: leave it
+        .cleared => null, // sent as null: empty it
+        .value => |v| v.view(),
+    };
+
+    return store.write(id, name, email, nickname);
+}
+
+/// `Status(204, void)` — a response with no body at all, which is what a
+/// DELETE answers. `.{}` is the whole return.
+fn deleteUser(store: *Store, id: u32) !zfast.Status(204, void) {
+    if (!try store.remove(id)) return fail.notFound("no user {d}", .{id});
+    return .{};
 }
 
 // ---- who is asking ----
@@ -237,6 +351,9 @@ pub fn main() !void {
     try app.get("/users", listUsers);
     try app.get("/users/:id", getUser);
     try app.post("/users", createUser);
+    try app.put("/users/:id", replaceUser);
+    try app.patch("/users/:id", editUser);
+    try app.delete("/users/:id", deleteUser);
 
     // A group: one prefix, written once, carrying both the routes under it
     // and the middleware that guards them. A function taking one of these
@@ -255,13 +372,41 @@ pub fn main() !void {
 
 const testing = std.testing;
 
-test "getUser answers with the user, or fails with a 404" {
+test "getUser answers with the user, or with null — which zfast sends as a 404" {
     var store = Store{ .gpa = testing.allocator };
     defer store.deinit();
     const wati = try store.add("wati", "wati@example.dev");
 
-    try testing.expectEqualStrings("wati", (try getUser(&store, wati.id)).name);
-    try testing.expectError(error.Failed, getUser(&store, 999));
+    try testing.expectEqualStrings("wati", (try getUser(&store, wati.id)).?.name);
+    try testing.expect(try getUser(&store, 999) == null);
+}
+
+test "editUser tells a field left out from one sent as null" {
+    var store = Store{ .gpa = testing.allocator };
+    defer store.deinit();
+    const wati = try store.add("wati", "wati@example.dev");
+    _ = try store.write(wati.id, "wati", "wati@example.dev", "wat");
+
+    // Not mentioned: left alone. This is the case `?Str` gets wrong.
+    const kept = try editUser(&store, wati.id, .{ .email = .{ .value = .static("new@example.dev") } });
+    try testing.expectEqualStrings("wat", kept.?.nickname.?);
+    try testing.expectEqualStrings("new@example.dev", kept.?.email);
+
+    // Sent as null: cleared.
+    const cleared = try editUser(&store, wati.id, .{ .nickname = .cleared });
+    try testing.expect(cleared.?.nickname == null);
+    try testing.expectEqualStrings("wati", cleared.?.name);
+
+    try testing.expect(try editUser(&store, 999, .{}) == null);
+}
+
+test "deleteUser answers an empty 204, and a 404 the second time" {
+    var store = Store{ .gpa = testing.allocator };
+    defer store.deinit();
+    const wati = try store.add("wati", "wati@example.dev");
+
+    _ = try deleteUser(&store, wati.id);
+    try testing.expectError(error.Failed, deleteUser(&store, wati.id));
 }
 
 test "createUser refuses a body that does not make sense" {
@@ -288,7 +433,8 @@ test "createUser refuses a body that does not make sense" {
         .name = .static("wati"),
         .email = .static("wati@example.dev"),
     });
-    try testing.expectEqual(@as(u16, 201), created.status);
+    // The 201 is in the return type, so there is nothing to assert about it
+    // here — asking for `Status(201, User)` is asking for a 201.
     try testing.expectEqualStrings("wati", created.value.name);
     try testing.expectEqualStrings("Location", created.headers.view()[0].name);
     try testing.expectEqualStrings("/users/1", created.headers.view()[0].value);

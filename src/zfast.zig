@@ -93,9 +93,25 @@ pub const sleep = @import("bulkhead.zig").sleep;
 /// callable from anywhere (ADR 0005).
 pub const fail = @import("fail.zig");
 
-/// A response with a status other than 200, headers of its own, or both:
-/// `Response(User){ .status = 201, .headers = …, .value = user }`.
+/// A response whose status the handler picks while it runs, headers of its
+/// own, or both: `Response(User){ .status = 201, .headers = …, .value = user }`.
+///
+/// `Response(void)` is an empty one — `.{ .status = 204 }` after a DELETE.
+///
+/// The status being a runtime field is why the API description can only
+/// write `default` for one of these. Where the status is part of the
+/// contract rather than a decision, `Status` below says so (ADR 0024).
 pub const Response = @import("typed.zig").Response;
+
+/// A response whose status is part of the signature, so the API description
+/// can name it: `Status(201, User)`, `Status(204, void)` (ADR 0024).
+///
+/// ```zig
+/// fn createUser(incoming: NewUser) !zfast.Status(201, User) {
+///     return .{ .value = made };
+/// }
+/// ```
+pub const Status = @import("typed.zig").Status;
 
 /// One response header, as `Response.headers` takes them.
 pub const Header = @import("typed.zig").Header;
@@ -137,6 +153,20 @@ pub const testing = @import("testing.zig");
 /// fn search(params: zfast.Query(Search)) ![]const Item { … }
 /// ```
 pub const Query = @import("typed.zig").Query;
+
+/// A body field that can tell "not sent" from "sent as null" — what a PATCH
+/// needs and `?T` cannot say (ADR 0026).
+///
+/// ```zig
+/// const EditTodo = struct { title: zfast.Patch(zfast.Str) = .absent };
+///
+/// switch (incoming.title) {
+///     .absent => {},                  // not mentioned: leave it alone
+///     .cleared => todo.title = null,  // sent as null: empty it
+///     .value => |v| todo.title = try v.keep(gpa),
+/// }
+/// ```
+pub const Patch = @import("patch.zig").Patch;
 
 pub const Middleware = @import("middleware.zig").Middleware;
 pub const Next = @import("middleware.zig").Next;
@@ -255,6 +285,7 @@ test "a fail function inside blocking reaches the request that made the call" {
 
 test {
     _ = @import("str.zig");
+    _ = @import("patch.zig");
     _ = @import("percent.zig");
     _ = @import("http1.zig");
     _ = @import("bulkhead.zig");

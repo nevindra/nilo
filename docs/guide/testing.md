@@ -19,6 +19,9 @@ test "getUser" {
 ```
 
 Every fail function returns `error.Failed`, so that is what a refusal asserts on.
+A handler returning `?T` says the same thing by answering null, so there the
+assertion is `try expect(try getUser(&fake, 99) == null)` and no error is
+involved at all.
 To check *which* refusal, look at the message the failure box holds — or drive the
 request through the test client below, where the status is on the answer.
 

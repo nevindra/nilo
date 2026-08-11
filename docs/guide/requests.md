@@ -89,8 +89,52 @@ A field with a default is what "absent" is allowed to mean, exactly as in a quer
 struct. Working out which of these to say costs a second parse, which is paid
 only by a request that was already going to be refused.
 
+Nested objects and lists are named by where the trouble is, not by the field at
+the top that contains it:
+
+```
+the request body is missing "address.city" (text)
+the request body has a field "address.zip" this endpoint does not know. It takes: street, city
+"lines[1].qty" has to be a whole number, not text
+```
+
+That goes eight levels down — the same depth the API description and the
+staleness trap follow — and below that a mistake is a plain 400 again.
+
 A `Str` field lives in the request arena, so — like every `Str` — it stops being
 valid when the request ends. `keep` it if the value goes into a service.
+
+### PATCH: telling "not sent" from "sent as null"
+
+`?T` has two states and a PATCH needs three. With `due: ?Str = null`, the bodies
+`{}` and `{"due":null}` arrive identical — so "leave the due date alone" and
+"empty the due date out" cannot be told apart, and one of them has to be given
+up. `Patch(T)` is the field type that keeps all three:
+
+```zig
+const EditTodo = struct {
+    title: zfast.Patch(zfast.Str) = .absent,
+    due: zfast.Patch(zfast.Str) = .absent,
+};
+
+fn editTodo(store: *Store, id: u32, incoming: EditTodo) !?Todo {
+    const current = store.find(id) orelse return null;
+
+    const due: ?[]const u8 = switch (incoming.due) {
+        .absent => current.due,   // not mentioned: leave it
+        .cleared => null,         // sent as null: empty it
+        .value => |v| v.view(),   // sent with a value
+    };
+    …
+}
+```
+
+The `= .absent` default is not optional: it is what "the field was not in the
+body" means, and it is also what makes the field optional in the generated
+description. Where "leave it" and "clear it" really are the same thing,
+`incoming.due.orNull()` collapses the two.
+
+See [ADR 0026](../adr/0026-a-patch-needs-three-answers-and-an-optional-has-two.md).
 
 ### Reading the body yourself
 

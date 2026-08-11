@@ -39,6 +39,7 @@ const fail = @import("fail.zig");
 const str_mod = @import("str.zig");
 const resolve = @import("resolve.zig");
 const openapi = @import("openapi.zig");
+const patch_mod = @import("patch.zig");
 
 const Ctx = ctx_mod.Ctx;
 const Str = str_mod.Str;
@@ -60,10 +61,62 @@ const Str = str_mod.Str;
 /// framework writes itself — Content-Type, Content-Length, Connection — are
 /// refused here too; the content type follows from the return type.
 pub fn Response(comptime T: type) type {
+    // `Response(void)` — a 204, almost always — carries nothing, so the
+    // field it would carry it in defaults to nothing and `.{ .status = 204 }`
+    // is the whole return. Written as its own branch rather than as
+    // `value: T = undefined`, which would have compiled for every T and let
+    // a forgotten `.value` go out as whatever was on the stack.
+    if (T == void) return struct {
+        pub const zfast_response = void;
+
+        status: u16 = 200,
+        headers: Headers = .{},
+        value: void = {},
+    };
     return struct {
         pub const zfast_response = T;
 
         status: u16 = 200,
+        headers: Headers = .{},
+        value: T,
+    };
+}
+
+/// `Response(T)` with the status settled while compiling, so the generated
+/// description can name it.
+///
+/// ```zig
+/// fn createUser(arena: std.mem.Allocator, incoming: NewUser) !Status(201, User) {
+///     return .{
+///         .headers = .of(&.{.{ .name = "Location", .value = try location(arena, made.id) }}),
+///         .value = made,
+///     };
+/// }
+///
+/// fn deleteUser(db: *Db, id: u32) !Status(204, void) {
+///     if (!try db.remove(id)) return fail.notFound("no user {d}", .{id});
+///     return .{};
+/// }
+/// ```
+///
+/// The two types differ in one thing and it is not the runtime behaviour:
+/// a `Response(T)` picks its status while the request is running, so the
+/// API description can only write `default`, while this one is part of the
+/// signature and comes out as `"201"` (ADR 0024). Reach for `Response(T)`
+/// when the status genuinely depends on what the handler found — a 200 or a
+/// 201 from the same upsert — and for this one the rest of the time.
+pub fn Status(comptime code: u16, comptime T: type) type {
+    if (T == void) return struct {
+        pub const zfast_response = void;
+        pub const zfast_status = code;
+
+        headers: Headers = .{},
+        value: void = {},
+    };
+    return struct {
+        pub const zfast_response = T;
+        pub const zfast_status = code;
+
         headers: Headers = .{},
         value: T,
     };
@@ -344,19 +397,36 @@ fn answerOf(comptime Fn: type) openapi.Answer {
         if (V == void) return empty;
 
         if (hasNamedDecl(V, "zfast_response")) {
-            const Inner = V.zfast_response;
             // The status of a `Response(T)` is a field the handler fills in,
             // so it is not knowable here. Saying "default" is the truth;
-            // claiming 200 for a route that answers 201 would not be.
-            if (Inner == void) return .{ .status = null, .content_type = "", .schema = null };
-            return .{
-                .status = null,
-                .content_type = contentTypeFor(Inner),
-                .schema = openapi.schemaOf(Inner),
-            };
+            // claiming 200 for a route that answers 201 would not be. A
+            // `Status(code, T)` puts the code in the type instead, which is
+            // the whole reason that type exists (ADR 0024).
+            const status: ?u16 = if (hasNamedDecl(V, "zfast_status")) V.zfast_status else null;
+            const Inner = V.zfast_response;
+            if (Inner == void) return .{ .status = status, .content_type = "", .schema = null };
+            return answerWith(status, Inner);
         }
 
-        return .{ .status = 200, .content_type = contentTypeFor(V), .schema = openapi.schemaOf(V) };
+        return answerWith(200, V);
+    }
+}
+
+/// The success answer for a handler returning `V`, with `?V` read as "and a
+/// 404 when it is not there" (ADR 0024) — so the body described is the thing
+/// itself rather than "the thing or null".
+fn answerWith(comptime status: ?u16, comptime V: type) openapi.Answer {
+    comptime {
+        const Present = switch (@typeInfo(V)) {
+            .optional => |o| o.child,
+            else => V,
+        };
+        return .{
+            .status = status,
+            .content_type = contentTypeFor(Present),
+            .schema = openapi.schemaOf(Present),
+            .not_found = Present != V,
+        };
     }
 }
 
@@ -504,7 +574,15 @@ fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Rol
                 "exactly right: put the field in a struct and ask for `zfast.Query(That)`.",
         ),
 
-        else => @compileError(
+        else => if (comptime patch_mod.isPatch(P)) @compileError(
+            "zfast: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
+                "\" is a `Patch(…)`, which is a field of a request body rather than an " ++
+                "argument of its own.\n" ++
+                "  A Patch says whether the body mentioned one field, so it only means " ++
+                "anything inside the struct that body is read into:\n" ++
+                "    const EditUser = struct { name: zfast.Patch(zfast.Str) = .absent };\n" ++
+                "    fn editUser(id: u32, incoming: EditUser) !?User { … }",
+        ) else @compileError(
             "zfast: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
                 "\" is a " ++ @typeName(P) ++ ", which zfast does not recognise.\n" ++
                 "  What you can ask for: `*Ctx`, a pointer to a service (`*Db`), a path param " ++
@@ -683,13 +761,28 @@ fn sendResult(c: *Ctx, result: anytype) !void {
         // handler assembling a header value has the request arena to build
         // it in, and should not have to think about which of the two it is.
         for (value.headers.view()) |h| try c.setHeader(h.name, h.value);
-        return sendValue(c, value.status, value.value);
+        const status = if (comptime hasNamedDecl(T, "zfast_status"))
+            T.zfast_status
+        else
+            value.status;
+        return sendValue(c, status, value.value);
     }
     return sendValue(c, 200, value);
 }
 
 fn sendValue(c: *Ctx, status: u16, value: anytype) !void {
     const T = @TypeOf(value);
+    // Nothing to describe and nothing to send. Under a 204 that is the whole
+    // response; under any other status it is an empty body with no content
+    // type, which is still the truth.
+    if (T == void) return c.sendEmpty(status);
+    // `?T` is how a signature says "this may not exist", and the only answer
+    // HTTP has for that is a 404 (ADR 0024). The alternative — 200 with the
+    // body `null` — is a thing nobody meant and every client crashes on.
+    if (comptime @typeInfo(T) == .optional) {
+        const present = value orelse return fail.notFound("there is no {s}", .{c._path});
+        return sendValue(c, status, present);
+    }
     if (T == Str) return c.sendText(status, value.view());
     if (T == []const u8 or T == []u8) return c.sendText(status, value);
     return c.sendJson(status, value);

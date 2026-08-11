@@ -304,3 +304,31 @@ Two things about how it was built are worth keeping.
 **That split is also the test seam, and it is why the tests are quick.** `Deadlines` reaches its target through a vtable, so a test hands `App` one that writes down what it was asked for instead of doing it. "The header deadline is armed once, however many reads the head takes" is then a counting assertion that runs in a millisecond — where a socket test would have to wait out a real deadline to prove a negative. What zio does with a limit once it has one is checked by hand; the table above is that run.
 
 One wart the tests found: `drain` was arming the body limit on requests that had no body, which left a limit meant for a body sitting on a connection about to go idle. And one log line got fixed on the way past — `handler GET /users/7 failed after answering: WriteFailed` sends whoever reads it hunting for a bug in a handler that did nothing wrong, so when the write ran out of time it now says the client stopped reading.
+
+## After 0.1.0: what building a CRUD app found
+
+Not a feature and not a bug report — a todo API written from `zig init` to `curl`, by somebody who had only the guide, to see what the DX is actually like at the shape zfast is most likely to be used in. Everything below is something that trip hit.
+
+The happy path held up. `GET`, `POST` with a `Location`, `PUT`, `PATCH` — correct on the first run, no framework compile errors, and the validation messages are as good in a real app as they are in the tests. What follows is what was *around* it.
+
+**`Response(void)` did not compile.** `return .{ .status = 204 }` gave `missing struct field: value`; adding `.value = {}` gave `Unable to stringify type 'void'`, four frames inside `std.json`. The cause is worth recording because it is a shape to watch for: `answerOf` had a branch for `Response(void)` and `sendValue` had no `void` case, so one side of the bridge was documenting a case the other side could not reach. A dead branch on one side of a boundary is evidence the other side is missing one.
+
+It also broke the rule [ADR 0015](./adr/0015-what-zfast-borrows-and-from-whom.md) sets for itself — *every check fires at the first place a human named the thing, or it does not ship*. Two of the errors on this trip came from inside `std`, not from zfast.
+
+**The generated document could not be used for CRUD.** Every read handler ended `orelse fail.notFound(…)`, and not one of those 404s reached the document, because `fail` calls live in a function body and comptime cannot read one. Every write endpoint said `default` for its status. The fix was to move both into the return type — `!?T` and `Status(code, T)`, [ADR 0024](./adr/0024-a-failure-mode-belongs-in-the-return-type.md) — rather than to add the annotation FastAPI uses, which would have been a second thing to keep in step.
+
+The `!?T` slot turned out to be free. It used to answer `200` with the body `null`, which is a thing nobody means by a get-by-id.
+
+**Errors went out as `text/plain`.** The best error messages in the ecosystem, in the one format the code reading them cannot accept: `res.json()` throws on every 4xx, in the `catch` where the frontend was going to show the user what went wrong. [ADR 0025](./adr/0025-every-failure-answers-with-the-same-json-body.md).
+
+**Validation stopped at the first level.** `{"address":{"street":"jl mawar"}}` was a bare `Bad Request`, where the same mistake one level up got a sentence. `describeBadBody` walked the top level and `fits()` checked a struct field only for being an object at all, so the loop found nothing and fell through. Now it recurses and names the field by where it is — `address.city`, `lines[1].qty`.
+
+**PATCH could not express itself.** `{}` and `{"due":null}` arrive identical through `?T`, so "leave it alone" and "clear it" are the same request. [ADR 0026](./adr/0026-a-patch-needs-three-answers-and-an-optional-has-two.md).
+
+**The `Str` trap missed the way anybody would test it.** Two `curl` calls stashed a `Str` and read it back, and got the stale bytes with no complaint; the same thing on one keep-alive connection panicked correctly. Every connection started its generation counter at zero, so the second connection's counter matched what the first connection's `Str` was holding. Spans per connection fixed it. The lesson is not about counters: **the case the trap was tested with was the case that could not fail.** Same request, same handler, two connections instead of one, and the safety feature was off.
+
+**Two-fifths of the app was memory bookkeeping.** 58 lines of dupe/free/lock against 84 lines of handler, and not one page of the guide talked about the pattern. That is what owning memory costs in Zig rather than anything zfast does, but the audience is people for whom it is new, so [Services](./guide/services.md#holding-on-to-request-text) now says it plainly and the `rest` example — the one everybody copies — was extended to `PUT`, `PATCH` and `DELETE` so that it shows the whole shape rather than the easy half.
+
+That last point is the one worth generalising. `rest` had no `DELETE`, which is why nobody found that `Response(void)` could not compile.
+
+Measured, stripped `ReleaseFast`: **+6 KB on hello, +14 KB on rest**, and the allocation budget is unchanged — the failure path uses a stack buffer, and the nested description allocates in the request arena on a request that was already going to be refused.

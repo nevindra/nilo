@@ -18,8 +18,15 @@ const zfast = @import("zfast");
 pub const std_options = zfast.std_options;       // engine chatter out of your logs
 pub const std_options_debug_io = zfast.debug_io; // `std.log` off the event loop
 
-fn getUser(db: *Db, id: u32) !User {
-    return db.find(id) orelse zfast.fail.notFound("no user {d}", .{id});
+// `?User` says it may not be there, so null goes out as a 404 — and the
+// generated API document says the endpoint answers 404.
+fn getUser(db: *Db, id: u32) !?User {
+    return db.find(id);
+}
+
+// `Status(201, User)` puts the status in the type, so the document names it.
+fn createUser(db: *Db, incoming: NewUser) !zfast.Status(201, User) {
+    return .{ .value = try db.add(incoming) };
 }
 
 pub fn main() !void {
@@ -29,6 +36,7 @@ pub fn main() !void {
     try app.provide(&db);
     try app.use(zfast.logger.standard);
     try app.get("/users/:id", getUser);
+    try app.post("/users", createUser);
     try app.static("/", "public");
 
     try app.listen(.{});
@@ -42,9 +50,11 @@ value is request data.**
 
 ## Install
 
-Needs Zig 0.16.
+Needs Zig 0.16. From an empty directory, `zig init` first — `zig fetch` writes
+into a `build.zig.zon` that has to exist already:
 
 ```
+zig init
 zig fetch --save git+https://github.com/nevindra/zfast
 ```
 

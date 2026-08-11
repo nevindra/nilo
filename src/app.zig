@@ -14,6 +14,7 @@ const range_mod = @import("range.zig");
 const router_mod = @import("router.zig");
 const ctx_mod = @import("ctx.zig");
 const str_mod = @import("str.zig");
+const patch_mod = @import("patch.zig");
 const service_mod = @import("service.zig");
 const typed = @import("typed.zig");
 const fail = @import("fail.zig");
@@ -31,13 +32,49 @@ const Ctx = ctx_mod.Ctx;
 /// connection sitting on the memory for good.
 const arena_keep = 16 * 1024;
 
-const RESPONSE_400 = http1.staticResponse(400, "Bad Request", "text/plain", "malformed request\n", false);
-const RESPONSE_431 = http1.staticResponse(431, "Request Header Fields Too Large", "text/plain", "head too long\n", false);
+/// The three answers that go out before there is a Ctx to assemble one with.
+/// They carry the same JSON shape every other failure does (ADR 0025), so a
+/// client has one thing to parse and not two.
+const RESPONSE_400 = http1.staticResponse(400, "Bad Request", failure_content_type, staticFailure(400, "malformed request"), false);
+const RESPONSE_431 = http1.staticResponse(431, "Request Header Fields Too Large", failure_content_type, staticFailure(431, "head too long"), false);
 /// Sent when a request head started arriving and then stopped (ADR 0023).
 /// Not when a keep-alive connection simply sat idle: that client has not
 /// asked for anything, and a status answering nothing is noise a proxy has
 /// to decide what to do with.
-const RESPONSE_408 = http1.staticResponse(408, "Request Timeout", "text/plain", "request head timed out\n", false);
+const RESPONSE_408 = http1.staticResponse(408, "Request Timeout", failure_content_type, staticFailure(408, "request head timed out"), false);
+
+const failure_content_type = "application/json";
+
+/// Room for the longest failure body there can be: a message at the Failure's
+/// ceiling where every byte needs the six-character `\u00xx` escape, plus the
+/// wrapper around it.
+const failure_body_max = fail.max_message * 6 + 32;
+
+/// A failure body for a message known while compiling — no escaping, because
+/// these three are written here and have nothing in them to escape.
+fn staticFailure(comptime status: u16, comptime message: []const u8) []const u8 {
+    return std.fmt.comptimePrint("{{\"error\":\"{s}\",\"status\":{d}}}", .{ message, status });
+}
+
+/// The body of a failure response: the sentence a fail function wrote, in the
+/// one shape every client can read (ADR 0025).
+///
+/// A frontend calling `res.json()` on a 4xx used to throw, which is the
+/// worst moment to lose the message that says what went wrong. The message
+/// itself is unchanged, so `curl` still shows the sentence — one pair of
+/// braces further in.
+fn writeFailureBody(w: *std.Io.Writer, status: u16, message: []const u8) !void {
+    try w.writeAll("{\"error\":\"");
+    for (message) |ch| switch (ch) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        '\n' => try w.writeAll("\\n"),
+        '\r' => try w.writeAll("\\r"),
+        '\t' => try w.writeAll("\\t"),
+        else => if (ch < 0x20) try w.print("\\u{x:0>4}", .{ch}) else try w.writeByte(ch),
+    };
+    try w.print("\",\"status\":{d}}}", .{status});
+}
 
 pub const App = struct {
     gpa: std.mem.Allocator,
@@ -469,7 +506,10 @@ pub const App = struct {
     ) void {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
-        var lifetime = str_mod.Lifetime{};
+        // A span of its own, so a Str this connection hands out cannot pass
+        // for one of the next connection's (ADR 0004).
+        var lifetime = str_mod.Lifetime.init();
+        defer lifetime.deinit();
 
         // Once for the connection. Nothing in a response changes how long a
         // single write may take, so nothing re-arms it — including a stream
@@ -689,7 +729,9 @@ pub const App = struct {
         const reusable = drain(&c, in, &r);
 
         if (!c._sent) {
-            sendDirect(&c, 200, "") catch return false;
+            // A handler that returned without answering meant an empty 200.
+            // No content type, because there is no content to give one to.
+            sendDirect(&c, 200, "", "") catch return false;
         }
         if (c._stream != null) return endAbandonedStream(&c);
         return reusable;
@@ -974,8 +1016,12 @@ fn drain(c: *Ctx, in: *std.Io.Reader, r: *const http1.Request) bool {
 
 /// The innermost call when no route matched. It is a normal handler so
 /// that middleware wraps a 404 exactly as it wraps anything else.
+///
+/// It fails rather than answering, so this 404 goes out through the one
+/// place that assembles a failure and gets the same body shape as every
+/// other (ADR 0025).
 fn notFoundHandler(c: *Ctx) anyerror!void {
-    try c.sendText(404, "not found\n");
+    return fail.notFound("there is no {s}", .{c._path});
 }
 
 /// The innermost call when the path is registered but not for this method.
@@ -993,15 +1039,16 @@ fn methodNotAllowedHandler(c: *Ctx) anyerror!void {
     // refused: that is the question the method exists for, and the `Allow`
     // header above is the answer. A preflight never gets this far — CORS
     // middleware handles those before any handler runs.
-    if (c.method == .OPTIONS) return c.send(204, "text/plain", "");
+    if (c.method == .OPTIONS) return c.sendEmpty(204);
 
-    var buf: [160]u8 = undefined;
-    const body = std.fmt.bufPrint(
-        &buf,
-        "{s} is not allowed here. This path answers: {s}\n",
-        .{ @tagName(c.method), allow },
-    ) catch "method not allowed\n";
-    try c.sendText(405, body);
+    // Failing rather than answering, for the reason `notFoundHandler` does:
+    // one place assembles a failure body. The `Allow` header set above
+    // survives it — `sendDirect` writes whatever headers the request
+    // collected, which is also what keeps CORS on an error response.
+    return fail.status(405, "{s} is not allowed here. This path answers: {s}", .{
+        @tagName(c.method),
+        allow,
+    });
 }
 
 /// `GET, HEAD, POST` — an `Allow` header's value, in the order the methods
@@ -1111,7 +1158,7 @@ fn sendFinal(out: *std.Io.Writer, response: []const u8) void {
 /// and headers middleware added still go out: an error response that
 /// silently drops its CORS headers is one a browser refuses to show, which
 /// is the worst possible moment to lose them.
-fn sendDirect(c: *Ctx, status: u16, body: []const u8) !void {
+fn sendDirect(c: *Ctx, status: u16, content_type: []const u8, body: []const u8) !void {
     c._sent = true;
     c._status = status;
     const keep_alive = c.keepAlive();
@@ -1119,7 +1166,7 @@ fn sendDirect(c: *Ctx, status: u16, body: []const u8) !void {
         c._out,
         status,
         http1.statusPhrase(status),
-        "text/plain",
+        content_type,
         body.len,
         keep_alive,
         c.extraHeaders(),
@@ -1128,7 +1175,7 @@ fn sendDirect(c: *Ctx, status: u16, body: []const u8) !void {
         c._out,
         status,
         http1.statusPhrase(status),
-        "text/plain",
+        content_type,
         body,
         keep_alive,
         c.extraHeaders(),
@@ -1140,8 +1187,6 @@ fn sendDirect(c: *Ctx, status: u16, body: []const u8) !void {
 /// table, and anything unrecognised becomes a 500 logged with its error
 /// name (ADR 0005).
 fn sendFailure(c: *Ctx, failure: *const fail.Failure, err: anyerror) !void {
-    var buf: [fail.max_message + 1]u8 = undefined;
-
     const status = fail.resolveStatus(failure, err);
     const message: []const u8 = if (failure.isSet()) failure.message() else blk: {
         if (status == 500) {
@@ -1156,9 +1201,15 @@ fn sendFailure(c: *Ctx, failure: *const fail.Failure, err: anyerror) !void {
         break :blk http1.statusPhrase(status);
     };
 
-    // The message line ends in a newline so it reads nicely under curl.
-    const body = std.fmt.bufPrint(&buf, "{s}\n", .{message}) catch message;
-    try sendDirect(c, status, body);
+    var buf: [failure_body_max]u8 = undefined;
+    var body: std.Io.Writer = .fixed(&buf);
+    // The buffer is sized for the longest message a Failure can hold, so
+    // this cannot run out of room; if it somehow did, what was written so
+    // far would not be JSON, and the status alone is better than that.
+    writeFailureBody(&body, status, message) catch {
+        return sendDirect(c, status, "", "");
+    };
+    try sendDirect(c, status, failure_content_type, buf[0..body.end]);
 }
 
 // ---- tests: all of App's HTTP behaviour, without starting a server ----
@@ -1196,6 +1247,23 @@ const Harness = struct {
     fn ready(self: *Harness, app: *App) !void {
         _ = self;
         try app.resolveChains();
+    }
+
+    /// Whether a failure response says `wanted`, read out of the JSON body
+    /// rather than off the wire (ADR 0025). A test then spells the message
+    /// the way a person reads it, instead of the way JSON escapes it — and
+    /// gets "the body really was JSON" asserted for free.
+    fn saysFailure(response: []const u8, wanted: []const u8) !bool {
+        const blank = std.mem.indexOf(u8, response, "\r\n\r\n") orelse return false;
+        const parsed = try std.json.parseFromSlice(
+            std.json.Value,
+            testing.allocator,
+            response[blank + 4 ..],
+            .{},
+        );
+        defer parsed.deinit();
+        const message = (parsed.value.object.get("error") orelse return false).string;
+        return std.mem.indexOf(u8, message, wanted) != null;
     }
 
     fn send(self: *Harness, app: *App, request: []const u8) struct { response: []const u8, keep_alive: bool } {
@@ -1314,7 +1382,8 @@ test "a quiet handler answers an empty 200" {
     defer h.deinit();
     const result = h.send(&app, "GET /quiet HTTP/1.1\r\n\r\n");
     try testing.expect(result.keep_alive);
-    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 0\r\n"));
+    // No Content-Type: there is no content to give one to.
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n"));
 }
 
 fn testHeaderAndQuery(c: *Ctx) anyerror!void {
@@ -1549,7 +1618,7 @@ test "a body field that does not fit is a 400 naming the field, like a query par
     for (cases) |case| {
         const response = signupResponse(&h, &app, case.body);
         try testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 400 Bad Request\r\n"));
-        testing.expect(std.mem.indexOf(u8, response, case.says) != null) catch |err| {
+        testing.expect(try Harness.saysFailure(response, case.says)) catch |err| {
             std.debug.print("body {s}\n  wanted: {s}\n  got:    {s}\n", .{ case.body, case.says, response });
             return err;
         };
@@ -1567,6 +1636,148 @@ test "a body that fits still parses, so the diagnosis costs the happy path nothi
 
     try testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 200 OK\r\n"));
     try testing.expect(std.mem.indexOf(u8, response, "{\"name\":\"wati\"}") != null);
+}
+
+const EditTodo = struct {
+    title: patch_mod.Patch(Str) = .absent,
+    due: patch_mod.Patch(Str) = .absent,
+};
+
+fn editTodo(incoming: EditTodo) !struct { title: []const u8, due: []const u8 } {
+    return .{
+        .title = switch (incoming.title) {
+            .absent => "absent",
+            .cleared => "cleared",
+            // Read through `view()`, which is what proves the Str inside a
+            // Patch got its lifetime marker like any other.
+            .value => |v| v.view(),
+        },
+        .due = switch (incoming.due) {
+            .absent => "absent",
+            .cleared => "cleared",
+            .value => |v| v.view(),
+        },
+    };
+}
+
+test "a PATCH body tells a field left out from one sent as null" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.patch("/todos", editTodo);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const cases = [_]struct { body: []const u8, says: []const u8 }{
+        // The distinction `?T` cannot make, and the reason Patch exists
+        // (ADR 0026).
+        .{ .body = "{}", .says = "{\"title\":\"absent\",\"due\":\"absent\"}" },
+        .{ .body = "{\"title\":null}", .says = "{\"title\":\"cleared\",\"due\":\"absent\"}" },
+        .{ .body = "{\"title\":\"buy milk\"}", .says = "{\"title\":\"buy milk\",\"due\":\"absent\"}" },
+        .{
+            .body = "{\"title\":\"x\",\"due\":null}",
+            .says = "{\"title\":\"x\",\"due\":\"cleared\"}",
+        },
+    };
+
+    for (cases) |case| {
+        var buf: [256]u8 = undefined;
+        const request = std.fmt.bufPrint(
+            &buf,
+            "PATCH /todos HTTP/1.1\r\nContent-Length: {d}\r\n\r\n{s}",
+            .{ case.body.len, case.body },
+        ) catch unreachable;
+        const response = h.send(&app, request).response;
+        try testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 200 OK\r\n"));
+        testing.expect(std.mem.indexOf(u8, response, case.says) != null) catch |err| {
+            std.debug.print("body {s}\n  wanted: {s}\n  got:    {s}\n", .{ case.body, case.says, response });
+            return err;
+        };
+    }
+
+    // And a value of the wrong shape still says so, naming the field: a
+    // Patch takes its value or null, and nothing else.
+    const wrong = h.send(
+        &app,
+        "PATCH /todos HTTP/1.1\r\nContent-Length: 14\r\n\r\n{\"title\":123}\n",
+    );
+    try testing.expect(std.mem.startsWith(u8, wrong.response, "HTTP/1.1 400"));
+    try testing.expect(try Harness.saysFailure(wrong.response, "\"title\" has to be text or null"));
+}
+
+const Address = struct { street: Str, city: Str };
+const Line = struct { sku: Str, qty: u32 };
+const Order = struct {
+    customer: Str,
+    address: Address,
+    lines: []const Line,
+    note: ?Str = null,
+};
+
+fn placeOrder(incoming: Order) !struct { customer: []const u8 } {
+    return .{ .customer = incoming.customer.view() };
+}
+
+test "a field below the top level is named by where it is, not left to a bare 400" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/orders", placeOrder);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const good_address = "\"address\":{\"street\":\"jl mawar\",\"city\":\"bandung\"}";
+    const good_lines = "\"lines\":[{\"sku\":\"a\",\"qty\":1}]";
+
+    const cases = [_]struct { body: []const u8, says: []const u8 }{
+        // Inside a nested object: missing, unknown, and the wrong shape.
+        .{
+            .body = "{\"customer\":\"wati\",\"address\":{\"street\":\"jl mawar\"}," ++ good_lines ++ "}",
+            .says = "missing \"address.city\"",
+        },
+        .{
+            .body = "{\"customer\":\"wati\",\"address\":{\"street\":\"a\",\"city\":\"b\",\"zip\":\"c\"}," ++ good_lines ++ "}",
+            .says = "field \"address.zip\" this endpoint does not know",
+        },
+        .{
+            .body = "{\"customer\":\"wati\",\"address\":{\"street\":1,\"city\":\"b\"}," ++ good_lines ++ "}",
+            .says = "\"address.street\" has to be text, not a number",
+        },
+        // Inside a list, which is named by the position that went wrong
+        // rather than by the list.
+        .{
+            .body = "{\"customer\":\"wati\"," ++ good_address ++ ",\"lines\":[{\"sku\":\"a\",\"qty\":1},{\"sku\":\"b\",\"qty\":\"two\"}]}",
+            .says = "\"lines[1].qty\" has to be a whole number, not text",
+        },
+        .{
+            .body = "{\"customer\":\"wati\"," ++ good_address ++ ",\"lines\":[{\"sku\":\"a\"}]}",
+            .says = "missing \"lines[0].qty\"",
+        },
+        // The top level still reads exactly as it did before any of this
+        // went deeper: no prefix, because there is nothing to be inside of.
+        .{
+            .body = "{" ++ good_address ++ "," ++ good_lines ++ "}",
+            .says = "the request body is missing \"customer\"",
+        },
+    };
+
+    for (cases) |case| {
+        var head_buf: [128]u8 = undefined;
+        const head = std.fmt.bufPrint(
+            &head_buf,
+            "POST /orders HTTP/1.1\r\nContent-Length: {d}\r\n\r\n",
+            .{case.body.len},
+        ) catch unreachable;
+        var request_buf: [1024]u8 = undefined;
+        const request = std.fmt.bufPrint(&request_buf, "{s}{s}", .{ head, case.body }) catch unreachable;
+        const response = h.send(&app, request).response;
+
+        try testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 400 Bad Request\r\n"));
+        testing.expect(try Harness.saysFailure(response, case.says)) catch |err| {
+            std.debug.print("body {s}\n  wanted: {s}\n  got:    {s}\n", .{ case.body, case.says, response });
+            return err;
+        };
+    }
 }
 
 // ---- 405 ----
@@ -1786,11 +1997,10 @@ test "a query param that is missing or malformed is a 400 that says which one" {
 
     const not_a_number = h.send(&app, "GET /search?q=zig&page=soon HTTP/1.1\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, not_a_number.response, "HTTP/1.1 400"));
-    try testing.expect(std.mem.indexOf(
-        u8,
+    try testing.expect(try Harness.saysFailure(
         not_a_number.response,
         "?page has to be a whole number, not \"soon\"",
-    ) != null);
+    ));
 
     // An enum says what it would have accepted, rather than only refusing.
     const bad_enum = h.send(&app, "GET /search?q=zig&sort=sideways HTTP/1.1\r\n\r\n");
@@ -1825,6 +2035,84 @@ test "Response(T) carries headers of its own, without reaching for a Ctx" {
     try testing.expect(std.mem.indexOf(u8, result.response, "Location: /users/7\r\n") != null);
     try testing.expect(std.mem.indexOf(u8, result.response, "X-Made-By: zfast\r\n") != null);
     try testing.expect(std.mem.indexOf(u8, result.response, "{\"id\":7,\"name\":\"wati\"}") != null);
+}
+
+fn deleteWithResponse() typed.Response(void) {
+    return .{ .status = 204 };
+}
+
+fn deleteWithStatus() typed.Status(204, void) {
+    return .{};
+}
+
+fn createWithStatus() typed.Status(201, UserOut) {
+    return .{
+        .headers = .of(&.{.{ .name = "Location", .value = "/users/7" }}),
+        .value = .{ .id = 7, .name = "wati" },
+    };
+}
+
+test "an empty response is a 204 with nothing after the head" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.delete("/one", deleteWithResponse);
+    try app.delete("/two", deleteWithStatus);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    // Both spellings answer the same thing. A 204 carries neither
+    // Content-Type nor Content-Length — see `http1.bodyless` — and the
+    // connection is fine to carry another request.
+    for ([_][]const u8{ "/one", "/two" }) |path| {
+        var buf: [64]u8 = undefined;
+        const request = std.fmt.bufPrint(&buf, "DELETE {s} HTTP/1.1\r\n\r\n", .{path}) catch unreachable;
+        const result = h.send(&app, request);
+        try testing.expectEqualStrings(
+            "HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\n\r\n",
+            result.response,
+        );
+        try testing.expect(result.keep_alive);
+    }
+}
+
+test "a Status(code, T) answers that code and carries headers like a Response does" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/users", createWithStatus);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "POST /users HTTP/1.1\r\nContent-Length: 0\r\n\r\n");
+
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 201 Created\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "Location: /users/7\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, result.response, "{\"id\":7,\"name\":\"wati\"}") != null);
+}
+
+fn findUser(id: u32) !?UserOut {
+    if (id != 7) return null;
+    return .{ .id = 7, .name = "wati" };
+}
+
+test "a handler returning ?T answers 404 when there is none, and never sends null" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/users/:id", findUser);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const found = h.send(&app, "GET /users/7 HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, found.response, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(std.mem.indexOf(u8, found.response, "{\"id\":7,\"name\":\"wati\"}") != null);
+
+    // Not `200 null`, which is what this used to be and what nobody meant
+    // (ADR 0024). The path is in the message, so the log says which one.
+    const missing = h.send(&app, "GET /users/99 HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, missing.response, "HTTP/1.1 404 Not Found\r\n"));
+    try testing.expect(try Harness.saysFailure(missing.response, "there is no /users/99"));
+    try testing.expect(missing.keep_alive);
 }
 
 fn headersBuiltInAFrameThatDies(arena: std.mem.Allocator, id: u32) !typed.Headers {
@@ -3164,6 +3452,98 @@ test "the document describes what the signatures say" {
     // A route with something to convert can be refused before the handler
     // runs, and the document admits it.
     try testing.expect(std.mem.indexOf(u8, json, "\"400\":") != null);
+}
+
+fn docFindUser(_: *Db, id: u32) !?DocUser {
+    _ = id;
+    return null;
+}
+fn docMakeUser(_: *Db, _: DocNewUser) !typed.Status(201, DocUser) {
+    return undefined;
+}
+fn docDropUser(_: *Db, _: u32) !typed.Status(204, void) {
+    return .{};
+}
+
+test "the document names the statuses and failures the signatures settle" {
+    var db = Db{ .rows = &.{} };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    app.docs(.{});
+
+    try app.get("/users/:id", docFindUser);
+    try app.post("/users", docMakeUser);
+    try app.delete("/users/:id", docDropUser);
+
+    const json = try docsFor(&app);
+
+    // `Status(code, T)` puts the code in the type, so the document names it
+    // instead of falling back to `default` (ADR 0024).
+    try testing.expect(std.mem.indexOf(u8, json, "\"responses\":{\"201\":") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"responses\":{\"204\":") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"default\":") == null);
+
+    // A handler returning `?T` promises a 404, and the body it describes is
+    // the thing itself — not "the thing or null", which was the old answer
+    // and the reason nobody could generate a client from this.
+    try testing.expect(std.mem.indexOf(u8, json, "\"404\":") != null);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        json,
+        "\"200\":{\"description\":\"the response\",\"content\":{\"application/json\":" ++
+            "{\"schema\":{\"$ref\":\"#/components/schemas/DocUser\"}}}}",
+    ) != null);
+
+    // Every failure the document promises has the one shape all of them
+    // take, described once (ADR 0025).
+    try testing.expect(std.mem.indexOf(u8, json, "\"Failure\":{\"type\":\"object\"") != null);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        json,
+        "\"$ref\":\"#/components/schemas/Failure\"",
+    ) != null);
+}
+
+test "a shape used by more than one route is written once and referred to" {
+    var db = Db{ .rows = &.{} };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    app.docs(.{});
+
+    try app.get("/users/:id", docGetUser);
+    try app.get("/users", docListUsers);
+    try app.post("/users", docCreateUser);
+
+    const json = try docsFor(&app);
+
+    // The shape itself appears once, under the name of the Zig type it came
+    // from, and everywhere else is a reference to it.
+    try testing.expect(std.mem.indexOf(u8, json, "\"DocUser\":{\"type\":\"object\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"DocNewUser\":{\"type\":\"object\"") != null);
+
+    var found: usize = 0;
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, json, at, "\"$ref\":\"#/components/schemas/DocUser\"")) |i| {
+        found += 1;
+        at = i + 1;
+    }
+    // Once for the single user, once inside the list, once for the created
+    // one — three references and one copy, where there used to be three
+    // copies.
+    try testing.expectEqual(@as(usize, 3), found);
+    try testing.expectEqual(@as(usize, 1), countOccurrences(json, "\"id\":{\"type\":\"integer\"}"));
+}
+
+fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
+    var n: usize = 0;
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, haystack, at, needle)) |i| {
+        n += 1;
+        at = i + 1;
+    }
+    return n;
 }
 
 test "the document is valid JSON, all of it" {

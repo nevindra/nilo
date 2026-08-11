@@ -595,12 +595,20 @@ fn writeHead(
         // No Content-Length: see `bodyless`. Content-Type still goes out on
         // a 304, which is describing a representation the client already
         // has, but not on a 204, where there is no representation at all.
-        if (status == 304) try out.print("Content-Type: {s}\r\n", .{content_type});
+        if (status == 304 and content_type.len > 0) {
+            try out.print("Content-Type: {s}\r\n", .{content_type});
+        }
         try out.print("Connection: {s}\r\n", .{if (keep_alive) "keep-alive" else "close"});
     } else {
+        // An empty content type is how a caller says there is no body to
+        // describe — a handler returning `void` under a status that is not
+        // one of the bodyless ones. `Content-Length: 0` still goes out,
+        // because that status *does* have a body and its length is nothing;
+        // `Content-Type:` with nothing after it would be a malformed header.
+        if (content_type.len > 0) try out.print("Content-Type: {s}\r\n", .{content_type});
         try out.print(
-            "Content-Type: {s}\r\nContent-Length: {d}\r\nConnection: {s}\r\n",
-            .{ content_type, body_len, if (keep_alive) "keep-alive" else "close" },
+            "Content-Length: {d}\r\nConnection: {s}\r\n",
+            .{ body_len, if (keep_alive) "keep-alive" else "close" },
         );
     }
     for (extra) |h| try out.print("{s}: {s}\r\n", .{ h.name, h.value });

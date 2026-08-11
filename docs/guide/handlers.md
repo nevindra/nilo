@@ -52,16 +52,46 @@ The return value becomes the response body:
 | `void` | 200, empty |
 | `Str`, `[]const u8` | 200, `text/plain` |
 | anything else | 200, that value as JSON |
-| `Response(T)` | a status and headers of your choosing |
-| `!T` | the same, or a [failure](./errors.md) |
+| `?T` | 200 with the value, or **404** when it is null |
+| `Status(code, T)` | that status, and headers if you set any |
+| `Response(T)` | a status picked while the handler runs, and headers |
+| `!T` | any of the above, or a [failure](./errors.md) |
+
+### "It might not be there": `?T`
+
+The commonest handler in any CRUD app, and the whole 404 is in the signature:
+
+```zig
+fn getUser(db: *Db, id: u32) !?User {
+    return db.find(id);
+}
+```
+
+Null goes out as `404 Not Found`, and the generated API description says the
+endpoint answers 404 — which it cannot know about an `orelse fail.notFound(…)`
+in the body, because a compile-time check cannot read a function body.
+
+Write the `orelse` when you want a better sentence than `there is no /users/99`.
+You get both: your message, and the 404 in the document.
+
+```zig
+fn getUser(db: *Db, id: u32) !User {
+    return db.find(id) orelse fail.notFound("no user {d}", .{id});
+}
+```
+
+What `?T` no longer does is answer `200` with the body `null`. If that really is
+what you mean, return a struct with a nullable field, which says so.
 
 ### Choosing the status, or adding headers
 
+When the status is part of the contract, put it in the type — the document can
+then name it instead of writing `default`:
+
 ```zig
-fn createUser(db: *Db, arena: std.mem.Allocator, incoming: NewUser) !Response(User) {
+fn createUser(db: *Db, arena: std.mem.Allocator, incoming: NewUser) !Status(201, User) {
     const created = try db.add(incoming);
     return .{
-        .status = 201,
         .headers = .of(&.{.{
             .name = "Location",
             .value = try std.fmt.allocPrint(arena, "/users/{d}", .{created.id}),
@@ -69,7 +99,26 @@ fn createUser(db: *Db, arena: std.mem.Allocator, incoming: NewUser) !Response(Us
         .value = created,
     };
 }
+
+fn deleteUser(db: *Db, id: u32) !Status(204, void) {
+    if (!try db.remove(id)) return fail.notFound("no user {d}", .{id});
+    return .{};
+}
 ```
+
+When the status genuinely depends on what the handler found — a 200 or a 201 out
+of the same upsert — that is what `Response(T)` is for, and its `.status` is an
+ordinary field:
+
+```zig
+fn upsertUser(db: *Db, id: u32, incoming: NewUser) !Response(User) {
+    const result = try db.upsert(id, incoming);
+    return .{ .status = if (result.created) 201 else 200, .value = result.user };
+}
+```
+
+The two behave identically at runtime. The difference is what the API
+description can say ([ADR 0024](../adr/0024-a-failure-mode-belongs-in-the-return-type.md)).
 
 A `std.mem.Allocator` argument is the request arena — the thing to build a header
 value in, since it lives exactly as long as the response needs it to and is
@@ -125,6 +174,22 @@ afterwards, and the type says so:
 Returning a `Str` from a handler is fine: the response goes out before the
 request ends. Storing one in a service is the mistake `Str` exists to catch, and
 in a debug build reading a stale one panics rather than returning whatever the
-next request put there. `keep` is how you mean it.
+next request put there:
+
+```
+thread panic: Str used after its request finished. Request data dies with the
+request; copy it with .keep() while the handler is still running if you need to
+hold on to it. (while handling GET /read)
+```
+
+`keep` is how you mean it — see
+[Holding on to request text](./services.md#holding-on-to-request-text) for the
+pattern a service wants.
+
+What the trap cannot promise is *everything*: Zig has no ownership system, so
+this is a debug-build check and not a guarantee. A `Str` reached through a
+pointer zfast never walked — inside a const slice, inside an untagged union —
+carries no marker and is not watched. Release builds drop the whole mechanism,
+at no cost.
 
 See [ADR 0004](../adr/0004-request-arena-and-the-str-type.md).

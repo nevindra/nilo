@@ -75,7 +75,7 @@ pub fn with(comptime options: Options) mw.Middleware {
                 if (comptime options.max_age > 0) {
                     try c.setStaticHeader("Access-Control-Max-Age", max_age_text);
                 }
-                return c.send(204, "text/plain", "");
+                return c.sendEmpty(204);
             }
 
             return next.run(c);

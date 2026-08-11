@@ -40,6 +40,32 @@ Things that are wrong or missing today, with what fixing them would take.
   because the header is a line of Zig inside the resolver rather than something
   in a type. Whatever fixes this must not become a second thing to keep in step
   with the resolver — that drift is what the generated document exists to avoid.
+- **The API description names one failure, and endpoints have several.** `!?T`
+  puts a 404 in the document because the signature settles it
+  ([ADR 0024](./adr/0024-a-failure-mode-belongs-in-the-return-type.md)). A
+  `fail.conflict` on a duplicate email is a line in a function body and stays
+  invisible. That is the rule rather than a gap — the document promises what the
+  signature settles — but it is the rule that costs the most, and if a way is
+  ever found to state a failure in a type without inventing an annotation, this
+  is where it goes.
+- **A route that drops to `*Ctx` drops out of the document.** Correct — a
+  handler that digs the body out by hand has told nobody anything — and easy to
+  do without noticing, because nothing says so at startup. A count of
+  undocumented routes in the `listen()` log would be enough.
+- **`describeBadBody` walks eight levels and then stops.** Deeper than that, a
+  bad field is a plain 400 again. Same limit as the schema walker and the
+  staleness trap, and for the same reason: a type holding one of its own has to
+  stop somewhere.
+- **Nothing enforces the rule that a mistake stops in zfast's own words.**
+  [ADR 0015](./adr/0015-what-zfast-borrows-and-from-whom.md) says every check
+  fires where a human named the thing, says what is wrong and says the fix — *or
+  it does not ship* — and building a CRUD app found two that did not: one landed
+  in `std.json.Stringify`, one in a struct initialiser. Both are fixed; the rule
+  is still held by nobody. What would hold it is a directory of deliberately
+  wrong handlers, each compiled and each expected to fail with a message
+  starting `zfast:`. Zig has no in-language way to assert a compile error, so
+  that means a build step driving the compiler and reading its stderr — worth
+  doing, and it is a build-system project rather than a function.
 - **A group prefix cannot carry a param.** `app.group("/orgs/:org")` is refused,
   because `use` scopes middleware by comparing the front of the request path
   against the prefix and `/orgs/:org` is the front of no real path. Making it
@@ -107,7 +133,7 @@ pattern too.
 | Risk | How it is handled |
 |---|---|
 | zio is a one-person project; it could stop when Zig 0.17 lands | The Bulkhead, fitted from the first stage rather than patched on later ([ADR 0002](./adr/0002-zio-as-the-engine-behind-the-bulkhead.md)) |
-| The `Str` guarantee cannot be complete | The debug-build staleness trap, on from day one ([ADR 0004](./adr/0004-request-arena-and-the-str-type.md)) |
+| The `Str` guarantee cannot be complete | The debug-build staleness trap, on from day one ([ADR 0004](./adr/0004-request-arena-and-the-str-type.md)). It missed the case anybody would actually test it with — two separate `curl` calls, where the next connection started counting from the same number the stashed `Str` held — until every connection was given a generation span of its own. What it still cannot watch is a `Str` reached through something nothing walks: a const slice, an untagged union |
 | A Service is shared across threads and nothing makes a user notice | `zfast.Mutex`, in the guide and in the example everyone copies. Nothing forces it — Zig has no ownership tracking to force it with ([ADR 0011](./adr/0011-shared-services-need-a-lock-from-the-bulkhead.md)) |
 | A panic in any handler takes the whole process down, and Go people will assume otherwise | Cannot be fixed in Zig. Said plainly in the docs, `ReleaseSafe` and a supervisor recommended, and the in-flight request named in the crash ([ADR 0008](./adr/0008-no-recover-middleware.md)) |
 | ~~`std.json` may not be fast enough, and it sits on the hot path~~ *Bit, and was fixed.* It was worse than this line imagined, and hid behind a profile taken on the wrong payload | `src/json.zig`, a writer generated from the response type, with `std.json` as the fallback and the tests asserting the two produce identical bytes |

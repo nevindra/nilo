@@ -40,6 +40,10 @@ _Avoid_: dupe, clone, copy, to_owned
 The bag of memory belonging to one request. All of it is thrown away at once when the request finishes. A handler that has to build something outliving its own stack frame — a `Location` header, usually — asks for it as a `std.mem.Allocator` argument.
 _Avoid_: request allocator, pool, scratch
 
+**Patch**:
+A body field that can say three things rather than two: not sent, sent as null, or sent with a value. What a PATCH needs and an optional cannot express. The default `.absent` is what "not sent" means.
+_Avoid_: tri-state optional, maybe, undefined, nullable wrapper
+
 **Query struct**:
 A struct of the caller's own, one field per query param, asked for as `Query(T)`. Field names are the param names, and a field's default is what "absent" means. The named counterpart to a positional path param.
 _Avoid_: query bag, params map, extractor
@@ -83,7 +87,7 @@ An ordinary function that takes a Group and registers into it. There is no plugi
 _Avoid_: extension, module, add-on, middleware bundle
 
 **API description**:
-The OpenAPI document zfast writes from the handler signatures. Not maintained alongside the code — read off the same argument list the compile-time engine reads, and built once when the server starts.
+The OpenAPI document zfast writes from the handler signatures. Not maintained alongside the code — read off the same argument list the compile-time engine reads, and built once when the server starts. It promises what the signature settles and nothing else.
 _Avoid_: schema, spec file, swagger, annotations
 
 **Blocking**:

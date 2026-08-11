@@ -62,21 +62,35 @@ warning: handler GET /report failed after answering: WriteFailed
 
 ## What the client is told
 
-The status, and the message as `text/plain` with a newline on the end so it reads
-properly under `curl`:
+The status, and the message — as JSON, always, whatever the endpoint returns on
+its happy path:
 
 ```
 $ curl -i localhost:8787/users/99
 HTTP/1.1 404 Not Found
-Content-Type: text/plain
+Content-Type: application/json
 
-no user 99
+{"error":"no user 99","status":404}
 ```
+
+One shape for every failure, from every source: a `fail` function, an error out
+of a handler, a body zfast refused, a request head that never finished arriving.
+Nothing to configure and nothing to negotiate — a frontend calls `res.json()` in
+the same `catch` where it shows the user what went wrong, and it works
+([ADR 0025](../adr/0025-every-failure-answers-with-the-same-json-body.md)).
 
 A failure with no message of its own gets the status phrase. Nothing about
 zfast's internals goes out — no stack trace, no file name, no Zig error name
 unless a `fail` function put it in the message on purpose. A 500 logs the error
 name and sends `internal server error`.
+
+In tests, read the field rather than matching the wire:
+
+```zig
+const parsed = try std.json.parseFromSlice(std.json.Value, gpa, body, .{});
+defer parsed.deinit();
+try expectEqualStrings("no user 99", parsed.value.object.get("error").?.string);
+```
 
 ## Errors zfast writes for you
 

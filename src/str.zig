@@ -18,21 +18,55 @@ pub const trap_enabled = builtin.mode == .Debug;
 /// Lifetime marker for one request arena. One per connection, bumped
 /// every time a request finishes; every Str from the old request goes
 /// stale at once.
+///
+/// The counter is not simply "requests so far on this connection", and the
+/// difference is what makes the trap worth having. Every Lifetime starts in
+/// a span of its own, handed out once per connection, so no two connections
+/// ever count through the same numbers. Without that, a connection closing
+/// and the next one starting from zero in the same piece of stack meant a
+/// Str stashed by the first compared equal to the second and came back with
+/// nobody the wiser — which is the one mistake this type exists to catch,
+/// and the shape it takes when somebody tests it with two `curl` calls.
 pub const Lifetime = struct {
     gen: Gen = if (trap_enabled) 0 else {},
 
-    const Gen = if (trap_enabled) u32 else void;
+    const Gen = if (trap_enabled) u64 else void;
+
+    /// One span per connection. Wide enough that a connection would have to
+    /// serve four billion requests to reach the next one, and there would
+    /// have to be four billion connections before the spans came round
+    /// again — so in practice, never.
+    var next_span: std.atomic.Value(u32) = .init(1);
+
+    /// A Lifetime for one connection. `.{}` is span zero, which is what a
+    /// test driving one request wants; a server calls this.
+    pub fn init() Lifetime {
+        if (!trap_enabled) return .{};
+        return .{ .gen = @as(u64, next_span.fetchAdd(1, .monotonic)) << 32 };
+    }
 
     pub fn end(self: *Lifetime) void {
         if (trap_enabled) self.gen +%= 1;
     }
+
+    /// The connection is over. Everything from it is stale for good, and
+    /// saying so here means a Str that outlived its connection is caught
+    /// even while the memory this sat in is still readable.
+    pub fn deinit(self: *Lifetime) void {
+        if (trap_enabled) self.gen = dead;
+    }
+
+    /// A generation `init` can never hand out and `end` can never reach
+    /// from one: the low half is all ones, and a span only ever counts up
+    /// from zero.
+    const dead: u64 = std.math.maxInt(u64);
 };
 
 pub const Str = struct {
     _bytes: []const u8,
     _marker: Marker,
 
-    const Marker = if (trap_enabled) ?struct { gen_ptr: *const u32, gen: u32 } else void;
+    const Marker = if (trap_enabled) ?struct { gen_ptr: *const u64, gen: u64 } else void;
 
     /// A Str tied to a request's lifetime. Used internally by zfast.
     pub fn fromRequest(bytes: []const u8, lifetime: *const Lifetime) Str {
@@ -134,10 +168,11 @@ pub const Str = struct {
 /// lives in the request arena, so the Strs inside it have to die when the
 /// request does.
 ///
-/// What gets walked: Str, struct fields, the payload of an optional,
-/// array elements, and the elements of a mutable slice. Const slices and
-/// unions are skipped — Strs there still work, they just don't get the
-/// debug trap watching over them.
+/// What gets walked: Str, struct fields, the payload of an optional, the
+/// active arm of a tagged union — which is how a `Patch(Str)` gets watched
+/// too — array elements, and the elements of a mutable slice. Const slices
+/// and untagged unions are skipped: Strs there still work, they just don't
+/// get the debug trap watching over them.
 pub fn stamp(value: anytype, lifetime: *const Lifetime) void {
     if (!trap_enabled) return;
     stampInner(value, lifetime, 8);
@@ -157,6 +192,10 @@ fn stampInner(value: anytype, lifetime: *const Lifetime, comptime depth: u8) voi
             stampInner(&@field(value, f.name), lifetime, depth - 1);
         },
         .optional => if (value.*) |*payload| stampInner(payload, lifetime, depth - 1),
+        // Only the arm that is actually set: the others hold nothing.
+        .@"union" => |u| if (u.tag_type != null) switch (value.*) {
+            inline else => |_, tag| stampInner(&@field(value, @tagName(tag)), lifetime, depth - 1),
+        },
         .array => for (value) |*item| stampInner(item, lifetime, depth - 1),
         .pointer => |p| switch (p.size) {
             .slice => if (!p.is_const) for (value.*) |*item| stampInner(item, lifetime, depth - 1),
@@ -176,6 +215,9 @@ fn containsStr(comptime T: type, comptime depth: u8) bool {
             if (containsStr(f.type, depth - 1)) break true;
         } else false,
         .optional => |o| containsStr(o.child, depth - 1),
+        .@"union" => |u| u.tag_type != null and for (u.fields) |f| {
+            if (containsStr(f.type, depth - 1)) break true;
+        } else false,
         .array => |a| containsStr(a.child, depth - 1),
         .pointer => |p| p.size == .slice and !p.is_const and containsStr(p.child, depth - 1),
         else => false,
@@ -221,6 +263,39 @@ test "the marker goes stale once the request finishes" {
     const s = Str.fromRequest("hello", &lifetime);
     try testing.expect(s.alive());
     lifetime.end();
+    try testing.expect(!s.alive());
+}
+
+test "two connections never count through the same generations" {
+    if (!trap_enabled) return;
+
+    // What this is really testing is the mistake in the field: a handler
+    // stashes a Str, the connection closes, and the next connection reuses
+    // the same piece of stack. Before spans, the new Lifetime started at the
+    // number the old Str was holding and the stale read came back clean.
+    var first = Lifetime.init();
+    const stashed = Str.fromRequest("secret-from-request-one", &first);
+    try testing.expect(stashed.alive());
+
+    first.deinit();
+    try testing.expect(!stashed.alive());
+
+    // The same memory, a new connection. Nothing it counts through can match
+    // what the first one handed out.
+    first = Lifetime.init();
+    try testing.expect(!stashed.alive());
+    for (0..8) |_| {
+        first.end();
+        try testing.expect(!stashed.alive());
+    }
+}
+
+test "a Lifetime made with .{} is still a working one, for a test holding a single request" {
+    if (!trap_enabled) return;
+    var lifetime = Lifetime{};
+    const s = Str.fromRequest("hello", &lifetime);
+    try testing.expect(s.alive());
+    lifetime.deinit();
     try testing.expect(!s.alive());
 }
 

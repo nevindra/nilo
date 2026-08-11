@@ -30,6 +30,7 @@
 const std = @import("std");
 const http1 = @import("http1.zig");
 const str_mod = @import("str.zig");
+const patch_mod = @import("patch.zig");
 
 const Str = str_mod.Str;
 
@@ -47,11 +48,24 @@ pub const Schema = union(enum) {
     array: *const Schema,
     /// `?T`, which in a JSON body means the value may also be null.
     nullable: *const Schema,
-    object: []const Field,
+    object: Object,
     /// A type with no useful JSON shape, or one nested deeper than this
     /// module follows. Emitted as `{}`, which in JSON Schema means "anything"
     /// — true, and better than a wrong claim.
     unknown,
+};
+
+/// A struct, and the name of the Zig type it came from.
+pub const Object = struct {
+    /// The type's full name — `myapp.models.User`. It is what lets a shape
+    /// be written once under `components/schemas` and referred to from every
+    /// route that uses it, instead of being copied out per route.
+    ///
+    /// Null when there is no name worth putting in somebody's generated
+    /// client: an anonymous struct, a tuple, or one the compiler named after
+    /// where it was written.
+    name: ?[]const u8,
+    fields: []const Field,
 };
 
 pub const Field = struct {
@@ -78,6 +92,11 @@ pub const Answer = struct {
     status: ?u16,
     content_type: []const u8,
     schema: ?*const Schema,
+    /// Whether this endpoint answers 404 when the thing asked for is not
+    /// there — which is exactly the handlers returning `?T` (ADR 0024). The
+    /// only failure mode a signature can state, and so the only one this
+    /// document is entitled to promise.
+    not_found: bool = false,
 };
 
 /// Everything the signature of one route says about it.
@@ -133,6 +152,12 @@ fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
     comptime {
         if (depth >= max_depth) return held(.unknown);
         if (T == Str) return held(.string);
+        // On the wire a `Patch(T)` is the value or null — the third state it
+        // carries is "the field was not here at all", and JSON Schema says
+        // that with `required`, which a default already takes care of.
+        if (patch_mod.isPatch(T)) {
+            return held(.{ .nullable = schemaWithin(T.zfast_patch, depth + 1) });
+        }
 
         return switch (@typeInfo(T)) {
             .bool => held(.boolean),
@@ -160,7 +185,7 @@ fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
                         .required = f.default_value_ptr == null,
                     }};
                 }
-                break :blk held(.{ .object = fields });
+                break :blk held(.{ .object = .{ .name = nameOf(T), .fields = fields } });
             },
 
             .pointer => |p| switch (p.size) {
@@ -194,6 +219,125 @@ fn held(comptime s: Schema) *const Schema {
     return &frozen;
 }
 
+/// The name to file `T`'s shape under, or null for a struct whose name would
+/// be noise in somebody's generated client.
+///
+/// What gets a name is a type a person declared and can say out loud: `User`,
+/// `NewUser`, `Address`. What does not is an anonymous struct — the compiler
+/// names those after where they were written, `main.main__struct_2914` — and
+/// anything whose last name segment is not a plain identifier, which is how
+/// an instantiated generic (`Query(main.Listing)`) reads.
+fn nameOf(comptime T: type) ?[]const u8 {
+    comptime {
+        const full = @typeName(T);
+        if (std.mem.indexOf(u8, full, "__") != null) return null;
+
+        var start = full.len;
+        while (start > 0 and full[start - 1] != '.') start -= 1;
+        const short = full[start..];
+        if (short.len == 0) return null;
+        if (!std.ascii.isAlphabetic(short[0]) and short[0] != '_') return null;
+        for (short[1..]) |ch| {
+            if (!std.ascii.isAlphanumeric(ch) and ch != '_') return null;
+        }
+        return full;
+    }
+}
+
+/// The last segment of a full type name — `myapp.models.User` → `User`.
+fn shortNameOf(full: []const u8) []const u8 {
+    var start = full.len;
+    while (start > 0 and full[start - 1] != '.') start -= 1;
+    return full[start..];
+}
+
+// ---- the shapes that are written once and referred to ----
+
+/// What the failure body goes by in the document. Not `Error`, which is a
+/// name a user type may well already have taken.
+const error_schema_name = "Failure";
+
+/// How many named shapes one document can hold. Past this a shape is written
+/// out in place, exactly as it used to be everywhere — the document is
+/// bigger and still correct.
+const max_components = 64;
+
+/// The named shapes a document refers to rather than repeating. Collected in
+/// one pass over the routes before anything is written, because the
+/// `components` section and the `$ref`s pointing into it have to agree and
+/// only one of them can be written first.
+const Components = struct {
+    names: [max_components][]const u8 = undefined,
+    schemas: [max_components]*const Schema = undefined,
+    count: usize = 0,
+
+    fn gather(self: *Components, ops: []const Operation) void {
+        for (ops) |op| {
+            for (op.params) |p| self.add(p.schema);
+            for (op.query) |f| self.add(f.schema);
+            if (op.body) |b| self.add(b);
+            if (op.answer.schema) |s| self.add(s);
+        }
+    }
+
+    fn add(self: *Components, schema: *const Schema) void {
+        switch (schema.*) {
+            .object => |o| {
+                if (o.name) |full| {
+                    // Already known — and so are its fields, which were
+                    // walked when it was first seen. This is also what stops
+                    // a type holding one of its own from recursing for ever.
+                    if (self.indexOf(full) != null) return;
+                    if (self.count < max_components) {
+                        self.names[self.count] = full;
+                        self.schemas[self.count] = schema;
+                        self.count += 1;
+                    }
+                }
+                for (o.fields) |f| self.add(f.schema);
+            },
+            .array => |item| self.add(item),
+            .nullable => |inner| self.add(inner),
+            else => {},
+        }
+    }
+
+    fn indexOf(self: *const Components, full: []const u8) ?usize {
+        for (self.names[0..self.count], 0..) |name, i| {
+            if (std.mem.eql(u8, name, full)) return i;
+        }
+        return null;
+    }
+
+    /// What this shape is called in the document: its short name, unless
+    /// something else in the same document would answer to it too. Two
+    /// modules can both have a `User`, and a client generator handed one
+    /// `User` meaning two shapes produces code that does not compile — so
+    /// where that happens both keep their full names.
+    fn writeName(self: *const Components, w: *std.Io.Writer, i: usize) !void {
+        const full = self.names[i];
+        const short = shortNameOf(full);
+        return writeComponentName(w, if (self.shortIsFree(i, short)) short else full);
+    }
+
+    fn shortIsFree(self: *const Components, i: usize, short: []const u8) bool {
+        if (std.mem.eql(u8, short, error_schema_name)) return false;
+        for (self.names[0..self.count], 0..) |other, j| {
+            if (j != i and std.mem.eql(u8, shortNameOf(other), short)) return false;
+        }
+        return true;
+    }
+
+    /// Whether anything in this document promises a failure, and so whether
+    /// the shape those failures take has to be described.
+    fn anyFailure(ops: []const Operation) bool {
+        for (ops) |op| {
+            if (op.can_reject or op.answer.not_found) return true;
+        }
+        return false;
+    }
+};
+
 // ---- writing the document ----
 
 /// Write the whole OpenAPI document for `ops`.
@@ -203,6 +347,9 @@ fn held(comptime s: Schema) *const Schema {
 /// is written for clarity rather than for speed — the quadratic grouping
 /// below included, over a route list that is dozens long at most.
 pub fn write(w: *std.Io.Writer, ops: []const Operation, info: Info) !void {
+    var components: Components = .{};
+    components.gather(ops);
+
     try w.writeAll("{\"openapi\":\"3.1.0\",\"info\":{\"title\":");
     try writeString(w, info.title);
     try w.writeAll(",\"version\":");
@@ -232,14 +379,37 @@ pub fn write(w: *std.Io.Writer, ops: []const Operation, info: Info) !void {
             if (sibling.method == .other) continue;
             if (wrote_method) try w.writeByte(',');
             wrote_method = true;
-            try writeOperation(w, sibling);
+            try writeOperation(w, &components, sibling);
         }
 
         try w.writeByte('}');
     }
 
-    try w.writeAll("}}");
+    try w.writeAll("},\"components\":{\"schemas\":{");
+    var wrote_schema = false;
+    if (Components.anyFailure(ops)) {
+        try w.writeAll("\"" ++ error_schema_name ++ "\":" ++ error_schema);
+        wrote_schema = true;
+    }
+    for (components.schemas[0..components.count], 0..) |schema, i| {
+        if (wrote_schema) try w.writeByte(',');
+        wrote_schema = true;
+        try w.writeByte('"');
+        try components.writeName(w, i);
+        try w.writeAll("\":");
+        try writeObject(w, &components, schema.object);
+    }
+    try w.writeAll("}}}");
 }
+
+/// The shape of every failure zfast assembles (ADR 0025). Written out here
+/// rather than derived from a Zig type, because the type it would be derived
+/// from is a fixed buffer and a status code, not a struct anybody returns.
+const error_schema =
+    "{\"type\":\"object\",\"properties\":{" ++
+    "\"error\":{\"type\":\"string\",\"description\":\"what went wrong, in words\"}," ++
+    "\"status\":{\"type\":\"integer\"}}," ++
+    "\"required\":[\"error\",\"status\"]}";
 
 fn alreadyWritten(earlier: []const Operation, pattern: []const u8) bool {
     for (earlier) |op| {
@@ -248,7 +418,7 @@ fn alreadyWritten(earlier: []const Operation, pattern: []const u8) bool {
     return false;
 }
 
-fn writeOperation(w: *std.Io.Writer, op: Operation) !void {
+fn writeOperation(w: *std.Io.Writer, components: *const Components, op: Operation) !void {
     try w.writeByte('"');
     for (@tagName(op.method)) |ch| try w.writeByte(std.ascii.toLower(ch));
     try w.writeAll("\":{\"operationId\":");
@@ -263,7 +433,7 @@ fn writeOperation(w: *std.Io.Writer, op: Operation) !void {
             // A path param on a route that matched is always there, and
             // OpenAPI requires saying so explicitly.
             try w.writeAll(",\"in\":\"path\",\"required\":true,\"schema\":");
-            try writeSchema(w, p.schema);
+            try writeSchema(w, components, p.schema);
             try w.writeByte('}');
         }
         for (op.query, 0..) |f, i| {
@@ -273,7 +443,7 @@ fn writeOperation(w: *std.Io.Writer, op: Operation) !void {
             try w.print(",\"in\":\"query\",\"required\":{s},\"schema\":", .{
                 if (f.required) "true" else "false",
             });
-            try writeSchema(w, f.schema);
+            try writeSchema(w, components, f.schema);
             try w.writeByte('}');
         }
         try w.writeByte(']');
@@ -282,21 +452,32 @@ fn writeOperation(w: *std.Io.Writer, op: Operation) !void {
     if (op.body) |body| {
         try w.writeAll(",\"requestBody\":{\"required\":true,\"content\":" ++
             "{\"application/json\":{\"schema\":");
-        try writeSchema(w, body);
+        try writeSchema(w, components, body);
         try w.writeAll("}}}");
     }
 
     try w.writeAll(",\"responses\":{");
-    try writeAnswer(w, op.answer);
+    try writeAnswer(w, components, op.answer);
     if (op.can_reject) {
-        try w.writeAll(",\"400\":{\"description\":\"the request did not fit what this " ++
-            "endpoint takes; the body says which part\",\"content\":{\"text/plain\":" ++
-            "{\"schema\":{\"type\":\"string\"}}}}");
+        try writeFailure(w, "400", "the request did not fit what this endpoint takes; " ++
+            "the body says which part");
+    }
+    if (op.answer.not_found) {
+        try writeFailure(w, "404", "there is no such thing");
     }
     try w.writeAll("}}");
 }
 
-fn writeAnswer(w: *std.Io.Writer, answer: Answer) !void {
+/// A failure this endpoint's signature promises, carrying the shape every
+/// failure zfast assembles has (ADR 0025).
+fn writeFailure(w: *std.Io.Writer, status: []const u8, description: []const u8) !void {
+    try w.print(",\"{s}\":{{\"description\":", .{status});
+    try writeString(w, description);
+    try w.writeAll(",\"content\":{\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/" ++
+        error_schema_name ++ "\"}}}}");
+}
+
+fn writeAnswer(w: *std.Io.Writer, components: *const Components, answer: Answer) !void {
     try w.writeByte('"');
     if (answer.status) |status| try w.print("{d}", .{status}) else try w.writeAll("default");
     try w.writeAll("\":{\"description\":");
@@ -312,7 +493,7 @@ fn writeAnswer(w: *std.Io.Writer, answer: Answer) !void {
     try w.writeAll(",\"content\":{");
     try writeString(w, answer.content_type);
     try w.writeAll(":{\"schema\":");
-    try writeSchema(w, answer.schema.?);
+    try writeSchema(w, components, answer.schema.?);
     try w.writeAll("}}}");
 }
 
@@ -374,7 +555,16 @@ fn pathParamName(name: []const u8) []const u8 {
     return if (std.mem.eql(u8, name, "*")) "path" else name;
 }
 
-fn writeSchema(w: *std.Io.Writer, schema: *const Schema) !void {
+/// One schema, as it appears inside a route: a shape with a name of its own
+/// is a `$ref` into `components`, and everything else is written out.
+/// The error set is written out rather than inferred: this and `writeObject`
+/// call each other, and two inferred sets that depend on one another are a
+/// loop the compiler cannot settle.
+fn writeSchema(
+    w: *std.Io.Writer,
+    components: *const Components,
+    schema: *const Schema,
+) std.Io.Writer.Error!void {
     switch (schema.*) {
         .string => try w.writeAll("{\"type\":\"string\"}"),
         .integer => try w.writeAll("{\"type\":\"integer\"}"),
@@ -393,7 +583,7 @@ fn writeSchema(w: *std.Io.Writer, schema: *const Schema) !void {
 
         .array => |item| {
             try w.writeAll("{\"type\":\"array\",\"items\":");
-            try writeSchema(w, item);
+            try writeSchema(w, components, item);
             try w.writeByte('}');
         },
 
@@ -401,30 +591,59 @@ fn writeSchema(w: *std.Io.Writer, schema: *const Schema) !void {
         // two possibilities rather than with 3.0's `nullable` keyword.
         .nullable => |inner| {
             try w.writeAll("{\"anyOf\":[");
-            try writeSchema(w, inner);
+            try writeSchema(w, components, inner);
             try w.writeAll(",{\"type\":\"null\"}]}");
         },
 
-        .object => |fields| {
-            try w.writeAll("{\"type\":\"object\",\"properties\":{");
-            for (fields, 0..) |f, i| {
-                if (i > 0) try w.writeByte(',');
-                try writeString(w, f.name);
-                try w.writeByte(':');
-                try writeSchema(w, f.schema);
+        .object => |o| {
+            if (o.name) |full| {
+                if (components.indexOf(full)) |i| {
+                    try w.writeAll("{\"$ref\":\"#/components/schemas/");
+                    try components.writeName(w, i);
+                    try w.writeAll("\"}");
+                    return;
+                }
             }
-            try w.writeByte('}');
-
-            var required = false;
-            for (fields) |f| {
-                if (!f.required) continue;
-                try w.writeAll(if (required) "," else ",\"required\":[");
-                required = true;
-                try writeString(w, f.name);
-            }
-            if (required) try w.writeByte(']');
-            try w.writeByte('}');
+            try writeObject(w, components, o);
         },
+    }
+}
+
+/// A struct written out in full. This is what goes into `components`, and
+/// what an unnamed shape gets wherever it appears. Its fields go through
+/// `writeSchema`, so a named shape inside it is still a reference.
+fn writeObject(
+    w: *std.Io.Writer,
+    components: *const Components,
+    object: Object,
+) std.Io.Writer.Error!void {
+    try w.writeAll("{\"type\":\"object\",\"properties\":{");
+    for (object.fields, 0..) |f, i| {
+        if (i > 0) try w.writeByte(',');
+        try writeString(w, f.name);
+        try w.writeByte(':');
+        try writeSchema(w, components, f.schema);
+    }
+    try w.writeByte('}');
+
+    var required = false;
+    for (object.fields) |f| {
+        if (!f.required) continue;
+        try w.writeAll(if (required) "," else ",\"required\":[");
+        required = true;
+        try writeString(w, f.name);
+    }
+    if (required) try w.writeByte(']');
+    try w.writeByte('}');
+}
+
+/// A name inside a `$ref`, which OpenAPI restricts to letters, digits and
+/// `.`, `_`, `-`. Anything else a Zig type name carries becomes an
+/// underscore rather than a document nothing can read.
+fn writeComponentName(w: *std.Io.Writer, name: []const u8) !void {
+    for (name) |ch| {
+        const ok = std.ascii.isAlphanumeric(ch) or ch == '.' or ch == '_' or ch == '-';
+        try w.writeByte(if (ok) ch else '_');
     }
 }
 
@@ -484,10 +703,13 @@ const testing = std.testing;
 fn schemaJson(comptime T: type) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     errdefer out.deinit();
+    // Nothing collected, so nothing is a reference and every shape is
+    // written out — which is what these tests are about.
+    const none: Components = .{};
     // `comptime` here rather than inside `schemaOf`: the whole point of a
     // Schema is that it exists before the program runs, and a call from a
     // runtime context would be asking for one that does not.
-    try writeSchema(&out.writer, comptime schemaOf(T));
+    try writeSchema(&out.writer, &none, comptime schemaOf(T));
     return out.toOwnedSlice();
 }
 

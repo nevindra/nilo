@@ -38,6 +38,17 @@ The insistence on measuring is not pedantry. That +14 KB was first reported as +
 
 14 KB on a 1 MB static binary is a trade worth making once. It is not one worth making five times, so the number goes in the table each time and somebody gets to notice the day it stops being reasonable.
 
+### The running total
+
+Measured stripped, `ReleaseFast`, on the examples in this repository.
+
+| Change | hello | rest |
+|---|---|---|
+| The API description ([ADR 0017](./0017-the-api-description-comes-from-the-signatures.md)) | +14 KB | +34 KB |
+| JSON failure bodies, `Status`, `?T` → 404, nested body messages, `components`, `Patch` ([ADRs 0024](./0024-a-failure-mode-belongs-in-the-return-type.md)–[0026](./0026-a-patch-needs-three-answers-and-an-optional-has-two.md)) | +6 KB | +14 KB | 
+
+The second row is one measurement of six changes because they landed together, which is a worse record than the first row and is noted as such. The split it does show is the useful part: `hello` has one route returning text and pays +6 KB, which is the failure-body writer and nothing else — that part is unconditional. The remaining +8 KB on `rest` is the body describer and the schema walker, and those are generated per body type, so they are paid by applications that have bodies.
+
 ## Consequences
 
 - ADR 0001 is not superseded. Its rule is now the first row of a table, and its reasoning about the audience is unchanged.

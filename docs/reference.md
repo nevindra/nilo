@@ -74,11 +74,25 @@ See [Deploying](./guide/deploying.md#deadlines).
 | a type with `zfast_resolve` | a resolved value |
 | any other struct | the body, parsed from JSON |
 
-Return: `void` → empty 200, `Str`/`[]const u8` → `text/plain`, anything else →
-JSON, `Response(T)` → your status and headers.
+A body field may be `Patch(T)`, which tells "not sent" from "sent as null":
+`.absent`, `.cleared`, `.value`. Give it `= .absent` as its default;
+`.orNull()` collapses the two empty cases.
+
+## Handler returns
+
+| Returned | Response |
+|---|---|
+| `void` | 200, empty, no `Content-Type` |
+| `Str`, `[]const u8` | 200, `text/plain` |
+| anything else | 200, that value as JSON |
+| `?T` | 200 with the value, **404** when null |
+| `Status(code, T)` | that status — and the API description names it |
+| `Response(T)` | a status chosen at runtime; the description says `default` |
 
 ```zig
-Response(User){ .status = 201, .headers = .of(&.{…}), .value = user }
+Status(201, User){ .headers = .of(&.{…}), .value = user }
+Status(204, void){}                                        // an empty response
+Response(User){ .status = if (made) 201 else 200, .value = user }
 ```
 
 `Headers` holds up to 8 by value; a ninth is a compile error.
@@ -111,6 +125,7 @@ Response(User){ .status = 201, .headers = .of(&.{…}), .value = user }
 | `c.send(status, content_type, bytes)` | |
 | `c.sendText(status, text)` | `text/plain` |
 | `c.sendJson(status, value)` | `application/json` |
+| `c.sendEmpty(status)` | no body and no `Content-Type` — a 204, usually |
 | `c.stream(status, content_type)` | `!Stream` |
 | `c.streamWith(status, content_type, .{ .buffer = … })` | the same, buffer of your own. Default 4 KB |
 | `c.events()` | `!Events` |
@@ -194,7 +209,9 @@ refused by `setHeader`. Set headers before sending.
 | `fail.internal(…)` | 500 — logged, not sent |
 | `fail.status(code, fmt, args)` | any |
 
-All return `error.Failed`. The message goes into a 240-byte slot, no allocation.
+All return `error.Failed`. The message goes into a 240-byte slot, no allocation,
+and goes out as `{"error": "…", "status": 404}` — the same shape for every
+failure, whatever the endpoint returns when it works.
 
 ## Concurrency
 

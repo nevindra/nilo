@@ -54,6 +54,75 @@ which maps to a 503 already. It still works with no server running, so a handler
 that takes the lock is still testable as a plain function. See
 [ADR 0011](../adr/0011-shared-services-need-a-lock-from-the-bulkhead.md).
 
+## Holding on to request text
+
+The first wall anybody arriving from Go or Node hits, and it is worth spelling
+out because the compiler will not.
+
+Text from a request is a [`Str`](./handlers.md#str-and-text-that-belongs-to-the-request),
+and it points into memory that is thrown away when the request ends. A service
+outlives the request. So this compiles, passes every test you write for it, and
+serves the *next* request's bytes to the one that asked:
+
+```zig
+fn addTodo(store: *Store, incoming: NewTodo) !Todo {
+    const todo = Todo{ .id = store.next_id, .title = incoming.title };  // ✗
+    try store.todos.append(store.gpa, todo);
+    …
+}
+```
+
+In a debug build zfast panics on the read instead, and names the request that
+did it. That is the trap doing its job — but the fix is the point:
+
+```zig
+const Store = struct {
+    gpa: std.mem.Allocator,
+    lock: zfast.Mutex = .init,
+    todos: std.ArrayList(Todo) = .empty,
+
+    /// Everything a Todo owns, freed in one place. Worth having even for one
+    /// string: the day a `due` is added, this is the only function to change.
+    fn free(self: *Store, todo: Todo) void {
+        self.gpa.free(todo.title);
+    }
+
+    fn deinit(self: *Store) void {
+        for (self.todos.items) |t| self.free(t);
+        self.todos.deinit(self.gpa);
+    }
+
+    fn add(self: *Store, title: []const u8) !Todo {
+        try self.lock.lock();
+        defer self.lock.unlock();
+        // The copy, and the whole of the rule: the store owns its strings.
+        const todo = Todo{ .id = self.next_id, .title = try self.gpa.dupe(u8, title) };
+        try self.todos.append(self.gpa, todo);
+        self.next_id += 1;
+        return todo;
+    }
+};
+
+fn addTodo(store: *Store, incoming: NewTodo) !Todo {
+    return store.add(incoming.title.view());   // ✓ view() to read, add() copies
+}
+```
+
+Two habits make the rest of it fall out:
+
+- **The service takes `[]const u8`, not `Str`.** `Str` is a request type; a
+  service that never names it cannot accidentally store one. The handler calls
+  `.view()` at the boundary, which is the one line where the lifetime matters.
+  `.keep(gpa)` is the same copy for the times a handler does it itself.
+- **One `free` per stored type, called from `deinit` and from every replace and
+  remove.** Replacing a row means allocating the new string *before* freeing the
+  old one, so a failed allocation leaves the row as it was rather than holding a
+  pointer to freed memory.
+
+None of this is zfast's — it is what owning memory costs in Zig, and it is a real
+part of what a CRUD app in this language weighs. The framework's part is that
+getting it wrong stops on your laptop instead of in production.
+
 ## Handlers must not block
 
 `zfast.Mutex` is one case of a rule that runs through everything: **many requests

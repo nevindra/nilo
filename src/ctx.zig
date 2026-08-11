@@ -19,6 +19,7 @@ const service_mod = @import("service.zig");
 const static_mod = @import("static.zig");
 const stream_mod = @import("stream.zig");
 const str_mod = @import("str.zig");
+const patch_mod = @import("patch.zig");
 const websocket = @import("websocket.zig");
 const percent = @import("percent.zig");
 const fail = @import("fail.zig");
@@ -435,6 +436,16 @@ pub const Ctx = struct {
         try self.send(status, "text/plain", text);
     }
 
+    /// A response with no body at all — a 204 after a DELETE, mostly. What a
+    /// handler returning `void` becomes.
+    ///
+    /// No `Content-Type`, because there is no content to give a type to. On
+    /// a 204 there is no `Content-Length` either; that is not this function's
+    /// doing but the status's, and `http1.bodyless` is where it is decided.
+    pub fn sendEmpty(self: *Ctx, status: u16) !void {
+        try self.send(status, "", "");
+    }
+
     /// Serialise `value` to JSON (through the request arena) and send it.
     ///
     /// The buffer starts at `json_hint` rather than at nothing, so a
@@ -615,12 +626,14 @@ pub const Ctx = struct {
 // Paying for a second parse to explain a request that was already going to
 // be refused is a trade worth making; a body that parses never comes here.
 
+/// How far down a body this walks. The same limit `openapi.schemaOf` and
+/// `str.stamp` use, and for the same reason: a type holding one of its own
+/// would otherwise be followed for ever. Nothing below it is described, so a
+/// mistake down there is still a plain 400.
+const max_body_depth = 8;
+
 /// Turn a failed body parse into a 400 that names what is wrong with it,
 /// falling back to `err` when nothing here can do better.
-///
-/// Only the top level is described. A field inside a nested object that
-/// does not fit still becomes a plain 400 — naming it would mean walking
-/// two shapes at once, for the least common of these mistakes.
 fn describeBadBody(
     comptime T: type,
     arena: std.mem.Allocator,
@@ -657,8 +670,21 @@ fn describeBadBody(
         "the request body has to be a JSON object with: {s} — this is {s}",
         .{ comptime fieldList(T), kindOf(dynamic) },
     );
-    const object = dynamic.object;
 
+    return describeObject(T, arena, dynamic.object, "", max_body_depth) orelse err;
+}
+
+/// What is wrong inside one object, or null if nothing here explains the
+/// refusal. `where` is what to call this object in a message — empty at the
+/// top level, `address` one down, `lines[2]` inside a list — so a nested
+/// field is named the way somebody would point at it in the JSON they sent.
+fn describeObject(
+    comptime T: type,
+    arena: std.mem.Allocator,
+    object: std.json.ObjectMap,
+    where: []const u8,
+    comptime depth: u8,
+) ?anyerror {
     // Something the body carries that the endpoint has no room for. Almost
     // always a typo, which is why the known names go out with it.
     //
@@ -671,7 +697,7 @@ fn describeBadBody(
         const name = entry.key_ptr.*;
         if (!hasField(T, name)) return fail.badRequest(
             "the request body has a field \"{s}\" this endpoint does not know. It takes: {s}",
-            .{ name, comptime fieldList(T) },
+            .{ nameWithin(arena, where, name), comptime fieldList(T) },
         );
     }
 
@@ -681,22 +707,72 @@ fn describeBadBody(
     inline for (@typeInfo(T).@"struct".fields) |f| {
         if (f.default_value_ptr == null and !object.contains(f.name)) return fail.badRequest(
             "the request body is missing \"{s}\" ({s})",
-            .{ f.name, comptime expectedOf(f.type) },
+            .{ nameWithin(arena, where, f.name), comptime expectedOf(f.type) },
         );
     }
 
     // Everything is present and nothing is spare, so a value is the wrong
-    // shape for the field it landed in.
+    // shape for the field it landed in — here, or somewhere further down.
     inline for (@typeInfo(T).@"struct".fields) |f| {
         if (object.get(f.name)) |given| {
-            if (!fits(f.type, given)) return fail.badRequest(
-                "\"{s}\" has to be {s}, not {s}",
-                .{ f.name, comptime expectedOf(f.type), kindOf(given) },
-            );
+            if (describeField(f.type, arena, given, nameWithin(arena, where, f.name), depth)) |found| {
+                return found;
+            }
         }
     }
 
-    return err;
+    return null;
+}
+
+/// What is wrong with one value, given the type it landed in. Answers about
+/// this value first, then about whatever is inside it.
+fn describeField(
+    comptime T: type,
+    arena: std.mem.Allocator,
+    given: std.json.Value,
+    name: []const u8,
+    comptime depth: u8,
+) ?anyerror {
+    // Asked of `T` and not of what is inside it, so an optional still says
+    // "text or null" rather than dropping the half that makes it optional.
+    if (!fits(T, given)) return fail.badRequest(
+        "\"{s}\" has to be {s}, not {s}",
+        .{ name, comptime expectedOf(T), kindOf(given) },
+    );
+
+    if (depth == 0) return null;
+    // An optional sent as null fits and holds nothing to look inside.
+    if (given == .null) return null;
+
+    const Inner = if (comptime patch_mod.isPatch(T)) T.zfast_patch else switch (@typeInfo(T)) {
+        .optional => |o| o.child,
+        else => T,
+    };
+
+    if (Inner != Str) switch (@typeInfo(Inner)) {
+        .@"struct" => return describeObject(Inner, arena, given.object, name, depth - 1),
+        .pointer => |p| {
+            // `[]const u8` is text, which has nothing inside it to describe.
+            if (p.size != .slice or p.child == u8) return null;
+            for (given.array.items, 0..) |item, i| {
+                const at = std.fmt.allocPrint(arena, "{s}[{d}]", .{ name, i }) catch name;
+                if (describeField(p.child, arena, item, at, depth - 1)) |found| return found;
+            }
+        },
+        else => {},
+    };
+
+    return null;
+}
+
+/// `address.street` — what to call a field that is inside something else. At
+/// the top level there is nothing to be inside, so the name stands alone and
+/// the message reads exactly as it did before any of this nested.
+fn nameWithin(arena: std.mem.Allocator, where: []const u8, name: []const u8) []const u8 {
+    if (where.len == 0) return name;
+    // Out of memory while explaining a bad request: the unqualified name is
+    // most of the message, and is better than no message.
+    return std.fmt.allocPrint(arena, "{s}.{s}", .{ where, name }) catch name;
 }
 
 /// What a JSON value is, in the words an error message wants.
@@ -715,6 +791,9 @@ fn kindOf(value: std.json.Value) []const u8 {
 fn expectedOf(comptime T: type) []const u8 {
     comptime {
         if (T == Str) return "text";
+        // A `Patch(T)` takes the value or null; leaving it out is the third
+        // thing it can be, and that is not a value to describe.
+        if (patch_mod.isPatch(T)) return expectedOf(T.zfast_patch) ++ " or null";
         return switch (@typeInfo(T)) {
             .optional => |o| expectedOf(o.child) ++ " or null",
             .bool => "true or false",
@@ -756,6 +835,7 @@ fn hasField(comptime T: type, name: []const u8) bool {
 /// to find the field that explains the refusal, not to re-decide it.
 fn fits(comptime T: type, value: std.json.Value) bool {
     if (T == Str) return value == .string;
+    if (comptime patch_mod.isPatch(T)) return value == .null or fits(T.zfast_patch, value);
     return switch (@typeInfo(T)) {
         .optional => |o| value == .null or fits(o.child, value),
         .bool => value == .bool,

@@ -34,10 +34,13 @@ framework's to write, and setting them is refused — a response carrying two of
 any of those is malformed. Pass the content type to `send` instead.
 
 For a handler that returns a value, the same headers are set through
-`Response(T).headers`, which is copied rather than borrowed:
+`.headers`, which is copied rather than borrowed:
 
 ```zig
-return .{ .status = 201, .headers = .of(&.{
+// The status is part of the signature — `!Status(201, User)` — so the API
+// description names it. `Response(T)` is the same thing with the status as
+// a runtime field, for when it depends on what the handler found.
+return .{ .headers = .of(&.{
     .{ .name = "Location", .value = url },
 }), .value = created };
 ```
@@ -75,9 +78,12 @@ reason to hang up.
 
 | Returned | Sent as |
 |---|---|
-| `void` | no body |
+| `void` | no body, and no `Content-Type` either |
 | `Str`, `[]const u8` | `text/plain` |
 | anything else | `application/json` |
+
+A failure — from a `fail.*` function, from an error, from zfast refusing a
+request — is always `application/json`. See [Errors](./errors.md).
 
 For anything else, `c.send(status, content_type, bytes)`, or `c.stream(status,
 content_type)` when the length isn't known yet.

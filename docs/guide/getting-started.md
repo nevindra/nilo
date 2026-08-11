@@ -4,7 +4,12 @@ zfast needs **Zig 0.16**. Nothing else — no C library, no system package.
 
 ## Add it to your project
 
+Starting from an empty directory, `zig init` first — `zig fetch --save` writes
+into `build.zig.zon` and fails with `no build.zig file found` if there isn't one
+yet:
+
 ```
+zig init
 zig fetch --save git+https://github.com/nevindra/zfast
 ```
 
