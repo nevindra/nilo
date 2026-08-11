@@ -2,7 +2,7 @@
 
 An HTTP framework for Zig, aimed at people coming from Go or Node.
 
-> **Status: v1 feature-complete, v2 in progress, unreleased.** Routing with path params, query params and catch-alls; typed handlers, JSON, middleware, logger, CORS, static files, chunked bodies. v2 has added resolved values, route groups and plugins, an OpenAPI document generated from the handler signatures, and answers written in pieces — streamed responses and server-sent events. Not yet benchmarked on a quiet machine, so there are no performance claims here.
+> **Status: v1 feature-complete, v2 in progress, unreleased.** Routing with path params, query params and catch-alls; typed handlers, JSON, middleware, logger, CORS, static files, chunked bodies. v2 has added resolved values, route groups and plugins, an OpenAPI document generated from the handler signatures, answers written in pieces — streamed responses and server-sent events — bodies read in pieces, and range requests. Not yet benchmarked on a quiet machine, so there are no performance claims here.
 > `zfast` is a working name and may change.
 
 ```zig
@@ -459,7 +459,27 @@ The directory is read into memory when the server starts, so nothing touches the
 
 `spa_fallback` is what makes a browser reload on `/users/42` reach your client-side router instead of a 404.
 
-The limit: a file that doesn't fit in memory can't be served. Range requests and `sendfile` are v2.
+### Asking for part of a file
+
+A video being scrubbed and a download being resumed both ask for a range, and both get one:
+
+```
+$ curl -i -r 0-20 localhost:8787/video.mp4
+HTTP/1.1 206 Partial Content
+Content-Length: 21
+Accept-Ranges: bytes
+Content-Range: bytes 0-20/739
+```
+
+`bytes=3-7`, `bytes=20-` and `bytes=-30` all work, and `Accept-Ranges: bytes` goes out on every file response so a client knows it may ask.
+
+The rule for everything else is that **a `Range` that can't be understood is ignored and the whole file goes out** ([ADR 0021](./docs/adr/0021-a-range-is-a-slice-and-two-headers.md)). That is a correct answer to every request, so `bytes=abc-def` or `bytes=99-10` gets a 200 rather than an error. The one case worth refusing is a range starting past the end of the file: that's a client with the wrong idea about the size, and a `416` with `Content-Range: bytes */739` is the only way to say so.
+
+`If-Range` is honoured against the ETag, which is the one that matters for correctness: resuming a download of a file that has since changed would staple two halves of two different files together, so a stale ETag gets the whole file instead.
+
+A request for several ranges at once is legal and wants a `multipart/byteranges` body zfast doesn't assemble — so it gets the whole file too. Nothing sends them.
+
+The limit: a file that doesn't fit in memory can't be served. `sendfile` is still not here, and it contradicts holding files in memory rather than extending it.
 
 ## Services are shared across threads
 
@@ -607,7 +627,7 @@ No requests-per-second figures, on purpose: that number needs a machine nobody e
 
 ## What isn't here yet
 
-WebSocket, TLS, sessions, templates, and range requests.
+WebSocket, TLS, sessions, templates, and `sendfile`.
 
 There are also no deadlines of any kind — no read, header or write timeout — so a client that opens a connection and then goes quiet parks a fiber until TCP gives up on it. That is the largest hole on this list and it wants one decision about deadlines rather than a knob per feature.
 

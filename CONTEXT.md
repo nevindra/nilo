@@ -98,6 +98,10 @@ _Avoid_: abort, throw, bail
 One directory read into memory when the App is built, and answered from without touching the disk again. Not a middleware: it holds state, so it is a terminal handler the middleware chain wraps like any other.
 _Avoid_: file server, asset middleware, public dir
 
+**Range**:
+A request for part of a file rather than all of it — a video being scrubbed, a download being resumed. One that cannot be understood is ignored and the whole file goes out, because that is a correct answer to every request.
+_Avoid_: partial content, byte range, seek, chunk
+
 **Test client**:
 A stand-in for the other end of a connection, for testing a handler that writes its answer rather than returning one. Runs one request through the App with no server and no socket.
 _Avoid_: mock, fixture, test server, harness

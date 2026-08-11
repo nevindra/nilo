@@ -259,6 +259,7 @@ test {
     _ = @import("openapi.zig");
     _ = @import("stream.zig");
     _ = @import("body.zig");
+    _ = @import("range.zig");
     _ = @import("testing.zig");
     _ = @import("middleware.zig");
     _ = @import("typed.zig");

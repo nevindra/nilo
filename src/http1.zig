@@ -303,6 +303,7 @@ pub fn statusPhrase(status: u16) []const u8 {
         200 => "OK",
         201 => "Created",
         204 => "No Content",
+        206 => "Partial Content",
         301 => "Moved Permanently",
         302 => "Found",
         304 => "Not Modified",
@@ -313,6 +314,7 @@ pub fn statusPhrase(status: u16) []const u8 {
         405 => "Method Not Allowed",
         409 => "Conflict",
         413 => "Content Too Large",
+        416 => "Range Not Satisfiable",
         422 => "Unprocessable Content",
         429 => "Too Many Requests",
         431 => "Request Header Fields Too Large",
@@ -446,7 +448,7 @@ fn statusLine(comptime status: u16) []const u8 {
 
 fn writeStatusLine(out: *std.Io.Writer, status: u16, phrase: []const u8) !void {
     switch (status) {
-        inline 200, 201, 204, 301, 302, 304, 400, 401, 403, 404, 405, 409, 413, 422, 429, 431, 500, 501, 503 => |s| {
+        inline 200, 201, 204, 206, 301, 302, 304, 400, 401, 403, 404, 405, 409, 413, 416, 422, 429, 431, 500, 501, 503 => |s| {
             return out.writeAll(comptime statusLine(s));
         },
         else => return out.print("HTTP/1.1 {d} {s}\r\n", .{ status, phrase }),

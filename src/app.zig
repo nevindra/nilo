@@ -10,6 +10,7 @@ const std = @import("std");
 const bulkhead = @import("bulkhead.zig");
 const body_mod = @import("body.zig");
 const http1 = @import("http1.zig");
+const range_mod = @import("range.zig");
 const router_mod = @import("router.zig");
 const ctx_mod = @import("ctx.zig");
 const str_mod = @import("str.zig");
@@ -950,6 +951,9 @@ fn serveStaticFile(c: *Ctx) anyerror!void {
     // there is nothing to copy.
     try c.setStaticHeader("ETag", file.etag);
     if (file.cache_control.len > 0) try c.setStaticHeader("Cache-Control", file.cache_control);
+    // Said on every file response, including the 304 and the 416: it is how
+    // a client learns it may ask for part of one at all.
+    try c.setStaticHeader("Accept-Ranges", "bytes");
 
     // The ETag was computed when the file was read, so a repeat visitor
     // costs a comparison and a head — no body, no work.
@@ -959,7 +963,40 @@ fn serveStaticFile(c: *Ctx) anyerror!void {
         }
     }
 
+    const total = file.bytes.len;
+    // `If-Range` means "only give me the part if the file is still the one I
+    // started with". A client resuming a download sends the ETag it had;
+    // anything else and the safe answer is all of it.
+    const still_the_same = if (c.header("If-Range")) |sent|
+        static_mod.etagMatches(sent.view(), file.etag)
+    else
+        true;
+
+    var buf: [range_mod.max_content_range]u8 = undefined;
+    switch (range_mod.parse(headerValue(c, "Range"), total, still_the_same)) {
+        .whole => {},
+        .part => |part| {
+            try c.setHeader("Content-Range", range_mod.contentRange(&buf, part, total));
+            return c.send(206, file.content_type, part.slice(file.bytes));
+        },
+        .unsatisfiable => {
+            // The one answer whose whole content is "you have the wrong idea
+            // about how big this is", which the header carries and the body
+            // does not need to repeat.
+            try c.setHeader("Content-Range", range_mod.unsatisfiableRange(&buf, total));
+            return c.send(416, file.content_type, "");
+        },
+    }
+
     try c.send(200, file.content_type, file.bytes);
+}
+
+/// A request header as plain bytes. The `Str` a handler gets is the right
+/// shape for a handler and the wrong one for a parser that takes `?[]const
+/// u8`, and this is the only place that difference comes up.
+fn headerValue(c: *const Ctx, name: []const u8) ?[]const u8 {
+    const found = c.header(name) orelse return null;
+    return found.view();
 }
 
 /// A handler opened a stream and returned without calling `finish()`.
@@ -3427,4 +3464,133 @@ test "a body read in pieces allocates nothing" {
     // went past in twenty-five reads and not one of them allocated —
     // `c.body()` would have made it three and held the lot.
     try testing.expectEqual(@as(usize, 2), counting.allocs);
+}
+
+// ---- asking for part of a file (ADR 0021) ----
+
+test "a range asks for part of a file and gets a 206" {
+    var files = try TmpFiles.init(testing.allocator, &.{
+        .{ "alphabet.txt", "abcdefghijklmnopqrstuvwxyz" },
+    });
+    defer files.deinit(testing.allocator);
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.static("/", files.path);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    // A whole-file request advertises that ranges are possible at all.
+    const whole = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, whole.response, "Accept-Ranges: bytes\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, whole.response, "abcdefghijklmnopqrstuvwxyz"));
+
+    const part = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\nRange: bytes=3-7\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, part.response, "HTTP/1.1 206 Partial Content\r\n"));
+    try testing.expect(std.mem.indexOf(u8, part.response, "Content-Range: bytes 3-7/26\r\n") != null);
+    // Content-Length is the part's length, not the file's.
+    try testing.expect(std.mem.indexOf(u8, part.response, "Content-Length: 5\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, part.response, "defgh"));
+    try testing.expect(part.keep_alive);
+
+    // Resuming a download: everything from here on.
+    const rest = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\nRange: bytes=20-\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, rest.response, "Content-Range: bytes 20-25/26\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, rest.response, "uvwxyz"));
+
+    // The tail, counted from the end.
+    const tail = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\nRange: bytes=-3\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, tail.response, "Content-Range: bytes 23-25/26\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, tail.response, "xyz"));
+}
+
+test "a range past the end of a file says how big it really is" {
+    var files = try TmpFiles.init(testing.allocator, &.{
+        .{ "alphabet.txt", "abcdefghijklmnopqrstuvwxyz" },
+    });
+    defer files.deinit(testing.allocator);
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.static("/", files.path);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const past = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\nRange: bytes=100-200\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, past.response, "HTTP/1.1 416 Range Not Satisfiable\r\n"));
+    // The whole content of the answer, and the reason a client asked wrong.
+    try testing.expect(std.mem.indexOf(u8, past.response, "Content-Range: bytes */26\r\n") != null);
+    try testing.expect(past.keep_alive);
+
+    // Nonsense is ignored rather than refused: the whole file is a correct
+    // answer to every request, and a 416 for a typo helps nobody.
+    const nonsense = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\nRange: bytes=abc-def\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, nonsense.response, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(std.mem.endsWith(u8, nonsense.response, "abcdefghijklmnopqrstuvwxyz"));
+
+    // More than one range wants a multipart body zfast does not assemble.
+    const several = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\nRange: bytes=0-2,10-12\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, several.response, "HTTP/1.1 200 OK\r\n"));
+}
+
+test "If-Range holds a resumed download to the file it started with" {
+    var files = try TmpFiles.init(testing.allocator, &.{
+        .{ "alphabet.txt", "abcdefghijklmnopqrstuvwxyz" },
+    });
+    defer files.deinit(testing.allocator);
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.static("/", files.path);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    // Read the ETag off a normal response, the way a client resuming would.
+    const first = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\n\r\n");
+    const etag_at = std.mem.indexOf(u8, first.response, "ETag: ").? + 6;
+    const etag_end = std.mem.indexOfPos(u8, first.response, etag_at, "\r\n").?;
+    var etag_buf: [64]u8 = undefined;
+    const etag = etag_buf[0 .. etag_end - etag_at];
+    @memcpy(etag, first.response[etag_at..etag_end]);
+
+    var request: [256]u8 = undefined;
+    const matching = std.fmt.bufPrint(
+        &request,
+        "GET /alphabet.txt HTTP/1.1\r\nRange: bytes=20-\r\nIf-Range: {s}\r\n\r\n",
+        .{etag},
+    ) catch unreachable;
+    const resumed = h.send(&app, matching);
+    try testing.expect(std.mem.startsWith(u8, resumed.response, "HTTP/1.1 206"));
+
+    // A stale ETag means the file is no longer the one the client started
+    // with, so byte 20 of it is not the byte they wanted. All of it, then.
+    const stale = h.send(
+        &app,
+        "GET /alphabet.txt HTTP/1.1\r\nRange: bytes=20-\r\nIf-Range: \"nope\"\r\n\r\n",
+    );
+    try testing.expect(std.mem.startsWith(u8, stale.response, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(std.mem.endsWith(u8, stale.response, "abcdefghijklmnopqrstuvwxyz"));
+}
+
+test "a HEAD with a range gets the head a GET would have, and no body" {
+    var files = try TmpFiles.init(testing.allocator, &.{
+        .{ "alphabet.txt", "abcdefghijklmnopqrstuvwxyz" },
+    });
+    defer files.deinit(testing.allocator);
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.static("/", files.path);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const head = h.send(&app, "HEAD /alphabet.txt HTTP/1.1\r\nRange: bytes=3-7\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, head.response, "HTTP/1.1 206 Partial Content\r\n"));
+    try testing.expect(std.mem.indexOf(u8, head.response, "Content-Range: bytes 3-7/26\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, head.response, "Content-Length: 5\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, head.response, "\r\n\r\n"));
 }
