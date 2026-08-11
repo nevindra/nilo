@@ -502,9 +502,6 @@ pub const App = struct {
         const prev_slot = bulkhead.setFallbackSlot(in_flight);
         defer _ = bulkhead.setFallbackSlot(prev_slot);
 
-        // The head is copied into the request arena so every Str from this
-        // request stays valid even once the connection buffer is refilled
-        // (when reading the body, say). One small memcpy, paid once.
         const raw_head = http1.readHead(in) catch |err| {
             switch (err) {
                 error.EndOfStream, error.ReadFailed => {},
@@ -519,14 +516,36 @@ pub const App = struct {
         _ = self.stop.in_flight.fetchAdd(1, .acq_rel);
         defer _ = self.stop.in_flight.fetchSub(1, .acq_rel);
 
-        const request_head = arena.dupe(u8, raw_head) catch return false;
-        in.toss(raw_head.len);
-
         var r = http1.Request{};
-        http1.parseHead(request_head, &r) catch {
+        http1.parseHead(raw_head, &r) catch {
             sendFinal(out, RESPONSE_400);
             return false;
         };
+
+        // Every `Str` from this request points into the head, and the head is
+        // sitting in the connection's read buffer — where the next read
+        // overwrites it. So it is copied into the request arena, but only when
+        // there is going to be a next read: a body to take in, or a protocol
+        // about to take the socket over. On a GET, which is the shape the
+        // primary metric measures and most of the traffic besides, nothing
+        // reads again and the copy has nobody to protect — worth 19ns on a
+        // small head and 77ns on the one a browser really sends, plus one of
+        // the three allocations a request makes.
+        //
+        // What holds it together is `Ctx.aboutToRead`: every path that reads
+        // from the connection calls it, and it fails loudly in a debug build
+        // if this decision said there would be no such path.
+        const borrowed = !http1.readsMore(&r);
+        const request_head = if (borrowed) raw_head else copy: {
+            const copied = arena.dupe(u8, raw_head) catch return false;
+            // The two slices the parser left pointing into the old bytes.
+            // Everything derived below — the path, the query, the params —
+            // comes off `r.target`, so moving these two moves all of it.
+            r.method = rebase(raw_head, copied, r.method);
+            r.target = rebase(raw_head, copied, r.target);
+            break :copy copied;
+        };
+        in.toss(raw_head.len);
 
 
         const qmark = std.mem.indexOfScalar(u8, r.target, '?');
@@ -548,6 +567,7 @@ pub const App = struct {
             ._query = raw_query,
             ._query_params = ctx_mod.parseQuery(arena, raw_query) catch return false,
             ._head = request_head,
+            ._head_borrowed = borrowed,
             ._params = &.{},
             ._services = &self.services,
             // Stopping: this one still gets answered — a request already on
@@ -850,6 +870,13 @@ fn checkRootWiring() void {
 }
 
 /// Two requirements naming the same service, whatever route each came from.
+/// The same bytes as `slice`, pointed at `to` instead of at `from` — for
+/// moving a slice of a buffer onto a copy of that buffer.
+fn rebase(from: []const u8, to: []const u8, slice: []const u8) []const u8 {
+    const offset = @intFromPtr(slice.ptr) - @intFromPtr(from.ptr);
+    return to[offset..][0..slice.len];
+}
+
 fn sameService(a: service_mod.Requirement, b: service_mod.Requirement) bool {
     return a.needs_mutable == b.needs_mutable and std.mem.eql(u8, a.type_name, b.type_name);
 }
@@ -1041,7 +1068,7 @@ fn sendDirect(c: *Ctx, status: u16, body: []const u8) !void {
         "text/plain",
         body.len,
         keep_alive,
-        c._extra_headers.items,
+        c.extraHeaders(),
     );
     try http1.writeResponse(
         c._out,
@@ -1050,7 +1077,7 @@ fn sendDirect(c: *Ctx, status: u16, body: []const u8) !void {
         "text/plain",
         body,
         keep_alive,
-        c._extra_headers.items,
+        c.extraHeaders(),
     );
 }
 
@@ -2483,14 +2510,225 @@ test "the request path stays inside its allocation budget" {
     counting.reset();
     send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
 
-    // Three, and what each one is for:
-    //   1. the request head, copied so its Strs outlive the read buffer
-    //   2. the list of response headers CORS adds
-    //   3. the JSON body
-    // All three are bump allocations into an arena that is already warm.
-    // Raising this number needs a reason; lowering it is welcome.
-    try testing.expectEqual(@as(usize, 3), counting.allocs);
+    // One, and it is the JSON body. Raising this number needs a reason;
+    // lowering it is welcome.
+    //
+    // It was three. The two that went:
+    //
+    //   - **The copy of the request head.** A request with no body does not
+    //     need it: nothing is going to read from the connection again, so the
+    //     head can stay in the read buffer where the parser found it (see
+    //     `handleRequest`, and `Ctx.aboutToRead` for what stops that from
+    //     becoming a dangling `Str`). A POST still pays it, which is what the
+    //     next test checks — so the saving cannot quietly become a bug.
+    //   - **The list of response headers CORS adds.** The first four now sit
+    //     in the `Ctx` itself; the arena only hears about a fifth.
+    try testing.expectEqual(@as(usize, 1), counting.allocs);
     try testing.expectEqual(@as(usize, 0), counting.resizes);
+}
+
+test "a fifth response header spills to the arena, and all five go out in order" {
+    // The other side of holding four inline: the fifth has to join them rather
+    // than replace them, and the response has to carry one list.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/many", struct {
+        fn run(c: *Ctx) anyerror!void {
+            inline for (.{ "A", "B", "C", "D", "E", "F" }) |name| {
+                try c.setStaticHeader("X-" ++ name, name);
+            }
+            // And one that repeats an inline entry, which must replace it.
+            try c.setStaticHeader("x-b", "again");
+            try c.sendText(200, "ok");
+        }
+    }.run);
+    try app.resolveChains();
+
+    var h = Harness.init();
+    defer h.deinit();
+    const sent = h.send(&app, "GET /many HTTP/1.1\r\n\r\n");
+
+    for ([_][]const u8{ "X-A: A", "X-C: C", "X-D: D", "X-E: E", "X-F: F" }) |line| {
+        try testing.expect(std.mem.indexOf(u8, sent.response, line) != null);
+    }
+    // Replaced, not duplicated.
+    try testing.expect(std.mem.indexOf(u8, sent.response, "x-b: again") != null);
+    try testing.expect(std.mem.indexOf(u8, sent.response, "X-B: B") == null);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sent.response, "again"));
+}
+
+/// A connection that hands its bytes over a few at a time, into a buffer of
+/// its own — which is what a socket does and what `Reader.fixed` never does,
+/// because there the input *is* the buffer and no read ever refills it.
+///
+/// Two things can only be tested through something like this: that a head
+/// arriving in pieces is still found (`readHead` resumes its scan rather than
+/// starting again), and that a head left in the read buffer is copied out
+/// before a body read overwrites it.
+const Trickle = struct {
+    rest: []const u8,
+    per_read: usize,
+    reader: std.Io.Reader,
+
+    fn init(source: []const u8, per_read: usize, buffer: []u8) Trickle {
+        return .{
+            .rest = source,
+            .per_read = per_read,
+            .reader = .{
+                .vtable = &.{ .stream = stream },
+                .buffer = buffer,
+                .end = 0,
+                .seek = 0,
+            },
+        };
+    }
+
+    fn stream(
+        r: *std.Io.Reader,
+        w: *std.Io.Writer,
+        limit: std.Io.Limit,
+    ) std.Io.Reader.StreamError!usize {
+        const self: *Trickle = @alignCast(@fieldParentPtr("reader", r));
+        if (self.rest.len == 0) return error.EndOfStream;
+        const dest = limit.slice(try w.writableSliceGreedy(1));
+        const n = @min(@min(dest.len, self.per_read), self.rest.len);
+        @memcpy(dest[0..n], self.rest[0..n]);
+        self.rest = self.rest[n..];
+        w.advance(n);
+        return n;
+    }
+};
+
+fn echoHeadAfterBody(c: *Ctx) anyerror!void {
+    const body_text = (try c.body()).view();
+    // Read out of the head *after* the body: on a head still sitting in the
+    // read buffer, these are whatever the refill put there.
+    const host = c.header("Host") orelse return fail.badRequest("no Host", .{});
+    try c.sendText(200, try std.fmt.allocPrint(
+        c._arena,
+        "{s}|{s}|{f}",
+        .{ host.view(), body_text, c.path() },
+    ));
+}
+
+test "a request with a body copies the head, so its Strs survive reading it" {
+    // The other half of the budget above: the saving is only allowed to exist
+    // because a request that *will* read still pays for the copy. Driven
+    // through a connection that trickles, so the body genuinely cannot arrive
+    // without refilling the buffer the head is in.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/echo", echoHeadAfterBody);
+    try app.resolveChains();
+
+    const wire = "POST /echo HTTP/1.1\r\nHost: example.dev\r\n" ++
+        "Content-Length: 11\r\n\r\nhello world";
+
+    // Several read sizes, so the head/body split lands in a different place
+    // each time — including one byte at a time, which is the worst case for
+    // both the scan and the copy.
+    for ([_]usize{ 1, 3, 7, 16, 64 }) |per_read| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var lifetime = str_mod.Lifetime{};
+        var in_flight = fail.InFlight{};
+        var out_buf: [4096]u8 = undefined;
+        var read_buf: [128]u8 = undefined;
+
+        var conn = Trickle.init(wire, per_read, &read_buf);
+        var out = std.Io.Writer.fixed(&out_buf);
+        _ = app.handleRequest(arena.allocator(), &lifetime, &in_flight, &conn.reader, &out);
+
+        try testing.expect(std.mem.startsWith(u8, out.buffered(), "HTTP/1.1 200"));
+        try testing.expect(std.mem.endsWith(u8, out.buffered(), "example.dev|hello world|/echo"));
+    }
+}
+
+test "a head arriving a byte at a time is still parsed, and its Strs are sound" {
+    // The no-body side, on a trickling connection. Nothing reads again, so the
+    // head stays where it was parsed — and every Str off it has to hold up for
+    // the whole request anyway.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/users/:id", struct {
+        fn run(c: *Ctx) anyerror!void {
+            const host = c.header("Host") orelse return fail.badRequest("no Host", .{});
+            const agent = c.header("User-Agent") orelse return fail.badRequest("no UA", .{});
+            const id = c.param("id") orelse return fail.badRequest("no id", .{});
+            try c.sendText(200, try std.fmt.allocPrint(
+                c._arena,
+                "{s}|{s}|{s}|{f}",
+                .{ host.view(), agent.view(), id.view(), c.path() },
+            ));
+        }
+    }.run);
+    try app.resolveChains();
+
+    const wire = "GET /users/42 HTTP/1.1\r\nHost: example.dev\r\n" ++
+        "User-Agent: curl/8.0\r\nAccept: */*\r\n\r\n";
+
+    for ([_]usize{ 1, 2, 5, 31, 32, 33, 200 }) |per_read| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var lifetime = str_mod.Lifetime{};
+        var in_flight = fail.InFlight{};
+        var out_buf: [4096]u8 = undefined;
+        var read_buf: [256]u8 = undefined;
+
+        var conn = Trickle.init(wire, per_read, &read_buf);
+        var out = std.Io.Writer.fixed(&out_buf);
+        _ = app.handleRequest(arena.allocator(), &lifetime, &in_flight, &conn.reader, &out);
+
+        try testing.expect(std.mem.endsWith(
+            u8,
+            out.buffered(),
+            "example.dev|curl/8.0|42|/users/42",
+        ));
+    }
+}
+
+test "two requests on one trickling connection do not borrow each other's head" {
+    // A keep-alive connection reuses the buffer, so the second request's head
+    // lands where the first one's was. Both answers have to be about their own
+    // request.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/*", struct {
+        fn run(c: *Ctx) anyerror!void {
+            const host = c.header("Host") orelse return fail.badRequest("no Host", .{});
+            try c.sendText(200, try std.fmt.allocPrint(
+                c._arena,
+                "{f}@{s}",
+                .{ c.path(), host.view() },
+            ));
+        }
+    }.run);
+    try app.resolveChains();
+
+    const wire = "GET /first HTTP/1.1\r\nHost: one.example\r\n\r\n" ++
+        "GET /second HTTP/1.1\r\nHost: two.example\r\n\r\n";
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var lifetime = str_mod.Lifetime{};
+    var in_flight = fail.InFlight{};
+    var read_buf: [128]u8 = undefined;
+    var conn = Trickle.init(wire, 4, &read_buf);
+
+    for ([_][]const u8{ "/first@one.example", "/second@two.example" }) |want| {
+        var out_buf: [4096]u8 = undefined;
+        var out = std.Io.Writer.fixed(&out_buf);
+        try testing.expect(app.handleRequest(
+            arena.allocator(),
+            &lifetime,
+            &in_flight,
+            &conn.reader,
+            &out,
+        ));
+        try testing.expect(std.mem.endsWith(u8, out.buffered(), want));
+        lifetime.end();
+        _ = arena.reset(.{ .retain_with_limit = arena_keep });
+    }
 }
 
 // ---- the generated API description (ADR 0017) ----
@@ -3083,8 +3321,9 @@ test "a route that resolves nothing still costs what it always did" {
     counting.reset();
     send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
 
-    // Two here rather than three: no CORS, so no response header list.
-    try testing.expectEqual(@as(usize, 2), counting.allocs);
+    // One: no CORS, so no response header list, and no body to read, so no
+    // copy of the head. All that is left is the JSON.
+    try testing.expectEqual(@as(usize, 1), counting.allocs);
 }
 
 test "the in-flight request is readable, which is what the panic handler uses" {
@@ -3250,10 +3489,11 @@ test "a stream allocates once, however many pieces it writes" {
     counting.reset();
     send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
 
-    // Two: the request head, and the stream's own buffer. Two hundred
-    // pieces went out between them and not one of them allocated — which is
-    // the promise ADR 0020 makes, and the reason a stream can run for a week.
-    try testing.expectEqual(@as(usize, 2), counting.allocs);
+    // One: the stream's own buffer. Two hundred pieces went out through it
+    // and not one of them allocated — which is the promise ADR 0020 makes, and
+    // the reason a stream can run for a week. (It was two; the request head is
+    // no longer copied for a request with no body.)
+    try testing.expectEqual(@as(usize, 1), counting.allocs);
     try testing.expectEqual(@as(usize, 0), counting.resizes);
 }
 

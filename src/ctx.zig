@@ -11,7 +11,9 @@
 const std = @import("std");
 const body_mod = @import("body.zig");
 const http1 = @import("http1.zig");
+const json_mod = @import("json.zig");
 const router = @import("router.zig");
+const scan = @import("scan.zig");
 const service_mod = @import("service.zig");
 const static_mod = @import("static.zig");
 const stream_mod = @import("stream.zig");
@@ -28,6 +30,12 @@ pub const max_body = 1024 * 1024;
 /// The size `sendJson` reserves before serialising. Not a limit — a
 /// bigger response simply grows past it.
 pub const json_hint = 512;
+
+/// How many response headers a request holds without reaching for the arena.
+/// Four covers what the built-in middleware set — CORS one to three, a static
+/// file two — which is what makes it the number that keeps an allocation off
+/// the ordinary request.
+const inline_headers = 4;
 
 /// One resolved value, kept for the rest of the request that asked for it.
 ///
@@ -57,6 +65,11 @@ pub const Ctx = struct {
     /// of it on demand rather than collected up front — most handlers ask
     /// for none, and the ones that ask, ask for two.
     _head: []const u8,
+    /// Whether `_head` is still the connection's own read buffer rather than a
+    /// copy in the request arena. True for a request nothing will read from
+    /// the connection for again, which is most of them — see the copy in
+    /// `App.handleRequest`, and `aboutToRead` for what keeps it honest.
+    _head_borrowed: bool = false,
     _params: []const router.Param,
     _services: *const service_mod.Registry,
     /// Set by App when the path names a file in a static set, so the
@@ -87,7 +100,16 @@ pub const Ctx = struct {
     _force_close: bool = false,
     /// The status actually sent, once something has been. 0 until then.
     _status: u16 = 0,
-    _extra_headers: std.ArrayList(http1.Header) = .empty,
+    /// Response headers a handler or middleware added.
+    ///
+    /// The first four live here rather than in the arena. CORS sets one to
+    /// three of them and a static file two, so an ArrayList meant an
+    /// allocation on the path of every request that had any middleware at all
+    /// — for something that fits in 128 bytes of a struct already on the
+    /// stack. Past four it spills, and then the spill is the whole list.
+    _extra_inline: [inline_headers]http1.Header = undefined,
+    _extra_n: usize = 0,
+    _extra_spill: std.ArrayList(http1.Header) = .empty,
     /// Resolved values already worked out for this request (ADR 0016).
     /// Stays empty — and costs nothing — on a request that asks for none.
     _resolved: std.ArrayList(Resolved) = .empty,
@@ -197,9 +219,24 @@ pub const Ctx = struct {
     /// The whole request body, read once into the request arena. Chunked
     /// and Content-Length look the same from here — the handler asks for
     /// the body, not for the way it arrived.
+    /// Called by everything that is about to read from the connection.
+    ///
+    /// The head normally still lives in the connection's read buffer, because
+    /// copying it into the arena costs an allocation and a memcpy that a
+    /// request with no body has no use for. A read can overwrite it, so every
+    /// read has to be one `App.handleRequest` already foresaw when it made
+    /// that call. This is what says so out loud instead of leaving it to be
+    /// remembered — a new way to read from the connection trips it in `Debug`
+    /// and `ReleaseSafe`, which is where the suite runs, rather than handing
+    /// somebody a `Str` full of the next request's bytes.
+    fn aboutToRead(self: *const Ctx) void {
+        std.debug.assert(!self._head_borrowed);
+    }
+
     pub fn body(self: *Ctx) !Str {
         if (self._body == null) {
             if (self._request.chunked) {
+                self.aboutToRead();
                 self._body = http1.readChunkedBody(self._in, self._arena, max_body) catch |err| {
                     // The chunk sizes and the stream have come apart, so
                     // where this body ends is now a guess. Reading on and
@@ -211,6 +248,8 @@ pub const Ctx = struct {
                 };
             } else {
                 if (self._request.content_length > max_body) return error.BodyTooLarge;
+                // A body of nothing reads nothing, so it is not a read.
+                if (self._request.content_length > 0) self.aboutToRead();
                 const b = try self._arena.alloc(u8, @intCast(self._request.content_length));
                 try self._in.readSliceAll(b);
                 self._body = b;
@@ -251,6 +290,7 @@ pub const Ctx = struct {
         if (!self._request.chunked and self._request.content_length > options.max_bytes) {
             return error.BodyTooLarge;
         }
+        if (self._request.chunked or self._request.content_length > 0) self.aboutToRead();
 
         self._incoming = .start(self._request, options.max_bytes);
         return .init(self._in, &self._incoming.?);
@@ -317,20 +357,39 @@ pub const Ctx = struct {
         return self.putHeader(.{ .name = name, .value = value });
     }
 
+    /// The response headers added so far, in the order they were set.
+    pub fn extraHeaders(self: *const Ctx) []const http1.Header {
+        if (self._extra_spill.items.len > 0) return self._extra_spill.items;
+        return self._extra_inline[0..self._extra_n];
+    }
+
+    fn extraHeadersMutable(self: *Ctx) []http1.Header {
+        if (self._extra_spill.items.len > 0) return self._extra_spill.items;
+        return self._extra_inline[0..self._extra_n];
+    }
+
     fn putHeader(self: *Ctx, entry: http1.Header) !void {
         if (http1.isReservedHeader(entry.name)) return error.ReservedHeader;
-        for (self._extra_headers.items) |*h| {
+        for (self.extraHeadersMutable()) |*h| {
             if (std.ascii.eqlIgnoreCase(h.name, entry.name)) {
                 h.* = entry; // last one wins, rather than sending both
                 return;
             }
         }
-        // Room for a few in one go: CORS alone sets two or three, and
-        // growing one at a time would mean an allocation for each.
-        if (self._extra_headers.capacity == 0) {
-            try self._extra_headers.ensureTotalCapacity(self._arena, 4);
+
+        if (self._extra_spill.items.len > 0) {
+            return self._extra_spill.append(self._arena, entry);
         }
-        try self._extra_headers.append(self._arena, entry);
+        if (self._extra_n < inline_headers) {
+            self._extra_inline[self._extra_n] = entry;
+            self._extra_n += 1;
+            return;
+        }
+        // The fifth one. The inline four move across so the list stays in one
+        // piece — whoever writes the response wants a single slice.
+        try self._extra_spill.ensureTotalCapacity(self._arena, inline_headers * 2);
+        self._extra_spill.appendSliceAssumeCapacity(&self._extra_inline);
+        self._extra_spill.appendAssumeCapacity(entry);
     }
 
     pub fn send(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8) !void {
@@ -346,7 +405,7 @@ pub const Ctx = struct {
             content_type,
             response_body.len,
             self.keepAlive(),
-            self._extra_headers.items,
+            self.extraHeaders(),
         );
         try http1.writeResponse(
             self._out,
@@ -355,7 +414,7 @@ pub const Ctx = struct {
             content_type,
             response_body,
             self.keepAlive(),
-            self._extra_headers.items,
+            self.extraHeaders(),
         );
     }
 
@@ -369,9 +428,13 @@ pub const Ctx = struct {
     /// response of ordinary size is assembled in one allocation instead of
     /// a handful of doublings. Overshooting costs nothing: the arena is
     /// emptied when the request ends either way.
+    ///
+    /// The serialising itself is `json.write`, which produces exactly what
+    /// `std.json` would and is several times quicker at it for the shapes a
+    /// handler returns.
     pub fn sendJson(self: *Ctx, status: u16, value: anytype) !void {
         var out: std.Io.Writer.Allocating = try .initCapacity(self._arena, json_hint);
-        try std.json.Stringify.value(value, .{}, &out.writer);
+        try json_mod.write(&out.writer, value);
         try self.send(status, "application/json", out.written());
     }
 
@@ -419,7 +482,7 @@ pub const Ctx = struct {
             content_type,
             chunked,
             self.keepAlive(),
-            self._extra_headers.items,
+            self.extraHeaders(),
         );
 
         // The one allocation a stream makes, made once. Everything written
@@ -477,6 +540,12 @@ pub const Ctx = struct {
                 .{},
             );
         }
+        // Only once the handshake is real: from here a Socket is going to read
+        // from the connection for as long as it lives, so the head must have
+        // been copied out of the read buffer. `Request.upgrade` is what told
+        // `handleRequest` to copy it, and it is deliberately the looser of the
+        // two tests — anything `isUpgrade` accepts, it accepted first.
+        self.aboutToRead();
         const version = self.header("Sec-WebSocket-Version") orelse
             return fail.badRequest("the handshake is missing Sec-WebSocket-Version", .{});
         // 13 is the only version there has ever been in the published RFC.
@@ -683,23 +752,83 @@ fn fits(comptime T: type, value: std.json.Value) bool {
 ///
 /// Splitting happens before decoding, so a `%26` inside a value stays an
 /// `&` of data instead of becoming a pair separator.
+///
+/// Walked once, the way the request head is (see `scan.zig`). `&` and `=` are
+/// found together — one load, two compares — and each pair's `=` is picked out
+/// of the mask with a shift and an `and` rather than by a fresh
+/// `std.mem.indexOfScalar` over the pair.
+///
+/// The `&`s are counted first so the list is allocated once at the right size.
+/// Growing it a pair at a time meant three allocations for
+/// `?q=…&sort=…&page=…`, one per doubling. Whatever the count overshoots by —
+/// an empty pair, a trailing `&` — is arena space nobody uses, and the arena
+/// is emptied at the end of the request anyway.
+///
+/// Measured inside a request, `?q=hello%20world&sort=newest&page=3` went
+/// 263ns → 191ns. What is left is mostly the six `percent.decode` calls, one
+/// per name and value, and the one allocation the value with the `%20` needs.
 pub fn parseQuery(arena: std.mem.Allocator, raw: []const u8) ![]const router.Param {
     if (raw.len == 0) return &.{};
 
-    var list: std.ArrayList(router.Param) = .empty;
-    var pairs = std.mem.splitScalar(u8, raw, '&');
-    while (pairs.next()) |pair| {
-        if (pair.len == 0) continue; // "a=1&&b=2" and a trailing "&"
-        const equals = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
-        try list.append(arena, .{
-            .name = try percent.decode(arena, pair[0..equals], true),
-            .value = if (equals < pair.len)
-                try percent.decode(arena, pair[equals + 1 ..], true)
-            else
-                "",
-        });
+    const params = try arena.alloc(router.Param, scan.countOf(raw, '&') + 1);
+    var n: usize = 0;
+
+    var pair_start: usize = 0;
+    // Where this pair's first `=` is, as an absolute index. Null until one
+    // turns up; a pair may span two blocks, so this outlives the block loop.
+    var equals: ?usize = null;
+
+    var i: usize = 0;
+    while (i < raw.len) : (i += scan.lanes) {
+        var amps = scan.positionsOf(raw, i, '&');
+        var unclaimed = scan.positionsOf(raw, i, '=');
+
+        while (amps != 0) : (amps &= amps - 1) {
+            const bit: u5 = @intCast(@ctz(amps));
+            const amp_at = i + bit;
+
+            const mine = unclaimed & scan.below(bit);
+            unclaimed &= ~scan.below(bit);
+            if (equals == null and mine != 0) equals = i + @ctz(mine);
+
+            try take(arena, params, &n, raw[pair_start..amp_at], relative(equals, pair_start));
+            pair_start = amp_at + 1;
+            equals = null;
+        }
+        // Whatever `=`s are left sit after the last `&` in this block, so they
+        // belong to the pair still open.
+        if (equals == null and unclaimed != 0) equals = i + @ctz(unclaimed);
     }
-    return list.items;
+    try take(arena, params, &n, raw[pair_start..], relative(equals, pair_start));
+
+    return params[0..n];
+}
+
+/// An absolute index inside the pair starting at `pair_start`, as an offset
+/// into that pair.
+fn relative(at: ?usize, pair_start: usize) ?usize {
+    return if (at) |a| a - pair_start else null;
+}
+
+/// One `name=value` pair, decoded into the next slot. An empty pair is
+/// skipped: `a=1&&b=2` and a trailing `&` both produce one.
+fn take(
+    arena: std.mem.Allocator,
+    params: []router.Param,
+    n: *usize,
+    pair: []const u8,
+    equals: ?usize,
+) !void {
+    if (pair.len == 0) return;
+    const split_at = equals orelse pair.len;
+    params[n.*] = .{
+        .name = try percent.decode(arena, pair[0..split_at], true),
+        .value = if (split_at < pair.len)
+            try percent.decode(arena, pair[split_at + 1 ..], true)
+        else
+            "",
+    };
+    n.* += 1;
 }
 
 /// Decode the path params a match produced, in place in the match's own
@@ -729,4 +858,120 @@ test "an empty query string parses to nothing" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     try testing.expectEqual(@as(usize, 0), (try parseQuery(arena.allocator(), "")).len);
+}
+
+/// The parser this replaced: split on `&`, then look for `=` in each pair.
+/// Kept so the block-at-a-time one can be held against it — a rewrite that is
+/// faster and subtly different is worse than a slow one.
+fn parseQueryTheOldWay(arena: std.mem.Allocator, raw: []const u8) ![]const router.Param {
+    if (raw.len == 0) return &.{};
+    var list: std.ArrayList(router.Param) = .empty;
+    var pairs = std.mem.splitScalar(u8, raw, '&');
+    while (pairs.next()) |pair| {
+        if (pair.len == 0) continue;
+        const equals = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
+        try list.append(arena, .{
+            .name = try percent.decode(arena, pair[0..equals], true),
+            .value = if (equals < pair.len)
+                try percent.decode(arena, pair[equals + 1 ..], true)
+            else
+                "",
+        });
+    }
+    return list.items;
+}
+
+test "the block-at-a-time query parser agrees with the one it replaced" {
+    const cases = [_][]const u8{
+        "",
+        "a",
+        "a=",
+        "=a",
+        "a=1",
+        "a=1&b=2",
+        "a=1&b=2&c=3",
+        "a=1&&b=2",
+        "a=1&",
+        "&a=1",
+        "&&&",
+        "=",
+        "a==1",
+        "a=1=2",
+        "bare&a=1",
+        "q=hello%20world&tag=a%26b&plus=a+b&bare&empty=",
+        "q=%",
+        "q=%zz",
+        "q=a%2Fb",
+        // Long enough to cross block boundaries, with the delimiters landing
+        // either side of them — which is what the mask arithmetic decides.
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=1&bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb=2",
+        "a=" ++ "x" ** 40 ++ "&b=" ++ "y" ** 40,
+        "a" ** 31 ++ "=1",
+        "a" ** 32 ++ "=1",
+        "a" ** 33 ++ "=1",
+        "x=1&" ++ "y" ** 31 ++ "=2",
+        "x=1&" ++ "y" ** 32 ++ "=2",
+        "x=1&" ++ "y" ** 33 ++ "=2",
+        "%20" ** 20,
+        "a=1&" ** 20,
+    };
+
+    for (cases) |raw| {
+        var mine_arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer mine_arena.deinit();
+        var theirs_arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer theirs_arena.deinit();
+
+        const mine = try parseQuery(mine_arena.allocator(), raw);
+        const theirs = try parseQueryTheOldWay(theirs_arena.allocator(), raw);
+
+        testing.expectEqual(theirs.len, mine.len) catch |err| {
+            std.debug.print("query: \"{s}\"\n", .{raw});
+            return err;
+        };
+        for (theirs, mine) |want, got| {
+            testing.expectEqualStrings(want.name, got.name) catch |err| {
+                std.debug.print("query: \"{s}\"\n", .{raw});
+                return err;
+            };
+            testing.expectEqualStrings(want.value, got.value) catch |err| {
+                std.debug.print("query: \"{s}\"\n", .{raw});
+                return err;
+            };
+        }
+    }
+}
+
+test "a `=` in one pair does not split the next one" {
+    // The danger the mask creates: an `=` from an earlier pair being taken as
+    // this pair's. `bare` has none and must come out with an empty value.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const params = try parseQuery(arena.allocator(), "a=1&bare&b=2");
+    try testing.expectEqual(@as(usize, 3), params.len);
+    try testing.expectEqualStrings("bare", params[1].name);
+    try testing.expectEqualStrings("", params[1].value);
+    try testing.expectEqualStrings("b", params[2].name);
+    try testing.expectEqualStrings("2", params[2].value);
+}
+
+test "a query string is split in one allocation, whatever it holds" {
+    // The other half of the request's allocation budget: one for the list, and
+    // one more only for a value that really has an escape in it.
+    const budget = @import("budget.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // Warm it, so growing the arena is not what is being counted.
+    _ = try parseQuery(arena.allocator(), "a=1&b=2&c=3&d=4");
+    _ = arena.reset(.retain_capacity);
+
+    var counting = budget.Counting{ .child = arena.allocator() };
+    _ = try parseQuery(counting.allocator(), "a=1&b=2&c=3&d=4&e=5&f=6");
+    try testing.expectEqual(@as(usize, 1), counting.allocs);
+
+    counting.reset();
+    _ = try parseQuery(counting.allocator(), "q=hello%20world&sort=newest");
+    // The list, plus the one value that had something to decode.
+    try testing.expectEqual(@as(usize, 2), counting.allocs);
 }
