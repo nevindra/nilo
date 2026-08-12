@@ -320,9 +320,26 @@ def save(results):
         json.dump(results, f, indent=2)
 
 
+def load():
+    """What is already recorded, so re-running one candidate updates the file
+    instead of replacing it. Without this, `drive.py zfast` wrote a raw.json
+    holding one row and the other eight were gone — which is how the file came
+    to disagree with docs/comparison.md."""
+    try:
+        with open(os.path.join(HERE, "results", "raw.json")) as f:
+            return json.load(f)
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
 def main():
     only = sys.argv[1:]
-    results = {}
+    # A full run starts clean; a partial one merges into what is there. Anything
+    # kept from an older run is a number this run did not take, so say so.
+    results = load() if only else {}
+    if results:
+        print("keeping recorded results for: "
+              + ", ".join(k for k in results if k not in only), flush=True)
     for cand in CANDIDATES:
         if only and cand["key"] not in only:
             continue

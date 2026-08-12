@@ -62,6 +62,15 @@ and reaching the rows above it means `cluster.fork()` or `reusePort` and running
 one process per core. The gap between a runtime's default and its tuned form is
 larger here than the gap between most of the frameworks.
 
+**All nine rows above are one session**, and they are kept that way on purpose.
+zfast has since been run through the same harness again — the run that produced
+the memory figures below — and read 1,456,636 req/s with a p99 of 57µs. That is
+4% above the row in the table, which is inside the run-to-run spread declared at
+the bottom of this page and is not an effect of anything that changed in
+between. The table keeps the session number, because a re-run that only one of
+nine candidates got is not a comparison. `results/raw.json` holds the newer zfast
+figures, so the two disagree by exactly this much and for this reason.
+
 ### The field is compressed, and that was predictable
 
 [`benchmarks.md`](./benchmarks.md#the-number-that-reframes-the-budget) measured
@@ -116,7 +125,7 @@ harness afterwards; nothing else moved.
 |---|---|---|
 | Bun.serve ×8 | 338 | 257.6 MB |
 | Bun.serve ×1 | 700 | 32.7 MB |
-| **zfast** | **8,767** | **5.5 MB** |
+| **zfast** | **8,767** | **5.4 MB** |
 | Node http ×1 | 10,543 | 48.5 MB |
 | Node cluster ×8 | 10,594 | 440.5 MB |
 | http.zig | 11,218 | 11.5 MB (caps at 8,192 connections) |
@@ -148,7 +157,7 @@ the crossings have moved a long way:
 
 **What this means for the README.** "Low memory" was stated without a number and
 would not have survived being given one. It survives 8,767: an idle server is
-5.5 MB, ten thousand held connections are 91 MB, and every server here except
+5.4 MB, ten thousand held connections are 91 MB, and every server here except
 Bun is beaten at every count measured. The honest qualifier that remains is that
 a connection which has served a large response holds a page of retained request
 arena on top — 12,940 bytes rather than 8,762 — and that Bun is still an order
@@ -277,7 +286,7 @@ code that was never generated cannot be stripped back out afterwards.
 | Throughput | **1st of 9** — but inside the noise of http.zig |
 | p99 under equal load | **2nd of 9**, and 3–45× ahead of everything outside the top two |
 | CPU per request | 2nd of 9 |
-| Memory, idle server | 2nd of 9 (5.5 MB) |
+| Memory, idle server | 2nd of 9 (5.4 MB) |
 | Memory per connection | 3rd of 9 — was 7th before the fix this measurement caused |
 | Warm rebuild, dev — the edit loop | 5th of 5 compiled, by 0.2s |
 | Warm rebuild, release | **5th of 5 compiled** — 7.4s, was 15.0s before this measurement |

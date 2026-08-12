@@ -84,6 +84,12 @@ The reasoning, and what it cost to find out, is in
 | `httpzig/` | http.zig, the in-language competitor |
 | `results/` | the recorded run behind `docs/comparison.md` |
 
+`python3 drive.py` runs everything and starts `results/raw.json` clean. Naming
+candidates — `python3 drive.py zfast httpzig` — merges into what is already
+there and prints which rows it kept. The rows it keeps are numbers this run did
+not take, so a file built that way is not a single session, and
+`docs/comparison.md` says which of its tables is one and which is not.
+
 Node and Bun are measured twice — as they ship, which is one thread, and with
 one process per core. The distance between those two rows is larger than the
 distance between most of the frameworks, which is itself the finding.
