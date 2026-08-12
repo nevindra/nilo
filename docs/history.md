@@ -379,3 +379,22 @@ referenced by:
 ```
 
 Measured stripped, `ReleaseFast`: **+0 bytes** on hello, rest and orders alike, all of it being comptime. The cost is build time — a warm `zig build test` went from 6.4s to 15.4s, because the compiler keeps nothing from a compilation that failed and all 39 are re-analysed every run. It goes on `test` anyway: enforcement that has to be asked for is a sentence in a document again, which is where this started.
+
+## After 0.1.0: what the router scan actually costs
+
+"No machine to measure on" had been doing more work than it should. It is true of *throughput* — requests per second on a quiet box, which is what [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md)'s 10% rule needs and what nothing here can produce. It is not true of the pieces: `zig build profile` measures those in-process and always could. The linear router scan had been sitting under the first excuse while being answerable by the second.
+
+So it got measured. Two route sets, five sizes, wanted route registered last so nothing is captured early:
+
+| routes | 1 | 5 | 25 | 50 | 100 |
+|---|---|---|---|---|---|
+| mixed — four methods, three depths | 27ns | 47ns | 56ns | 107ns | 167ns |
+| same shape — every route `GET /thingN/:id/leaf` | 53ns | 84ns | 242ns | 431ns | 855ns |
+
+The first set is what an app looks like and the cheap filters throw out nearly everything. The second is the ceiling: same method, same length, same score, so every route runs the full segment walk. The distance between the rows is the whole story — it is the first literal segment doing all the rejecting.
+
+**The useful number is where it crosses.** One request is 585ns of zfast's own work, measured with one route. A 25-route app spends ~9% of that matching, a 50-route app ~16%, a 100-route app ~23%. The scan passes ADR 0001's bar at **around 30 routes**, which is an ordinary app rather than a pathological one. That turns the roadmap entry from *needs numbers nobody has* into a threshold — with the caveat, stated because it matters, that this is 10% of zfast's work and not of a real request's wall clock.
+
+**And a hypothesis was tried and was wrong**, which is the other half of what measuring is for. The idea was that "linear" was the wrong thing to blame: rejecting a route reads about ten bytes and a `Route` is seven times that, so the scan looked like it was pulling in cache lines to read four fields. Lifting those four into a packed parallel array made the mixed set 7% faster and the same-shape set 10% slower — a wash, bought with eight bytes per route of duplicated state that `add` has to keep in step. Reverted. The routes are walked in order, the prefetcher was already covering the stride, and what the scan actually spends is compares and the first `mem.eql`.
+
+What survives is the harness. The question is now one command for anyone who wants to ask it again, which is the part that was missing when the answer was "there are no numbers".

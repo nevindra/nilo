@@ -90,11 +90,41 @@ Things that are wrong or missing today, with what fixing them would take.
   end went 183ns → 51ns and parsing 303ns → 163ns. It is still two passes:
   merging them would mean recording line boundaries during a scan that has to
   resume where it left off, and the two passes cost 214ns between them.
-- **The router is still a linear scan.** Which structure replaces it — radix
-  tree, per-method buckets, something else — needs numbers nobody has yet. What
-  the scan costs was measured in-process: 3.7× at 50 routes, 1.4× at 5, worst
-  case with the wanted route last. Whatever replaces it has to keep specificity
-  ordering, which is a property of the structure rather than a cost added to it
+- **The router is still a linear scan**, and there are numbers now. `zig build
+  profile` measures two route sets at five sizes, wanted route last so nothing
+  is captured early. **Mixed** is what an app looks like — four methods, three
+  depths — so nearly every route is thrown out on the method or the segment
+  count. **Same shape** is every route `GET /thingN/:id/leaf`, where not one can
+  be rejected cheaply; no real app looks like that, and it is the ceiling.
+
+  | routes | 1 | 5 | 25 | 50 | 100 |
+  |---|---|---|---|---|---|
+  | mixed | 27ns | 47ns | 56ns | 107ns | 167ns |
+  | same shape | 53ns | 84ns | 242ns | 431ns | 855ns |
+
+  What that says is when it starts to matter. One request is 585ns of zfast's
+  own work, measured with one route, so a 25-route app spends ~9% of it
+  matching, a 50-route app ~16%, and a 100-route app ~23%. **The scan passes
+  [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md)'s 10% bar at
+  around 30 routes** — which most real apps have. The caveat is that this is
+  in-process with no kernel in it, so it is 10% of zfast's work rather than of
+  a request's wall clock; ADR 0001's budget is about zfast's work, so the
+  comparison is the right one, but it is not a claim about a real server.
+
+  One cheap fix was tried and did not work. The hypothesis was that "linear" is
+  not the problem — that rejecting a route reads about ten bytes and a `Route`
+  is seven times that, so the scan was pulling in cache lines to look at four
+  fields. Lifting those four into a packed parallel array made **mixed 7%
+  faster and same-shape 10% slower**, which is a wash bought with eight bytes
+  per route of duplicated state to keep in step. Reverted. The routes are
+  walked in order and the hardware prefetcher was already covering the stride;
+  the cost is the compares and the first `mem.eql`, not the fetch.
+
+  So what is left is the structural change, and the shape of it is now visible
+  in the table: the gap between the two rows is entirely the first literal
+  segment. Indexing on that — which is the first level of a radix tree — is
+  what the numbers point at. Whatever it is has to keep specificity ordering as
+  a property of the structure rather than a cost added on top
   ([ADR 0013](./adr/0013-the-most-specific-route-wins-and-duplicates-are-refused.md)).
 - ~~**`std.json` sits on the hot path** of the metric that matters, at 13% of a
   request.~~ *Done, and it was not 13% — it was 63%.* The profile had been taken

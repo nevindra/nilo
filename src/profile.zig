@@ -22,6 +22,7 @@ const websocket = @import("websocket.zig");
 const stream_mod = @import("stream.zig");
 const body_mod = @import("body.zig");
 const range = @import("range.zig");
+const router_mod = @import("router.zig");
 
 const rounds = 300_000;
 const arena_keep = 16 * 1024;
@@ -189,9 +190,108 @@ pub fn main() !void {
     , .{});
 
     try longLived(gpa);
+    try routerScale(gpa);
 
     if (sink == 0) unreachable; // keeps the work from being optimised away
 }
+
+// ---- one route out of many ----
+//
+// The row above is measured on the app this file serves, which has one
+// route. What the scan costs as routes are added is a different question and
+// the one the roadmap has open, so it gets measured here rather than
+// reasoned about.
+//
+// Every pattern carries a `:id`, so nothing is all-literal and the early
+// exit never fires; and the wanted route is registered last, so nothing is
+// captured until the end. That is the worst case on purpose — the number to
+// beat, not the number to quote.
+
+const scale_rounds = 200_000;
+const scale_counts = [_]usize{ 1, 5, 25, 50, 100 };
+
+/// Two route sets, because they exercise opposite halves of the scan and a
+/// number from one says nothing about the other.
+///
+/// **Mixed** is what an app looks like: four methods, three depths. Nearly
+/// every route is thrown out on the method or the segment count, before any
+/// text is read — so this measures the cheap filter.
+///
+/// **Same shape** is every route `GET /thingN/:id/leaf`. Not one of them can
+/// be rejected cheaply: same method, same length, same score. Every single
+/// one runs the full segment walk. No real app looks like this and it is the
+/// ceiling, which is the useful thing about it.
+const Shape = enum { mixed, same };
+
+fn routerScale(gpa: std.mem.Allocator) !void {
+    std.debug.print("\n---- matching one route out of many ----\n\n", .{});
+    std.debug.print("  {s:<12}{s:>7}{s:>7}{s:>7}{s:>7}{s:>7}\n", .{ "", "1", "5", "25", "50", "100" });
+
+    for ([_]Shape{ .mixed, .same }) |shape| {
+        std.debug.print("  {s:<12}", .{@tagName(shape)});
+        for (scale_counts) |n| {
+            std.debug.print("{d:>5}ns", .{try oneScale(gpa, shape, n)});
+        }
+        std.debug.print("\n", .{});
+    }
+}
+
+fn oneScale(gpa: std.mem.Allocator, shape: Shape, n: usize) !u64 {
+    const methods = [_]http1.Method{ .GET, .POST, .PUT, .DELETE };
+    const depths = 3;
+
+    var patterns = try gpa.alloc([]u8, n);
+    defer {
+        for (patterns) |p| gpa.free(p);
+        gpa.free(patterns);
+    }
+
+    var r = router_mod.Router.init(gpa);
+    defer r.deinit();
+
+    for (0..n) |i| {
+        patterns[i] = switch (shape) {
+            .mixed => switch (i % depths) {
+                0 => try std.fmt.allocPrint(gpa, "/thing{d}", .{i}),
+                1 => try std.fmt.allocPrint(gpa, "/thing{d}/:id", .{i}),
+                else => try std.fmt.allocPrint(gpa, "/thing{d}/:id/leaf", .{i}),
+            },
+            .same => try std.fmt.allocPrint(gpa, "/thing{d}/:id/leaf", .{i}),
+        };
+        try r.add(switch (shape) {
+            .mixed => methods[i % methods.len],
+            .same => .GET,
+        }, patterns[i], nothing);
+    }
+
+    // The last route registered, so nothing is captured before the end.
+    const last = n - 1;
+    const wanted = switch (shape) {
+        .mixed => switch (last % depths) {
+            0 => try std.fmt.allocPrint(gpa, "/thing{d}", .{last}),
+            1 => try std.fmt.allocPrint(gpa, "/thing{d}/7", .{last}),
+            else => try std.fmt.allocPrint(gpa, "/thing{d}/7/leaf", .{last}),
+        },
+        .same => try std.fmt.allocPrint(gpa, "/thing{d}/7/leaf", .{last}),
+    };
+    defer gpa.free(wanted);
+    const method = switch (shape) {
+        .mixed => methods[last % methods.len],
+        .same => .GET,
+    };
+
+    for (0..scale_rounds / 4) |_| sink += (r.match(method, wanted) orelse unreachable).n_params;
+    var best: u64 = std.math.maxInt(u64);
+    for (0..reps) |_| {
+        const started = clock();
+        for (0..scale_rounds) |_| sink += (r.match(method, wanted) orelse unreachable).n_params;
+        const took = clock() - started;
+        if (took < best) best = took;
+    }
+    return best / scale_rounds;
+}
+
+fn nothing(_: *ctx_mod.Ctx) anyerror!void {}
 
 fn line(label: []const u8, part: u64, whole: u64) void {
     std.debug.print("  {s:<28}{d:>5}ns {d:>6.1}%\n", .{
