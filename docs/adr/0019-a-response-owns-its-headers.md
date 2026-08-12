@@ -51,6 +51,8 @@ This bug was reachable from the front page of the README, and the suite was gree
 
 `zig build test` now builds and runs the whole suite in `Debug` **and** `ReleaseSafe`, and `-Doptimize=` does not change that. A cold run went from about 7 seconds to about 90 seconds, almost all of it LLVM; a run with nothing changed is still about 6, since Zig caches per module. That is the price of a class of bug that only exists in one of the two modes — and it is the mode people deploy in. `Debug` alone was faster and reported a passing suite for code that could not serve a request in production.
 
+**Amended after the first real measurement.** The rule above is unchanged — both modes, every time, before anything ships. What changed is where "every time" is enforced. Measured on Zig 0.16, a warm suite is **0.8s in `Debug` and 7.8s in both**, so charging the second mode to every local test run was taxing the loop somebody sits in by 10× to catch a bug at the moment it is least likely to have been written yet. `zig build test` is `Debug`; `zig build test-all` is both and is what [CI](../../.github/workflows/ci.yml) runs on every push. The reasoning that put both modes in is why `test-all` exists at all rather than being a flag somebody remembers — what moved is the clock, not the standard. The numbers behind the split are in [`comparison.md`](../comparison.md#build-time-and-binary-size).
+
 ## Consequences
 
 - **`Response.headers` is a breaking change** for anybody who wrote one: `&.{…}` becomes `.of(&.{…})`, and reading them back is `.view()`. There is no deprecation path, because the old spelling still compiles and still crashes.

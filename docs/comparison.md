@@ -6,9 +6,10 @@ servers were written against the same route, verified to return zfast's response
 byte for byte, and run on the same four physical cores with the same load
 generator.
 
-The short version: **zfast is first on throughput and clearly first on tail
-latency, mid-pack on memory per connection, and last on build time.** The two
-places it loses are the ones worth reading.
+The short version: **zfast is first on throughput, clearly first on tail
+latency, mid-pack on memory per connection, and last on release build time
+though not on the build a developer waits for.** The places it loses are the
+ones worth reading.
 
 The harness is [`bench/compare/`](../bench/compare/) — `./build.sh` then
 `python3 drive.py` — so this is a question that can be asked again rather than a
@@ -155,37 +156,77 @@ being asked to.
 
 ## Build time and binary size
 
-| framework | cold build | warm rebuild | binary | stripped |
-|---|---|---|---|---|
-| Node / Bun | — | — | — | — |
-| Go net/http | 3.0s | **0.2s** | 8.3 MB | 5.8 MB |
-| Go Fiber v2 | 4.1s | **0.2s** | 9.7 MB | 6.7 MB |
-| http.zig | 9.9s | 9.3s | 4.2 MB | 0.6 MB |
-| Rust axum | 10.3s | 4.8s | 1.0 MB | 0.8 MB |
-| **zfast** | **15.5s** | **15.0s** | 6.0 MB | 1.1 MB |
+Warm means one source file's **contents** changed — measured by appending a
+line, not by `touch`, because Go and Zig hash file contents and a touch reports
+a fake 0.0s.
 
-Cold means an empty build cache with dependencies already downloaded. Warm means
-one source file's **contents** changed — measured by appending a line, not by
-`touch`, because Go and Zig hash file contents and a touch reports a fake 0.0s.
+The mode matters more than the framework, so both are here. **Dev** is what an
+edit loop costs: `zig build`, `go build`, `cargo build`. **Release** is the
+binary you ship: `-Doptimize=ReleaseFast`, `cargo build --release`, and for Go
+whichever one it has, because Go does not offer the choice.
 
-**zfast has the slowest edit-rebuild loop in the field, by a lot.** 15 seconds
-against Go's 0.2 is 75×, and the audience this framework is written for is
-coming from Go and Node, where a rebuild is not a thing you wait for.
+| framework | warm, dev | warm, release | cold, release | binary | stripped |
+|---|---|---|---|---|---|
+| Node / Bun | — | — | — | — | — |
+| Go net/http | **0.2s** | 0.2s | 3.0s | 8.3 MB | 5.8 MB |
+| Go Fiber v2 | **0.2s** | 0.2s | 4.1s | 9.7 MB | 6.7 MB |
+| Rust axum | **0.2s** | 4.8s | 10.3s | 1.0 MB | 0.8 MB |
+| http.zig | 0.3s | 9.3s | 9.9s | 4.2 MB | 0.6 MB |
+| **zfast** | **0.4s** | **15.0s** | 15.5s | 6.0 MB | 1.1 MB |
 
-Worse than the absolute number is that **warm is not meaningfully cheaper than
-cold** — 15.0s against 15.5s. Changing one line of `src/main.zig` re-does
-essentially the whole build, because the typed layer is comptime and the root
-file is what drives it. http.zig shows the same pattern (9.3s against 9.9s) so
-part of this is Zig, but zfast is 60% slower than http.zig on top of it, and
-`history.md` already recorded `zig build test` going from 6.4s to 15.4s when
-`refusals/` landed.
+**In the loop that a developer actually sits in, zfast is last by 0.2 seconds**
+— 0.4s against Go's 0.2s. That is a difference nobody will feel, and it is the
+column that ADR 0001's "developer experience comes first" is about.
 
-[ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md) says developer
-experience comes first and spends its whole budget on throughput. On the
-evidence here that budget was aimed at the wrong axis: zfast bought a throughput
-win that a user cannot perceive and is paying for it with a wait the user feels
-on every single edit. Nothing in the three-axis budget of ADR 0018 has a row for
-build time, and this table is the argument that it needs one.
+The release column is a real 15 seconds and it is last, but it is worth knowing
+what is in it before deciding to spend anything on it. Building the same
+executable in each mode, warm:
+
+| | |
+|---|---|
+| `zig build` (Debug) | 0.4s |
+| `zig build -Doptimize=ReleaseSmall` | 4.6s |
+| `zig build -Doptimize=ReleaseSafe` | 14.1s |
+| `zig build -Doptimize=ReleaseFast` | 14.9s |
+
+And building progressively less of zfast, warm, in `ReleaseFast`:
+
+| | |
+|---|---|
+| a Zig hello world, no zfast at all | **7.1s** |
+| zfast imported, `App` built, **zero** routes | 14.6s |
+| the same with 32 routes | 16.6s |
+
+**Half of the 15 seconds is a hello world.** Seven of them are what Zig and LLVM
+charge any program at all for a release build, before a line of zfast is
+involved. Another ~7.5s is zfast's library arriving as machine code for LLVM to
+optimise. And the part that looks most expensive — the comptime typed layer,
+one specialised handler generated per route — costs about **59ms per route**:
+32 of them add 2.0s.
+
+So the earlier reading of this, that "the typed layer is comptime and the root
+file drives it", was wrong. Comptime is nearly free here. What is not free is
+LLVM optimising the code that comes out the other side, and most of that bill is
+addressed to Zig rather than to zfast.
+
+The test step is the one place a real choice exists:
+
+| | |
+|---|---|
+| `zig build test`, Debug only | **0.8s** |
+| `zig build test`, Debug and ReleaseSafe (as it ships) | 7.8s |
+| `zig build refusals` | 0.5s |
+
+Running the suite in both modes costs 10× running it in one, and
+[ADR 0019](./adr/0019-a-response-owns-its-headers.md) is the reason it does it:
+a use-after-return passed in `Debug` for a whole stage and only failed in a
+release build. That is a real trade with a real bug behind it, not an
+accident — but it is currently paid on every `zig build test` rather than
+before a commit.
+
+One number in `build.zig` is now stale: the comment there says the refusals
+"never cache" and cost "about 9 seconds on a warm `zig build test`". They cache
+fine on Zig 0.16 and cost 0.5s.
 
 The binary is fine — 1.1 MB stripped, second only to http.zig, and a sixth of
 Go's.
@@ -199,9 +240,9 @@ Go's.
 | CPU per request | 2nd of 9 |
 | Memory, idle server | 2nd of 9 (5.5 MB) |
 | Memory per connection | **7th of 9** |
-| Cold build | **9th of 9** |
-| Warm rebuild | **9th of 9** |
-| Binary size, stripped | 2nd of 9 |
+| Warm rebuild, dev — the edit loop | 5th of 5 compiled, by 0.2s |
+| Warm rebuild, release | **5th of 5 compiled**, and half of it is Zig's floor |
+| Binary size, stripped | 2nd of 5 compiled |
 
 ## What this does not say
 

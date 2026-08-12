@@ -80,7 +80,9 @@ Their line, first, with no flag. Done for all seven verbs on `App` and on `Group
 
 **Binary: nothing.** Measured stripped, `ReleaseFast`: `hello`, `rest` and `orders` are byte-for-byte the size they were. Both pieces are comptime-only — a message that is never produced is a string that never exists.
 
-**Build time: about 9 seconds on every `zig build test`.** A warm suite went from 6.4s to 15.4s. These steps never cache: the compiler does not keep the output of a compilation that failed, so all 39 are re-analysed every run. That is the real price and it is worth naming rather than discovering.
+~~**Build time: about 9 seconds on every `zig build test`.** A warm suite went from 6.4s to 15.4s. These steps never cache: the compiler does not keep the output of a compilation that failed, so all 39 are re-analysed every run. That is the real price and it is worth naming rather than discovering.~~
+
+**Corrected on Zig 0.16: 0.5 seconds, and they do cache.** Measured warm, `zig build refusals` is 0.5s for all 39 — the compiler now keeps enough from a failed compilation to skip re-analysing one that has not changed. The paragraph above was true when it was written and is left visible because the argument it lost is the interesting part: the price was named, accepted, and then went away on its own. Nothing was done to earn that.
 
 It goes on `test` anyway, not on a step of its own. A rule whose enforcement is opt-in is back to being a sentence in a document, and the failure this exists to prevent — a check that quietly stops saying anything useful — is exactly the kind nobody would think to go looking for.
 

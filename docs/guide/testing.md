@@ -112,7 +112,8 @@ None of this is on the request path, and none of it exists in a running server.
 ## Running the suite
 
 ```
-zig build test
+zig build test        # Debug — 0.8s, the one to keep hitting
+zig build test-all    # Debug and ReleaseSafe — 7.8s, before you push
 ```
 
 zfast's own suite runs **in both `Debug` and `ReleaseSafe`**, and `-Doptimize=`
@@ -122,5 +123,11 @@ tests in `Debug` and segfaulted in release, because a stack temporary still hold
 the right bytes until something reuses the stack. A suite that only runs in one
 mode can't see that class of bug at all.
 
+The two modes are split across two steps only so the fast one can be run without
+thinking about it. `test-all` is what CI runs on every push, so nothing reaches
+`main` having been checked in one mode — which is the part that matters, and the
+part that is easy to lose by making it a flag somebody has to remember.
+
 Worth doing the same in your own `build.zig` if you hold anything across a
-handler's return.
+handler's return: the split costs nothing and the second mode is the only thing
+that sees a dangling pointer before your users do.

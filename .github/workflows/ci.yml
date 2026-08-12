@@ -1,0 +1,62 @@
+# The other half of splitting `zig build test`.
+#
+# `test` runs in Debug and takes 0.8s, which is the point of it. `test-all`
+# runs the same suite again in ReleaseSafe, because a lifetime bug passes in
+# Debug and segfaults in the mode people deploy in (ADR 0019). That check used
+# to happen on every local test run and now happens here, so being fast locally
+# does not mean shipping without it.
+#
+# Zig is downloaded and checksummed rather than installed by a third-party
+# action: one fewer thing to trust, and the version is pinned to the same
+# `minimum_zig_version` that build.zig.zon names.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZIG_VERSION: 0.16.0
+  ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Zig's global cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/zig
+          key: zig-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: zig-${{ env.ZIG_VERSION }}-
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        run: |
+          set -euo pipefail
+          url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSL --retry 3 -o zig.tar.xz "$url"
+          echo "${ZIG_SHA256}  zig.tar.xz" | sha256sum -c -
+          mkdir -p "$HOME/zig"
+          tar -xf zig.tar.xz -C "$HOME/zig" --strip-components=1
+          echo "$HOME/zig" >> "$GITHUB_PATH"
+
+      - run: zig version
+
+      # Both modes. This is the job that exists.
+      - name: zig build test-all
+        run: zig build test-all
+
+      # An example that stops compiling is a failed build rather than a
+      # surprise for the first person who copies it.
+      - name: zig build examples
+        run: zig build examples

@@ -236,7 +236,8 @@ commands are the ones that measure something.
 - ~~**Anything to compare against.**~~ *Done* —
   [`comparison.md`](./comparison.md) runs eight other servers through this same
   harness on this same machine. zfast is first on throughput, first-equal on
-  tail latency, seventh of nine on memory per connection, and last on build
-  time.
+  tail latency, seventh of nine on memory per connection, and last on release
+  build time — though its edit loop is 0.4s, which is 0.2s behind Go and not
+  the crisis a release-mode number alone makes it look.
 - **The allocations-per-request invariant**, the second row of ADR 0018's
   budget, which is held by a test rather than by this document.

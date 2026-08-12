@@ -398,3 +398,24 @@ The first set is what an app looks like and the cheap filters throw out nearly e
 **And a hypothesis was tried and was wrong**, which is the other half of what measuring is for. The idea was that "linear" was the wrong thing to blame: rejecting a route reads about ten bytes and a `Route` is seven times that, so the scan looked like it was pulling in cache lines to read four fields. Lifting those four into a packed parallel array made the mixed set 7% faster and the same-shape set 10% slower — a wash, bought with eight bytes per route of duplicated state that `add` has to keep in step. Reverted. The routes are walked in order, the prefetcher was already covering the stride, and what the scan actually spends is compares and the first `mem.eql`.
 
 What survives is the harness. The question is now one command for anyone who wants to ask it again, which is the part that was missing when the answer was "there are no numbers".
+
+## After 0.1.0: a machine turned up, and one of the numbers was about us
+
+The measuring machine the benchmark script had been waiting for since stage 1 finally existed. What it produced is in [`benchmarks.md`](./benchmarks.md) and [`comparison.md`](./comparison.md) — 1.31M req/s, 16,961 bytes per idle connection, first place on throughput against eight other servers and second on the tail. Pleasant, and not the useful part.
+
+**The useful part was being wrong twice in one afternoon, in public, about our own build.**
+
+The first was a measuring mistake and it flattered nobody. The server was pinned to CPUs 0–7 and the load generator to 8–15, which reads like eight cores each. On this machine CPUs 0–7 are the eight physical cores' *first threads* and 8–15 are their SMT siblings, so both halves were sharing all eight cores. Splitting by physical core instead — four whole ones each — made the server **faster on half as many cores**, 1.14M to 1.31M. Every number taken before that was wrong in the same direction.
+
+The second was worse, because it was an accusation. `zig build -Doptimize=ReleaseFast` takes 15 seconds warm, and that got written down as "zfast has the slowest edit-rebuild loop in the field, 75× Go's", with the cause named as the comptime typed layer. Both halves false:
+
+- **`zig build` is `Debug`, and `Debug` is 0.4s.** Nobody's edit loop was ever 15 seconds. The 15 is a release build, which is a thing you do before you ship, not on every save. Against Go's 0.2s in the same loop, zfast is behind by two tenths of a second.
+- **Comptime is nearly free.** Measured by building progressively less of zfast in `ReleaseFast`: a Zig hello world with no zfast at all is **7.1s**, zfast with zero routes is 14.6s, and thirty-two routes is 16.6s. So half the release build is Zig's own floor, ~7.5s is zfast's library arriving as machine code for LLVM to chew, and the thing that looked most expensive — one specialised handler generated per route — costs **59ms each**.
+
+The general lesson is the one [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md) keeps needing: a number is not a finding until you know what is in it. "15 seconds" was measured correctly and meant something entirely different from what it was used to argue.
+
+**What actually changed.** One real choice existed and it was in the test step. A warm suite is 0.8s in `Debug` and 7.8s in both modes, so [ADR 0019](./adr/0019-a-response-owns-its-headers.md)'s both-modes rule — which exists because a use-after-return passed 175 tests in `Debug` and segfaulted in release — was charging 10× to the loop somebody sits in. `zig build test` is now `Debug` and `zig build test-all` is both, with CI running `test-all` on every push. The standard did not move; the clock did. The repo had no CI at all before this, so the split came with the thing that makes it safe rather than after it.
+
+And one price named in an ADR turned out to have quietly stopped being real: [ADR 0027](./adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md) recorded the 39 refusals as "about 9 seconds on every `zig build test`" that "never cache". On Zig 0.16 they cache, and they are 0.5s. Nothing was done to earn that, which is exactly why it needed checking.
+
+**What was left alone.** Memory per idle connection is 16,961 bytes and seventh of nine — http.zig holds a connection in 11.2 KB, Bun in 338 bytes. zfast is the leaner one below about a thousand connections and is not above it, so the README's "low memory" needs the qualifier or the number needs to come down. Not fixed here, and written down rather than left to be discovered, which is the only part of that sentence this project has earned yet.

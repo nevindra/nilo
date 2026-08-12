@@ -175,13 +175,20 @@ const refusals = [_]Refusal{
 
 const Refusal = struct { name: []const u8, says: []const u8 };
 
-/// The suite runs in both, every time, and `-Doptimize=` does not change it.
-/// A lifetime bug passes in `Debug` — where the bytes a dangling pointer
-/// points at happen to still be there — and segfaults in a release build,
-/// which is the mode the README tells people to deploy in. That is not a
-/// hypothetical: `Response.headers` got away with a use-after-return for a
-/// whole stage because nothing here ever built the tests any other way
+/// The suite runs in both modes, and `-Doptimize=` does not change that — a
+/// lifetime bug passes in `Debug`, where the bytes a dangling pointer points at
+/// happen to still be there, and segfaults in a release build, which is the
+/// mode the README tells people to deploy in. Not a hypothetical:
+/// `Response.headers` got away with a use-after-return for a whole stage
+/// because nothing here ever built the tests any other way
 /// ([ADR 0019](docs/adr/0019-a-response-owns-its-headers.md)).
+///
+/// What changed is *when* the second mode is paid for. Measured on Zig 0.16, a
+/// warm suite is 0.8s in `Debug` and 7.8s in both, so both-modes-every-time was
+/// charging 10× to the loop somebody sits in. `test` is now the loop and
+/// `test-all` is the gate; CI runs `test-all` on every push, so the rule is
+/// still held by something other than remembering.
+const loop_mode: std.builtin.OptimizeMode = .Debug;
 const test_modes = [_]std.builtin.OptimizeMode{ .Debug, .ReleaseSafe };
 
 pub fn build(b: *std.Build) void {
@@ -231,8 +238,17 @@ pub fn build(b: *std.Build) void {
     });
     b.step("profile", "Time the pieces of one request").dependOn(&b.addRunArtifact(profile).step);
 
-    const test_step = b.step("test", "Run all tests, in Debug and in ReleaseSafe");
+    // `test` is the loop: Debug, plus the refusals, which are cheap. `test-all`
+    // is everything `test` does and the same suite again in ReleaseSafe. Both
+    // exist because the second mode catches a class of bug the first cannot,
+    // and CI runs `test-all` so that staying fast locally does not mean
+    // shipping without it.
+    const test_step = b.step("test", "Run the tests in Debug — the fast loop");
+    const test_all_step = b.step("test-all", "Run the tests in Debug and ReleaseSafe — what CI runs");
+    test_all_step.dependOn(test_step);
+
     for (test_modes) |mode| {
+        const step = if (mode == loop_mode) test_step else test_all_step;
         // Each mode needs its own copy of everything, down to zio: a module
         // carries the optimize mode it was created with.
         const engine = b.dependency("zio", .{ .target = target, .optimize = mode });
@@ -264,7 +280,7 @@ pub fn build(b: *std.Build) void {
 
         for ([_]*std.Build.Module{ lib_tests, bench_tests }) |module| {
             const tests = b.addTest(.{ .root_module = module });
-            test_step.dependOn(&b.addRunArtifact(tests).step);
+            step.dependOn(&b.addRunArtifact(tests).step);
         }
 
         // The examples carry the tests the README promises are possible, so
@@ -277,7 +293,7 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{.{ .name = "zfast", .module = library }},
             });
             const tests = b.addTest(.{ .root_module = module });
-            test_step.dependOn(&b.addRunArtifact(tests).step);
+            step.dependOn(&b.addRunArtifact(tests).step);
         }
     }
 
@@ -289,10 +305,13 @@ pub fn build(b: *std.Build) void {
     // library cannot be written down as passing, only fixed or deleted
     // ([ADR 0027](docs/adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)).
     //
-    // These never cache: the compiler keeps nothing from a compilation that
-    // failed, so all of them are re-analysed on every run. That is about 9
-    // seconds on a warm `zig build test`, and it is on `test` anyway —
-    // enforcement that has to be asked for is a sentence in a document again.
+    // This used to say the refusals never cache, because the compiler keeps
+    // nothing from a compilation that failed, and cost about 9 seconds on every
+    // warm `zig build test`. Zig 0.16 caches them: measured warm, all 39 are
+    // 0.5s. The note stays because the number is what put them on `test` rather
+    // than on a step of their own, and it is no longer an argument that has to
+    // be won — enforcement that has to be asked for is a sentence in a document
+    // again, and now it is nearly free as well.
     const refusals_step = b.step("refusals", "Check that each mistake stops in zfast's own words");
     for (refusals) |refusal| {
         const module = b.createModule(.{
