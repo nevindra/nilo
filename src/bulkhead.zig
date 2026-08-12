@@ -40,6 +40,7 @@
 //! which Engine is behind them.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const engine = @import("engine/zio.zig");
 
@@ -128,6 +129,60 @@ pub const unbindSlot = engine.unbindSlot;
 pub const monotonicNanos = engine.monotonicNanos;
 pub const Mutex = engine.Mutex;
 pub const sleep = engine.sleep;
+
+// ---- idle connections give their pages back ----
+
+/// Hand the physical pages behind a connection's buffers back to the kernel
+/// while it waits for the next request.
+///
+/// A keep-alive connection is allocated its read and write buffers once and
+/// holds them until it closes, so every page it has ever touched stays
+/// resident for as long as the client keeps the connection open. Measured: a
+/// connection that has never been used costs 8,766 bytes, one that has served
+/// a 6-byte response costs 16,955, and one that has served a 982-byte response
+/// costs 21,114. The difference is buffer pages doing nothing.
+///
+/// The allocation itself stays, which is the point. Nothing here allocates or
+/// frees, so ADR 0018's per-request allocation invariant is untouched, and the
+/// buffer is still exactly as big as it was — the next request faults the pages
+/// back in as zeroes, which is all a buffer about to be overwritten needs to
+/// be. What it costs is one syscall per idle transition and a fault per page
+/// on the way back, which is why the caller only does this when the connection
+/// is actually about to wait.
+///
+/// Does nothing unless both buffers are empty. A pipelined request already
+/// sitting in the read buffer is live data, and so is a response that has not
+/// been flushed; discarding either would be a corrupted connection rather than
+/// a smaller one.
+pub fn releaseIdlePages(in: *std.Io.Reader, out: *std.Io.Writer) void {
+    if (in.seek != in.end) return;
+    if (out.end != 0) return;
+    dontNeed(in.buffer);
+    dontNeed(out.buffer);
+}
+
+/// `MADV_DONTNEED` over whatever whole pages the slice covers.
+///
+/// Aligned inward rather than outward: a partial page at either end may be
+/// shared with somebody else's allocation, and zeroing that would be a bug of
+/// the worst kind — silent, rare, and in another module. The engine allocates
+/// these buffers page-aligned so that in practice nothing is trimmed.
+///
+/// Nothing happens off POSIX. Windows has `DiscardVirtualMemory` for the same
+/// job and it is not wired up here, so a Windows build keeps the pages and the
+/// old numbers — which is the behaviour that shipped, not a new fault.
+fn dontNeed(buf: []u8) void {
+    if (builtin.os.tag == .windows) return;
+    if (buf.len == 0) return;
+    const page = std.heap.pageSize();
+    const start = std.mem.alignForward(usize, @intFromPtr(buf.ptr), page);
+    const end = std.mem.alignBackward(usize, @intFromPtr(buf.ptr) + buf.len, page);
+    if (end <= start) return;
+    const ptr: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(start);
+    // A failure here means the pages stay resident, which is where they were
+    // anyway. There is nothing to report and nothing to do about it.
+    std.posix.madvise(ptr, end - start, std.posix.MADV.DONTNEED) catch {};
+}
 
 // ---- deadlines (ADR 0023) ----
 
@@ -226,6 +281,16 @@ pub const Deadlines = struct {
     /// client has nothing to say for an hour is working correctly.
     pub fn readForever(self: Deadlines) void {
         self.set(.read, .none);
+    }
+
+    /// A deliberately short read limit, used to find out whether a connection
+    /// is about to be idle rather than to enforce anything.
+    ///
+    /// Running out of time here is not an error and does not end the
+    /// connection: it is the answer to "is the next request already on its
+    /// way?", and the caller arms the real idle limit straight afterwards.
+    pub fn armPeek(self: Deadlines, ms: u32) void {
+        self.set(.read, .{ .within_ms = ms });
     }
 
     /// Whether the last read or write failed because it ran out of time,

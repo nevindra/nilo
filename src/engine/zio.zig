@@ -390,6 +390,16 @@ pub fn serve(
 
     std.log.info("zfast listening on {f} across {d} thread(s)", .{ server.socket.address, threads });
 
+    // A buffer that starts on a page boundary and ends on one, so every page
+    // of it belongs to this connection alone and can be given back.
+    const alignedPages = struct {
+        fn f(buf_gpa: std.mem.Allocator, want: usize) ![]align(std.heap.page_size_min) u8 {
+            const page = std.heap.pageSize();
+            const rounded = std.mem.alignForward(usize, @max(want, 1), page);
+            return buf_gpa.alignedAlloc(u8, .fromByteUnits(std.heap.page_size_min), rounded);
+        }
+    }.f;
+
     const Conn = struct {
         fn run(st: State, stream: zio.net.Stream, conn_gpa: std.mem.Allocator, sizes: Options) void {
             defer stream.close();
@@ -401,9 +411,17 @@ pub fn serve(
             // Allocated rather than put on the fiber stack, so the sizes can
             // be an option instead of a constant. Twice per connection, not
             // per request — next to a connection's lifetime it is nothing.
-            const read_buf = conn_gpa.alloc(u8, sizes.read_buffer) catch return;
+            //
+            // Page-aligned, and rounded up to whole pages, so that
+            // `bulkhead.releaseIdlePages` can hand every page back while the
+            // connection sits idle. Unaligned, the first and last page of each
+            // buffer might be shared with another allocation and would have to
+            // be left alone — on an 8 KB buffer that is most of the saving. The
+            // rounding costs at most a page per buffer of address space, and
+            // the page it rounds up to is never touched.
+            const read_buf = alignedPages(conn_gpa, sizes.read_buffer) catch return;
             defer conn_gpa.free(read_buf);
-            const write_buf = conn_gpa.alloc(u8, sizes.write_buffer) catch return;
+            const write_buf = alignedPages(conn_gpa, sizes.write_buffer) catch return;
             defer conn_gpa.free(write_buf);
 
             var reader = stream.reader(read_buf);

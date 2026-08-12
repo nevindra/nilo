@@ -558,6 +558,19 @@ pub const App = struct {
         defer bulkhead.unbindSlot(&binding);
 
         while (true) {
+            // Find out whether this connection is going quiet before deciding
+            // to give its pages back.
+            //
+            // Doing it unconditionally costs more than it saves: on a busy
+            // keep-alive connection the next request is already arriving, so
+            // every cycle pays an madvise and faults the same pages straight
+            // back in — measured at 1.31M req/s down to 626k, a 52% loss,
+            // because MADV_DONTNEED in a process with eight threads shoots
+            // down TLB entries on all of them. So the pages only go once a
+            // short read has come back empty, which a connection under load
+            // never sees and a browser tab between clicks always does.
+            waitOrRelease(in, out, deadlines);
+
             // Waiting for the next request to start is the idle limit, not
             // the header one. Re-armed every time round: a connection that
             // has just served a request is idle again from now, not from
@@ -576,6 +589,34 @@ pub const App = struct {
             _ = arena.reset(.{ .retain_with_limit = arena_keep });
             if (!keep_going) return;
         }
+    }
+
+    /// How long a connection has to produce its next request before its
+    /// buffers are handed back to the kernel.
+    ///
+    /// Long enough that nothing serving back-to-back requests ever reaches it,
+    /// short enough that a connection a person is behind reaches it between
+    /// almost any two clicks. It is not a timeout: running out of it costs a
+    /// syscall and some page faults on the next request, not the connection.
+    const idle_peek_ms = 200;
+
+    /// Give the client `idle_peek_ms` to say something. If it does, this is a
+    /// busy connection and nothing else happens — the bytes stay buffered and
+    /// the request that follows reads them. If it does not, the connection is
+    /// idle and its buffers are worth more to the kernel than to us.
+    ///
+    /// Every error is swallowed: a broken connection is `handleRequest`'s to
+    /// diagnose and report, and it will meet the same failure one call later
+    /// with all the machinery for saying so.
+    fn waitOrRelease(in: *std.Io.Reader, out: *std.Io.Writer, deadlines: bulkhead.Deadlines) void {
+        // Already holding a pipelined request: not idle, and the buffer is
+        // live data that must not be discarded.
+        if (in.seek != in.end) return;
+
+        deadlines.armPeek(idle_peek_ms);
+        in.fillMore() catch {
+            if (deadlines.timedOut()) bulkhead.releaseIdlePages(in, out);
+        };
     }
 
     /// Handle exactly one request from `in`, writing the answer to `out`.

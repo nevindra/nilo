@@ -7,9 +7,10 @@ byte for byte, and run on the same four physical cores with the same load
 generator.
 
 The short version: **zfast is first on throughput, clearly first on tail
-latency, mid-pack on memory per connection, and last on release build time
-though not on the build a developer waits for.** The places it loses are the
-ones worth reading.
+latency, third on memory per connection, and last on release build time though
+not on the build a developer waits for.** The places it loses are the ones worth
+reading — and the memory row only reads that way because measuring it the first
+time put it seventh and got the code changed.
 
 The harness is [`bench/compare/`](../bench/compare/) — `./build.sh` then
 `python3 drive.py` — so this is a question that can be asked again rather than a
@@ -102,51 +103,56 @@ about: the budget's first row is "throughput **and** p99", not throughput.
 
 ## Memory per idle connection
 
-Here zfast does not win, and the shape of the loss is worth more than the
-throughput win.
+This is the measurement that changed the code. As first measured, zfast was
+**seventh of nine** at 16,961 bytes — http.zig held a connection in two thirds
+of that, Bun in a fiftieth. Chasing why turned up something the number was
+hiding, and the fix is described in
+[`benchmarks.md`](./benchmarks.md#giving-the-pages-back): a keep-alive
+connection was holding every page its buffers had ever touched, and now hands
+them back between requests. zfast's row below is re-measured through the same
+harness afterwards; nothing else moved.
 
 | framework | B per idle connection | baseline RSS |
 |---|---|---|
 | Bun.serve ×8 | 338 | 257.6 MB |
 | Bun.serve ×1 | 700 | 32.7 MB |
+| **zfast** | **8,767** | **5.5 MB** |
 | Node http ×1 | 10,543 | 48.5 MB |
 | Node cluster ×8 | 10,594 | 440.5 MB |
 | http.zig | 11,218 | 11.5 MB (caps at 8,192 connections) |
 | Go Fiber v2 | 16,534 | 7.9 MB |
-| **zfast** | **16,961** | **5.5 MB** |
 | Rust axum | 19,259 | 3.6 MB |
 | Go net/http | 19,897 | 7.7 MB |
 
-zfast is **seventh of nine** on the per-connection number. http.zig holds a
-connection in two thirds of what zfast uses; Bun holds one in a fiftieth.
+**Third of nine**, and the lowest of anything that is not Bun. What is left is
+two pages of fiber stack and about 574 bytes of bookkeeping, paid the moment
+`accept` returns and belonging to zio rather than to zfast.
 
-The reason is architectural rather than sloppy: zfast gives every connection its
-buffers up front, which is exactly what makes the number so flat — the marginal
-cost is within 17 bytes of the average from 500 connections to 10,000, and that
-predictability is what
-[ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md) is really asking for.
-Bun's uSockets allocates lazily and pays instead with a 33 MB floor. Both are
-defensible. They are not the same claim.
+The flatness is the part that has not changed and is worth as much as the level:
+marginal cost is within 20 bytes of average from 1,000 connections to 10,000.
+Nothing steps and no pool doubles in the background, which is what makes the
+figure safe to multiply and what
+[ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md)'s third row is really
+asking for. Bun gets to a smaller number a different way — uSockets allocates
+lazily and pays with a 33 MB floor per process, 258 MB across eight.
 
-Because zfast has the second-lowest baseline and a mid-pack slope, whether it is
-the leaner choice depends entirely on how many connections you hold:
+Which framework is leaner still depends on how many connections are held, but
+the crossings have moved a long way:
 
-| against | zfast uses less below | and more above |
-|---|---|---|
-| Rust axum | — | 882 connections |
-| http.zig | 1,083 connections | — |
-| Bun.serve ×1 | 1,752 connections | — |
-| Go Fiber v2 | 5,797 connections | — |
-| Node http ×1 | 7,018 connections | — |
-| Bun.serve ×8 | 15,897 connections | — |
-| Go net/http | every count measured | — |
+| against | |
+|---|---|
+| Rust axum | axum below 193 connections, zfast above |
+| Bun.serve ×1 | zfast below 3,532 connections |
+| Bun.serve ×8 | zfast below 31,352 connections |
+| http.zig, Go Fiber, Go net/http, both Node rows | zfast lower at every count |
 
-**What this means for the README.** "Low memory" is currently stated without a
-number. With one, it is true of an idle server and true of a few thousand
-connections, and it stops being true against http.zig at about a thousand and
-against Bun at about seventeen hundred. The claim needs the qualifier or the
-16 KB needs to come down — most plausibly by not handing a connection its write
-buffer until it has something to write.
+**What this means for the README.** "Low memory" was stated without a number and
+would not have survived being given one. It survives 8,767: an idle server is
+5.5 MB, ten thousand held connections are 91 MB, and every server here except
+Bun is beaten at every count measured. The honest qualifier that remains is that
+a connection which has served a large response holds a page of retained request
+arena on top — 12,940 bytes rather than 8,762 — and that Bun is still an order
+of magnitude below on the per-connection number alone.
 
 One more thing this measurement turned up: **http.zig stops accepting at 8,192
 connections** and does not refuse them, it just stops answering. That is
@@ -239,7 +245,7 @@ Go's.
 | p99 under equal load | **2nd of 9**, and 3–45× ahead of everything outside the top two |
 | CPU per request | 2nd of 9 |
 | Memory, idle server | 2nd of 9 (5.5 MB) |
-| Memory per connection | **7th of 9** |
+| Memory per connection | 3rd of 9 — was 7th before the fix this measurement caused |
 | Warm rebuild, dev — the edit loop | 5th of 5 compiled, by 0.2s |
 | Warm rebuild, release | **5th of 5 compiled**, and half of it is Zig's floor |
 | Binary size, stripped | 2nd of 5 compiled |

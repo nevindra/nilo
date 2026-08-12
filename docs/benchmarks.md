@@ -198,8 +198,69 @@ increase. Nothing steps, nothing compounds, no pool doubles in the background �
 which is what makes the figure safe to extrapolate from at all. 10,000 idle
 connections cost 171 MB; 100,000 would cost about 1.7 GB.
 
-The number is 16 KiB of buffers plus about 570 bytes of bookkeeping, which is a
-figure a deployment can multiply. An idle server is 5.6 MB.
+An idle server is 5.6 MB.
+
+### That number was not a property of a connection
+
+The first reading of it was "16 KiB of buffers plus about 570 bytes of
+bookkeeping". That is wrong in a way worth keeping, because the arithmetic
+worked and the explanation did not.
+
+`VmRSS` counts pages that have been *touched*, not bytes that have been
+allocated, so what a connection costs depends on what it has done. Measured
+three ways at the shipped 8 KB / 4 KB buffers, 4,000 connections each:
+
+| the connection has | bytes of RSS |
+|---|---|
+| been accepted and never sent a byte | **8,766** |
+| served one 6-byte response | 16,955 |
+| served one 982-byte response | **21,114** |
+
+So the table above, which used `GET /health`, understates a real application by
+about a quarter. And raising the buffers changes nothing at all: at 16 KB / 8 KB
+and again at 32 KB / 16 KB the cost stays 16,955, because the extra pages are
+allocated and never touched. Lowering them does help, roughly a byte per byte,
+until the touched pages run out.
+
+The 8,766 that a never-used connection costs is two pages of fiber stack plus
+about 574 bytes of connection bookkeeping. That part is zio's, and is paid the
+moment `accept` returns. Everything above it is buffer pages that a connection
+touched once and then held for as long as the client kept the socket open.
+
+### Giving the pages back
+
+Which is a thing that can be fixed, and now is. Between requests — once a short
+read has come back empty, so a connection under load never reaches it —
+`MADV_DONTNEED` hands both buffers' pages back to the kernel. The allocation
+stays, so nothing here allocates and ADR 0018's per-request invariant is
+untouched; the next request faults the pages in again as zeroes, which is all a
+buffer about to be overwritten needs to be.
+
+| | before | after |
+|---|---|---|
+| accepted, never used | 8,766 | 8,763 |
+| served one 6-byte response | 16,955 | **8,762** |
+| served one 982-byte response | 21,114 | **12,940** |
+| 10,000 idle connections | 171 MB | **91 MB** |
+| throughput | 1,314,275 req/s | 1,314,031 req/s |
+| p99 | ~90µs | 66µs |
+
+A connection that has served a small response now costs what one that has never
+been used costs. Re-measured through the same harness as the table above, the
+per-connection figure is **8,767 bytes** and just as flat — 8,749 at 1,000
+connections against 8,769 at 10,000.
+
+The gate is the whole design. Releasing on every trip round the loop, which was
+the first attempt, took throughput from 1.31M to **626k** — a 52% loss, because
+`MADV_DONTNEED` in a process with eight threads shoots down TLB entries on all
+of them, and a busy keep-alive connection was paying that on every single
+request to free pages it needed back microseconds later. Waiting 200ms first
+costs a connection under load nothing, because it never gets there.
+
+What is left above the floor for a real response is the request arena, which
+retains up to `arena_keep` and so holds a page on any connection that has served
+something. That is a deliberate trade for not reallocating per request, and it
+is the next thing to look at rather than a defect.
 
 ## Reproducing this
 
