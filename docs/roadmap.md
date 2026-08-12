@@ -13,10 +13,14 @@ In order.
    outbox with its own lock rather than a loop over a list
    ([ADR 0022](./adr/0022-a-websocket-is-a-handler-that-does-not-return.md)).
    Phoenix Channels is the shape, and it is a project rather than a function.
-2. **Somewhere honest to measure.** Until there is a machine nobody else is
-   using, [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md) is not
-   active and every conflict goes to DX. `bench/bench.sh` has been in the repo
-   since the first stage so that when the machine turns up it is one command away.
+2. ~~**Somewhere honest to measure.**~~ *Done, and it changed two of our own
+   numbers.* [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md)'s
+   10% rule is active: [`benchmarks.md`](./benchmarks.md) is zfast alone and
+   [`comparison.md`](./comparison.md) is eight other servers through the same
+   harness. What it cost to get right is in
+   [`history.md`](./history.md) — an SMT core split that had both halves on the
+   same eight cores, and a release build blamed on comptime when half of it was
+   debug info. `bench/compare/` is the harness; `drive.py` runs it.
 3. **Reloading static files without a restart.** A development annoyance rather
    than a design hole: a deploy restarts anyway. Wants a watch option.
 4. **`sendfile`, and serving a file too big to hold in memory.** This is the part
@@ -143,8 +147,11 @@ Not "later" — decided against, with the reasoning written down.
   nothing to build ([ADR 0008](./adr/0008-no-recover-middleware.md)).
 - **Auth contents.** The mechanism is provided — middleware, resolved values —
   and the policy is yours.
-- **Benchmark claims without a benchmark machine.** No numbers in the README
-  until there is somewhere honest to measure
+- **Benchmark claims without a benchmark machine.** The condition has since been
+  met, so the README carries numbers — but the rule it was protecting still
+  holds, and the README states the caveats in the same breath as the figures:
+  what the throughput number does *not* mean, and that a handler touching a
+  database flattens the whole comparison
   ([ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md)).
 
 ## Not decided

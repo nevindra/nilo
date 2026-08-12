@@ -7,8 +7,9 @@ An HTTP framework for Zig, aimed at people coming from Go or Node.
 > document, streamed responses and server-sent events, large request bodies,
 > range requests, and WebSocket. Needs Zig 0.16.
 >
-> Not benchmarked on a quiet machine yet, so there are no performance claims
-> here. `zfast` is a working name and may change before 1.0.
+> Measured, at last, on a machine nobody else was using — the numbers and what
+> is in them are at the bottom of this page. `zfast` is a working name and may
+> change before 1.0.
 
 ```zig
 const zfast = @import("zfast");
@@ -157,7 +158,8 @@ That trade has a budget, and it isn't one number
 
 Throughput is elastic and the bottom two aren't: an extra allocation isn't 10%
 slower on average, it's fine a million times and then it's the tail. Those two
-rows are what lets zfast say "low memory" at all.
+rows are what lets zfast say "low memory" at all, and they now read 1 allocation
+and 8,767 bytes.
 
 Where the design is borrowed from — FastAPI for the signature, Elysia for
 resolved values and plugins, nginx and TigerBeetle for the memory discipline,
@@ -169,4 +171,30 @@ compilation stops with a sentence naming your route, your argument and the fix;
 [`refusals/`](./refusals/) is 39 programs written wrong on purpose that keep it
 that way ([ADR 0027](./docs/adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)).
 
-There are no benchmark numbers yet, so there are no performance claims here.
+## Measured
+
+One quiet machine, four physical cores, loopback, a routed `GET` with a path
+param returning ~1 KB of JSON. The method, and everything it does not cover, is
+in [`docs/benchmarks.md`](./docs/benchmarks.md); eight other servers through the
+same harness are in [`docs/comparison.md`](./docs/comparison.md).
+
+| | |
+|---|---|
+| Throughput | 1,456,636 req/s |
+| p99 | 57µs |
+| Memory per idle connection | 8,767 bytes, flat from 1,000 to 10,000 |
+| Idle server | 5.4 MB |
+| Allocations per request | 1 — the JSON body; a POST with a body pays more |
+
+**The throughput number is the least useful one here.** zfast's own code is
+about 4% of a request's CPU and the rest is `epoll`, `recv`, `send` and the TCP
+path — so at this payload the top of that comparison is five servers making the
+same syscalls and landing in the same place. The honest reading is that zfast is
+*in* the fastest group, not ahead of it.
+
+The two worth anything are the flat 8,767 and the single allocation, because
+they are properties of the design rather than of the machine, and they are what
+the invariants above exist to keep.
+
+And a handler that touches a database makes every row of that comparison
+identical to everybody else's.
