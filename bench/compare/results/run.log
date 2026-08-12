@@ -1,0 +1,111 @@
+
+===== zfast =====
+  payload verified: 982 bytes body, 1110 bytes on the wire
+  processes=1 threads=8
+     1,401,412 req/s   p50  36.00us  p90  46.00us  p99  69.00us
+  runs: 1,368,727, 1,401,412, 1,427,563
+  server CPU 641%   4573 ns CPU/req
+  idle baseline: 5,672 kB
+    1000 idle conns:    22,220 kB  avg   16,945  marginal   16,945 B/conn
+    2000 idle conns:    38,780 kB  avg   16,951  marginal   16,957 B/conn
+    5000 idle conns:    88,472 kB  avg   16,957  marginal   16,962 B/conn
+   10000 idle conns:   171,288 kB  avg   16,959  marginal   16,961 B/conn
+
+===== Go net/http =====
+  payload verified: 982 bytes body, 1123 bytes on the wire
+  processes=1 threads=6
+       651,458 req/s   p50  79.00us  p90 289.00us  p99 652.00us
+  runs: 650,224, 651,458, 672,275
+  server CPU 717%   11008 ns CPU/req
+  idle baseline: 7,868 kB
+    1000 idle conns:    28,828 kB  avg   21,463  marginal   21,463 B/conn
+    2000 idle conns:    47,928 kB  avg   20,511  marginal   19,558 B/conn
+    5000 idle conns:   106,664 kB  avg   20,233  marginal   20,049 B/conn
+   10000 idle conns:   203,816 kB  avg   20,065  marginal   19,897 B/conn
+
+===== Go Fiber v2 =====
+  payload verified: 982 bytes body, 1123 bytes on the wire
+  processes=1 threads=6
+     1,100,151 req/s   p50  45.00us  p90 125.00us  p99 763.00us
+  runs: 1,058,989, 1,100,151, 1,103,494
+  server CPU 753%   6841 ns CPU/req
+  idle baseline: 8,088 kB
+    1000 idle conns:    26,300 kB  avg   18,649  marginal   18,649 B/conn
+    2000 idle conns:    42,464 kB  avg   17,601  marginal   16,552 B/conn
+    5000 idle conns:    90,720 kB  avg   16,923  marginal   16,471 B/conn
+   10000 idle conns:   171,452 kB  avg   16,728  marginal   16,534 B/conn
+
+===== http.zig =====
+  payload verified: 982 bytes body, 1099 bytes on the wire
+  processes=1 threads=34
+     1,389,678 req/s   p50  38.00us  p90  51.00us  p99  65.00us
+  runs: 1,345,416, 1,389,678, 1,399,273
+  server CPU 606%   4361 ns CPU/req
+  !! stopped accepting at 8,192 connections
+  idle baseline: 11,744 kB
+    1000 idle conns:    22,648 kB  avg   11,166  marginal   11,166 B/conn
+    2000 idle conns:    33,612 kB  avg   11,196  marginal   11,227 B/conn
+    5000 idle conns:    66,424 kB  avg   11,198  marginal   11,200 B/conn
+    8192 idle conns:   101,392 kB  avg   11,206  marginal   11,218 B/conn
+
+===== Rust axum =====
+  payload verified: 982 bytes body, 1123 bytes on the wire
+  processes=1 threads=9
+     1,197,545 req/s   p50  46.00us  p90  65.00us  p99 226.00us
+  runs: 1,176,326, 1,197,545, 1,225,676
+  server CPU 695%   5803 ns CPU/req
+  idle baseline: 3,692 kB
+    1000 idle conns:    22,520 kB  avg   19,280  marginal   19,280 B/conn
+    2000 idle conns:    41,336 kB  avg   19,274  marginal   19,268 B/conn
+    5000 idle conns:    97,772 kB  avg   19,268  marginal   19,263 B/conn
+   10000 idle conns:   191,812 kB  avg   19,263  marginal   19,259 B/conn
+
+===== Node http (1 thread, default) =====
+  payload verified: 982 bytes body, 1171 bytes on the wire
+  processes=1 threads=7
+       141,271 req/s   p50 446.00us  p90 460.00us  p99 663.00us
+  runs: 140,057, 141,271, 141,756
+  server CPU 100%   7096 ns CPU/req
+  idle baseline: 49,656 kB
+    1000 idle conns:    82,180 kB  avg   33,305  marginal   33,305 B/conn
+    2000 idle conns:    92,636 kB  avg   22,006  marginal   10,707 B/conn
+    5000 idle conns:   129,492 kB  avg   16,350  marginal   12,580 B/conn
+   10000 idle conns:   180,972 kB  avg   13,447  marginal   10,543 B/conn
+
+===== Node http (cluster, 8 workers) =====
+  payload verified: 982 bytes body, 1171 bytes on the wire
+  processes=9 threads=63
+       698,643 req/s   p50  90.00us  p90 137.00us  p99 260.00us
+  runs: 696,308, 698,643, 703,226
+  server CPU 796%   11393 ns CPU/req
+  idle baseline: 451,036 kB
+    1000 idle conns:   494,448 kB  avg   44,454  marginal   44,454 B/conn
+    2000 idle conns:   513,576 kB  avg   32,020  marginal   19,587 B/conn
+    5000 idle conns:   666,328 kB  avg   44,092  marginal   52,139 B/conn
+   10000 idle conns:   718,056 kB  avg   27,343  marginal   10,594 B/conn
+
+===== Bun.serve (1 process, default) =====
+  payload verified: 982 bytes body, 1123 bytes on the wire
+  processes=1 threads=9
+       269,284 req/s   p50 231.00us  p90 250.00us  p99 389.00us
+  runs: 268,679, 269,284, 270,614
+  server CPU 104%   3879 ns CPU/req
+  idle baseline: 33,488 kB
+    1000 idle conns:    38,272 kB  avg    4,899  marginal    4,899 B/conn
+    2000 idle conns:    38,628 kB  avg    2,632  marginal      365 B/conn
+    5000 idle conns:    39,204 kB  avg    1,171  marginal      197 B/conn
+   10000 idle conns:    42,624 kB  avg      936  marginal      700 B/conn
+
+===== Bun.serve (8 processes, reusePort) =====
+  payload verified: 982 bytes body, 1123 bytes on the wire
+  processes=8 threads=72
+     1,170,614 req/s   p50  42.00us  p90 104.00us  p99   3.12ms
+  runs: 1,169,868, 1,170,614, 1,179,370
+  server CPU 732%   6255 ns CPU/req
+  idle baseline: 263,732 kB
+    1000 idle conns:   298,248 kB  avg   35,344  marginal   35,344 B/conn
+    2000 idle conns:   298,584 kB  avg   17,844  marginal      344 B/conn
+    5000 idle conns:   297,784 kB  avg    6,974  marginal     -273 B/conn
+   10000 idle conns:   299,436 kB  avg    3,656  marginal      338 B/conn
+
+wrote results/raw.json

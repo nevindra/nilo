@@ -1,0 +1,7 @@
+# Build output. The sources are the harness; the binaries are not.
+__pycache__/
+.gocache/
+gonet/gonet-bench
+gofiber/gofiber-bench
+rustaxum/target/
+node_modules/
