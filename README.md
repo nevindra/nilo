@@ -79,15 +79,21 @@ what each line is for: [Getting started](./docs/guide/getting-started.md).
 
 ## Examples
 
-Five runnable ones live in [`examples/`](./examples/):
+Six runnable ones live in [`examples/`](./examples/):
 
 ```
 zig build run-hello    # the smallest thing that serves
 zig build run-rest     # a service, JSON in and out, query params, auth middleware
+zig build run-orders   # the same ideas on a domain that is not one flat struct
 zig build run-spa      # a single-page app's files next to its API
 zig build run-stream   # a streamed report, an event stream, an upload
 zig build run-chat     # a WebSocket, browser page included
 ```
+
+`rest` is the one to read first. `orders` is the one that answers "yes, but what
+about…": resources inside resources, a body with structs and lists inside it, a
+state machine that answers 409, an upsert whose status is not known until it
+runs, and a service that owns everything it was handed.
 
 ## Documentation
 
@@ -132,8 +138,8 @@ it is rather than how to use it:
 
 Absent: TLS, sessions, templates, `sendfile`, `permessage-deflate`, and
 broadcasting to WebSockets a handler doesn't hold. Each with its reason in
-[`docs/roadmap.md`](./docs/roadmap.md); the ones that are refusals rather than
-backlog are in [`docs/adr/`](./docs/adr/).
+[`docs/roadmap.md`](./docs/roadmap.md); the ones decided against rather than
+queued up are in [`docs/adr/`](./docs/adr/).
 
 ## Principles
 
@@ -157,5 +163,10 @@ Where the design is borrowed from — FastAPI for the signature, Elysia for
 resolved values and plugins, nginx and TigerBeetle for the memory discipline,
 Elm for the error messages — is
 [ADR 0015](./docs/adr/0015-what-zfast-borrows-and-from-whom.md).
+
+The Elm part is the one with a build step behind it. Get a handler wrong and
+compilation stops with a sentence naming your route, your argument and the fix;
+[`refusals/`](./refusals/) is 39 programs written wrong on purpose that keep it
+that way ([ADR 0027](./docs/adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)).
 
 There are no benchmark numbers yet, so there are no performance claims here.

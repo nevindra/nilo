@@ -79,7 +79,8 @@ named, and what was wrong with it:
 ```
 the request body has a field "titl" this endpoint does not know. It takes: title, done (optional)
 the request body is missing "age" (a whole number)
-"plan" has to be one of free, paid, not text
+"plan" is not one of the known choices (free, paid): "gold"
+"plan" has to be one of free, paid, not a number
 "name" has to be text, not a number
 the request body is not valid JSON — it stops making sense at line 1, column 12
 the request body is empty. This endpoint expects a JSON object with: title, done (optional)

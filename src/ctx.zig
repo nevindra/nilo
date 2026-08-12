@@ -735,10 +735,22 @@ fn describeField(
 ) ?anyerror {
     // Asked of `T` and not of what is inside it, so an optional still says
     // "text or null" rather than dropping the half that makes it optional.
-    if (!fits(T, given)) return fail.badRequest(
-        "\"{s}\" has to be {s}, not {s}",
-        .{ name, comptime expectedOf(T), kindOf(given) },
-    );
+    if (!fits(T, given)) {
+        // A word that is not one of the choices is the one wrong value that
+        // is the right *kind*, so "has to be one of …, not text" is a
+        // sentence arguing with itself. It gets the wording a bad `?stage=`
+        // gets, which quotes back what was actually sent.
+        if (given == .string) {
+            if (comptime choicesOf(T)) |choices| return fail.badRequest(
+                "\"{s}\" is not one of the known choices ({s}): \"{s}\"",
+                .{ name, choices, given.string },
+            );
+        }
+        return fail.badRequest(
+            "\"{s}\" has to be {s}, not {s}",
+            .{ name, comptime expectedOf(T), kindOf(given) },
+        );
+    }
 
     if (depth == 0) return null;
     // An optional sent as null fits and holds nothing to look inside.
@@ -807,6 +819,25 @@ fn expectedOf(comptime T: type) []const u8 {
             .@"struct" => "an object",
             .pointer => |p| if (p.size == .slice and p.child == u8) "text" else "a list",
             else => "something this endpoint understands",
+        };
+    }
+}
+
+/// The names an enum field will answer to, or null if the field is not one —
+/// through an optional or a `Patch`, since `?Stage` is as much a list of
+/// choices as `Stage` is.
+fn choicesOf(comptime T: type) ?[]const u8 {
+    comptime {
+        if (T == Str) return null;
+        if (patch_mod.isPatch(T)) return choicesOf(T.zfast_patch);
+        return switch (@typeInfo(T)) {
+            .optional => |o| choicesOf(o.child),
+            .@"enum" => |e| blk: {
+                var out: []const u8 = "";
+                for (e.fields, 0..) |f, i| out = out ++ (if (i == 0) "" else ", ") ++ f.name;
+                break :blk out;
+            },
+            else => null,
         };
     }
 }

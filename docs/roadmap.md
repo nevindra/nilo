@@ -48,24 +48,33 @@ Things that are wrong or missing today, with what fixing them would take.
   signature settles — but it is the rule that costs the most, and if a way is
   ever found to state a failure in a type without inventing an annotation, this
   is where it goes.
-- **A route that drops to `*Ctx` drops out of the document.** Correct — a
-  handler that digs the body out by hand has told nobody anything — and easy to
-  do without noticing, because nothing says so at startup. A count of
-  undocumented routes in the `listen()` log would be enough.
+- ~~**A route that drops to `*Ctx` drops out of the document.**~~ *It did not,
+  and that was worse.* It stayed in and was described as answering an empty
+  200 — so an endpoint that streamed a CSV or answered 202 was documented as
+  answering nothing at all. A handler holding a `*Ctx` and returning nothing
+  now says `"this endpoint writes its own response"`, and `listen()` counts
+  them: `1 of 12 routes write their own response`. Holding a `*Ctx` is not
+  itself the disqualification — a handler that reads a header and still
+  returns its answer is described as fully as any other.
 - **`describeBadBody` walks eight levels and then stops.** Deeper than that, a
   bad field is a plain 400 again. Same limit as the schema walker and the
   staleness trap, and for the same reason: a type holding one of its own has to
   stop somewhere.
-- **Nothing enforces the rule that a mistake stops in zfast's own words.**
-  [ADR 0015](./adr/0015-what-zfast-borrows-and-from-whom.md) says every check
-  fires where a human named the thing, says what is wrong and says the fix — *or
-  it does not ship* — and building a CRUD app found two that did not: one landed
-  in `std.json.Stringify`, one in a struct initialiser. Both are fixed; the rule
-  is still held by nobody. What would hold it is a directory of deliberately
-  wrong handlers, each compiled and each expected to fail with a message
-  starting `zfast:`. Zig has no in-language way to assert a compile error, so
-  that means a build step driving the compiler and reading its stderr — worth
-  doing, and it is a build-system project rather than a function.
+- ~~**Nothing enforces the rule that a mistake stops in zfast's own words.**~~
+  *Done, and it was holding less than it looked.* `refusals/` is 39 programs
+  written wrong on purpose, each expected to fail with a named message, run by
+  `zig build test`
+  ([ADR 0027](./adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)).
+  Writing them found four defects: two messages with no `zfast:` prefix at all,
+  a slice passed to `Headers.of` that stopped inside zfast instead of at its own
+  message, a two-bodies message blaming the one argument that was already right,
+  and zfast's types spelled with zfast's file names (`str.Str`) at people who
+  have never opened them. It also showed that the *location* half of the rule
+  was failing everywhere: the reader's own line sat one slot outside the
+  reference trace Zig prints by default, so every frame they got was zfast's.
+  Each registration method now runs the check itself, which puts their line
+  first. Nothing asserts that it stays there — the build system has no way to
+  make a claim about a reference trace.
 - **A group prefix cannot carry a param.** `app.group("/orgs/:org")` is refused,
   because `use` scopes middleware by comparing the front of the request path
   against the prefix and `/orgs/:org` is the front of no real path. Making it

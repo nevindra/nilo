@@ -285,6 +285,7 @@ test "a fail function inside blocking reaches the request that made the call" {
 
 test {
     _ = @import("str.zig");
+    _ = @import("names.zig");
     _ = @import("patch.zig");
     _ = @import("percent.zig");
     _ = @import("http1.zig");

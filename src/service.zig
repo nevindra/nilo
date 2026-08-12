@@ -13,6 +13,7 @@
 //! request is served, rather than at three in the morning.
 
 const std = @import("std");
+const names = @import("names.zig");
 
 /// What a handler needs from the registry. Computed at compile time by the
 /// typed engine, then checked once at startup.
@@ -63,13 +64,13 @@ pub const Registry = struct {
         const info = switch (@typeInfo(P)) {
             .pointer => |p| p,
             else => @compileError(
-                "zfast: app.provide() wants a pointer to a service, not " ++ @typeName(P) ++
+                "zfast: app.provide() wants a pointer to a service, not " ++ names.of(P) ++
                     ".\n  Services outlive the App, so what gets registered is a pointer to one: " ++
                     "`app.provide(&db)`.",
             ),
         };
         if (info.size != .one) @compileError(
-            "zfast: app.provide() wants a pointer to a single value, not " ++ @typeName(P) ++ ".",
+            "zfast: app.provide() wants a pointer to a single value, not " ++ names.of(P) ++ ".",
         );
 
         const type_name = @typeName(info.child);

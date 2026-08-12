@@ -237,30 +237,37 @@ pub const App = struct {
     }
 
     pub fn get(self: *App, comptime pattern: []const u8, comptime handler: anytype) !void {
+        comptime typed.check(pattern, handler);
         try self.route(.GET, pattern, handler);
     }
 
     pub fn post(self: *App, comptime pattern: []const u8, comptime handler: anytype) !void {
+        comptime typed.check(pattern, handler);
         try self.route(.POST, pattern, handler);
     }
 
     pub fn put(self: *App, comptime pattern: []const u8, comptime handler: anytype) !void {
+        comptime typed.check(pattern, handler);
         try self.route(.PUT, pattern, handler);
     }
 
     pub fn delete(self: *App, comptime pattern: []const u8, comptime handler: anytype) !void {
+        comptime typed.check(pattern, handler);
         try self.route(.DELETE, pattern, handler);
     }
 
     pub fn patch(self: *App, comptime pattern: []const u8, comptime handler: anytype) !void {
+        comptime typed.check(pattern, handler);
         try self.route(.PATCH, pattern, handler);
     }
 
     pub fn head(self: *App, comptime pattern: []const u8, comptime handler: anytype) !void {
+        comptime typed.check(pattern, handler);
         try self.route(.HEAD, pattern, handler);
     }
 
     pub fn options(self: *App, comptime pattern: []const u8, comptime handler: anytype) !void {
+        comptime typed.check(pattern, handler);
         try self.route(.OPTIONS, pattern, handler);
     }
 
@@ -281,6 +288,7 @@ pub const App = struct {
         comptime pattern: []const u8,
         comptime handler: anytype,
     ) !void {
+        comptime typed.check(pattern, handler);
         self.tryRoute(method, pattern, handler) catch |err| {
             if (err == error.DuplicateRoute) std.process.exit(1);
             return err;
@@ -297,7 +305,7 @@ pub const App = struct {
         comptime pattern: []const u8,
         comptime handler: anytype,
     ) !void {
-        comptime router_mod.validatePattern(pattern);
+        comptime typed.check(pattern, handler);
 
         // Registering the same path twice is not a small mistake: the
         // second handler never runs, and nothing about the running server
@@ -486,7 +494,33 @@ pub const App = struct {
         checkRootWiring();
         try self.checkServices();
         try self.resolveChains();
+        self.countUndescribed();
         try bulkhead.serve(self.gpa, options_, &self.stop, self, handleConnection);
+    }
+
+    /// Say how many routes the document cannot describe, at the one moment
+    /// somebody is looking: startup.
+    ///
+    /// A handler that writes its own answer is a fine thing to write — it is
+    /// how a stream or an upload has to work — but it is invisible to a
+    /// generated client, and it is easy to drop to a `*Ctx` for one small
+    /// reason and not notice what went with it. The document itself now says
+    /// so per route (`"this endpoint writes its own response"`), and nobody
+    /// reads the document to find out what is missing from it.
+    fn countUndescribed(self: *App) void {
+        if (self.docs_options == null) return;
+
+        var written: usize = 0;
+        for (self.operations.items) |op| {
+            if (op.answer.written) written += 1;
+        }
+        if (written == 0) return;
+
+        std.log.info(
+            "{d} of {d} routes write their own response, so the API description does not " ++
+                "describe what they answer",
+            .{ written, self.operations.items.len },
+        );
     }
 
     /// Stop the server: `listen()` stops accepting, connections finish the
@@ -804,30 +838,37 @@ pub fn Group(comptime prefix: []const u8) type {
         }
 
         pub fn get(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
+            comptime typed.check(joined(prefix, pattern), handler);
             return self.app.get(comptime joined(prefix, pattern), handler);
         }
 
         pub fn post(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
+            comptime typed.check(joined(prefix, pattern), handler);
             return self.app.post(comptime joined(prefix, pattern), handler);
         }
 
         pub fn put(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
+            comptime typed.check(joined(prefix, pattern), handler);
             return self.app.put(comptime joined(prefix, pattern), handler);
         }
 
         pub fn delete(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
+            comptime typed.check(joined(prefix, pattern), handler);
             return self.app.delete(comptime joined(prefix, pattern), handler);
         }
 
         pub fn patch(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
+            comptime typed.check(joined(prefix, pattern), handler);
             return self.app.patch(comptime joined(prefix, pattern), handler);
         }
 
         pub fn head(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
+            comptime typed.check(joined(prefix, pattern), handler);
             return self.app.head(comptime joined(prefix, pattern), handler);
         }
 
         pub fn options(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
+            comptime typed.check(joined(prefix, pattern), handler);
             return self.app.options(comptime joined(prefix, pattern), handler);
         }
 
@@ -837,6 +878,7 @@ pub fn Group(comptime prefix: []const u8) type {
             comptime pattern: []const u8,
             comptime handler: anytype,
         ) !void {
+            comptime typed.check(joined(prefix, pattern), handler);
             return self.app.route(method, comptime joined(prefix, pattern), handler);
         }
 
@@ -846,6 +888,7 @@ pub fn Group(comptime prefix: []const u8) type {
             comptime pattern: []const u8,
             comptime handler: anytype,
         ) !void {
+            comptime typed.check(joined(prefix, pattern), handler);
             return self.app.tryRoute(method, comptime joined(prefix, pattern), handler);
         }
 
@@ -1605,8 +1648,19 @@ test "a body field that does not fit is a 400 naming the field, like a query par
         // Present, but the wrong shape for where it landed.
         .{ .body = "{\"name\":123,\"age\":7}", .says = "\"name\" has to be text, not a number" },
         .{ .body = "{\"name\":\"wati\",\"age\":\"soon\"}", .says = "\"age\" has to be a whole number, not text" },
-        // An enum says which names it knows, the way a query param does.
-        .{ .body = "{\"name\":\"w\",\"age\":7,\"plan\":\"gold\"}", .says = "\"plan\" has to be one of free, paid" },
+        // An enum says which names it knows, the way a query param does —
+        // and quotes back the word it was given, because "has to be one of
+        // free, paid, not text" is a sentence arguing with itself.
+        .{
+            .body = "{\"name\":\"w\",\"age\":7,\"plan\":\"gold\"}",
+            .says = "\"plan\" is not one of the known choices (free, paid): \"gold\"",
+        },
+        // Not a word at all, which is the other way to get an enum wrong,
+        // and there the kind is the thing worth saying.
+        .{
+            .body = "{\"name\":\"w\",\"age\":7,\"plan\":9}",
+            .says = "\"plan\" has to be one of free, paid, not a number",
+        },
         // An optional field takes null, but not anything at all.
         .{ .body = "{\"name\":\"w\",\"age\":7,\"nickname\":9}", .says = "\"nickname\" has to be text or null" },
         // Valid JSON of the wrong kind entirely.
@@ -3534,6 +3588,126 @@ test "a shape used by more than one route is written once and referred to" {
     // copies.
     try testing.expectEqual(@as(usize, 3), found);
     try testing.expectEqual(@as(usize, 1), countOccurrences(json, "\"id\":{\"type\":\"integer\"}"));
+}
+
+/// Handlers that write their own answer, and one that merely reads the
+/// request before returning a value. The difference is the whole point of
+/// the test below: taking a `*Ctx` is not what makes an endpoint
+/// undescribable — returning nothing while holding one is.
+fn docStreamsIt(c: *Ctx, id: u32) !void {
+    var body = try c.stream(202, "text/csv");
+    try body.print("id\n{d}\n", .{id});
+    try body.finish();
+}
+
+fn docReadsHeaderThenAnswers(c: *Ctx) !DocUser {
+    return .{ .id = 1, .name = c.header("X-Who") orelse Str.static("nobody") };
+}
+
+test "a handler that writes its own answer says so, instead of promising an empty 200" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    app.docs(.{});
+
+    try app.get("/report/:id", docStreamsIt);
+    try app.get("/me", docReadsHeaderThenAnswers);
+
+    const json = try docsFor(&app);
+
+    // The one that streams answers 202 with a CSV, and its signature says
+    // none of that. Claiming "200, empty" — which is what reading the return
+    // type alone produces — would be a document that is wrong twice.
+    try testing.expect(std.mem.indexOf(u8, json, "writes its own response") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"an empty response\"") == null);
+
+    // ...and holding a `*Ctx` is not itself the disqualification. This one
+    // reads a header and still returns its answer, so the answer is known.
+    try testing.expect(std.mem.indexOf(
+        u8,
+        json,
+        "\"200\":{\"description\":\"the response\",\"content\":{\"application/json\":" ++
+            "{\"schema\":{\"$ref\":\"#/components/schemas/DocUser\"}}}}",
+    ) != null);
+}
+
+fn DocBox(comptime T: type) type {
+    return struct { held: T, at: u32 };
+}
+
+fn docBoxedUser(db: *Db) !DocBox(DocUser) {
+    _ = db;
+    return .{ .held = .{ .id = 1, .name = .static("wati") }, .at = 0 };
+}
+
+fn docBoxedText(db: *Db) !DocBox([]const u8) {
+    _ = db;
+    return .{ .held = "hello", .at = 0 };
+}
+
+test "an instantiated generic keeps a name, made out of the one the compiler gives it" {
+    var db = Db{ .rows = &.{} };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    app.docs(.{});
+
+    try app.get("/boxed/user", docBoxedUser);
+    try app.get("/boxed/text", docBoxedText);
+
+    const json = try docsFor(&app);
+
+    // `app.DocBox(app.DocUser)` read back into an identifier. Without this a
+    // generic envelope — which is how Zig says "the same shape twice", and
+    // so the answer to writing every body struct out again with `Str` in it
+    // — costs the shape its name in every generated client.
+    try testing.expect(std.mem.indexOf(u8, json, "\"DocBox_DocUser\":{\"type\":\"object\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"$ref\":\"#/components/schemas/DocBox_DocUser\"") != null);
+
+    // A slice of bytes is text rather than `const_u8`, because that is what
+    // it is on the wire and `DocBox_const_u8` is nobody's idea of a name.
+    try testing.expect(std.mem.indexOf(u8, json, "\"DocBox_Text\":{\"type\":\"object\"") != null);
+}
+
+const nudged = struct {
+    fn Box(comptime T: type) type {
+        return struct { held: T };
+    }
+};
+
+const shoved = struct {
+    fn Box(comptime T: type) type {
+        return struct { thrown: T };
+    }
+};
+
+fn docNudgedBox(db: *Db) !nudged.Box(u32) {
+    _ = db;
+    return .{ .held = 1 };
+}
+
+fn docShovedBox(db: *Db) !shoved.Box(u32) {
+    _ = db;
+    return .{ .thrown = 2 };
+}
+
+test "a name two different generics both answer to belongs to neither" {
+    var db = Db{ .rows = &.{} };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    app.docs(.{});
+
+    try app.get("/nudged", docNudgedBox);
+    try app.get("/shoved", docShovedBox);
+
+    const json = try docsFor(&app);
+
+    // Both render to `Box_u32` and they are not the same shape. A `$ref`
+    // either way round would describe one endpoint as the other, so neither
+    // gets the name and both are written out where they appear.
+    try testing.expect(std.mem.indexOf(u8, json, "Box_u32") == null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"held\":{\"type\":\"integer\"}") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"thrown\":{\"type\":\"integer\"}") != null);
 }
 
 fn countOccurrences(haystack: []const u8, needle: []const u8) usize {

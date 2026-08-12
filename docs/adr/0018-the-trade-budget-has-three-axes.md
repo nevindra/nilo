@@ -45,9 +45,17 @@ Measured stripped, `ReleaseFast`, on the examples in this repository.
 | Change | hello | rest |
 |---|---|---|
 | The API description ([ADR 0017](./0017-the-api-description-comes-from-the-signatures.md)) | +14 KB | +34 KB |
-| JSON failure bodies, `Status`, `?T` → 404, nested body messages, `components`, `Patch` ([ADRs 0024](./0024-a-failure-mode-belongs-in-the-return-type.md)–[0026](./0026-a-patch-needs-three-answers-and-an-optional-has-two.md)) | +6 KB | +14 KB | 
+| JSON failure bodies, `Status`, `?T` → 404, nested body messages, `components`, `Patch` ([ADRs 0024](./0024-a-failure-mode-belongs-in-the-return-type.md)–[0026](./0026-a-patch-needs-three-answers-and-an-optional-has-two.md)) | +6 KB | +14 KB |
+| Names for generic shapes, an honest answer for a handler that writes its own, and the enum wording | +3.3 KB | +3.2 KB |
+| Holding the rule about error messages ([ADR 0027](./0027-the-rule-about-error-messages-is-held-by-a-build-step.md)) | +0 | +0 |
 
 The second row is one measurement of six changes because they landed together, which is a worse record than the first row and is noted as such. The split it does show is the useful part: `hello` has one route returning text and pays +6 KB, which is the failure-body writer and nothing else — that part is unconditional. The remaining +8 KB on `rest` is the body describer and the schema walker, and those are generated per body type, so they are paid by applications that have bodies.
+
+The third row is nearly the same on both, which says what it is: the name renderer and the extra descriptions live in the document writer, and the document writer is linked in whether or not `docs()` is called — the same unconditional cost the first row is about, and the same open question in `docs/roadmap.md`.
+
+The fourth row is a real zero rather than a rounded one: the same three examples came out byte-for-byte identical, because both halves of that change — the message rewriting and the earlier check — happen while compiling and a message that is never produced is a string that never exists. It is a row rather than an omission because the rule is that a feature states its cost, and "none" is a number somebody may want to check later.
+
+`orders`, the largest example, is 1,327,992 bytes stripped. It is not a row here because it has no before.
 
 ## Consequences
 

@@ -42,6 +42,7 @@
 //! nothing and runs the code it ran before (ADR 0018).
 
 const std = @import("std");
+const names = @import("names.zig");
 const ctx_mod = @import("ctx.zig");
 const service_mod = @import("service.zig");
 const fail = @import("fail.zig");
@@ -175,7 +176,7 @@ fn checkResolvable(comptime V: type, comptime being_resolved: []const type) void
             // Two types each declaring the other as an argument. Left alone
             // this is a compiler that expands for ever rather than a message.
             @compileError(
-                "zfast: the resolved value `" ++ @typeName(V) ++ "` is worked out from itself — " ++
+                "zfast: the resolved value `" ++ names.of(V) ++ "` is worked out from itself — " ++
                     loop(being_resolved, V) ++ "\n" ++
                     "  Break the loop: one of these resolvers should take a `*Ctx` and read what " ++
                     "it needs directly, rather than asking for the other value.",
@@ -186,15 +187,15 @@ fn checkResolvable(comptime V: type, comptime being_resolved: []const type) void
         const info = @typeInfo(Fn).@"fn";
 
         const Returned = info.return_type orelse @compileError(
-            "zfast: the resolver on `" ++ @typeName(V) ++ "` has no return type.",
+            "zfast: the resolver on `" ++ names.of(V) ++ "` has no return type.",
         );
         const Produced = switch (@typeInfo(Returned)) {
             .error_union => |u| u.payload,
             else => Returned,
         };
         if (Produced != V) @compileError(
-            "zfast: the resolver on `" ++ @typeName(V) ++ "` returns " ++ @typeName(Produced) ++
-                ", not " ++ @typeName(V) ++ ".\n" ++
+            "zfast: the resolver on `" ++ names.of(V) ++ "` returns " ++ names.of(Produced) ++
+                ", not " ++ names.of(V) ++ ".\n" ++
                 "  A type's `" ++ marker ++ "` is how that type is worked out from a request, so " ++
                 "it has to hand back that type.",
         );
@@ -208,7 +209,7 @@ fn rolesOf(comptime V: type, comptime params: []const std.builtin.Type.Fn.Param)
         var roles: [params.len]Role = undefined;
         for (params, 0..) |p, i| {
             const P = p.type orelse @compileError(
-                "zfast: argument " ++ num(i + 1) ++ " of the resolver on `" ++ @typeName(V) ++
+                "zfast: argument " ++ num(i + 1) ++ " of the resolver on `" ++ names.of(V) ++
                     "` has no type.",
             );
             roles[i] = roleOf(V, P, i);
@@ -225,8 +226,8 @@ fn roleOf(comptime V: type, comptime P: type, comptime i: usize) Role {
     if (@typeInfo(P) == .pointer and @typeInfo(P).pointer.size == .one) return .service;
 
     @compileError(
-        "zfast: argument " ++ num(i + 1) ++ " of the resolver on `" ++ @typeName(V) ++ "` is a " ++
-            @typeName(P) ++ ", which a resolver cannot be given.\n" ++
+        "zfast: argument " ++ num(i + 1) ++ " of the resolver on `" ++ names.of(V) ++ "` is a " ++
+            names.of(P) ++ ", which a resolver cannot be given.\n" ++
             "  A resolver belongs to the request, not to a route, so there is no `:id` for it to " ++
             "be handed and no query struct to fill in.\n" ++
             "  What it can ask for: a `*Ctx`, a service (`*Db`), a `std.mem.Allocator` for the " ++
@@ -246,11 +247,11 @@ fn fnTypeOf(comptime V: type, comptime F: type) type {
 
 fn notAFunction(comptime V: type, comptime F: type) noreturn {
     @compileError(
-        "zfast: `" ++ @typeName(V) ++ "." ++ marker ++ "` is a " ++ @typeName(F) ++
+        "zfast: `" ++ names.of(V) ++ "." ++ marker ++ "` is a " ++ names.of(F) ++
             ", not a function.\n" ++
             "  It is the function that works the value out from a request:\n" ++
             "      pub const " ++ marker ++ " = authenticate;   // fn (c: *Ctx) !" ++
-            @typeName(V) ++ "\n" ++
+            names.of(V) ++ "\n" ++
             "  The function's name, not a call to it.",
     );
 }
@@ -263,9 +264,9 @@ fn loop(comptime being_resolved: []const type, comptime V: type) []const u8 {
         for (being_resolved) |T| {
             if (!started and T != V) continue;
             started = true;
-            out = out ++ @typeName(T) ++ " → ";
+            out = out ++ names.of(T) ++ " → ";
         }
-        return out ++ @typeName(V);
+        return out ++ names.of(V);
     }
 }
 

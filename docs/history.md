@@ -332,3 +332,50 @@ The `!?T` slot turned out to be free. It used to answer `200` with the body `nul
 That last point is the one worth generalising. `rest` had no `DELETE`, which is why nobody found that `Response(void)` could not compile.
 
 Measured, stripped `ReleaseFast`: **+6 KB on hello, +14 KB on rest**, and the allocation budget is unchanged — the failure path uses a stack buffer, and the nested description allocates in the request arena on a request that was already going to be refused.
+
+## After 0.1.0: what a domain that is not one flat struct found
+
+The trip above was a todo list — one struct, four fields. So the next one was deliberately the opposite: orders with lines in them, an address, a customer, a state machine, an upsert, three services and an upload. It is in the repo as [`examples/orders`](../examples/orders/main.zig), because a stress test nobody can run again is an anecdote.
+
+**Most of it was uneventful, which is the finding.** The file compiled on the third try, and both failures were Zig rather than zfast: `packed` is a keyword, and two top-level `const`s shadowed two parameters. Nothing in the argument-list rules needed a second look at three services, two path params on one route, a `Str` param beside a `Query(T)`, a resolver that takes a service, and a middleware written by a function. The comptime layer scales.
+
+**A route that writes its own answer was documented as answering nothing.** The upload endpoint sends a 202 with a JSON body; the document said `"200": "an empty response"`. The roadmap had this recorded as *routes that drop to `*Ctx` drop out of the document* — which would have been fine. They did not drop out. They stayed in and lied, and a wrong entry in a generated document is worse than a missing one because nobody goes looking for it. A handler holding a `*Ctx` and returning nothing now says so, and `listen()` counts them at startup.
+
+**A generic lost its shape's name.** The obvious answer to writing every body struct twice — once with `Str`, once with `[]const u8` — is to write it once with the text type as a parameter. Doing that turned `Address` into `Addressed(str.Str)`, which is not an identifier, so the shape went from a named component to an anonymous copy at every use. Fixing the naming rather than the generic was the right end to pull: `main.Page(main.Order)` reads back as `Page_Order`, `[]const u8` reads as `Text`, and two generics that render to the same name and are not the same shape both lose it rather than one silently describing the other.
+
+**An enum's refusal argued with itself.** `{"to":"teleported"}` answered `"to" has to be one of draft, placed, …, not text` — and it *was* text. The query-string half of the same feature had the better sentence all along (`?stage is not one of the known choices (…): "nonsense"`), so the body half now uses it and quotes back the word it was given.
+
+**The suite caught the bug it exists to catch, in the test helper.** Six tests passed in `Debug` and failed in `ReleaseSafe`, because a `&.{ … }` written inside a function is a pointer into that function's frame. That is [ADR 0019](./adr/0019-a-response-owns-its-headers.md)'s bug met from the user's side, and the reason `zig build test` runs both modes every time.
+
+**What stayed hard is what a service owns.** With lines, an address and a customer in one row, a hand-written `free` is a dozen calls that fall out of step with the type the first time a field is added; an arena per row makes freeing one call. And a read has to copy into the request arena before returning, because zfast writes the response after the handler returns and a `DELETE` in that gap frees the text mid-write. Neither is zfast's to fix — but neither was written down, and now both are, in [Services](./guide/services.md#once-a-row-is-more-than-one-string).
+
+## After 0.1.0: making the rule about error messages hold
+
+[ADR 0015](./adr/0015-what-zfast-borrows-and-from-whom.md) borrowed Elm's standard and wrote it with teeth — *fires where a human named the thing, says what is wrong, says the fix, or it does not ship* — and then nothing held it. The CRUD trip above found two checks that had already got past it. Being found by accident is the whole problem, so the next piece of work was the thing that would find them on purpose.
+
+`refusals/` is 39 programs written wrong on purpose. Each has to fail to compile with a message named in a table in `build.zig`, and `zig build test` compiles all of them ([ADR 0027](./adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)). The detail that makes it a rule rather than 39 assertions is that **the build script supplies the `zfast: ` prefix** — so a check that stops somewhere inside the standard library cannot be written down as passing, only fixed or deleted.
+
+Writing the cases found four defects, in the part of the codebase whose message quality had been argued about the most:
+
+- **Two messages had no `zfast:` prefix**, both on `Response.headers` — in the file that documents the rule.
+- **A slice handed to `Headers.of` never reached its message.** `of` dereferenced any pointer and a slice is a pointer, so it stopped with `index syntax required for slice type '[]http1.Header'`: an error from inside zfast, about zfast, three lines above the sentence written for exactly that mistake.
+- **The two-bodies message blamed the wrong argument.** `fn placeOrder(store: Store, incoming: NewOrder)` — a service passed by value — was told `NewOrder` was the surplus body and advised to make *it* a pointer. `NewOrder` was the one correct thing in the signature. zfast cannot tell which of two structs was meant to be the body, so it now names both and states the rule.
+- **zfast's types were spelled with zfast's file names.** `str.Str`, `[]http1.Header` — true, and about a source tree the reader does not have. `src/names.zig` prints them as `zfast.Str` and `[]zfast.Header`, and leaves a type of the reader's own where they wrote it.
+
+Then it exposed something bigger than any of them. The rule has two halves and only the second was being checked; on the first — *fires where a human named the thing* — zfast was failing everywhere. Zig reports a `@compileError` inside zfast and points back with a reference trace two frames deep, and both of those frames were `src/app.zig`. The reader's own line was the third entry, hidden behind a flag they would have to know to pass:
+
+```
+referenced by:
+    route__anon_702: src/app.zig:284:22
+    post__anon_685: src/app.zig:244:23
+    6 reference(s) hidden; use '-freference-trace=8' to see all references
+```
+
+The fix is that `post` — and every other registration method — runs the check itself instead of letting the error surface from wherever the work is done. Same checks, same words, called one frame from the reader:
+
+```
+referenced by:
+    refusal: refusals/two_bodies.zig:17:13
+```
+
+Measured stripped, `ReleaseFast`: **+0 bytes** on hello, rest and orders alike, all of it being comptime. The cost is build time — a warm `zig build test` went from 6.4s to 15.4s, because the compiler keeps nothing from a compilation that failed and all 39 are re-analysed every run. It goes on `test` anyway: enforcement that has to be asked for is a sentence in a document again, which is where this started.

@@ -97,6 +97,14 @@ pub const Answer = struct {
     /// only failure mode a signature can state, and so the only one this
     /// document is entitled to promise.
     not_found: bool = false,
+    /// Whether the handler writes its own response — it takes a `*Ctx` and
+    /// returns nothing, so the answer is a `c.send…` call in its body and
+    /// there is no return type to read it off.
+    ///
+    /// Worth a field of its own because the alternative is a lie: a handler
+    /// that streams a CSV or sends a 202 looks, to a reader of return types,
+    /// exactly like one that answers an empty 200.
+    written: bool = false,
 };
 
 /// Everything the signature of one route says about it.
@@ -223,24 +231,114 @@ fn held(comptime s: Schema) *const Schema {
 /// be noise in somebody's generated client.
 ///
 /// What gets a name is a type a person declared and can say out loud: `User`,
-/// `NewUser`, `Address`. What does not is an anonymous struct — the compiler
-/// names those after where they were written, `main.main__struct_2914` — and
-/// anything whose last name segment is not a plain identifier, which is how
-/// an instantiated generic (`Query(main.Listing)`) reads.
+/// `NewUser`, `Address` — and an instantiated generic, which reads as
+/// `main.Page(main.Order)` and is filed as `Page_Order`. What does not is an
+/// anonymous struct, because the compiler names those after where they were
+/// written (`main.main__struct_2914`) and that is a name that moves when a
+/// line is added above it.
 fn nameOf(comptime T: type) ?[]const u8 {
     comptime {
         const full = @typeName(T);
         if (std.mem.indexOf(u8, full, "__") != null) return null;
 
-        var start = full.len;
-        while (start > 0 and full[start - 1] != '.') start -= 1;
-        const short = full[start..];
-        if (short.len == 0) return null;
-        if (!std.ascii.isAlphabetic(short[0]) and short[0] != '_') return null;
-        for (short[1..]) |ch| {
-            if (!std.ascii.isAlphanumeric(ch) and ch != '_') return null;
+        const short = shortNameOf(full);
+        if (isIdentifier(short)) return full;
+
+        // Not an identifier, so either an instantiated generic — which has a
+        // name once it is read rather than copied — or something this does
+        // not recognise, which gets none.
+        if (std.mem.indexOfScalar(u8, full, '(') == null) return null;
+        return genericNameOf(full);
+    }
+}
+
+fn isIdentifier(comptime name: []const u8) bool {
+    comptime {
+        if (name.len == 0) return false;
+        if (!std.ascii.isAlphabetic(name[0]) and name[0] != '_') return false;
+        for (name[1..]) |ch| {
+            if (!std.ascii.isAlphanumeric(ch) and ch != '_') return false;
         }
-        return full;
+        return true;
+    }
+}
+
+/// A generic instantiation, rendered as a name a document can use.
+///
+/// `Page(T)` and `Addressed(Text)` are how Zig says "the same shape, twice"
+/// — which is the answer to writing every request struct out a second time
+/// with `Str` in it. The answer should not cost the shape its name, so the
+/// compiler's rendering is turned back into an identifier: module prefixes
+/// dropped, `[]const u8` read as `Text`, the pieces joined with `_`.
+///
+/// ```
+/// main.Page(main.Order)        -> Page_Order
+/// main.Addressed(str.Str)      -> Addressed_Str
+/// main.Addressed([]const u8)   -> Addressed_Text
+/// ```
+///
+/// Null when the result would not be an identifier — a numeric parameter, a
+/// pointer with attributes, anything this does not recognise. An unnamed
+/// shape is written out where it appears, which is what every generic used
+/// to get and is never wrong, only repetitive.
+fn genericNameOf(comptime full: []const u8) ?[]const u8 {
+    comptime {
+        // Building a string a character at a time is what a comptime branch
+        // budget is counted in, and the default budget is smaller than a
+        // handful of type names. Raised here rather than by whoever calls
+        // `docs()`, because a quota is not a thing anybody should have to
+        // know about to describe their API.
+        @setEvalBranchQuota(100 * full.len + 4_000);
+        // The one spelling common enough to be worth reading rather than
+        // taking apart: a slice of bytes is text, and `List_const_u8` would
+        // be nobody's idea of a name.
+        var text = replaceAll(full, "[]const u8", "Text");
+        text = replaceAll(text, "[]u8", "Text");
+
+        var out: []const u8 = "";
+        var segment: []const u8 = "";
+        for (text) |ch| {
+            if (std.ascii.isAlphanumeric(ch) or ch == '_') {
+                segment = segment ++ [_]u8{ch};
+                continue;
+            }
+            // A dot means what came before it was the module, not the type.
+            if (ch == '.') {
+                segment = "";
+                continue;
+            }
+            out = out ++ joinable(segment, out);
+            segment = "";
+        }
+        out = out ++ joinable(segment, out);
+
+        if (out.len == 0) return null;
+        if (!std.ascii.isAlphabetic(out[0]) and out[0] != '_') return null;
+        return out;
+    }
+}
+
+/// One rendered piece, with the separator it needs — and nothing at all for
+/// the pieces that are Zig grammar rather than names.
+fn joinable(comptime segment: []const u8, comptime so_far: []const u8) []const u8 {
+    comptime {
+        if (segment.len == 0) return "";
+        for ([_][]const u8{ "const", "volatile", "allowzero", "align" }) |word| {
+            if (std.mem.eql(u8, segment, word)) return "";
+        }
+        return if (so_far.len == 0) segment else "_" ++ segment;
+    }
+}
+
+fn replaceAll(comptime haystack: []const u8, comptime needle: []const u8, comptime with: []const u8) []const u8 {
+    comptime {
+        var out: []const u8 = "";
+        var rest = haystack;
+        while (std.mem.indexOf(u8, rest, needle)) |at| {
+            out = out ++ rest[0..at] ++ with;
+            rest = rest[at + needle.len ..];
+        }
+        return out ++ rest;
     }
 }
 
@@ -269,6 +367,12 @@ const max_components = 64;
 const Components = struct {
     names: [max_components][]const u8 = undefined,
     schemas: [max_components]*const Schema = undefined,
+    /// Whether two shapes turned out to answer to this name. A declared type
+    /// cannot collide with another — its full name has its module in it — but
+    /// a *rendered* one can: `a.Page(b.Order)` and `c.Page(d.Order)` are both
+    /// `Page_Order`. When that happens neither gets the name, and both are
+    /// written out where they appear. Bigger document, still a true one.
+    contested: [max_components]bool = @splat(false),
     count: usize = 0,
 
     fn gather(self: *Components, ops: []const Operation) void {
@@ -284,11 +388,18 @@ const Components = struct {
         switch (schema.*) {
             .object => |o| {
                 if (o.name) |full| {
-                    // Already known — and so are its fields, which were
-                    // walked when it was first seen. This is also what stops
-                    // a type holding one of its own from recursing for ever.
-                    if (self.indexOf(full) != null) return;
-                    if (self.count < max_components) {
+                    if (self.indexOf(full)) |i| {
+                        // The same shape under the same name — and its fields
+                        // were walked when it was first seen. This is also
+                        // what stops a type holding one of its own from
+                        // recursing for ever.
+                        if (sameShape(self.schemas[i], schema)) return;
+                        // A second shape wanting the same name. Once is
+                        // enough to settle it; returning on the second visit
+                        // is what keeps a self-referential one from looping.
+                        if (self.contested[i]) return;
+                        self.contested[i] = true;
+                    } else if (self.count < max_components) {
                         self.names[self.count] = full;
                         self.schemas[self.count] = schema;
                         self.count += 1;
@@ -300,6 +411,36 @@ const Components = struct {
             .nullable => |inner| self.add(inner),
             else => {},
         }
+    }
+
+    /// Whether two schemas are the same shape, as far as sharing a name goes.
+    /// Field names and their order, which is enough: the same type reached by
+    /// two routes produces two `Schema` values at two addresses, and the only
+    /// thing this has to tell apart is two *different* types that render to
+    /// one name.
+    fn sameShape(a: *const Schema, b: *const Schema) bool {
+        if (a == b) return true;
+        const one = switch (a.*) {
+            .object => |o| o,
+            else => return false,
+        };
+        const other = switch (b.*) {
+            .object => |o| o,
+            else => return false,
+        };
+        if (one.fields.len != other.fields.len) return false;
+        for (one.fields, other.fields) |f, g| {
+            if (!std.mem.eql(u8, f.name, g.name)) return false;
+        }
+        return true;
+    }
+
+    /// The slot this shape is named in, or null if it has no name of its own
+    /// in this document — either it never had one, or something else wanted
+    /// the same one.
+    fn slotFor(self: *const Components, full: []const u8) ?usize {
+        const i = self.indexOf(full) orelse return null;
+        return if (self.contested[i]) null else i;
     }
 
     fn indexOf(self: *const Components, full: []const u8) ?usize {
@@ -323,6 +464,9 @@ const Components = struct {
     fn shortIsFree(self: *const Components, i: usize, short: []const u8) bool {
         if (std.mem.eql(u8, short, error_schema_name)) return false;
         for (self.names[0..self.count], 0..) |other, j| {
+            // A contested slot is written nowhere, so it is not competing
+            // for the short name it would otherwise have taken.
+            if (self.contested[j]) continue;
             if (j != i and std.mem.eql(u8, shortNameOf(other), short)) return false;
         }
         return true;
@@ -392,6 +536,9 @@ pub fn write(w: *std.Io.Writer, ops: []const Operation, info: Info) !void {
         wrote_schema = true;
     }
     for (components.schemas[0..components.count], 0..) |schema, i| {
+        // A name two shapes wanted belongs to neither, and both were written
+        // out where they appear rather than referred to here.
+        if (components.contested[i]) continue;
         if (wrote_schema) try w.writeByte(',');
         wrote_schema = true;
         try w.writeByte('"');
@@ -478,6 +625,17 @@ fn writeFailure(w: *std.Io.Writer, status: []const u8, description: []const u8) 
 }
 
 fn writeAnswer(w: *std.Io.Writer, components: *const Components, answer: Answer) !void {
+    // A handler that writes its own response has told this document nothing,
+    // and saying so is the only honest thing left. `default` with no content
+    // is OpenAPI's way of writing "an answer, unspecified" — which beats the
+    // "200, empty" that reading the return type alone would produce for a
+    // handler that in fact streams a CSV.
+    if (answer.written) {
+        try w.writeAll("\"default\":{\"description\":\"this endpoint writes its own response, " ++
+            "so its signature does not describe it\"}");
+        return;
+    }
+
     try w.writeByte('"');
     if (answer.status) |status| try w.print("{d}", .{status}) else try w.writeAll("default");
     try w.writeAll("\":{\"description\":");
@@ -597,7 +755,7 @@ fn writeSchema(
 
         .object => |o| {
             if (o.name) |full| {
-                if (components.indexOf(full)) |i| {
+                if (components.slotFor(full)) |i| {
                     try w.writeAll("{\"$ref\":\"#/components/schemas/");
                     try components.writeName(w, i);
                     try w.writeAll("\"}");

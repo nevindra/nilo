@@ -123,6 +123,61 @@ None of this is zfast's — it is what owning memory costs in Zig, and it is a r
 part of what a CRUD app in this language weighs. The framework's part is that
 getting it wrong stops on your laptop instead of in production.
 
+### Once a row is more than one string
+
+A `free` per stored type stops scaling the moment a row holds a customer, an
+address and a list of lines, each with text of its own. Give the row an arena
+instead, and freeing it is one call that cannot fall behind the type:
+
+```zig
+const Row = struct { memory: std.heap.ArenaAllocator, order: Order };
+
+fn place(self: *Orders, incoming: NewOrder) !Order {
+    const row = try self.gpa.create(Row);
+    row.* = .{ .memory = .init(self.gpa), .order = undefined };
+    errdefer row.memory.deinit();
+
+    const mine = row.memory.allocator();
+    row.order = .{ .customer = try keepCustomer(mine, incoming.customer), … };
+    …
+}
+
+fn drop(self: *Orders, row: *Row) void {
+    row.memory.deinit();       // the customer, the address, every line
+    self.gpa.destroy(row);
+}
+```
+
+Hold the rows **by pointer**, not by value: an `ArenaAllocator` that moves when
+the list grows leaves any `allocator()` handle taken from it pointing at where
+the arena used to be.
+
+### Returning text a service owns
+
+A handler returns to zfast, and zfast writes the response *after* it returns. In
+between, another request on another thread can delete that row and free the text
+the response is about to be written from.
+
+So a read hands back a copy in the request arena rather than a view into the
+store:
+
+```zig
+fn get(self: *Orders, into: std.mem.Allocator, id: u32) !?Order {
+    try self.lock.lock();
+    defer self.lock.unlock();
+    const row = self.rowFor(id) orelse return null;
+    return try copyOut(into, row.order);   // under the lock, into the request
+}
+```
+
+It costs one walk of a structure that is about to be walked again anyway, and the
+copy is thrown away with the request. A store nothing ever deletes from does not
+need it — but "nothing ever deletes from it" is a property that stops being true
+quietly.
+
+[`examples/orders`](../../examples/orders/main.zig) does the whole of this on a
+domain with lines, an address and a customer in it.
+
 ## Handlers must not block
 
 `zfast.Mutex` is one case of a rule that runs through everything: **many requests

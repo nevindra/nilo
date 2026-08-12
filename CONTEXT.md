@@ -110,6 +110,10 @@ _Avoid_: websocket connection, channel, ws, peer
 A request for part of a file rather than all of it — a video being scrubbed, a download being resumed. One that cannot be understood is ignored and the whole file goes out, because that is a correct answer to every request.
 _Avoid_: partial content, byte range, seek, chunk
 
+**Refusal**:
+A program written wrong on purpose, kept so that the message it stops with stays the one zfast wrote. Never run and never compiles; the build checks the wording of the error, and a mistake that stops somewhere inside the standard library instead cannot be recorded as acceptable.
+_Avoid_: negative test, compile-fail case, error test, fixture
+
 **Test client**:
 A stand-in for the other end of a connection, for testing a handler that writes its answer rather than returning one. Runs one request through the App with no server and no socket.
 _Avoid_: mock, fixture, test server, harness

@@ -87,6 +87,14 @@ const Store = struct {
         return user;
     }
 
+    /// A `User` handed back here carries pointers into this Store, and the
+    /// response is written after the handler returns — so a DELETE landing
+    /// in that gap frees the text mid-write. This example lives with it, to
+    /// keep the first thing anybody reads about handlers and not about
+    /// lifetimes; an app that deletes under load should not. The fix is one
+    /// habit — copy the row into the request arena, under the lock, before
+    /// returning it — and [`examples/orders`](../orders/main.zig) does it
+    /// throughout.
     fn find(self: *Store, id: u32) ?User {
         self.lock.lock() catch return null; // only fails if the request was cancelled
         defer self.lock.unlock();

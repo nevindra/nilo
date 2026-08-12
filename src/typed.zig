@@ -31,6 +31,7 @@
 //! charges (ADR 0003), so it is taken seriously here.
 
 const std = @import("std");
+const naming = @import("names.zig");
 const ctx_mod = @import("ctx.zig");
 const http1 = @import("http1.zig");
 const router = @import("router.zig");
@@ -164,8 +165,11 @@ pub const Headers = struct {
     /// itself; either way its length is known while compiling, which is what
     /// lets a ninth header be a compile error rather than a surprise.
     pub fn of(list: anytype) Headers {
+        // The `.one` is doing work: a slice is a pointer too, and
+        // dereferencing one is an error from inside this function rather
+        // than the message below — the exact failure ADR 0015 is about.
         const items = switch (@typeInfo(@TypeOf(list))) {
-            .pointer => list.*,
+            .pointer => |p| if (p.size == .one) list.* else notAList(@TypeOf(list)),
             else => list,
         };
         const count = comptime lengthOf(@TypeOf(items));
@@ -189,8 +193,8 @@ pub const Headers = struct {
                 else => notAList(Items),
             };
             if (count > room) @compileError(std.fmt.comptimePrint(
-                "a Response can carry {d} headers and this one was given {d}. " ++
-                    "Set the rest with c.setHeader, which has no limit.",
+                "zfast: a Response can carry {d} headers and this one was given {d}.\n" ++
+                    "  Set the rest with `c.setHeader`, which has no limit.",
                 .{ room, count },
             ));
             return count;
@@ -199,10 +203,11 @@ pub const Headers = struct {
 
     fn notAList(comptime Items: type) noreturn {
         @compileError(
-            "Response headers have to be written out where they are set — " ++
+            "zfast: Response headers have to be written out where they are set — " ++
                 ".of(&.{.{ .name = \"Location\", .value = where }}) — and this is a " ++
-                @typeName(Items) ++ ". A slice would not say how many there are " ++
-                "until the program runs, and the response has to hold them itself.",
+                naming.of(Items) ++ ".\n" ++
+                "  A slice would not say how many there are until the program runs, and the " ++
+                "response has to hold them itself.",
         );
     }
 };
@@ -341,7 +346,14 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
         // Not a guess — it is exactly the routes with something to convert.
         var can_reject = false;
 
+        // A handler holding a `*Ctx` and returning nothing has sent its
+        // answer itself, somewhere in its body, and no reading of its
+        // signature will find out what. That is a different thing from a
+        // handler that returns nothing *because* the answer is empty.
+        var wants_ctx = false;
+
         for (params, 0..) |p, i| switch (roles[i]) {
+            .ctx => wants_ctx = true,
             .param => can_reject = can_reject or p.type.? != Str,
             .query => {
                 query = queryFields(p.type.?.zfast_query);
@@ -354,13 +366,16 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
             else => {},
         };
 
+        var answer = answerOf(Fn);
+        answer.written = wants_ctx and returnsNothing(Fn);
+
         return .{
             .method = .other, // filled in by the caller, which knows the verb
             .pattern = pattern,
             .params = path_params,
             .query = query,
             .body = body,
-            .answer = answerOf(Fn),
+            .answer = answer,
             .can_reject = can_reject,
         };
     }
@@ -380,6 +395,19 @@ fn queryFields(comptime T: type) []const openapi.Field {
             }};
         }
         return out;
+    }
+}
+
+/// Whether the handler returns `void` — either bare or through an error
+/// union. `Status(204, void)` is not this: it is a value that says what to
+/// send, and it is returned.
+fn returnsNothing(comptime Fn: type) bool {
+    comptime {
+        const Returned = @typeInfo(Fn).@"fn".return_type orelse return true;
+        return switch (@typeInfo(Returned)) {
+            .error_union => |u| u.payload == void,
+            else => Returned == void,
+        };
     }
 }
 
@@ -437,6 +465,18 @@ fn contentTypeFor(comptime T: type) []const u8 {
 
 // ---- the compile-time side ----
 
+/// Everything that can be wrong with a route's pattern and its handler,
+/// checked from the method the caller actually wrote. See ADR 0027: the
+/// message is the same wherever it fires, but the reference trace Zig prints
+/// under it only reaches back two frames, and this is what puts the caller's
+/// own line inside those two.
+pub fn check(comptime pattern: []const u8, comptime handler: anytype) void {
+    comptime {
+        router.validatePattern(pattern);
+        _ = rolesOf(pattern, @typeInfo(fnTypeOf(pattern, @TypeOf(handler))).@"fn".params);
+    }
+}
+
 fn fnTypeOf(comptime pattern: []const u8, comptime F: type) type {
     const Fn = switch (@typeInfo(F)) {
         .@"fn" => F,
@@ -458,7 +498,7 @@ fn fnTypeOf(comptime pattern: []const u8, comptime F: type) type {
 fn notAFunction(comptime pattern: []const u8, comptime F: type) noreturn {
     @compileError(
         "zfast: the handler for route \"" ++ pattern ++ "\" has to be a function, not " ++
-            @typeName(F) ++ ".\n" ++
+            naming.of(F) ++ ".\n" ++
             "  Write `app.get(\"" ++ pattern ++ "\", getUser)` — the function's name, not a call to it.",
     );
 }
@@ -471,8 +511,8 @@ fn rolesOf(
         const param_names = patternParamNames(pattern);
         var roles: [params.len]Role = undefined;
         var used: usize = 0;
-        var body_seen = false;
-        var query_seen = false;
+        var body_at: ?usize = null;
+        var query_at: ?usize = null;
         var wants_ctx = false;
 
         for (params, 0..) |p, i| {
@@ -488,23 +528,31 @@ fn rolesOf(
                     roles[i] = .{ .param = used };
                     used += 1;
                 },
+                // Both arguments are named, and on purpose. zfast cannot know
+                // which of the two was meant to be the body, so a message
+                // that blamed only the second would send people to fix the
+                // one argument that was probably already right.
                 .body => {
-                    if (body_seen) @compileError(
-                        "zfast: the handler for route \"" ++ pattern ++ "\" asks for two request " ++
-                            "bodies (argument " ++ num(i + 1) ++ " is a " ++ @typeName(P) ++ ").\n" ++
-                            "  A request only has one body. If " ++ @typeName(P) ++
-                            " is a service, ask for it as a pointer: `*" ++ @typeName(P) ++ "`.",
+                    if (body_at) |first| @compileError(
+                        "zfast: the handler for route \"" ++ pattern ++ "\" takes two structs by " ++
+                            "value — argument " ++ num(first + 1) ++ " is a " ++
+                            naming.of(params[first].type.?) ++ " and argument " ++ num(i + 1) ++
+                            " is a " ++ naming.of(P) ++ " — and a request only has one body.\n" ++
+                            "  A value is request data and a pointer is a service, so whichever of " ++
+                            "the two is not read from the body is asked for as a pointer: `*" ++
+                            naming.of(params[first].type.?) ++ "`.",
                     );
-                    body_seen = true;
+                    body_at = i;
                 },
                 .query => {
-                    if (query_seen) @compileError(
+                    if (query_at) |first| @compileError(
                         "zfast: the handler for route \"" ++ pattern ++ "\" asks for the query " ++
-                            "string twice (argument " ++ num(i + 1) ++ ").\n" ++
+                            "string twice — argument " ++ num(first + 1) ++ " and argument " ++
+                            num(i + 1) ++ ".\n" ++
                             "  A request has one query string. Put every field in a single struct " ++
                             "and ask for that.",
                     );
-                    query_seen = true;
+                    query_at = i;
                     checkQueryFields(pattern, P.zfast_query, i);
                 },
                 // Checked here, at the first place anybody names the type,
@@ -551,14 +599,14 @@ fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Rol
             .one => .service,
             .slice => @compileError(
                 "zfast: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
-                    "\" is a " ++ @typeName(P) ++ ".\n" ++
+                    "\" is a " ++ naming.of(P) ++ ".\n" ++
                     "  Text from a request is asked for as a `zfast.Str`, not a bare slice: Str is " ++
                     "what stops the contents from outliving the request (ADR 0004).\n" ++
                     "  Inside the handler, `.view()` reads it and `.keep()` holds on to it.",
             ),
             else => @compileError(
                 "zfast: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
-                    "\" is a " ++ @typeName(P) ++ ", which cannot be matched.\n" ++
+                    "\" is a " ++ naming.of(P) ++ ", which cannot be matched.\n" ++
                     "  A service is asked for as a pointer to a single value (`*Db`).",
             ),
         },
@@ -567,7 +615,7 @@ fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Rol
 
         .optional => @compileError(
             "zfast: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
-                "\" is a " ++ @typeName(P) ++ ".\n" ++
+                "\" is a " ++ naming.of(P) ++ ".\n" ++
                 "  A path param on a route that matched is always present, so an optional means " ++
                 "nothing here.\n" ++
                 "  A query param is the thing that may be absent, and there an optional is " ++
@@ -584,7 +632,7 @@ fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Rol
                 "    fn editUser(id: u32, incoming: EditUser) !?User { … }",
         ) else @compileError(
             "zfast: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
-                "\" is a " ++ @typeName(P) ++ ", which zfast does not recognise.\n" ++
+                "\" is a " ++ naming.of(P) ++ ", which zfast does not recognise.\n" ++
                 "  What you can ask for: `*Ctx`, a pointer to a service (`*Db`), a path param " ++
                 "(`u32`, `zfast.Str`, `bool`, an enum), `zfast.Query(T)` for the query string, " ++
                 "a `std.mem.Allocator` for the request arena, or one struct for the request body.",
@@ -601,14 +649,14 @@ fn checkQueryFields(comptime pattern: []const u8, comptime T: type, comptime i: 
             .@"struct" => |s| s,
             else => @compileError(
                 "zfast: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
-                    "\" is a `Query(" ++ @typeName(T) ++ ")`, but " ++ @typeName(T) ++
+                    "\" is a `Query(" ++ naming.of(T) ++ ")`, but " ++ naming.of(T) ++
                     " is not a struct.\n" ++
                     "  The query string is read into a struct: one field per query param.",
             ),
         };
 
         if (info.fields.len == 0) @compileError(
-            "zfast: the `Query(" ++ @typeName(T) ++ ")` on route \"" ++ pattern ++
+            "zfast: the `Query(" ++ naming.of(T) ++ ")` on route \"" ++ pattern ++
                 "\" has no fields, so it would read nothing.\n" ++
                 "  Add one field per query param you want: `page: u32 = 1`.",
         );
@@ -622,8 +670,8 @@ fn checkQueryFields(comptime pattern: []const u8, comptime T: type, comptime i: 
             switch (@typeInfo(Inner)) {
                 .int, .float, .bool, .@"enum" => {},
                 else => @compileError(
-                    "zfast: the field `" ++ f.name ++ ": " ++ @typeName(f.type) ++ "` of the " ++
-                        "`Query(" ++ @typeName(T) ++ ")` on route \"" ++ pattern ++
+                    "zfast: the field `" ++ f.name ++ ": " ++ naming.of(f.type) ++ "` of the " ++
+                        "`Query(" ++ naming.of(T) ++ ")` on route \"" ++ pattern ++
                         "\" is not something a query value can become.\n" ++
                         "  A query param arrives as text, so a field is a `zfast.Str`, a number, " ++
                         "a `bool`, or an enum — optionally wrapped in `?` when it may be absent.",
@@ -645,9 +693,9 @@ fn tooFewPatternParams(
         "the route only has " ++ num(param_names.len) ++ " (:" ++ join(param_names, ", :") ++ ")";
 
     return "zfast: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
-        "\" is a " ++ @typeName(P) ++ ", so zfast reads it as a path param — but " ++ has ++ ".\n" ++
-        "  Add `:name` to the route pattern, or — if " ++ @typeName(P) ++
-        " is a service — ask for it as a pointer: `*" ++ @typeName(P) ++ "`.";
+        "\" is a " ++ naming.of(P) ++ ", so zfast reads it as a path param — but " ++ has ++ ".\n" ++
+        "  Add `:name` to the route pattern, or — if " ++ naming.of(P) ++
+        " is a service — ask for it as a pointer: `*" ++ naming.of(P) ++ "`.";
 }
 
 /// The name of everything the pattern captures, in order of appearance:
