@@ -191,9 +191,40 @@ const Refusal = struct { name: []const u8, says: []const u8 };
 const loop_mode: std.builtin.OptimizeMode = .Debug;
 const test_modes = [_]std.builtin.OptimizeMode{ .Debug, .ReleaseSafe };
 
+/// Debug info is half of a release build. Measured on Zig 0.16, warm, one
+/// source file changed: `-Doptimize=ReleaseFast` is 14.7s, and the same build
+/// with debug info off is 7.3s. Linking is not in it either way — `build-obj`
+/// and `build-exe` came out 30ms apart — and the whole frontend, every comptime
+/// handler included, is 0.5s. The 7.4s is LLVM, twice: DWARF that never gets
+/// generated, and metadata that no longer has to be carried through every
+/// optimisation pass. Some of it is code that stops existing, because with
+/// nothing to read, std's stack-trace machinery — a DWARF reader and an ELF
+/// parser — is dead: `.text` goes from 787 KB to 498 KB.
+///
+/// At runtime it costs nothing measurable: 1,996,698 req/s against 1,988,414,
+/// which is inside this machine's noise. What it costs is the file and the line
+/// on every frame of a panic.
+///
+/// So the default is per-artifact rather than one switch for the repo. The two
+/// binaries whose whole job is to be measured give up their debug info in the
+/// mode they are measured in; the examples and the tests, which are things a
+/// person runs and may have to debug, keep theirs. `-Dstrip` overrides either
+/// way, and `-Dstrip=false` gets the old behaviour back everywhere.
+///
+/// The return is `?bool` and not `bool` on purpose. Zig already leaves debug
+/// info out in `ReleaseSmall`, and an unconditional `false` would be this file
+/// quietly switching that back on: measured, a warm `ReleaseSmall` went from
+/// 3.7s to 6.9s while the `null` was missing. Only `ReleaseFast` is decided
+/// here. Every other mode is left to say what it wants.
+fn stripMeasured(strip: ?bool, optimize: std.builtin.OptimizeMode) ?bool {
+    if (strip) |asked| return asked;
+    return if (optimize == .ReleaseFast) true else null;
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const strip = b.option(bool, "strip", "Leave debug info out: halves a release build, costs nothing measurable at runtime, and leaves a panic without file and line");
 
     const zio = b.dependency("zio", .{
         .target = target,
@@ -218,6 +249,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .strip = stripMeasured(strip, optimize),
         .imports = &.{.{ .name = "zfast", .module = zfast }},
     });
 
@@ -233,6 +265,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/profile.zig"),
             .target = target,
             .optimize = .ReleaseFast,
+            .strip = stripMeasured(strip, .ReleaseFast),
             .imports = &.{.{ .name = "zio", .module = zio.module("zio") }},
         }),
     });
@@ -335,6 +368,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path(b.fmt("examples/{s}/main.zig", .{example.name})),
             .target = target,
             .optimize = optimize,
+            // Deliberately not `stripMeasured`: an example is run by a person,
+            // and the first thing they need from a crash is where it was.
+            .strip = strip,
             .imports = &.{.{ .name = "zfast", .module = zfast }},
         });
         const built = b.addExecutable(.{

@@ -90,8 +90,11 @@ A WebSocket has no read limit once the handshake is done — a chat tab with
 nobody typing is working correctly. Its writes keep theirs, which is how the
 server finds out the client is gone.
 
-No requests-per-second figures, on purpose: that number needs a machine nobody
-else is using, and there isn't one yet ([`../roadmap.md`](../roadmap.md)).
+Requests-per-second figures now exist, on one quiet box:
+[`../benchmarks.md`](../benchmarks.md) for zfast alone and
+[`../comparison.md`](../comparison.md) against eight other servers. Read the
+caveats in both — loopback, no TLS, no database, and a handler that touches
+Postgres makes every row in them the same.
 
 ## Which build mode
 
@@ -99,6 +102,21 @@ else is using, and there isn't one yet ([`../roadmap.md`](../roadmap.md)).
 instead of a loud crash, and a web server takes input from strangers — that is
 exactly the code where the check earns its keep. `Debug` is for development;
 zfast's own `Str` staleness trap only exists there.
+
+## Debug info, and what a build costs
+
+Half of a Zig release build is debug info. Measured on this repo, warm: 14.7s
+with it and 7.4s without, and the binary goes from 6.0 MB to 0.8 MB. At runtime
+it costs nothing measurable. What it costs is the file and the line on every
+frame of a panic — so **keep it for anything you deploy**, which is also why the
+mode recommended above is not the one where zfast turns it off. The full
+decomposition is in [`../comparison.md`](../comparison.md).
+
+`zig build -Doptimize=ReleaseFast` in this repo builds the benchmark binary,
+whose only job is to be measured, and leaves debug info out of it. Nothing else
+here does, and `-Dstrip=false` turns even that off. Your own `build.zig` decides
+for your own binaries: pass `.strip = true` to the module if you want the
+smaller, faster-to-build one and can give up the line numbers.
 
 ## Panics
 

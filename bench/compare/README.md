@@ -75,6 +75,7 @@ The reasoning, and what it cost to find out, is in
 | `build.sh` | builds every candidate; skips whatever toolchain is missing |
 | `buildtimes.sh` | cold build times and binary sizes |
 | `warmbuilds.sh` | warm rebuild times, by changing file contents rather than `touch` |
+| `debuginfo.sh` | the same, with and without debug info — the projects here disagree on the default, and it is half of a Zig release build |
 | `gonet/` | Go stdlib `net/http`, method+wildcard `ServeMux` |
 | `gofiber/` | Go Fiber v2, fasthttp underneath |
 | `nodehttp/` | Node stdlib `http`; `CLUSTER=n` forks n workers |

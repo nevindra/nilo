@@ -419,3 +419,28 @@ The general lesson is the one [ADR 0001](./adr/0001-dx-wins-below-the-10-percent
 And one price named in an ADR turned out to have quietly stopped being real: [ADR 0027](./adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md) recorded the 39 refusals as "about 9 seconds on every `zig build test`" that "never cache". On Zig 0.16 they cache, and they are 0.5s. Nothing was done to earn that, which is exactly why it needed checking.
 
 **What was left alone.** Memory per idle connection is 16,961 bytes and seventh of nine — http.zig holds a connection in 11.2 KB, Bun in 338 bytes. zfast is the leaner one below about a thousand connections and is not above it, so the README's "low memory" needs the qualifier or the number needs to come down. Not fixed here, and written down rather than left to be discovered, which is the only part of that sentence this project has earned yet.
+
+*It came down. A keep-alive connection was holding every buffer page it had ever touched until close; between requests those pages now go back, and the figure is 8,767 bytes flat — third of nine, and third place is behind Bun and nothing else. The number is in [`benchmarks.md`](./benchmarks.md).*
+
+## After 0.1.0: the release build, and the third wrong reason
+
+The build number kept getting attributed to the wrong thing. It had already been wrong twice — once as "the slowest edit loop in the field" when `zig build` is `Debug` and 0.4s, once as the comptime typed layer when comptime is nearly free. The remaining sentence, *"half the release build is Zig's own floor and the other ~7.5s is zfast's library arriving as machine code for LLVM to chew"*, was measured correctly and still named the wrong cause.
+
+Stopping the same build at each stage says where it goes:
+
+| | |
+|---|---|
+| parse and sema — every comptime handler included | **0.5s** |
+| and LLVM, with the debug info left out | 7.3s |
+| and the debug info | 14.7s |
+| the same, stopping before the link | 14.6s |
+
+The frontend is 3%. The linker does not appear at all — `build-obj` and `build-exe` came out 30ms apart. **Half of a release build is debug info**, and it is half for two reasons rather than one: 1.9 MB of DWARF has to be generated and then carried as metadata through every optimisation pass, and some of the machine code stops existing, because with nothing to read, std's stack-trace machinery — a DWARF reader and an ELF parser — is dead. `.text` goes from 787 KB to 498 KB.
+
+**And the comparison had been unfair in the same place.** Rust's `[profile.release]` leaves debug info out unless asked; Zig emits it and makes you opt out. So "zfast 15.0s against axum 4.8s" was a build that does the work sitting next to a build that skips it. Measured both ways, warm: axum is 6.5s with and 4.7s without, zfast 14.7s and 7.4s. zfast is still last. It is last by 2.7s rather than by 10.2s, and the difference between those two readings was nobody's code.
+
+**What changed.** `zig build -Doptimize=ReleaseFast` now leaves debug info out of the two binaries whose whole job is to be measured — 14.7s to 7.4s, the binary 6.0 MB to 0.8 MB. It costs nothing at runtime: 1,996,698 req/s against 1,988,414, inside this machine's noise. What it costs is the file and the line on every frame of a panic, so the examples and the tests keep theirs, and `-Dstrip` overrides in both directions.
+
+**A mistake made while doing it, caught by re-measuring something that should not have moved.** The helper deciding this returned `bool`, so every mode that had not asked for debug info got told to keep it — and Zig already leaves it out in `ReleaseSmall`. That mode went from 3.7s to 6.9s, quietly, in a change whose entire subject was build time. The only reason it was noticed is that the mode table was measured again afterwards rather than assumed unchanged. The return type is `?bool` now, and `null` means *the mode decides*.
+
+**One dead end, recorded because it looks alive.** `-fno-llvm` builds the same executable with Zig's self-hosted backend in **0.31s** — 47× faster. The binary does 615,264 req/s against 1,988,414, with a p99 of 555ms. It is not a release build, and for the loop where build speed is the thing that matters, `Debug` is already 0.4s.

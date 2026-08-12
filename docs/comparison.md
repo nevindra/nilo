@@ -166,76 +166,109 @@ Warm means one source file's **contents** changed — measured by appending a
 line, not by `touch`, because Go and Zig hash file contents and a touch reports
 a fake 0.0s.
 
-The mode matters more than the framework, so both are here. **Dev** is what an
-edit loop costs: `zig build`, `go build`, `cargo build`. **Release** is the
-binary you ship: `-Doptimize=ReleaseFast`, `cargo build --release`, and for Go
-whichever one it has, because Go does not offer the choice.
+There are three columns and not two, because these projects do not agree on
+what a release build is. Rust's `[profile.release]` leaves debug info out unless
+asked; Go and Zig both emit it and make you opt out. A single "release" column
+had a Rust build that skips that work sitting next to a Zig build that does it,
+which is most of what made the gap look the size it did. **Dev** is what an edit
+loop costs: `zig build`, `go build`, `cargo build`. **◂** marks what each
+project does when you do not tell it anything.
 
-| framework | warm, dev | warm, release | cold, release | binary | stripped |
+| framework | warm, dev | warm release, debug info | warm release, without | binary, debug info | without |
 |---|---|---|---|---|---|
 | Node / Bun | — | — | — | — | — |
-| Go net/http | **0.2s** | 0.2s | 3.0s | 8.3 MB | 5.8 MB |
-| Go Fiber v2 | **0.2s** | 0.2s | 4.1s | 9.7 MB | 6.7 MB |
-| Rust axum | **0.2s** | 4.8s | 10.3s | 1.0 MB | 0.8 MB |
-| http.zig | 0.3s | 9.3s | 9.9s | 4.2 MB | 0.6 MB |
-| **zfast** | **0.4s** | **15.0s** | 15.5s | 6.0 MB | 1.1 MB |
+| Go net/http | **0.2s** | 0.2s ◂ | 0.1s | 8.3 MB | 5.8 MB |
+| Go Fiber v2 | **0.2s** | 0.2s ◂ | 0.2s | 9.7 MB | 6.7 MB |
+| Rust axum | **0.2s** | 6.5s | **4.7s** ◂ | — | 1.0 MB |
+| http.zig | 0.3s | 9.2s ◂ | 3.9s | 4.2 MB | 0.4 MB |
+| **zfast** | **0.4s** | 14.7s | **7.4s** ◂ | 6.0 MB | 0.8 MB |
 
 **In the loop that a developer actually sits in, zfast is last by 0.2 seconds**
 — 0.4s against Go's 0.2s. That is a difference nobody will feel, and it is the
 column that ADR 0001's "developer experience comes first" is about.
 
-The release column is a real 15 seconds and it is last, but it is worth knowing
-what is in it before deciding to spend anything on it. Building the same
-executable in each mode, warm:
+zfast is still last in a release build, by 2.7s against axum and 3.5s against
+http.zig. But it was 15.0s against 4.8s before this measurement was taken, and
+that reading had two different things in it: a genuine gap, and a default
+nobody had noticed.
+
+### Where a release build goes
+
+Building the same executable, warm, and stopping at each stage:
+
+| | |
+|---|---|
+| parse and sema — every comptime handler included | **0.5s** |
+| and LLVM, with the debug info left out | 7.3s |
+| and the debug info | 14.7s |
+| the same, stopping before the link | 14.6s |
+
+So the frontend is 3% of it, the linker does not appear at all, and **half of a
+release build is debug info**. Two things are behind that. The DWARF has to be
+generated — 1.9 MB of it — and its metadata is then carried through every
+optimisation pass LLVM runs. And some of it is code that stops existing: with
+no debug info to read, std's stack-trace machinery, a DWARF reader and an ELF
+parser, is dead. `.text` goes from 787 KB to 498 KB.
+
+Leaving it out costs nothing measurable at runtime — 1,996,698 req/s against
+1,988,414, which is inside this machine's noise — and costs the file and the
+line on every frame of a panic. So `zig build -Doptimize=ReleaseFast` now leaves
+it out for the two binaries whose whole job is to be measured, and nothing else:
+the examples and the tests keep theirs. `-Dstrip=false` gets the old behaviour
+back, `-Dstrip=true` applies it to everything.
+
+By mode, warm:
 
 | | |
 |---|---|
 | `zig build` (Debug) | 0.4s |
-| `zig build -Doptimize=ReleaseSmall` | 4.6s |
-| `zig build -Doptimize=ReleaseSafe` | 14.1s |
-| `zig build -Doptimize=ReleaseFast` | 14.9s |
+| `zig build -Doptimize=ReleaseSmall` | 3.7s |
+| `zig build -Doptimize=ReleaseFast` | 7.3s |
+| `zig build -Doptimize=ReleaseSafe` | 13.9s |
+| `zig build -Doptimize=ReleaseFast -Dstrip=false` | 14.6s |
 
-And building progressively less of zfast, warm, in `ReleaseFast`:
+### How much of it is zfast
 
-| | |
-|---|---|
-| a Zig hello world, no zfast at all | **7.1s** |
-| zfast imported, `App` built, **zero** routes | 14.6s |
-| the same with 32 routes | 16.6s |
+Building progressively less, cold, in `ReleaseFast`:
 
-**Half of the 15 seconds is a hello world.** Seven of them are what Zig and LLVM
-charge any program at all for a release build, before a line of zfast is
-involved. Another ~7.5s is zfast's library arriving as machine code for LLVM to
-optimise. And the part that looks most expensive — the comptime typed layer,
-one specialised handler generated per route — costs about **59ms per route**:
-32 of them add 2.0s.
+| | with debug info | without |
+|---|---|---|
+| a Zig hello world, no zfast at all | 6.9s | 1.5s |
+| zfast-hello | 14.7s | 7.3s |
+| **what zfast's own code adds** | 7.8s | **5.8s** |
+
+And the part that looks most expensive — the comptime typed layer, one
+specialised handler generated per route — costs about **59ms per route**:
+zero routes to 32 routes adds 2.0s, measured with debug info on.
 
 So the earlier reading of this, that "the typed layer is comptime and the root
-file drives it", was wrong. Comptime is nearly free here. What is not free is
-LLVM optimising the code that comes out the other side, and most of that bill is
-addressed to Zig rather than to zfast.
+file drives it", was wrong twice over. Comptime is nearly free: half a second
+for the entire frontend. What is not free is LLVM, and half of what LLVM is
+doing was debug info that nobody had asked for.
 
-The test step is the one place a real choice exists:
+One thing that is *not* a way out, since it looks like one: `-fno-llvm`, Zig's
+self-hosted backend, builds the same binary in **0.31s** — 47× faster. The
+binary does 615,264 req/s against 1,988,414, with a p99 of 555ms. It is not a
+release build. And for the loop where a fast build is what matters, `Debug` is
+already 0.4s.
+
+The test step had the same shape of problem and was split for the same reason:
 
 | | |
 |---|---|
-| `zig build test`, Debug only | **0.8s** |
-| `zig build test`, Debug and ReleaseSafe (as it ships) | 7.8s |
-| `zig build refusals` | 0.5s |
+| `zig build test` — Debug, the loop | **0.6s** |
+| `zig build test-all` — Debug and ReleaseSafe, what CI runs | 7.8s |
+| `zig build refusals` (included in both) | 0.5s |
 
-Running the suite in both modes costs 10× running it in one, and
-[ADR 0019](./adr/0019-a-response-owns-its-headers.md) is the reason it does it:
-a use-after-return passed in `Debug` for a whole stage and only failed in a
-release build. That is a real trade with a real bug behind it, not an
-accident — but it is currently paid on every `zig build test` rather than
-before a commit.
+Running the suite in both modes costs 12× running it in one, and
+[ADR 0019](./adr/0019-a-response-owns-its-headers.md) is why it is still run
+both ways: a use-after-return passed in `Debug` for a whole stage and only
+failed in a release build. What changed is when it is paid. `test-all` runs on
+every push, so the rule is held by CI rather than by the edit loop.
 
-One number in `build.zig` is now stale: the comment there says the refusals
-"never cache" and cost "about 9 seconds on a warm `zig build test`". They cache
-fine on Zig 0.16 and cost 0.5s.
-
-The binary is fine — 1.1 MB stripped, second only to http.zig, and a sixth of
-Go's.
+The binary is 0.8 MB, second only to http.zig and a seventh of Go's — and
+smaller than `strip(1)` on the old one, which came out at 1.1 MB, because the
+code that was never generated cannot be stripped back out afterwards.
 
 ## The scorecard
 
@@ -247,8 +280,8 @@ Go's.
 | Memory, idle server | 2nd of 9 (5.5 MB) |
 | Memory per connection | 3rd of 9 — was 7th before the fix this measurement caused |
 | Warm rebuild, dev — the edit loop | 5th of 5 compiled, by 0.2s |
-| Warm rebuild, release | **5th of 5 compiled**, and half of it is Zig's floor |
-| Binary size, stripped | 2nd of 5 compiled |
+| Warm rebuild, release | **5th of 5 compiled** — 7.4s, was 15.0s before this measurement |
+| Binary size | 2nd of 5 compiled (0.8 MB) |
 
 ## What this does not say
 
@@ -266,3 +299,9 @@ Go's.
 - **No statistical work.** Three runs and a median, spreads of 1–4%. Enough to
   separate 650k from 1.4M, not enough to separate zfast from http.zig — which is
   the point made above.
+- **The second build column needed a knob http.zig does not ship.** Its
+  `-Dstrip` is three lines added to the harness's own `build.zig`, defaulting to
+  what http.zig would do on its own, purely so both Zig projects could be
+  measured both ways. axum's column used `CARGO_PROFILE_RELEASE_DEBUG`; editing
+  `Cargo.toml` instead invalidates the dependency graph and reports 12.5s, which
+  is a rebuild of tokio, not a warm build.
