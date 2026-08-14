@@ -76,6 +76,24 @@ pub const Route = struct {
     /// match a path of its length, so finding one ends the scan.
     all_literal: bool = false,
 
+    /// The first segment, boiled down to four bytes — the first level of a
+    /// radix tree, without the tree.
+    ///
+    /// `zig build profile` says where the scan's time goes: at 100 routes
+    /// every route that survives the method and length checks pays a
+    /// `mem.eql` on its first segment, and the gap between the two route
+    /// sets it measures is entirely that call. Comparing a `u32` first
+    /// throws out everything whose first segment is a different word, and
+    /// the `mem.eql` is left to run only where it can succeed.
+    ///
+    /// A collision costs nothing but the `mem.eql` that would have run
+    /// anyway, so the key does not have to be a good hash — only a cheap
+    /// one. What it must not do is exclude a route that could match, which
+    /// is what `first_literal` is for: a route beginning `:id` or `*`
+    /// answers whatever turns up and is never skipped.
+    first_key: u32 = 0,
+    first_literal: bool = false,
+
     /// How specific this route is, so that `/users/new` wins over
     /// `/users/:id` no matter which was registered first — the same
     /// order-independence `use` and `get` already have (ADR 0009).
@@ -93,6 +111,24 @@ pub const Route = struct {
             };
         }
         return score;
+    }
+
+    /// Four bytes standing for a path segment: its length, its first byte,
+    /// its last byte and the one in the middle.
+    ///
+    /// Not a hash, and deliberately not — a hash worth the name costs more
+    /// than the `mem.eql` it is trying to avoid at the one route count most
+    /// apps have. This is four loads and three shifts. It has to tell apart
+    /// the segments that actually appear next to each other in a route
+    /// table, and those differ at the end (`/users` and `/uploads`) or in
+    /// length far more often than they differ nowhere at all.
+    fn firstKey(text: []const u8) u32 {
+        if (text.len == 0) return 0;
+        const len: u32 = @intCast(@min(text.len, 0xff));
+        const head: u32 = text[0];
+        const tail: u32 = text[text.len - 1];
+        const middle: u32 = text[text.len / 2];
+        return (len << 24) | (head << 16) | (tail << 8) | middle;
     }
 
     /// Whether two patterns match exactly the same set of paths, which
@@ -165,6 +201,8 @@ pub const Router = struct {
             if (seg.kind != .literal) literal_only = false;
         }
 
+        const starts_literal = segments.len > 0 and segments[0].kind == .literal;
+
         try self.routes.append(self.gpa, .{
             .method = method,
             .pattern = pattern,
@@ -173,6 +211,8 @@ pub const Router = struct {
             .score = Route.specificity(segments),
             .wildcard_tail = tail_is_wildcard,
             .all_literal = literal_only,
+            .first_literal = starts_literal,
+            .first_key = if (starts_literal) Route.firstKey(segments[0].text) else 0,
         });
     }
 
@@ -271,6 +311,12 @@ pub const Router = struct {
         var have = false;
         var best_score: u32 = 0;
 
+        // Worked out once for the path, then compared against every route
+        // that gets far enough to care. Zero when the path has no segments
+        // at all, which no literal-first route can answer anyway — the
+        // length check above has already thrown those out.
+        const want_first = if (parts.len > 0) Route.firstKey(parts[0]) else 0;
+
         for (self.routes.items) |*route| {
             // Two integer compares throw out nearly every route before any
             // text is looked at.
@@ -280,6 +326,12 @@ pub const Router = struct {
                 // slot is the only one that need not be there.
                 if (parts.len + 1 < route.segments.len) continue;
             } else if (route.segments.len != parts.len) continue;
+
+            // A third integer compare, for the route sets the first two
+            // cannot separate: every route the same shape, differing only
+            // in the word they start with. A route beginning with a param
+            // or a `*` answers anything and is never skipped here.
+            if (route.first_literal and route.first_key != want_first) continue;
 
             // With something already captured, a route that cannot outrank
             // it is not worth testing — and one that can has to be tested
@@ -717,4 +769,75 @@ test "conflicting names the pattern that is already there" {
     try testing.expect(r.conflicting(.GET, "/users/me") == null);
     try testing.expect(r.conflicting(.GET, "/users/*") == null);
     try testing.expect(r.conflicting(.GET, "/users") == null);
+}
+
+test "a first-segment key collision still matches, because the key only skips" {
+    var r = Router.init(testing.allocator);
+    defer r.deinit();
+
+    // Same length, same first byte, same last byte, same middle byte — so
+    // `firstKey` cannot tell these two apart. The scan must fall through to
+    // the real comparison rather than trusting the key.
+    try testing.expectEqual(Route.firstKey("abcde"), Route.firstKey("axcye"));
+
+    try r.add(.GET, "/abcde/:id", testHandler);
+    try r.add(.GET, "/axcye/:id", otherHandler);
+
+    const first = r.match(.GET, "/abcde/7") orelse return error.TestExpectedMatch;
+    const second = r.match(.GET, "/axcye/7") orelse return error.TestExpectedMatch;
+    try testing.expect(first.handler == testHandler);
+    try testing.expect(second.handler == otherHandler);
+
+    // And a third word that collides with neither is still a miss.
+    try testing.expect(r.match(.GET, "/zzzzz/7") == null);
+}
+
+test "a route starting with a param or a catch-all is never skipped by the key" {
+    var r = Router.init(testing.allocator);
+    defer r.deinit();
+
+    // A literal-first route sits in front of them, so the key of the path
+    // being asked for matches nothing that was registered as a literal.
+    try r.add(.GET, "/users/:id", testHandler);
+    try r.add(.GET, "/:tenant/dashboard", otherHandler);
+
+    const wild = r.match(.GET, "/acme/dashboard") orelse return error.TestExpectedMatch;
+    try testing.expect(wild.handler == otherHandler);
+    try testing.expectEqualStrings("tenant", wild.params[0].name);
+    try testing.expectEqualStrings("acme", wild.params[0].value);
+
+    // The literal still wins where both could answer.
+    const literal = r.match(.GET, "/users/42") orelse return error.TestExpectedMatch;
+    try testing.expect(literal.handler == testHandler);
+}
+
+test "a catch-all at the root answers a path whose first segment matches no route" {
+    var r = Router.init(testing.allocator);
+    defer r.deinit();
+    try r.add(.GET, "/assets/:file", testHandler);
+    try r.add(.GET, "/*", otherHandler);
+
+    const anything = r.match(.GET, "/nothing/like/the/others") orelse
+        return error.TestExpectedMatch;
+    try testing.expect(anything.handler == otherHandler);
+
+    const asset = r.match(.GET, "/assets/logo.svg") orelse return error.TestExpectedMatch;
+    try testing.expect(asset.handler == testHandler);
+}
+
+test "the key tells apart the words a route table actually holds" {
+    // The point of the key is that neighbouring route names differ where
+    // it looks. These are the shapes that turn up in a real table, and the
+    // benchmark's `/thingN/...`, which differs only at the end.
+    const words = [_][]const u8{
+        "users", "uploads", "user", "usage", "health", "healthz",
+        "api",   "admin",   "auth", "thing0", "thing1", "thing99",
+    };
+    var collisions: usize = 0;
+    for (words, 0..) |a, i| {
+        for (words[i + 1 ..]) |b| {
+            if (Route.firstKey(a) == Route.firstKey(b)) collisions += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 0), collisions);
 }
