@@ -271,6 +271,28 @@ pub fn build(b: *std.Build) void {
     });
     b.step("profile", "Time the pieces of one request").dependOn(&b.addRunArtifact(profile).step);
 
+    // Generated requests thrown at the parser, checking the properties in
+    // `src/fuzz.zig`. Separate from `test` because it runs until it is bored
+    // rather than until it is done, and the corpus half of the same
+    // properties already runs on every `zig build test`.
+    //
+    // `ReleaseSafe` and not the caller's mode: the safety checks are the
+    // point — an index out of bounds is the class of bug this is looking for
+    // — and the speed is what makes a million inputs a coffee break rather
+    // than an afternoon.
+    const fuzzer = b.addExecutable(.{
+        .name = "zfast-fuzz",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/fuzz_main.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+            .imports = &.{.{ .name = "zio", .module = zio.module("zio") }},
+        }),
+    });
+    const run_fuzzer = b.addRunArtifact(fuzzer);
+    if (b.args) |args| run_fuzzer.addArgs(args);
+    b.step("fuzz", "Throw generated requests at the parser").dependOn(&run_fuzzer.step);
+
     // `test` is the loop: Debug, plus the refusals, which are cheap. `test-all`
     // is everything `test` does and the same suite again in ReleaseSafe. Both
     // exist because the second mode catches a class of bug the first cannot,

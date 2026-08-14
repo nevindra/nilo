@@ -291,6 +291,7 @@ test {
     _ = @import("http1.zig");
     _ = @import("bulkhead.zig");
     _ = @import("engine/zio.zig");
+    _ = @import("fuzz.zig");
     _ = @import("json.zig");
     _ = @import("scan.zig");
     _ = @import("static.zig");

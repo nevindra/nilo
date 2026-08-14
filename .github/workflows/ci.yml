@@ -60,3 +60,16 @@ jobs:
       # surprise for the first person who copies it.
       - name: zig build examples
         run: zig build examples
+
+      # `test-all` already runs the parser's properties over the corpus,
+      # which is every input this has ever caught. This runs them over a
+      # million generated ones: the corpus is the regression half, and this
+      # is the half that finds something new. About eight seconds.
+      #
+      # The seed is the commit, so a given commit always fuzzes the same
+      # million inputs — re-running a red job gives the same answer instead
+      # of a coin toss — while a new commit explores a different million.
+      # A failure prints the seed and the bytes, ready to be pasted into
+      # the corpus in `src/fuzz.zig`.
+      - name: zig build fuzz
+        run: zig build fuzz -- --iterations 1000000 --seed 0x$(echo "${{ github.sha }}" | cut -c1-16)

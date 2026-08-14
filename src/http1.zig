@@ -100,6 +100,13 @@ pub fn discardBody(in: *std.Io.Reader, r: *const Request, limit: u64) !void {
 // already been given the body, so there is nothing left to do with it.
 
 /// Read a chunked body into one contiguous slice from `gpa`.
+///
+/// `gpa` is meant to be the request arena, and this is written as though
+/// it always is: a chunk that fails partway leaves what it had allocated,
+/// and a body of no chunks comes back as a slice that was never allocated
+/// at all. Against an arena both are free and correct — the whole thing
+/// goes when the request does. Against a general allocator the first is a
+/// leak and the second panics on `free`.
 pub fn readChunkedBody(in: *std.Io.Reader, gpa: std.mem.Allocator, limit: usize) ![]const u8 {
     var body: std.ArrayList(u8) = .empty;
     while (true) {
@@ -265,7 +272,11 @@ const blockAt = scan.positionsOf;
 /// The index just past the blank line that ends the head, if it is
 /// complete. Accepts CRLF as well as a bare LF. Starts at `from`, which
 /// the caller advances as the head arrives in pieces.
-fn findEndOfHead(buf: []const u8, from: usize) ?usize {
+///
+/// Public for `fuzz.zig`, which checks it against a byte-at-a-time
+/// reference. Where a head ends is where the next request begins, so a
+/// disagreement here is request smuggling rather than a wrong answer.
+pub fn findEndOfHead(buf: []const u8, from: usize) ?usize {
     var i: usize = from;
     while (i < buf.len) : (i += lanes) {
         var newlines = blockAt(buf, i, '\n');
@@ -323,7 +334,13 @@ pub fn parseHead(head: []const u8, r: *Request) ParseError!void {
                 first_line = false;
             } else {
                 if (end == line_start) return; // the blank line ends the head
-                if (colon == 0 or colon >= end) return error.BadHeader;
+                // No colon (0 is the sentinel), a colon where the name
+                // should be, or one past the end of the line. A field name
+                // is one or more characters (RFC 9110 §5.1), so `: value`
+                // is malformed and gets the same 400 as a line with no
+                // colon at all — found by `fuzz.zig`, which had zfast
+                // ignoring it and every reference parser refusing it.
+                if (colon <= line_start or colon >= end) return error.BadHeader;
                 // Two of the three headers that matter begin with `c` and one
                 // with `t`, so one compare throws out Host, Accept,
                 // User-Agent and the rest before their name is even measured.
@@ -382,6 +399,9 @@ pub fn parseRequestLine(line: []const u8, r: *Request) ParseError!void {
 /// rather than three case-insensitive string compares and a trim.
 pub fn applyHeader(line: []const u8, r: *Request) ParseError!void {
     const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.BadHeader;
+    // A line that begins with its colon has no name — malformed, same as
+    // one with no colon.
+    if (colon == 0) return error.BadHeader;
     return applyHeaderAt(line, 0, colon, line.len, r);
 }
 

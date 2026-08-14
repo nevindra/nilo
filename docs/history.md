@@ -444,3 +444,30 @@ The frontend is 3%. The linker does not appear at all — `build-obj` and `build
 **A mistake made while doing it, caught by re-measuring something that should not have moved.** The helper deciding this returned `bool`, so every mode that had not asked for debug info got told to keep it — and Zig already leaves it out in `ReleaseSmall`. That mode went from 3.7s to 6.9s, quietly, in a change whose entire subject was build time. The only reason it was noticed is that the mode table was measured again afterwards rather than assumed unchanged. The return type is `?bool` now, and `null` means *the mode decides*.
 
 **One dead end, recorded because it looks alive.** `-fno-llvm` builds the same executable with Zig's self-hosted backend in **0.31s** — 47× faster. The binary does 615,264 req/s against 1,988,414, with a p99 of 555ms. It is not a release build, and for the loop where build speed is the thing that matters, `Debug` is already 0.4s.
+
+## After 0.1.0: the parser gets a fuzzer, and what the first hour of it found
+
+The request head is the one piece of zfast that a stranger writes directly. Every test of it, all the way to here, was an input somebody thought of — which is a decent way to check the cases you know and no way at all to find the ones you don't.
+
+**The coverage-guided fuzzer was the plan, and it does not work.** Zig 0.16 has `zig build test --fuzz`, and `std/Build/Fuzz.zig` is 99 mentions of it, so it looked like a switch to flick. It fails to compile: `lib/compiler/test_runner.zig:566` passes a `*builtin.StackTrace` where `std.debug.writeStackTrace` wants a `*const debug.StackTrace`, and that line is only instantiated in fuzz mode. Nothing of ours is involved — a five-line file with a `std.testing.fuzz` call and no imports reproduces it.
+
+So the targets are written as `std.testing.fuzz` targets anyway, and two other things drive them:
+
+- **`zig build test`** replays a corpus through them. That is the regression half: every input this has ever caught, plus every nasty shape anybody wrote down — both framing headers at once, `Content-Length: -1`, a chunk size of `ffffffffffffffff`, a head boundary landing exactly on a block edge.
+- **`zig build fuzz`** generates them. Not random bytes, mostly: three quarters of the inputs are built to be nearly valid and then damaged in one place, because random bytes are almost never a request and a run made of them re-checks that nonsense is refused. A million inputs is about eight seconds, and CI runs a million on every push with the commit SHA as the seed — so a given commit always fuzzes the same million, and a red job re-run gives the same answer rather than a coin toss.
+
+**Two of the three properties are differential**, and that is what makes them worth having. "It does not crash" is a low bar for a parser; the interesting question is whether the fast implementation and an obvious one agree. Where a head *ends* is where the next request begins, and `Content-Length` and `Transfer-Encoding` are the two fields a smuggled request is built out of, so a disagreement about any of them is a security bug rather than a wrong answer. The reference is written to be obviously right: no blocks, no bitmasks, no resuming.
+
+The third property is about resuming specifically. `readHead` is called again every time more bytes arrive and does not rescan what it has seen — it backs up three bytes, so a `\r\n\r\n` split across two reads is still found. Three is exactly the kind of number that is right until it is off by one, so the check replays a head arriving a byte at a time and requires the resumed answer to equal the from-scratch answer at every single prefix.
+
+### What it found
+
+**A header line with no name was accepted.** `: value` — colon first, nothing before it. zfast ignored the line and carried on; every reference parser refuses it, and RFC 9110 §5.1 says a field name is one or more characters. zfast already refused a line with *no* colon, so this was the same rule applied inconsistently. It is a 400 now. Small, and precisely the kind of leniency that ends up in a smuggling write-up years later.
+
+**`readChunkedBody` is arena-only, and nothing said so.** The property that a body cannot exceed its limit was written with the testing allocator, and `0\r\n\r\n` — a body of no chunks — panicked with *Invalid free*: the empty body comes back as a slice that was never allocated. Reading further, a chunk that fails partway leaves what it had, too. Both are correct against the request arena, which is the only thing that ever calls it, and neither survives a general allocator. The contract is written down now, and the check reads into an arena like the server does.
+
+**The corpus was decoding to nothing.** `std.testing.Smith` replays a recorded input as a length-prefixed stream, and the helper building those prefixes wrote them with `std.mem.toBytes(@as(u32, text.len))`. That compiles, and every entry came out with `0xaa` where the length should be — the undefined-memory pattern. Every corpus entry was silently replaying as an empty input, and the suite was green while testing air. What caught it was a test whose whole job is to check that one corpus entry arrives at the target as the bytes it was written as, added because a corpus you cannot see decode is a corpus you are trusting.
+
+**And the first thing it caught was the oracle.** The reference request-line parser split on spaces, which made `GET /x` an unsupported version where zfast said malformed request line. zfast was right. A reference implementation is code, it gets things wrong like code, and a differential test that has never disagreed with anything is not evidence of much.
+
+Twenty million generated inputs, plus the corpus in both build modes, and the three properties hold.
