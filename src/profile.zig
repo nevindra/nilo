@@ -95,7 +95,7 @@ var body_json: []const u8 = "";
 fn wholeRequest() void {
     var in = std.Io.Reader.fixed(request);
     var out = std.Io.Writer.fixed(&out_buf);
-    sink += @intFromBool(app.handleRequest(arena.allocator(), &lifetime, &in_flight, &in, &out, .off));
+    sink += @intFromBool(app.handleRequest(arena.allocator(), &lifetime, &in_flight, &in, &out, .off, .{}));
     lifetime.end();
     _ = arena.reset(.{ .retain_with_limit = arena_keep });
 }

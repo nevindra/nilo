@@ -25,9 +25,14 @@ const percent = @import("percent.zig");
 const fail = @import("fail.zig");
 const Str = str_mod.Str;
 
-/// The ceiling on a request body read into the arena. A per-App limit
-/// comes later; for now, one number that makes sense.
-pub const max_body = 1024 * 1024;
+/// What one request is allowed to do. Filled from `listen()`'s options and
+/// carried on the Ctx, so a limit is one field away rather than a reach
+/// back into the App. The defaults are what a test driving a handler
+/// directly gets, and they are `bulkhead.Options`' defaults.
+pub const Limits = struct {
+    max_body: usize = 1024 * 1024,
+    trusted_hops: u8 = 0,
+};
 
 /// The size `sendJson` reserves before serialising. Not a limit — a
 /// bigger response simply grows past it.
@@ -77,6 +82,12 @@ pub const Ctx = struct {
     /// is the default, and what a test driving App directly gets — makes
     /// every one of those calls do nothing.
     _deadlines: bulkhead.Deadlines = .off,
+    /// Who the connection came from, as the socket reports it. Empty when
+    /// there is no socket — a test driving App directly, a Unix socket.
+    _peer: bulkhead.Peer = .{},
+    /// What this request may do, from `listen()`. Defaults when App was
+    /// never listened on, which is what a test gets.
+    _limits: Limits = .{},
     _params: []const router.Param,
     _services: *const service_mod.Registry,
     /// Set by App when the path names a file in a static set, so the
@@ -223,6 +234,55 @@ pub const Ctx = struct {
         return null;
     }
 
+    /// The address the connection itself came from — the proxy's, when
+    /// there is a proxy. Never forgeable, and never null: this is what the
+    /// kernel says, not what a header claims.
+    ///
+    /// Empty text when there is no socket, which is what a handler called
+    /// straight from a test gets.
+    pub fn peer(self: *const Ctx) bulkhead.Peer {
+        return self._peer;
+    }
+
+    /// The address of the client, looking through however many proxies
+    /// `listen()` was told stand in front (`.trusted_hops`).
+    ///
+    /// With the default of zero this is `peer()` — the connection's own
+    /// address — because `X-Forwarded-For` is a header like any other and
+    /// a server that believes it without being told to has handed every
+    /// client the ability to be any address it likes. Rate limits, audit
+    /// logs and blocklists are the things that read this, and they are
+    /// exactly the things worth lying to.
+    ///
+    /// Counted from the right, so the entries a trusted proxy wrote are
+    /// the only ones reachable and anything the client put in the header
+    /// itself stays to the left, unread. A header with fewer entries than
+    /// there are hops means the chain is not the one configured, so the
+    /// socket's address is used rather than the closest guess.
+    pub fn clientIp(self: *const Ctx) Str {
+        const hops = self._limits.trusted_hops;
+        if (hops == 0) return Str.fromRequest(self._peer.address(), self._lifetime);
+
+        const forwarded = self.header("X-Forwarded-For") orelse
+            return Str.fromRequest(self._peer.address(), self._lifetime);
+
+        // Walk right to left, counting entries. `hops` of them belong to
+        // proxies; the one before those is the client.
+        var rest = forwarded.view();
+        var seen: u8 = 0;
+        while (rest.len > 0) {
+            const at = std.mem.lastIndexOfScalar(u8, rest, ',');
+            const entry = std.mem.trim(u8, if (at) |i| rest[i + 1 ..] else rest, " \t");
+            seen += 1;
+            if (seen == hops) {
+                if (entry.len == 0) break;
+                return Str.fromRequest(entry, self._lifetime);
+            }
+            rest = if (at) |i| rest[0..i] else "";
+        }
+        return Str.fromRequest(self._peer.address(), self._lifetime);
+    }
+
     /// The whole request body, read once into the request arena. Chunked
     /// and Content-Length look the same from here — the handler asks for
     /// the body, not for the way it arrived.
@@ -251,7 +311,7 @@ pub const Ctx = struct {
         if (self._body == null) {
             if (self._request.chunked) {
                 self.aboutToRead();
-                self._body = http1.readChunkedBody(self._in, self._arena, max_body) catch |err| {
+                self._body = http1.readChunkedBody(self._in, self._arena, self._limits.max_body) catch |err| {
                     // The chunk sizes and the stream have come apart, so
                     // where this body ends is now a guess. Reading on and
                     // hoping to land on the next request is exactly how a
@@ -261,7 +321,7 @@ pub const Ctx = struct {
                     return err;
                 };
             } else {
-                if (self._request.content_length > max_body) return error.BodyTooLarge;
+                if (self._request.content_length > self._limits.max_body) return error.BodyTooLarge;
                 // A body of nothing reads nothing, so it is not a read.
                 if (self._request.content_length > 0) self.aboutToRead();
                 const b = try self._arena.alloc(u8, @intCast(self._request.content_length));

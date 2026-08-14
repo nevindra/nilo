@@ -290,6 +290,7 @@ test {
     _ = @import("percent.zig");
     _ = @import("http1.zig");
     _ = @import("bulkhead.zig");
+    _ = @import("engine/zio.zig");
     _ = @import("json.zig");
     _ = @import("scan.zig");
     _ = @import("static.zig");

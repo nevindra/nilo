@@ -8,110 +8,134 @@ const zio = @import("zio");
 
 pub const debug_io = zio.debug_io;
 
-pub const Options = struct {
-    /// An IPv4 or IPv6 address in the usual notation: `"127.0.0.1"` and
-    /// `"::1"` for this machine only, `"0.0.0.0"` and `"::"` for every
-    /// interface. A host name is not resolved — this is the address to bind
-    /// to, and a name would make which interface it lands on a lookup's
-    /// business rather than yours.
-    address: []const u8 = "127.0.0.1",
-    port: u16 = 8787,
-    /// On by default so that stopping the server and starting it again
-    /// works. Without it, connections left in TIME_WAIT hold the port and
-    /// the restart fails with `AddressInUse` — which, during development,
-    /// is every single restart. It does not let two servers share a port:
-    /// a second listener on the same address is still refused.
-    reuse_address: bool = true,
+/// The address at the other end of a connection, as text.
+///
+/// Text rather than bytes because every use of it is textual: it goes in a
+/// log line, or it is compared against an `X-Forwarded-For` entry, which
+/// arrives as text and would otherwise have to be parsed back. Formatted
+/// once when the connection is accepted, into a fiber stack that is
+/// already there, so it costs no allocation and no syscall — `accept`
+/// hands the address over along with the socket.
+///
+/// The port is kept apart from the address, because the address is the
+/// part anything identifies a client by. A port changes per connection.
+pub const Peer = struct {
+    _text: [max_text]u8 = @splat(0),
+    _len: u8 = 0,
+    port: u16 = 0,
 
-    /// How many OS threads run fibers. 0 means one per core.
-    ///
-    /// zio's own default is a single executor. That is the right default
-    /// for a library that might be embedded in someone else's thread, and
-    /// the wrong one for a server process, which would otherwise leave
-    /// every core but one idle.
-    ///
-    /// The consequence is that handlers really do run at the same time on
-    /// different threads, so a Service that gets written to needs
-    /// `zfast.Mutex` (ADR 0011). Set this to 1 and that stops being true —
-    /// but so does using the machine.
-    threads: u8 = 0,
+    /// `ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255` — the longest an IP
+    /// address gets in text.
+    pub const max_text = 45;
 
-    /// Bytes of the connection's read buffer. It doubles as the ceiling on
-    /// the size of a request head: a head that does not fit is answered
-    /// with 431.
-    read_buffer: usize = 8 * 1024,
+    /// Empty when there is no socket behind the request, which is what a
+    /// test driving App directly gets.
+    pub fn address(self: *const Peer) []const u8 {
+        return self._text[0..self._len];
+    }
 
-    /// Bytes of the connection's write buffer. A response that fits in it
-    /// leaves as one write; a bigger one is split across several.
-    ///
-    /// Together with `read_buffer` this is most of what an idle connection
-    /// costs, so it is worth turning down for a server holding many
-    /// connections open and up for one serving large responses.
-    write_buffer: usize = 4 * 1024,
+    /// A Peer standing for an address given as text. For the test client,
+    /// which has no socket to ask. Anything longer than an address can be
+    /// is refused rather than cut short, so a typo does not become a
+    /// silently different address.
+    pub fn from(text: []const u8) error{AddressTooLong}!Peer {
+        if (text.len > max_text) return error.AddressTooLong;
+        var self: Peer = .{ ._len = @intCast(text.len) };
+        @memcpy(self._text[0..text.len], text);
+        return self;
+    }
 
-    // ---- deadlines (ADR 0023) ----
-    //
-    // Zero turns any one of these off. All four off is what zfast did
-    // before 0.1.0, and it meant a client could hold a fiber by opening a
-    // connection and saying nothing.
-
-    /// How long a client has to finish sending a request head, counted from
-    /// its first byte. Not per read — for the whole head, which is what
-    /// makes it a limit at all: a client dribbling one byte a second is
-    /// inside any per-read limit and never finishes.
-    ///
-    /// Ten seconds is far more than a real client needs on a real link, and
-    /// the cost of being wrong is a 408 to somebody on a bad connection who
-    /// will retry.
-    header_timeout_ms: u32 = 10_000,
-    /// How long a connection may sit between one request and the next
-    /// before it is closed.
-    ///
-    /// This is the number that decides how much memory idle clients hold —
-    /// about 21 KB each with the default buffers — so a server with many
-    /// visitors and few of them active wants it lower than a server with a
-    /// handful of chatty ones. Above what browsers hold a connection for on
-    /// their own (Chrome and Firefox let go at around a minute), so in
-    /// practice the client is normally the one that closes.
-    idle_timeout_ms: u32 = 75_000,
-    /// How long any single read of a request body may take.
-    ///
-    /// Per read, not for the whole body: how long a legitimate body takes
-    /// depends on its size and the client's line, and a server cannot put a
-    /// number on either in advance. A client that stops sending halfway
-    /// through can be caught without guessing at that.
-    body_timeout_ms: u32 = 30_000,
-    /// How long any single write to the client may take.
-    ///
-    /// The answer to a client that asks for something and then stops
-    /// reading: the socket's buffers fill, the next write blocks, and
-    /// without this it blocks for as long as TCP takes to give up. It is
-    /// also what bounds a server-sent event stream whose reader has walked
-    /// away — the write fails, the handler gets an error, the fiber
-    /// unwinds.
-    write_timeout_ms: u32 = 30_000,
-
-    /// Stop on Ctrl-C (SIGINT) and on SIGTERM, which is what a container
-    /// runtime or a supervisor sends when it wants the process to go.
-    ///
-    /// On by default because the alternative is worse in both directions:
-    /// during development, a server that ignores Ctrl-C has to be hunted
-    /// down with `kill`; in production, a deploy that sends SIGTERM would
-    /// otherwise kill requests mid-response. Turn it off if the surrounding
-    /// program installs handlers of its own — then call `App.shutdown()`
-    /// from them.
-    stop_on_signal: bool = true,
-
-    /// How long a stop waits for requests already in flight before giving
-    /// up on them. 0 means don't wait.
-    ///
-    /// Long enough for an ordinary request to finish, short enough that a
-    /// deploy is not held up by one slow handler. What is waited on is
-    /// requests being answered, not connections held open: a browser tab
-    /// parked on a keep-alive connection is holding no work, so Ctrl-C does
-    /// not spend a single millisecond of this on it.
-    shutdown_grace_ms: u32 = 10_000,
+    pub fn format(self: Peer, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try w.writeAll(self.address());
+    }
 };
+
+/// An IPv4 client reaching a server bound to `::` arrives as
+/// `::ffff:203.0.113.9`, and a user comparing that against an
+/// `X-Forwarded-For` entry saying `203.0.113.9` would find they differ.
+/// So a v4-mapped address is written the way everything else writes it.
+fn writePeer(out: *[Peer.max_text]u8, sock_addr: zio.net.Address) u8 {
+    var w: std.Io.Writer = .fixed(out);
+    // A Unix socket has a path where an address would be, and nothing that
+    // identifies a client. It reaches a handler as no address at all.
+    if (sock_addr.getType() != .ip) return 0;
+    const addr = sock_addr.ip;
+    switch (addr.getFamily()) {
+        .ipv4 => {
+            const b: *const [4]u8 = @ptrCast(&addr.in.addr);
+            w.print("{d}.{d}.{d}.{d}", .{ b[0], b[1], b[2], b[3] }) catch {};
+        },
+        .ipv6 => {
+            const b = addr.in6.addr;
+            if (std.mem.eql(u8, b[0..12], &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff })) {
+                w.print("{d}.{d}.{d}.{d}", .{ b[12], b[13], b[14], b[15] }) catch {};
+            } else {
+                writeIp6(&w, b);
+            }
+        },
+    }
+    return @intCast(w.end);
+}
+
+fn portOf(sock_addr: zio.net.Address) u16 {
+    if (sock_addr.getType() != .ip) return 0;
+    return sock_addr.ip.getPort();
+}
+
+/// RFC 5952: lower case, and the longest run of zero groups — two or more
+/// of them — replaced by `::`.
+fn writeIp6(w: *std.Io.Writer, bytes: [16]u8) void {
+    var groups: [8]u16 = undefined;
+    for (&groups, 0..) |*g, i| {
+        g.* = std.mem.readInt(u16, bytes[i * 2 ..][0..2], .big);
+    }
+
+    var best_at: usize = 8;
+    var best_len: usize = 0;
+    var run_at: usize = 0;
+    var run_len: usize = 0;
+    for (groups, 0..) |g, i| {
+        if (g != 0) {
+            run_len = 0;
+            continue;
+        }
+        if (run_len == 0) run_at = i;
+        run_len += 1;
+        if (run_len > best_len) {
+            best_at = run_at;
+            best_len = run_len;
+        }
+    }
+    // A single zero group is written out, not shortened: `::` has to save
+    // something to be worth the ambiguity.
+    if (best_len < 2) best_at = 8;
+
+    var i: usize = 0;
+    while (i < 8) {
+        if (i == best_at) {
+            w.writeAll("::") catch {};
+            i += best_len;
+            continue;
+        }
+        if (i != 0 and i != best_at + best_len) w.writeByte(':') catch {};
+        w.print("{x}", .{groups[i]}) catch {};
+        i += 1;
+    }
+}
+
+// The options a caller passes in are the Bulkhead's — `bulkhead.Options`,
+// where they are declared and documented, because they are what a user
+// writes inside `listen()` and ADR 0002 says the Engine is not the user's
+// business. They arrive here as `anytype` so that this file names only the
+// fields it actually reads:
+//
+//   address  port  reuse_address  threads  read_buffer  write_buffer
+//   header_timeout_ms  idle_timeout_ms  body_timeout_ms  write_timeout_ms
+//   stop_on_signal  shutdown_grace_ms
+//
+// Anything else in there — a body ceiling, how many proxies to trust — is
+// HTTP, and an Engine that knew about it would not be one. A second Engine
+// declares its own list; a field it never reads is a field it never sees.
 
 /// The flag that turns "please stop" into a server that has stopped.
 ///
@@ -310,23 +334,24 @@ pub const Clocks = struct {
     }
 };
 
-/// Run `handler(state, in, out, clocks)` for every accepted connection,
-/// each in its own fiber, until that connection is done. The Reader/Writer
-/// are already buffered; the handler does not need to know there is a
-/// socket behind them. `handler` must be
-/// `fn (@TypeOf(state), *std.Io.Reader, *std.Io.Writer, *Clocks) void`.
+/// Run `handler(state, in, out, clocks, peer)` for every accepted
+/// connection, each in its own fiber, until that connection is done. The
+/// Reader/Writer are already buffered; the handler does not need to know
+/// there is a socket behind them. `handler` must be
+/// `fn (@TypeOf(state), *std.Io.Reader, *std.Io.Writer, *Clocks, Peer) void`.
 ///
 /// Returns when `stop` is set — by a signal, or by somebody calling
 /// `App.shutdown()` — once the connections still being served have
 /// finished or the grace period has run out.
 pub fn serve(
     gpa: std.mem.Allocator,
-    options: Options,
+    options: anytype,
     stop: *Stop,
     state: anytype,
     comptime handler: anytype,
 ) !void {
     const State = @TypeOf(state);
+    const Options = @TypeOf(options);
     const threads: u8 = if (options.threads > 0)
         options.threads
     else
@@ -428,7 +453,12 @@ pub fn serve(
             var writer = stream.writer(write_buf);
             var clocks = Clocks{ .reader = &reader, .writer = &writer };
 
-            handler(st, &reader.interface, &writer.interface, &clocks);
+            // `accept` already returned who this is, so this costs no
+            // syscall — only the formatting, once per connection.
+            var peer: Peer = .{ .port = portOf(stream.socket.address) };
+            peer._len = writePeer(&peer._text, stream.socket.address);
+
+            handler(st, &reader.interface, &writer.interface, &clocks, peer);
         }
     };
 
@@ -548,4 +578,67 @@ pub fn unbindSlot(n: *Binding) void {
 /// (a unit test calling App directly, for instance).
 pub fn slot() ?*anyopaque {
     return fiber_slot.get();
+}
+
+const testing = std.testing;
+
+fn ip6Text(buf: *[Peer.max_text]u8, groups: [8]u16) []const u8 {
+    var bytes: [16]u8 = undefined;
+    for (groups, 0..) |g, i| std.mem.writeInt(u16, bytes[i * 2 ..][0..2], g, .big);
+    var w: std.Io.Writer = .fixed(buf);
+    writeIp6(&w, bytes);
+    return buf[0..w.end];
+}
+
+test "an IPv6 address is written the way RFC 5952 says to write it" {
+    var buf: [Peer.max_text]u8 = undefined;
+
+    // The longest run of zero groups becomes `::`, once.
+    try testing.expectEqualStrings(
+        "2001:db8::1",
+        ip6Text(&buf, .{ 0x2001, 0x0db8, 0, 0, 0, 0, 0, 1 }),
+    );
+    // A run at the front, and a run at the back.
+    try testing.expectEqualStrings("::1", ip6Text(&buf, .{ 0, 0, 0, 0, 0, 0, 0, 1 }));
+    try testing.expectEqualStrings("2001::", ip6Text(&buf, .{ 0x2001, 0, 0, 0, 0, 0, 0, 0 }));
+    try testing.expectEqualStrings("::", ip6Text(&buf, .{ 0, 0, 0, 0, 0, 0, 0, 0 }));
+
+    // Nothing to shorten.
+    try testing.expectEqualStrings(
+        "2001:db8:1:2:3:4:5:6",
+        ip6Text(&buf, .{ 0x2001, 0x0db8, 1, 2, 3, 4, 5, 6 }),
+    );
+
+    // A single zero group is written out. `::` has to save more than one
+    // group to be worth the ambiguity, and RFC 5952 says so.
+    try testing.expectEqualStrings(
+        "2001:0:1:2:3:4:5:6",
+        ip6Text(&buf, .{ 0x2001, 0, 1, 2, 3, 4, 5, 6 }),
+    );
+
+    // Two runs, different lengths: the longer one is the one that goes,
+    // and the shorter is written out in full (RFC 5952 §4.2.3).
+    try testing.expectEqualStrings(
+        "2001:0:0:1::2",
+        ip6Text(&buf, .{ 0x2001, 0, 0, 1, 0, 0, 0, 2 }),
+    );
+
+    // Two runs of the same length: the first one wins, so that two
+    // machines never write the same address two ways.
+    try testing.expectEqualStrings(
+        "2001::1:0:0:5:6",
+        ip6Text(&buf, .{ 0x2001, 0, 0, 1, 0, 0, 5, 6 }),
+    );
+}
+
+test "a Peer given as text keeps it, and refuses what cannot be an address" {
+    const peer = try Peer.from("203.0.113.9");
+    try testing.expectEqualStrings("203.0.113.9", peer.address());
+
+    // No socket at all, which is what a handler called from a test gets.
+    const nowhere: Peer = .{};
+    try testing.expectEqualStrings("", nowhere.address());
+
+    const too_long = "a" ** (Peer.max_text + 1);
+    try testing.expectError(error.AddressTooLong, Peer.from(too_long));
 }

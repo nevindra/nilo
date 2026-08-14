@@ -5,11 +5,15 @@
 //! swapping the one import below, without touching a line of user code.
 //!
 //! The contract an Engine has to meet:
-//! - `Options` — the address and port to listen on.
+//! - reading the fields of `Options` that name a socket, a buffer or a
+//!   deadline. The struct itself is declared here, not by the Engine, so
+//!   that swapping the Engine cannot change what a user writes.
 //! - `serve(gpa, options, stop, state, handler)` — listen, accept
-//!   connections, and run `handler(state, in, out, deadlines)` for each one
-//!   concurrently until that connection is done. `state` is carried through
-//!   as-is (normally `*App`). Returns when `stop` is set.
+//!   connections, and run `handler(state, in, out, deadlines, peer)` for
+//!   each one concurrently until that connection is done. `state` is
+//!   carried through as-is (normally `*App`). Returns when `stop` is set.
+//! - `Peer` — who is at the other end of a connection. `accept` already
+//!   knows, so this asks the Engine for nothing it did not have.
 //! - `Deadlines.limit`/`Deadlines.timedOut` — put a time limit on the next
 //!   read or write of one connection, and say afterwards whether that limit
 //!   is what a failure was. An Engine that waits on sockets already has to
@@ -44,8 +48,157 @@ const builtin = @import("builtin");
 
 const engine = @import("engine/zio.zig");
 
-pub const Options = engine.Options;
 pub const debug_io = engine.debug_io;
+pub const Peer = engine.Peer;
+
+/// Everything `listen()` takes.
+///
+/// Declared here rather than in the Engine, even though most of it is the
+/// Engine's to read: this is the struct a user writes by hand, and ADR 0002
+/// promises the Engine can be swapped without touching user code. An
+/// options struct owned by zio would have broken that promise the first
+/// time zio was replaced. The Engine reads the fields it knows and never
+/// names the rest.
+pub const Options = struct {
+    /// An IPv4 or IPv6 address in the usual notation: `"127.0.0.1"` and
+    /// `"::1"` for this machine only, `"0.0.0.0"` and `"::"` for every
+    /// interface. A host name is not resolved — this is the address to bind
+    /// to, and a name would make which interface it lands on a lookup's
+    /// business rather than yours.
+    address: []const u8 = "127.0.0.1",
+    port: u16 = 8787,
+    /// On by default so that stopping the server and starting it again
+    /// works. Without it, connections left in TIME_WAIT hold the port and
+    /// the restart fails with `AddressInUse` — which, during development,
+    /// is every single restart. It does not let two servers share a port:
+    /// a second listener on the same address is still refused.
+    reuse_address: bool = true,
+
+    /// How many OS threads run fibers. 0 means one per core.
+    ///
+    /// zio's own default is a single executor. That is the right default
+    /// for a library that might be embedded in someone else's thread, and
+    /// the wrong one for a server process, which would otherwise leave
+    /// every core but one idle.
+    ///
+    /// The consequence is that handlers really do run at the same time on
+    /// different threads, so a Service that gets written to needs
+    /// `zfast.Mutex` (ADR 0011). Set this to 1 and that stops being true —
+    /// but so does using the machine.
+    threads: u8 = 0,
+
+    /// Bytes of the connection's read buffer. It doubles as the ceiling on
+    /// the size of a request head: a head that does not fit is answered
+    /// with 431.
+    read_buffer: usize = 8 * 1024,
+
+    /// Bytes of the connection's write buffer. A response that fits in it
+    /// leaves as one write; a bigger one is split across several.
+    ///
+    /// Together with `read_buffer` this is most of what an idle connection
+    /// costs, so it is worth turning down for a server holding many
+    /// connections open and up for one serving large responses.
+    write_buffer: usize = 4 * 1024,
+
+    // ---- deadlines (ADR 0023) ----
+    //
+    // Zero turns any one of these off. All four off is what zfast did
+    // before 0.1.0, and it meant a client could hold a fiber by opening a
+    // connection and saying nothing.
+
+    /// How long a client has to finish sending a request head, counted from
+    /// its first byte. Not per read — for the whole head, which is what
+    /// makes it a limit at all: a client dribbling one byte a second is
+    /// inside any per-read limit and never finishes.
+    ///
+    /// Ten seconds is far more than a real client needs on a real link, and
+    /// the cost of being wrong is a 408 to somebody on a bad connection who
+    /// will retry.
+    header_timeout_ms: u32 = 10_000,
+    /// How long a connection may sit between one request and the next
+    /// before it is closed.
+    ///
+    /// This is the number that decides how much memory idle clients hold —
+    /// about 21 KB each with the default buffers — so a server with many
+    /// visitors and few of them active wants it lower than a server with a
+    /// handful of chatty ones. Above what browsers hold a connection for on
+    /// their own (Chrome and Firefox let go at around a minute), so in
+    /// practice the client is normally the one that closes.
+    idle_timeout_ms: u32 = 75_000,
+    /// How long any single read of a request body may take.
+    ///
+    /// Per read, not for the whole body: how long a legitimate body takes
+    /// depends on its size and the client's line, and a server cannot put a
+    /// number on either in advance. A client that stops sending halfway
+    /// through can be caught without guessing at that.
+    body_timeout_ms: u32 = 30_000,
+    /// How long any single write to the client may take.
+    ///
+    /// The answer to a client that asks for something and then stops
+    /// reading: the socket's buffers fill, the next write blocks, and
+    /// without this it blocks for as long as TCP takes to give up. It is
+    /// also what bounds a server-sent event stream whose reader has walked
+    /// away — the write fails, the handler gets an error, the fiber
+    /// unwinds.
+    write_timeout_ms: u32 = 30_000,
+
+    /// Stop on Ctrl-C (SIGINT) and on SIGTERM, which is what a container
+    /// runtime or a supervisor sends when it wants the process to go.
+    ///
+    /// On by default because the alternative is worse in both directions:
+    /// during development, a server that ignores Ctrl-C has to be hunted
+    /// down with `kill`; in production, a deploy that sends SIGTERM would
+    /// otherwise kill requests mid-response. Turn it off if the surrounding
+    /// program installs handlers of its own — then call `App.shutdown()`
+    /// from them.
+    stop_on_signal: bool = true,
+
+    /// How long a stop waits for requests already in flight before giving
+    /// up on them. 0 means don't wait.
+    ///
+    /// Long enough for an ordinary request to finish, short enough that a
+    /// deploy is not held up by one slow handler. What is waited on is
+    /// requests being answered, not connections held open: a browser tab
+    /// parked on a keep-alive connection is holding no work, so Ctrl-C does
+    /// not spend a single millisecond of this on it.
+    shutdown_grace_ms: u32 = 10_000,
+
+    // ---- what a request may do ----
+
+    /// The most `Ctx.body()` will read into the request arena. Past it, a
+    /// 413 that names `bodyStream()` as the way to take more.
+    ///
+    /// A megabyte is a JSON body's worth. It is deliberately not a file
+    /// upload's worth: this body is held whole, in memory, per request, so
+    /// raising it raises what a handful of concurrent clients can make the
+    /// server hold. `bodyStream()` has no such ceiling because it holds
+    /// nothing — it is bounded by the buffer the handler passes in.
+    max_body: usize = 1024 * 1024,
+
+    /// How many proxies stand in front of this server, for reading a
+    /// client's address out of `X-Forwarded-For`.
+    ///
+    /// Zero — the default — means trust nothing: `Ctx.clientIp()` is the
+    /// address the connection actually came from, and a header claiming
+    /// otherwise is ignored. That is the only safe default, because
+    /// `X-Forwarded-For` is a header like any other and anyone can send
+    /// one.
+    ///
+    /// A count rather than a list of addresses, and counted from the right,
+    /// which is what makes it hard to get wrong. Each proxy appends the
+    /// address it heard from, so the rightmost entry was written by the
+    /// proxy nearest this server and the leftmost is whatever the original
+    /// client claimed. With one proxy in front, a client sending
+    /// `X-Forwarded-For: 1.2.3.4` arrives as `1.2.3.4, 203.0.113.9` — and
+    /// counting one from the right reads `203.0.113.9`, the address the
+    /// proxy saw, while the forgery sits to the left and is never looked
+    /// at. Set this to the number of proxies you run, not to the number of
+    /// entries you have seen in the header.
+    ///
+    /// Fewer entries than hops means the chain is not what this says it is,
+    /// so the socket's own address is used rather than a guess.
+    trusted_hops: u8 = 0,
+};
 
 /// Listen, and run `handler(state, in, out, deadlines)` for every
 /// connection. The one call here that is a wrapper rather than a re-export,
@@ -72,10 +225,11 @@ pub fn serve(
             in: *std.Io.Reader,
             out: *std.Io.Writer,
             clocks: *engine.Clocks,
+            peer: Peer,
         ) void {
             var deadlines = carried.limits;
             deadlines.target = clocks;
-            handler(carried.state, in, out, deadlines);
+            handler(carried.state, in, out, deadlines, peer);
         }
     };
 

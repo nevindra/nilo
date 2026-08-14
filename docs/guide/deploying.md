@@ -47,6 +47,9 @@ try app.listen(.{
     .idle_timeout_ms = 75_000,    // a connection between requests
     .body_timeout_ms = 30_000,    // any one read of a body
     .write_timeout_ms = 30_000,   // any one write to the client
+
+    .max_body = 1024 * 1024,      // the most `c.body()` reads into the arena
+    .trusted_hops = 0,            // how many proxies stand in front
 });
 ```
 
@@ -89,6 +92,53 @@ this lower than the default.
 A WebSocket has no read limit once the handshake is done — a chat tab with
 nobody typing is working correctly. Its writes keep theirs, which is how the
 server finds out the client is gone.
+
+## How big a body may be
+
+`max_body` is the most `c.body()` will read into the request arena. Past it, a
+413. A megabyte, the default, is a JSON body's worth on purpose: this body is
+held whole, in memory, per request, so raising it raises what a handful of
+concurrent clients can make the server hold.
+
+`c.bodyStream()` has no such ceiling, because it holds nothing at all — it is
+bounded by the buffer the handler passes in ([Requests](./requests.md)). An
+endpoint taking files wants that one, not a bigger `max_body`.
+
+This is the knob a reverse proxy in front cannot stand in for. A proxy can bring
+the limit **down** — most already do — but nothing in front of zfast can raise a
+limit inside it. An app taking uploads has to say so here.
+
+## Who the client is
+
+`c.peer()` is the address the connection came from. It is what the kernel says,
+so it cannot be forged — and behind a proxy it is the proxy's address, which is
+the same for every client.
+
+`c.clientIp()` is the one to reach for, and by default it answers exactly what
+`peer()` does. `X-Forwarded-For` is a header like any other: anyone can send one,
+so a server that believed it without being told to would let every client claim
+any address it liked. The things that read a client address — rate limits, audit
+logs, blocklists — are precisely the things worth lying to.
+
+`trusted_hops` is how many proxies you actually run:
+
+```zig
+try app.listen(.{ .trusted_hops = 1 });   // one Caddy, nginx or ALB in front
+```
+
+Set it to the number of proxies, **not** to the number of entries you have seen
+in a header. Each proxy appends the address it heard from, so the entries are
+counted from the right — the rightmost was written by the proxy nearest this
+server, and the leftmost is whatever the original client claimed.
+
+That direction is the whole safety property. With one proxy in front, a client
+sending `X-Forwarded-For: 1.2.3.4` arrives as `1.2.3.4, 203.0.113.9`. Counting
+one from the right reads `203.0.113.9` — the address the proxy actually saw —
+while the forgery sits to the left and is never looked at.
+
+A header with fewer entries than there are hops means the chain is not the one
+configured, so `clientIp()` falls back to `peer()` rather than reading the
+closest thing to hand, which would be the forgery.
 
 Requests-per-second figures now exist, on one quiet box:
 [`../benchmarks.md`](../benchmarks.md) for zfast alone and
@@ -181,10 +231,61 @@ try app.provide(&app);          // …or `*zfast.App was never registered` at st
 try app.post("/admin/quit", quit);
 ```
 
+## TLS, and the proxy in front
+
+**zfast does not speak TLS, and is not going to**
+([ADR 0028](../adr/0028-tls-is-terminated-in-front.md)). Zig's standard library
+can be a TLS client and not a TLS server; the alternatives were a one-person
+crypto dependency or a C toolchain in the install story, and both cost the
+per-connection memory figure this project publishes.
+
+On Fly.io, Railway, Render, Cloud Run, a Kubernetes ingress, an ALB or
+Cloudflare this changes nothing — every one of them terminates TLS before the
+request arrives. Set `trusted_hops` to 1 and carry on.
+
+On a bare VPS, the whole of it is a Caddyfile:
+
+```
+example.com {
+    reverse_proxy 127.0.0.1:8787
+}
+```
+
+Caddy gets the certificate, renews it, redirects `:80`, and sends
+`X-Forwarded-For`. The nginx equivalent needs the header said out loud:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name example.com;
+    ssl_certificate     /etc/letsencrypt/live/example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8787;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Host $host;
+        # A stream, a WebSocket and SSE all need this pair.
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+    }
+}
+```
+
+Either way, bind zfast to `127.0.0.1` so nothing reaches it except through the
+proxy, and say `.trusted_hops = 1` so `clientIp()` reads the address the proxy
+saw.
+
+Two things go with this decision and are worth knowing before you need them:
+**HTTP/2 is not available** — browsers only speak it over TLS, negotiated during
+the handshake — and therefore **zfast cannot be a gRPC server**, since gRPC is
+HTTP/2. Neither follows from "no TLS" on its own, which is why both are here.
+
 ## What isn't here yet
 
-**TLS** (terminate it in front), sessions, templates, `sendfile`,
-`permessage-deflate`, and broadcasting to WebSockets a handler doesn't hold.
+Sessions, templates, `sendfile`, `permessage-deflate`, compression, and
+broadcasting to WebSockets a handler doesn't hold.
 
 Each item is listed with its reason in [`../roadmap.md`](../roadmap.md); the ones
 that are refusals rather than backlog are in [`../adr/`](../adr/).

@@ -27,6 +27,7 @@
 const std = @import("std");
 
 const App = @import("app.zig").App;
+const bulkhead = @import("bulkhead.zig");
 const fail = @import("fail.zig");
 const str_mod = @import("str.zig");
 
@@ -35,6 +36,15 @@ pub const Options = struct {
     /// truncated one rather than a failure, so turn this up for a stream
     /// that produces a lot.
     response_bytes: usize = 64 * 1024,
+
+    /// The address these requests appear to come from — what `c.peer()`
+    /// answers, and what `c.clientIp()` falls back to.
+    ///
+    /// There is no socket here, so without this every request in a test
+    /// arrives from nowhere. Middleware that counts requests per address,
+    /// or refuses some of them, needs two different clients to be two
+    /// different addresses before there is anything to test.
+    client_address: []const u8 = "",
 };
 
 /// One answer, taken apart far enough to ask questions of.
@@ -96,12 +106,14 @@ pub const Client = struct {
     lifetime: str_mod.Lifetime = .{},
     in_flight: fail.InFlight = .{},
     buffer: []u8,
+    peer: bulkhead.Peer = .{},
 
     pub fn init(gpa: std.mem.Allocator, options: Options) !Client {
         return .{
             .gpa = gpa,
             .arena = std.heap.ArenaAllocator.init(gpa),
             .buffer = try gpa.alloc(u8, options.response_bytes),
+            .peer = try bulkhead.Peer.from(options.client_address),
         };
     }
 
@@ -152,6 +164,7 @@ pub const Client = struct {
             &out,
             // There is no socket here, so there is nothing to time out.
             .off,
+            self.peer,
         );
         // One request, then everything it allocated goes — exactly as a
         // connection does between requests.

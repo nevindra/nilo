@@ -100,6 +100,14 @@ pub const App = struct {
     /// Set when the server should stop. Read by the Engine's accept loop
     /// and by every connection between requests.
     stop: bulkhead.Stop = .{},
+    /// The part of `listen()`'s options a request reads rather than the
+    /// socket, copied out once when the server starts. Defaults stand for
+    /// an App a test drives directly, which never calls `listen()`.
+    limits: Limits = .{},
+
+    /// What one request is allowed to do. Declared on the Ctx, which is
+    /// what reads it.
+    pub const Limits = ctx_mod.Limits;
 
     pub fn init(gpa: std.mem.Allocator) App {
         return .{
@@ -495,6 +503,13 @@ pub const App = struct {
         try self.checkServices();
         try self.resolveChains();
         self.countUndescribed();
+        // The two knobs a request reads rather than the socket. Kept on the
+        // App because that is what a request can reach; a test driving
+        // `handleRequest` with no server gets the defaults below.
+        self.limits = .{
+            .max_body = options_.max_body,
+            .trusted_hops = options_.trusted_hops,
+        };
         try bulkhead.serve(self.gpa, options_, &self.stop, self, handleConnection);
     }
 
@@ -537,6 +552,7 @@ pub const App = struct {
         in: *std.Io.Reader,
         out: *std.Io.Writer,
         deadlines: bulkhead.Deadlines,
+        peer: bulkhead.Peer,
     ) void {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
@@ -576,7 +592,7 @@ pub const App = struct {
             // has just served a request is idle again from now, not from
             // whenever it was accepted.
             deadlines.armIdle();
-            const keep_going = self.handleRequest(arena.allocator(), &lifetime, &in_flight, in, out, deadlines);
+            const keep_going = self.handleRequest(arena.allocator(), &lifetime, &in_flight, in, out, deadlines, peer);
             // The request is done: every Str of its goes stale, then the
             // bag is emptied in one go.
             //
@@ -629,6 +645,7 @@ pub const App = struct {
         in: *std.Io.Reader,
         out: *std.Io.Writer,
         deadlines: bulkhead.Deadlines,
+        peer: bulkhead.Peer,
     ) bool {
         const failure = &in_flight.failure;
         in_flight.startRequest("", "");
@@ -714,6 +731,8 @@ pub const App = struct {
             ._head = request_head,
             ._head_borrowed = borrowed,
             ._deadlines = deadlines,
+            ._peer = peer,
+            ._limits = self.limits,
             ._params = &.{},
             ._services = &self.services,
             // Stopping: this one still gets answered — a request already on
@@ -1093,7 +1112,7 @@ fn drain(c: *Ctx, in: *std.Io.Reader, r: *const http1.Request) bool {
     }
     if (http1.readsMore(r)) {
         c._deadlines.armBody();
-        http1.discardBody(in, r, ctx_mod.max_body) catch return false;
+        http1.discardBody(in, r, c._limits.max_body) catch return false;
     }
     return true;
 }
@@ -1307,6 +1326,9 @@ const Harness = struct {
     in_flight: fail.InFlight = .{},
     buf: [4096]u8 = undefined,
     restore_log_level: std.log.Level,
+    /// Who these requests come from. No socket by default, which is what
+    /// every test that does not care about the address wants.
+    peer: bulkhead.Peer = .{},
 
     fn init() Harness {
         // Several tests below drive a handler into failure on purpose, and
@@ -1353,7 +1375,7 @@ const Harness = struct {
     fn send(self: *Harness, app: *App, request: []const u8) struct { response: []const u8, keep_alive: bool } {
         var in = std.Io.Reader.fixed(request);
         var out = std.Io.Writer.fixed(&self.buf);
-        const keep_alive = app.handleRequest(self.arena.allocator(), &self.lifetime, &self.in_flight, &in, &out, .off);
+        const keep_alive = app.handleRequest(self.arena.allocator(), &self.lifetime, &self.in_flight, &in, &out, .off, self.peer);
         self.lifetime.end();
         _ = self.arena.reset(.retain_capacity);
         return .{ .response = out.buffered(), .keep_alive = keep_alive };
@@ -2743,7 +2765,7 @@ test "a chunked body nobody read is still stepped over" {
             "GET /ignore HTTP/1.1\r\n\r\n",
     );
     var out = std.Io.Writer.fixed(&h.buf);
-    try testing.expect(app.handleRequest(h.arena.allocator(), &h.lifetime, &h.in_flight, &in, &out, .off));
+    try testing.expect(app.handleRequest(h.arena.allocator(), &h.lifetime, &h.in_flight, &in, &out, .off, .{}));
 
     const next = try http1.readRequest(&in);
     try testing.expectEqualStrings("/ignore", next.target);
@@ -2932,7 +2954,7 @@ test "the request path stays inside its allocation budget" {
         fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
             var in = std.Io.Reader.fixed(request);
             var out = std.Io.Writer.fixed(b);
-            _ = a.handleRequest(gpa, l, f, &in, &out, .off);
+            _ = a.handleRequest(gpa, l, f, &in, &out, .off, .{});
             l.end();
         }
     }.once;
@@ -3074,7 +3096,7 @@ test "a request with a body copies the head, so its Strs survive reading it" {
 
         var conn = Trickle.init(wire, per_read, &read_buf);
         var out = std.Io.Writer.fixed(&out_buf);
-        _ = app.handleRequest(arena.allocator(), &lifetime, &in_flight, &conn.reader, &out, .off);
+        _ = app.handleRequest(arena.allocator(), &lifetime, &in_flight, &conn.reader, &out, .off, .{});
 
         try testing.expect(std.mem.startsWith(u8, out.buffered(), "HTTP/1.1 200"));
         try testing.expect(std.mem.endsWith(u8, out.buffered(), "example.dev|hello world|/echo"));
@@ -3114,7 +3136,7 @@ test "a head arriving a byte at a time is still parsed, and its Strs are sound" 
 
         var conn = Trickle.init(wire, per_read, &read_buf);
         var out = std.Io.Writer.fixed(&out_buf);
-        _ = app.handleRequest(arena.allocator(), &lifetime, &in_flight, &conn.reader, &out, .off);
+        _ = app.handleRequest(arena.allocator(), &lifetime, &in_flight, &conn.reader, &out, .off, .{});
 
         try testing.expect(std.mem.endsWith(
             u8,
@@ -3162,6 +3184,7 @@ test "two requests on one trickling connection do not borrow each other's head" 
             &conn.reader,
             &out,
             .off,
+            .{},
         ));
         try testing.expect(std.mem.endsWith(u8, out.buffered(), want));
         lifetime.end();
@@ -3312,6 +3335,7 @@ const Deadline = struct {
             &conn.reader,
             &out,
             self.clock.with(test_limits),
+            .{},
         );
         return .{ .response = out.buffered(), .keep_alive = keep_alive };
     }
@@ -4241,7 +4265,7 @@ test "a route that resolves nothing still costs what it always did" {
         fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
             var in = std.Io.Reader.fixed("GET /users/7 HTTP/1.1\r\nHost: x\r\n\r\n");
             var out = std.Io.Writer.fixed(b);
-            _ = a.handleRequest(gpa, l, f, &in, &out, .off);
+            _ = a.handleRequest(gpa, l, f, &in, &out, .off, .{});
             l.end();
         }
     }.once;
@@ -4409,7 +4433,7 @@ test "a stream allocates once, however many pieces it writes" {
         fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
             var in = std.Io.Reader.fixed("GET /many HTTP/1.1\r\nHost: x\r\n\r\n");
             var out = std.Io.Writer.fixed(b);
-            _ = a.handleRequest(gpa, l, f, &in, &out, .off);
+            _ = a.handleRequest(gpa, l, f, &in, &out, .off, .{});
             l.end();
         }
     }.once;
@@ -4620,7 +4644,7 @@ test "a body read in pieces allocates nothing" {
         fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
             var in = std.Io.Reader.fixed(request);
             var out = std.Io.Writer.fixed(b);
-            _ = a.handleRequest(gpa, l, f, &in, &out, .off);
+            _ = a.handleRequest(gpa, l, f, &in, &out, .off, .{});
             l.end();
         }
     }.once;
@@ -4848,7 +4872,7 @@ test "a WebSocket allocates nothing per message, however many it carries" {
         fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
             var in = std.Io.Reader.fixed(conversation);
             var out = std.Io.Writer.fixed(b);
-            _ = a.handleRequest(gpa, l, f, &in, &out, .off);
+            _ = a.handleRequest(gpa, l, f, &in, &out, .off, .{});
             l.end();
         }
     }.once;
@@ -4892,4 +4916,174 @@ test "a request that is not asking to be upgraded is told which part is missing"
             "Sec-WebSocket-Version: 8\r\nSec-WebSocket-Key: x\r\n\r\n",
     );
     try testing.expect(std.mem.indexOf(u8, wrong_version.response, "speaks WebSocket version 13") != null);
+}
+
+// ---- who the client is (X-Forwarded-For) ----
+
+fn echoClientIp(c: *Ctx) anyerror!void {
+    try c.sendText(200, try std.fmt.allocPrint(c._arena, "{f}", .{c.clientIp()}));
+}
+
+// The whole point of the default. A server that believed the header
+// without being told to would let anyone be any address they liked, and
+// the things that read a client address — rate limits, audit logs,
+// blocklists — are exactly the things worth lying to.
+test "with no proxies trusted, a forged X-Forwarded-For is ignored" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/who", echoClientIp);
+    try app.resolveChains();
+
+    var h = Harness.init();
+    defer h.deinit();
+    h.peer = try bulkhead.Peer.from("198.51.100.7");
+
+    const answer = h.send(&app, "GET /who HTTP/1.1\r\nX-Forwarded-For: 1.2.3.4\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, answer.response, "198.51.100.7"));
+}
+
+test "with one proxy trusted, the client is the entry that proxy wrote" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/who", echoClientIp);
+    try app.resolveChains();
+    app.limits.trusted_hops = 1;
+
+    var h = Harness.init();
+    defer h.deinit();
+    h.peer = try bulkhead.Peer.from("10.0.0.1");
+
+    // Nothing forged: the proxy appended the address it saw, and that is
+    // the only entry there is.
+    const plain = h.send(&app, "GET /who HTTP/1.1\r\nX-Forwarded-For: 203.0.113.9\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, plain.response, "203.0.113.9"));
+
+    // The client sent an address of its own and the proxy appended after
+    // it. Counting from the right reads the proxy's entry; the forgery is
+    // to the left of it and is never looked at. This is why the count is
+    // from the right and not from the left.
+    const forged = h.send(
+        &app,
+        "GET /who HTTP/1.1\r\nX-Forwarded-For: 9.9.9.9, 203.0.113.9\r\n\r\n",
+    );
+    try testing.expect(std.mem.endsWith(u8, forged.response, "203.0.113.9"));
+}
+
+test "with two proxies trusted, the client is two entries from the right" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/who", echoClientIp);
+    try app.resolveChains();
+    app.limits.trusted_hops = 2;
+
+    var h = Harness.init();
+    defer h.deinit();
+    h.peer = try bulkhead.Peer.from("10.0.0.1");
+
+    // A CDN saw the client and appended it; the load balancer saw the CDN
+    // and appended that. Two hops back from the right is the client.
+    const answer = h.send(
+        &app,
+        "GET /who HTTP/1.1\r\nX-Forwarded-For: 203.0.113.9, 198.51.100.2\r\n\r\n",
+    );
+    try testing.expect(std.mem.endsWith(u8, answer.response, "203.0.113.9"));
+}
+
+test "a header with fewer entries than there are hops falls back to the socket" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/who", echoClientIp);
+    try app.resolveChains();
+    app.limits.trusted_hops = 2;
+
+    var h = Harness.init();
+    defer h.deinit();
+    h.peer = try bulkhead.Peer.from("10.0.0.1");
+
+    // Two proxies were configured and one entry turned up, so the chain is
+    // not the one this server was told about. The closest guess would be
+    // the client's own forgery, so there is no guess.
+    const short = h.send(&app, "GET /who HTTP/1.1\r\nX-Forwarded-For: 9.9.9.9\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, short.response, "10.0.0.1"));
+
+    // And no header at all is the same answer.
+    const none = h.send(&app, "GET /who HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, none.response, "10.0.0.1"));
+}
+
+test "the socket's own address is there whatever the header says" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/peer", struct {
+        fn run(c: *Ctx) anyerror!void {
+            try c.sendText(200, try std.fmt.allocPrint(c._arena, "{f}", .{c.peer()}));
+        }
+    }.run);
+    try app.resolveChains();
+    app.limits.trusted_hops = 1;
+
+    var h = Harness.init();
+    defer h.deinit();
+    h.peer = try bulkhead.Peer.from("198.51.100.7");
+
+    const answer = h.send(&app, "GET /peer HTTP/1.1\r\nX-Forwarded-For: 1.2.3.4\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, answer.response, "198.51.100.7"));
+}
+
+// ---- the body ceiling is a number somebody can change ----
+
+test "a body past max_body is a 413, and max_body is what listen() was told" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/echo", struct {
+        fn run(c: *Ctx) anyerror!void {
+            try c.sendText(200, (try c.body()).view());
+        }
+    }.run);
+    try app.resolveChains();
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const body = "0123456789";
+    const request = "POST /echo HTTP/1.1\r\nContent-Length: 10\r\n\r\n" ++ body;
+
+    // Ten bytes is under the default megabyte.
+    const allowed = h.send(&app, request);
+    try testing.expect(std.mem.startsWith(u8, allowed.response, "HTTP/1.1 200"));
+
+    // The same ten bytes against a ceiling of four.
+    app.limits.max_body = 4;
+    const refused = h.send(&app, request);
+    try testing.expect(std.mem.startsWith(u8, refused.response, "HTTP/1.1 413"));
+
+    // And raising it past the default works in the other direction, which
+    // is the half a proxy in front cannot do for you.
+    app.limits.max_body = 32 * 1024 * 1024;
+    const raised = h.send(&app, request);
+    try testing.expect(std.mem.startsWith(u8, raised.response, "HTTP/1.1 200"));
+}
+
+test "a chunked body is counted against max_body as it arrives" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/echo", struct {
+        fn run(c: *Ctx) anyerror!void {
+            try c.sendText(200, (try c.body()).view());
+        }
+    }.run);
+    try app.resolveChains();
+    app.limits.max_body = 4;
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    // No Content-Length to refuse up front, so the only way to catch this
+    // is to count the chunks.
+    const answer = h.send(
+        &app,
+        "POST /echo HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n" ++
+            "5\r\nhello\r\n0\r\n\r\n",
+    );
+    try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 413"));
 }
