@@ -1178,28 +1178,46 @@ fn allowList(arena: std.mem.Allocator, allowed: router_mod.MethodSet) ![]const u
 fn serveStaticFile(c: *Ctx) anyerror!void {
     const file = c._static_file.?;
 
-    // Both belong to the loaded file, which outlives every request, so
-    // there is nothing to copy.
-    try c.setStaticHeader("ETag", file.etag);
+    // A `Range` is an offset into a representation, and the gzipped copy is
+    // a different representation with different offsets. Rather than work
+    // out which one a client meant, a request that asks for part of a file
+    // gets the plain one — which is the representation `Accept-Ranges:
+    // bytes` has been promising all along.
+    const wants_part = c.header("Range") != null;
+    const wants_gzip = !wants_part and
+        static_mod.acceptsGzip(headerValue(c, "Accept-Encoding"));
+    const sending = file.representation(wants_gzip);
+
+    // Everything here belongs to the loaded file, which outlives every
+    // request, so there is nothing to copy.
+    try c.setStaticHeader("ETag", sending.etag);
     if (file.cache_control.len > 0) try c.setStaticHeader("Cache-Control", file.cache_control);
     // Said on every file response, including the 304 and the 416: it is how
     // a client learns it may ask for part of one at all.
     try c.setStaticHeader("Accept-Ranges", "bytes");
+    // Whenever there are two representations to choose between — not only
+    // when the gzipped one is the one going out. A shared cache that stored
+    // the plain answer without this would go on handing it to clients that
+    // could have had the small one, and, worse, the other way round.
+    if (file.gzip != null) try c.setStaticHeader("Vary", "Accept-Encoding");
+    if (sending.gzipped) try c.setStaticHeader("Content-Encoding", "gzip");
 
     // The ETag was computed when the file was read, so a repeat visitor
-    // costs a comparison and a head — no body, no work.
+    // costs a comparison and a head — no body, no work. Compared against
+    // the representation actually going out, which is why the two ETags are
+    // kept apart in the first place.
     if (c.header("If-None-Match")) |sent| {
-        if (static_mod.etagMatches(sent.view(), file.etag)) {
+        if (static_mod.etagMatches(sent.view(), sending.etag)) {
             return c.send(304, file.content_type, "");
         }
     }
 
-    const total = file.bytes.len;
+    const total = sending.bytes.len;
     // `If-Range` means "only give me the part if the file is still the one I
     // started with". A client resuming a download sends the ETag it had;
     // anything else and the safe answer is all of it.
     const still_the_same = if (c.header("If-Range")) |sent|
-        static_mod.etagMatches(sent.view(), file.etag)
+        static_mod.etagMatches(sent.view(), sending.etag)
     else
         true;
 
@@ -1208,7 +1226,7 @@ fn serveStaticFile(c: *Ctx) anyerror!void {
         .whole => {},
         .part => |part| {
             try c.setHeader("Content-Range", range_mod.contentRange(&buf, part, total));
-            return c.send(206, file.content_type, part.slice(file.bytes));
+            return c.send(206, file.content_type, part.slice(sending.bytes));
         },
         .unsatisfiable => {
             // The one answer whose whole content is "you have the wrong idea
@@ -1219,7 +1237,7 @@ fn serveStaticFile(c: *Ctx) anyerror!void {
         },
     }
 
-    try c.send(200, file.content_type, file.bytes);
+    try c.send(200, file.content_type, sending.bytes);
 }
 
 /// A request header as plain bytes. The `Str` a handler gets is the right
@@ -2980,8 +2998,8 @@ test "the request path stays inside its allocation budget" {
     //     `handleRequest`, and `Ctx.aboutToRead` for what stops that from
     //     becoming a dangling `Str`). A POST still pays it, which is what the
     //     next test checks — so the saving cannot quietly become a bug.
-    //   - **The list of response headers CORS adds.** The first four now sit
-    //     in the `Ctx` itself; the arena only hears about a fifth.
+    //   - **The list of response headers CORS adds.** The first six now sit
+    //     in the `Ctx` itself; the arena only hears about a seventh.
     try testing.expectEqual(@as(usize, 1), counting.allocs);
     try testing.expectEqual(@as(usize, 0), counting.resizes);
 }
@@ -5086,4 +5104,213 @@ test "a chunked body is counted against max_body as it arrives" {
             "5\r\nhello\r\n0\r\n\r\n",
     );
     try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 413"));
+}
+
+// ---- static files, gzipped once at startup ----
+
+/// Big enough and repetitive enough to be worth compressing, which is what
+/// a real stylesheet or bundle is.
+const test_css = "body { margin: 0; padding: 0; } " ** 64;
+
+fn cssApp(gpa: std.mem.Allocator) !App {
+    var app = App.init(gpa);
+    errdefer app.deinit();
+    try app.static_sets.append(gpa, try static_mod.fromMemory(gpa, &.{.{
+        .url = "/app.css",
+        .bytes = test_css,
+        .content_type = "text/css",
+    }}));
+    try app.resolveChains();
+    return app;
+}
+
+test "a client that says gzip gets the copy made at startup" {
+    var app = try cssApp(testing.allocator);
+    defer app.deinit();
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const answer = h.send(&app, "GET /app.css HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 200"));
+    try testing.expect(std.mem.indexOf(u8, answer.response, "Content-Encoding: gzip") != null);
+    // Whenever there are two representations, whichever one goes out.
+    try testing.expect(std.mem.indexOf(u8, answer.response, "Vary: Accept-Encoding") != null);
+
+    const body = answer.response[std.mem.indexOf(u8, answer.response, "\r\n\r\n").? + 4 ..];
+    try testing.expect(body.len < test_css.len);
+    try testing.expectEqual(@as(u8, 0x1f), body[0]);
+    try testing.expectEqual(@as(u8, 0x8b), body[1]);
+}
+
+test "a client that says nothing gets the file as it is, and still gets Vary" {
+    var app = try cssApp(testing.allocator);
+    defer app.deinit();
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const answer = h.send(&app, "GET /app.css HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, answer.response, "Content-Encoding") == null);
+    // Said even though the plain copy is the one going out: a shared cache
+    // that stored this without it would hand it to every client after,
+    // including the ones that could have had the small one.
+    try testing.expect(std.mem.indexOf(u8, answer.response, "Vary: Accept-Encoding") != null);
+    try testing.expect(std.mem.endsWith(u8, answer.response, test_css));
+}
+
+test "a client that refuses gzip with q=0 is not sent gzip" {
+    var app = try cssApp(testing.allocator);
+    defer app.deinit();
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const answer = h.send(&app, "GET /app.css HTTP/1.1\r\nAccept-Encoding: gzip;q=0\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, answer.response, "Content-Encoding") == null);
+    try testing.expect(std.mem.endsWith(u8, answer.response, test_css));
+}
+
+test "the ETag of one representation does not answer for the other" {
+    var app = try cssApp(testing.allocator);
+    defer app.deinit();
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    // Collect both tags, from the two answers that carry them.
+    var plain_buf: [128]u8 = undefined;
+    const plain = h.send(&app, "GET /app.css HTTP/1.1\r\n\r\n");
+    const plain_etag = try dupeHeader(&plain_buf, plain.response, "ETag");
+
+    var gz_buf: [128]u8 = undefined;
+    const gz = h.send(&app, "GET /app.css HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n");
+    const gz_etag = try dupeHeader(&gz_buf, gz.response, "ETag");
+
+    try testing.expect(!std.mem.eql(u8, plain_etag, gz_etag));
+
+    // Each tag is a 304 for its own representation.
+    var buf: [512]u8 = undefined;
+    const plain_again = h.send(&app, try std.fmt.bufPrint(
+        &buf,
+        "GET /app.css HTTP/1.1\r\nIf-None-Match: {s}\r\n\r\n",
+        .{plain_etag},
+    ));
+    try testing.expect(std.mem.startsWith(u8, plain_again.response, "HTTP/1.1 304"));
+
+    const gz_again = h.send(&app, try std.fmt.bufPrint(
+        &buf,
+        "GET /app.css HTTP/1.1\r\nAccept-Encoding: gzip\r\nIf-None-Match: {s}\r\n\r\n",
+        .{gz_etag},
+    ));
+    try testing.expect(std.mem.startsWith(u8, gz_again.response, "HTTP/1.1 304"));
+
+    // And neither is a 304 for the other. This is the failure the two tags
+    // exist to prevent: a client holding the plain copy, now asking for
+    // gzip, must be sent gzip rather than told what it has is current.
+    const crossed = h.send(&app, try std.fmt.bufPrint(
+        &buf,
+        "GET /app.css HTTP/1.1\r\nAccept-Encoding: gzip\r\nIf-None-Match: {s}\r\n\r\n",
+        .{plain_etag},
+    ));
+    try testing.expect(std.mem.startsWith(u8, crossed.response, "HTTP/1.1 200"));
+    try testing.expect(std.mem.indexOf(u8, crossed.response, "Content-Encoding: gzip") != null);
+}
+
+test "a range is served from the plain file even when gzip was offered" {
+    var app = try cssApp(testing.allocator);
+    defer app.deinit();
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    // A range is an offset into a representation. Answering with gzipped
+    // bytes would hand back the wrong ones, silently.
+    const answer = h.send(
+        &app,
+        "GET /app.css HTTP/1.1\r\nAccept-Encoding: gzip\r\nRange: bytes=0-4\r\n\r\n",
+    );
+    try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 206"));
+    try testing.expect(std.mem.indexOf(u8, answer.response, "Content-Encoding") == null);
+    try testing.expect(std.mem.endsWith(u8, answer.response, test_css[0..5]));
+}
+
+test "a file too small to be worth gzipping has one representation and no Vary" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.static_sets.append(testing.allocator, try static_mod.fromMemory(testing.allocator, &.{.{
+        .url = "/hi.txt",
+        .bytes = "hello",
+        .content_type = "text/plain",
+    }}));
+    try app.resolveChains();
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const answer = h.send(&app, "GET /hi.txt HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, answer.response, "Content-Encoding") == null);
+    try testing.expect(std.mem.indexOf(u8, answer.response, "Vary") == null);
+    try testing.expect(std.mem.endsWith(u8, answer.response, "hello"));
+}
+
+/// A response header, copied out of the raw answer into `buf` so it can
+/// outlive the harness buffer the next request will overwrite.
+fn dupeHeader(buf: []u8, response: []const u8, name: []const u8) ![]const u8 {
+    const head_end = std.mem.indexOf(u8, response, "\r\n\r\n") orelse return error.NoHead;
+    var lines = std.mem.splitSequence(u8, response[0..head_end], "\r\n");
+    _ = lines.next();
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[0..colon], " "), name)) continue;
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        if (value.len > buf.len) return error.NoRoom;
+        @memcpy(buf[0..value.len], value);
+        return buf[0..value.len];
+    }
+    return error.NoSuchHeader;
+}
+
+// The static half of the budget above. A compressed asset carries five
+// response headers where a plain one carried three, and five is the number
+// `inline_headers` was raised past — so this is what says the extra two did
+// not quietly become an allocation on the path every asset goes down.
+test "serving a gzipped static file allocates nothing" {
+    // No middleware, deliberately. A path that matched no route builds its
+    // chain out of the request arena — that is one allocation, it predates
+    // any of this, and it would hide the thing being measured here.
+    var app = try cssApp(testing.allocator);
+    defer app.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var counting = budget.Counting{ .child = arena.allocator() };
+    var lifetime = str_mod.Lifetime{};
+    var in_flight = fail.InFlight{};
+    var buf: [8192]u8 = undefined;
+
+    const request = "GET /app.css HTTP/1.1\r\nHost: example.dev\r\n" ++
+        "Accept-Encoding: gzip\r\nConnection: keep-alive\r\n\r\n";
+
+    const send = struct {
+        fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
+            var in = std.Io.Reader.fixed(request);
+            var out = std.Io.Writer.fixed(b);
+            _ = a.handleRequest(gpa, l, f, &in, &out, .off, .{});
+            l.end();
+        }
+    }.once;
+
+    for (0..3) |_| {
+        send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+        _ = arena.reset(.{ .retain_with_limit = arena_keep });
+    }
+
+    counting.reset();
+    send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+
+    // Zero, not one: the bytes were compressed when the App was built and
+    // the body going out is a slice of them. Nothing is serialised, nothing
+    // is copied, and the five headers fit in the Ctx.
+    try testing.expectEqual(@as(usize, 0), counting.allocs);
 }

@@ -39,10 +39,19 @@ pub const Limits = struct {
 pub const json_hint = 512;
 
 /// How many response headers a request holds without reaching for the arena.
-/// Four covers what the built-in middleware set — CORS one to three, a static
-/// file two — which is what makes it the number that keeps an allocation off
-/// the ordinary request.
-const inline_headers = 4;
+///
+/// Six covers what the built-in middleware set puts on one response: CORS
+/// one to three, and a static file up to five — `ETag`, `Cache-Control`,
+/// `Accept-Ranges`, and, once a file has a gzipped copy beside it,
+/// `Vary` and `Content-Encoding`. It was four until gzip added those two,
+/// and four would have meant every compressed asset spilling to the arena
+/// for one header over.
+///
+/// Each slot is two slices on a Ctx that already lives on the fiber's
+/// stack, so the two extra cost 64 bytes of a stack that is two pages and
+/// nothing at all in allocations — which is the invariant they are here to
+/// keep (ADR 0018).
+const inline_headers = 6;
 
 /// One resolved value, kept for the rest of the request that asked for it.
 ///

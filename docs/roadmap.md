@@ -33,6 +33,28 @@ In order.
 
 Things that are wrong or missing today, with what fixing them would take.
 
+- **A response body is never compressed, only a file is.** Static files are
+  gzipped once while the App is built, which is the shape that costs nothing per
+  request ([static files](./guide/static-files.md#compression)). A handler
+  returning JSON gets no such thing, and the reason is the one that shaped the
+  static half: a deflate compressor needs a 64 KB window, so one per connection
+  would multiply the 8,767 bytes an idle connection holds and one per request
+  would break the allocation budget
+  ([ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md)). The shape that
+  fits is a pool of compressors sized to the thread count rather than the
+  connection count — four cores, 256 KB, and a request borrows one for as long
+  as it is writing. That is a real design with real questions in it (what
+  happens when the pool is empty, what it does to a stream, what it does to
+  SSE, which is the one thing that must never be buffered), and it has not been
+  had yet. A proxy in front does this today and does it well.
+- **A static file served through any middleware costs one allocation.** Not the
+  file — the middleware chain. A path that matched no route has nothing
+  precomputed, so `handleRequest` builds its chain out of the request arena.
+  Every static response with a logger or CORS in front of it pays it, and the
+  allocation budget test does not see it because it measures a routed handler.
+  Fixing it means resolving a chain per static set at `listen()` the way routes
+  already do.
+
 - **The linker cannot drop what nobody uses.** The API description costs +14 KB
   on the hello example and +34 KB on rest whether or not `docs()` is called,
   because the switch is a runtime `null` check
@@ -94,42 +116,55 @@ Things that are wrong or missing today, with what fixing them would take.
   end went 183ns → 51ns and parsing 303ns → 163ns. It is still two passes:
   merging them would mean recording line boundaries during a scan that has to
   resume where it left off, and the two passes cost 214ns between them.
-- **The router is still a linear scan**, and there are numbers now. `zig build
-  profile` measures two route sets at five sizes, wanted route last so nothing
-  is captured early. **Mixed** is what an app looks like — four methods, three
-  depths — so nearly every route is thrown out on the method or the segment
-  count. **Same shape** is every route `GET /thingN/:id/leaf`, where not one can
-  be rejected cheaply; no real app looks like that, and it is the ceiling.
+- **The router is still a linear scan**, but the first segment is indexed now
+  and the scan is roughly half of what it was. `zig build profile` measures two
+  route sets at five sizes, wanted route last so nothing is captured early.
+  **Mixed** is what an app looks like — four methods, three depths — so nearly
+  every route is thrown out on the method or the segment count. **Same shape**
+  is every route `GET /thingN/:id/leaf`, where not one can be rejected cheaply;
+  no real app looks like that, and it is the ceiling.
 
   | routes | 1 | 5 | 25 | 50 | 100 |
   |---|---|---|---|---|---|
-  | mixed | 27ns | 47ns | 56ns | 107ns | 167ns |
-  | same shape | 53ns | 84ns | 242ns | 431ns | 855ns |
+  | mixed, before | 26ns | 48ns | 62ns | 116ns | 193ns |
+  | **mixed** | 28ns | 48ns | **45ns** | **81ns** | **108ns** |
+  | same shape, before | 52ns | 82ns | 245ns | 445ns | 855ns |
+  | **same shape** | 55ns | 60ns | **99ns** | **150ns** | **271ns** |
 
-  What that says is when it starts to matter. One request is 585ns of zfast's
-  own work, measured with one route, so a 25-route app spends ~9% of it
-  matching, a 50-route app ~16%, and a 100-route app ~23%. **The scan passes
+  What was added is four bytes per route standing for its first segment — its
+  length, first byte, last byte and middle byte — compared as one `u32` before
+  any `mem.eql` runs. That is the first level of a radix tree without the tree,
+  and it leaves specificity ordering exactly where it was: the routes are still
+  walked in registration order and still ranked by `score`, so
+  [ADR 0013](./adr/0013-the-most-specific-route-wins-and-duplicates-are-refused.md)
+  costs nothing extra to keep. A key collision is not a correctness problem —
+  it only means the `mem.eql` that would have run anyway does run — which is
+  what allows a key this cheap instead of a real hash.
+
+  **It is not a clean win, and the row that says so is the first one.** At one
+  route the key is computed and nothing can be skipped with it, so matching
+  goes 26ns → 28ns; the whole-request profile, which runs one route, moves its
+  "match the route" line 41ns → 44ns. Three nanoseconds of a ~600ns request,
+  spent to take 44% off a hundred-route app. The trade is stated here rather
+  than left for somebody to find in a profile.
+
+  Where that leaves the bar: one request is ~610ns of zfast's own work, so a
+  25-route app now spends ~7% of it matching, a 50-route app ~13%, and a
+  100-route app ~18%. **The scan passes
   [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md)'s 10% bar at
-  around 30 routes** — which most real apps have. The caveat is that this is
-  in-process with no kernel in it, so it is 10% of zfast's work rather than of
-  a request's wall clock; ADR 0001's budget is about zfast's work, so the
-  comparison is the right one, but it is not a claim about a real server.
+  around 40 routes** rather than 30. Better, not solved — and measured
+  in-process with no kernel in it, so it is a share of zfast's work rather than
+  of a request's wall clock.
 
-  One cheap fix was tried and did not work. The hypothesis was that "linear" is
-  not the problem — that rejecting a route reads about ten bytes and a `Route`
-  is seven times that, so the scan was pulling in cache lines to look at four
-  fields. Lifting those four into a packed parallel array made **mixed 7%
-  faster and same-shape 10% slower**, which is a wash bought with eight bytes
-  per route of duplicated state to keep in step. Reverted. The routes are
-  walked in order and the hardware prefetcher was already covering the stride;
-  the cost is the compares and the first `mem.eql`, not the fetch.
+  Two things were tried before this and are worth not repeating. A packed
+  parallel array of the four fields the scan reads made **mixed 7% faster and
+  same-shape 10% slower** — a wash bought with eight bytes per route of
+  duplicated state, reverted. And a real hash of the first segment was the
+  obvious version of what shipped, but a hash worth the name costs more at one
+  route than the `mem.eql` it saves, which is the size most apps are.
 
-  So what is left is the structural change, and the shape of it is now visible
-  in the table: the gap between the two rows is entirely the first literal
-  segment. Indexing on that — which is the first level of a radix tree — is
-  what the numbers point at. Whatever it is has to keep specificity ordering as
-  a property of the structure rather than a cost added on top
-  ([ADR 0013](./adr/0013-the-most-specific-route-wins-and-duplicates-are-refused.md)).
+  What is left is the actual tree, for the app with hundreds of routes. The
+  numbers no longer point at it urgently.
 - ~~**`std.json` sits on the hot path** of the metric that matters, at 13% of a
   request.~~ *Done, and it was not 13% — it was 63%.* The profile had been taken
   on a 25-byte payload while the benchmark target answered a kilobyte, and
@@ -145,6 +180,13 @@ Not "later" — decided against, with the reasoning written down.
 
 - **A `recover` middleware.** Zig cannot recover from a panic at all, so there is
   nothing to build ([ADR 0008](./adr/0008-no-recover-middleware.md)).
+- **TLS.** Terminated in front, and that is the answer rather than the plan
+  ([ADR 0028](./adr/0028-tls-is-terminated-in-front.md)). Zig's standard library
+  can be a TLS client and not a TLS server, nobody in the comparison wrote their
+  own, and the two alternatives are a one-person crypto dependency or a C
+  toolchain in the install story. HTTP/2 and a gRPC server go with it, which is
+  said out loud because nobody derives it from "no TLS". `Ctx.clientIp()` and
+  `.trusted_hops` are this decision's other half.
 - **Auth contents.** The mechanism is provided — middleware, resolved values —
   and the policy is yours.
 - **Benchmark claims without a benchmark machine.** The condition has since been
@@ -156,9 +198,15 @@ Not "later" — decided against, with the reasoning written down.
 
 ## Not decided
 
-- **TLS, sessions, templates.** Each is a real ask and none has a shape yet. TLS
-  in particular may stay out on purpose: terminating it in front is what most
-  deployments already do.
+- **Sessions and templates.** Both are real asks and neither has a shape yet.
+- **Somewhere to put work that is not a request.** A batching exporter, a cache
+  refresh, a queue drain, a ping every thirty seconds — every one of them wants
+  a unit of work that outlives a request, and zfast has no word for one. A
+  Service can start an OS thread today, but then the state it shares with
+  handlers is reachable from a fiber and from a thread, and `zfast.Mutex` is
+  right for one and wrong for the other. Handing out a way to start a fiber
+  makes the lock rule one sentence again. What it needs first is a name, and
+  what `fail` and `Str` mean somewhere there is no request.
 - **The name.** `zfast` is a working name. The `z-` prefix is crowded in the Zig
   ecosystem already (`zap`, `zzz`, `zon`, a dozen `zig-*`), so it is easy to
   confuse. The module name has to stay easy to change without touching user code,

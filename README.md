@@ -137,10 +137,16 @@ it is rather than how to use it:
 
 ## Not here yet
 
-Absent: TLS, sessions, templates, `sendfile`, `permessage-deflate`, and
-broadcasting to WebSockets a handler doesn't hold. Each with its reason in
-[`docs/roadmap.md`](./docs/roadmap.md); the ones decided against rather than
-queued up are in [`docs/adr/`](./docs/adr/).
+Absent: sessions, templates, `sendfile`, `permessage-deflate`, compressing a
+handler's response, and broadcasting to WebSockets a handler doesn't hold. Each
+with its reason in [`docs/roadmap.md`](./docs/roadmap.md); the ones decided
+against rather than queued up are in [`docs/adr/`](./docs/adr/).
+
+**TLS is a refusal rather than a gap** — terminate it in front, and the
+[deploying guide](./docs/guide/deploying.md#tls-and-the-proxy-in-front) has the
+five lines that do it ([ADR 0028](./docs/adr/0028-tls-is-terminated-in-front.md)).
+HTTP/2 and a gRPC server go with that decision. Static files *are* compressed,
+once, when the App is built.
 
 ## Principles
 

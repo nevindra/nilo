@@ -45,6 +45,33 @@ pub const Options = struct {
     /// or a `.git` that found its way into the directory being published
     /// on the first request is a bad way to learn it was there.
     dotfiles: bool = false,
+
+    /// Gzip every file worth gzipping, once, while the App is being built.
+    ///
+    /// This is the only shape compression can take here without giving up
+    /// something the project has measured and published
+    /// ([ADR 0018](../docs/adr/0018-the-trade-budget-has-three-axes.md)). A
+    /// compressor needs a 64 KB window: one per connection would take an
+    /// idle connection from 8,767 bytes to something like ten times that,
+    /// and one per request would be an allocation on the request path where
+    /// the invariant is one. A file that never changes has a third option —
+    /// compress it before the socket is even open, and spend nothing at all
+    /// per request.
+    ///
+    /// What it costs instead is memory that stays: the compressed copy
+    /// lives beside the original for as long as the App does. It is charged
+    /// against `max_total_bytes` like everything else, and the load line
+    /// says how much it came to.
+    compress: bool = true,
+
+    /// Files smaller than this are served as they are.
+    ///
+    /// A gzip stream carries about 20 bytes of framing, so below a few
+    /// hundred bytes compression can make a file bigger — and even where it
+    /// does not, it is saving less than one TCP segment on a response that
+    /// was already one packet. A file that comes out no smaller is dropped
+    /// whatever this says.
+    compress_min_bytes: usize = 1024,
 };
 
 pub const File = struct {
@@ -56,6 +83,39 @@ pub const File = struct {
     etag: []const u8,
     /// Borrowed from the Set's options.
     cache_control: []const u8,
+
+    /// The same file, gzipped at load. Null when it was not worth it — too
+    /// small, a type that is already compressed, or it came out no smaller.
+    gzip: ?[]const u8 = null,
+    /// The ETag of the gzipped bytes, which is a different one.
+    ///
+    /// An ETag names a representation, not a file. Handing the same ETag to
+    /// both would let anything caching in front of this — a CDN, a browser,
+    /// a proxy — answer a client that cannot read gzip with the gzipped
+    /// copy, on the grounds that the tag matched. Empty when `gzip` is null.
+    gzip_etag: []const u8 = &.{},
+
+    /// Which bytes and which ETag to answer with. Kept together so the two
+    /// cannot come apart: picking one representation and then tagging it
+    /// with the other's ETag is the failure this whole pairing exists to
+    /// make impossible.
+    pub const Representation = struct {
+        bytes: []const u8,
+        etag: []const u8,
+        gzipped: bool,
+    };
+
+    pub fn identity(self: *const File) Representation {
+        return .{ .bytes = self.bytes, .etag = self.etag, .gzipped = false };
+    }
+
+    /// The gzipped form if there is one and the client said it can read
+    /// one, and the plain form otherwise.
+    pub fn representation(self: *const File, wants_gzip: bool) Representation {
+        if (!wants_gzip) return self.identity();
+        const packed_bytes = self.gzip orelse return self.identity();
+        return .{ .bytes = packed_bytes, .etag = self.gzip_etag, .gzipped = true };
+    }
 };
 
 /// One directory, loaded. Owns every byte in it.
@@ -72,6 +132,8 @@ pub const Set = struct {
             self.gpa.free(f.url);
             self.gpa.free(f.bytes);
             self.gpa.free(f.etag);
+            if (f.gzip) |p| self.gpa.free(p);
+            if (f.gzip_etag.len > 0) self.gpa.free(f.gzip_etag);
         }
         self.gpa.free(self.files);
         self.gpa.free(self.prefix);
@@ -188,12 +250,23 @@ pub fn fromMemory(gpa: std.mem.Allocator, entries: []const Entry) !Set {
         .cache_control = "",
     };
 
+    // The same rule a loaded directory follows, with the same defaults.
+    // The API description is JSON and is the largest thing that comes
+    // through here, so leaving it out would have meant the one file zfast
+    // generates itself being the one file it does not compress.
+    const defaults = Options{};
+
     for (entries, set.files) |entry, *file| {
         file.url = try gpa.dupe(u8, entry.url);
         file.bytes = try gpa.dupe(u8, entry.bytes);
         file.etag = try etagFor(gpa, entry.bytes);
         file.content_type = entry.content_type;
         file.cache_control = entry.cache_control;
+
+        if (entry.bytes.len >= defaults.compress_min_bytes and compressible(entry.content_type)) {
+            file.gzip = try gzipped(gpa, entry.bytes);
+            if (file.gzip) |p| file.gzip_etag = try etagFor(gpa, p);
+        }
     }
 
     sortByUrl(set.files);
@@ -234,11 +307,14 @@ pub fn load(
             gpa.free(f.url);
             gpa.free(f.bytes);
             gpa.free(f.etag);
+            if (f.gzip) |p| gpa.free(p);
+            if (f.gzip_etag.len > 0) gpa.free(f.gzip_etag);
         }
         files.deinit(gpa);
     }
 
     var total: usize = 0;
+    var packed_total: usize = 0;
     var skipped_dotfiles: usize = 0;
 
     var walker = try dir.walk(gpa);
@@ -288,12 +364,37 @@ pub fn load(
             return error.StaticSetTooLarge;
         }
 
+        const content_type = contentTypeFor(url);
+        var packed_bytes: ?[]const u8 = null;
+        errdefer if (packed_bytes) |p| gpa.free(p);
+        if (options.compress and
+            bytes.len >= options.compress_min_bytes and
+            compressible(content_type))
+        {
+            packed_bytes = try gzipped(gpa, bytes);
+            if (packed_bytes) |p| {
+                packed_total += p.len;
+                total += p.len;
+                if (total > options.max_total_bytes) {
+                    std.log.err(
+                        "zfast: static directory \"{s}\" is over the {d} byte total limit " ++
+                            "once the gzipped copies are counted — raise .max_total_bytes, " ++
+                            "or pass .compress = false",
+                        .{ dir_path, options.max_total_bytes },
+                    );
+                    return error.StaticSetTooLarge;
+                }
+            }
+        }
+
         try files.append(gpa, .{
             .url = try gpa.dupe(u8, url),
             .bytes = bytes,
-            .content_type = contentTypeFor(url),
+            .content_type = content_type,
             .etag = try etagFor(gpa, bytes),
             .cache_control = options.cache_control,
+            .gzip = packed_bytes,
+            .gzip_etag = if (packed_bytes) |p| try etagFor(gpa, p) else &.{},
         });
     }
 
@@ -330,11 +431,30 @@ pub fn load(
     }
 
     std.log.info(
-        "zfast: loaded {d} static file(s) ({d} bytes) from \"{s}\" onto \"{s}\"{s}",
-        .{ set.files.len, total, dir_path, url_prefix, if (skipped_dotfiles > 0) " (dotfiles skipped)" else "" },
+        "zfast: loaded {d} static file(s) ({d} bytes{f}) from \"{s}\" onto \"{s}\"{s}",
+        .{
+            set.files.len,
+            total,
+            GzipNote{ .bytes = packed_total },
+            dir_path,
+            url_prefix,
+            if (skipped_dotfiles > 0) " (dotfiles skipped)" else "",
+        },
     );
     return set;
 }
+
+/// The gzip half of the load line, and nothing at all when no file was
+/// worth compressing — a directory of images should not have to read a
+/// clause about a feature that did not apply to it.
+const GzipNote = struct {
+    bytes: usize,
+
+    pub fn format(self: GzipNote, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        if (self.bytes == 0) return;
+        try w.print(", {d} of them gzipped copies", .{self.bytes});
+    }
+};
 
 fn lessByUrl(_: void, a: File, b: File) bool {
     return std.mem.order(u8, a.url, b.url) == .lt;
@@ -386,6 +506,120 @@ fn hasDotSegment(rel_path: []const u8) bool {
         }
     }
     return rel_path.len > start and rel_path[start] == '.';
+}
+
+/// Whether an `Accept-Encoding` header says gzip is welcome.
+///
+/// Not `indexOf("gzip")`, because `gzip;q=0` contains the word and means the
+/// exact opposite — it is how a client that cannot decompress says so, and
+/// answering it with a gzipped body is a broken page rather than a slow one.
+/// `*` is honoured too, with an explicit `gzip` entry outranking it either
+/// way, which is what RFC 9110 §12.5.3 says to do.
+pub fn acceptsGzip(header: ?[]const u8) bool {
+    const value = header orelse return false;
+
+    var star: ?bool = null;
+    var it = std.mem.splitScalar(u8, value, ',');
+    while (it.next()) |raw| {
+        const entry = std.mem.trim(u8, raw, " \t");
+        if (entry.len == 0) continue;
+
+        const semi = std.mem.indexOfScalar(u8, entry, ';');
+        const name = std.mem.trimEnd(u8, entry[0 .. semi orelse entry.len], " \t");
+        const wanted = if (semi) |i| !isQualityZero(entry[i + 1 ..]) else true;
+
+        if (std.ascii.eqlIgnoreCase(name, "gzip")) return wanted;
+        if (std.mem.eql(u8, name, "*")) star = wanted;
+    }
+    return star orelse false;
+}
+
+/// Whether the parameters after a `;` say `q=0` — `q=0`, `q=0.0`, `q=0.000`.
+/// Anything else, including a malformed one, is read as "wanted": the cost
+/// of being wrong that way is a header the client asked for by listing the
+/// encoding at all.
+fn isQualityZero(params: []const u8) bool {
+    var it = std.mem.splitScalar(u8, params, ';');
+    while (it.next()) |raw| {
+        const param = std.mem.trim(u8, raw, " \t");
+        if (param.len < 2) continue;
+        if (param[0] != 'q' and param[0] != 'Q') continue;
+        const eq = std.mem.indexOfScalar(u8, param, '=') orelse continue;
+        if (std.mem.trim(u8, param[1..eq], " \t").len != 0) continue;
+
+        const q = std.mem.trim(u8, param[eq + 1 ..], " \t");
+        const value = std.fmt.parseFloat(f32, q) catch continue;
+        return value == 0;
+    }
+    return false;
+}
+
+/// Whether gzipping a file of this type is worth the memory it will sit in
+/// for the life of the process.
+///
+/// An allowlist rather than a blocklist. Getting it wrong in the permissive
+/// direction means spending a second copy of a JPEG to save nothing; in the
+/// strict direction it means a CSS file goes out uncompressed, which is
+/// merely the behaviour of every previous version. So the list names what is
+/// known to be text.
+fn compressible(content_type: []const u8) bool {
+    // `text/anything` is text, including the ones nobody has thought of.
+    if (std.mem.startsWith(u8, content_type, "text/")) return true;
+
+    // A structured type ending in `+json` or `+xml` — `image/svg+xml`,
+    // `application/manifest+json` — is text however it starts.
+    const base = content_type[0 .. std.mem.indexOfScalar(u8, content_type, ';') orelse content_type.len];
+    const trimmed = std.mem.trimEnd(u8, base, " ");
+    if (std.mem.endsWith(u8, trimmed, "+json")) return true;
+    if (std.mem.endsWith(u8, trimmed, "+xml")) return true;
+
+    for ([_][]const u8{
+        "application/json",
+        "application/javascript",
+        "application/xml",
+        "application/wasm",
+        "application/x-ndjson",
+        "image/x-icon",
+        "font/ttf",
+        "font/otf",
+    }) |known| {
+        if (std.mem.eql(u8, trimmed, known)) return true;
+    }
+    return false;
+}
+
+/// Gzip `bytes`, or null if the result is not smaller than what went in.
+///
+/// The 64 KB window lives on this function's stack and is gone before the
+/// server starts. That is the whole reason compression can be here at all
+/// and not on the request path.
+fn gzipped(gpa: std.mem.Allocator, bytes: []const u8) error{OutOfMemory}!?[]const u8 {
+    // `Compress.init` asserts its output has somewhere to write, and an
+    // `Allocating` starts with a buffer of nothing at all. Half the input
+    // is roughly where text lands, so this is also the size that usually
+    // means the output is never grown.
+    var out: std.Io.Writer.Allocating = try .initCapacity(gpa, bytes.len / 2 + 64);
+    errdefer out.deinit();
+
+    const window = try gpa.alloc(u8, std.compress.flate.max_window_len);
+    defer gpa.free(window);
+
+    var compressor = std.compress.flate.Compress.init(
+        &out.writer,
+        window,
+        .gzip,
+        .default,
+    ) catch return error.OutOfMemory;
+    compressor.writer.writeAll(bytes) catch return error.OutOfMemory;
+    compressor.finish() catch return error.OutOfMemory;
+
+    // A file that does not shrink is a file served as it is. Keeping the
+    // copy would cost memory to send more bytes than the original.
+    if (out.written().len >= bytes.len) {
+        out.deinit();
+        return null;
+    }
+    return try out.toOwnedSlice();
 }
 
 /// A strong ETag: the contents hashed, so it changes exactly when the file
@@ -566,4 +800,137 @@ test "the SPA fallback catches unknown paths but not unknown prefixes" {
     try testing.expectEqualStrings("/app.js", set.find("/app.js").?.url);
     // A browser reload deep inside a client-side route.
     try testing.expectEqualStrings("/index.html", set.find("/users/42").?.url);
+}
+
+// ---- gzip, done once when the App is built ----
+
+test "Accept-Encoding is read, not searched for the word gzip" {
+    // The plain yes.
+    try testing.expect(acceptsGzip("gzip"));
+    try testing.expect(acceptsGzip("gzip, deflate, br"));
+    try testing.expect(acceptsGzip("deflate, gzip"));
+    try testing.expect(acceptsGzip("GZIP"));
+    try testing.expect(acceptsGzip("gzip;q=1.0"));
+    try testing.expect(acceptsGzip("gzip ; q=0.5"));
+
+    // The header contains "gzip" and means the opposite. A server that
+    // searched for the word would send a body this client cannot read.
+    try testing.expect(!acceptsGzip("gzip;q=0"));
+    try testing.expect(!acceptsGzip("gzip;q=0.0"));
+    try testing.expect(!acceptsGzip("gzip;q=0.000"));
+    try testing.expect(!acceptsGzip("deflate, gzip;q=0"));
+
+    // A wildcard stands in, and an explicit entry outranks it either way.
+    try testing.expect(acceptsGzip("*"));
+    try testing.expect(!acceptsGzip("*;q=0"));
+    try testing.expect(!acceptsGzip("*, gzip;q=0"));
+    try testing.expect(acceptsGzip("*;q=0, gzip"));
+
+    // Nothing asked for it.
+    try testing.expect(!acceptsGzip(null));
+    try testing.expect(!acceptsGzip(""));
+    try testing.expect(!acceptsGzip("identity"));
+    try testing.expect(!acceptsGzip("deflate, br"));
+
+    // A word that merely starts the same way is a different encoding.
+    try testing.expect(!acceptsGzip("gzip-x"));
+    try testing.expect(!acceptsGzip("x-gzip"));
+}
+
+test "only the types that are text get a compressed copy" {
+    try testing.expect(compressible("text/html; charset=utf-8"));
+    try testing.expect(compressible("text/css"));
+    try testing.expect(compressible("application/json"));
+    try testing.expect(compressible("application/javascript"));
+    try testing.expect(compressible("image/svg+xml"));
+    try testing.expect(compressible("application/manifest+json"));
+    try testing.expect(compressible("application/wasm"));
+
+    // Already compressed. A second copy would cost memory to save nothing.
+    try testing.expect(!compressible("image/png"));
+    try testing.expect(!compressible("image/jpeg"));
+    try testing.expect(!compressible("font/woff2"));
+    try testing.expect(!compressible("video/mp4"));
+    try testing.expect(!compressible("application/zip"));
+    try testing.expect(!compressible("application/octet-stream"));
+}
+
+test "a gzipped copy is smaller, and inflates back to exactly the original" {
+    const gpa = testing.allocator;
+    // Repetitive enough to compress, which is what a real stylesheet is.
+    const original = "body { margin: 0; padding: 0; } " ** 64;
+
+    const squeezed = (try gzipped(gpa, original)) orelse return error.TestExpectedCompression;
+    defer gpa.free(squeezed);
+    try testing.expect(squeezed.len < original.len);
+    // The gzip magic, so this is a container a browser will recognise
+    // rather than a raw deflate stream.
+    try testing.expectEqual(@as(u8, 0x1f), squeezed[0]);
+    try testing.expectEqual(@as(u8, 0x8b), squeezed[1]);
+
+    // The whole point: what comes back out is what went in.
+    var in: std.Io.Reader = .fixed(squeezed);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var window: [std.compress.flate.max_window_len]u8 = undefined;
+    var inflate: std.compress.flate.Decompress = .init(&in, .gzip, &window);
+    _ = try inflate.reader.streamRemaining(&out.writer);
+    try testing.expectEqualStrings(original, out.written());
+}
+
+test "a file that does not shrink keeps no copy" {
+    const gpa = testing.allocator;
+    // Already-random bytes are the case gzip cannot help with, and the
+    // container's own header makes the result bigger than the input.
+    var noise: [512]u8 = undefined;
+    var seed: u32 = 12345;
+    for (&noise) |*b| {
+        seed = seed *% 1664525 +% 1013904223;
+        b.* = @truncate(seed >> 24);
+    }
+    try testing.expect((try gzipped(gpa, &noise)) == null);
+}
+
+test "the two representations of one file never share an ETag" {
+    const gpa = testing.allocator;
+    const html = "<!doctype html><title>hello</title>" ** 64;
+
+    var set = try fromMemory(gpa, &.{.{
+        .url = "/index.html",
+        .bytes = html,
+        .content_type = "text/html; charset=utf-8",
+    }});
+    defer set.deinit();
+
+    const file = set.find("/index.html").?;
+    try testing.expect(file.gzip != null);
+    // Different bytes, so a different tag. Sharing one would let a cache in
+    // front answer a client that cannot read gzip with the gzipped copy,
+    // because the tag it was holding matched.
+    try testing.expect(!std.mem.eql(u8, file.etag, file.gzip_etag));
+
+    const plain = file.representation(false);
+    try testing.expect(!plain.gzipped);
+    try testing.expectEqualStrings(html, plain.bytes);
+    try testing.expectEqualStrings(file.etag, plain.etag);
+
+    const squeezed = file.representation(true);
+    try testing.expect(squeezed.gzipped);
+    try testing.expect(squeezed.bytes.len < html.len);
+    try testing.expectEqualStrings(file.gzip_etag, squeezed.etag);
+}
+
+test "a file with no compressed copy asks for the plain one whatever the client says" {
+    const gpa = testing.allocator;
+    var set = try fromMemory(gpa, &.{.{
+        .url = "/tiny.txt",
+        .bytes = "no",
+        .content_type = "text/plain",
+    }});
+    defer set.deinit();
+
+    const file = set.find("/tiny.txt").?;
+    try testing.expect(file.gzip == null);
+    try testing.expect(!file.representation(true).gzipped);
+    try testing.expectEqualStrings("no", file.representation(true).bytes);
 }

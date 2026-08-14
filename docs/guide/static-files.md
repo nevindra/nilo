@@ -29,6 +29,8 @@ that can't be opened stops `listen()` with that sentence in the error.
 | `max_file_bytes` | files bigger than this are refused **at load**, with their name in the error. Default 8 MB |
 | `max_total_bytes` | the same for the whole tree. Default 64 MB |
 | `dotfiles` | whether to load names starting with `.`. Off by default |
+| `compress` | gzip every file worth gzipping, once, at load. On by default |
+| `compress_min_bytes` | files smaller than this are served as they are. Default 1 KB |
 
 `spa_fallback` is what makes a browser reload on `/users/42` reach your
 client-side router instead of a 404. Dotfiles are off because a `.env` or a
@@ -37,6 +39,46 @@ is a bad way to learn it was there.
 
 The size ceilings are real ones — the whole tree is going into RAM — and it is
 better to hit them at startup than at 3am.
+
+## Compression
+
+Every file worth compressing is gzipped **once, while the App is being built**,
+and a client that says `Accept-Encoding: gzip` gets the copy that was already
+made. Nothing is compressed per request, so serving a compressed asset costs a
+slice and a header — measured at zero allocations, held by a test.
+
+That timing is the whole design, not an optimisation on top of it. A gzip
+compressor needs a 64 KB window: one per connection would take an idle
+connection from 8,767 bytes to roughly ten times that, and one per request would
+put an allocation on the path where the budget is one
+([ADR 0018](../adr/0018-the-trade-budget-has-three-axes.md)). A file that never
+changes escapes both, because it can be compressed before the socket is open.
+
+What it costs instead is memory that stays: the compressed copy sits beside the
+original for the life of the process, and is charged against `max_total_bytes`
+like everything else. The startup line says how much it came to:
+
+```
+zfast: loaded 34 static file(s) (2411903 bytes, 383204 of them gzipped copies)
+       from "dist" onto "/assets"
+```
+
+A file is skipped when it is under `compress_min_bytes`, when its type is already
+compressed — a PNG, a woff2, an MP4 — or when gzip did not actually make it
+smaller. **A response body is never compressed**, only files; an endpoint
+returning JSON goes out as it is.
+
+Three details that are easy to get wrong, and are not:
+
+- **`Vary: Accept-Encoding`** goes out whenever a file has two representations,
+  including on the response carrying the plain one. Without it a shared cache
+  stores whichever answer it saw first and hands it to everyone after.
+- **The two representations have different ETags.** An ETag names a
+  representation, not a file, so handing both the same one would let a cache
+  answer a client that can't read gzip with the gzipped copy — the tag matched,
+  after all.
+- **`gzip;q=0` means no.** It contains the word `gzip` and means the opposite,
+  which is how a client that can't decompress says so.
 
 ## Range requests
 
@@ -66,6 +108,11 @@ with `Content-Range: bytes */739` is the only way to say so.
 correctness: resuming a download of a file that has since changed would staple
 two halves of two different files together, so a stale ETag gets the whole file
 instead.
+
+A request that asks for a range gets the **uncompressed** file, whatever it said
+about `Accept-Encoding`. A range is an offset into a representation, and the
+gzipped copy has different offsets — so answering one from the other would hand
+back the wrong bytes without saying so.
 
 A request for several ranges at once is legal and wants a `multipart/byteranges`
 body zfast doesn't assemble — so it gets the whole file too. Nothing sends them.
