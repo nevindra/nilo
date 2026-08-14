@@ -142,6 +142,29 @@ pub const Options = struct {
     /// unwinds.
     write_timeout_ms: u32 = 30_000,
 
+    /// The most connections this process holds at once. 0 means no limit.
+    ///
+    /// A connection costs a measured 8,767 bytes before it has asked for
+    /// anything, so this number times nine kilobytes is what the server
+    /// may hold: the default is about 88 MB. That is the whole point of
+    /// having it. Without a cap a server does not fail at a number
+    /// somebody chose, it fails when the machine runs out, and what
+    /// notices is the OOM killer — which takes the process down along with
+    /// every request that was being answered correctly.
+    ///
+    /// Past it, a connection is accepted and closed at once: no request is
+    /// read and no status is sent. A client finds out immediately, which
+    /// is what lets a load balancer try another instance, and the log says
+    /// so once a minute for as long as it lasts. Ten thousand is above
+    /// what an ordinary service sees and below what a small machine
+    /// minds; a server holding WebSockets open wants it raised, and the
+    /// arithmetic above is how to decide by how much.
+    ///
+    /// It bounds connections, not requests. One connection makes many
+    /// requests in a row, and a WebSocket is one connection for as long as
+    /// the tab is open.
+    max_connections: u32 = 10_000,
+
     /// Stop on Ctrl-C (SIGINT) and on SIGTERM, which is what a container
     /// runtime or a supervisor sends when it wants the process to go.
     ///

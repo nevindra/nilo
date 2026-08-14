@@ -131,7 +131,7 @@ fn writeIp6(w: *std.Io.Writer, bytes: [16]u8) void {
 //
 //   address  port  reuse_address  threads  read_buffer  write_buffer
 //   header_timeout_ms  idle_timeout_ms  body_timeout_ms  write_timeout_ms
-//   stop_on_signal  shutdown_grace_ms
+//   stop_on_signal  shutdown_grace_ms  max_connections
 //
 // Anything else in there — a body ceiling, how many proxies to trust — is
 // HTTP, and an Engine that knew about it would not be one. A second Engine
@@ -168,6 +168,57 @@ pub const Stop = struct {
         return self.requested.load(.acquire);
     }
 };
+
+/// How many connections are being held right now, against the most that
+/// may be.
+///
+/// A server with no cap does not fail at a number somebody chose — it
+/// fails when the machine runs out, and what notices is the OOM killer.
+/// Every connection costs a measured 8,767 bytes before it has asked for
+/// anything, so a cap is the one option that turns that figure into a
+/// number an operator can multiply.
+///
+/// `take` is only ever called from the accept loop, and there is one of
+/// those, so the load and the increment cannot race each other and a
+/// compare-and-swap would be a lock nobody contends. `give` is called from
+/// every connection fiber, which is why the counter is atomic at all.
+/// Nothing is published through it — it is a count, not a handoff — so
+/// `.monotonic` is the whole ordering requirement.
+pub const Capacity = struct {
+    live: std.atomic.Value(u32) = .init(0),
+    /// 0 means no limit, which is what zfast did before this existed.
+    max: u32 = 0,
+    /// Connections closed because the server was full, since it started.
+    /// Read only for the log line.
+    refused: std.atomic.Value(u64) = .init(0),
+
+    /// Count one more connection, or say there is no room for it.
+    pub fn take(self: *Capacity) bool {
+        if (self.max != 0 and self.live.load(.monotonic) >= self.max) {
+            _ = self.refused.fetchAdd(1, .monotonic);
+            return false;
+        }
+        _ = self.live.fetchAdd(1, .monotonic);
+        return true;
+    }
+
+    /// A connection has closed. Called from the fiber that held it.
+    pub fn give(self: *Capacity) void {
+        _ = self.live.fetchSub(1, .monotonic);
+    }
+
+    pub fn held(self: *const Capacity) u32 {
+        return self.live.load(.monotonic);
+    }
+};
+
+/// The shortest gap between two "the server is full" warnings.
+///
+/// A server that is full is full for a while, and one line per refused
+/// connection would be a log that fills a disk at exactly the moment
+/// somebody needs to read it. Once a minute, with a running total, says
+/// the same thing.
+const capacity_warn_gap_ns: u64 = 60 * std.time.ns_per_s;
 
 /// How often the accept loop looks up to see whether a stop was asked for.
 ///
@@ -426,7 +477,17 @@ pub fn serve(
     }.f;
 
     const Conn = struct {
-        fn run(st: State, stream: zio.net.Stream, conn_gpa: std.mem.Allocator, sizes: Options) void {
+        fn run(
+            st: State,
+            stream: zio.net.Stream,
+            conn_gpa: std.mem.Allocator,
+            sizes: Options,
+            capacity: *Capacity,
+        ) void {
+            // After the close, not before: the count is meant to answer
+            // "how many sockets does this process hold", and the socket is
+            // held until it is shut. Deferred first so it runs last.
+            defer capacity.give();
             defer stream.close();
 
             // One response = one flush = one segment; Nagle would only add
@@ -470,6 +531,9 @@ pub fn serve(
     if (options.stop_on_signal) installStopSignals(stop);
     defer if (options.stop_on_signal) restoreStopSignals();
 
+    var capacity: Capacity = .{ .max = options.max_connections };
+    var warned_at_ns: u64 = 0;
+
     while (!stop.isRequested()) {
         const stream = server.accept(.{ .timeout = .fromMilliseconds(accept_poll_ms) }) catch |err| {
             // The wait ran out, which is the loop's chance to look at the
@@ -477,8 +541,37 @@ pub fn serve(
             if (err == error.Timeout) continue;
             return err;
         };
-        errdefer stream.close();
-        try group.spawn(Conn.run, .{ state, stream, gpa, options });
+
+        // Full: closed at once, without being read from and without being
+        // answered. Closing rather than not accepting, so that the client
+        // finds out now — a connection left in the kernel's backlog hangs
+        // until something times out, and the load balancer that ADR 0028
+        // says is in front cannot fail over to another instance until it
+        // does. Closing rather than answering 503, because writing to a
+        // client the server has just decided it cannot afford to serve is
+        // work an attacker gets to choose, and it would put a write with a
+        // deadline on it inside the one loop that must not stall.
+        if (!capacity.take()) {
+            stream.close();
+            const now = monotonicNanos();
+            if (warned_at_ns == 0 or now - warned_at_ns >= capacity_warn_gap_ns) {
+                warned_at_ns = now;
+                std.log.warn(
+                    "zfast is holding its limit of {d} connections, so new ones are being closed " ++
+                        "unanswered ({d} so far). Raise `.max_connections` in listen() if the " ++
+                        "machine has the memory — each connection costs about 9 KB — or put " ++
+                        "fewer of them on this process.",
+                    .{ capacity.max, capacity.refused.load(.monotonic) },
+                );
+            }
+            continue;
+        }
+
+        group.spawn(Conn.run, .{ state, stream, gpa, options, &capacity }) catch |err| {
+            capacity.give();
+            stream.close();
+            return err;
+        };
     }
 
     drain(stop, options.shutdown_grace_ms);
@@ -629,6 +722,57 @@ test "an IPv6 address is written the way RFC 5952 says to write it" {
         "2001::1:0:0:5:6",
         ip6Text(&buf, .{ 0x2001, 0, 0, 1, 0, 0, 5, 6 }),
     );
+}
+
+test "a full server refuses, and takes the next connection once one closes" {
+    var capacity: Capacity = .{ .max = 3 };
+
+    try testing.expect(capacity.take());
+    try testing.expect(capacity.take());
+    try testing.expect(capacity.take());
+    try testing.expectEqual(@as(u32, 3), capacity.held());
+
+    // Full. Nothing is held by the refusal, so the count does not move.
+    try testing.expect(!capacity.take());
+    try testing.expect(!capacity.take());
+    try testing.expectEqual(@as(u32, 3), capacity.held());
+    try testing.expectEqual(@as(u64, 2), capacity.refused.load(.monotonic));
+
+    // One closes, and the next client gets in. A cap that stayed full
+    // after a connection ended would be a server that answers once.
+    capacity.give();
+    try testing.expect(capacity.take());
+    try testing.expect(!capacity.take());
+    try testing.expectEqual(@as(u32, 3), capacity.held());
+}
+
+test "no cap is a server that takes whatever arrives" {
+    // What zfast did before `max_connections` existed, and what setting it
+    // to zero asks for back.
+    var capacity: Capacity = .{ .max = 0 };
+    for (0..1000) |_| try testing.expect(capacity.take());
+    try testing.expectEqual(@as(u32, 1000), capacity.held());
+    try testing.expectEqual(@as(u64, 0), capacity.refused.load(.monotonic));
+}
+
+test "the count follows connections closing on other threads" {
+    // `give` is the one that really is called from everywhere: every
+    // connection fiber calls it as it goes, and they are spread across
+    // every thread the server runs.
+    var capacity: Capacity = .{ .max = 256 };
+    for (0..256) |_| try testing.expect(capacity.take());
+    try testing.expect(!capacity.take());
+
+    const Closer = struct {
+        fn run(c: *Capacity, n: usize) void {
+            for (0..n) |_| c.give();
+        }
+    };
+    var threads: [4]std.Thread = undefined;
+    for (&threads) |*t| t.* = try std.Thread.spawn(.{}, Closer.run, .{ &capacity, 64 });
+    for (threads) |t| t.join();
+
+    try testing.expectEqual(@as(u32, 0), capacity.held());
 }
 
 test "a Peer given as text keeps it, and refuses what cannot be an address" {

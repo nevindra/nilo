@@ -48,6 +48,8 @@ try app.listen(.{
     .body_timeout_ms = 30_000,    // any one read of a body
     .write_timeout_ms = 30_000,   // any one write to the client
 
+    .max_connections = 10_000,    // held at once; 0 = no limit
+
     .max_body = 1024 * 1024,      // the most `c.body()` reads into the arena
     .trusted_hops = 0,            // how many proxies stand in front
 });
@@ -92,6 +94,47 @@ this lower than the default.
 A WebSocket has no read limit once the handshake is done — a chat tab with
 nobody typing is working correctly. Its writes keep theirs, which is how the
 server finds out the client is gone.
+
+## How many connections at once
+
+`max_connections` is the most this process holds at one time. Ten thousand by
+default, and the arithmetic behind that number is the one measurement this
+project keeps repeating: **a connection costs about 9 KB before it has asked for
+anything**, so the default is around 88 MB of connections and no more.
+
+That is the whole reason it exists. A server with no cap does not fail at a
+number somebody chose — it keeps accepting until the machine runs out, and what
+notices is the OOM killer, which takes the process down along with every request
+that was being answered correctly. A cap turns "we ran out of memory" into "we
+ran out of connections", which is a thing you can read in a log and set a number
+for.
+
+Past the limit, a connection is accepted and closed at once. No request is read
+and no status is sent, so a client sees the connection go immediately — often as
+a reset, since the request it sent was never read. That is on purpose:
+
+- **Not "stop accepting".** Connections left in the kernel's backlog hang until
+  something times out, and the load balancer in front cannot try another
+  instance until it does. Closing tells it now.
+- **Not a 503.** Writing to a client the server has just decided it cannot
+  afford to serve is work an attacker gets to choose, and it would put a write —
+  with a deadline on it — inside the accept loop, which is the one loop that must
+  not stall.
+
+The log says so once a minute for as long as it lasts, with a running total:
+
+```
+warning: zfast is holding its limit of 10000 connections, so new ones are being
+closed unanswered (417 so far). Raise `.max_connections` in listen() if the
+machine has the memory — each connection costs about 9 KB — or put fewer of them
+on this process.
+```
+
+It counts connections, not requests. One connection makes many requests in a
+row, and a WebSocket is one connection for as long as the tab is open — a chat
+server holding open tabs wants this raised, and multiplied by 9 KB first.
+`.max_connections = 0` turns it off, which is what zfast did before this
+existed.
 
 ## How big a body may be
 

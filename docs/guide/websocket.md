@@ -98,4 +98,10 @@ A ping it fails to answer is what would catch one nobody writes to, and that is 
 feature this doesn't have yet
 ([ADR 0023](../adr/0023-a-deadline-belongs-to-an-operation-not-to-a-request.md)).
 
+One number worth knowing before a chat server meets its users: an open socket is
+an open connection, and `max_connections` bounds those at 10,000 by default. A
+tab that is connected and silent still counts. Raise it — and multiply by the
+9 KB a connection costs — before that is the limit you find out about
+([Deploying](./deploying.md#how-many-connections-at-once)).
+
 `zig build run-chat` is a working one, browser page included.

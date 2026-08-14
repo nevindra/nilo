@@ -57,10 +57,17 @@ literal; the type is `zfast.Group("/api")`.
 | `idle_timeout_ms` | `75_000` — a connection between requests |
 | `body_timeout_ms` | `30_000` — any one read of a body |
 | `write_timeout_ms` | `30_000` — any one write to the client |
+| `max_connections` | `10_000` — held at once, about 9 KB each. `0` = no limit |
+| `max_body` | `1024 * 1024` — the most `c.body()` reads into the arena |
+| `trusted_hops` | `0` — how many proxies stand in front, for `c.clientIp()` |
 
-Each of the four bounds one wait for the network, not a request, so a long
-upload or an hour-long stream is not hurried by any of them. `0` turns one off.
-See [Deploying](./guide/deploying.md#deadlines).
+Each of the four deadlines bounds one wait for the network, not a request, so a
+long upload or an hour-long stream is not hurried by any of them. `0` turns one
+off. See [Deploying](./guide/deploying.md#deadlines).
+
+Past `max_connections` a connection is accepted and closed at once — no request
+read, no status sent
+([why](./guide/deploying.md#how-many-connections-at-once)).
 
 ## Handler arguments
 
@@ -108,10 +115,12 @@ Response(User){ .status = if (made) 201 else 200, .value = user }
 | `c.param(name)` | `?Str`, percent-decoded. `"*"` for a catch-all |
 | `c.query(name)` | `?Str`, percent-decoded, `+` as space |
 | `c.header(name)` | `?Str`, name matched case-insensitively |
-| `c.body()` | `!Str` — the whole body, up to 1 MB |
+| `c.body()` | `!Str` — the whole body, up to `max_body` (1 MB) |
 | `c.json(T)` | `!T` — the body parsed as JSON |
 | `c.bodyStream()` | `!Body` — the body in pieces |
 | `c.bodyStreamWith(.{ .max_bytes = … })` | the same, with a ceiling. Default 64 MB |
+| `c.peer()` | the address the connection came from — the proxy's, if there is one |
+| `c.clientIp()` | `Str` — the client, looking through `trusted_hops` proxies |
 | `c.service(*Db)` | `?*Db` |
 | `c.resolve(V)` | `!V` — a resolved value, worked out once per request |
 | `c.keepAlive()` | whether the connection will carry another request |

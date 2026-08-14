@@ -169,6 +169,17 @@ connections** and does not refuse them, it just stops answering. That is
 Configurable, and a `u16`, so 65,535 is the ceiling. zfast took 10,000 without
 being asked to.
 
+That last sentence was written as a win and it was not one. http.zig has a
+number and zfast had none, which means http.zig's failure mode is a connection
+that waits and zfast's was the machine running out — the OOM killer takes the
+whole process, in-flight requests included. zfast now has a cap of its own,
+`.max_connections`, defaulting to 10,000: past it a connection is closed at once
+rather than left waiting, so a client finds out immediately
+([deploying](./guide/deploying.md#how-many-connections-at-once)). The default
+sits exactly at the top row of the memory table above, which is where the 9 KB
+figure came from — a run that wants more than 10,000 connections has to raise it
+first.
+
 ## Build time and binary size
 
 Warm means one source file's **contents** changed — measured by appending a
