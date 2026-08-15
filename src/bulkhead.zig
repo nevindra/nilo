@@ -307,12 +307,9 @@ pub const monotonicNanos = engine.monotonicNanos;
 pub const Mutex = engine.Mutex;
 pub const sleep = engine.sleep;
 
-// SPIKE (spike/broadcast). Not part of the Bulkhead contract until an ADR
-// says so; deleted with the spike otherwise.
-pub const Spawned = engine.Spawned;
+/// Somewhere to put work that is not a request, owned by the server that
+/// is running rather than by the fiber that started it (ADR 0029).
 pub const spawn = engine.spawn;
-pub const Channel = engine.Channel;
-pub const BroadcastChannel = engine.BroadcastChannel;
 
 // ---- idle connections give their pages back ----
 
@@ -504,6 +501,14 @@ fn msToNanos(ms: u32) u64 {
 /// is safe because this is a hand-off, not sharing: the fiber is parked for
 /// exactly as long as the worker is running, so only one of them is ever
 /// looking at the InFlight.
+///
+/// The `setFallbackSlot` below must keep happening on a thread-pool worker
+/// and never on an executor thread. `spawn` (ADR 0029) runs fibers with no
+/// slot of their own, and those fall through to the threadlocal; if this
+/// assignment ever landed on the thread they run on, spawned work would
+/// write its failure message into an unrelated request — ADR 0007's leak,
+/// by another route. It lands on a worker because `engine.blocking` is
+/// `zio.blockInPlace`, which submits the call to the thread pool.
 pub fn blocking(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) ReturnType(func) {
     const Args = @TypeOf(args);
     const Carrier = struct {
@@ -522,8 +527,14 @@ fn ReturnType(comptime func: anytype) type {
 
 /// A fallback for use outside the Engine: unit tests call App directly,
 /// with no fiber, so `engine.slot()` is always null there. On a real
-/// server the fiber slot always exists and wins, so what is stored here
-/// is never read.
+/// server a connection's fiber slot always exists and wins, so what is
+/// stored here is never read by one.
+///
+/// A fiber from `spawn` (ADR 0029) has no slot, so it *does* read this. It
+/// is safe only because the one place that writes it — `blocking` above —
+/// does so on a thread-pool worker, and spawned fibers run on executor
+/// threads. Anything that starts setting this on an executor thread
+/// reintroduces the cross-request leak ADR 0007 exists to prevent.
 threadlocal var fallback_slot: ?*anyopaque = null;
 
 /// Install the fallback slot, returning the previous one so it can be

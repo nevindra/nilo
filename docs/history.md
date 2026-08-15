@@ -471,3 +471,83 @@ The third property is about resuming specifically. `readHead` is called again ev
 **And the first thing it caught was the oracle.** The reference request-line parser split on spaces, which made `GET /x` an unsupported version where zfast said malformed request line. zfast was right. A reference implementation is code, it gets things wrong like code, and a differential test that has never disagreed with anything is not evidence of much.
 
 Twenty million generated inputs, plus the corpus in both build modes, and the three properties hold.
+
+## Four ways to broadcast, three of them wrong
+
+`spike/broadcast` existed for about a day and is gone with
+[ADR 0029](./adr/0029-a-spawned-fiber-belongs-to-the-server.md), which is what
+it was for. It answered the question [ADR
+0022](./adr/0022-a-websocket-is-a-handler-that-does-not-return.md) had left
+open — what does it take to write to a socket this fiber does not own — and the
+answer was not the one that ADR had guessed at twice.
+
+**The obvious problem is not the problem.** A connection's write buffer belongs
+to the fiber serving it, so two fibers writing into it interleave frames. That
+is real, and a lock per socket fixes it: no torn frames in any shape the spike
+tried. So the first version held the room's lock across every write, and the
+second — the fix anybody reaches for — held it only long enough to copy out who
+was there, then took a lock per socket for the writes.
+
+They are exactly as dead as each other. Eight clients, one of them handed a
+socket and then never reading from it, two healthy clients wanting only to talk
+to each other: their messages never arrived, in either version, at a five-second
+timeout. Contention was never what was wrong. The broadcast is done by the
+*speaker's own fiber*, which walks the connections, reaches the wedged one, and
+blocks there — and never gets back to reading its own socket. Any design where
+fiber A writes to socket B ties A's liveness to B's readiness to read, and no
+lock granularity touches that.
+
+**So the write has to be done by a fiber that serves only B, and a fiber has a
+price.** 400 idle connections, RSS delta, repeated until the number stopped
+moving — byte-identical across runs:
+
+| | bytes per idle connection |
+|---|---|
+| one fiber | 66,959 |
+| two fibers | 75,633 |
+| **difference** | **8,673** |
+
+[ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md) calls 8,767 bytes per
+idle connection a hard invariant. The writer fiber costs that entire budget a
+second time, to within one percent. The absolute numbers are a Debug build and
+mean nothing on their own; both modes carried an identical member struct, so the
+delta is the fiber and nothing else.
+
+**The obvious way to get it back does not.** `zio.BroadcastChannel` — one ring
+for the whole server instead of a queue per connection — is better in two ways
+that matter. Delivery went from 5,925 of 12,000 messages to 12,000 of 12,000,
+and the send path collapsed to `wire.send(post)`: no lock, no walk, no touching
+another connection's memory at all, which deletes the nastiest thing in the file
+(a registry holding pointers into other fibers' stacks). It made no difference
+whatsoever to the number above. Idle, the two agree to the byte, because a queue
+that is never written costs nothing. The fiber is the price.
+
+It also crashed 2 runs in 4 under connection churn, inside zio's own wait queue:
+a waiter node pushed onto a list it was already in. The same test crashed 0 of 2
+with no spawned fiber and 0 of 4 with a per-connection queue, so it is not churn
+on its own. A shared ring has no per-consumer close, so the only way to stop one
+reader is to cancel its fiber — that difference is forced, not chosen. Worth
+reporting upstream regardless of what zfast does, because the check is
+`runtime_safety`-only: in `ReleaseFast` the same race relinks the node with
+nothing said.
+
+**What shipped was the half that was paid for.** `zfast.spawn` — somewhere to
+put work that is not a request, joined to the server's group rather than
+detached, because the spike's detached version made shutdown announce eight
+fibers when there were sixteen. Broadcast did not ship, and the reason is now a
+number instead of a shrug. The shape that would cost nothing extra is the one
+ADR 0022 guessed second — a mailbox the connection's own fiber drains — and it
+turns out to be blocked on one exported line upstream: zio has `ev.NetPoll`,
+`ev.Async.notify` and `ev.Group.init(.race)`, which is exactly how its own
+`timedWaitForIo` races a read against a timer, but nothing public parks a fiber
+on a completion.
+
+**The thing that nearly went wrong quietly.** A spawned fiber has no task-local
+slot, so `bulkhead.slot()` falls through to a threadlocal — and a threadlocal is
+what [ADR 0007](./adr/0007-failure-box-bound-to-the-fiber.md) exists to say is
+the wrong answer. If anything ever set it on an executor thread, spawned work
+would write its failure message into an unrelated user's response. It does not,
+because the one place that writes it does so from inside `zio.blockInPlace`,
+which runs on a thread-pool worker. That is a real invariant held up by a
+coincidence of scheduling, and until this it was written down nowhere. Both ends
+carry a comment now.

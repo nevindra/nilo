@@ -408,20 +408,4 @@ pub fn build(b: *std.Build) void {
         b.step(b.fmt("run-{s}", .{example.name}), example.about).dependOn(&run.step);
     }
 
-    // Throwaway. Deliberately not depended on by `test`, `test-all` or
-    // `examples`, so that a spike left half-finished cannot turn into a
-    // thing the build protects. Delete this block with `spike/`.
-    {
-        const module = b.createModule(.{
-            .root_source_file = b.path("spike/broadcast/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .strip = strip,
-            .imports = &.{.{ .name = "zfast", .module = zfast }},
-        });
-        const built = b.addExecutable(.{ .name = "spike-broadcast", .root_module = module });
-        const run = b.addRunArtifact(built);
-        if (b.args) |a| run.addArgs(a);
-        b.step("spike-broadcast", "SPIKE: write to a socket this fiber does not own").dependOn(&run.step);
-    }
 }

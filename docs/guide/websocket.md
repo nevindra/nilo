@@ -85,11 +85,25 @@ fn chat(c: *zfast.Ctx, room: *Room) !void { … }
 ## What isn't here
 
 **Sending to a socket you don't hold.** A connection's write buffer belongs to
-the fiber serving it, so broadcasting needs a per-socket outbox with its own lock
-rather than a loop over a list. Building that naively interleaves frames from two
-writers under load, which is a corrupt stream rather than a slow one — so it is
-recorded rather than half-built
-([ADR 0022](../adr/0022-a-websocket-is-a-handler-that-does-not-return.md)).
+the fiber serving it, so two fibers writing into it interleave frames — a corrupt
+stream rather than a slow one. A lock per socket fixes that much.
+
+It fixes nothing else, and this is worth knowing before you try it in your own
+code. The broadcast is performed by the *speaker's* fiber: it walks the
+connections, reaches one whose client has stopped reading, and blocks there. It
+never gets back to reading its own socket, so everybody's messages stop because
+one client stopped. Measured, with two healthy clients wanting only to talk to
+each other and one wedged client in the same room: their messages never arrived
+at all, at either lock granularity.
+
+The write has to be done by something whose stalling costs only the slow
+connection — which today means a second fiber per connection, at 8,673 bytes
+each against a per-connection budget of 8,767. So it is not here, and
+[ADR 0029](../adr/0029-a-spawned-fiber-belongs-to-the-server.md) records both the
+number and the one upstream change that would remove it.
+
+What did come out of that work is [`zfast.spawn`](../reference.md#concurrency),
+for work that is not a request at all.
 
 Also absent: `permessage-deflate`, and any read deadline. A socket is allowed to
 sit quiet — a chat tab with nobody typing is working correctly — so what catches

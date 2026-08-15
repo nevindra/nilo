@@ -62,6 +62,8 @@ Sending to *other* connections needs a registry of live sockets and a way to wri
 
 It is recorded here rather than half-built, because a broadcast that works in a test and interleaves under load is worse than one that does not exist.
 
+> **Both of those guesses were wrong, and ADR 0029 has the measurements.** The interleaving is real and a lock per socket does fix it — and fixes nothing else, because the writing is done by the *speaker's* fiber, which then blocks on the first connection that has stopped reading. That is not a locking problem and no lock granularity touches it. The second guess, a mailbox the owning fiber drains, is the right shape and is not reachable: it needs a wait that ends on either the socket becoming readable or a post arriving, and zio exports no way to park a fiber on a completion. What did come out of that work is `zfast.spawn`.
+
 Also not here: `permessage-deflate` (negotiated in the handshake, and a compressor per connection is memory zfast has not budgeted), and any deadline at all — a client that opens a socket and never speaks holds a fiber until TCP gives up. That last one is the same hole ADR 0020 recorded, and WebSocket makes it cheaper to exploit.
 
 ## Consequences

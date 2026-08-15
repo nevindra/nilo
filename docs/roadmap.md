@@ -8,12 +8,27 @@ binding are in [`adr/`](./adr/).
 
 In order.
 
-1. **Sending to a WebSocket a handler does not hold.** A connection's write
-   buffer belongs to the fiber serving it, so broadcasting needs a per-socket
-   outbox with its own lock rather than a loop over a list
-   ([ADR 0022](./adr/0022-a-websocket-is-a-handler-that-does-not-return.md)).
-   Phoenix Channels is the shape, and it is a project rather than a function.
-2. ~~**Somewhere honest to measure.**~~ *Done, and it changed two of our own
+1. **A socket read that can be raced against something else, from zio.** This
+   is now the thing broadcasting waits on, and it is one exported line
+   upstream rather than a design. zio has every piece — `ev.NetPoll(.recv)`,
+   `ev.Async.notify`, `ev.Group.init(.race)` — but no public way to park a
+   fiber on a completion, so a fiber sitting in a socket read cannot also be
+   waiting on a mailbox. Worth **8,673 bytes per connection**: with it, the
+   fiber already serving a connection drains its own mailbox and nothing new
+   is spent; without it, every connection that can be broadcast to needs a
+   second fiber, which is the whole of
+   [ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md)'s per-connection
+   budget over again
+   ([ADR 0029](./adr/0029-a-spawned-fiber-belongs-to-the-server.md)).
+2. **Sending to a WebSocket a handler does not hold.** Blocked on the above,
+   and no longer blocked on knowing what to build.
+   [ADR 0022](./adr/0022-a-websocket-is-a-handler-that-does-not-return.md)
+   guessed at a per-socket outbox with its own lock; a spike measured that
+   and it is exactly as dead as the naive version, because the problem is
+   not locking — the speaker's own fiber does the writing, so it blocks on
+   the first connection that has stopped reading. `zfast.spawn` shipped out
+   of that work; broadcast did not.
+3. ~~**Somewhere honest to measure.**~~ *Done, and it changed two of our own
    numbers.* [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md)'s
    10% rule is active: [`benchmarks.md`](./benchmarks.md) is zfast alone and
    [`comparison.md`](./comparison.md) is eight other servers through the same
@@ -21,12 +36,12 @@ In order.
    [`history.md`](./history.md) — an SMT core split that had both halves on the
    same eight cores, and a release build blamed on comptime when half of it was
    debug info. `bench/compare/` is the harness; `drive.py` runs it.
-3. **Reloading static files without a restart.** A development annoyance rather
+4. **Reloading static files without a restart.** A development annoyance rather
    than a design hole: a deploy restarts anyway. Wants a watch option.
-4. **`sendfile`, and serving a file too big to hold in memory.** This is the part
+5. **`sendfile`, and serving a file too big to hold in memory.** This is the part
    that contradicts [ADR 0010](./adr/0010-static-files-are-held-in-memory.md)
    rather than extending it, so it wants its own argument before any code.
-5. **`permessage-deflate`.** Negotiated in the handshake, and a compressor per
+6. **`permessage-deflate`.** Negotiated in the handshake, and a compressor per
    connection is memory that has not been budgeted.
 
 ## Known gaps
@@ -236,3 +251,6 @@ pattern too.
 | A WebSocket has no read limit, so a client that vanishes without a FIN holds a fiber | Caught by the write limit as soon as the server sends anything. A connection nobody writes to is not, and the answer to that is a ping it fails to answer — a WebSocket feature with its own design, not a number in `Options` |
 | The request head is the one thing a stranger writes directly, and every test of it was an input somebody thought of | `src/fuzz.zig` states properties instead: the head boundary and the framing fields are checked against a byte-at-a-time reference implementation, over a corpus on every `zig build test` and over a million generated inputs on every CI run (`zig build fuzz`). Coverage-guided fuzzing is not available — `zig build test --fuzz` fails to compile inside std's own test runner on Zig 0.16.0 — so the generator is the substitute, and the targets are written to become coverage-guided the day that is fixed |
 | Nothing bounds how many connections one process holds | `.max_connections`, 10,000 by default. Past it a connection is accepted and closed at once, so the failure mode is a client that finds out immediately rather than an OOM kill that takes every in-flight request with it |
+| Spawned work can capture a `Str`, or call a fail function, and both compile | Neither can be caught: Zig has no ownership tracking, and `spawn` takes a plain function that nothing marks as being outside a request. Documented at the function, in the reference and in [ADR 0029](./adr/0029-a-spawned-fiber-belongs-to-the-server.md), and `spawn` takes its arguments by value so the copy is at least the obvious thing to write. A `Str` that escapes this way is the debug staleness trap's problem, and it is the case that trap cannot watch |
+| A fail function in spawned work is safe only because of where a threadlocal gets written | `bulkhead.slot()` falls back to a threadlocal when a fiber has no slot, which spawned fibers never do. It is null on executor threads only because the one thing that sets it does so from inside `zio.blockInPlace`, which runs on a thread-pool worker. Both ends now carry a comment saying so; nothing enforces it, and if it broke, spawned work would write its message into an unrelated request — [ADR 0007](./adr/0007-failure-box-bound-to-the-fiber.md)'s leak by another route |
+| `zio.BroadcastChannel` crashed 2 runs in 4 under connection churn, in zio's own wait queue | Not used. The crash is a waiter node pushed onto a queue while already in a list, reached by cancelling a fiber parked in `receive` — which a shared ring forces, because it has no per-consumer close. The check that caught it is `runtime_safety`-only, so in `ReleaseFast` the same race relinks a node silently. To be reported upstream ([ADR 0029](./adr/0029-a-spawned-fiber-belongs-to-the-server.md)) |

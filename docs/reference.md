@@ -229,10 +229,26 @@ failure, whatever the endpoint returns when it works.
 | `zfast.Mutex` | `.init`, then `try lock()`, `unlock()`, `tryLock()` |
 | `zfast.blocking(f, args)` | run a blocking call off the event loop |
 | `zfast.sleep(ms)` | wait without parking the thread |
+| `zfast.spawn(f, args)` | run something that is not a request |
 | `zfast.monotonicNanos()` | a clock reading, for durations |
 
 `lock()` and `sleep()` fail with `error.Canceled` if the request went away, which
 maps to a 503.
+
+`spawn` starts `f` in a fiber the server owns: counted while it runs, cut off
+when the shutdown grace period ends. `error.NoServer` if nothing is listening.
+Two things must not travel into it, and the compiler catches neither — a `Str`,
+which points into the request arena that is about to be reset, and a fail
+function, which has no request to fail and so returns a bare error nobody turns
+into a response. Copy what you borrow, and log instead of failing.
+
+```zig
+try zfast.spawn(flushMetrics, .{&exporter});
+```
+
+Sending to a WebSocket somebody else's connection is holding is **not** here.
+[ADR 0029](adr/0029-a-spawned-fiber-belongs-to-the-server.md) has the
+measurement that says why.
 
 ## Built-in middleware
 

@@ -528,6 +528,11 @@ pub fn serve(
     // here. By then it has had its chance.
     defer group.cancel();
 
+    // Registered after the cancel above, so it runs before it: nothing can
+    // be spawned into a group that is already winding up (ADR 0029).
+    background.store(&group, .release);
+    defer background.store(null, .release);
+
     if (options.stop_on_signal) installStopSignals(stop);
     defer if (options.stop_on_signal) restoreStopSignals();
 
@@ -641,31 +646,40 @@ pub fn sleep(ms: u64) error{Canceled}!void {
     return zio.sleep(.fromMilliseconds(ms));
 }
 
-// ---- SPIKE, not the Bulkhead contract ----
+// ---- work that is not a request (see ADR 0029) ----
 //
-// Added for `spike/broadcast`, which exists to work out what writing to a
-// socket this fiber does not own actually costs. Nothing in `src/` outside
-// this block may use them, and they go away with the spike unless the ADR
-// that comes out of it keeps them — at which point they get written down
-// properly, the way `Mutex` was in ADR 0011.
+// The group `serve` already runs its connections in, reached from outside
+// it. A spawned fiber is therefore counted while it runs and cut off when
+// the grace period ends, exactly like a connection — the alternative,
+// `zio.spawn`, is detached, and a fiber the shutdown path cannot see is a
+// shutdown message that lies.
+//
+// A pointer rather than a parameter because `spawn` is called from user
+// code that holds no server: the same reason the stop signals are
+// installed process-wide. Cleared before `serve` cancels the group, so
+// nothing can be spawned into a group already winding up.
+//
+// Atomic because it is written by the thread that called `serve` and read
+// by fibers on every executor. It is only ever written twice, both times
+// with no connection in flight, so the ordering is not load-bearing — but
+// a plain global read across threads is not something to leave to luck.
+//
+// One server per process, therefore. A second `serve` would take the
+// pointer from the first, and its `spawn`ed work would be counted by the
+// wrong shutdown. Nothing in zfast does that today and `listen` is the
+// only caller; if that changes, this is the line that has to move into
+// the state `serve` already carries.
+var background: std.atomic.Value(?*zio.Group) = .init(null);
 
-/// A fiber that nobody is waiting for. Detached, so it outlives the call
-/// that made it; whoever spawns one is responsible for ending it.
-pub const Spawned = zio.JoinHandle(void);
-
-pub fn spawn(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !Spawned {
-    return zio.spawn(func, args);
+/// Start `func` in a fiber of its own, owned by the running server.
+///
+/// `error.NoServer` if there is no server running, which is what a unit
+/// test calling a handler directly gets — the caller decides whether that
+/// is a failure or a no-op.
+pub fn spawn(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void {
+    const group = background.load(.acquire) orelse return error.NoServer;
+    return group.spawn(func, args);
 }
-
-/// A bounded queue between fibers. `trySend` is the half that matters
-/// here: it fails rather than waits, which is the only way a broadcast
-/// can refuse to be slowed down by one receiver.
-pub const Channel = zio.Channel;
-
-/// One ring, read by everybody, each at their own position. The sender
-/// never blocks — a full ring overwrites, and whoever fell behind is told
-/// `error.Lagged` on their next read rather than being waited for.
-pub const BroadcastChannel = zio.BroadcastChannel;
 
 // ---- the per-request slot (see ADR 0007) ----
 //

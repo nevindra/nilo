@@ -63,12 +63,27 @@ pub const std_options: std.Options = .{
 /// ```
 pub const Mutex = @import("bulkhead.zig").Mutex;
 
-// SPIKE (spike/broadcast). Deliberately undocumented and deliberately not
-// in `docs/reference.md`: it is here to be measured, not to be used.
+/// Somewhere to put work that is not a request: a fiber of its own, owned
+/// by the server rather than by whatever started it (ADR 0029).
+///
+/// ```zig
+/// try zfast.spawn(flushMetrics, .{&exporter});
+/// ```
+///
+/// The server counts it while it runs and cuts it off when the shutdown
+/// grace period ends, exactly as it does a connection. `error.NoServer` if
+/// nothing is listening yet — which is what a unit test calling a handler
+/// directly gets.
+///
+/// Two things do not travel into it, and neither is caught by the compiler:
+///
+/// - **A `Str`.** It points into the request arena, which is reset when the
+///   request ends; spawned work outlives the call that started it by
+///   definition. Copy anything borrowed from a request before it goes in.
+/// - **A fail function.** There is no request to fail, so `fail.notFound`
+///   returns a plain error with no message and nobody assembles a response
+///   from it. Log instead.
 pub const spawn = @import("bulkhead.zig").spawn;
-pub const Spawned = @import("bulkhead.zig").Spawned;
-pub const Channel = @import("bulkhead.zig").Channel;
-pub const BroadcastChannel = @import("bulkhead.zig").BroadcastChannel;
 
 /// Run a blocking call without stopping the thread it is on.
 ///
@@ -263,6 +278,30 @@ test "blocking runs the call, keeps its errors, and needs no Engine under it" {
     // handler using `blocking` testable as an ordinary function (ADR 0003).
     try std.testing.expectEqual(@as(u32, 42), try blocking(doubleOrFail, .{21}));
     try std.testing.expectError(error.Failed, blocking(doubleOrFail, .{0}));
+}
+
+fn neverRuns(ran: *bool) void {
+    ran.* = true;
+}
+
+test "spawn with no server says so, rather than starting something nothing owns" {
+    // The counterpart of the Mutex test above, and the opposite answer on
+    // purpose. A lock with no Engine can do its job alone; a fiber cannot,
+    // and there would be nothing to count it or stop it (ADR 0029). Better
+    // an error the caller can see than work that quietly never happens.
+    var ran = false;
+    try std.testing.expectError(error.NoServer, spawn(neverRuns, .{&ran}));
+    try std.testing.expect(!ran);
+}
+
+test "a fail function in spawned work has no request to fail" {
+    // Spawned work has no slot of its own, so it falls through to the
+    // threadlocal — which is null here and on an executor thread, and is
+    // only ever set on a thread-pool worker. If that ever stops being true
+    // this keeps passing and ADR 0007's leak comes back, so the comments in
+    // bulkhead.zig are the real guard; this pins the visible half.
+    try std.testing.expect(fail.inFlight() == null);
+    try std.testing.expectError(error.Failed, doubleOrFail(0));
 }
 
 test "a fail function inside blocking reaches the request that made the call" {

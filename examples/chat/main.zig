@@ -74,8 +74,12 @@ const Room = struct {
 
     /// Keeps the last thing anybody said, up to what fits. A real chat would
     /// fan out to the other connections instead, which needs a way to write
-    /// to a socket this handler does not own — see ADR 0022 on why that is
-    /// not here yet.
+    /// to a socket this handler does not own.
+    ///
+    /// The reason that is not here is now a number rather than a shrug: the
+    /// only shape that works today gives every connection a second fiber, at
+    /// 8,673 bytes each against a whole-connection budget of 8,767. ADR 0029
+    /// has the measurement and what it is waiting on.
     fn remember(self: *Room, text: []const u8) !void {
         try self.lock.lock();
         defer self.lock.unlock();
