@@ -641,6 +641,32 @@ pub fn sleep(ms: u64) error{Canceled}!void {
     return zio.sleep(.fromMilliseconds(ms));
 }
 
+// ---- SPIKE, not the Bulkhead contract ----
+//
+// Added for `spike/broadcast`, which exists to work out what writing to a
+// socket this fiber does not own actually costs. Nothing in `src/` outside
+// this block may use them, and they go away with the spike unless the ADR
+// that comes out of it keeps them — at which point they get written down
+// properly, the way `Mutex` was in ADR 0011.
+
+/// A fiber that nobody is waiting for. Detached, so it outlives the call
+/// that made it; whoever spawns one is responsible for ending it.
+pub const Spawned = zio.JoinHandle(void);
+
+pub fn spawn(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !Spawned {
+    return zio.spawn(func, args);
+}
+
+/// A bounded queue between fibers. `trySend` is the half that matters
+/// here: it fails rather than waits, which is the only way a broadcast
+/// can refuse to be slowed down by one receiver.
+pub const Channel = zio.Channel;
+
+/// One ring, read by everybody, each at their own position. The sender
+/// never blocks — a full ring overwrites, and whoever fell behind is told
+/// `error.Lagged` on their next read rather than being waited for.
+pub const BroadcastChannel = zio.BroadcastChannel;
+
 // ---- the per-request slot (see ADR 0007) ----
 //
 // zio runs each connection in its own fiber, and many fibers share one OS

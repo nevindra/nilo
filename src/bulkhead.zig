@@ -307,6 +307,13 @@ pub const monotonicNanos = engine.monotonicNanos;
 pub const Mutex = engine.Mutex;
 pub const sleep = engine.sleep;
 
+// SPIKE (spike/broadcast). Not part of the Bulkhead contract until an ADR
+// says so; deleted with the spike otherwise.
+pub const Spawned = engine.Spawned;
+pub const spawn = engine.spawn;
+pub const Channel = engine.Channel;
+pub const BroadcastChannel = engine.BroadcastChannel;
+
 // ---- idle connections give their pages back ----
 
 /// Hand the physical pages behind a connection's buffers back to the kernel

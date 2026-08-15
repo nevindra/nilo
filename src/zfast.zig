@@ -63,6 +63,13 @@ pub const std_options: std.Options = .{
 /// ```
 pub const Mutex = @import("bulkhead.zig").Mutex;
 
+// SPIKE (spike/broadcast). Deliberately undocumented and deliberately not
+// in `docs/reference.md`: it is here to be measured, not to be used.
+pub const spawn = @import("bulkhead.zig").spawn;
+pub const Spawned = @import("bulkhead.zig").Spawned;
+pub const Channel = @import("bulkhead.zig").Channel;
+pub const BroadcastChannel = @import("bulkhead.zig").BroadcastChannel;
+
 /// Run a blocking call without stopping the thread it is on.
 ///
 /// Many requests share one OS thread, so a handler that blocks stops all of
