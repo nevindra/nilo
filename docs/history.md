@@ -540,7 +540,9 @@ ADR 0022 guessed second — a mailbox the connection's own fiber drains — and 
 turns out to be blocked on one exported line upstream: zio has `ev.NetPoll`,
 `ev.Async.notify` and `ev.Group.init(.race)`, which is exactly how its own
 `timedWaitForIo` races a read against a timer, but nothing public parks a fiber
-on a completion.
+on a completion. Asked for as
+[zio#668](https://github.com/lalinsky/zio/issues/668), with the 8,673 bytes
+attached, since a number is a better argument than a request.
 
 **The thing that nearly went wrong quietly.** A spawned fiber has no task-local
 slot, so `bulkhead.slot()` falls through to a threadlocal — and a threadlocal is

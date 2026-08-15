@@ -159,11 +159,18 @@ direction.
   fiber.
 
   This is not a diagnosis — the race is in zio's wait queue and the spike
-  did not go and find it. It is enough to keep it out, especially given what
-  the check is: `in_list` is a `bool` under `runtime_safety` and `void`
-  otherwise, so in ReleaseFast there is no assertion and the same race
-  relinks a node belonging to another list with nothing said. It should go
-  upstream as a report either way.
+  did not go and find it. It was enough to keep it out.
+
+  > **Chased down afterwards, on a standalone reproduction, and one guess
+  > here was wrong.** `in_list` is a `bool` under `runtime_safety` and
+  > `void` otherwise, so this ADR reasoned that ReleaseFast would relink a
+  > node silently. It does not — the flag is only ever asserted on, never
+  > read for linking. What ReleaseFast does instead is **deadlock**: 17 runs
+  > in 20 hung where a clean run takes 200ms. Debug and ReleaseSafe abort
+  > 10 in 10 and 3 in 3. Cancellation is required to reach it: the same
+  > program closing the channel and waiting instead is clean 5 times in 5.
+  > Reported upstream with a standalone reproduction as
+  > [zio#667](https://github.com/lalinsky/zio/issues/667).
 
 - **A mailbox the owning fiber drains** — ADR 0022's second guess, and the
   shape that would cost nothing per idle connection, because the fiber

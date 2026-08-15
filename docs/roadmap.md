@@ -19,7 +19,10 @@ In order.
    second fiber, which is the whole of
    [ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md)'s per-connection
    budget over again
-   ([ADR 0029](./adr/0029-a-spawned-fiber-belongs-to-the-server.md)).
+   ([ADR 0029](./adr/0029-a-spawned-fiber-belongs-to-the-server.md)). Asked
+   for upstream as [zio#668](https://github.com/lalinsky/zio/issues/668),
+   with the measurement — so this one is now somebody else's call rather than
+   ours, and worth checking before anything below it is picked up.
 2. **Sending to a WebSocket a handler does not hold.** Blocked on the above,
    and no longer blocked on knowing what to build.
    [ADR 0022](./adr/0022-a-websocket-is-a-handler-that-does-not-return.md)
@@ -268,4 +271,4 @@ pattern too.
 | Nothing bounds how many connections one process holds | `.max_connections`, 10,000 by default. Past it a connection is accepted and closed at once, so the failure mode is a client that finds out immediately rather than an OOM kill that takes every in-flight request with it |
 | Spawned work can capture a `Str`, or call a fail function, and both compile | Neither can be caught: Zig has no ownership tracking, and `spawn` takes a plain function that nothing marks as being outside a request. Documented at the function, in the reference and in [ADR 0029](./adr/0029-a-spawned-fiber-belongs-to-the-server.md), and `spawn` takes its arguments by value so the copy is at least the obvious thing to write. A `Str` that escapes this way is the debug staleness trap's problem, and it is the case that trap cannot watch |
 | A fail function in spawned work is safe only because of where a threadlocal gets written | `bulkhead.slot()` falls back to a threadlocal when a fiber has no slot, which spawned fibers never do. It is null on executor threads only because the one thing that sets it does so from inside `zio.blockInPlace`, which runs on a thread-pool worker. Both ends now carry a comment saying so; nothing enforces it, and if it broke, spawned work would write its message into an unrelated request — [ADR 0007](./adr/0007-failure-box-bound-to-the-fiber.md)'s leak by another route |
-| `zio.BroadcastChannel` crashed 2 runs in 4 under connection churn, in zio's own wait queue | Not used. The crash is a waiter node pushed onto a queue while already in a list, reached by cancelling a fiber parked in `receive` — which a shared ring forces, because it has no per-consumer close. The check that caught it is `runtime_safety`-only, so in `ReleaseFast` the same race relinks a node silently. To be reported upstream ([ADR 0029](./adr/0029-a-spawned-fiber-belongs-to-the-server.md)) |
+| `zio.BroadcastChannel` aborts, or in `ReleaseFast` deadlocks, when a fiber parked in `receive` is cancelled | Not used, and now reported upstream with a standalone reproduction. A waiter node is pushed onto a queue it is already linked into (`simple_queue.zig:43`, from `broadcast_channel.zig:72`). Debug aborts 10 runs in 10, ReleaseSafe 3 in 3, and `ReleaseFast` — which has no such assertion — **hangs 17 runs in 20** where a clean run takes 200ms. Cancellation is what reaches it: the same program closing the channel and waiting is clean 5 in 5. A shared ring forces the cancel, having no per-consumer close ([ADR 0029](./adr/0029-a-spawned-fiber-belongs-to-the-server.md), [zio#667](https://github.com/lalinsky/zio/issues/667)) |
