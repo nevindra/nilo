@@ -47,14 +47,14 @@ And the README gains a section stating the general rule, with the table of what 
 ## Why not the alternatives
 
 - **Wrap handlers automatically**, running every one on the blocking pool. This makes the slow path safe by making the fast path slow: every request would pay a thread hand-off, including the overwhelming majority that only touch memory. It also throws away the reason for choosing a fiber Engine.
-- **Detect blocking calls at compile time.** Zig has no effect system and no way to mark a function as blocking. Nothing to detect with.
+- **Detect blocking calls at compile time.** Zig has no effect system and no way to mark a function as blocking. Nothing to detect with. *This is still true and it turned out to be the less interesting question — see [ADR 0034](./0034-the-thing-a-handler-holds-is-watched-at-run-time.md), which does not ask whether the compiler can prove a function blocks but whether the server can notice that one just did.*
 - **Provide async drivers.** The real fix, and far outside v1 — it means an async Postgres client, an async file API, an async HTTP client. `blocking` is what makes the ecosystem that exists today usable in the meantime, and it is what Go's own `syscall` boundary does underneath.
 - **Say nothing and let people find out.** This was the status quo, and it is the option this ADR exists to reject. The symptom is a p99 nobody can explain, on a metric zfast has declared primary since stage 1.
 
 ## Consequences
 
 - The Bulkhead contract grows by two items. Every future Engine has to supply a way to offload a blocking call and a way to wait. A threaded Engine satisfies both trivially — `blocking` calls the function, `sleep` sleeps the thread — so this is a cheap obligation, unlike file IO ([ADR 0010](./0010-static-files-are-held-in-memory.md)).
-- **Nothing forces it.** A handler calling the driver directly still compiles and still passes its tests. Same honest answer as ADR 0011: say it plainly in the docs, and put it where people copy from.
+- ~~**Nothing forces it.** A handler calling the driver directly still compiles and still passes its tests.~~ Still true of the compiler, no longer true of the running server: [ADR 0034](./0034-the-thing-a-handler-holds-is-watched-at-run-time.md) added a stopwatch that says so in the log, on the first request, with nobody else waiting. The docs half of the answer stands — say it plainly, and put it where people copy from.
 - The blocking pool is finite, so `blocking` converts "the thread stalls" into "the pool is the queue" rather than into unlimited concurrency. That is the correct trade for a database, which has a connection limit of its own, and it is worth saying out loud before someone expects otherwise.
 - `zfast.monotonicNanos` was exported in the same pass. It is not part of this decision, but it came from the same cause: the README's timing middleware used `std.time.milliTimestamp`, which Zig 0.16 does not have, and the Engine's clock was sitting in the Bulkhead unexposed. A user could not write a timing middleware at all.
 - Long computation is covered by the same tool and is not mentioned separately in the README's table. `zfast.blocking` around a CPU-bound call moves it off the executor thread just as well as it moves a syscall.

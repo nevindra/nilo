@@ -21,27 +21,29 @@ each one assumes the ones above it — and jump straight in afterwards.
    layer underneath the typed one.
 7. [Cookies](./cookies.md) — reading them, setting them, and the signed-in
    user.
-8. [Streaming](./streaming.md) — writing an answer whose length nobody knows
+8. [Sessions](./sessions.md) — a struct of yours, sealed into one cookie, with
+   nothing kept on the server.
+9. [Streaming](./streaming.md) — writing an answer whose length nobody knows
    yet, and server-sent events.
-9. [WebSocket](./websocket.md) — a handler that doesn't return for a while.
+10. [WebSocket](./websocket.md) — a handler that doesn't return for a while.
 
 ## Building an application
 
-10. [Middleware](./middleware.md) — the onion, and resolved values for the
+11. [Middleware](./middleware.md) — the onion, and resolved values for the
     signed-in user.
-11. [Services](./services.md) — shared state across threads, locks, and the rule
+12. [Services](./services.md) — shared state across threads, locks, and the rule
     about blocking calls.
-12. [Static files](./static-files.md) — a directory held in memory, with ETags
+13. [Static files](./static-files.md) — a directory held in memory, with ETags
     and range requests.
-13. [Errors](./errors.md) — failing a request from anywhere, and what a client
+14. [Errors](./errors.md) — failing a request from anywhere, and what a client
     is told.
 
 ## Shipping it
 
-14. [Testing](./testing.md) — handlers as ordinary functions, and the test
+15. [Testing](./testing.md) — handlers as ordinary functions, and the test
     client for the ones that write their answer.
-15. [OpenAPI](./openapi.md) — an API document written from the signatures.
-16. [Deploying](./deploying.md) — startup errors, panics, graceful shutdown,
+16. [OpenAPI](./openapi.md) — an API document written from the signatures.
+17. [Deploying](./deploying.md) — startup errors, panics, graceful shutdown,
     tuning, and what isn't here yet.
 
 ## Also

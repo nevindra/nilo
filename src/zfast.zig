@@ -220,6 +220,37 @@ pub const Cookie = @import("cookie.zig").Cookie;
 /// `SameSite`, for a cookie that needs one of the other answers.
 pub const SameSite = @import("cookie.zig").SameSite;
 
+/// The session: a struct of yours, sealed into one cookie the client holds.
+///
+/// ```zig
+/// const Signed = struct { user: u32, admin: bool = false };
+///
+/// fn signIn(s: zfast.Session(Signed)) !zfast.Redirect(303) {
+///     try s.set(.{ .user = 7 });
+///     return .to("/");
+/// }
+///
+/// fn me(s: zfast.Session(Signed)) !?Profile {
+///     const signed = s.get() orelse return null;
+///     return profiles.find(signed.user);
+/// }
+/// ```
+///
+/// Nothing is kept on the server: the whole thing is encrypted and signed
+/// with `XChaCha20Poly1305` and travels in the cookie, so there is no store,
+/// no expiry sweep, and nothing added to what an idle connection costs.
+/// `listen(.{ .session_secret = … })` is where the key comes from.
+///
+/// What a session may hold is a fixed-size struct — numbers, bools, enums,
+/// `[N]u8`, optionals and nested structs of those. Not slices: a browser
+/// drops an oversized cookie silently, so the size has to be settled while
+/// compiling.
+pub const Session = @import("session.zig").Session;
+
+/// Everything else session: `Options` for `setWith`, `key_len` for the
+/// secret, and `max_cookie_bytes`.
+pub const session = @import("session.zig");
+
 /// A body field that can tell "not sent" from "sent as null" — what a PATCH
 /// needs and `?T` cannot say (ADR 0026).
 ///
@@ -380,10 +411,12 @@ test {
     _ = @import("percent.zig");
     _ = @import("convert.zig");
     _ = @import("cookie.zig");
+    _ = @import("session.zig");
     _ = @import("form.zig");
     _ = @import("redirect.zig");
     _ = @import("http1.zig");
     _ = @import("bulkhead.zig");
+    _ = @import("watchdog.zig");
     _ = @import("engine/zio.zig");
     _ = @import("fuzz.zig");
     _ = @import("json.zig");

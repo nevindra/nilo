@@ -47,6 +47,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const engine = @import("engine/zio.zig");
+const watchdog = @import("watchdog.zig");
 
 pub const debug_io = engine.debug_io;
 pub const Peer = engine.Peer;
@@ -221,6 +222,50 @@ pub const Options = struct {
     /// Fewer entries than hops means the chain is not what this says it is,
     /// so the socket's own address is used rather than a guess.
     trusted_hops: u8 = 0,
+
+    /// How long a handler may run without yielding before zfast says so in
+    /// the log. 0 turns it off (ADR 0034).
+    ///
+    /// Many requests share one OS thread, so a handler that waits on the
+    /// operating system directly stops all of them. `zfast.blocking` is the
+    /// way not to, and nothing in the type system can make anybody use it —
+    /// the wrong version compiles and passes its tests. This is what
+    /// notices instead, and it notices on the first request rather than
+    /// under load, which is the point: the bug is invisible in development
+    /// precisely because there is nobody else to be slow for.
+    ///
+    /// What is measured is time the handler ran, not time the request took:
+    /// waiting on `zfast.blocking`, `zfast.sleep`, a `zfast.Mutex`, the
+    /// request body or the response write is all subtracted, because in
+    /// every one of those the thread is off serving somebody else. A
+    /// request that takes the connection over — a stream, a body reader, a
+    /// WebSocket — is not watched at all.
+    ///
+    /// A quarter of a second is far longer than any handler that is not
+    /// waiting, and long enough that ordinary CPU work does not trip it.
+    /// Deliberately on outside `Debug` too: the cost is two clock readings
+    /// per request, and a detector that only runs where the bug cannot
+    /// happen would never have fired.
+    block_warning_ms: u32 = 250,
+
+    /// The secret `Session(T)` cookies are sealed with — exactly
+    /// `zfast.session.key_len` (32) bytes. Null means this application has no
+    /// sessions, and a handler that asks for one anyway fails with a sentence
+    /// naming this option.
+    ///
+    /// **Where it comes from is yours**, the same line zfast draws around
+    /// authentication: an environment variable, a mounted file, a secrets
+    /// manager. What zfast will not do is have a default, because a default
+    /// key is a key everybody who has read this repository already has.
+    ///
+    /// It has to be the *same on every instance* behind a load balancer, or a
+    /// request will land on the machine that cannot read its own cookies —
+    /// which looks like users being randomly signed out. It also has to
+    /// survive a restart for the same reason.
+    ///
+    /// Checked at `listen()`: the wrong length stops the server with a
+    /// message, rather than every request failing once the traffic arrives.
+    session_secret: ?[]const u8 = null,
 };
 
 /// Listen, and run `handler(state, in, out, deadlines)` for every
@@ -304,8 +349,83 @@ pub const binding_unset = engine.binding_unset;
 pub const bindSlot = engine.bindSlot;
 pub const unbindSlot = engine.unbindSlot;
 pub const monotonicNanos = engine.monotonicNanos;
-pub const Mutex = engine.Mutex;
-pub const sleep = engine.sleep;
+
+/// Bytes from the operating system's entropy source, off the event loop.
+/// What a session nonce is made of.
+///
+/// Wrapped rather than re-exported for the reason `Mutex` and `sleep` below
+/// are: this parks the fiber on the Engine's blocking pool, so the thread is
+/// off serving somebody else and the detector has to be told (ADR 0034).
+/// Without this, sealing a session cookie would be charged to the handler as
+/// time it spent holding its thread.
+pub fn randomSecure(buffer: []u8) !void {
+    const w = watchdog.waitingAnywhere();
+    defer watchdog.waitedAnywhere(w);
+    return engine.randomSecure(buffer);
+}
+
+/// A monotonic clock reading that is cheap rather than exact.
+///
+/// `monotonicNanos` costs a measured 27ns, because `CLOCK_MONOTONIC` does
+/// the full timekeeping arithmetic on every read. The blocking detector
+/// (ADR 0034) reads a clock four times per request and compares the answer
+/// against a quarter of a second, so it wants the opposite trade — and gets
+/// it: 5ns, from a reading that only moves once a millisecond.
+///
+/// Where there is no such clock this is `monotonicNanos` and the detector
+/// simply costs what it costs. Nothing's correctness depends on which one
+/// is underneath, only the price of asking.
+pub fn coarseNanos() u64 {
+    if (builtin.os.tag == .linux) {
+        // Through `std.posix.system` rather than `std.os.linux`, which is
+        // the difference between the vDSO and a real syscall once libc is
+        // linked — and zfast links libc. Measured on this machine: 5ns the
+        // right way, 600ns the wrong way, which is the sort of gap that
+        // turns a cheap check into the most expensive thing a request does.
+        var ts: std.posix.system.timespec = undefined;
+        const rc = std.posix.system.clock_gettime(.MONOTONIC_COARSE, &ts);
+        if (std.posix.errno(rc) == .SUCCESS) {
+            return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+        }
+    }
+    return monotonicNanos();
+}
+
+/// A lock that parks the fiber rather than the OS thread.
+///
+/// A wrapper rather than a re-export for one reason: waiting on a lock is
+/// not the handler holding its thread, and the detector has to be told so
+/// or a busy lock would be reported as a blocking handler (ADR 0034). The
+/// three methods are the Engine's, in the order it defines them.
+pub const Mutex = struct {
+    _inner: engine.Mutex = .init,
+
+    pub const init: Mutex = .{};
+
+    pub fn lock(self: *Mutex) !void {
+        const w = watchdog.waitingAnywhere();
+        defer watchdog.waitedAnywhere(w);
+        return self._inner.lock();
+    }
+
+    /// Take the lock if it is free, without waiting. Never parks, so there
+    /// is nothing to forgive.
+    pub fn tryLock(self: *Mutex) bool {
+        return self._inner.tryLock();
+    }
+
+    pub fn unlock(self: *Mutex) void {
+        self._inner.unlock();
+    }
+};
+
+/// Wait, without stopping the thread. Wrapped for the same reason `Mutex`
+/// is: a sleeping fiber is not a held thread.
+pub fn sleep(ms: u64) error{Canceled}!void {
+    const w = watchdog.waitingAnywhere();
+    defer watchdog.waitedAnywhere(w);
+    return engine.sleep(ms);
+}
 
 /// Somewhere to put work that is not a request, owned by the server that
 /// is running rather than by the fiber that started it (ADR 0029).
@@ -518,6 +638,12 @@ pub fn blocking(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) ReturnTy
             return @call(.auto, func, inner);
         }
     };
+    // Opened and closed on this side of the hand-off on purpose. Inside
+    // `Carrier.run` the slot points at the same InFlight, so the arithmetic
+    // would be the same — but that code runs on a thread-pool worker, and
+    // two threads writing `waited_ns` is a race for no gain (ADR 0034).
+    const w = watchdog.waitingAnywhere();
+    defer watchdog.waitedAnywhere(w);
     return engine.blocking(Carrier.run, .{ slot(), args });
 }
 

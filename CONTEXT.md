@@ -60,6 +60,10 @@ _Avoid_: file, attachment, part, blob
 A name and a value the client stores and sends back. Read out of the head where it lies and never decoded, because what a value means is whoever wrote it's convention. On the way out it is the one response header that may be sent twice rather than replaced.
 _Avoid_: session, token, crumb
 
+**Session**:
+A struct of the caller's own, sealed into one Cookie and held by the client. Encrypted and signed, so the client can tell that it has one and not what is in it. Nothing is kept on the server, which is why it cannot be revoked and why its size has to be settled while compiling. Asked for as `Session(T)`, and a Resolved value like any other.
+_Avoid_: session store, session id, token, JWT, login
+
 **Redirect**:
 An answer that is a status and a `Location` rather than a body, returned by the handler with its status in the type. `Redirect(303)` is the one a form POST wants, because it turns the follow-up into a GET.
 _Avoid_: forward, 302, location header
@@ -109,6 +113,10 @@ _Avoid_: schema, spec file, swagger, annotations
 **Blocking**:
 Waiting on the operating system from inside a handler — a database driver, a file, a call out to another service. Many requests share one OS thread, so doing it directly stops all of them; `zfast.blocking` hands the call to a pool of real threads instead, and only the one request waits.
 _Avoid_: offload, thread pool, async, await
+
+**Held thread**:
+What a handler that forgot the rule above is doing: running without yielding while the requests sharing its thread wait. The compiler cannot see it and one request cannot feel it, so the server times each handler — everything it spent legitimately waiting subtracted — and says so in the log by name.
+_Avoid_: event loop lag, starvation, watchdog, stall
 
 **Fail function**:
 A function callable from anywhere to stop a request with a given status and message, without having to hold a Ctx.

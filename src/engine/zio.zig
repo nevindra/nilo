@@ -622,6 +622,21 @@ pub fn monotonicNanos() u64 {
     return @intCast(zio.Timestamp.now(.monotonic).toNanoseconds());
 }
 
+/// Fill `buffer` with bytes from the operating system's entropy source.
+///
+/// Through the Engine rather than out of `std`, for the same reason the clock
+/// is (ADR 0002): getting randomness is a syscall, and a syscall made
+/// directly from a fiber stops every request sharing its thread. zio hands it
+/// to the blocking pool, and outside a running server it simply calls
+/// `getrandom` inline — so a handler that seals a session is still testable
+/// as an ordinary function.
+///
+/// `error.Canceled` if the request went away mid-call, which is the same
+/// answer `sleep` and `Mutex.lock` give.
+pub fn randomSecure(buffer: []u8) !void {
+    return zio.randomSecure(buffer);
+}
+
 /// A lock that parks the fiber rather than the OS thread under it. Also
 /// works from a plain thread with no fiber at all, which is what makes a
 /// handler holding one still testable as an ordinary function (ADR 0003).

@@ -707,3 +707,50 @@ Counting the refusals meant touching the sentence next to the count, which said 
 Measured warm on this machine: 46 refusals are ~12.8s of a ~17s `zig build test`, at about 270ms each. Re-run against a clean checkout of the commit that made the claim, the 39 that existed then are 10.6s — not 0.5s. The original entry, "about 9 seconds", was right the whole time and had been struck through in favour of a number nobody checked.
 
 The lesson is not about caching. That correction sits four paragraphs below this file's own line about a number not being a finding until you know what is in it, which makes it the mistake it warns about committed in the same breath. **A number saying a cost went away on its own deserves more scrutiny than one saying work made something faster**, not less — there is nobody to argue with it. [ADR 0027](./adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md) carries the corrected figure and keeps the wrong one visible.
+
+## The rule that only ever passed, and the stopwatch that came out of it
+
+Three separate times, a guard turned out not to be guarding anything, and each time somebody found it by accident: the suite whose green runs were not evidence, the allocation budget test written to look the other way, and the build-time number that improved on its own. All three are written up above. Putting them side by side is the only reason the shape is visible — separately each read as bad luck.
+
+The shape: **each had only ever been observed passing.** A check that has only been seen to pass and a check that cannot fail look identical from the outside, because passing is the default state of both. [ADR 0033](./adr/0033-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md) makes watching it fail part of shipping it.
+
+Writing that ADR immediately produced a fourth instance of the thing it describes. The first draft listed four incidents, of which two were the same one — `history.md` writes the budget test up under a heading about "the third guard", which from memory sounds like a separate event — and the description of the first said the suite "passed with the implementation deleted", which is not what happened and is written down nowhere. Both were caught by opening `history.md` and reading it rather than remembering it. The ADR keeps the account of its own draft, because an entry about only ever having observed something passing, drafted from memory of the observation, is the cheapest available demonstration that this is not about being careless.
+
+### The rule with no guard at all
+
+[ADR 0014](./adr/0014-handlers-must-not-block-the-thread.md) had said it outright: *"Nothing forces it. A handler calling the driver directly still compiles and still passes its tests."* It had also considered detection and rejected it in one line — Zig has no effect system, so there is nothing to detect with at compile time.
+
+That is true, and it answers the wrong question. "Can the compiler prove this function blocks" is no. "Can the server notice that one just did" is yes, with a stopwatch, and nobody had asked.
+
+It matters more than the ADR's wording suggests, because this bug is invisible in development *because* there is no load. One `curl` against a handler that queries a database synchronously returns the right answer at the right speed and looks correct in every way a person can check by looking. It needs a second request to exist at all, and the second request normally turns up in production.
+
+`src/watchdog.zig` measures elapsed time minus time the fiber spent parked. Parked time is not guessed at — `zfast.blocking`, `zfast.sleep`, `zfast.Mutex.lock`, `bulkhead.randomSecure`, reading the body and writing the response each report their own wait. What is left is the handler running, and a quarter of a second of it without one yield gets a line in the log naming the route.
+
+### What the measurement cost, and the trap inside it
+
+The first working version cost **116ns of a 612ns request — 19%**, twice [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md)'s budget. Four clock reads per request, at 27ns each, because `CLOCK_MONOTONIC` does the full timekeeping arithmetic every time.
+
+`CLOCK_MONOTONIC_COARSE` costs 5ns and only moves once a millisecond, which against a quarter-second threshold is not a compromise at all. But reached through `std.os.linux.clock_gettime` it costs **571ns**, not 5ns, because zfast links libc and that path skips the vDSO. The first attempt at the optimisation was a hundred times slower than the thing it replaced and looked identical on the page — it showed up only because the profile went from 728ns to 3040ns and there was no story that fit.
+
+The other half of the 116ns was not the clock at all. It was `fail.inFlight()`, which finds the request through the fiber slot, called twice on the response-write path. The `Ctx` carries the pointer now.
+
+**610ns before, 668ns after: 58ns, 9.5%.** Inside the budget and not comfortably. Six runs of each, interleaved, the before taken from a `git worktree` at the parent commit rather than by stashing — which turned out to matter, because uninterleaved passes on this same machine read 612 against 728 half an hour apart and 681 against 673 ten minutes later. The second pair would have been quoted as "under the noise" and would have been wrong.
+
+### What it looks like against a real server
+
+Two handlers on two executor threads, both waiting 600ms, one holding the thread and one going through `zfast.blocking`. From the client they are three milliseconds apart — 0.6007s against 0.6034s — and nothing in either response tells them apart. That is the bug in one line: with one request, the wrong version is indistinguishable from the right one.
+
+With four in flight and one trivial request behind them:
+
+```
+/quick behind 4x /slow      1.654528s
+/quick behind 4x /proper    0.002606s
+```
+
+Six hundred times, paid by a request that had nothing to wait for. [ADR 0014](./adr/0014-handlers-must-not-block-the-thread.md) measured the first half of this and got 1.701s; what it never had was the second column. The single `curl` at `/slow` produced the warning on its own, and nothing was ever said about `/proper`.
+
+### Seven tests, three of which exist to prove it stays quiet
+
+Which is [ADR 0033](./adr/0033-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md) applied to the first thing built after it. A handler that busy-waits 30ms is caught; the same wait through `zfast.blocking` is not; a stream is not; a server with `block_warning_ms = 0` is not. Half of a detector's job is not firing — one that cries wolf gets switched off, and then it is worth less than nothing, because its absence looks exactly like its silence.
+
+They cost about 150ms of wall clock to prove something about wall clock. Paid rather than skipped.

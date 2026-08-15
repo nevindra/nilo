@@ -60,6 +60,8 @@ literal; the type is `zfast.Group("/api")`.
 | `max_connections` | `10_000` — held at once, about 9 KB each. `0` = no limit |
 | `max_body` | `1024 * 1024` — the most `c.body()` reads into the arena |
 | `trusted_hops` | `0` — how many proxies stand in front, for `c.clientIp()` |
+| `session_secret` | `null` — 32 bytes, for `Session(T)`. The same on every instance |
+| `block_warning_ms` | `250` — say so when a handler holds its thread. `0` = off |
 
 Each of the four deadlines bounds one wait for the network, not a request, so a
 long upload or an hour-long stream is not hurried by any of them. `0` turns one
@@ -78,6 +80,7 @@ read, no status sent
 | `u32`, `f64`, `Str`, `bool`, an enum | a path param, positionally |
 | `Query(T)` | the query string as a struct |
 | `Form(T)` | the body as an HTML form — urlencoded or multipart |
+| `Session(T)` | the session, out of its cookie |
 | `std.mem.Allocator` | the request arena |
 | a type with `zfast_resolve` | a resolved value |
 | any other struct | the body, parsed from JSON |
@@ -182,6 +185,30 @@ A value holding a space, comma, semicolon, quote, backslash or control byte is
 refused with a 500: a `;` would start an attribute nobody wrote. `.none`
 without `.secure` is refused for the same kind of reason — browsers drop it.
 
+## `Session(T)`
+
+The session, sealed into one cookie. `T` is a struct of yours of a size known
+while compiling — numbers, bools, enums, `[N]u8`, optionals and structs of
+those. Not slices. See [Sessions](./guide/sessions.md).
+
+| | |
+|---|---|
+| `s.get()` | `?T` — what the client sent, or null if it sent nothing readable |
+| `s.set(value)` | replace it; one `Set-Cookie` on this response |
+| `s.setWith(value, options)` | the same, with the cookie's attributes your own |
+| `s.clear()` | sign out — deletes the cookie |
+| `s.clearWith(.{ .path = …, .domain = … })` | the same, matching a cookie set elsewhere |
+
+`setWith` options: `path` (`"/"`), `domain` (`""`), `max_age` (`null` — a
+session cookie), `secure` (`true`), `same_site` (`.lax`). No `http_only`: it
+is always on.
+
+Every way a cookie can be unreadable — tampered, truncated, sealed under
+another secret, written by a build with a different shape of `T` — is the
+same answer, `null`. The secret comes from
+`listen(.{ .session_secret = … })` and must be exactly 32 bytes; a handler
+asking for a session with none set answers 500.
+
 ## `Upload`
 
 One file out of a multipart form, as a `Form(T)` field type.
@@ -283,6 +310,22 @@ failure, whatever the endpoint returns when it works.
 
 `lock()` and `sleep()` fail with `error.Canceled` if the request went away, which
 maps to a 503.
+
+A handler that waits on the operating system without going through one of these
+holds the thread every other request on it is being served by. zfast notices and
+says so, once a second at most:
+
+```
+handler GET /users/7 held its thread for 2003ms. Every other request being
+served on that thread waited the whole time. Hand the call that waits to
+zfast.blocking (ADR 0014).
+```
+
+It fires on the first request, with nobody else waiting, which is the point —
+under `curl` the mistake is otherwise invisible. `block_warning_ms` is the
+threshold and `0` turns it off. A stream, a body reader and a WebSocket are not
+watched at all: holding the connection is what they are for. See
+[ADR 0034](./adr/0034-the-thing-a-handler-holds-is-watched-at-run-time.md).
 
 `spawn` starts `f` in a fiber the server owns: counted while it runs, cut off
 when the shutdown grace period ends. `error.NoServer` if nothing is listening.

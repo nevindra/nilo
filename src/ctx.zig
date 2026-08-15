@@ -24,6 +24,7 @@ const patch_mod = @import("patch.zig");
 const websocket = @import("websocket.zig");
 const percent = @import("percent.zig");
 const fail = @import("fail.zig");
+const watchdog = @import("watchdog.zig");
 const Str = str_mod.Str;
 
 /// What one request is allowed to do. Filled from `listen()`'s options and
@@ -33,6 +34,7 @@ const Str = str_mod.Str;
 pub const Limits = struct {
     max_body: usize = 1024 * 1024,
     trusted_hops: u8 = 0,
+    block_warning_ms: u32 = 250,
 };
 
 /// The size `sendJson` reserves before serialising. Not a limit — a
@@ -98,6 +100,20 @@ pub const Ctx = struct {
     /// What this request may do, from `listen()`. Defaults when App was
     /// never listened on, which is what a test gets.
     _limits: Limits = .{},
+    /// The key session cookies are sealed with, from
+    /// `listen(.{ .session_secret = … })`. Points at the App's copy, which
+    /// outlives every request it serves.
+    ///
+    /// Null when the application never set one. That is what makes a
+    /// `Session(T)` fail with a sentence naming the option instead of
+    /// quietly sealing everything under zeroes — a default key would be a
+    /// key every reader of this repository already has.
+    ///
+    /// Spelled `[32]u8` rather than `session.Key` because session.zig needs
+    /// `Ctx` and a field type cannot be imported from inside a function body
+    /// the way `resolve` below does it. `session.zig` asserts the two agree,
+    /// so the duplication cannot drift silently.
+    _session_key: ?*const [32]u8 = null,
     _params: []const router.Param,
     _services: *const service_mod.Registry,
     /// Set by App when the path names a file in a static set, so the
@@ -122,6 +138,18 @@ pub const Ctx = struct {
     /// Set between `stream()` and the stream's `finish()`, which clears it.
     /// App reads it to find a body nobody ended (ADR 0020).
     _stream: ?stream_mod.Open = null,
+    /// The blocking detector's stopwatch for this request, or null when
+    /// there is no request behind this Ctx — a handler called straight from
+    /// a test. Held here rather than looked up: `Ctx.send` is on the path of
+    /// every request, and finding it through the fiber slot instead cost a
+    /// measured 45ns of the 612 a whole request takes (ADR 0034).
+    _watch: ?*watchdog.Watch = null,
+    /// Set when this request took the connection over — a stream, a body
+    /// reader, a WebSocket. Once set it stays set, which is what separates
+    /// it from `_stream` above: a stream that was finished properly is
+    /// still a request that spent its time on the socket, and the blocking
+    /// detector has to leave it alone either way (ADR 0034).
+    _took_over: bool = false,
     /// Set when the response cannot share its connection with another
     /// request whatever the client asked for — an unframed HTTP/1.0 stream,
     /// where the end of the body *is* the end of the connection.
@@ -346,6 +374,13 @@ pub const Ctx = struct {
 
     pub fn body(self: *Ctx) !Str {
         if (self._body == null) {
+            // Waiting for a client to finish sending is not the handler
+            // holding its thread — the fiber parks and the thread serves
+            // somebody else. Said out loud, or a slow uploader would be
+            // reported as a blocking handler (ADR 0034).
+            const w = watchdog.waiting(self._watch);
+            defer watchdog.waited(self._watch, w);
+
             if (self._request.chunked) {
                 self.aboutToRead();
                 self._body = http1.readChunkedBody(self._in, self._arena, self._limits.max_body) catch |err| {
@@ -403,6 +438,7 @@ pub const Ctx = struct {
         }
         if (self._request.chunked or self._request.content_length > 0) self.aboutToRead();
 
+        self._took_over = true;
         self._incoming = .start(self._request, options.max_bytes);
         return .init(self._in, &self._incoming.?);
     }
@@ -621,6 +657,14 @@ pub const Ctx = struct {
         std.debug.assert(!self._sent); // one request, one response
         self._sent = true;
         self._status = status;
+
+        // Putting the answer on the wire is zfast waiting on the client, not
+        // the handler running. A client too slow to take a large response
+        // parks this fiber for as long as it takes, and without this that
+        // would be reported as a handler holding its thread (ADR 0034).
+        const w = watchdog.waiting(self._watch);
+        defer watchdog.waited(self._watch, w);
+
         // A handler need not know this is a HEAD: it assembles a response
         // as usual, and what must not go out is filtered here.
         if (self.method == .HEAD) return http1.writeResponseHeadOnly(
@@ -708,6 +752,7 @@ pub const Ctx = struct {
 
         self._sent = true;
         self._status = status;
+        self._took_over = true;
         self._stream = .{ .chunked = chunked, .drop = self.method == .HEAD };
 
         try http1.writeStreamHead(
@@ -796,6 +841,7 @@ pub const Ctx = struct {
         // From here the answer is written, so nothing above may fail.
         self._sent = true;
         self._status = 101;
+        self._took_over = true;
         // The connection stops being HTTP at the blank line below, so it can
         // never carry another request.
         self._force_close = true;

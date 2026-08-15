@@ -23,6 +23,8 @@ const cors = @import("cors.zig");
 const static_mod = @import("static.zig");
 const openapi = @import("openapi.zig");
 const budget = @import("budget.zig");
+const watchdog = @import("watchdog.zig");
+const session_mod = @import("session.zig");
 
 const Ctx = ctx_mod.Ctx;
 
@@ -118,6 +120,11 @@ pub const App = struct {
     /// socket, copied out once when the server starts. Defaults stand for
     /// an App a test drives directly, which never calls `listen()`.
     limits: Limits = .{},
+    /// The key session cookies are sealed with, from
+    /// `listen(.{ .session_secret = … })` and checked there. Null for an App
+    /// with no sessions, and for one a test drives directly — a test that
+    /// wants sessions sets this field.
+    session_key: ?session_mod.Key = null,
 
     /// What one request is allowed to do. Declared on the Ctx, which is
     /// what reads it.
@@ -561,7 +568,23 @@ pub const App = struct {
         self.limits = .{
             .max_body = options_.max_body,
             .trusted_hops = options_.trusted_hops,
+            .block_warning_ms = options_.block_warning_ms,
         };
+        // Here rather than at the first request that reads a cookie: a secret
+        // of the wrong length is a deployment mistake, and the moment somebody
+        // is watching for one is startup. The key is copied onto the App, so
+        // whatever the caller passed does not have to outlive this call.
+        if (options_.session_secret) |secret| {
+            self.session_key = session_mod.checkSecret(secret) catch {
+                std.log.err(
+                    "the session secret is {d} bytes and it has to be exactly {d}. It is a key, " ++
+                        "not a password: {d} bytes of randomness, the same on every instance and " ++
+                        "the same after a restart, or everybody is signed out.",
+                    .{ secret.len, session_mod.key_len, session_mod.key_len },
+                );
+                return error.SessionSecretWrongLength;
+            };
+        }
         try bulkhead.serve(self.gpa, options_, &self.stop, self, handleConnection);
     }
 
@@ -782,9 +805,13 @@ pub const App = struct {
             ._query_params = ctx_mod.parseQuery(arena, raw_query) catch return false,
             ._head = request_head,
             ._head_borrowed = borrowed,
+            ._watch = &in_flight.watch,
             ._deadlines = deadlines,
             ._peer = peer,
             ._limits = self.limits,
+            // A pointer to the App's copy, not the copy: the key is 32 bytes
+            // on every Ctx otherwise, for something almost no request reads.
+            ._session_key = if (self.session_key) |*k| k else null,
             ._params = &.{},
             ._services = &self.services,
             // Stopping: this one still gets answered — a request already on
@@ -846,7 +873,16 @@ pub const App = struct {
             }
         }
 
+        // The one mistake the compiler cannot catch and everybody else pays
+        // for: a handler that waits on the operating system directly holds
+        // the thread every other request on it is being served by
+        // (ADR 0034). Bracketed around the whole chain rather than around
+        // the terminal handler, because a middleware that blocks stops the
+        // thread just as dead as a handler that does.
+        watchdog.begin(&in_flight.watch, self.limits.block_warning_ms);
+
         (mw.Next{ .rest = chain, .handler = terminal }).run(&c) catch |err| {
+            watchdog.finish(&in_flight.watch, @tagName(c.method), path, c._took_over);
             // A half-sent response cannot be taken back, so the connection
             // is closed: the next request on it would read leftover bytes
             // of unclear provenance.
@@ -874,6 +910,7 @@ pub const App = struct {
             sendFailure(&c, failure, err) catch return false;
             return reusable;
         };
+        watchdog.finish(&in_flight.watch, @tagName(c.method), path, c._took_over);
 
         // A body the handler did not read is discarded so the next request
         // on this connection starts at the right byte.
@@ -1360,6 +1397,10 @@ fn sendFinal(out: *std.Io.Writer, response: []const u8) void {
 fn sendDirect(c: *Ctx, status: u16, content_type: []const u8, body: []const u8) !void {
     c._sent = true;
     c._status = status;
+    // `Ctx.send`'s reason, and the other half of the same accounting: this
+    // is zfast waiting on the client, not a handler running (ADR 0034).
+    const w = watchdog.waiting(c._watch);
+    defer watchdog.waited(c._watch, w);
     const keep_alive = c.keepAlive();
     if (c.method == .HEAD) return http1.writeResponseHeadOnly(
         c._out,
@@ -5786,4 +5827,170 @@ test "the document says which encoding a form takes, and where a redirect sends 
     try testing.expect(std.mem.indexOf(u8, document, "\"Location\"") != null);
     // Nothing about a JSON body, which neither of these takes.
     try testing.expect(std.mem.indexOf(u8, document, "\"requestBody\":{\"required\":true,\"content\":{\"application/json\"") == null);
+}
+
+// ---- a handler that holds its thread (ADR 0034) ----
+//
+// The whole point of these is that the detector is watched failing, in the
+// shape a person would hit it (ADR 0033). They cost real milliseconds of
+// wall clock, which is the price of measuring something whose unit is time.
+
+/// Hold this thread for `ms`, the way a database driver waiting on a socket
+/// would. Spelled out rather than reached for from `std`, which in Zig 0.16
+/// only sleeps through an `Io` — and an `Io` is exactly the thing a handler
+/// that makes this mistake does not have.
+fn holdFor(ms: u64) void {
+    const until = bulkhead.monotonicNanos() + ms * std.time.ns_per_ms;
+    while (bulkhead.monotonicNanos() < until) {}
+}
+
+const held_ms = 30;
+
+fn holdsTheThread(c: *Ctx) anyerror!void {
+    holdFor(held_ms);
+    try c.sendEmpty(200);
+}
+
+fn waitsProperly(c: *Ctx) anyerror!void {
+    // The same wait, done right. With no Engine underneath, `blocking` runs
+    // the call inline — so this test really does spend the 20ms on this
+    // thread, and passes only because the wait is accounted for, not because
+    // it did not happen.
+    bulkhead.blocking(holdFor, .{held_ms});
+    try c.sendEmpty(200);
+}
+
+test "a handler that blocks is caught, on the first request and with nobody else waiting" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    app.limits.block_warning_ms = 10;
+    try app.get("/slow", holdsTheThread);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const before = watchdog.caught.load(.monotonic);
+    const answer = h.send(&app, "GET /slow HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 200"));
+    try testing.expectEqual(before + 1, watchdog.caught.load(.monotonic));
+}
+
+test "the same wait through zfast.blocking is not" {
+    // The half that decides whether anybody keeps the detector switched on.
+    // A guard that fires on correct code is a guard that gets turned off,
+    // and then it is not a guard.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    app.limits.block_warning_ms = 10;
+    try app.get("/slow", waitsProperly);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const before = watchdog.caught.load(.monotonic);
+    const answer = h.send(&app, "GET /slow HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 200"));
+    try testing.expectEqual(before, watchdog.caught.load(.monotonic));
+}
+
+test "zero turns it off, and then even a blocking handler goes unremarked" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    app.limits.block_warning_ms = 0;
+    try app.get("/slow", holdsTheThread);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const before = watchdog.caught.load(.monotonic);
+    _ = h.send(&app, "GET /slow HTTP/1.1\r\n\r\n");
+    try testing.expectEqual(before, watchdog.caught.load(.monotonic));
+}
+
+fn streamsSlowly(c: *Ctx) anyerror!void {
+    var out = try c.stream(200, "text/plain");
+    holdFor(held_ms);
+    try out.writeAll("done");
+    try out.finish();
+}
+
+test "a stream is excused, because holding the connection is what it is for" {
+    // The stated gap, pinned so that closing it later is a decision rather
+    // than a surprise: a blocking call inside a stream, a body reader or a
+    // WebSocket is real and is not reported.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    app.limits.block_warning_ms = 10;
+    try app.get("/feed", streamsSlowly);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const before = watchdog.caught.load(.monotonic);
+    const answer = h.send(&app, "GET /feed HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 200"));
+    try testing.expectEqual(before, watchdog.caught.load(.monotonic));
+}
+
+fn blocksAfterAnswering(c: *Ctx) anyerror!void {
+    try c.sendEmpty(200);
+    holdFor(held_ms);
+}
+
+test "work after the answer went out is still work, and still counted" {
+    // Stopping the clock at the response would have been simpler and would
+    // have missed a middleware that logs to a file after `next.run`, which
+    // is the second most common way to block.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    app.limits.block_warning_ms = 10;
+    try app.get("/late", blocksAfterAnswering);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const before = watchdog.caught.load(.monotonic);
+    _ = h.send(&app, "GET /late HTTP/1.1\r\n\r\n");
+    try testing.expectEqual(before + 1, watchdog.caught.load(.monotonic));
+}
+
+fn blocksThenFails(_: *Ctx) anyerror!void {
+    holdFor(held_ms);
+    return fail.notFound("nothing here", .{});
+}
+
+test "a handler that blocks and then fails is caught on the way out" {
+    // Two exits from the chain, and the early one is the one a hand-written
+    // pair of calls can forget.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    app.limits.block_warning_ms = 10;
+    try app.get("/gone", blocksThenFails);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const before = watchdog.caught.load(.monotonic);
+    const answer = h.send(&app, "GET /gone HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 404"));
+    try testing.expectEqual(before + 1, watchdog.caught.load(.monotonic));
+}
+
+fn locksAndAnswers(c: *Ctx) anyerror!void {
+    var lock: bulkhead.Mutex = .init;
+    try lock.lock();
+    try testing.expect(!lock.tryLock());
+    lock.unlock();
+    try c.sendEmpty(200);
+}
+
+test "a zfast.Mutex still locks after being wrapped for the detector" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/guarded", locksAndAnswers);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const answer = h.send(&app, "GET /guarded HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 200"));
 }

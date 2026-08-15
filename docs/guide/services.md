@@ -224,7 +224,33 @@ different problem, and `zfast.blocking` handles that one too.
 `zfast.sleep` takes milliseconds and fails with `error.Canceled` if the request
 went away while waiting, the same way `Mutex.lock` does.
 
-Nothing forces any of this — Zig has no way to mark a function as blocking, so a
-handler that calls the driver directly still compiles and still works. It just
-takes the rest of its thread down with it under load. See
-[ADR 0014](../adr/0014-handlers-must-not-block-the-thread.md).
+### zfast says so when you forget
+
+Nothing *forces* any of this — Zig has no way to mark a function as blocking, so
+a handler that calls the driver directly still compiles and still passes its
+tests. What it does not do is go unnoticed. The server times each handler, minus
+whatever it spent legitimately waiting, and says so:
+
+```
+handler GET /users/7 held its thread for 2003ms. Every other request being
+served on that thread waited the whole time. Hand the call that waits to
+zfast.blocking (ADR 0014).
+```
+
+The useful part is *when*: on the first request, with nobody else on the server.
+That is the whole difficulty with this bug — one `curl` against a handler that
+queries the database synchronously gives the right answer at the right speed,
+and looks correct in every way you can check by looking. It only misbehaves once
+there is a second request, which normally means production.
+
+A quarter of a second is the default; `listen(.{ .block_warning_ms = … })` moves
+it and `0` turns it off. A repeat offender is logged once a second with a count
+of the rest, rather than once per request.
+
+Three things are not watched, because holding the connection is exactly what
+they are for: a stream, a body reader, and a WebSocket. A blocking call inside a
+WebSocket loop is real and will not be reported.
+
+See [ADR 0014](../adr/0014-handlers-must-not-block-the-thread.md) for the rule
+and [ADR 0034](../adr/0034-the-thing-a-handler-holds-is-watched-at-run-time.md)
+for what watches it.

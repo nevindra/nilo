@@ -3,7 +3,7 @@
 An HTTP framework for Zig, aimed at people coming from Go or Node.
 
 > **0.1.0** — the first release. Routing, typed handlers, JSON, HTML forms and
-> file uploads, cookies, redirects, middleware, static files, resolved values,
+> file uploads, cookies, sessions, redirects, middleware, static files, resolved values,
 > groups and plugins, a generated OpenAPI document, streamed responses and
 > server-sent events, large request bodies, range requests, and WebSocket.
 > Needs Zig 0.16.
@@ -114,6 +114,7 @@ might want to do, in the order you would meet them:
 | [Forms](./docs/guide/forms.md) | an HTML form as a struct of yours, and file uploads |
 | [Responses](./docs/guide/responses.md) | statuses, headers, redirects, and `Ctx` when you want full control |
 | [Cookies](./docs/guide/cookies.md) | reading and setting them, and the signed-in user |
+| [Sessions](./docs/guide/sessions.md) | a struct of yours, sealed into one cookie |
 | [Streaming](./docs/guide/streaming.md) | answers written in pieces, and server-sent events |
 | [WebSocket](./docs/guide/websocket.md) | upgrading a connection, and what it costs |
 | [Middleware](./docs/guide/middleware.md) | the onion, plus the signed-in user as a resolved value |
@@ -143,15 +144,19 @@ it is rather than how to use it:
 
 ## Not here yet
 
-Absent: sessions, templates, `sendfile`, `permessage-deflate`, compressing a
-handler's response, and broadcasting to WebSockets a handler doesn't hold. Each
-with its reason in [`docs/roadmap.md`](./docs/roadmap.md); the ones decided
-against rather than queued up are in [`docs/adr/`](./docs/adr/).
+Absent: templates, `sendfile`, `permessage-deflate`, compressing a handler's
+response, and broadcasting to WebSockets a handler doesn't hold. Each with its
+reason in [`docs/roadmap.md`](./docs/roadmap.md); the ones decided against
+rather than queued up are in [`docs/adr/`](./docs/adr/).
 
-**Sessions are absent, cookies are not.** zfast sets and reads the cookie; what
-goes in it and where it is stored is your application's, the same line it draws
-around authentication. [`examples/forms`](./examples/forms/main.zig) is the
-whole shape in about forty lines.
+**Sessions are here, and nothing is stored on the server.** `Session(T)` seals
+a struct of yours into one cookie with `XChaCha20Poly1305` — so there is no
+table, no expiry sweep, no lock, and nothing added to what an idle connection
+costs ([ADR 0035](./docs/adr/0035-a-session-is-sealed-into-the-cookie.md)).
+What that cannot do is revoke one, and the
+[guide](./docs/guide/sessions.md#what-it-cannot-do) says so in the same breath.
+What stays yours is what a password check is and where the secret lives — the
+same line zfast draws around authentication.
 
 **TLS is a refusal rather than a gap** — terminate it in front, and the
 [deploying guide](./docs/guide/deploying.md#tls-and-the-proxy-in-front) has the

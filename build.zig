@@ -157,6 +157,22 @@ const refusals = [_]Refusal{
         .says = "Response headers have to be written out where they are set — .of(&.{.{ .name = \"Location\", .value = where }}) — and this is a []zfast.Header.",
     },
     .{
+        .name = "session_field_is_a_slice",
+        .says = "`[]const u8` cannot be part of a session, because it is not something a session can carry.",
+    },
+    .{
+        .name = "session_not_a_struct",
+        .says = "the `Session(u32)` is not a struct.",
+    },
+    .{
+        .name = "session_too_big_for_a_cookie",
+        .says = "a `Session(session_too_big_for_a_cookie.Signed)` would be 5528 bytes in the cookie, and the most that fits is 3800.",
+    },
+    .{
+        .name = "session_with_no_fields",
+        .says = "the `Session(session_with_no_fields.Empty)` has no fields, so it would remember nothing.",
+    },
+    .{
         .name = "too_few_pattern_params",
         .says = "argument 1 of the handler for route \"/users\" is a u32, so zfast reads it as a path param — but the route has no path params at all.",
     },

@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const bulkhead = @import("bulkhead.zig");
+const watchdog = @import("watchdog.zig");
 
 /// Messages longer than this are truncated. The Failure is deliberately a
 /// fixed buffer rather than an allocation from the request arena: the
@@ -68,6 +69,11 @@ pub const InFlight = struct {
     /// arena, so valid for exactly as long as the request is.
     method: []const u8 = "",
     path: []const u8 = "",
+
+    /// Whether this request is holding its thread (ADR 0034). Here for the
+    /// same reason everything else is: `zfast.blocking` has to find it from
+    /// inside a call that knows nothing about the request it is part of.
+    watch: watchdog.Watch = .{},
 
     pub fn startRequest(self: *InFlight, method: []const u8, path: []const u8) void {
         self.failure.clear();

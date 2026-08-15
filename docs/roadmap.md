@@ -8,30 +8,94 @@ binding are in [`adr/`](./adr/).
 
 In order.
 
-1. **A socket read that can be raced against something else, from zio.** This
-   is now the thing broadcasting waits on, and it is one exported line
-   upstream rather than a design. zio has every piece — `ev.NetPoll(.recv)`,
-   `ev.Async.notify`, `ev.Group.init(.race)` — but no public way to park a
-   fiber on a completion, so a fiber sitting in a socket read cannot also be
-   waiting on a mailbox. Worth **8,673 bytes per connection**: with it, the
-   fiber already serving a connection drains its own mailbox and nothing new
-   is spent; without it, every connection that can be broadcast to needs a
-   second fiber, which is the whole of
-   [ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md)'s per-connection
-   budget over again
-   ([ADR 0029](./adr/0029-a-spawned-fiber-belongs-to-the-server.md)). Asked
-   for upstream as [zio#668](https://github.com/lalinsky/zio/issues/668),
-   with the measurement — so this one is now somebody else's call rather than
-   ours, and worth checking before anything below it is picked up.
-2. **Sending to a WebSocket a handler does not hold.** Blocked on the above,
-   and no longer blocked on knowing what to build.
+1. ~~**A socket read that can be raced against something else, from zio.**~~
+   *Answered, and the question was wrong.* We asked
+   [zio#668](https://github.com/lalinsky/zio/issues/668) for `waitForIo` to
+   be exported; lalinsky pointed at `zio.CompletionQueue`, which was already
+   public in v0.17.0 — the version zfast pins — along with `ev.NetPoll`,
+   `ev.Async` and `ev.Completion`. **Nothing upstream has to change to make
+   this reachable**, and the 8,673 bytes per connection are on the table.
+
+   The real question was never the API. It was whether
+   [zio#667](https://github.com/lalinsky/zio/issues/667) — a waiter node
+   pushed onto a queue it is already linked into, which hangs `ReleaseFast`
+   17 runs in 20 — reaches `CompletionQueue`, which is built on the same
+   `SimpleQueue`, given that every zfast connection is cancelled at
+   shutdown. [`spike/completion_queue/`](../spike/completion_queue/) asks
+   that as a program: **it does not.** A fiber parked on a `NetPoll(.recv)`
+   and an `Async` at once, woken from a plain OS thread, then cancelled
+   mid-park, is clean 30 runs in 30 in each of Debug, ReleaseSafe and
+   ReleaseFast — no hangs, no aborts, and `error.Canceled` out of `wait()`.
+   `ownerCallback` removes a node from `pending` before pushing it to
+   `completed`, which is the discipline `BroadcastChannel` fails to keep.
+
+   **One thing found on the way, and it is a real defect.** Handing a
+   completion that has already fired straight back to `submit` — the obvious
+   thing to write, and what a connection would do forever — crashes zio 90
+   runs in 90. `CompletionQueue.submit` sets `c.group.owner` and
+   `c.group.owner_callback`, then calls `loop.add`, which for a completion
+   in phase `.dead` calls `Completion.reset()` and clears both
+   (`ev/loop.zig:831`, `ev/completion.zig:411-414`). The completion then
+   fires as a task wake with a null `userdata` and panics in
+   `runtime.zig:1085`. `CompletionQueue`'s own tests never re-submit, which
+   is why it has not been seen. Building the completion again first works
+   around it, but not for free: re-initialising an `Async` clears its
+   `pending` flag, so a notify landing in the gap is lost — fine for a
+   spike, not fine for a broadcast, where the whole point is that anyone may
+   notify at any time. **Report it upstream before building #2 on top.**
+2. **Sending to a WebSocket a handler does not hold.** No longer blocked on
+   an API that does not exist — `CompletionQueue` is it, and the cancel path
+   holds. What stands between here and building it is the re-submit defect
+   above: a connection's fiber has to re-arm its wakeup after every message,
+   which is exactly the case that crashes, and the workaround drops
+   notifications. So this is now waiting on a two-line fix upstream rather
+   than on a design.
    [ADR 0022](./adr/0022-a-websocket-is-a-handler-that-does-not-return.md)
    guessed at a per-socket outbox with its own lock; a spike measured that
    and it is exactly as dead as the naive version, because the problem is
    not locking — the speaker's own fiber does the writing, so it blocks on
    the first connection that has stopped reading. `zfast.spawn` shipped out
    of that work; broadcast did not.
-3. ~~**Somewhere honest to measure.**~~ *Done, and it changed two of our own
+3. ~~**Sessions, carried in the cookie.**~~ *Built*
+   ([ADR 0035](./adr/0035-a-session-is-sealed-into-the-cookie.md),
+   [guide](./guide/sessions.md)). `zfast.Session(T)` is a resolved value; the
+   whole session is sealed with `XChaCha20Poly1305` into one cookie and
+   nothing is kept on the server, so there is no table, no expiry sweep, no
+   lock, and **nothing added to the 8,767 bytes** an idle connection holds.
+   The secret comes from `listen(.{ .session_secret = … })` and its length is
+   checked there.
+
+   Two of the three open questions got answers in the building. **The
+   ceiling** is 3,800 bytes of cookie, checked while compiling, and a
+   `Session(T)` past it stops the build with the number — so a browser
+   silently dropping an oversized cookie is not a failure anybody has to
+   diagnose. **The secret** fails at `listen()` with zfast's own sentence, and
+   there is deliberately no default, because a default key is a key everybody
+   who has read this repository already has.
+
+   What the building added to the list was a failure nobody had named: change
+   the shape of `T` and every cookie already out there decrypts to something
+   *plausible* rather than corrupt, and somebody is signed in as the wrong
+   user. The sealed bytes now carry a 32-bit fingerprint of the shape, so a
+   cookie from another build is ignored rather than misread — including two
+   fields of the same type swapping places, which a size check would miss.
+
+   **Rotation is still open**, and is the entry under "Not decided" below.
+4. **A form field that is wrong without the whole request being wrong.**
+   `Form(T)` today either binds or fails: a field that will not convert is a
+   400 out of `fail` and the request is over. That is the right answer for an
+   API and the wrong one for a web page, where the answer to a bad email
+   address is the form again — with that field marked and everything else the
+   person typed still in it. A 400 throws all of it away. What is wanted is a
+   handler that can ask for the binding *and* its failures, by field name, and
+   choose between 422 and rendering the form again itself. jetzig has the thin
+   version (`expectParams(T)` returns null when anything is missing), which
+   says *something* was wrong and not *what*; naming the fields is the part
+   worth building. Two constraints it has to hold: nothing allocated per
+   failed field, and it does not become a validation language — zfast's job
+   stops at "this did not convert to a `u32`", and whether the age is
+   plausible stays the application's.
+5. ~~**Somewhere honest to measure.**~~ *Done, and it changed two of our own
    numbers.* [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md)'s
    10% rule is active: [`benchmarks.md`](./benchmarks.md) is zfast alone and
    [`comparison.md`](./comparison.md) is eight other servers through the same
@@ -39,12 +103,19 @@ In order.
    [`history.md`](./history.md) — an SMT core split that had both halves on the
    same eight cores, and a release build blamed on comptime when half of it was
    debug info. `bench/compare/` is the harness; `drive.py` runs it.
-4. **Reloading static files without a restart.** A development annoyance rather
-   than a design hole: a deploy restarts anyway. Wants a watch option.
-5. **`sendfile`, and serving a file too big to hold in memory.** This is the part
+6. **Reloading without a restart — static files, then the server.** A
+   development annoyance rather than a design hole: a deploy restarts anyway.
+   The static half is a watch option on `staticWith`, re-reading a directory
+   that has changed. The other half is the whole process, and it cannot live
+   inside `App` — a running binary cannot rebuild itself, so it belongs in the
+   build alongside `zig build run`. jetzig's dev server sums the modification
+   times of its source tree and rebuilds when the sum moves, which is about as
+   much machinery as this deserves; the part to be careful about is that
+   neither half can end up in a release binary.
+7. **`sendfile`, and serving a file too big to hold in memory.** This is the part
    that contradicts [ADR 0010](./adr/0010-static-files-are-held-in-memory.md)
    rather than extending it, so it wants its own argument before any code.
-6. **`permessage-deflate`.** Negotiated in the handshake, and a compressor per
+8. **`permessage-deflate`.** Negotiated in the handshake, and a compressor per
    connection is memory that has not been budgeted.
 
 ## Known gaps
@@ -230,16 +301,27 @@ Not "later" — decided against, with the reasoning written down.
 
 ## Not decided
 
-- **Sessions.** The cookie half is here now
-  ([ADR 0030](./adr/0030-a-cookie-is-a-header-and-set-cookie-is-the-one-that-repeats.md)):
-  `c.setCookie`, `c.cookie`, `c.clearCookie`, and a resolved value reading the
-  cookie is the whole of a signed-in user. What is not here is the half that
-  is policy — where the session is stored, whether the cookie carries an id or
-  a signed payload, what signs it, and how it is rotated. That is the same
-  line [ADR 0016](./adr/0016-resolved-values-are-declared-by-their-type.md)
-  draws around authentication, and it is not obvious there is a shape zfast
-  should have an opinion about rather than an example of.
-  [`examples/forms`](../examples/forms/main.zig) is the example.
+- ~~**Sessions.**~~ *Built —
+  [ADR 0035](./adr/0035-a-session-is-sealed-into-the-cookie.md).* This entry
+  used to end "it is not obvious there is a shape zfast should have an
+  opinion about rather than an example of", and what settled it was reading
+  how somebody else answered it: jetzig keeps the whole session in the
+  cookie, encrypted and signed, with no server-side store at all. That is a
+  shape zfast can have an opinion about, because the reason to prefer it is
+  [ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md)'s second and third
+  rows rather than taste.
+- **Rotating the session secret.** What is left of the entry above. Changing
+  the secret today signs everybody out at once, which is correct and blunt.
+  Doing better means a second key to decrypt with and a decision about how
+  long to keep it — how many keys, where the list comes from, what a cookie
+  sealed under a dropped one does. Nobody has asked yet, and the blunt
+  version is not wrong, so this waits for somebody who actually rotates.
+- **Signing out everywhere.** The other thing a sealed cookie cannot do: it
+  is valid until it expires, so revocation is not in the mechanism. The
+  answer today is a version number in the session checked against the row the
+  handler was fetching anyway ([guide](./guide/sessions.md#what-it-cannot-do)),
+  and it is not obvious zfast should have more of an opinion than that —
+  anything further is a store, which is the design ADR 0035 declined.
 - **Templates.** A real ask, and no shape yet. What makes it hard in Zig is
   that the two obvious answers are far apart: comptime-checked templates,
   which are a compiler of their own, and runtime string interpolation, which
