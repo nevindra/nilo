@@ -308,10 +308,12 @@ pub fn build(b: *std.Build) void {
         // carries the optimize mode it was created with.
         const engine = b.dependency("zio", .{ .target = target, .optimize = mode });
 
-        // The library's tests run under their own root, which silences
-        // logging — several of them drive a request into failure on
-        // purpose, and the stderr that produces makes a passing suite print
-        // `failed command`.
+        // The library's tests run under a root of their own so there is one
+        // place to say what a test build's root actually is: the compiler's
+        // test runner, not this file. That matters because a test that logs
+        // reaches stderr, and the build runner answers stderr from a test
+        // process with a red `failed command` block above a summary saying
+        // every step passed — see `src/test_root.zig`.
         const lib_tests = b.createModule(.{
             .root_source_file = b.path("src/test_root.zig"),
             .target = target,

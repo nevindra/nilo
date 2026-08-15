@@ -1,23 +1,23 @@
-//! The root of `zig build test`, and nothing else. It exists for one
-//! reason: several tests deliberately drive a request into failure, and the
-//! log lines they produce are correct behaviour being checked, not news.
+//! The root of `zig build test`, and nothing else.
 //!
-//! Left alone they go to stderr, where Zig's build runner prints
-//! `failed command` beside a suite that passed — so a green run looks red.
-//! Setting the log function here rather than in `zfast.zig` keeps the
-//! library's own root clean: `std_options` only takes effect in the file
-//! that happens to be the root, and for the library that file is the user's.
-
-const std = @import("std");
-
-pub const std_options: std.Options = .{ .logFn = swallow };
-
-fn swallow(
-    comptime _: std.log.Level,
-    comptime _: @EnumLiteral(),
-    comptime _: []const u8,
-    _: anytype,
-) void {}
+//! This file used to set `std_options` to swallow the log lines a few tests
+//! provoke on purpose. That never ran once, in any Zig version this project
+//! has been built with: in a test build the root module is the compiler's own
+//! `lib/compiler/test_runner.zig`, which declares `std_options` itself, so a
+//! tested file's copy of it is never consulted. The silence it appeared to be
+//! buying was the build runner caching the run step and not executing the
+//! binary at all — which is why the noise looked intermittent, and why six
+//! green runs in a row proved nothing.
+//!
+//! What the runner does honour is `std.testing.log_level`, a plain `pub var`
+//! it compares against on every line. So a test that means to provoke a log
+//! line turns it down around itself and says why — `stream.zig` has the one
+//! test that needs it.
+//!
+//! Worth knowing if this comes back: the build still *succeeds*. A test
+//! process that writes to stderr gets a red `failed command` block that is
+//! shaped exactly like a failure report, printed above a summary that says
+//! every step passed.
 
 test {
     _ = @import("zfast.zig");

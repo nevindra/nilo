@@ -350,6 +350,21 @@ test "writing after finish adds nothing to a body that already ended" {
     try body.writeAll("all of it");
     try body.finish();
 
+    // The warning `drain` is about to emit is the behaviour under test, so it
+    // is not news — but a `std.log.warn` from a test reaches stderr, and the
+    // build runner answers stderr from a test process by printing a red
+    // `failed command` block beside a suite that passed. This is the only
+    // switch that turns it off: a test build's root module is the compiler's
+    // own `test_runner.zig`, which sets `std_options` itself, so a tested
+    // file's copy of it is never consulted (see `test_root.zig`).
+    //
+    // Scoped to this test rather than set once for the suite, because the
+    // warning is worth having: a test that trips it by accident should still
+    // say so out loud.
+    const noisy = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = noisy;
+
     // Short enough to have fitted in the buffer, which is exactly the case
     // that used to disappear without reaching `drain`. The terminator has
     // already gone out and there is no reopening a finished body, so these

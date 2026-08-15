@@ -551,3 +551,39 @@ because the one place that writes it does so from inside `zio.blockInPlace`,
 which runs on a thread-pool worker. That is a real invariant held up by a
 coincidence of scheduling, and until this it was written down nowhere. Both ends
 carry a comment now.
+
+## The suite that was never failing
+
+`zig build test` had been printing a red block that reads exactly like a failure
+report — a warning line, then `failed command:` and the path of a test binary —
+and doing it often enough to be written off as a flaky suite under load. It was
+neither flaky nor a failure. Underneath the red, every run said
+`76/76 steps succeeded; 722/722 tests passed`, and every run exited 0.
+
+**Two mistakes, and each one hid the other.**
+
+The first: `src/test_root.zig` set `std_options` with a log function that threw
+every line away, and a comment in `build.zig` explained why that was necessary.
+It had never run. In a test build the root module is the compiler's own
+`lib/compiler/test_runner.zig`, which declares `std_options` itself, so a tested
+file's copy of it is never read. The runner's log function writes to stderr, and
+the build runner answers stderr from a test process with that red block. One
+test — the one checking that bytes written after `finish()` are dropped loudly —
+tripped it every single time.
+
+The second is why "every single time" looked like "sometimes". A run step that
+already succeeded is cached, so `zig build test` six times in a row executes the
+binary once and prints nothing on the other five. Green runs were not evidence
+of anything. Forcing the run — `touch` one source file per iteration — gave the
+warning eight times out of eight, at which point there was nothing intermittent
+left to chase.
+
+The fix is three lines in the test that provokes the warning: turn
+`std.testing.log_level` down around it and put it back. Scoped there rather than
+set once for the whole suite, because the warning earns its keep — a test that
+trips it *by accident* should still say so. `zig build test-all` now produces
+zero bytes of output.
+
+Worth keeping in mind for the next one: a green run only means something if the
+run actually ran, and a build that exits 0 can still print something shaped like
+a failure.
