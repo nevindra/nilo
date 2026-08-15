@@ -47,6 +47,11 @@ and a client that says `Accept-Encoding: gzip` gets the copy that was already
 made. Nothing is compressed per request, so serving a compressed asset costs a
 slice and a header — measured at zero allocations, held by a test.
 
+That holds with middleware in front of it, which is worth saying because it did
+not always: the chain an asset runs through is worked out at `listen()`, per
+file, the same as a route's. A logger, a CORS, or anything scoped to a prefix
+above or below the asset adds nothing to the request.
+
 That timing is the whole design, not an optimisation on top of it. A gzip
 compressor needs a 64 KB window: one per connection would take an idle
 connection from 8,767 bytes to roughly ten times that, and one per request would

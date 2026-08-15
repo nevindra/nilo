@@ -587,3 +587,45 @@ zero bytes of output.
 Worth keeping in mind for the next one: a green run only means something if the
 run actually ran, and a build that exits 0 can still print something shaped like
 a failure.
+
+## The third guard that was written not to catch anything
+
+Straight after the one above, and the same shape: the test guarding
+[ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md)'s hard invariant —
+one allocation per request — opened with
+
+> `// No middleware, deliberately. A path that matched no route builds its`
+> `// chain out of the request arena — that is one allocation, it predates`
+> `// any of this, and it would hide the thing being measured here.`
+
+Every word of that is true, and together they mean the one shape nearly every
+app deploys — assets behind a logger — was the one shape the allocation budget
+never checked. A path that matched no route had no chain precomputed, so
+`handleRequest` built one per request out of the arena. Static files go down
+that path by design (ADR 0010), so every asset served with any middleware
+registered broke the invariant, quietly, and the guard was written to look the
+other way.
+
+Chains for static files are resolved at `listen()` now, beside the routes'.
+**Per file, not per set** — and that is the part worth remembering. A set has
+one URL prefix, so one chain for the whole set looks obviously sufficient; it
+is not, because a middleware can be scoped *below* the prefix:
+
+```zig
+app.static("/assets", "public");
+app.useOn("/assets/private", auth);
+```
+
+One chain per set would be the chain for `/assets`, and that `auth` would
+never run. The failure is silent and it fails open. Per file costs a slice per
+file at startup, on files already held in memory, and has no such case.
+
+The test now puts a global middleware and a scoped one in front of the asset,
+and **counts that the middleware ran** — because zero allocations is also what
+an empty chain looks like, and a test that cannot tell those apart would have
+passed happily while the fix quietly dropped everybody's middleware. Reverted
+against the old behaviour it reads `expected 0, found 1`.
+
+What still costs one allocation is a 404 or a 405, and that stays: the set of
+paths that are neither a route nor a file is every string there is, so there is
+nothing to precompute for.

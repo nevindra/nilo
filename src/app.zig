@@ -97,6 +97,20 @@ pub const App = struct {
     /// directory is so that ETags and 304s arrive without a second code
     /// path. Null until `listen()` builds it.
     docs_set: ?static_mod.Set = null,
+    /// One middleware chain per file in `docs_set`, in the same order, and
+    /// the same again for each entry of `static_sets`. Resolved at
+    /// `listen()` beside the routes' chains, and for the same reason: a
+    /// static file is a hot path, and building its chain per request is an
+    /// allocation on a path that did not ask for one
+    /// ([ADR 0018](../docs/adr/0018-the-trade-budget-has-three-axes.md)).
+    ///
+    /// Per file rather than per set, which is what makes it unconditional.
+    /// A set has one URL prefix, but a middleware can be scoped *below* it
+    /// — `static("/assets")` with `use("/assets/private", auth)` — so one
+    /// chain for the whole set would be wrong for exactly the case where
+    /// getting it wrong means running no auth.
+    docs_chains: []const []const mw.Middleware = &.{},
+    static_chains: std.ArrayList([]const []const mw.Middleware) = .empty,
     /// Set when the server should stop. Read by the Engine's accept loop
     /// and by every connection between requests.
     stop: bulkhead.Stop = .{},
@@ -123,6 +137,7 @@ pub const App = struct {
         self.operations.deinit(self.gpa);
         for (self.static_sets.items) |*s| s.deinit();
         self.static_sets.deinit(self.gpa);
+        self.static_chains.deinit(self.gpa);
         self.scoped.deinit(self.gpa);
         self.requirements.deinit(self.gpa);
         self.services.deinit();
@@ -425,6 +440,30 @@ pub const App = struct {
             r.chain = try mw.chainFor(self.gpa, self.scoped.items, r.pattern);
         }
         try self.buildDocs();
+
+        // After `buildDocs`, which is what makes `docs_set` exist to have
+        // chains for.
+        if (self.docs_set) |*set| self.docs_chains = try self.chainsFor(set);
+        try self.static_chains.ensureTotalCapacityPrecise(self.gpa, self.static_sets.items.len);
+        for (self.static_sets.items) |*set| {
+            self.static_chains.appendAssumeCapacity(try self.chainsFor(set));
+        }
+    }
+
+    /// The chain for every file in `set`, in the set's own order, so a
+    /// lookup that found a file has found its chain as well.
+    fn chainsFor(self: *App, set: *const static_mod.Set) ![]const []const mw.Middleware {
+        const chains = try self.gpa.alloc([]const mw.Middleware, set.files.len);
+        var made: usize = 0;
+        errdefer {
+            for (chains[0..made]) |c| if (c.len > 0) self.gpa.free(c);
+            self.gpa.free(chains);
+        }
+        for (set.files, chains) |file, *chain| {
+            chain.* = try mw.chainFor(self.gpa, self.scoped.items, file.url);
+            made += 1;
+        }
+        return chains;
     }
 
     /// Turn the collected operations into the document and its reader page.
@@ -476,6 +515,19 @@ pub const App = struct {
             if (r.chain.len > 0) self.gpa.free(r.chain);
             r.chain = &.{};
         }
+
+        // Freed here rather than in `deinit` alone, because `resolveChains`
+        // can run more than once — a test, or a program that listens twice
+        // — and `buildDocs` replaces the very `docs_set` these parallel.
+        self.freeChainList(self.docs_chains);
+        self.docs_chains = &.{};
+        for (self.static_chains.items) |chains| self.freeChainList(chains);
+        self.static_chains.clearRetainingCapacity();
+    }
+
+    fn freeChainList(self: *App, chains: []const []const mw.Middleware) void {
+        for (chains) |c| if (c.len > 0) self.gpa.free(c);
+        if (chains.len > 0) self.gpa.free(chains);
     }
 
     /// Listen and serve until the server is stopped — by Ctrl-C, by a
@@ -764,28 +816,33 @@ pub const App = struct {
             c._params = params;
             chain = match.chain;
             terminal = match.handler;
+        } else if (self.findStatic(c.method, path)) |found| {
+            // Resolved at `listen()` with the routes' chains, so an asset
+            // served with a logger or a CORS in front of it allocates
+            // nothing — which is the shape nearly every app deploys, and
+            // the one the budget test used to step around rather than
+            // measure (ADR 0018).
+            c._static_file = found.file;
+            terminal = serveStaticFile;
+            chain = found.chain;
         } else {
-            // Nothing was precomputed for a path with no route, so the
-            // chain is built here — out of the request arena, which costs
-            // about as much as the pointer to it.
+            // Nothing is precomputed for a path that is neither a route nor
+            // a file, because the set of them is every string there is. So
+            // the chain is built here, out of the request arena — one
+            // allocation, bounded by the middleware count, and paid only by
+            // a 404 or a 405.
             if (self.scoped.items.len > 0) {
                 chain = mw.chainFor(arena, self.scoped.items, path) catch &.{};
             }
-            if (self.findStatic(c.method, path)) |file| {
-                c._static_file = file;
-                terminal = serveStaticFile;
-            } else {
-                // No route for this method, but the path itself is spelled
-                // out by routes under other methods. "There is nothing
-                // here" and "there is something here, but not for that
-                // verb" are different answers, and a 404 for the second one
-                // sends you looking for a registration bug that is not
-                // there.
-                const allowed = self.router.allowedFor(path);
-                if (allowed.count() > 0) {
-                    c._allowed = allowed;
-                    terminal = methodNotAllowedHandler;
-                }
+            // No route for this method, but the path itself is spelled out
+            // by routes under other methods. "There is nothing here" and
+            // "there is something here, but not for that verb" are
+            // different answers, and a 404 for the second one sends you
+            // looking for a registration bug that is not there.
+            const allowed = self.router.allowedFor(path);
+            if (allowed.count() > 0) {
+                c._allowed = allowed;
+                terminal = methodNotAllowedHandler;
             }
         }
 
@@ -834,19 +891,40 @@ pub const App = struct {
     /// The static file `path` names, if any set holds one. Only GET and
     /// HEAD: a POST to a `.css` is a mistake, and answering it with the
     /// stylesheet would hide that.
-    fn findStatic(self: *const App, method: http1.Method, path: []const u8) ?*const static_mod.File {
+    /// A file and the middleware in front of it, both settled before the
+    /// socket opened.
+    const StaticHit = struct {
+        file: *const static_mod.File,
+        chain: []const mw.Middleware,
+    };
+
+    fn findStatic(self: *const App, method: http1.Method, path: []const u8) ?StaticHit {
         if (method != .GET and method != .HEAD) return null;
         // Asked before the loaded directories, not after. A single-page app
         // served from `/` with an `index.html` fallback answers for every
         // path there is, and it would swallow `/openapi.json` whole —
         // which is exactly the setup most likely to want the document.
         if (self.docs_set) |*set| {
-            if (set.find(path)) |file| return file;
+            if (set.find(path)) |file| return hit(file, self.docs_chains, set.indexOf(file));
         }
-        for (self.static_sets.items) |*set| {
-            if (set.find(path)) |file| return file;
+        for (self.static_sets.items, 0..) |*set, i| {
+            if (set.find(path)) |file| {
+                // A set appended without `resolveChains` having run since —
+                // which only a test reaching past `static()` can arrange —
+                // has no chains, exactly as an unresolved route has none.
+                const chains = if (i < self.static_chains.items.len) self.static_chains.items[i] else &.{};
+                return hit(file, chains, set.indexOf(file));
+            }
         }
         return null;
+    }
+
+    fn hit(
+        file: *const static_mod.File,
+        chains: []const []const mw.Middleware,
+        i: usize,
+    ) StaticHit {
+        return .{ .file = file, .chain = if (i < chains.len) chains[i] else &.{} };
     }
 };
 
@@ -2551,6 +2629,19 @@ fn tagInner(c: *Ctx, next: mw.Next) anyerror!void {
     try next.run(c);
 }
 
+/// Runs the rest of the onion and does nothing else — a middleware that set
+/// a header would have the budget test measuring the header instead.
+///
+/// It counts, because "allocated nothing" is also what an empty chain looks
+/// like: without this the test would pass just as happily if the middleware
+/// never ran at all, which is the way this could break.
+var pass_through_runs: usize = 0;
+
+fn passThrough(c: *Ctx, next: mw.Next) anyerror!void {
+    pass_through_runs += 1;
+    return next.run(c);
+}
+
 fn rejectingMiddleware(_: *Ctx, _: mw.Next) anyerror!void {
     return fail.unauthorized("no token", .{});
 }
@@ -2880,7 +2971,7 @@ test "static files: content type, ETag, 304, index and the dotfile that is not s
     try testing.expect(std.mem.startsWith(u8, dotfile.response, "HTTP/1.1 404"));
 
     // The ETag the last response carried, handed back, costs no body.
-    const etag = app.findStatic(.GET, "/app.css").?.etag;
+    const etag = app.findStatic(.GET, "/app.css").?.file.etag;
     var request_buf: [256]u8 = undefined;
     const conditional = std.fmt.bufPrint(
         &request_buf,
@@ -5275,12 +5366,22 @@ fn dupeHeader(buf: []u8, response: []const u8, name: []const u8) ![]const u8 {
 // response headers where a plain one carried three, and five is the number
 // `inline_headers` was raised past — so this is what says the extra two did
 // not quietly become an allocation on the path every asset goes down.
-test "serving a gzipped static file allocates nothing" {
-    // No middleware, deliberately. A path that matched no route builds its
-    // chain out of the request arena — that is one allocation, it predates
-    // any of this, and it would hide the thing being measured here.
+test "serving a gzipped static file allocates nothing, middleware included" {
+    // Middleware in front of it, deliberately — this test used to leave it
+    // out and say so, because a path that matched no route built its chain
+    // out of the request arena and that one allocation would have hidden
+    // what the test was measuring. Leaving it out meant the shape nearly
+    // every app deploys — assets behind a logger — was the one shape the
+    // allocation budget never checked. The chains are resolved at
+    // `listen()` now, per file, so this is the case that proves it.
     var app = try cssApp(testing.allocator);
     defer app.deinit();
+
+    // One global and one scoped somewhere else, so the chain is a genuine
+    // filter of the registrations rather than all of them.
+    try app.use(passThrough);
+    try app.useOn("/api", passThrough);
+    try app.resolveChains();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -5307,10 +5408,40 @@ test "serving a gzipped static file allocates nothing" {
     }
 
     counting.reset();
+    pass_through_runs = 0;
     send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+
+    // The global one, and not the one scoped to `/api`.
+    try testing.expectEqual(@as(usize, 1), pass_through_runs);
 
     // Zero, not one: the bytes were compressed when the App was built and
     // the body going out is a slice of them. Nothing is serialised, nothing
-    // is copied, and the five headers fit in the Ctx.
+    // is copied, the five headers fit in the Ctx, and the chain the
+    // middleware runs in was worked out before the socket opened.
     try testing.expectEqual(@as(usize, 0), counting.allocs);
+}
+
+test "a middleware scoped below a static prefix still runs, and still costs nothing" {
+    // The case that decided this is resolved per file rather than per set.
+    // A set has one prefix, so one chain for the whole of it would be the
+    // chain for `/assets` — and this middleware, scoped underneath, would
+    // never run. Getting that wrong is silent, and it is silent in the
+    // direction of not running somebody's auth.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.static_sets.append(testing.allocator, try static_mod.fromMemory(testing.allocator, &.{
+        .{ .url = "/assets/open.css", .bytes = test_css, .content_type = "text/css" },
+        .{ .url = "/assets/private/secret.css", .bytes = test_css, .content_type = "text/css" },
+    }));
+    try app.useOn("/assets/private", rejectingMiddleware);
+    try app.resolveChains();
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const open = h.send(&app, "GET /assets/open.css HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, open.response, "HTTP/1.1 200"));
+
+    const shut = h.send(&app, "GET /assets/private/secret.css HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, shut.response, "HTTP/1.1 401"));
 }

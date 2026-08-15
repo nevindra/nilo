@@ -62,13 +62,27 @@ Things that are wrong or missing today, with what fixing them would take.
   happens when the pool is empty, what it does to a stream, what it does to
   SSE, which is the one thing that must never be buffered), and it has not been
   had yet. A proxy in front does this today and does it well.
-- **A static file served through any middleware costs one allocation.** Not the
-  file — the middleware chain. A path that matched no route has nothing
-  precomputed, so `handleRequest` builds its chain out of the request arena.
-  Every static response with a logger or CORS in front of it pays it, and the
-  allocation budget test does not see it because it measures a routed handler.
-  Fixing it means resolving a chain per static set at `listen()` the way routes
-  already do.
+- ~~**A static file served through any middleware costs one allocation.**~~
+  *Done, and the test that was supposed to catch it had been written to step
+  around it.* The chain, not the file: a path that matched no route had nothing
+  precomputed, so `handleRequest` built its chain out of the request arena, and
+  every asset behind a logger or a CORS paid one allocation —
+  [ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md)'s hard invariant,
+  broken in the shape nearly every app deploys. What kept it invisible was the
+  budget test's own opening line: *"No middleware, deliberately… it would hide
+  the thing being measured here."* Chains are now resolved for static files at
+  `listen()` beside the routes' — **per file, not per set**, which is the part
+  worth keeping. A set has one URL prefix but a middleware can be scoped below
+  it (`static("/assets")` with `useOn("/assets/private", auth)`), so one chain
+  for a whole set would be the chain for `/assets` and that auth would silently
+  never run. The budget test now puts middleware in front and counts that it
+  ran, because "allocated nothing" is also what an empty chain looks like.
+
+  What still costs one allocation is a 404 or a 405 with middleware
+  registered, and it stays that way on purpose: the set of paths that are
+  neither a route nor a file is every string there is, so there is nothing to
+  precompute for. It is one arena allocation on a cold path, bounded by the
+  number of `use` calls.
 
 - **The linker cannot drop what nobody uses.** The API description costs +14 KB
   on the hello example and +34 KB on rest whether or not `docs()` is called,
@@ -214,14 +228,15 @@ Not "later" — decided against, with the reasoning written down.
 ## Not decided
 
 - **Sessions and templates.** Both are real asks and neither has a shape yet.
-- **Somewhere to put work that is not a request.** A batching exporter, a cache
-  refresh, a queue drain, a ping every thirty seconds — every one of them wants
-  a unit of work that outlives a request, and zfast has no word for one. A
-  Service can start an OS thread today, but then the state it shares with
-  handlers is reachable from a fiber and from a thread, and `zfast.Mutex` is
-  right for one and wrong for the other. Handing out a way to start a fiber
-  makes the lock rule one sentence again. What it needs first is a name, and
-  what `fail` and `Str` mean somewhere there is no request.
+- ~~**Somewhere to put work that is not a request.**~~ *Decided and shipped.*
+  It is `zfast.spawn(f, args)`, a fiber owned by the running server rather
+  than by whatever started it, so shutdown counts it and cuts it off exactly
+  like a connection
+  ([ADR 0029](./adr/0029-a-spawned-fiber-belongs-to-the-server.md)). The two
+  open questions this entry ended on both got answers: a fail function there
+  has no request to fail and says so, and a `Str` must not travel into one at
+  all — it points into an arena that is about to be reset, and nothing in the
+  compiler will stop you.
 - **The name.** `zfast` is a working name. The `z-` prefix is crowded in the Zig
   ecosystem already (`zap`, `zzz`, `zon`, a dozen `zig-*`), so it is easy to
   confuse. The module name has to stay easy to change without touching user code,

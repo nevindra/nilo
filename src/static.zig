@@ -160,6 +160,17 @@ pub const Set = struct {
         return self.fallback;
     }
 
+    /// Where a file this Set handed back sits in `files`, for a caller
+    /// keeping an array alongside it — `App` keeps the middleware chains
+    /// there, resolved once at `listen()`.
+    ///
+    /// Exact because every `*const File` a Set returns points into `files`:
+    /// `lookup` returns `&self.files[mid]`, and `fallback` is set from
+    /// `lookup` rather than from anywhere else.
+    pub fn indexOf(self: *const Set, file: *const File) usize {
+        return (@intFromPtr(file) - @intFromPtr(self.files.ptr)) / @sizeOf(File);
+    }
+
     fn lookup(self: *const Set, url: []const u8) ?*const File {
         var lo: usize = 0;
         var hi: usize = self.files.len;
