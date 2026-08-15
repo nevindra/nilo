@@ -119,7 +119,7 @@ Things that are wrong or missing today, with what fixing them would take.
   staleness trap, and for the same reason: a type holding one of its own has to
   stop somewhere.
 - ~~**Nothing enforces the rule that a mistake stops in zfast's own words.**~~
-  *Done, and it was holding less than it looked.* `refusals/` is 39 programs
+  *Done, and it was holding less than it looked.* `refusals/` is 46 programs
   written wrong on purpose, each expected to fail with a named message, run by
   `zig build test`
   ([ADR 0027](./adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)).
@@ -230,7 +230,28 @@ Not "later" — decided against, with the reasoning written down.
 
 ## Not decided
 
-- **Sessions and templates.** Both are real asks and neither has a shape yet.
+- **Sessions.** The cookie half is here now
+  ([ADR 0030](./adr/0030-a-cookie-is-a-header-and-set-cookie-is-the-one-that-repeats.md)):
+  `c.setCookie`, `c.cookie`, `c.clearCookie`, and a resolved value reading the
+  cookie is the whole of a signed-in user. What is not here is the half that
+  is policy — where the session is stored, whether the cookie carries an id or
+  a signed payload, what signs it, and how it is rotated. That is the same
+  line [ADR 0016](./adr/0016-resolved-values-are-declared-by-their-type.md)
+  draws around authentication, and it is not obvious there is a shape zfast
+  should have an opinion about rather than an example of.
+  [`examples/forms`](../examples/forms/main.zig) is the example.
+- **Templates.** A real ask, and no shape yet. What makes it hard in Zig is
+  that the two obvious answers are far apart: comptime-checked templates,
+  which are a compiler of their own, and runtime string interpolation, which
+  is a worse `std.fmt`. Nothing in between has been argued for.
+- **Multipart, streamed.** `Form(T)` reads a multipart body whole, bounded by
+  `max_body` ([ADR 0031](./adr/0031-a-form-is-the-body-read-by-another-rule.md)),
+  which is right for a form with a photo in it and wrong for a 2 GB video.
+  The streaming version wants a parser that resumes across reads and an
+  `Upload` that is a reader rather than bytes — a real design, and one that
+  belongs next to `sendfile` above rather than on its own. Until then the
+  answer is `c.bodyStream()`, which holds nothing and makes the framing the
+  handler's problem.
 - ~~**Somewhere to put work that is not a request.**~~ *Decided and shipped.*
   It is `zfast.spawn(f, args)`, a fiber owned by the running server rather
   than by whatever started it, so shutdown counts it and cuts it off exactly

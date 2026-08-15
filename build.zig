@@ -4,6 +4,7 @@ const examples = [_]Example{
     .{ .name = "hello", .about = "The smallest thing that serves" },
     .{ .name = "rest", .about = "Typed handlers, a service, fail functions, middleware" },
     .{ .name = "orders", .about = "Nested resources, nested bodies, a state machine, an upsert" },
+    .{ .name = "forms", .about = "An HTML form, a session cookie, an upload and a redirect" },
     .{ .name = "spa", .about = "A single-page app's files plus a JSON API" },
     .{ .name = "stream", .about = "A streamed report and a stream of events" },
     .{ .name = "chat", .about = "A WebSocket, from the handshake to the last frame" },
@@ -26,6 +27,22 @@ const refusals = [_]Refusal{
     .{
         .name = "cors_credentials_with_any_origin",
         .says = "cors credentials cannot be combined with origin \"*\" — browsers reject it.",
+    },
+    .{
+        .name = "form_and_body",
+        .says = "the handler for route \"/sign-up\" asks for both a request body (argument 1, a form_and_body.Profile) and a form (argument 2) — and a request only has one body.",
+    },
+    .{
+        .name = "form_field_cannot_convert",
+        .says = "the field `tags: []const u8` of the `Form(form_field_cannot_convert.SignUp)` on route \"/sign-up\" is not something a form value can become.",
+    },
+    .{
+        .name = "form_not_a_struct",
+        .says = "the `Form(u32)` on route \"/sign-up\" is not a struct.",
+    },
+    .{
+        .name = "form_with_no_fields",
+        .says = "the `Form(form_with_no_fields.Empty)` on route \"/sign-up\" has no fields, so it would read nothing.",
     },
     .{
         .name = "group_no_slash",
@@ -112,6 +129,10 @@ const refusals = [_]Refusal{
         .says = "the `Query(query_with_no_fields.Search)` on route \"/users\" has no fields, so it would read nothing.",
     },
     .{
+        .name = "redirect_not_a_redirect",
+        .says = "`Redirect(200)` is not a redirect.",
+    },
+    .{
         .name = "resolver_argument_not_allowed",
         .says = "argument 1 of the resolver on `resolver_argument_not_allowed.Caller` is a u32, which a resolver cannot be given.",
     },
@@ -156,12 +177,20 @@ const refusals = [_]Refusal{
         .says = "the handler for route \"/orders\" takes two structs by value — argument 1 is a two_bodies.Store and argument 2 is a two_bodies.NewOrder — and a request only has one body.",
     },
     .{
+        .name = "two_forms",
+        .says = "the handler for route \"/sign-up\" asks for the form twice — argument 1 and argument 2.",
+    },
+    .{
         .name = "two_queries",
         .says = "the handler for route \"/users\" asks for the query string twice — argument 1 and argument 2.",
     },
     .{
         .name = "unused_pattern_params",
         .says = "route \"/users/:user/pets/:pet\" has 2 path params (:user, :pet), but its handler only takes 1.",
+    },
+    .{
+        .name = "upload_as_an_argument",
+        .says = "argument 1 of the handler for route \"/avatars\" is a `zfast.Upload`, which is a field of a form rather than an argument of its own.",
     },
     .{
         .name = "wildcard_in_segment",
@@ -362,13 +391,21 @@ pub fn build(b: *std.Build) void {
     // library cannot be written down as passing, only fixed or deleted
     // ([ADR 0027](docs/adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)).
     //
-    // This used to say the refusals never cache, because the compiler keeps
-    // nothing from a compilation that failed, and cost about 9 seconds on every
-    // warm `zig build test`. Zig 0.16 caches them: measured warm, all 39 are
-    // 0.5s. The note stays because the number is what put them on `test` rather
-    // than on a step of their own, and it is no longer an argument that has to
-    // be won — enforcement that has to be asked for is a sentence in a document
-    // again, and now it is nearly free as well.
+    // **They do not cache, and they are the slow part of `zig build test`.**
+    // The compiler keeps nothing from a compilation that failed, so every
+    // refusal is re-analysed every run: measured warm on Zig 0.16.0, all 46
+    // are ~12.8s of a ~17s `zig build test`, at roughly 270ms each.
+    //
+    // A note here once said the opposite — that Zig 0.16 had started caching
+    // them and all 39 were 0.5s. That was measured wrong and is corrected in
+    // [ADR 0027](docs/adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md);
+    // the original entry's number, about 9 seconds, was right all along.
+    //
+    // They stay on `test` at that price, which is the trade the ADR argues:
+    // enforcement that has to be asked for is a sentence in a document again.
+    // If the loop somebody sits in gets too slow to sit in, the move is to
+    // take them off `test` and leave them on `test-all` — not to stop
+    // checking.
     const refusals_step = b.step("refusals", "Check that each mistake stops in zfast's own words");
     for (refusals) |refusal| {
         const module = b.createModule(.{

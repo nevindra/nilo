@@ -75,6 +75,45 @@ pub const Answer = struct {
         return null;
     }
 
+    /// The `n`th header of this name, counting from zero.
+    ///
+    /// `header` answers with the first, which is right for every header
+    /// except the one a response is supposed to send more than one of — see
+    /// `setCookie` below, and `http1.repeats`.
+    pub fn headerAt(self: Answer, name: []const u8, n: usize) ?[]const u8 {
+        var seen: usize = 0;
+        var lines = std.mem.splitSequence(u8, self.head, "\r\n");
+        _ = lines.next(); // the status line
+        while (lines.next()) |line| {
+            const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+            if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[0..colon], " "), name)) continue;
+            if (seen == n) return std.mem.trim(u8, line[colon + 1 ..], " \t");
+            seen += 1;
+        }
+        return null;
+    }
+
+    /// How many headers of this name the response carries.
+    pub fn headerCount(self: Answer, name: []const u8) usize {
+        var n: usize = 0;
+        while (self.headerAt(name, n) != null) n += 1;
+        return n;
+    }
+
+    /// The whole `Set-Cookie` line that sets the cookie called `name`,
+    /// attributes and all — or null if the response sets no such cookie.
+    ///
+    /// A response may set several, so asking by name is the only way to ask
+    /// (ADR 0030).
+    pub fn setCookie(self: Answer, name: []const u8) ?[]const u8 {
+        var n: usize = 0;
+        while (self.headerAt("Set-Cookie", n)) |line| : (n += 1) {
+            const equals = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+            if (std.mem.eql(u8, line[0..equals], name)) return line;
+        }
+        return null;
+    }
+
     /// The body as the client sees it: chunk framing removed if there was
     /// any, and the bytes as they are otherwise.
     pub fn text(self: Answer, into: []u8) ![]const u8 {
@@ -128,6 +167,35 @@ pub const Client = struct {
 
     pub fn post(self: *Client, app: *App, path: []const u8, body: []const u8) !Answer {
         return self.request(app, "POST", path, body);
+    }
+
+    /// A POST that says what its body is — which a form has to, because
+    /// `application/x-www-form-urlencoded` and `multipart/form-data` are told
+    /// apart by nothing else (ADR 0031).
+    ///
+    /// ```zig
+    /// const answer = try client.postWith(
+    ///     &app,
+    ///     "/sign-in",
+    ///     "application/x-www-form-urlencoded",
+    ///     "email=wati%40example.dev&password=hunter2",
+    /// );
+    /// ```
+    pub fn postWith(
+        self: *Client,
+        app: *App,
+        path: []const u8,
+        content_type: []const u8,
+        body: []const u8,
+    ) !Answer {
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(self.gpa);
+        try text.print(
+            self.gpa,
+            "POST {s} HTTP/1.1\r\nHost: test\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n\r\n{s}",
+            .{ path, content_type, body.len, body },
+        );
+        return self.send(app, text.items);
     }
 
     pub fn request(

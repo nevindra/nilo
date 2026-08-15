@@ -186,6 +186,20 @@ pub fn isReservedHeader(name: []const u8) bool {
         std.ascii.eqlIgnoreCase(name, "connection");
 }
 
+/// Headers a response may legitimately carry more than one of, and so the
+/// ones `Ctx.setHeader` must not treat as a replacement.
+///
+/// There is exactly one, and it is not a matter of taste: RFC 6265 §3 says a
+/// server sending two cookies has to send two `Set-Cookie` lines, and that
+/// they may not be folded into one comma-separated value the way every other
+/// repeatable header may. So "last one wins" — which is right for `Vary` or
+/// a cache directive, where a second call is somebody changing their mind —
+/// would mean setting a session cookie and a preference cookie silently
+/// delivered only the second.
+pub fn repeats(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, "set-cookie");
+}
+
 /// Iterate every header in a head (the request line is skipped), for
 /// layers that need all the headers, not just the ones the parser uses.
 pub const HeaderIterator = struct {
@@ -452,7 +466,10 @@ pub fn statusPhrase(status: u16) []const u8 {
         206 => "Partial Content",
         301 => "Moved Permanently",
         302 => "Found",
+        303 => "See Other",
         304 => "Not Modified",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
@@ -594,7 +611,7 @@ fn statusLine(comptime status: u16) []const u8 {
 
 fn writeStatusLine(out: *std.Io.Writer, status: u16, phrase: []const u8) !void {
     switch (status) {
-        inline 200, 201, 204, 206, 301, 302, 304, 400, 401, 403, 404, 405, 409, 413, 416, 422, 429, 431, 500, 501, 503 => |s| {
+        inline 200, 201, 204, 206, 301, 302, 303, 304, 307, 308, 400, 401, 403, 404, 405, 409, 413, 416, 422, 429, 431, 500, 501, 503 => |s| {
             return out.writeAll(comptime statusLine(s));
         },
         else => return out.print("HTTP/1.1 {d} {s}\r\n", .{ status, phrase }),
@@ -996,4 +1013,30 @@ test "the framework's own headers are reserved" {
     try testing.expect(isReservedHeader("content-type"));
     try testing.expect(isReservedHeader("CONNECTION"));
     try testing.expect(!isReservedHeader("Vary"));
+}
+
+test "Set-Cookie is the one header a response may carry twice" {
+    try testing.expect(repeats("Set-Cookie"));
+    try testing.expect(repeats("set-cookie"));
+    try testing.expect(!repeats("Vary"));
+    try testing.expect(!repeats("Location"));
+    // And it is not a header the framework writes itself, so it goes through
+    // `setHeader` like any other.
+    try testing.expect(!isReservedHeader("Set-Cookie"));
+}
+
+test "the redirect statuses all have a phrase, and it is written from the constant" {
+    for ([_]u16{ 301, 302, 303, 307, 308 }) |status| {
+        try testing.expect(statusPhrase(status).len > 0);
+
+        var buf: [128]u8 = undefined;
+        var out = std.Io.Writer.fixed(&buf);
+        try writeStatusLine(&out, status, statusPhrase(status));
+
+        var expected: [128]u8 = undefined;
+        try testing.expectEqualStrings(
+            try std.fmt.bufPrint(&expected, "HTTP/1.1 {d} {s}\r\n", .{ status, statusPhrase(status) }),
+            out.buffered(),
+        );
+    }
 }

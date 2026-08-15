@@ -1416,6 +1416,13 @@ fn sendFailure(c: *Ctx, failure: *const fail.Failure, err: anyerror) !void {
 const testing = std.testing;
 const Str = str_mod.Str;
 
+// Reached for only by the tests below, which is why they are here rather
+// than at the top: `testing.zig` imports this file, and the tests are the
+// one place that wants to go back the other way.
+const zfast_testing = @import("testing.zig");
+const form_mod = @import("form.zig");
+const redirect_mod = @import("redirect.zig");
+
 const Harness = struct {
     arena: std.heap.ArenaAllocator,
     lifetime: str_mod.Lifetime = .{},
@@ -5444,4 +5451,339 @@ test "a middleware scoped below a static prefix still runs, and still costs noth
 
     const shut = h.send(&app, "GET /assets/private/secret.css HTTP/1.1\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, shut.response, "HTTP/1.1 401"));
+}
+
+// ---- cookies, forms and redirects, down the real request path ----
+//
+// Each of the three has its own module and its own tests; what these are
+// for is the wiring — that a cookie survives the head being parsed, that a
+// form is read out of a body the connection really delivered, and that a
+// redirect's Location comes out of the same header machinery everything
+// else uses.
+
+fn echoCookie(c: *Ctx) anyerror!void {
+    const session = c.cookie("session") orelse
+        return c.sendText(200, "no cookie");
+    try c.sendText(200, session.view());
+}
+
+test "a cookie is read out of the head the connection delivered" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/me", echoCookie);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const answer = h.send(&app, "GET /me HTTP/1.1\r\nCookie: theme=dark; session=abc123\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, answer.response, "abc123"));
+
+    // A request carrying no cookie at all takes the other branch rather
+    // than reading somebody else's head.
+    const bare = h.send(&app, "GET /me HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, bare.response, "no cookie"));
+}
+
+test "a cookie split across two Cookie headers is still found" {
+    // What an HTTP/2 client's request looks like once a proxy has turned it
+    // back into HTTP/1.1.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/me", echoCookie);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const answer = h.send(&app, "GET /me HTTP/1.1\r\nCookie: theme=dark\r\nCookie: session=abc123\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, answer.response, "abc123"));
+}
+
+test "reading a cookie allocates nothing" {
+    // The claim `Ctx.cookie` makes: the header is walked where it lies, so a
+    // request that carries cookies costs the same as one that does not
+    // (ADR 0018's hard invariant, ADR 0030).
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/me", echoCookie);
+    try app.resolveChains();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var counting = budget.Counting{ .child = arena.allocator() };
+    var lifetime = str_mod.Lifetime{};
+    var in_flight = fail.InFlight{};
+    var buf: [4096]u8 = undefined;
+
+    const request = "GET /me HTTP/1.1\r\nHost: example.dev\r\n" ++
+        "Cookie: theme=dark; lang=id; session=abc123; consent=yes\r\n\r\n";
+
+    for (0..3) |_| {
+        var warm_in = std.Io.Reader.fixed(request);
+        var warm_out = std.Io.Writer.fixed(&buf);
+        _ = app.handleRequest(counting.allocator(), &lifetime, &in_flight, &warm_in, &warm_out, .off, .{});
+        lifetime.end();
+        _ = arena.reset(.{ .retain_with_limit = arena_keep });
+    }
+
+    counting.reset();
+    var in = std.Io.Reader.fixed(request);
+    var out = std.Io.Writer.fixed(&buf);
+    _ = app.handleRequest(counting.allocator(), &lifetime, &in_flight, &in, &out, .off, .{});
+
+    try testing.expectEqual(@as(usize, 0), counting.allocs);
+}
+
+fn setsTwoCookies(c: *Ctx) anyerror!void {
+    try c.setCookie(.{ .name = "session", .value = "abc123" });
+    try c.setCookie(.{ .name = "theme", .value = "dark", .http_only = false, .secure = false });
+    try c.sendEmpty(200);
+}
+
+test "two cookies are two Set-Cookie lines, not one replacing the other" {
+    // The reason `http1.repeats` exists. Every other header replaces on a
+    // second `setHeader`, and applying that rule here would have delivered
+    // only the theme — silently, and only in the case where a login sets a
+    // session alongside anything else.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/sign-in", setsTwoCookies);
+
+    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    const answer = try client.get(&app, "/sign-in");
+    try testing.expectEqual(@as(usize, 2), answer.headerCount("Set-Cookie"));
+    try testing.expectEqualStrings(
+        "session=abc123; Path=/; Secure; HttpOnly; SameSite=Lax",
+        answer.setCookie("session").?,
+    );
+    try testing.expectEqualStrings("theme=dark; Path=/; SameSite=Lax", answer.setCookie("theme").?);
+}
+
+fn signsOut(c: *Ctx) anyerror!void {
+    try c.clearCookie(.{ .name = "session" });
+    try c.sendEmpty(204);
+}
+
+test "clearing a cookie sends one that has already expired" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/sign-out", signsOut);
+
+    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    const answer = try client.post(&app, "/sign-out", "");
+    try testing.expectEqual(@as(u16, 204), answer.status);
+    const line = answer.setCookie("session").?;
+    try testing.expect(std.mem.indexOf(u8, line, "Max-Age=0") != null);
+    try testing.expect(std.mem.indexOf(u8, line, "Expires=Thu, 01 Jan 1970") != null);
+}
+
+fn setsASmuggledCookie(c: *Ctx) anyerror!void {
+    // A value assembled from something the request supplied, which is how
+    // this happens for real.
+    try c.setCookie(.{ .name = "session", .value = "abc; Path=/admin" });
+    try c.sendEmpty(200);
+}
+
+test "a cookie value that would smuggle an attribute is refused, not escaped" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/bad", setsASmuggledCookie);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const answer = h.send(&app, "GET /bad HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 500"));
+    try testing.expect(try Harness.saysFailure(answer.response, "holds a character a cookie value cannot"));
+    // And nothing went out with it.
+    try testing.expect(std.mem.indexOf(u8, answer.response, "Set-Cookie") == null);
+}
+
+const SignIn = struct {
+    email: Str,
+    password: Str,
+    remember: bool = false,
+};
+
+fn signIn(incoming: form_mod.Form(SignIn)) !redirect_mod.Redirect(303) {
+    if (!incoming.value.email.eql("wati@example.dev")) {
+        return fail.unauthorized("no such account", .{});
+    }
+    return .with("/welcome", .of(&.{
+        .{ .name = "Set-Cookie", .value = "session=abc123; Path=/; HttpOnly" },
+    }));
+}
+
+test "a urlencoded form reaches a typed handler, and its redirect carries the cookie" {
+    // The whole shape of a sign-in, which is what these three features were
+    // added for: a form in, a session cookie out, and a 303 so the browser's
+    // reload does not post the form again.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/sign-in", signIn);
+
+    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    const answer = try client.postWith(
+        &app,
+        "/sign-in",
+        "application/x-www-form-urlencoded",
+        "email=wati%40example.dev&password=hunter2&remember=true",
+    );
+    try testing.expectEqual(@as(u16, 303), answer.status);
+    try testing.expectEqualStrings("/welcome", answer.header("Location").?);
+    try testing.expectEqualStrings("session=abc123; Path=/; HttpOnly", answer.setCookie("session").?);
+    // A redirect has no body to read.
+    try testing.expectEqualStrings("", answer.body);
+}
+
+test "a form that does not fit is a 400 naming the field, like a query param" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/sign-in", signIn);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const missing = h.send(&app, "POST /sign-in HTTP/1.1\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 24\r\n\r\n" ++
+        "email=wati%40example.dev");
+    try testing.expect(std.mem.startsWith(u8, missing.response, "HTTP/1.1 400"));
+    try testing.expect(try Harness.saysFailure(missing.response, "the form is missing \"password\""));
+
+    const wrong_type = h.send(&app, "POST /sign-in HTTP/1.1\r\n" ++
+        "Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}");
+    try testing.expect(std.mem.startsWith(u8, wrong_type.response, "HTTP/1.1 400"));
+    try testing.expect(try Harness.saysFailure(wrong_type.response, "this endpoint takes a form"));
+}
+
+const NewAvatar = struct {
+    caption: Str,
+    image: form_mod.Upload,
+};
+
+fn uploadAvatar(incoming: form_mod.Form(NewAvatar)) !struct {
+    caption: []const u8,
+    filename: []const u8,
+    content_type: []const u8,
+    bytes: usize,
+} {
+    const image = incoming.value.image;
+    return .{
+        .caption = incoming.value.caption.view(),
+        .filename = image.filename.view(),
+        .content_type = image.content_type.view(),
+        .bytes = image.len(),
+    };
+}
+
+test "a multipart upload reaches a typed handler with its bytes intact" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/avatars", uploadAvatar);
+
+    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    const body = "--X\r\nContent-Disposition: form-data; name=\"caption\"\r\n\r\nme, squinting\r\n" ++
+        "--X\r\nContent-Disposition: form-data; name=\"image\"; filename=\"me.png\"\r\n" ++
+        "Content-Type: image/png\r\n\r\n\x89PNG\r\n\x1a\n....\r\n" ++
+        "--X--\r\n";
+
+    const answer = try client.postWith(&app, "/avatars", "multipart/form-data; boundary=X", body);
+    try testing.expectEqual(@as(u16, 200), answer.status);
+    try testing.expectEqualStrings(
+        "{\"caption\":\"me, squinting\",\"filename\":\"me.png\"," ++
+            "\"content_type\":\"image/png\",\"bytes\":12}",
+        answer.body,
+    );
+}
+
+test "an endpoint wanting a file, sent a form that cannot carry one, says which to send" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/avatars", uploadAvatar);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const answer = h.send(&app, "POST /avatars HTTP/1.1\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 11\r\n\r\n" ++
+        "caption=hey");
+    try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 400"));
+    try testing.expect(try Harness.saysFailure(answer.response, "has to be sent as multipart/form-data"));
+}
+
+fn redirectsItself(c: *Ctx) anyerror!void {
+    try c.redirect(302, "/somewhere-else");
+}
+
+test "a *Ctx handler can redirect, and a redirect carries no body" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/old", redirectsItself);
+
+    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    const answer = try client.get(&app, "/old");
+    try testing.expectEqual(@as(u16, 302), answer.status);
+    try testing.expectEqualStrings("/somewhere-else", answer.header("Location").?);
+    try testing.expectEqualStrings("0", answer.header("Content-Length").?);
+    try testing.expectEqualStrings("", answer.body);
+    // A redirect is an ordinary answer, so the connection carries on.
+    try testing.expect(answer.keep_alive);
+}
+
+fn redirectsNowhere(c: *Ctx) anyerror!void {
+    try c.redirect(302, "");
+}
+
+test "a redirect with nowhere to go is a 500 rather than a Location nobody can follow" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/old", redirectsNowhere);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const answer = h.send(&app, "GET /old HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 500"));
+    try testing.expect(try Harness.saysFailure(answer.response, "has to say where to"));
+}
+
+fn docsSignIn(_: form_mod.Form(SignIn)) !redirect_mod.Redirect(303) {
+    return .to("/welcome");
+}
+
+fn docsUpload(_: form_mod.Form(NewAvatar)) !typed.Status(201, DocUser) {
+    return .{ .value = .{ .id = 1, .name = .static("x") } };
+}
+
+test "the document says which encoding a form takes, and where a redirect sends you" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/sign-in", docsSignIn);
+    try app.post("/avatars", docsUpload);
+    app.docs(.{ .title = "Forms" });
+
+    // Borrowed from the App, which owns it — not a copy to free.
+    const document = try docsFor(&app);
+
+    // A form with no file in it is what a browser sends urlencoded; one with
+    // a file can only be multipart, and a generated client that guessed
+    // would post something the endpoint refuses.
+    try testing.expect(std.mem.indexOf(u8, document, "\"application/x-www-form-urlencoded\":{\"schema\":") != null);
+    try testing.expect(std.mem.indexOf(u8, document, "\"multipart/form-data\":{\"schema\":") != null);
+    // The file itself is bytes, not the three-field struct carrying it.
+    try testing.expect(std.mem.indexOf(u8, document, "\"image\":{\"type\":\"string\",\"format\":\"binary\"}") != null);
+    // And the redirect promises the one header that makes it followable.
+    try testing.expect(std.mem.indexOf(u8, document, "\"303\":{\"description\":\"the client is sent somewhere else\"") != null);
+    try testing.expect(std.mem.indexOf(u8, document, "\"Location\"") != null);
+    // Nothing about a JSON body, which neither of these takes.
+    try testing.expect(std.mem.indexOf(u8, document, "\"requestBody\":{\"required\":true,\"content\":{\"application/json\"") == null);
 }

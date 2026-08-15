@@ -418,6 +418,8 @@ The general lesson is the one [ADR 0001](./adr/0001-dx-wins-below-the-10-percent
 
 And one price named in an ADR turned out to have quietly stopped being real: [ADR 0027](./adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md) recorded the 39 refusals as "about 9 seconds on every `zig build test`" that "never cache". On Zig 0.16 they cache, and they are 0.5s. Nothing was done to earn that, which is exactly why it needed checking.
 
+*It needed checking harder. Re-run later against a clean checkout of this very commit, `zig build refusals` is **10.6s** warm for those 39 — they never started caching, and the 0.5s was a bad measurement. The paragraph above stays where it is because it is the mistake it warns about, made in the same breath: "a number is not a finding until you know what is in it", followed immediately by a number nobody looked into. See [ADR 0027](./adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md), which now carries the corrected figure.*
+
 **What was left alone.** Memory per idle connection is 16,961 bytes and seventh of nine — http.zig holds a connection in 11.2 KB, Bun in 338 bytes. zfast is the leaner one below about a thousand connections and is not above it, so the README's "low memory" needs the qualifier or the number needs to come down. Not fixed here, and written down rather than left to be discovered, which is the only part of that sentence this project has earned yet.
 
 *It came down. A keep-alive connection was holding every buffer page it had ever touched until close; between requests those pages now go back, and the figure is 8,767 bytes flat — third of nine, and third place is behind Bun and nothing else. The number is in [`benchmarks.md`](./benchmarks.md).*
@@ -631,3 +633,77 @@ against the old behaviour it reads `expected 0, found 1`.
 What still costs one allocation is a 404 or a 405, and that stays: the set of
 paths that are neither a route nor a file is every string there is, so there is
 nothing to precompute for.
+
+## The three gaps that were nobody's decision
+
+Everything absent from 0.1.0 had a reason written down — TLS is refused, broadcast waits on zio, response compression has a design nobody has had yet. Three things had no reason at all. They were simply missing, and the review that found them found them the way anybody would: by asking what somebody coming from Express does in their first ten minutes.
+
+**Cookies.** Not sessions — cookies. `c.header("Cookie")` and split `a=1; b=2` yourself. `docs/guide/middleware.md` had been writing "behind a cookie" in an example for weeks, so the concept was acknowledged and the tool was not there.
+
+**Form bodies.** A struct argument meant JSON. `<form method="post">` sends urlencoded, and multipart once it has a file, and neither reached a handler.
+
+**Redirects.** Possible as `Status(302, void)` with a `Location` header, which is three lines for a one-line idea and invisible to the generated document.
+
+Three ADRs came out of it — [0030](./adr/0030-a-cookie-is-a-header-and-set-cookie-is-the-one-that-repeats.md), [0031](./adr/0031-a-form-is-the-body-read-by-another-rule.md), [0032](./adr/0032-a-redirect-puts-its-status-in-the-type.md) — and what follows is the part that was not obvious in advance.
+
+### The bug that would have had no symptom
+
+`Ctx.setHeader` replaces. Setting `Vary` twice is somebody changing their mind, and sending both would be untidy at best. That rule is right for every response header there is, except one.
+
+RFC 6265 §3 says a server sending two cookies sends two `Set-Cookie` lines, and — unlike every other repeatable field — that they may **not** be folded into one comma-separated value. (A cookie's `Expires` attribute contains a comma. That is how it ended up being true.)
+
+Applied unchanged, the replace rule would have meant a handler setting a session cookie and a preference cookie delivered only the preference. No error, no log line, no failing test unless somebody wrote one that set two. `http1.repeats` is a list of one entry and it is a function rather than an inline `eqlIgnoreCase` precisely because a list of one that is really a rule needs somewhere to say why.
+
+### The thing that is refused rather than escaped
+
+```zig
+try c.setCookie(.{ .name = "session", .value = "abc; Path=/admin" });
+```
+
+That is not a malformed cookie. It is a cookie **with a path nobody wrote**, because `;` separates attributes and RFC 6265's grammar has no escaping to defend with. A `\r\n` in the same position is response splitting outright.
+
+There is nothing to encode it as, so it is refused before anything is allocated — a 500 naming the character and saying to encode the value first. A 500 and not a 400: the request did nothing wrong. Base64 and hex, which is what a session token actually is, pass untouched.
+
+### Two rules that made the form parser one function shorter each
+
+`Query(T)` and `Form(T)` convert their fields the same way and must say the same thing when the text does not fit. That was going to be two copies of `convert`, so it is now `convert.zig` — one module, used by path params, query values and form fields alike. `"age" has to be a whole number, not "soon"` is the sentence a bad `?age=` has always produced, and now a bad form field produces it too because it is the same line of code.
+
+The other rule is that **a form is the body.** `Form(T)` sits exactly where a plain struct argument would have read JSON, so asking for both is a compile error with its own message — the two-bodies advice ("make one a pointer, so it is a service") is wrong here, because one of the two genuinely has to go.
+
+### What the multipart parser is careful about, and why each is silent
+
+Three, and none of them fails loudly when got wrong:
+
+- **The boundary is matched at the start of a line only.** A boundary string occurring inside a file is data. An `indexOf` that did not check would truncate the upload there, and only for files that happened to contain it.
+- **The line break in front of the boundary is framing.** A byte too many or too few corrupts every file that goes through. A text upload would look fine.
+- **A part with a `filename` is a file even when it is empty.** That is a browser saying "the field was there and nothing was chosen". Reading it as a text field puts an empty string where a handler expected an `Upload`.
+
+Each has a test named after the mistake rather than after the feature. The one that pins the file's bytes to the body's own address is there because "it works" and "it does not memcpy a 900 KB upload" look identical from outside.
+
+The part count is capped at 256. The arrays are sized from a count of boundaries in the body, and without a cap a megabyte of nothing but boundaries — about 15,000 of them under the default `max_body` — is half a megabyte of arena for a request carrying no data at all. That is the client choosing how much memory to spend, which is the shape of every limit in this project.
+
+### The compile error that is really documentation
+
+`Redirect(200)` stops compilation, and the message lists the five statuses that carry a `Location` with what each is for. That sentence is the whole reason `Redirect` is worth more than a header helper:
+
+> 303 (see other — what a form POST answers with, so the reload does not post again)
+
+**303 after a POST is the one people get wrong**, and getting it wrong means a browser's reload button submits the form a second time. Putting it in the compile error puts it where somebody is already reading, which is [ADR 0027](./adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)'s argument applied to a thing that is not a mistake in zfast's own terms at all.
+
+### What it cost
+
+Reading a cookie allocates **nothing**, and there is a test that says so: a request carrying four cookies through a route that reads one, counted through the same `budget.Counting` the primary metric uses. That is the header being walked where it lies, the same as `c.header` — a map built on the way in would have been an allocation on every request that carries cookies to save a scan on the few that read two.
+
+Setting one costs **one arena allocation**, sized by `cookie.lengthOf` before it is written. A test holds the length function and the writer together, because a length that disagreed with what gets written is either a buffer overrun or a truncated cookie, and both are the kind of thing that works until it does not.
+
+A form costs what `c.json` costs and for the same reason — the body is read whole, bounded by `max_body`. Nothing inside it is copied: every name, filename and file is a slice of the body already in the arena.
+
+Seven new refusals, bringing it to 46. `examples/forms` is the seventh example and the first one that is a web page rather than an API.
+
+### The measurement that had quietly stopped being true
+
+Counting the refusals meant touching the sentence next to the count, which said they cache on Zig 0.16 and cost 0.5s. They do not, and they never did.
+
+Measured warm on this machine: 46 refusals are ~12.8s of a ~17s `zig build test`, at about 270ms each. Re-run against a clean checkout of the commit that made the claim, the 39 that existed then are 10.6s — not 0.5s. The original entry, "about 9 seconds", was right the whole time and had been struck through in favour of a number nobody checked.
+
+The lesson is not about caching. That correction sits four paragraphs below this file's own line about a number not being a finding until you know what is in it, which makes it the mistake it warns about committed in the same breath. **A number saying a cost went away on its own deserves more scrutiny than one saying work made something faster**, not less — there is nobody to argue with it. [ADR 0027](./adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md) carries the corrected figure and keeps the wrong one visible.

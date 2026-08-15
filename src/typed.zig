@@ -15,14 +15,19 @@
 //! | `*Db`, `*const Cfg`   | a service, matched by its type             |
 //! | `u32`, `Str`, `bool`, a float, an enum | a path param, in the order `:name` (and a trailing `*`) appears in the pattern |
 //! | `Query(T)`            | the query string, read into a struct of yours |
+//! | `Form(T)`             | the body as an HTML form, into a struct of yours (ADR 0031) |
 //! | `std.mem.Allocator`   | the request arena, freed when the request ends |
 //! | a type carrying `zfast_resolve` | a resolved value, worked out from the request (ADR 0016) |
 //! | any other struct      | the request body, parsed from JSON         |
 //!
+//! A `Form(T)` and a plain struct are the same slot — a form *is* the body —
+//! so a handler asking for both stops compilation.
+//!
 //! The return value becomes the response: `void` → empty 200,
 //! `Str`/`[]const u8` → text/plain, anything else → JSON. Wrap it in
 //! `Response(T)` when the status is not 200, or when the response carries
-//! headers of its own.
+//! headers of its own, and `Redirect(status)` when the answer is a
+//! `Location` (ADR 0032).
 //!
 //! Zig does not keep argument names, so path params are matched **by
 //! position**, not by name. Every mismatch — the param count, a type that
@@ -32,7 +37,9 @@
 
 const std = @import("std");
 const naming = @import("names.zig");
+const converting = @import("convert.zig");
 const ctx_mod = @import("ctx.zig");
+const form_mod = @import("form.zig");
 const http1 = @import("http1.zig");
 const router = @import("router.zig");
 const service_mod = @import("service.zig");
@@ -247,6 +254,10 @@ const Role = union(enum) {
     param: usize,
     body,
     query,
+    /// The body again, but as an HTML form rather than as JSON (ADR 0031).
+    /// A separate role and not a flavour of `.body`, because the two are
+    /// the same slot and asking for both has to be refused.
+    form,
     /// The request arena, for a handler that has to build something that
     /// outlives its own stack frame — a `Location` header, usually.
     arena,
@@ -278,6 +289,7 @@ pub fn wrap(comptime pattern: []const u8, comptime f: anytype) router.CtxHandler
                     .param => |nth| args[i] = try paramValue(P, c, param_names[nth]),
                     .body => args[i] = try c.json(P),
                     .query => args[i] = .{ .value = try queryValue(P.zfast_query, c) },
+                    .form => args[i] = .{ .value = try c.form(P.zfast_form) },
                     .arena => args[i] = c._arena,
                     .resolved => args[i] = try resolve.value(P, c),
                 }
@@ -342,6 +354,7 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
 
         var query: []const openapi.Field = &.{};
         var body: ?*const openapi.Schema = null;
+        var body_kind: openapi.BodyKind = .json;
         // Whether zfast can refuse this request before the handler runs.
         // Not a guess — it is exactly the routes with something to convert.
         var can_reject = false;
@@ -363,6 +376,17 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
                 body = openapi.schemaOf(p.type.?);
                 can_reject = true;
             },
+            // The same slot as a body and described the same way, with one
+            // difference the document has to carry: which encoding the
+            // client is expected to send. A form with a file in it can only
+            // be multipart, and saying otherwise would send somebody's
+            // generated client to a 400.
+            .form => {
+                const Fields = p.type.?.zfast_form;
+                body = openapi.schemaOf(Fields);
+                body_kind = if (form_mod.holdsAFile(Fields)) .multipart else .urlencoded;
+                can_reject = true;
+            },
             else => {},
         };
 
@@ -375,6 +399,7 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
             .params = path_params,
             .query = query,
             .body = body,
+            .body_kind = body_kind,
             .answer = answer,
             .can_reject = can_reject,
         };
@@ -423,6 +448,16 @@ fn answerOf(comptime Fn: type) openapi.Answer {
             else => Returned,
         };
         if (V == void) return empty;
+
+        // A redirect has no body to describe and a status that is part of
+        // the type, so it is the most completely described thing a
+        // signature can produce (ADR 0032).
+        if (hasNamedDecl(V, "zfast_redirect")) return .{
+            .status = V.zfast_redirect,
+            .content_type = "",
+            .schema = null,
+            .redirect = true,
+        };
 
         if (hasNamedDecl(V, "zfast_response")) {
             // The status of a `Response(T)` is a field the handler fills in,
@@ -512,6 +547,7 @@ fn rolesOf(
         var roles: [params.len]Role = undefined;
         var used: usize = 0;
         var body_at: ?usize = null;
+        var form_at: ?usize = null;
         var query_at: ?usize = null;
         var wants_ctx = false;
 
@@ -544,6 +580,25 @@ fn rolesOf(
                     );
                     body_at = i;
                 },
+                // A form *is* the body — the same bytes, read by a different
+                // rule — so the two are one slot and asking for both is the
+                // same mistake as asking for two bodies. Worth its own
+                // message because the fix is not "make one a pointer": one
+                // of the two has to go.
+                .form => {
+                    if (form_at) |first| @compileError(
+                        "zfast: the handler for route \"" ++ pattern ++ "\" asks for the form " ++
+                            "twice — argument " ++ num(first + 1) ++ " and argument " ++
+                            num(i + 1) ++ ".\n" ++
+                            "  A request has one body. Put every field in a single struct and " ++
+                            "ask for that.",
+                    );
+                    form_at = i;
+                    form_mod.checkFields(
+                        P.zfast_form,
+                        "the `Form(" ++ naming.of(P.zfast_form) ++ ")` on route \"" ++ pattern ++ "\"",
+                    );
+                },
                 .query => {
                     if (query_at) |first| @compileError(
                         "zfast: the handler for route \"" ++ pattern ++ "\" asks for the query " ++
@@ -564,6 +619,15 @@ fn rolesOf(
                 else => {},
             }
         }
+
+        if (body_at != null and form_at != null) @compileError(
+            "zfast: the handler for route \"" ++ pattern ++ "\" asks for both a request body " ++
+                "(argument " ++ num(body_at.? + 1) ++ ", a " ++ naming.of(params[body_at.?].type.?) ++
+                ") and a form (argument " ++ num(form_at.? + 1) ++ ") — and a request only has " ++
+                "one body.\n" ++
+                "  A form *is* the body, read as `application/x-www-form-urlencoded` or " ++
+                "`multipart/form-data` instead of as JSON. Ask for one or the other, not both.",
+        );
 
         // A handler holding a `*Ctx` may ignore path params — it can reach
         // them itself via `c.param("…")`. One without a `*Ctx` has no other
@@ -587,6 +651,20 @@ fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Rol
     if (P == Str) return .{ .param = 0 };
     if (P == std.mem.Allocator) return .arena;
     if (comptime hasNamedDecl(P, "zfast_query")) return .query;
+    if (comptime hasNamedDecl(P, form_mod.marker)) return .form;
+    // Before `.@"struct" => .body`, and with a message of its own: an
+    // `Upload` in the argument list is somebody reaching for a file the way
+    // they would reach for a path param, and reading it as the request body
+    // would land them in a JSON parse error about a type they never sent.
+    if (P == form_mod.Upload) @compileError(
+        "zfast: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
+            "\" is a `zfast.Upload`, which is a field of a form rather than an argument of " ++
+            "its own.\n" ++
+            "  A file arrives as one field among several, so it is asked for inside the " ++
+            "struct the form is read into:\n" ++
+            "    const NewAvatar = struct { caption: zfast.Str, image: zfast.Upload };\n" ++
+            "    fn upload(incoming: zfast.Form(NewAvatar)) !zfast.Status(201, Avatar) { … }",
+    );
     // Before the `.@"struct" => .body` below, which would otherwise swallow
     // it: a resolved value is a struct too, and the marker is what tells the
     // two apart (ADR 0016).
@@ -662,21 +740,14 @@ fn checkQueryFields(comptime pattern: []const u8, comptime T: type, comptime i: 
         );
 
         for (info.fields) |f| {
-            const Inner = switch (@typeInfo(f.type)) {
-                .optional => |o| o.child,
-                else => f.type,
-            };
-            if (Inner == Str) continue;
-            switch (@typeInfo(Inner)) {
-                .int, .float, .bool, .@"enum" => {},
-                else => @compileError(
-                    "zfast: the field `" ++ f.name ++ ": " ++ naming.of(f.type) ++ "` of the " ++
-                        "`Query(" ++ naming.of(T) ++ ")` on route \"" ++ pattern ++
-                        "\" is not something a query value can become.\n" ++
-                        "  A query param arrives as text, so a field is a `zfast.Str`, a number, " ++
-                        "a `bool`, or an enum — optionally wrapped in `?` when it may be absent.",
-                ),
-            }
+            if (converting.convertible(f.type)) continue;
+            @compileError(
+                "zfast: the field `" ++ f.name ++ ": " ++ naming.of(f.type) ++ "` of the " ++
+                    "`Query(" ++ naming.of(T) ++ ")` on route \"" ++ pattern ++
+                    "\" is not something a query value can become.\n" ++
+                    "  A query param arrives as text, so a field is a `zfast.Str`, a number, " ++
+                    "a `bool`, or an enum — optionally wrapped in `?` when it may be absent.",
+            );
         }
     }
 }
@@ -760,43 +831,9 @@ fn queryValue(comptime T: type, c: *const Ctx) !T {
 }
 
 /// Turn one piece of request text into the type the handler asked for.
-/// `label` is how it is named back to the client — `:id` for a path param,
-/// `?page` for a query one — so the same message serves both.
-fn convert(comptime P: type, s: Str, comptime label: []const u8) !P {
-    if (P == Str) return s;
-
-    const text = s.view();
-    return switch (@typeInfo(P)) {
-        .int => std.fmt.parseInt(P, text, 10) catch
-            return fail.badRequest(label ++ " has to be a whole number, not \"{s}\"", .{text}),
-        .float => std.fmt.parseFloat(P, text) catch
-            return fail.badRequest(label ++ " has to be a number, not \"{s}\"", .{text}),
-        .bool => boolFrom(text) orelse
-            return fail.badRequest(label ++ " has to be true or false, not \"{s}\"", .{text}),
-        .@"enum" => std.meta.stringToEnum(P, text) orelse
-            return fail.badRequest(
-                label ++ " is not one of the known choices ({s}): \"{s}\"",
-                .{ comptime enumChoices(P), text },
-            ),
-        else => comptime unreachable,
-    };
-}
-
-/// The names of an enum's values, for the message that says what was
-/// expected. Built once at compile time.
-fn enumChoices(comptime E: type) []const u8 {
-    comptime {
-        var names: []const []const u8 = &.{};
-        for (@typeInfo(E).@"enum".fields) |f| names = names ++ [_][]const u8{f.name};
-        return join(names, ", ");
-    }
-}
-
-fn boolFrom(text: []const u8) ?bool {
-    if (std.mem.eql(u8, text, "true")) return true;
-    if (std.mem.eql(u8, text, "false")) return false;
-    return null;
-}
+/// Path params, query values and form fields all come through here, so all
+/// three say the same thing when the text does not fit (`convert.zig`).
+const convert = converting.convert;
 
 fn sendResult(c: *Ctx, result: anytype) !void {
     const R = @TypeOf(result);
@@ -804,6 +841,13 @@ fn sendResult(c: *Ctx, result: anytype) !void {
     const T = @TypeOf(value);
 
     if (T == void) return;
+    // Before `zfast_response`, and carrying no body of its own: a redirect
+    // is a status and a Location, and its `headers` are how a sign-in sends
+    // a `Set-Cookie` on the way out (ADR 0032).
+    if (comptime hasNamedDecl(T, "zfast_redirect")) {
+        for (value.headers.view()) |h| try c.setHeader(h.name, h.value);
+        return c.redirect(T.zfast_redirect, value.location);
+    }
     if (comptime hasNamedDecl(T, "zfast_response")) {
         // Copied rather than borrowed, the same as `Ctx.setHeader`: a
         // handler assembling a header value has the request arena to build

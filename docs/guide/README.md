@@ -16,29 +16,32 @@ each one assumes the ones above it — and jump straight in afterwards.
 
 4. [Requests](./requests.md) — path params, query structs, JSON bodies, and
    bodies too big to hold.
-5. [Responses](./responses.md) — statuses and headers, and the `Ctx` layer
-   underneath the typed one.
-6. [Streaming](./streaming.md) — writing an answer whose length nobody knows
+5. [Forms](./forms.md) — an HTML form as a struct of yours, and file uploads.
+6. [Responses](./responses.md) — statuses, headers and redirects, and the `Ctx`
+   layer underneath the typed one.
+7. [Cookies](./cookies.md) — reading them, setting them, and the signed-in
+   user.
+8. [Streaming](./streaming.md) — writing an answer whose length nobody knows
    yet, and server-sent events.
-7. [WebSocket](./websocket.md) — a handler that doesn't return for a while.
+9. [WebSocket](./websocket.md) — a handler that doesn't return for a while.
 
 ## Building an application
 
-8. [Middleware](./middleware.md) — the onion, and resolved values for the
-   signed-in user.
-9. [Services](./services.md) — shared state across threads, locks, and the rule
-   about blocking calls.
-10. [Static files](./static-files.md) — a directory held in memory, with ETags
+10. [Middleware](./middleware.md) — the onion, and resolved values for the
+    signed-in user.
+11. [Services](./services.md) — shared state across threads, locks, and the rule
+    about blocking calls.
+12. [Static files](./static-files.md) — a directory held in memory, with ETags
     and range requests.
-11. [Errors](./errors.md) — failing a request from anywhere, and what a client
+13. [Errors](./errors.md) — failing a request from anywhere, and what a client
     is told.
 
 ## Shipping it
 
-12. [Testing](./testing.md) — handlers as ordinary functions, and the test
+14. [Testing](./testing.md) — handlers as ordinary functions, and the test
     client for the ones that write their answer.
-13. [OpenAPI](./openapi.md) — an API document written from the signatures.
-14. [Deploying](./deploying.md) — startup errors, panics, graceful shutdown,
+15. [OpenAPI](./openapi.md) — an API document written from the signatures.
+16. [Deploying](./deploying.md) — startup errors, panics, graceful shutdown,
     tuning, and what isn't here yet.
 
 ## Also

@@ -11,6 +11,7 @@
 const std = @import("std");
 const body_mod = @import("body.zig");
 const bulkhead = @import("bulkhead.zig");
+const cookie_mod = @import("cookie.zig");
 const http1 = @import("http1.zig");
 const json_mod = @import("json.zig");
 const router = @import("router.zig");
@@ -243,6 +244,33 @@ pub const Ctx = struct {
         return null;
     }
 
+    /// The cookie called `name`, or null if the request carries no such one
+    /// (ADR 0030).
+    ///
+    /// ```zig
+    /// const token = c.cookie("session") orelse
+    ///     return fail.unauthorized("you are not signed in", .{});
+    /// ```
+    ///
+    /// Read out of the head each time, the way `header` is, so a request
+    /// that carries cookies and looks at none pays nothing. The value
+    /// arrives exactly as the client sent it: RFC 6265 makes a cookie value
+    /// opaque bytes and every framework layers its own encoding on top, so
+    /// guessing at one here would corrupt the ones that guessed otherwise.
+    ///
+    /// A request may carry more than one `Cookie` header — HTTP/2 clients
+    /// split them, and a proxy may — so all of them are looked through.
+    pub fn cookie(self: *const Ctx, name: []const u8) ?Str {
+        var headers = http1.HeaderIterator.from(self._head);
+        while (headers.next()) |h| {
+            if (!std.ascii.eqlIgnoreCase(h.name, "cookie")) continue;
+            if (cookie_mod.find(h.value, name)) |value| {
+                return Str.fromRequest(value, self._lifetime);
+            }
+        }
+        return null;
+    }
+
     /// The address the connection itself came from — the proxy's, when
     /// there is a proxy. Never forgeable, and never null: this is what the
     /// kernel says, not what a header claims.
@@ -393,6 +421,26 @@ pub const Ctx = struct {
         return value;
     }
 
+    /// Parse the request body as an HTML form into `T` — the `*Ctx` way in
+    /// to what `Form(T)` does for a typed handler (ADR 0031).
+    ///
+    /// `application/x-www-form-urlencoded` and `multipart/form-data` are
+    /// both read; which one arrived is the browser's business, not the
+    /// endpoint's. The whole body is held in memory and bounded by
+    /// `max_body`, exactly as `json` is.
+    ///
+    /// Every `Str` in the result — a file's bytes included — points into the
+    /// request arena and dies with the request, so `keep` is what takes one
+    /// out of it (ADR 0004).
+    pub fn form(self: *Ctx, comptime T: type) !T {
+        // Read before the body, while it is certain nothing has moved the
+        // head: `body()` may read from the connection, and on a request with
+        // a body the head has been copied for exactly that reason.
+        const content_type = if (self.header("Content-Type")) |h| h.view() else null;
+        const b = (try self.body()).view();
+        return @import("form.zig").readInto(T, self._arena, self._lifetime, content_type, b);
+    }
+
     /// Whether this connection is offered for another request.
     ///
     /// Checked when the response is written rather than when the request
@@ -453,10 +501,17 @@ pub const Ctx = struct {
 
     fn putHeader(self: *Ctx, entry: http1.Header) !void {
         if (http1.isReservedHeader(entry.name)) return error.ReservedHeader;
-        for (self.extraHeadersMutable()) |*h| {
-            if (std.ascii.eqlIgnoreCase(h.name, entry.name)) {
-                h.* = entry; // last one wins, rather than sending both
-                return;
+        // Setting a header twice is somebody changing their mind, so the
+        // second call replaces the first — except for the one header a
+        // response is *required* to send more than one of. Two cookies are
+        // two `Set-Cookie` lines and cannot be folded into one
+        // (`http1.repeats`).
+        if (!http1.repeats(entry.name)) {
+            for (self.extraHeadersMutable()) |*h| {
+                if (std.ascii.eqlIgnoreCase(h.name, entry.name)) {
+                    h.* = entry; // last one wins, rather than sending both
+                    return;
+                }
             }
         }
 
@@ -473,6 +528,93 @@ pub const Ctx = struct {
         try self._extra_spill.ensureTotalCapacity(self._arena, inline_headers * 2);
         self._extra_spill.appendSliceAssumeCapacity(&self._extra_inline);
         self._extra_spill.appendAssumeCapacity(entry);
+    }
+
+    /// Send a cookie back with this response (ADR 0030).
+    ///
+    /// ```zig
+    /// try c.setCookie(.{ .name = "session", .value = token });
+    /// ```
+    ///
+    /// The defaults are the careful ones — `Secure`, `HttpOnly`,
+    /// `SameSite=Lax`, `Path=/` — so turning a protection off is a visible
+    /// line rather than a forgotten one. See `zfast.Cookie` for the rest.
+    ///
+    /// Calling this twice sets two cookies rather than replacing the first,
+    /// which is the one way `Set-Cookie` differs from every other response
+    /// header. Costs **one arena allocation per cookie**, sized exactly.
+    ///
+    /// A cookie zfast cannot write — a value with a `;` in it, which would
+    /// smuggle an attribute nobody wrote — is a 500 saying which character
+    /// and why, because it is a mistake in the server rather than in the
+    /// request.
+    pub fn setCookie(self: *Ctx, c: cookie_mod.Cookie) !void {
+        cookie_mod.check(c) catch |err| return switch (err) {
+            error.CookieNameEmpty => fail.internal("a cookie has to have a name", .{}),
+            error.CookieNameInvalid => fail.internal(
+                "\"{s}\" is not a name a cookie can have — a cookie name is letters, digits, " ++
+                    "and any of !#$%&'*+-.^_`|~",
+                .{c.name},
+            ),
+            error.CookieValueInvalid => fail.internal(
+                "the value of the cookie \"{s}\" holds a character a cookie value cannot: a " ++
+                    "space, a comma, a semicolon, a quote, a backslash or a control byte. A " ++
+                    "semicolon would start an attribute nobody wrote, so this is refused rather " ++
+                    "than escaped — encode the value (base64, or percent) before setting it.",
+                .{c.name},
+            ),
+            error.CookieNeedsSecure => fail.internal(
+                "the cookie \"{s}\" asks for SameSite=None without Secure, and browsers drop " ++
+                    "that combination outright",
+                .{c.name},
+            ),
+        };
+
+        // Sized from `lengthOf`, so this is one allocation and the writer
+        // below cannot run out of room. A test holds the two together.
+        const buf = try self._arena.alloc(u8, cookie_mod.lengthOf(c));
+        var out: std.Io.Writer = .fixed(buf);
+        cookie_mod.write(&out, c) catch unreachable;
+        return self.putHeader(.{ .name = "Set-Cookie", .value = out.buffered() });
+    }
+
+    /// Delete a cookie the browser is holding.
+    ///
+    /// ```zig
+    /// try c.clearCookie(.{ .name = "session" });
+    /// ```
+    ///
+    /// A browser matches a deletion on the name, the path **and** the
+    /// domain, so a cookie set under `/admin` is not cleared by a deletion
+    /// at the default `/` — and nothing anywhere reports that it was not.
+    /// Pass the same path and domain the cookie was set with.
+    pub fn clearCookie(self: *Ctx, clearing: cookie_mod.Clearing) !void {
+        return self.setCookie(cookie_mod.deletion(clearing));
+    }
+
+    /// Send the client somewhere else (ADR 0032).
+    ///
+    /// ```zig
+    /// try c.redirect(303, "/welcome");
+    /// ```
+    ///
+    /// A handler that knows its status while it is being written returns
+    /// `zfast.Redirect(303)` instead, which is the same response and lets
+    /// the generated API description name it.
+    pub fn redirect(self: *Ctx, status: u16, location: []const u8) !void {
+        if (location.len == 0) return fail.internal(
+            "a redirect has to say where to — `c.redirect({d}, …)` was given nothing",
+            .{status},
+        );
+        if (status < 300 or status > 399) return fail.internal(
+            "{d} is not a redirect status, so a Location on it means nothing to a client",
+            .{status},
+        );
+        try self.setHeader("Location", location);
+        // No body. A browser follows the Location and never looks, and the
+        // handful of clients that do not are better served by the status
+        // than by a paragraph of HTML nobody maintains.
+        return self.sendEmpty(status);
     }
 
     pub fn send(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8) !void {
@@ -868,8 +1010,10 @@ fn kindOf(value: std.json.Value) []const u8 {
     };
 }
 
-/// What a field will accept, in those same words.
-fn expectedOf(comptime T: type) []const u8 {
+/// What a field will accept, in those same words. Public because a form
+/// field that was not sent is missing in the same way a body field is, and
+/// says so in the same sentence (`form.zig`).
+pub fn expectedOf(comptime T: type) []const u8 {
     comptime {
         if (T == Str) return "text";
         // A `Patch(T)` takes the value or null; leaving it out is the third

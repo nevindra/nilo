@@ -49,6 +49,9 @@ pub const Schema = union(enum) {
     /// `?T`, which in a JSON body means the value may also be null.
     nullable: *const Schema,
     object: Object,
+    /// A file out of a multipart form — `{"type":"string","format":"binary"}`,
+    /// which is how OpenAPI 3.1 says "bytes" (ADR 0031).
+    binary,
     /// A type with no useful JSON shape, or one nested deeper than this
     /// module follows. Emitted as `{}`, which in JSON Schema means "anything"
     /// — true, and better than a wrong claim.
@@ -105,6 +108,29 @@ pub const Answer = struct {
     /// that streams a CSV or sends a 202 looks, to a reader of return types,
     /// exactly like one that answers an empty 200.
     written: bool = false,
+    /// Whether this endpoint answers with a `Location` and no body — a
+    /// `Redirect(303)` (ADR 0032). The status is already in `status`; what
+    /// this adds is that the header is part of the promise, which is the
+    /// half a client generator has to see to follow it.
+    redirect: bool = false,
+};
+
+/// How a request body is expected to arrive on the wire. The shape is
+/// described the same way whichever it is; this is the content type it is
+/// filed under, and a form with a file in it can only be the last one
+/// (ADR 0031).
+pub const BodyKind = enum {
+    json,
+    urlencoded,
+    multipart,
+
+    pub fn contentType(self: BodyKind) []const u8 {
+        return switch (self) {
+            .json => "application/json",
+            .urlencoded => "application/x-www-form-urlencoded",
+            .multipart => "multipart/form-data",
+        };
+    }
 };
 
 /// Everything the signature of one route says about it.
@@ -115,6 +141,7 @@ pub const Operation = struct {
     params: []const Param,
     query: []const Field,
     body: ?*const Schema,
+    body_kind: BodyKind = .json,
     answer: Answer,
     /// Whether zfast itself can refuse this request with a 400 before the
     /// handler runs — true as soon as there is anything to convert or
@@ -160,6 +187,8 @@ fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
     comptime {
         if (depth >= max_depth) return held(.unknown);
         if (T == Str) return held(.string);
+        // A file is bytes, not the three-field struct it is carried in.
+        if (T == @import("form.zig").Upload) return held(.binary);
         // On the wire a `Patch(T)` is the value or null — the third state it
         // carries is "the field was not here at all", and JSON Schema says
         // that with `required`, which a default already takes care of.
@@ -597,8 +626,9 @@ fn writeOperation(w: *std.Io.Writer, components: *const Components, op: Operatio
     }
 
     if (op.body) |body| {
-        try w.writeAll(",\"requestBody\":{\"required\":true,\"content\":" ++
-            "{\"application/json\":{\"schema\":");
+        try w.writeAll(",\"requestBody\":{\"required\":true,\"content\":{");
+        try writeString(w, op.body_kind.contentType());
+        try w.writeAll(":{\"schema\":");
         try writeSchema(w, components, body);
         try w.writeAll("}}}");
     }
@@ -639,6 +669,15 @@ fn writeAnswer(w: *std.Io.Writer, components: *const Components, answer: Answer)
     try w.writeByte('"');
     if (answer.status) |status| try w.print("{d}", .{status}) else try w.writeAll("default");
     try w.writeAll("\":{\"description\":");
+
+    // A redirect promises a header rather than a body, and the header is the
+    // whole of the answer — a client that cannot see it has nowhere to go.
+    if (answer.redirect) {
+        try w.writeAll("\"the client is sent somewhere else\",\"headers\":{\"Location\":" ++
+            "{\"description\":\"where to go instead\",\"required\":true," ++
+            "\"schema\":{\"type\":\"string\"}}}}");
+        return;
+    }
 
     if (answer.schema == null) {
         try w.writeAll("\"an empty response\"}");
@@ -728,6 +767,7 @@ fn writeSchema(
         .integer => try w.writeAll("{\"type\":\"integer\"}"),
         .number => try w.writeAll("{\"type\":\"number\"}"),
         .boolean => try w.writeAll("{\"type\":\"boolean\"}"),
+        .binary => try w.writeAll("{\"type\":\"string\",\"format\":\"binary\"}"),
         .unknown => try w.writeAll("{}"),
 
         .choice => |names| {

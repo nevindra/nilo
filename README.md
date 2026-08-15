@@ -2,10 +2,11 @@
 
 An HTTP framework for Zig, aimed at people coming from Go or Node.
 
-> **0.1.0** — the first release. Routing, typed handlers, JSON, middleware,
-> static files, resolved values, groups and plugins, a generated OpenAPI
-> document, streamed responses and server-sent events, large request bodies,
-> range requests, and WebSocket. Needs Zig 0.16.
+> **0.1.0** — the first release. Routing, typed handlers, JSON, HTML forms and
+> file uploads, cookies, redirects, middleware, static files, resolved values,
+> groups and plugins, a generated OpenAPI document, streamed responses and
+> server-sent events, large request bodies, range requests, and WebSocket.
+> Needs Zig 0.16.
 >
 > Measured, at last, on a machine nobody else was using — the numbers and what
 > is in them are at the bottom of this page. `zfast` is a working name and may
@@ -80,12 +81,13 @@ what each line is for: [Getting started](./docs/guide/getting-started.md).
 
 ## Examples
 
-Six runnable ones live in [`examples/`](./examples/):
+Seven runnable ones live in [`examples/`](./examples/):
 
 ```
 zig build run-hello    # the smallest thing that serves
 zig build run-rest     # a service, JSON in and out, query params, auth middleware
 zig build run-orders   # the same ideas on a domain that is not one flat struct
+zig build run-forms    # an HTML form, a session cookie, an upload and a redirect
 zig build run-spa      # a single-page app's files next to its API
 zig build run-stream   # a streamed report, an event stream, an upload
 zig build run-chat     # a WebSocket, browser page included
@@ -94,7 +96,9 @@ zig build run-chat     # a WebSocket, browser page included
 `rest` is the one to read first. `orders` is the one that answers "yes, but what
 about…": resources inside resources, a body with structs and lists inside it, a
 state machine that answers 409, an upsert whose status is not known until it
-runs, and a service that owns everything it was handed.
+runs, and a service that owns everything it was handed. `forms` is the one for
+people building a web page rather than an API — a `<form>` posted, a session
+cookie set, a file uploaded, and a 303 so the reload button behaves.
 
 ## Documentation
 
@@ -107,7 +111,9 @@ might want to do, in the order you would meet them:
 | [Handlers](./docs/guide/handlers.md) | what a handler may ask for, and what it may return |
 | [Routing](./docs/guide/routing.md) | patterns, precedence, groups, plugins |
 | [Requests](./docs/guide/requests.md) | path params, query structs, JSON bodies, large uploads |
-| [Responses](./docs/guide/responses.md) | statuses, headers, and `Ctx` when you want full control |
+| [Forms](./docs/guide/forms.md) | an HTML form as a struct of yours, and file uploads |
+| [Responses](./docs/guide/responses.md) | statuses, headers, redirects, and `Ctx` when you want full control |
+| [Cookies](./docs/guide/cookies.md) | reading and setting them, and the signed-in user |
 | [Streaming](./docs/guide/streaming.md) | answers written in pieces, and server-sent events |
 | [WebSocket](./docs/guide/websocket.md) | upgrading a connection, and what it costs |
 | [Middleware](./docs/guide/middleware.md) | the onion, plus the signed-in user as a resolved value |
@@ -142,6 +148,11 @@ handler's response, and broadcasting to WebSockets a handler doesn't hold. Each
 with its reason in [`docs/roadmap.md`](./docs/roadmap.md); the ones decided
 against rather than queued up are in [`docs/adr/`](./docs/adr/).
 
+**Sessions are absent, cookies are not.** zfast sets and reads the cookie; what
+goes in it and where it is stored is your application's, the same line it draws
+around authentication. [`examples/forms`](./examples/forms/main.zig) is the
+whole shape in about forty lines.
+
 **TLS is a refusal rather than a gap** — terminate it in front, and the
 [deploying guide](./docs/guide/deploying.md#tls-and-the-proxy-in-front) has the
 five lines that do it ([ADR 0028](./docs/adr/0028-tls-is-terminated-in-front.md)).
@@ -174,7 +185,7 @@ Elm for the error messages — is
 
 The Elm part is the one with a build step behind it. Get a handler wrong and
 compilation stops with a sentence naming your route, your argument and the fix;
-[`refusals/`](./refusals/) is 39 programs written wrong on purpose that keep it
+[`refusals/`](./refusals/) is 46 programs written wrong on purpose that keep it
 that way ([ADR 0027](./docs/adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)).
 
 ## Measured

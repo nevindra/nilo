@@ -49,6 +49,42 @@ Eight per response there, and a ninth is a compile error pointing you at
 `c.setHeader`, which has no limit
 ([ADR 0019](../adr/0019-a-response-owns-its-headers.md)).
 
+## Redirects
+
+`Redirect(status)` carries its status in the type, so the API description
+names it and says the answer carries a `Location`:
+
+```zig
+fn shortLink(db: *Db, code: zfast.Str) !zfast.Redirect(302) {
+    return .to(try db.target(code.view()));
+}
+```
+
+Which one to use is the only difficulty, and it is worth getting right:
+
+| | |
+|---|---|
+| **301** | moved for good |
+| **302** | found — temporary |
+| **303** | see other. **What a form POST answers with**, because it turns the follow-up into a GET, so the reload button re-reads the page instead of posting the form again |
+| **307** | temporary, and the method is kept |
+| **308** | permanent, and the method is kept |
+
+Anything else is a compile error — a `Location` on a status that does not carry
+one means nothing to a client.
+
+A redirect can carry headers, which is how a sign-in answers:
+
+```zig
+return .with("/", .of(&.{.{ .name = "Set-Cookie", .value = session }}));
+```
+
+`c.redirect(status, location)` is the same response from a `*Ctx`, for a status
+only known while the request is running.
+
+There is no body. Browsers follow the header and never look
+([ADR 0032](../adr/0032-a-redirect-puts-its-status-in-the-type.md)).
+
 ## One request, one response
 
 A response is written and flushed in one go. There is no "start the response,

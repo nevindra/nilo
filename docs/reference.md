@@ -77,6 +77,7 @@ read, no status sent
 | `*Db`, `*const Config` | a service, by type |
 | `u32`, `f64`, `Str`, `bool`, an enum | a path param, positionally |
 | `Query(T)` | the query string as a struct |
+| `Form(T)` | the body as an HTML form — urlencoded or multipart |
 | `std.mem.Allocator` | the request arena |
 | a type with `zfast_resolve` | a resolved value |
 | any other struct | the body, parsed from JSON |
@@ -84,6 +85,11 @@ read, no status sent
 A body field may be `Patch(T)`, which tells "not sent" from "sent as null":
 `.absent`, `.cleared`, `.value`. Give it `= .absent` as its default;
 `.orNull()` collapses the two empty cases.
+
+`Form(T)` and a plain struct are the same slot — a form *is* the body — so
+asking for both is a compile error. A `Form(T)` field is a `Str`, a number, a
+`bool`, an enum or an `Upload`, optionally in a `?`; a default is what "not
+sent" means. See [Forms](./guide/forms.md).
 
 ## Handler returns
 
@@ -95,12 +101,18 @@ A body field may be `Patch(T)`, which tells "not sent" from "sent as null":
 | `?T` | 200 with the value, **404** when null |
 | `Status(code, T)` | that status — and the API description names it |
 | `Response(T)` | a status chosen at runtime; the description says `default` |
+| `Redirect(code)` | that status and a `Location`, no body |
 
 ```zig
 Status(201, User){ .headers = .of(&.{…}), .value = user }
 Status(204, void){}                                        // an empty response
 Response(User){ .status = if (made) 201 else 200, .value = user }
+Redirect(303).to("/welcome")                               // written `return .to(…)`
+Redirect(303).with("/welcome", .of(&.{…}))                 // …with headers of its own
 ```
+
+`Redirect` takes 301, 302, 303, 307 or 308; anything else is a compile error.
+303 is the one a form POST wants.
 
 `Headers` holds up to 8 by value; a ninth is a compile error.
 
@@ -115,8 +127,10 @@ Response(User){ .status = if (made) 201 else 200, .value = user }
 | `c.param(name)` | `?Str`, percent-decoded. `"*"` for a catch-all |
 | `c.query(name)` | `?Str`, percent-decoded, `+` as space |
 | `c.header(name)` | `?Str`, name matched case-insensitively |
+| `c.cookie(name)` | `?Str` — as the client sent it, nothing decoded. Allocates nothing |
 | `c.body()` | `!Str` — the whole body, up to `max_body` (1 MB) |
 | `c.json(T)` | `!T` — the body parsed as JSON |
+| `c.form(T)` | `!T` — the body parsed as a form, urlencoded or multipart |
 | `c.bodyStream()` | `!Body` — the body in pieces |
 | `c.bodyStreamWith(.{ .max_bytes = … })` | the same, with a ceiling. Default 64 MB |
 | `c.peer()` | the address the connection came from — the proxy's, if there is one |
@@ -131,6 +145,9 @@ Response(User){ .status = if (made) 201 else 200, .value = user }
 |---|---|
 | `c.setHeader(name, value)` | copied into the request arena |
 | `c.setStaticHeader(name, value)` | not copied — for text that already outlives the request |
+| `c.setCookie(cookie)` | a `Set-Cookie`. Calling it twice sets two, not one |
+| `c.clearCookie(.{ .name = …, .path = …, .domain = … })` | delete one. Path and domain have to match |
+| `c.redirect(status, location)` | a `Location` and no body |
 | `c.send(status, content_type, bytes)` | |
 | `c.sendText(status, text)` | `text/plain` |
 | `c.sendJson(status, value)` | `application/json` |
@@ -142,7 +159,39 @@ Response(User){ .status = if (made) 201 else 200, .value = user }
 | `c.upgradeWith(.{ .protocol = "chat.v1" })` | the same, naming a subprotocol |
 
 `Content-Type`, `Content-Length`, `Transfer-Encoding` and `Connection` are
-refused by `setHeader`. Set headers before sending.
+refused by `setHeader`. Set headers before sending. Setting the same header
+twice replaces it — except `Set-Cookie`, which a response may carry more than
+one of.
+
+## `Cookie`
+
+What `c.setCookie` takes. Only `name` and `value` have no default.
+
+| | Default |
+|---|---|
+| `name`, `value` | — |
+| `path` | `"/"` |
+| `domain` | `""` — this host, no subdomains |
+| `max_age` | `null` — a session cookie |
+| `expires` | `""` — an HTTP-date, if you have one |
+| `secure` | `true` |
+| `http_only` | `true` |
+| `same_site` | `.lax` — or `.strict`, `.none`, `.unset` |
+
+A value holding a space, comma, semicolon, quote, backslash or control byte is
+refused with a 500: a `;` would start an attribute nobody wrote. `.none`
+without `.secure` is refused for the same kind of reason — browsers drop it.
+
+## `Upload`
+
+One file out of a multipart form, as a `Form(T)` field type.
+
+| | |
+|---|---|
+| `u.filename` | `Str` — **what the client said**, never a path to write to |
+| `u.content_type` | `Str` — the client's claim, unverified |
+| `u.bytes` | `Str` — the file itself |
+| `u.len()` | how big it is |
 
 ## `Str`
 
@@ -292,8 +341,11 @@ zfast.cors.with(.{ .origin = …, .methods = …, .headers = …,
 |---|---|
 | `testing.Client.init(gpa, .{ .response_bytes = 64 * 1024 })` | |
 | `client.get(&app, path)` / `post(&app, path, body)` | |
+| `client.postWith(&app, path, content_type, body)` | a POST that says what its body is — what a form needs |
 | `client.request(&app, method, path, body)` | |
 | `client.send(&app, raw_request)` | the whole request, written out |
 | `answer.status` / `.head` / `.body` / `.raw` / `.chunked` / `.keep_alive` | |
-| `answer.header(name)` | case-insensitive |
+| `answer.header(name)` | case-insensitive, the first of that name |
+| `answer.headerAt(name, n)` / `.headerCount(name)` | for the ones a response repeats |
+| `answer.setCookie(name)` | the whole `Set-Cookie` line that sets it |
 | `answer.text(&buf)` | the body with chunk framing undone |

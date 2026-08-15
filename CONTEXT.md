@@ -48,6 +48,22 @@ _Avoid_: tri-state optional, maybe, undefined, nullable wrapper
 A struct of the caller's own, one field per query param, asked for as `Query(T)`. Field names are the param names, and a field's default is what "absent" means. The named counterpart to a positional path param.
 _Avoid_: query bag, params map, extractor
 
+**Form**:
+The request body when it came from an HTML form, read into a struct of the caller's own — one field per form field, asked for as `Form(T)`. The same slot a JSON body occupies and the same rules a Query struct follows. Whether it arrived urlencoded or as multipart is the browser's business, not the endpoint's.
+_Avoid_: form data, post data, multipart, body parser
+
+**Upload**:
+One file out of a Form. Three Strs — the bytes, the name the client gave it, and the type it claimed — of which only the first is a fact. Held whole in the request arena, so the ceiling is the Request arena's.
+_Avoid_: file, attachment, part, blob
+
+**Cookie**:
+A name and a value the client stores and sends back. Read out of the head where it lies and never decoded, because what a value means is whoever wrote it's convention. On the way out it is the one response header that may be sent twice rather than replaced.
+_Avoid_: session, token, crumb
+
+**Redirect**:
+An answer that is a status and a `Location` rather than a body, returned by the handler with its status in the type. `Redirect(303)` is the one a form POST wants, because it turns the follow-up into a GET.
+_Avoid_: forward, 302, location header
+
 **Catch-all**:
 A `*` as the last segment of a pattern, matching the whole rest of the path and handing it over under the name `*`. Always loses to a route that spells the path out.
 _Avoid_: wildcard route, splat, glob

@@ -176,6 +176,50 @@ pub const testing = @import("testing.zig");
 /// ```
 pub const Query = @import("typed.zig").Query;
 
+/// An HTML form body, read into a struct of yours — the same idea as
+/// `Query(T)`, on the body instead of the query string (ADR 0031).
+///
+/// ```zig
+/// const SignUp = struct { email: Str, password: Str, avatar: ?zfast.Upload = null };
+/// fn signUp(incoming: zfast.Form(SignUp)) !zfast.Redirect(303) { … }
+/// ```
+///
+/// `application/x-www-form-urlencoded` and `multipart/form-data` are both
+/// read — which one a browser sends depends on whether the form has a file
+/// in it, and that is not something the endpoint should have to know. The
+/// whole body is held in memory, bounded by `max_body`; an upload too big
+/// for that is `c.bodyStream()`'s.
+pub const Form = @import("form.zig").Form;
+
+/// One file out of a multipart form: its bytes, the name the client gave it
+/// and the type it claimed. Used as a field type inside a `Form(T)`.
+///
+/// The filename is whatever the client sent — `../../etc/passwd` included —
+/// so it is a label to show, never a path to write to.
+pub const Upload = @import("form.zig").Upload;
+
+/// A response that sends the client somewhere else, with the status in the
+/// type so the API description can name it (ADR 0032).
+///
+/// ```zig
+/// fn signUp(incoming: zfast.Form(SignUp)) !zfast.Redirect(303) {
+///     return .to("/welcome");
+/// }
+/// ```
+///
+/// 303 is the one a form POST wants — it turns the follow-up into a GET, so
+/// a reload does not post again. 301 and 308 are permanent, 302 and 307
+/// temporary; the pair ending in 7 and 8 keep the method.
+pub const Redirect = @import("redirect.zig").Redirect;
+
+/// A cookie on the way out: `c.setCookie(.{ .name = "session", .value = t })`
+/// (ADR 0030). Its defaults are `Secure`, `HttpOnly`, `SameSite=Lax` and
+/// `Path=/`, so a plain one is already the careful one.
+pub const Cookie = @import("cookie.zig").Cookie;
+
+/// `SameSite`, for a cookie that needs one of the other answers.
+pub const SameSite = @import("cookie.zig").SameSite;
+
 /// A body field that can tell "not sent" from "sent as null" — what a PATCH
 /// needs and `?T` cannot say (ADR 0026).
 ///
@@ -334,6 +378,10 @@ test {
     _ = @import("names.zig");
     _ = @import("patch.zig");
     _ = @import("percent.zig");
+    _ = @import("convert.zig");
+    _ = @import("cookie.zig");
+    _ = @import("form.zig");
+    _ = @import("redirect.zig");
     _ = @import("http1.zig");
     _ = @import("bulkhead.zig");
     _ = @import("engine/zio.zig");
