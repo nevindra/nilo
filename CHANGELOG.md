@@ -123,6 +123,18 @@ worth most to the cheap queries a service runs most of
 **pgbouncer in transaction mode** set `.prepared = false`, or a statement
 prepared on one server connection is missing on the next.
 
+**Set operations and pipelining are refused, and both are measured or argued
+rather than skipped.** Over one table `UNION`, `INTERSECT` and `EXCEPT` are
+boolean algebra on the `WHERE` clause and the module writes all of it; over
+two they are a view, which a Row may already name
+([ADR 0058](./docs/adr/0058-a-set-operation-over-one-table-is-a-condition.md)).
+A CTE is `db.raw`. Several statements in one round trip is refused with
+numbers: **a round trip to Postgres is 24 µs and the query inside it is
+about 2**, and a server here does **215,000 requests a second with a real
+query in every one** because a waiting fiber frees its thread
+([ADR 0059](./docs/adr/0059-a-round-trip-is-not-the-cost-worth-chasing.md)).
+`bench/sql_server.zig` is that measurement, and it is in the repository.
+
 **28 Refusals** hold the module's own error messages — a Row written wrong, a
 column misspelled, an update with no condition, a key where a condition
 belongs. Each is a program in `sql/refusals/` that must fail to compile with

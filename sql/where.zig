@@ -716,6 +716,28 @@ test "an alternative inside any may itself be several conditions" {
     );
 }
 
+test "an any nests inside an any, which is what closes the boolean algebra" {
+    // The reachability argument in
+    // [ADR 0058](../docs/adr/0058-a-set-operation-over-one-table-is-a-condition.md)
+    // rests on this: AND is a struct, OR is `.any`, every leaf has a
+    // negation, and De Morgan holds in SQL's three-valued logic — so any
+    // boolean combination over one table is writable, `EXCEPT` included.
+    // It only holds if `.any` composes with itself, which nothing asserted
+    // until now.
+    try testing.expectEqualStrings(
+        "(\"role\" <> $1 OR (\"age\" < $2 OR \"email\" IS NULL))",
+        sqlOf(.{
+            .any = .{
+                .{ .role = .{ .ne = "admin" } },
+                .{ .any = .{
+                    .{ .age = .{ .lt = 18 } },
+                    .{ .email = null },
+                } },
+            },
+        }),
+    );
+}
+
 test "an empty condition is an empty fragment, not a WHERE with nothing after it" {
     const p = comptime plan(Pg, User, @TypeOf(.{}), 1);
     try testing.expect(p.isEmpty());

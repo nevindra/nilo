@@ -61,6 +61,11 @@ const page_sql =
     "SELECT \"id\", \"email\", \"age\", \"created_at\" FROM \"" ++ table ++
     "\" WHERE \"age\" > $1 AND \"email\" LIKE $2 ORDER BY \"created_at\" DESC, \"id\" ASC LIMIT 20";
 
+/// `SELECT 1` prepared: as close to a bare round trip as the extended
+/// protocol gets, and the number the pipelining question turns on
+/// (ADR 0059). Whatever a statement costs, this is the floor under it.
+const empty_sql = "SELECT 1";
+
 const rounds = 20_000;
 const warmup = 2_000;
 
@@ -104,6 +109,7 @@ pub fn main() !void {
         .{ rounds, warmup },
     );
 
+    try report(gpa, conn, "a bare round trip", empty_sql, .empty, "nilo_bench_empty");
     try report(gpa, conn, "a key lookup", find_sql, .key, "nilo_bench_key");
     try report(gpa, conn, "a page with a sort", page_sql, .page, "nilo_bench_page");
 
@@ -115,12 +121,14 @@ pub fn main() !void {
     conn.release();
     try throughTheModule(gpa, threaded.io(), url);
 
-    var last = try pool.acquire();
-    defer last.release();
-    _ = try last.exec("DROP TABLE IF EXISTS " ++ table, .{});
+    // The table is left behind on purpose: `bench/sql_server.zig` reads the
+    // same one, and the setup above drops and rebuilds it every run, so
+    // leaving it costs a thousand rows in a throwaway database and saves
+    // the second program a fixture of its own.
+    std.debug.print("`" ++ table ++ "` is left in place for bench/sql_server.zig.\n", .{});
 }
 
-const Shape = enum { key, page };
+const Shape = enum { key, page, empty };
 
 /// `name` is per shape, and finding that out the hard way is half of what
 /// this measurement taught: reusing one name for two statements made pg.zig
@@ -179,6 +187,7 @@ fn walk(
             // only worked for one value would not be a cache.
             .key => try conn.queryOpts(text, .{@as(i64, @intCast((i % 1000) + 1))}, opts),
             .page => try conn.queryOpts(text, .{ @as(i32, 20), "p%" }, opts),
+            .empty => try conn.queryOpts(text, .{}, opts),
         };
         defer result.deinit();
         while (try result.next()) |_| {}

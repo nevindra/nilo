@@ -799,6 +799,62 @@ builder, and joins and aggregates are where databases disagree most. A
 boundary you can state in a sentence is worth more than one further out,
 because you can predict what it does without opening this page.
 
+### Set operations are conditions, not a second idea
+
+`UNION`, `INTERSECT` and `EXCEPT` combine two selects with the same column
+list — and a Row *is* the column list, so over one table all three are
+boolean algebra on the `WHERE` clause:
+
+| SQL | here |
+|---|---|
+| `… WHERE a UNION … WHERE b` | `.where = .{ .any = .{ .{ a }, .{ b } } }` |
+| `… WHERE a INTERSECT … WHERE b` | `.where = .{ a, b }` — fields are ANDed |
+| `… WHERE a EXCEPT … WHERE b` | `.where = .{ a, not_b }` |
+
+There is no group `NOT`, and none is needed: every leaf has a negation
+(`.ne`, `.distinct_from`, `.not_in`, `.not_like`, and the comparisons negate
+each other), De Morgan holds in SQL's three-valued logic, and `.any` nests
+inside itself. So `NOT (x AND y)` is `.any = .{ .{ not_x }, .{ not_y } }` and
+`NOT (x OR y)` is `.{ not_x, not_y }`.
+
+Over **two** tables, a set operation belongs to the schema rather than to the
+call site — write a view and put a Row over it, which has worked since views
+were readable:
+
+```sql
+CREATE VIEW all_orders AS
+  SELECT id, total, placed_at FROM current_orders
+  UNION ALL
+  SELECT id, total, placed_at FROM archived_orders;
+```
+
+([ADR 0058](../adr/0058-a-set-operation-over-one-table-is-a-condition.md).)
+
+### Several statements at once
+
+There is no pipelining, and the reason is measured rather than assumed: **a
+round trip to Postgres is 24 µs and the query inside it is about 2**, so
+latency is the cost and concurrency is what hides it. A server here serves
+**215,000 requests a second with a real query in every one**, because a
+waiting fiber frees its thread
+([ADR 0059](../adr/0059-a-round-trip-is-not-the-cost-worth-chasing.md)).
+
+Where several statements really do have to land together, SQL already does it
+in one round trip and `db.raw` reaches it:
+
+```zig
+_ = try db.raw(struct { id: i64 }, c,
+    "WITH gone AS (DELETE FROM sessions WHERE user_id = $1 RETURNING id) " ++
+    "INSERT INTO audit (kind, ref) SELECT 'session_revoked', id FROM gone " ++
+    "RETURNING ref AS id",
+    .{user_id},
+);
+```
+
+Atomic without a transaction, which saves the `BEGIN` and the `COMMIT` too.
+Many rows of the same shape is `db.insertMany`, which was always one
+statement.
+
 ## When a Row and its table disagree
 
 ```zig

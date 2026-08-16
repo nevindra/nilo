@@ -58,6 +58,7 @@ Measured stripped, `ReleaseFast`, on the examples in this repository.
 | A column type declared outside this module ([ADR 0055](./0055-a-column-type-can-come-from-outside-this-module.md)) | +0 | +0 |
 | Reading a view, and a nullability the database does not know ([ADR 0056](./0056-a-view-is-a-table-that-cannot-say-what-is-not-null.md)) | +0 | +0 |
 | A statement kept prepared on the connection it went down ([ADR 0057](./0057-a-statement-that-is-a-constant-can-be-prepared-once.md)) | +0 | +0 |
+| Set operations, CTEs and pipelining, all refused ([ADRs 0058](./0058-a-set-operation-over-one-table-is-a-condition.md)–[0059](./0059-a-round-trip-is-not-the-cost-worth-chasing.md)) | +0 | +0 |
 
 The second row is one measurement of six changes because they landed together, which is a worse record than the first row and is noted as such. The split it does show is the useful part: `hello` has one route returning text and pays +6 KB, which is the failure-body writer and nothing else — that part is unconditional. The remaining +8 KB on `rest` is the body describer and the schema walker, and those are generated per body type, so they are paid by applications that have bodies.
 

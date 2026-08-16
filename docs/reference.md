@@ -871,6 +871,17 @@ request ([ADR 0041](./adr/0041-a-module-sits-where-the-loop-puts-it.md)).
 | `db.raw(User, c, sql, .{ … })` | `![]User` — a statement this module will not write |
 | `db.begin(c, .{})` | `!Tx`. `.{ .isolation = …, .read_only = … }` rides on the `BEGIN`; see below |
 
+**Set operations are conditions.** Over one table `UNION` is
+`.any = .{ .{ a }, .{ b } }`, `INTERSECT` is `.{ a, b }` and `EXCEPT` is
+`.{ a, not_b }` — every leaf has a negation and `.any` nests, so the boolean
+algebra is closed. Over two tables it is a view, and a Row may name one
+([ADR 0058](./adr/0058-a-set-operation-over-one-table-is-a-condition.md)).
+There is no pipelining: a round trip is 24 µs, the query inside it is 2, and
+a server here serves 215,000 requests a second with a query in every one
+because a waiting fiber frees its thread
+([ADR 0059](./adr/0059-a-round-trip-is-not-the-cost-worth-chasing.md)).
+Statements that must land together are a data-modifying CTE through `db.raw`.
+
 ### A batch
 
 `insertMany` sends one array per column and lets Postgres `unnest` them, so

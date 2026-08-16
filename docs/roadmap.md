@@ -494,13 +494,21 @@ Two whole areas come off before the list starts.
 
 **Reading**
 
-- [ ] Set operations — `UNION`, `INTERSECT`, `EXCEPT`
-- [ ] Common table expressions
+- Set operations and common table expressions: refused, on the record
+  ([ADR 0058](./adr/0058-a-set-operation-over-one-table-is-a-condition.md)).
+  Over one table all three set operations are boolean algebra on the `WHERE`
+  clause and the module writes all of it; over two they are a view, and a Row
+  may name one. A CTE is `db.raw`, `WITH RECURSIVE` included.
 - Joins, nested rows, aggregates and subqueries: one decision, above.
 
 **Writing**
 
-- [ ] Several statements in one round trip
+- Several statements in one round trip: refused, with the numbers
+  ([ADR 0059](./adr/0059-a-round-trip-is-not-the-cost-worth-chasing.md)).
+  pg.zig has no pipelining, the shape that matters is `insertMany` already,
+  and a data-modifying CTE through `db.raw` is one round trip today. What it
+  would buy is latency for one request on an axis the load test says is not
+  short.
 
 **Connection and session**
 

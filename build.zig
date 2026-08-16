@@ -1148,6 +1148,26 @@ pub fn build(b: *std.Build) void {
     b.step("bench-sql", "Time a statement parsed every call against one prepared once")
         .dependOn(&b.addRunArtifact(bench_sql).step);
 
+    // The same question under load, which is the one that decides whether a
+    // Postgres wait costs a fiber or a thread (ADR 0059). Installed rather
+    // than run: it wants a load generator pointed at it, not a stopwatch.
+    const bench_sql_server_module = b.createModule(.{
+        .root_source_file = b.path("bench/sql_server.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .strip = stripMeasured(strip, .ReleaseFast),
+        .imports = &.{
+            .{ .name = "nilo_http", .module = bench_http },
+            .{ .name = "nilo_sql", .module = bench_nilo_sql },
+        },
+    });
+    const bench_sql_server = b.addExecutable(.{
+        .name = "nilo-bench-sql-server",
+        .root_module = bench_sql_server_module,
+    });
+    b.step("bench-sql-server", "A server whose every request reads Postgres, for a load generator")
+        .dependOn(&b.addInstallArtifact(bench_sql_server, .{}).step);
+
     // Each mode needs its own copy of everything the module imports, down to
     // zio: a module carries the optimize mode it was created with, and this
     // module's tests drive a whole request through `nilo.testing.Client`.
