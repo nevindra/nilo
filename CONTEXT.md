@@ -182,6 +182,10 @@ _Avoid_: file response, download, attachment, send file
 A WebSocket connection, held by an ordinary handler that does not return until it ends. nilo does the handshake, the framing and the housekeeping frames; the loop is the handler's. The buffer it reads into is the message ceiling.
 _Avoid_: websocket connection, channel, ws, peer
 
+**Room**:
+A Service that reaches Sockets a handler does not hold. Saying something puts one framed message in each seat and rings a bell; the writing is done by the fiber that already owns that connection, so a client that stops reading costs that client alone. A seat is given up by the handler that took it, because Zig has no destructor.
+_Avoid_: channel, topic, hub, pub/sub, broadcaster
+
 **Range**:
 A request for part of a file rather than all of it — a video being scrubbed, a download being resumed. One that cannot be understood is ignored and the whole file goes out, because that is a correct answer to every request.
 _Avoid_: partial content, byte range, seek, chunk

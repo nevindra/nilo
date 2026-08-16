@@ -104,6 +104,10 @@ you can state turns into a budget you have to multiply, and the API gets worse
 at the same time. Here a seat costs the same whether the room is silent or
 shouting, and a message can be as big as the receiving buffer.
 
+> **The block holds the frame header too now** ([ADR 0052](./0052-a-message-is-copied-once-and-framed-once.md)). A server frame carries no mask and nothing else that differs by recipient, so a thousand connections were building a thousand byte-identical headers for the same post. It is built once, here, and delivery is one `writeAll` of one slice — with one flush per burst rather than one per post.
+>
+> **And `say` no longer walks the seats it was sized for.** `roll` keeps the taken ones dense at the front, so a room of a thousand seats holding three visits three: 494ns to 161ns, and `join` stops being a scan as well. It costs 8 bytes a seat — four for the roll, four for the seat's place on it — which is per *seat* rather than per connection, so the "4 measured bytes per idle connection" below is unchanged.
+
 ### The policy is named at the room, which amends ADR 0020
 
 [ADR 0020](./0020-a-request-that-lasts-is-still-one-request.md) refused this

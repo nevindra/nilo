@@ -562,10 +562,18 @@ the 404 a file that was never there gets.
 | `s.receive(&buf)` | `!?Message` — the buffer is the message ceiling |
 | `s.send(kind, data)` | `.text` or `.binary` |
 | `s.sendText(text)` / `s.sendBinary(bytes)` | |
+| `s.print(fmt, args)` | one text message, formatted — no buffer of your own |
+| `s.json(value)` | one text message, serialised |
 | `s.ping(data)` | |
 | `s.close(code, reason)` | safe to call twice |
 | `s.closedCleanly()` | whether the other end said goodbye |
 | `s.live()` | false once the server is stopping |
+
+`receive` returns `null` when the server is stopping, after telling the client
+so with a 1001 — a message loop needs no shutdown branch of its own
+([ADR 0052](adr/0052-a-message-is-copied-once-and-framed-once.md)). `live()` is
+for a handler doing work of its own between messages. Sending on a socket that
+has already closed writes nothing rather than failing.
 
 `c.upgradeWith(.{ .idle_ms = 30_000 })` — how long this connection may say
 nothing before nilo pings it. No answer by the end of the next stretch closes
@@ -607,6 +615,8 @@ fn chat(c: *nilo.Ctx, room: *nilo.Room) !void {
 | `room.leave(&socket)` | safe twice, safe without joining — pair it with `defer` |
 | `room.say(kind, data)` | to everybody in the room, sender included |
 | `room.sayText(text)` / `room.sayBinary(bytes)` | |
+| `room.print(fmt, args)` | one text message, formatted into the post itself |
+| `room.json(value)` | one text message, serialised |
 | `room.count()` | how many connections are in it |
 | `room.missed(&socket)` | posts this connection was too slow to take |
 | `room.full = .drop_oldest` | or `.drop_newest`, when a connection's backlog fills |
@@ -618,6 +628,11 @@ client that stops reading costs that client and nobody else.
 
 `defer room.leave(&socket)` is not optional. Zig has no destructor, and a seat
 nobody gives up is one the next connection cannot have.
+
+Sizing a room generously is a memory decision and nothing else: `join` and
+`say` both cost what the room *holds*, not what it was sized for, and a `say`
+into an empty room allocates nothing at all
+([ADR 0052](adr/0052-a-message-is-copied-once-and-framed-once.md)).
 
 ## Failing
 

@@ -19,6 +19,7 @@ const clock = @import("bulkhead.zig").monotonicNanos;
 const App = @import("app.zig").App;
 const cors = @import("cors.zig");
 const websocket = @import("websocket.zig");
+const room_mod = @import("room.zig");
 const stream_mod = @import("stream.zig");
 const body_mod = @import("body.zig");
 const range = @import("range.zig");
@@ -95,7 +96,7 @@ var body_json: []const u8 = "";
 fn wholeRequest() void {
     var in = std.Io.Reader.fixed(request);
     var out = std.Io.Writer.fixed(&out_buf);
-    sink += @intFromBool(app.handleRequest(arena.allocator(), &lifetime, &in_flight, &in, &out, .off, .{}));
+    sink += @intFromBool(app.handleRequest(arena.allocator(), &lifetime, &in_flight, &in, &out, .off, .off, .{}));
     lifetime.end();
     _ = arena.reset(.{ .retain_with_limit = arena_keep });
 }
@@ -362,9 +363,31 @@ fn longLived(gpa: std.mem.Allocator) !void {
     }
     const ws_send = (clock() - t) / ws_rounds;
 
+    // The shape a chat actually has, which is not the one above: a short
+    // line, where the frame's own bytes cost about as much as its payload.
+    // The 16 KiB row says what the unmasking is worth; this one says what a
+    // real message costs, and it is the one a broadcast multiplies.
+    const chat = 48;
+    const chat_wire = try gpa.alloc(u8, chat + 14);
+    defer gpa.free(chat_wire);
+    const chat_len = buildClientFrame(chat_wire, chat);
+
+    t = clock();
+    for (0..ws_rounds) |_| {
+        var in = std.Io.Reader.fixed(chat_wire[0..chat_len]);
+        var out = std.Io.Writer.fixed(away);
+        var socket = websocket.Socket{ ._in = &in, ._out = &out, ._stopping = null };
+        const got = (try socket.receive(room)) orelse unreachable;
+        sink += got.data.len;
+    }
+    const ws_chat = (clock() - t) / ws_rounds;
+
     ops("websocket: frame overhead", ws_empty, null);
+    ops("websocket: receive 48 B", ws_chat, null);
     ops("websocket: receive 16 KiB", ws_full, throughput(ws_full - ws_empty, message));
     ops("websocket: send 16 KiB", ws_send, throughput(ws_send, message));
+
+    try roomBroadcast(gpa, away);
 
     // A streamed response of 200 short pieces, which is the shape a report
     // has: many small writes behind one chunk header per buffer-full.
@@ -425,6 +448,44 @@ fn longLived(gpa: std.mem.Allocator) !void {
     const range_ns = (clock() - t) / rounds;
 
     ops("range: parse one", range_ns, null);
+}
+
+/// What a chat line costs a room, which is the number the seats were walked
+/// for. A room is sized for the crowd it might hold and holds a handful, so
+/// the interesting shape is exactly that: far more seats than occupants.
+fn roomBroadcast(gpa: std.mem.Allocator, away: []u8) !void {
+    const seats = 1000;
+    const here = 8;
+    const say_rounds = 20_000;
+
+    var crowd = try room_mod.Room.initWith(gpa, .{ .seats = seats, .backlog = 4 });
+    defer crowd.deinit();
+
+    var readers: [here]std.Io.Reader = undefined;
+    var writers: [here]std.Io.Writer = undefined;
+    var sockets: [here]websocket.Socket = undefined;
+    for (0..here) |i| {
+        readers[i] = .fixed("");
+        writers[i] = .fixed(away);
+        sockets[i] = .{ ._in = &readers[i], ._out = &writers[i], ._stopping = null };
+        try crowd.join(&sockets[i]);
+    }
+
+    const said = "wati: has anybody seen the cat?";
+
+    // Composing one post, framing it once, and handing it to everybody here.
+    const t = clock();
+    for (0..say_rounds) |_| {
+        try crowd.sayText(said);
+        sink += crowd.count();
+    }
+    const say_ns = (clock() - t) / say_rounds;
+
+    // Deliberately no row for delivery. What changed on that side is the
+    // number of writes and flushes a burst costs, not the nanoseconds — and a
+    // measurement here would be reporting `DebugAllocator` and a fixed
+    // writer, neither of which a connection has.
+    ops("room: say to 8 of 1,000 seats", say_ns, null);
 }
 
 fn ops(label: []const u8, ns: u64, per_second: ?f64) void {

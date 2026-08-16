@@ -315,6 +315,16 @@ of it — measured at 0 bytes.
   latency.** One line per request is the contract, and a stream's line arrives
   when the stream ends. Time to first byte is a different number and wants a
   different feature.
+- **Nothing runs the Autobahn suite against the WebSocket.** `wstest` is the
+  thing every implementation of RFC 6455 is measured by, and nilo's framing
+  tests are all its own — written from the RFC rather than from a failing
+  report, which by
+  [ADR 0033](./adr/0033-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md)'s
+  reading makes the close-code and UTF-8 rules
+  ([ADR 0052](./adr/0052-a-message-is-copied-once-and-framed-once.md)) guards
+  that have only ever been seen to pass. It needs a build step that listens on
+  a port and drives a Python client at it — the same harness *The standing
+  risks* already names as missing for `sendfile`, and neither exists.
 - **The router is still a linear scan.** Indexing the first segment took 44% off
   a hundred-route app and moved
   [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md)'s 10% bar out

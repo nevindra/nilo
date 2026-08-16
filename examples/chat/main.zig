@@ -37,18 +37,21 @@ fn chat(c: *nilo.Ctx, room: *nilo.Room) !void {
     try room.join(&socket);
     defer room.leave(&socket);
 
-    var line: [64]u8 = undefined;
-    try room.sayText(try std.fmt.bufPrint(&line, "welcome, {d} here", .{room.count()}));
+    // Formatted straight into the post the room was going to allocate
+    // anyway — no buffer of ours in between, and nothing to guess the size of
+    // (ADR 0052).
+    try room.print("welcome, {d} here", .{room.count()});
 
     // This buffer is the message ceiling: one bigger than it closes the
     // connection with 1009 rather than growing anything. Ask for what you can
     // hold, which for a chat line is generous.
+    //
+    // The loop has no shutdown branch and does not need one: `receive` ends
+    // the conversation itself when the server is stopping, and tells the
+    // other end why, so a deploy is not held open by whoever is still typing
+    // (ADR 0020, ADR 0052).
     var buf: [16 * 1024]u8 = undefined;
     while (try socket.receive(&buf)) |message| {
-        // `live()` goes false when the server is stopping, so a deploy is not
-        // held open by whoever is still typing (ADR 0020).
-        if (!socket.live()) break;
-
         // To everybody, including whoever typed it. One code path, not one
         // for me and another for everyone else.
         try room.say(message.kind, message.data);

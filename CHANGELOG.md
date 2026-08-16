@@ -121,6 +121,56 @@ The module is still not an ORM and still refuses joins, aggregates and
 migrations
 ([ADR 0039](./docs/adr/0039-the-shape-of-a-query-is-settled-while-compiling.md)).
 
+### A WebSocket message, once through
+
+Receiving one used to copy every byte into your buffer and then walk the same
+bytes again to unmask them. It is one pass now — unmasked on the way across —
+and a message too big to have arrived whole is read straight into your buffer,
+past the connection's read buffer entirely
+([ADR 0052](./docs/adr/0052-a-message-is-copied-once-and-framed-once.md)).
+
+| `zig build profile` | was | is | |
+|---|---|---|---|
+| `websocket: frame overhead` | 9ns | 6ns | 1.5× |
+| `websocket: receive 48 B` | 15ns | 12ns | 1.25× |
+| `websocket: receive 16 KiB` | 196ns — 88.1 GB/s | 73ns — 244.5 GB/s | 2.7× |
+| `room: say to 8 of 1,000 seats` | 494ns | 161ns | 3.1× |
+
+Nothing about the API changed to get any of it. What *did* change:
+
+- **`socket.print(fmt, args)` and `socket.json(value)`**, and the same pair on
+  a `Room`. One text message, formatted or serialised straight onto the wire,
+  with no stack buffer of yours to size:
+
+  ```zig
+  try room.print("welcome, {d} here", .{room.count()});
+  try socket.json(.{ .kind = "joined", .who = name });
+  ```
+
+  Neither allocates on a Socket; on a Room they reuse the allocation `say` was
+  going to make. Both run the format twice, once to size the frame and once to
+  write it, because a frame states its length before its bytes.
+- **`receive` ends when the server is stopping**, after telling the client so
+  with a 1001. A message loop no longer needs `if (!socket.live()) break;` in
+  it, which was a rule ADR 0020 stated and every handler had to remember.
+  `live()` stays, for a handler doing work of its own between messages.
+- **Sending on a socket that has already closed writes nothing** rather than
+  failing. The other end closing between two of your sends is not a bug you
+  can prevent, so it is not one you have to branch on.
+- **A malformed close frame is refused with a 1002 rather than echoed.** A
+  one-byte payload, a code nobody assigned, or a reason that is not UTF-8 —
+  echoing those put the same broken frame back on the wire. A reason of your
+  own that is too long for a close frame is now cut on a character boundary
+  rather than through the middle of one.
+- **A fragment is measured against what is left of your buffer**, not all of
+  it, so a continuation that cannot fit beside what came before is refused on
+  its header.
+- **Sizing a `Room` generously is a memory decision and nothing else.** `join`
+  and `say` cost what the room holds rather than what it was sized for, and a
+  `say` into an empty room allocates nothing at all.
+- **Removed: `nilo.websocket.Handshake`**, a struct wrapping the array
+  `accept()` already returns. Nothing had ever used it.
+
 ### Also
 
 - **`error.AlreadyExists` is a 409.** A unique violation is the one database
@@ -363,6 +413,12 @@ not TLS — and pays **560 bytes** for the startup hook. One that uses the
 whole module pays **733 KB**, of which the entire write half is 53 KB and the
 rest is pg.zig's TLS dependency. Allocations per request, memory per idle
 connection and p99 are unchanged.
+
+The WebSocket work costs **896 bytes** on the chat example, stripped
+`ReleaseFast`, and **0 bytes** on hello — a server that never upgrades still
+links none of it. A seat in a `Room` costs **8 bytes** more than it did, so a
+room of the default 1,024 seats is 8 KB larger, once; memory per idle
+connection and allocations per request are unchanged.
 
 Splitting Core out cost **zero bytes**, measured on three binaries rather than
 assumed; adding `nilo_id` beside it cost the same three binaries nothing at

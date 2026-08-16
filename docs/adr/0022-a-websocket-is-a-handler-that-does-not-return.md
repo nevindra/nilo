@@ -40,6 +40,8 @@ That includes the closing handshake: a close frame is echoed before `receive` re
 
 Making the second one an error would be more precise and worse: it is the *most common* way a WebSocket ends, and every handler in the world would open with a `catch` that treats it as normal. The loop shape should be the same for both, because what the handler does next is the same for both. `closedCleanly()` tells them apart afterwards, for the one handler in twenty that cares.
 
+> **There is a third way now, and it is the same `null`** ([ADR 0052](./0052-a-message-is-copied-once-and-framed-once.md)). A server that has been asked to stop ends the conversation itself, with a 1001 to the client first. The argument is this section's, read once more: ADR 0020 says a handler that ignores the stopping flag holds the deploy open, and leaving that to `if (!socket.live()) break;` in every loop is a rule stated somewhere it cannot be enforced. The same reading runs the other way too — **sending on a socket that has already closed writes nothing rather than failing**, because the other end closing between two of a handler's sends is exactly as unpreventable as a client vanishing.
+
 ## What is refused, and why it is refused properly
 
 Every refusal sends a close frame with the right code before returning the error, because a connection that is dropped without one looks to the other end like a crash:
@@ -51,6 +53,8 @@ Every refusal sends a close frame with the right code before returning the error
 | A continuation with nothing to continue | `1002` |
 | Text that is not valid UTF-8 | `1007`, not `1002` — the framing was fine, the payload was not |
 | A message bigger than the buffer | `1009` |
+
+> **One row was missing and its absence was worse than pedantry** ([ADR 0052](./0052-a-message-is-copied-once-and-framed-once.md)). A close frame carrying one byte, a code nobody assigned, or a reason that is not UTF-8 was *echoed* — so a server whose whole discipline here is "say goodbye properly" answered a broken goodbye by putting the same broken bytes back on the wire. It is a `1002` now, like every other framing error, and the reason nilo sends with a close of its own is cut on a character boundary rather than at the 123rd byte.
 
 The UTF-8 check is the one that looks like pedantry and is not. Text frames are *defined* to be UTF-8; a handler that gets invalid bytes will pass them to something that breaks further away, where the cause is no longer visible.
 

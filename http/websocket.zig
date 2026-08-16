@@ -17,11 +17,19 @@
 //! Memory is the buffer passed to `receive` and nothing else. A message
 //! split across frames is reassembled into that buffer, and one too big for
 //! it closes the connection with 1009 rather than growing anything.
+//!
+//! **No byte of a message is copied twice** (ADR 0052). A frame that is
+//! already in the connection's read buffer — which is nearly every frame, and
+//! every frame at all under the size of one read — is unmasked *as* it is
+//! copied into the handler's buffer, in one pass. A frame too big to have
+//! arrived whole is read straight into the handler's buffer, past the read
+//! buffer entirely, and unmasked where it lands. There is no third case.
 
 const std = @import("std");
 
 const bulkhead = @import("bulkhead.zig");
 const http1 = @import("http1.zig");
+const json_mod = @import("json.zig");
 const room_mod = @import("room.zig");
 
 /// The string every WebSocket handshake in the world hashes against. It has
@@ -112,7 +120,46 @@ const Opcode = enum(u4) {
     fn isControl(self: Opcode) bool {
         return @intFromEnum(self) & 0x8 != 0;
     }
+
+    fn of(kind: Kind) Opcode {
+        return if (kind == .text) .text else .binary;
+    }
 };
+
+/// The longest a header nilo writes can be: two bytes and a 64-bit length.
+/// A server never masks, so there are no four bytes of key on the end of it.
+pub const max_header = 10;
+
+/// The bytes that go in front of one outgoing message, written into `into`
+/// and returned as the part of it that counts.
+///
+/// Public because a `Room` builds this **once** for a message and every
+/// connection in the room writes the same bytes. A server frame carries no
+/// mask and no per-connection anything, so there is nothing in a header worth
+/// building a thousand times (ADR 0038, ADR 0052).
+pub fn headerFor(into: *[max_header]u8, kind: Kind, len: u64) []u8 {
+    return writeHeader(into, .of(kind), len);
+}
+
+fn writeHeader(into: *[max_header]u8, opcode: Opcode, len: u64) []u8 {
+    into[0] = 0x80 | @as(u8, @intFromEnum(opcode)); // FIN, no reserved bits
+
+    // A server never masks. The mask exists to stop a hostile page making a
+    // browser send bytes that a proxy would read as a request, and only a
+    // browser is in that position.
+    if (len < 126) {
+        into[1] = @intCast(len);
+        return into[0..2];
+    }
+    if (len <= std.math.maxInt(u16)) {
+        into[1] = 126;
+        std.mem.writeInt(u16, into[2..4], @intCast(len), .big);
+        return into[0..4];
+    }
+    into[1] = 127;
+    std.mem.writeInt(u64, into[2..10], len, .big);
+    return into[0..10];
+}
 
 /// An open WebSocket connection.
 pub const Socket = struct {
@@ -145,11 +192,11 @@ pub const Socket = struct {
 
     /// The next message, or null once the connection is over.
     ///
-    /// Null covers both ways it ends: a close frame, and a client that
-    /// simply vanished — a tab closed, a network gone. They are the same
-    /// thing to a handler's loop, so a client dropping without saying
-    /// goodbye is not an error to write a branch for. `closedCleanly` tells
-    /// them apart afterwards, for the handler that cares.
+    /// Null covers every way it ends: a close frame, a client that simply
+    /// vanished — a tab closed, a network gone — and a server that has been
+    /// asked to stop. They are the same thing to a handler's loop, so none of
+    /// them is an error to write a branch for. `closedCleanly` tells the first
+    /// apart from the rest afterwards, for the handler that cares.
     ///
     /// Fragmented messages are reassembled into `buf`. Ping frames are
     /// answered and close frames are echoed without the handler seeing
@@ -167,11 +214,21 @@ pub const Socket = struct {
             // sees a post and never writes a branch for one.
             try self.deliver();
 
+            // A server on its way out ends the conversation itself, rather
+            // than leaving every handler to spell out the same `live()` check
+            // and every client to find the socket gone without being told
+            // (ADR 0020). What is already queued has gone out above; what is
+            // half-collected here is a message the other end never finished.
+            if (self.stopping()) {
+                self.closeWith(.going_away) catch {};
+                return null;
+            }
+
             // Only park when there is nothing already in hand: a reader
             // holding a buffered frame is readable whatever the socket
             // thinks, and asking the kernel instead would park a connection
             // that has a whole message sitting in memory.
-            if (self._in.seek == self._in.end) {
+            if (self._in.bufferedLen() == 0) {
                 switch (self._waker.wait(self._idle_ms)) {
                     // Round again, and the `deliver` above writes it out.
                     .posted => continue,
@@ -202,7 +259,10 @@ pub const Socket = struct {
             // Something arrived, so the question is answered whatever it was.
             self._awaiting_pong = false;
 
-            const frame = self.readFrameHeader(buf.len) catch |err| switch (err) {
+            // What is left of `buf`, not the whole of it: a fragment that
+            // cannot fit beside the ones already collected is refused on what
+            // its header claims, before a byte of it is read.
+            const frame = self.nextHeader(buf.len - filled) catch |err| switch (err) {
                 error.EndOfStream => {
                     self._closed = true;
                     return null;
@@ -228,11 +288,8 @@ pub const Socket = struct {
                 else => return self.fail(error.ProtocolError),
             }
 
-            // Fragments together may be more than one of them was.
-            if (filled + frame.len > buf.len) return self.tooBig();
             const into = buf[filled..][0..@intCast(frame.len)];
-            self._in.readSliceAll(into) catch return self.fail(error.ReadFailed);
-            unmask(into, frame.mask, 0);
+            self.readPayload(into, frame.mask) catch |err| return self.fail(err);
             filled += into.len;
 
             if (frame.fin) break;
@@ -251,8 +308,15 @@ pub const Socket = struct {
 
     /// Send one message. Never fragmented: nilo has it all already, so
     /// there is nothing to be gained by cutting it up.
+    ///
+    /// A socket that has already closed writes nothing and says so with a
+    /// plain return. The alternative — an error — would be one every handler
+    /// has to branch on for the one case it cannot prevent: the other end
+    /// closing between two of its own sends. That is the same reading
+    /// `receive` gives a client that vanished (ADR 0022).
     pub fn send(self: *Socket, kind: Kind, data: []const u8) Error!void {
-        return self.writeFrame(if (kind == .text) .text else .binary, data);
+        if (self._closed) return;
+        return self.sendFrame(.of(kind), data);
     }
 
     pub fn sendText(self: *Socket, text: []const u8) Error!void {
@@ -263,10 +327,47 @@ pub const Socket = struct {
         return self.send(.binary, bytes);
     }
 
+    /// `socket.print("{d} here now", .{room.count()})` — one text message,
+    /// formatted straight onto the wire with no buffer of your own in
+    /// between.
+    ///
+    /// **The format runs twice**, once counting and once writing, and that is
+    /// the cost written down. A frame states its length before its bytes, and
+    /// the only places to put the bytes meanwhile are an allocation (which
+    /// this module does not make) or a fixed buffer whose size you would have
+    /// to guess — which is the `bufPrint` dance this exists to delete. Nothing
+    /// is allocated either way.
+    ///
+    /// The arguments are therefore read twice: pass values, not a window onto
+    /// memory another fiber is writing.
+    pub fn print(self: *Socket, comptime fmt: []const u8, args: anytype) Error!void {
+        if (self._closed) return;
+        try self.beginText(counted(struct {
+            fn run(w: *std.Io.Writer, a: anytype) std.Io.Writer.Error!void {
+                return w.print(fmt, a);
+            }
+        }.run, args));
+        self._out.print(fmt, args) catch return error.WriteFailed;
+        self._out.flush() catch return error.WriteFailed;
+    }
+
+    /// Serialise `value` as JSON into one text message — which is what a
+    /// WebSocket carrying structured data almost always is.
+    ///
+    /// Two passes, for the reason `print` gives, and no allocation in either.
+    pub fn json(self: *Socket, value: anytype) Error!void {
+        if (self._closed) return;
+        try self.beginText(counted(json_mod.write, value));
+        json_mod.write(self._out, value) catch return error.WriteFailed;
+        self._out.flush() catch return error.WriteFailed;
+    }
+
     /// Ask the other end to answer, which is how a connection through a
-    /// proxy that drops quiet ones stays up.
+    /// proxy that drops quiet ones stays up. Nothing goes out on a socket
+    /// that has closed, for the reason `send` gives.
     pub fn ping(self: *Socket, data: []const u8) Error!void {
-        return self.writeFrame(.ping, data);
+        if (self._closed) return;
+        return self.sendFrame(.ping, data);
     }
 
     /// Close, saying why. Safe to call twice, and safe to call after the
@@ -277,15 +378,26 @@ pub const Socket = struct {
 
         var payload: [125]u8 = undefined;
         std.mem.writeInt(u16, payload[0..2], @intFromEnum(code), .big);
-        const room = @min(reason.len, payload.len - 2);
+        const room = fits(reason);
         @memcpy(payload[2..][0..room], reason[0..room]);
-        return self.writeFrame(.close, payload[0 .. 2 + room]);
+        return self.sendFrame(.close, payload[0 .. 2 + room]);
     }
 
     /// Whether the connection ended with a close frame rather than by simply
     /// stopping. Only meaningful once `receive` has returned null.
     pub fn closedCleanly(self: *const Socket) bool {
         return self._said_goodbye;
+    }
+
+    /// Whether the server still wants this connection running. False once the
+    /// connection is over, and false once a shutdown has started.
+    ///
+    /// `receive` checks this itself, so a message loop needs no branch for it
+    /// (ADR 0052). What it is still for is a handler doing work of its own
+    /// between messages — a long computation, a timer, a queue it drains —
+    /// which nilo cannot see and cannot end on its behalf (ADR 0020).
+    pub fn live(self: *const Socket) bool {
+        return !self._closed and !self.stopping();
     }
 
     // ---- what a Room needs, and nothing more ----
@@ -311,78 +423,156 @@ pub const Socket = struct {
     /// Write out everything waiting for this connection. Called at the top of
     /// every `receive`, and by `receive` alone: a post is written by the fiber
     /// that owns the socket or it is not written at all.
+    ///
+    /// The posts are already framed — the room built the header once, for
+    /// everybody — so each one is a single write, and the whole burst is one
+    /// flush. A connection that was away for ten messages costs one syscall
+    /// to catch up, not ten.
     fn deliver(self: *Socket) Error!void {
         const in_room = self._room orelse return;
         const t = self._ticket orelse return;
+
+        var any = false;
         while (in_room.take(t)) |post| {
             defer in_room.release(post);
-            const held = in_room.contentsOf(post);
-            try self.writeFrame(if (held.kind == .text) .text else .binary, held.data);
+            self._out.writeAll(in_room.framedBytes(post)) catch return error.WriteFailed;
+            any = true;
         }
+        if (any) self._out.flush() catch return error.WriteFailed;
     }
 
-    /// Whether the server still wants this connection running. Goes false on
-    /// a shutdown, exactly as `Stream.live` does — a socket held open past
-    /// that point holds the deploy open with it (ADR 0020).
-    pub fn live(self: *const Socket) bool {
-        if (self._closed) return false;
-        const stopping = self._stopping orelse return true;
-        return !stopping.load(.acquire);
+    fn stopping(self: *const Socket) bool {
+        const flag = self._stopping orelse return false;
+        return flag.load(.acquire);
     }
 
     // ---- the wire ----
 
+    /// One frame header, as it was found on the wire. `reserved` and `masked`
+    /// are carried rather than judged, because `headerFrom` is pure and every
+    /// refusal belongs to the connection that has a close frame to send.
     const Frame = struct {
         fin: bool,
+        reserved: bool,
+        masked: bool,
         opcode: Opcode,
         len: u64,
         mask: [4]u8,
+        /// How many bytes of the stream this header took.
+        size: usize,
     };
 
-    fn readFrameHeader(self: *Socket, room: u64) Error!Frame {
-        var first: [2]u8 = undefined;
-        self._in.readSliceAll(&first) catch |err| return switch (err) {
-            error.EndOfStream => error.EndOfStream,
-            else => error.ReadFailed,
+    /// How long a header is, from its first two bytes. The rest of it is a
+    /// length in one of three widths and, from a client, four bytes of key.
+    fn headerSize(lead: [2]u8) usize {
+        const extra: usize = switch (@as(u7, @truncate(lead[1]))) {
+            126 => 2,
+            127 => 8,
+            else => 0,
         };
+        return 2 + extra + @as(usize, if (lead[1] & 0x80 != 0) 4 else 0);
+    }
+
+    /// Read a frame header out of bytes already in hand, or null when there
+    /// are not yet enough of them to say.
+    ///
+    /// Pure: no reader, no socket, no refusals. That is what lets the whole of
+    /// RFC 6455 §5.2 be checked against a table of byte strings instead of
+    /// through a connection, and it is why the fast path below is three lines.
+    fn headerFrom(bytes: []const u8) ?Frame {
+        if (bytes.len < 2) return null;
+        const lead: [2]u8 = bytes[0..2].*;
+        const size = headerSize(lead);
+        if (bytes.len < size) return null;
+
+        const short: u7 = @truncate(lead[1]);
+        const masked = lead[1] & 0x80 != 0;
+        return .{
+            .fin = lead[0] & 0x80 != 0,
+            .reserved = lead[0] & 0x70 != 0,
+            .masked = masked,
+            .opcode = @enumFromInt(@as(u4, @truncate(lead[0]))),
+            .len = switch (short) {
+                126 => std.mem.readInt(u16, bytes[2..4], .big),
+                127 => std.mem.readInt(u64, bytes[2..10], .big),
+                else => short,
+            },
+            .mask = if (masked) bytes[size - 4 ..][0..4].* else .{ 0, 0, 0, 0 },
+            .size = size,
+        };
+    }
+
+    /// The next frame's header, consumed. `room` is what is left of the
+    /// handler's buffer, which is the only ceiling there is.
+    fn nextHeader(self: *Socket, room: u64) Error!Frame {
+        // Almost always the whole header is already in the connection's read
+        // buffer, and then this is a slice and a few shifts: no fill, no copy,
+        // no call into the reader at all.
+        const frame = headerFrom(self._in.buffered()) orelse try self.fillHeader();
 
         // The three reserved bits are for extensions that were negotiated in
         // the handshake. nilo negotiates none, so a frame setting one is
         // talking to a server that is not there.
-        if (first[0] & 0x70 != 0) return self.fail(error.ProtocolError);
-
-        const fin = first[0] & 0x80 != 0;
-        const opcode: Opcode = @enumFromInt(@as(u4, @truncate(first[0])));
-
+        if (frame.reserved) return self.fail(error.ProtocolError);
         // Every frame from a client is masked. An unmasked one is either a
         // broken client or something that is not a client at all, and the
         // RFC says to fail the connection either way.
-        if (first[1] & 0x80 == 0) return self.fail(error.ProtocolError);
-
-        const short_len: u7 = @truncate(first[1]);
-        const len: u64 = switch (short_len) {
-            126 => try self.readLen(u16),
-            127 => try self.readLen(u64),
-            else => short_len,
-        };
-
+        if (!frame.masked) return self.fail(error.ProtocolError);
         // A control frame has to fit in one small frame, because it may
         // arrive in the middle of somebody else's message.
-        if (opcode.isControl() and (len > 125 or !fin)) return self.fail(error.ProtocolError);
+        if (frame.opcode.isControl() and (frame.len > 125 or !frame.fin)) {
+            return self.fail(error.ProtocolError);
+        }
         // Refused on what the header claims, before a byte of it is read: a
         // frame announcing four gigabytes should cost four bytes to refuse.
-        if (!opcode.isControl() and len > room) return self.tooBig();
+        if (!frame.opcode.isControl() and frame.len > room) return self.tooBig();
 
-        var mask: [4]u8 = undefined;
-        self._in.readSliceAll(&mask) catch return self.fail(error.ReadFailed);
-
-        return .{ .fin = fin, .opcode = opcode, .len = len, .mask = mask };
+        self._in.toss(frame.size);
+        return frame;
     }
 
-    fn readLen(self: *Socket, comptime T: type) Error!u64 {
-        var raw: [@divExact(@typeInfo(T).int.bits, 8)]u8 = undefined;
-        self._in.readSliceAll(&raw) catch return self.fail(error.ReadFailed);
-        return std.mem.readInt(T, &raw, .big);
+    /// Wait for the rest of a header. Only reached when a frame arrived split
+    /// across reads, which a real network does and a fixed buffer never will.
+    fn fillHeader(self: *Socket) Error!Frame {
+        // The only place `EndOfStream` means the connection simply ended:
+        // between frames, with nothing half-read. Everywhere below here a
+        // stream that stops is a truncated frame, which is a broken one.
+        const lead = (self._in.peekArray(2) catch |err| return switch (err) {
+            error.EndOfStream => error.EndOfStream,
+            else => error.ReadFailed,
+        }).*;
+
+        // 14 bytes is the longest header there is, and the smallest read
+        // buffer nilo hands a connection is far larger, so this never asks
+        // for more room than the reader has.
+        const whole = self._in.peek(headerSize(lead)) catch return self.fail(error.ReadFailed);
+        return headerFrom(whole).?;
+    }
+
+    /// One frame's payload, unmasked into `dst`.
+    ///
+    /// Two paths, and between them no byte is ever copied twice. What is
+    /// already in the read buffer is unmasked *while* it is copied out —
+    /// one pass, where a `readSliceAll` and then an in-place unmask is two.
+    /// What has not arrived yet is read straight into `dst`, past the read
+    /// buffer entirely, and unmasked where it lands.
+    fn readPayload(self: *Socket, dst: []u8, key: [4]u8) Error!void {
+        var done: usize = 0;
+        while (done < dst.len) {
+            const held = self._in.buffered();
+            if (held.len == 0) {
+                // Nothing in hand, so there is nothing to fuse with. What is
+                // left goes into the handler's buffer directly — `readSliceAll`
+                // reads into the destination while the destination is the
+                // bigger of the two — and is unmasked where it lands.
+                self._in.readSliceAll(dst[done..]) catch return error.ReadFailed;
+                return unmask(dst[done..], key, done);
+            }
+            const n = @min(held.len, dst.len - done);
+            unmaskInto(dst[done..][0..n], held[0..n], key, done);
+            self._in.toss(n);
+            done += n;
+        }
     }
 
     /// Deal with a ping, pong or close. Returns true if the conversation
@@ -390,25 +580,29 @@ pub const Socket = struct {
     fn handleControl(self: *Socket, frame: Frame) Error!bool {
         var payload: [125]u8 = undefined;
         const data = payload[0..@intCast(frame.len)];
-        self._in.readSliceAll(data) catch return self.fail(error.ReadFailed);
-        unmask(data, frame.mask, 0);
+        self.readPayload(data, frame.mask) catch |err| return self.fail(err);
 
         switch (frame.opcode) {
             // A pong carries the ping's payload back, which is how the other
             // end tells its own pings apart.
             .ping => {
-                try self.writeFrame(.pong, data);
+                try self.sendFrame(.pong, data);
                 return true;
             },
             .pong => return true,
             .close => {
+                self._said_goodbye = true;
+                // A goodbye that is not a goodbye — one byte where there
+                // should be two, a code nobody assigned, a reason that is not
+                // UTF-8 — is a framing error like any other, and echoing it
+                // would put the same broken bytes back on the wire.
+                if (!closeIsWellFormed(data)) return self.fail(error.ProtocolError);
                 // Echoed back, then this end is done. What the RFC calls the
                 // closing handshake, and what stops a browser reporting an
                 // ordinary goodbye as a connection error.
-                self._said_goodbye = true;
                 if (!self._closed) {
                     self._closed = true;
-                    self.writeFrame(.close, data) catch {};
+                    self.sendFrame(.close, data) catch {};
                 }
                 return false;
             },
@@ -416,31 +610,28 @@ pub const Socket = struct {
         }
     }
 
+    /// One frame, written but not flushed. `deliver` is why the flush is
+    /// somebody else's: a burst of posts is one syscall, not one each.
     fn writeFrame(self: *Socket, opcode: Opcode, data: []const u8) Error!void {
-        var head: [10]u8 = undefined;
-        head[0] = 0x80 | @as(u8, @intFromEnum(opcode)); // FIN, no reserved bits
+        var head: [max_header]u8 = undefined;
+        // One call, so a payload too big for the write buffer leaves beside
+        // its header rather than after a drain of it.
+        var parts = [_][]const u8{ writeHeader(&head, opcode, data.len), data };
+        self._out.writeVecAll(&parts) catch return error.WriteFailed;
+    }
 
-        // A server never masks. The mask exists to stop a hostile page
-        // making a browser send bytes that a proxy would read as a request,
-        // and only a browser is in that position.
-        var head_len: usize = 2;
-        if (data.len < 126) {
-            head[1] = @intCast(data.len);
-        } else if (data.len <= std.math.maxInt(u16)) {
-            head[1] = 126;
-            std.mem.writeInt(u16, head[2..4], @intCast(data.len), .big);
-            head_len = 4;
-        } else {
-            head[1] = 127;
-            std.mem.writeInt(u64, head[2..10], data.len, .big);
-            head_len = 10;
-        }
-
-        self._out.writeAll(head[0..head_len]) catch return error.WriteFailed;
-        self._out.writeAll(data) catch return error.WriteFailed;
-        // Flushed every time: a message nobody sent yet is a message that
-        // has not arrived, and there is no later moment to flush at.
+    /// One frame, gone. Flushed every time: a message nobody sent yet is a
+    /// message that has not arrived, and there is no later moment to flush at.
+    fn sendFrame(self: *Socket, opcode: Opcode, data: []const u8) Error!void {
+        try self.writeFrame(opcode, data);
         self._out.flush() catch return error.WriteFailed;
+    }
+
+    /// The header of a text message whose bytes are about to be printed
+    /// straight into the connection.
+    fn beginText(self: *Socket, len: u64) Error!void {
+        var head: [max_header]u8 = undefined;
+        self._out.writeAll(writeHeader(&head, .text, len)) catch return error.WriteFailed;
     }
 
     fn closeWith(self: *Socket, code: Close) Error!void {
@@ -460,13 +651,81 @@ pub const Socket = struct {
     }
 };
 
-/// How many bytes are unmasked per instruction. The key is four bytes, so it
-/// tiles any multiple of four exactly; 32 is two SSE registers or one AVX2
-/// one, and LLVM splits it for whatever the target actually has.
-const unmask_lanes = 32;
+/// How many bytes something would be, without writing any of them. The
+/// counting half of `print` and `json`, kept in one place so both pay the
+/// same well-understood price and neither invents a buffer.
+fn counted(
+    comptime write: anytype,
+    value: anytype,
+) u64 {
+    // Big enough that a short message is one call into the counter rather
+    // than one per piece of the format, and small enough to be free.
+    var scratch: [256]u8 = undefined;
+    var counter: std.Io.Writer.Discarding = .init(&scratch);
+    // A counter has nowhere to fail: its drain throws the bytes away.
+    write(&counter.writer, value) catch unreachable;
+    return counter.fullCount();
+}
+
+/// Whether a close frame's payload is one RFC 6455 §5.5.1 allows: nothing at
+/// all, or two bytes of code and a reason in UTF-8.
+///
+/// One byte is neither. A code outside the ranges the registry hands out is
+/// one nobody can act on, and 1005 and 1006 in particular only ever mean
+/// something locally — an end that puts either on the wire is reporting
+/// something it cannot have observed.
+fn closeIsWellFormed(payload: []const u8) bool {
+    if (payload.len == 0) return true;
+    if (payload.len < 2) return false;
+
+    const code = std.mem.readInt(u16, payload[0..2], .big);
+    const known = switch (code) {
+        1000...1003, 1007...1014 => true,
+        // 3000-3999 belong to libraries and 4000-4999 to applications, and
+        // neither is this server's business to second-guess.
+        3000...4999 => true,
+        else => false,
+    };
+    if (!known) return false;
+    return std.unicode.utf8ValidateSlice(payload[2..]);
+}
+
+/// The most of `reason` that fits beside a close code, cut on a character
+/// boundary.
+///
+/// 123 is what is left of a control frame's 125 once the code has had its
+/// two, and a reason cut through the middle of a multi-byte character is a
+/// close frame the other end is entitled to refuse — which would turn saying
+/// goodbye politely into the crash it was meant to avoid.
+fn fits(reason: []const u8) usize {
+    if (reason.len <= 123) return reason.len;
+    var n: usize = 123;
+    // A continuation byte is 10xxxxxx. Back up to the one that starts the
+    // character it belongs to.
+    while (n > 0 and reason[n] & 0xc0 == 0x80) n -= 1;
+    return n;
+}
+
+/// The widths the unmasking steps down through. The key is four bytes, so
+/// every one of them tiles it exactly, and LLVM splits each into whatever
+/// registers the target actually has.
+///
+/// 128 is where the throughput stopped improving when ADR 0052 measured it:
+/// 2.4× a single 32-byte tile on a 16 KiB message, with 256 worth another 6%
+/// and twice the unrolled code. The smaller steps are not an afterthought —
+/// a chat line is forty bytes and would otherwise fall straight past the wide
+/// tile into a byte-at-a-time tail almost as long as the message.
+const unmask_tiers = [_]usize{ 128, 32, 8, 4 };
 
 /// Undo the client's masking, in place. `offset` is how far into the message
 /// these bytes are, so the key lines up across a payload read in pieces.
+fn unmask(data: []u8, key: [4]u8, offset: usize) void {
+    unmaskInto(data, data, key, offset);
+}
+
+/// Undo the client's masking out of `src` and into `dst`, which may be the
+/// same slice. `offset` is how far into the message these bytes are, so the
+/// key lines up across a payload that arrived in pieces.
 ///
 /// The obvious loop — one XOR per byte, `key[i % 4]` — is what the RFC
 /// describes, and it runs at about a fourteenth of the speed of copying the
@@ -474,33 +733,38 @@ const unmask_lanes = 32;
 /// one: 6.4µs, against 0.5µs to send the same message back. Since the key
 /// repeats every four bytes, the whole thing is one XOR against a repeating
 /// pattern, which is a vector operation rather than a loop.
-fn unmask(data: []u8, key: [4]u8, offset: usize) void {
+///
+/// **Copying and unmasking are the same pass**, which is the second half of
+/// that finding (ADR 0052): the bytes arrive in the connection's read buffer
+/// and have to reach the handler's, and doing the XOR on the way costs
+/// nothing over the move itself. Reading them and then unmasking them where
+/// they landed is two walks over the same cache lines for one result.
+fn unmaskInto(dst: []u8, src: []const u8, key: [4]u8, offset: usize) void {
+    std.debug.assert(dst.len == src.len);
+
     // Where these bytes sit in the message decides which byte of the key
     // lines up with the first of them.
     var rotated: [4]u8 = undefined;
     inline for (0..4) |k| rotated[k] = key[(k +% offset) & 3];
 
+    // Widest first, and each step only entered if there is work its size for
+    // it — so a 16 KiB message never touches the narrow loops and a forty-byte
+    // one never builds the wide pattern.
     var i: usize = 0;
-    if (data.len >= unmask_lanes) {
-        var tile: [unmask_lanes]u8 = undefined;
-        inline for (0..unmask_lanes) |k| tile[k] = rotated[k & 3];
-        const pattern: @Vector(unmask_lanes, u8) = tile;
-
-        while (i + unmask_lanes <= data.len) : (i += unmask_lanes) {
-            const block: @Vector(unmask_lanes, u8) = data[i..][0..unmask_lanes].*;
-            data[i..][0..unmask_lanes].* = block ^ pattern;
+    inline for (unmask_tiers) |lanes| {
+        if (dst.len - i >= lanes) {
+            const pattern: @Vector(lanes, u8) = std.simd.repeat(lanes, @as(@Vector(4, u8), rotated));
+            while (i + lanes <= dst.len) : (i += lanes) {
+                const block: @Vector(lanes, u8) = src[i..][0..lanes].*;
+                dst[i..][0..lanes].* = block ^ pattern;
+            }
         }
     }
-    // The tail, which is shorter than one vector by definition.
-    while (i < data.len) : (i += 1) data[i] ^= rotated[i & 3];
+    // Three bytes at the most.
+    while (i < dst.len) : (i += 1) dst[i] = src[i] ^ rotated[i & 3];
 }
 
 // ---- the handshake ----
-
-pub const Handshake = struct {
-    /// What goes back in `Sec-WebSocket-Accept`.
-    accept: [28]u8,
-};
 
 /// Whether this request is asking to become a WebSocket. Checked before
 /// anything is written, so a request that is not gets an ordinary answer.
@@ -509,20 +773,23 @@ pub fn isUpgrade(head: []const u8) bool {
     var found_connection = false;
     var headers = http1.HeaderIterator.from(head);
     while (headers.next()) |h| {
-        if (std.ascii.eqlIgnoreCase(h.name, "upgrade") and
+        if (!found_upgrade and std.ascii.eqlIgnoreCase(h.name, "upgrade") and
             std.ascii.eqlIgnoreCase(std.mem.trim(u8, h.value, " \t"), "websocket"))
         {
             found_upgrade = true;
         }
         // `Connection` may be a list — `keep-alive, Upgrade` — so this looks
         // inside it rather than comparing the whole value.
-        if (std.ascii.eqlIgnoreCase(h.name, "connection") and
+        if (!found_connection and std.ascii.eqlIgnoreCase(h.name, "connection") and
             std.ascii.indexOfIgnoreCase(h.value, "upgrade") != null)
         {
             found_connection = true;
         }
+        // Both found, and a head with fifty more headers on it has nothing
+        // left to say about this question.
+        if (found_upgrade and found_connection) return true;
     }
-    return found_upgrade and found_connection;
+    return false;
 }
 
 /// The answer to `Sec-WebSocket-Key`: SHA-1 of the key and a fixed string,
@@ -711,6 +978,41 @@ const Peer = struct {
     }
 };
 
+/// A reader that hands over a few bytes at a time.
+///
+/// A fixed reader has the whole conversation in memory before the first call,
+/// so it never once reaches the paths that exist for a frame arriving split
+/// across reads — which is what a network does with every frame over a
+/// kilobyte. Those paths are the slow half of ADR 0052 and were untested
+/// until this existed.
+const Trickle = struct {
+    rest: []const u8,
+    per: usize,
+    buf: [16]u8 = undefined,
+    reader: std.Io.Reader = undefined,
+
+    fn init(self: *Trickle, bytes: []const u8, per: usize) void {
+        self.rest = bytes;
+        self.per = per;
+        self.reader = .{ .vtable = &vtable, .buffer = &self.buf, .seek = 0, .end = 0 };
+    }
+
+    const vtable: std.Io.Reader.VTable = .{ .stream = stream };
+
+    fn stream(
+        r: *std.Io.Reader,
+        w: *std.Io.Writer,
+        limit: std.Io.Limit,
+    ) std.Io.Reader.StreamError!usize {
+        const self: *Trickle = @alignCast(@fieldParentPtr("reader", r));
+        if (self.rest.len == 0) return error.EndOfStream;
+        const n = @min(self.rest.len, self.per, @intFromEnum(limit));
+        const wrote = try w.write(self.rest[0..n]);
+        self.rest = self.rest[wrote..];
+        return wrote;
+    }
+};
+
 /// RFC 6455 §5.3 transformed-octet-i, written the way the RFC writes it:
 /// one byte at a time, no cleverness. Every test masks with this and lets
 /// `unmask` undo it, so what is being checked is agreement with the spec.
@@ -724,8 +1026,9 @@ fn maskLikeTheRfc(data: []u8, key: [4]u8, offset: usize) void {
 
 test "unmask agrees with the RFC at every length around a vector boundary" {
     // The lanes are what a length has to be checked against: one short of a
-    // block, exactly a block, one past it, and the same around two blocks.
-    const lengths = [_]usize{ 0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 32, 33, 63, 64, 65, 127, 1000 };
+    // block, exactly a block, one past it, and the same around two blocks —
+    // and around the eight- and four-byte steps that clear up the tail.
+    const lengths = [_]usize{ 0, 1, 2, 3, 4, 5, 7, 8, 9, 11, 12, 13, 15, 16, 31, 32, 33, 39, 40, 63, 64, 65, 127, 1000 };
     const key = [4]u8{ 0x37, 0xfa, 0x21, 0x3d };
 
     var original: [1000]u8 = undefined;
@@ -741,6 +1044,29 @@ test "unmask agrees with the RFC at every length around a vector boundary" {
 
             unmask(masked[0..len], key, offset);
             try testing.expectEqualSlices(u8, original[0..len], masked[0..len]);
+        }
+    }
+}
+
+test "unmasking into somewhere else agrees with unmasking in place" {
+    // The pass that receive actually takes: out of the read buffer and into
+    // the handler's, with the XOR done on the way. It has to agree with the
+    // in-place one byte for byte, at every length and every key alignment.
+    const lengths = [_]usize{ 0, 1, 3, 4, 7, 8, 15, 16, 31, 32, 33, 40, 65, 500 };
+    const key = [4]u8{ 0x9a, 0x11, 0xc3, 0x04 };
+
+    var original: [500]u8 = undefined;
+    for (&original, 0..) |*b, i| b.* = @truncate(i *% 17 +% 3);
+
+    for (lengths) |len| {
+        for (0..4) |offset| {
+            var masked: [500]u8 = undefined;
+            @memcpy(masked[0..len], original[0..len]);
+            maskLikeTheRfc(masked[0..len], key, offset);
+
+            var landed: [500]u8 = undefined;
+            unmaskInto(landed[0..len], masked[0..len], key, offset);
+            try testing.expectEqualSlices(u8, original[0..len], landed[0..len]);
         }
     }
 }
@@ -764,6 +1090,51 @@ test "unmask picks up mid-message where the previous piece left off" {
     try testing.expectEqualSlices(u8, &whole, &split);
 }
 
+test "a header is read out of the bytes in hand, or not read at all" {
+    // Pure, so the whole of RFC 6455 §5.2 is a table rather than a
+    // connection. Nothing here refuses anything: that is the socket's job,
+    // and it needs a close frame to do it with.
+    try testing.expect(Socket.headerFrom("") == null);
+    try testing.expect(Socket.headerFrom("\x81") == null);
+    // Announced as masked, and the four bytes of key have not arrived.
+    try testing.expect(Socket.headerFrom("\x81\x85\x37\xfa") == null);
+
+    const short = Socket.headerFrom("\x81\x85\x37\xfa\x21\x3d").?;
+    try testing.expect(short.fin);
+    try testing.expect(!short.reserved);
+    try testing.expect(short.masked);
+    try testing.expectEqual(Opcode.text, short.opcode);
+    try testing.expectEqual(@as(u64, 5), short.len);
+    try testing.expectEqual([4]u8{ 0x37, 0xfa, 0x21, 0x3d }, short.mask);
+    try testing.expectEqual(@as(usize, 6), short.size);
+
+    // 126 means the length is the next two bytes, and the header is 8 long.
+    const medium = Socket.headerFrom("\x82\xfe\xea\x60\x01\x02\x03\x04").?;
+    try testing.expectEqual(Opcode.binary, medium.opcode);
+    try testing.expectEqual(@as(u64, 60_000), medium.len);
+    try testing.expectEqual(@as(usize, 8), medium.size);
+
+    // 127 means eight bytes of length, and a header of 14.
+    const long = Socket.headerFrom(
+        "\x02\xff\x00\x00\x00\x01\x00\x00\x00\x00\x0a\x0b\x0c\x0d",
+    ).?;
+    try testing.expect(!long.fin);
+    try testing.expectEqual(@as(u64, 1 << 32), long.len);
+    try testing.expectEqual(@as(usize, 14), long.size);
+
+    // An unmasked frame is four bytes shorter and carries no key. It is a
+    // header that parses and a frame that will be refused.
+    const bare = Socket.headerFrom("\x89\x00").?;
+    try testing.expect(!bare.masked);
+    try testing.expectEqual(@as(usize, 2), bare.size);
+    try testing.expect(bare.opcode.isControl());
+
+    // Any of the three reserved bits.
+    try testing.expect(Socket.headerFrom("\xc1\x80\x00\x00\x00\x00").?.reserved);
+    try testing.expect(Socket.headerFrom("\xa1\x80\x00\x00\x00\x00").?.reserved);
+    try testing.expect(Socket.headerFrom("\x91\x80\x00\x00\x00\x00").?.reserved);
+}
+
 test "the handshake answer is the one every client checks" {
     // The example from RFC 6455 §1.3, which every implementation is tested
     // against and which pins the salt, the hash and the encoding at once.
@@ -783,6 +1154,11 @@ test "an upgrade is recognised, and an ordinary request is not" {
     // Half an upgrade is not one.
     try testing.expect(!isUpgrade("GET /ws HTTP/1.1\r\nUpgrade: websocket\r\n\r\n"));
     try testing.expect(!isUpgrade("GET /ws HTTP/1.1\r\nConnection: Upgrade\r\n\r\n"));
+    // The answer is settled before the rest of the head is walked.
+    try testing.expect(isUpgrade(
+        "GET /ws HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n" ++
+            "X-Whatever: and a hundred more of these\r\n\r\n",
+    ));
 }
 
 test "a text message arrives unmasked, and is echoed back without a mask" {
@@ -812,6 +1188,34 @@ test "a message split across frames is put back together" {
     var buf: [64]u8 = undefined;
     const message = (try socket.receive(&buf)).?;
     try testing.expectEqualStrings("hello, world", message.data);
+}
+
+test "a frame that arrives a few bytes at a time is the same message" {
+    // The slow path, end to end: a header split across two reads and a
+    // payload that never sits in the read buffer whole. What comes out has
+    // to be byte for byte what the fast path produces.
+    var peer: Peer = .{};
+    defer peer.deinit();
+    const long = "the quick brown fox jumps over the lazy dog. " ** 12; // 528 bytes
+    try peer.frame(true, 2, long);
+    // A ceiling well under the header's 8 bytes for one read, and far under
+    // the payload.
+    try peer.frame(true, 1, "and then a short one");
+
+    var trickle: Trickle = undefined;
+    trickle.init(peer.to_server.items, 3);
+    var bytes: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    var socket: Socket = .{ ._in = &trickle.reader, ._out = &out, ._stopping = null };
+
+    var buf: [1024]u8 = undefined;
+    const first = (try socket.receive(&buf)).?;
+    try testing.expectEqual(Kind.binary, first.kind);
+    try testing.expectEqualStrings(long, first.data);
+
+    const second = (try socket.receive(&buf)).?;
+    try testing.expectEqualStrings("and then a short one", second.data);
+    try testing.expect(try socket.receive(&buf) == null);
 }
 
 test "a ping is answered without the handler hearing about it" {
@@ -861,6 +1265,84 @@ test "a close is echoed and ends the conversation" {
     // loop does not send a second one.
     try socket.close(.normal, "");
     try testing.expectEqual(@as(usize, 10), peer.sent().len);
+
+    // Neither does sending: a message after goodbye is a frame the other end
+    // is entitled to treat as a protocol error, and a handler racing the
+    // client to the close is not a bug worth an error return.
+    try socket.sendText("one more thing");
+    try socket.print("or {d}", .{2});
+    try socket.json(.{ .and_also = true });
+    try testing.expectEqual(@as(usize, 10), peer.sent().len);
+}
+
+test "a close frame that is not one is refused rather than echoed" {
+    // One byte where there should be two: neither an empty goodbye nor a
+    // code and a reason. Echoing it would put the same broken frame back.
+    var peer: Peer = .{};
+    defer peer.deinit();
+    try peer.frame(true, 8, "\x03");
+    var socket = peer.socket();
+
+    var buf: [64]u8 = undefined;
+    try testing.expectError(error.ProtocolError, socket.receive(&buf));
+    try testing.expectEqualStrings("\x88\x02\x03\xea", peer.sent()); // 1002
+
+    // A code nobody assigned. 1005 in particular means "no code was sent",
+    // which is not something an end can observe about itself and put on a
+    // wire.
+    for ([_]u16{ 999, 1004, 1005, 1006, 1016, 2999, 5000 }) |code| {
+        var other: Peer = .{};
+        defer other.deinit();
+        var raw: [2]u8 = undefined;
+        std.mem.writeInt(u16, &raw, code, .big);
+        try other.frame(true, 8, &raw);
+        var s = other.socket();
+        try testing.expectError(error.ProtocolError, s.receive(&buf));
+        try testing.expectEqualStrings("\x88\x02\x03\xea", other.sent());
+    }
+
+    // And the ones that are fine, including the ranges libraries and
+    // applications get to themselves.
+    for ([_]u16{ 1000, 1001, 1003, 1011, 1012, 3000, 4999 }) |code| {
+        var other: Peer = .{};
+        defer other.deinit();
+        var raw: [2]u8 = undefined;
+        std.mem.writeInt(u16, &raw, code, .big);
+        try other.frame(true, 8, &raw);
+        var s = other.socket();
+        try testing.expectEqual(@as(?Message, null), try s.receive(&buf));
+        try testing.expect(s.closedCleanly());
+    }
+}
+
+test "a close reason that is not UTF-8 is refused with the framing intact" {
+    var peer: Peer = .{};
+    defer peer.deinit();
+    try peer.frame(true, 8, "\x03\xe8\xff\xfe");
+    var socket = peer.socket();
+
+    var buf: [64]u8 = undefined;
+    try testing.expectError(error.ProtocolError, socket.receive(&buf));
+    try testing.expectEqualStrings("\x88\x02\x03\xea", peer.sent());
+}
+
+test "a close reason too long for a control frame is cut on a character" {
+    var peer: Peer = .{};
+    defer peer.deinit();
+    var socket = peer.socket();
+
+    // 122 bytes of ASCII and then a three-byte character, so the 123rd byte
+    // is the start of a character that does not fit. Cutting at 123 would
+    // send half of it, and half a character is not UTF-8.
+    const reason = "x" ** 122 ++ "€" ++ "tail";
+    try socket.close(.policy, reason);
+
+    const sent = peer.sent();
+    try testing.expectEqual(@as(u8, 0x88), sent[0]);
+    const payload = sent[2..][0..sent[1]];
+    try testing.expectEqual(@as(usize, 124), payload.len); // 2 + 122
+    try testing.expect(std.unicode.utf8ValidateSlice(payload[2..]));
+    try testing.expectEqualStrings("x" ** 122, payload[2..]);
 }
 
 test "an unmasked frame from a client is refused" {
@@ -923,6 +1405,21 @@ test "a frame announcing more than the buffer holds is refused before its bytes 
     try testing.expectEqualStrings("\x88\x02\x03\xf1", peer.sent()); // 1009
 }
 
+test "fragments are measured against what is left of the buffer, not all of it" {
+    // Each frame fits on its own; together they do not. The second one is
+    // refused on its header, before its bytes are read, because the room
+    // that matters is what the first one left.
+    var peer: Peer = .{};
+    defer peer.deinit();
+    try peer.frame(false, 1, "x" ** 40);
+    try peer.frame(true, 0, "y" ** 40);
+    var socket = peer.socket();
+
+    var buf: [64]u8 = undefined;
+    try testing.expectError(error.MessageTooBig, socket.receive(&buf));
+    try testing.expectEqualStrings("\x88\x02\x03\xf1", peer.sent());
+}
+
 test "a continuation with nothing to continue is a protocol error" {
     var peer: Peer = .{};
     defer peer.deinit();
@@ -962,6 +1459,37 @@ test "a long message uses the sixteen-bit length form, both ways" {
     try testing.expectEqual(@as(u16, 400), std.mem.readInt(u16, head[2..4], .big));
 }
 
+test "a formatted message needs no buffer of the handler's own" {
+    var peer: Peer = .{};
+    defer peer.deinit();
+    var socket = peer.socket();
+
+    try socket.print("welcome, {d} here", .{3});
+    try testing.expectEqualStrings("\x81\x0fwelcome, 3 here", peer.sent());
+
+    // And one long enough to need the sixteen-bit length form, so the header
+    // the counting pass chose is the one the bytes deserve.
+    try socket.print("{s}", .{"z" ** 300});
+    const rest = peer.sent()[17..];
+    try testing.expectEqual(@as(u8, 0x81), rest[0]);
+    try testing.expectEqual(@as(u8, 126), rest[1]);
+    try testing.expectEqual(@as(u16, 300), std.mem.readInt(u16, rest[2..4], .big));
+    try testing.expectEqualStrings("z" ** 300, rest[4..]);
+}
+
+test "a value goes out as one JSON text message" {
+    var peer: Peer = .{};
+    defer peer.deinit();
+    var socket = peer.socket();
+
+    try socket.json(.{ .kind = "joined", .who = "wati", .here = 3 });
+    const body = "{\"kind\":\"joined\",\"who\":\"wati\",\"here\":3}";
+    const sent = peer.sent();
+    try testing.expectEqual(@as(u8, 0x81), sent[0]); // FIN + text
+    try testing.expectEqual(@as(u8, body.len), sent[1]);
+    try testing.expectEqualStrings(body, sent[2..]);
+}
+
 test "live follows the server's stopping flag" {
     var peer: Peer = .{};
     defer peer.deinit();
@@ -974,18 +1502,24 @@ test "live follows the server's stopping flag" {
     try testing.expect(!socket.live());
 }
 
-test "the acceptance says exactly what a client is looking for" {
-    var buf: [256]u8 = undefined;
-    var out: std.Io.Writer = .fixed(&buf);
-    try writeAcceptance(&out, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", "chat");
+test "a shutdown ends the loop, and the client is told why" {
+    var peer: Peer = .{};
+    defer peer.deinit();
+    try peer.frame(true, 1, "still typing");
+    var socket = peer.socket();
+    var stopping = std.atomic.Value(bool).init(false);
+    socket._stopping = &stopping;
 
-    try testing.expectEqualStrings(
-        "HTTP/1.1 101 Switching Protocols\r\n" ++
-            "Upgrade: websocket\r\nConnection: Upgrade\r\n" ++
-            "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n" ++
-            "Sec-WebSocket-Protocol: chat\r\n\r\n",
-        out.buffered(),
-    );
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("still typing", (try socket.receive(&buf)).?.data);
+
+    // A deploy starts. The handler's loop ends on its own — no `live()`
+    // branch of its own — and the other end gets a close rather than a
+    // socket that stopped answering (ADR 0020).
+    stopping.store(true, .release);
+    try testing.expectEqual(@as(?Message, null), try socket.receive(&buf));
+    try testing.expectEqualStrings("\x88\x02\x03\xe9", peer.sent()); // 1001
+    try testing.expect(!socket.closedCleanly());
 }
 
 test "a client that vanishes is the end of the conversation, not an error" {
@@ -1013,4 +1547,44 @@ test "a close frame is told apart from a client that vanished" {
     var buf: [64]u8 = undefined;
     try testing.expectEqual(@as(?Message, null), try socket.receive(&buf));
     try testing.expect(socket.closedCleanly());
+}
+
+test "the acceptance says exactly what a client is looking for" {
+    var buf: [256]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buf);
+    try writeAcceptance(&out, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", "chat");
+
+    try testing.expectEqualStrings(
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+            "Upgrade: websocket\r\nConnection: Upgrade\r\n" ++
+            "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n" ++
+            "Sec-WebSocket-Protocol: chat\r\n\r\n",
+        out.buffered(),
+    );
+}
+
+test "the header a room builds once is the one a socket would have written" {
+    // The Room frames a message for everybody at once, so the bytes it puts
+    // in front of it have to be exactly the bytes this module would.
+    var mine: [max_header]u8 = undefined;
+    var theirs: [max_header]u8 = undefined;
+
+    for ([_]u64{ 0, 1, 125, 126, 127, 1000, 65_535, 65_536, 1 << 20 }) |len| {
+        try testing.expectEqualSlices(
+            u8,
+            writeHeader(&mine, .text, len),
+            headerFor(&theirs, .text, len),
+        );
+        try testing.expectEqualSlices(
+            u8,
+            writeHeader(&mine, .binary, len),
+            headerFor(&theirs, .binary, len),
+        );
+    }
+
+    // And the three length forms are the shortest that will hold each.
+    try testing.expectEqual(@as(usize, 2), headerFor(&mine, .text, 125).len);
+    try testing.expectEqual(@as(usize, 4), headerFor(&mine, .text, 126).len);
+    try testing.expectEqual(@as(usize, 4), headerFor(&mine, .text, 65_535).len);
+    try testing.expectEqual(@as(usize, 10), headerFor(&mine, .text, 65_536).len);
 }
