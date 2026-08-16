@@ -100,6 +100,15 @@ them are hard:
 - Binary size: a feature the linker cannot drop states its measured cost, as a
   stripped `ReleaseFast` number, in the running total in ADR 0018.
 
+**A feature that cannot be made to fit does not ship in a worse shape.**
+Response compression is what that looks like: the shape that fits is known, it
+has not been built, and no allocating-per-request version was shipped meanwhile.
+
+**Every change is put against all four before it is written.** Which axis it
+spends, and the number, is part of proposing it — not something worked out after
+it lands, or left for review to ask about. That applies to a design argued in a
+session as much as to a diff, and a proposal that skips it is not finished.
+
 ## Conventions
 
 **Error messages are a feature, and a build step holds them.** Each file in
