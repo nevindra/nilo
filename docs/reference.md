@@ -632,7 +632,7 @@ by a counter asserted at `db.deinit()`.
 |---|---|
 | `sql.Timestamp` | microseconds since the epoch, written as RFC 3339 in JSON. `timestamptz` |
 | `sql.Uuid` | 16 bytes, written as text in JSON. `uuid` |
-| `sql.Json(T)` | a `T` stored as `jsonb` |
+| `sql.Json(T)` | a `T` stored as `jsonb`, parsed per row into the request arena. Not available in `db.stream`, which allocates nothing |
 
 ### Errors
 

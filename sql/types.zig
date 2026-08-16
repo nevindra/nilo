@@ -88,9 +88,14 @@ pub const Timestamp = struct {
 /// a handler and leave as `550e8400-e29b-41d4-a716-446655440000` rather than
 /// as an array of numbers. That is the whole of its job.
 pub const Uuid = struct {
-    bytes: [16]u8,
+    bytes: [byte_len]u8,
 
     pub const nilo_column = "uuid";
+
+    /// How many bytes a `uuid` column holds. Named because `db.zig` checks
+    /// the length of what the Wire handed back against it, and a literal
+    /// sixteen in two files is a literal sixteen that can disagree.
+    pub const byte_len = 16;
 
     /// The hyphenated form, lowercase. 8-4-4-4-12, which is the only spelling
     /// anything on the other side of an API expects.

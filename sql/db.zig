@@ -59,6 +59,7 @@ const postgres = @import("postgres.zig");
 const row_mod = @import("row.zig");
 const schema = @import("schema.zig");
 const statement = @import("statement.zig");
+const types = @import("types.zig");
 const where_mod = @import("where.zig");
 const wire_mod = @import("wire.zig");
 
@@ -92,7 +93,24 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         /// Debug only: transactions begun and not yet ended. A leak here is
         /// a connection that never goes back, so the count is asserted at
         /// `deinit` — see `begin`.
+        ///
+        /// **Moved atomically, because a `Db` is a Service and a Service is
+        /// shared across threads** (ADR 0011). A plain `+= 1` here is the
+        /// exact race that ADR warns about, and losing a count does not
+        /// merely weaken the trap: drift upwards makes `deinit` accuse a
+        /// program of a leak that never happened, and drift downwards
+        /// underflows a `usize` and panics. A trap that fires on correct
+        /// code is worse than no trap.
         open_transactions: if (traps_enabled) usize else void = if (traps_enabled) 0 else {},
+        /// Debug only: result sets opened with `stream` and never closed.
+        ///
+        /// The same trap as the one above, for the mistake that costs more.
+        /// An abandoned transaction holds a connection until the request
+        /// ends; an abandoned result set holds one until the process does,
+        /// because nothing else will ever call `close`. A handful of them
+        /// empty the pool and the server stops answering — so the cheaper
+        /// mistake was the one being watched and the expensive one was not.
+        open_streams: if (traps_enabled) usize else void = if (traps_enabled) 0 else {},
 
         pub const Opts = struct {
             /// Connections held open. The ceiling on how many requests can
@@ -117,16 +135,41 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         }
 
         pub fn deinit(self: *Self) void {
-            if (traps_enabled and self.open_transactions != 0) {
-                std.debug.panic(
+            if (traps_enabled) {
+                const open = self.heldCount(&self.open_transactions);
+                if (open != 0) std.debug.panic(
                     "nilo_sql: {d} transaction(s) were begun and never ended. Every `begin` " ++
                         "wants `defer tx.deinit()` on the line after it, or the connection " ++
                         "never goes back to the pool.",
-                    .{self.open_transactions},
+                    .{open},
+                );
+                const streaming = self.heldCount(&self.open_streams);
+                if (streaming != 0) std.debug.panic(
+                    "nilo_sql: {d} result set(s) were opened with `stream` and never closed. " ++
+                        "Every `stream` wants `defer rows.close()` on the line after it, or the " ++
+                        "connection never goes back to the pool at all — an abandoned " ++
+                        "transaction costs one until the request ends, an abandoned result set " ++
+                        "costs one for as long as the process runs.",
+                    .{streaming},
                 );
             }
             if (self.wire) |*w| w.close();
             self.wire = null;
+        }
+
+        /// One of the Debug-only counters, read the way it is written. Both
+        /// are `void` outside Debug, which is why every use of them sits
+        /// inside an `if (traps_enabled)` the compiler folds away.
+        fn heldCount(self: *Self, field: *const usize) usize {
+            _ = self;
+            return @atomicLoad(usize, field, .monotonic);
+        }
+
+        /// Move one of them. `delta` is `.Add` or `.Sub`; the amount is
+        /// always one, because these count things that are held.
+        fn hold(self: *Self, field: *usize, comptime delta: std.builtin.AtomicRmwOp) void {
+            _ = self;
+            _ = @atomicRmw(usize, field, delta, 1, .monotonic);
         }
 
         /// Check these Rows against the tables they name, once, while the
@@ -232,10 +275,11 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         ) !Streamed(Row) {
             const stmt = comptime statement.select(D, Row, @TypeOf(options));
             const w = try self.wireOf();
-            return .{
-                .w = w,
-                .rows = try w.run(c.arena(), stmt.sql, valuesOf(stmt, Row, options)),
-            };
+            const rows = try w.run(c.arena(), stmt.sql, valuesOf(stmt, Row, options));
+            // Counted only once the statement is away, so a `stream` that
+            // never opened is not a `stream` that was never closed.
+            if (traps_enabled) self.hold(&self.open_streams, .Add);
+            return .{ .db = self, .w = w, .rows = rows };
         }
 
         /// A statement this module will not write, filling `Row` from the
@@ -313,7 +357,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         pub fn begin(self: *Self, c: *nilo.Ctx) !Tx {
             const w = try self.wireOf();
             const inner = try w.begin(c.arena());
-            if (traps_enabled) self.open_transactions += 1;
+            if (traps_enabled) self.hold(&self.open_transactions, .Add);
             return .{ .db = self, .w = w, .inner = inner };
         }
 
@@ -349,7 +393,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
 
             fn end(self: *Tx) void {
                 self.finished = true;
-                if (traps_enabled) self.db.open_transactions -= 1;
+                if (traps_enabled) self.db.hold(&self.db.open_transactions, .Sub);
             }
 
             pub fn select(self: *Tx, comptime Row: type, c: *nilo.Ctx, options: anytype) ![]Row {
@@ -393,9 +437,15 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         /// Rows pulled one at a time, each borrowed from the read buffer.
         pub fn Streamed(comptime Row: type) type {
             comptime row_mod.assertRow(Row);
+            comptime assertStreamable(Row);
             return struct {
+                db: *Self,
                 w: *W,
                 rows: W.Rows,
+                /// Debug only: whether `close` has run. A `Streamed` is a
+                /// value the handler holds, so `close` being called twice
+                /// through two copies would take the count below zero.
+                closed: if (traps_enabled) bool else void = if (traps_enabled) false else {},
 
                 const Rows = @This();
 
@@ -405,8 +455,8 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
                     if (!try self.w.next(&self.rows)) return null;
                     var out: row_mod.Borrowed(Row) = undefined;
                     inline for (comptime row_mod.columnsOf(Row), 0..) |column, i| {
-                        const F = comptime row_mod.ColumnType(Row, column);
-                        @field(out, column) = try self.w.read(&self.rows, comptime plainOf(F), i);
+                        const B = comptime row_mod.ColumnType(row_mod.Borrowed(Row), column);
+                        @field(out, column) = try borrowColumn(self.w, &self.rows, B, i);
                     }
                     return out;
                 }
@@ -414,9 +464,42 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
                 /// Give the connection back. Wanted on every path out,
                 /// including the ones that stopped reading early.
                 pub fn close(self: *Rows) void {
+                    if (traps_enabled) {
+                        if (self.closed) return;
+                        self.closed = true;
+                        self.db.hold(&self.db.open_streams, .Sub);
+                    }
                     self.w.drain(&self.rows);
                 }
             };
+        }
+
+        /// One column of a row that is **borrowed** rather than kept.
+        ///
+        /// The same shape as `readColumn` and deliberately not the same
+        /// function: nothing is copied here, because the whole of what
+        /// `stream` sells is that a million rows cost no allocation. Text
+        /// stays pointing into the read buffer — which is why `Borrowed`
+        /// calls it `[]const u8` and not `Str` — and a `Timestamp` or a
+        /// `Uuid` is assembled from bytes that were going to be read anyway.
+        fn borrowColumn(
+            w: *W,
+            rows: *const W.Rows,
+            comptime B: type,
+            comptime col: usize,
+        ) !B {
+            if (@typeInfo(B) == .optional) {
+                const Inner = @typeInfo(B).optional.child;
+                const on_wire = try w.read(rows, ?WireRead(Inner), col);
+                return if (on_wire) |value| try borrowed(Inner, value) else null;
+            }
+            return borrowed(B, try w.read(rows, WireRead(B), col));
+        }
+
+        fn borrowed(comptime B: type, value: WireRead(B)) !B {
+            if (B == types.Timestamp) return .{ .micros = value };
+            if (B == types.Uuid) return uuidOf(value);
+            return value;
         }
 
         // -- the shared middle -----------------------------------------------
@@ -464,6 +547,10 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         }
 
         /// One column, with the borrow ended if there was one.
+        ///
+        /// The optional is stripped once, here, so that everything below
+        /// answers one question about one type. Asking the Wire for the
+        /// optional keeps the null check where the driver already does it.
         fn readColumn(
             w: *W,
             rows: *const W.Rows,
@@ -471,24 +558,36 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             comptime col: usize,
             c: *nilo.Ctx,
         ) !F {
-            if (F == nilo.Str) {
-                const borrowed = try w.read(rows, []const u8, col);
-                return c.str(try c.arena().dupe(u8, borrowed));
+            if (@typeInfo(F) == .optional) {
+                const Inner = @typeInfo(F).optional.child;
+                const on_wire = try w.read(rows, ?WireRead(Inner), col);
+                return if (on_wire) |value| try kept(Inner, value, c) else null;
             }
-            if (F == ?nilo.Str) {
-                const borrowed = try w.read(rows, ?[]const u8, col);
-                return if (borrowed) |b| c.str(try c.arena().dupe(u8, b)) else null;
-            }
-            if (F == []const u8) {
-                return try c.arena().dupe(u8, try w.read(rows, []const u8, col));
-            }
-            if (F == ?[]const u8) {
-                const borrowed = try w.read(rows, ?[]const u8, col);
-                return if (borrowed) |b| try c.arena().dupe(u8, b) else null;
+            return kept(F, try w.read(rows, WireRead(F), col), c);
+        }
+
+        /// The declared type, built out of what the Wire handed back — and
+        /// **the one place a borrow ends**: every byte that came out of the
+        /// driver's read buffer is copied into the request arena here, so
+        /// what a handler holds lives exactly as long as the response it is
+        /// going into.
+        fn kept(comptime F: type, value: WireRead(F), c: *nilo.Ctx) !F {
+            if (F == nilo.Str) return c.str(try c.arena().dupe(u8, value));
+            if (F == []const u8) return try c.arena().dupe(u8, value);
+            if (F == types.Timestamp) return .{ .micros = value };
+            if (F == types.Uuid) return uuidOf(value);
+            if (comptime types.jsonPayload(F)) |Payload| {
+                // The cost `types.zig` states: a Json column is parsed per
+                // row, into the arena, and freed by the reset that ends the
+                // request. This is `jsonPayload`'s one caller.
+                return .{
+                    .value = std.json.parseFromSliceLeaky(Payload, c.arena(), value, .{}) catch
+                        return error.QueryFailed,
+                };
             }
             // Everything else is a value rather than a view of a buffer, so
             // there is nothing to outlive.
-            return w.read(rows, F, col);
+            return value;
         }
 
         /// Check every Row against the table it names, and log what does not
@@ -537,10 +636,14 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         /// nullable column is set to NULL, and there is nothing to strip it
         /// to. `= null` in a condition never reaches here at all, because it
         /// compiled to `IS NULL`, which takes no parameter (`where.zig`).
-        fn valuesOf(comptime stmt: statement.Statement, comptime Row: type, options: anytype) Values(Row, stmt) {
-            var out: Values(Row, stmt) = undefined;
+        fn valuesOf(
+            comptime stmt: statement.Statement,
+            comptime Row: type,
+            options: anytype,
+        ) Values(Row, @TypeOf(options), stmt) {
+            var out: Values(Row, @TypeOf(options), stmt) = undefined;
             inline for (stmt.paths, 0..) |path, i| {
-                out[i] = where_mod.valueAt(options, path);
+                out[i] = forWire(@TypeOf(out[i]), where_mod.valueAt(options, path));
             }
             return out;
         }
@@ -554,16 +657,25 @@ const traps_enabled = builtin.mode == .Debug;
 
 /// The tuple type for a statement's parameters: one field per placeholder,
 /// each the type of the column it is compared against.
-fn Values(comptime Row: type, comptime stmt: statement.Statement) type {
+///
+/// `O` is the options struct the values are read out of, and it is here for
+/// the parameters that belong to no column. A `LIMIT` used to bind as `i64`
+/// on the reasoning that Postgres counts rows in a `bigint` — which is true
+/// of the column and not of the caller. `.limit = per_page` with `per_page`
+/// a `usize` is the shape everybody writes, and a `usize` does not coerce to
+/// an `i64`, so it stopped with Zig's own message pointing inside this file
+/// rather than with one of nilo's. Binding a count as whatever integer the
+/// caller is holding costs nothing — the driver already narrows to the
+/// column's width and says so when a value will not fit.
+fn Values(comptime Row: type, comptime O: type, comptime stmt: statement.Statement) type {
     return comptime blk: {
         var fields: [stmt.paths.len]type = undefined;
         for (stmt.params, 0..) |param, i| {
-            if (param.isBound()) {
-                // A LIMIT or an OFFSET, which is a count and not a column.
-                fields[i] = i64;
+            if (param.isCount()) {
+                fields[i] = where_mod.ValueAt(O, stmt.paths[i]);
                 continue;
             }
-            const F = plainOf(row_mod.ColumnType(Row, param.column));
+            const F = WireWrite(row_mod.ColumnType(Row, param.column));
             // `.in` is one placeholder holding many values — `= ANY($1)` —
             // so what binds is a list of the column's type rather than one
             // of them.
@@ -574,26 +686,108 @@ fn Values(comptime Row: type, comptime stmt: statement.Statement) type {
     };
 }
 
-/// A column's declared type with `Str`'s claim taken off it: plain bytes.
+/// What the Wire is asked for when a column's declared type is not the shape
+/// that travels on it. Everything here is a mapping to a type the driver
+/// already knows, which is what keeps the driver's name inside
+/// `sql/postgres.zig` where ADR 0039 put it — nothing above that file has to
+/// know a wire format to make one of these.
 ///
-/// Two callers, and they are the same question asked at both ends.
+/// - `Str` and `[]const u8` are bytes. The first is copied and renamed in
+///   `kept`, the second only copied.
+/// - `Timestamp` is an `i64`. Postgres counts a `timestamptz` from
+///   2000-01-01 and the driver's own `i64` decoder already converts to the
+///   epoch, so asking for the integer is asking for the field.
+/// - `Uuid` is its sixteen bytes, in the order the column stores them.
+/// - `Json(T)` is the bytes of the document. The driver hands back `jsonb`
+///   with its version byte already off, so what arrives is text to parse.
+fn WireRead(comptime F: type) type {
+    comptime {
+        if (F == nilo.Str) return []const u8;
+        if (F == types.Timestamp) return i64;
+        if (F == types.Uuid) return []const u8;
+        if (types.jsonPayload(F) != null) return []const u8;
+        return F;
+    }
+}
+
+/// Sixteen bytes into a `Uuid`. A column that answered with a different
+/// number of them is not a `uuid`, and saying so beats reading past the end
+/// of the buffer or quietly keeping a prefix.
+fn uuidOf(raw: []const u8) !types.Uuid {
+    if (raw.len != types.Uuid.byte_len) return error.QueryFailed;
+    return .{ .bytes = raw[0..types.Uuid.byte_len].* };
+}
+
+/// A Row is streamable unless it reads a `Json` column.
 ///
-/// **Reading**, in a `stream`: the row is borrowed from the driver's buffer
-/// and dies at the next one, so it is not a `Str` and must not be called
-/// one. This is `row.Borrowed`, one field at a time.
+/// A borrowed row costs no allocation — that is the whole of what `stream`
+/// sells, and it is what makes a million-row export run flat. Parsing a
+/// document needs one per row, into an arena that is not reset until the
+/// request ends, so a streamed `Json` column would turn the one call with a
+/// bounded memory promise into the one that grows without limit. Refusing is
+/// the honest answer; `select` parses them, and a Row that reads the column
+/// as `[]const u8` streams it as bytes.
+fn assertStreamable(comptime Row: type) void {
+    comptime {
+        for (@typeInfo(Row).@"struct".fields) |f| {
+            const Inner = switch (@typeInfo(f.type)) {
+                .optional => |o| o.child,
+                else => f.type,
+            };
+            if (types.jsonPayload(Inner) == null) continue;
+            @compileError(
+                "nilo: " ++ @typeName(Row) ++ " reads `" ++ f.name ++ "` as a Json column, " ++
+                    "and a streamed row cannot hold one.\n" ++
+                    "  A borrowed row allocates nothing, which is what makes a million of " ++
+                    "them run flat, and parsing a document costs one allocation per row. " ++
+                    "Read the column with `select`, or as `[]const u8` in a Row of its own " ++
+                    "and parse it where it is needed.",
+            );
+        }
+    }
+}
+
+/// What a column's value binds as on the way *to* the database — the mirror
+/// of `WireRead`, and the same mapping read the other way round.
 ///
-/// **Writing**, in the parameter tuple: a value going *to* the database has
-/// no lifetime question at all — it has to survive the call and nothing
-/// more. Requiring a `Str` there would mean `.email = "a@b.c"` did not
-/// compile, which is the shape everybody writes; `Str` is what text is when
-/// it comes *back*, and the same rule the other way round would be
-/// ceremony with nothing behind it.
-fn plainOf(comptime F: type) type {
+/// A value going to the database has no lifetime question at all: it has to
+/// survive the call and nothing more. So `Str` is not asked for here, and
+/// requiring it would mean `.email = "a@b.c"` did not compile, which is the
+/// shape everybody writes. `Str` is what text is when it comes *back*.
+///
+/// A `Uuid` binds as its sixteen bytes **as an array rather than a slice**,
+/// and that is load-bearing: the tuple this builds is what the driver reads
+/// from, so a slice would have to point at something, and the only thing
+/// available to point at is the copy `where.valueAt` just returned. The array
+/// travels inside the tuple and outlives the call, which a pointer into a
+/// temporary would not.
+///
+/// A `Json(T)` is handed over whole. The driver writes any struct into a
+/// `jsonb` column through `std.json`, which finds the `jsonStringify` on it
+/// and writes the `T` inside rather than the wrapper.
+fn WireWrite(comptime F: type) type {
     comptime {
         if (F == nilo.Str) return []const u8;
         if (F == ?nilo.Str) return ?[]const u8;
+        if (F == types.Timestamp) return i64;
+        if (F == ?types.Timestamp) return ?i64;
+        if (F == types.Uuid) return [types.Uuid.byte_len]u8;
+        if (F == ?types.Uuid) return ?[types.Uuid.byte_len]u8;
         return F;
     }
+}
+
+/// One value taken apart for the wire. Everything the driver already
+/// understands is handed over unchanged and coerced by the assignment; the
+/// two types carrying a column shape Zig has no word for are opened here,
+/// which is the same conversion `kept` makes coming back.
+fn forWire(comptime To: type, value: anytype) To {
+    const V = @TypeOf(value);
+    if (V == types.Timestamp) return value.micros;
+    if (V == ?types.Timestamp) return if (value) |t| t.micros else null;
+    if (V == types.Uuid) return value.bytes;
+    if (V == ?types.Uuid) return if (value) |u| u.bytes else null;
+    return value;
 }
 
 /// A connection URL with the password taken out, for the one log line that
@@ -709,7 +903,7 @@ test "the parameter tuple is built from the paths the statement worked out" {
 
     // `18` is written as a `comptime_int` and has to reach the database as
     // whatever `age` is, or there is nothing to put on the wire.
-    const Tuple = Values(User, stmt);
+    const Tuple = Values(User, @TypeOf(options), stmt);
     try testing.expectEqual(@as(usize, 1), @typeInfo(Tuple).@"struct".fields.len);
     try testing.expectEqual(i32, @typeInfo(Tuple).@"struct".fields[0].type);
 }
@@ -725,13 +919,13 @@ test "a nullable column keeps its optional, because a write may be null" {
     // Comparing: the `?` is harmless, a non-null optional binds the value.
     const found = .{ .where = .{ .nickname = "bo" } };
     const read = comptime statement.select(dialect.Postgres, User, @TypeOf(found));
-    try testing.expectEqual(?[]const u8, @typeInfo(Values(User, read)).@"struct".fields[0].type);
+    try testing.expectEqual(?[]const u8, @typeInfo(Values(User, @TypeOf(found), read)).@"struct".fields[0].type);
 
     // Writing: the `?` is the whole point. `.nickname = null` is how a
     // column is set to NULL, and stripping it would leave nothing to write.
     const written = .{ .nickname = @as(?[]const u8, null) };
     const wrote = comptime statement.insert(dialect.Postgres, User, @TypeOf(written));
-    try testing.expectEqual(?[]const u8, @typeInfo(Values(User, wrote)).@"struct".fields[0].type);
+    try testing.expectEqual(?[]const u8, @typeInfo(Values(User, @TypeOf(written), wrote)).@"struct".fields[0].type);
 }
 
 test "a limit held in a variable binds as a count, not as a column" {
@@ -750,6 +944,50 @@ test "a limit held in a variable binds as a count, not as a column" {
     try testing.expectEqual(@as(usize, 2), stmt.paths.len);
     try testing.expectEqualStrings("age", stmt.params[0].column);
     try testing.expectEqualStrings(where_mod.Param.none, stmt.params[1].column);
+}
+
+test "a count binds as the integer the caller is holding, whatever it is" {
+    const User = struct {
+        pub const nilo_table = .{ .name = "users", .key = .id };
+
+        id: i64,
+        age: i32,
+    };
+
+    // A page size in a `usize` is the shape everybody writes, and binding
+    // every count as `i64` meant this one stopped with Zig's own message
+    // pointing inside this file rather than with one of nilo's.
+    var per_page: usize = 20;
+    _ = &per_page;
+    const options = .{ .where = .{ .age = .{ .gt = 18 } }, .limit = per_page };
+    const stmt = comptime statement.select(dialect.Postgres, User, @TypeOf(options));
+    const fields = @typeInfo(Values(User, @TypeOf(options), stmt)).@"struct".fields;
+
+    try testing.expectEqual(@as(usize, 2), fields.len);
+    // The condition still binds as its column's type, which is the half that
+    // was always right.
+    try testing.expectEqual(i32, fields[0].type);
+    try testing.expectEqual(usize, fields[1].type);
+}
+
+test "the three types Zig has no word for are taken apart for the wire" {
+    // Both directions of the same mapping, which is what makes a column
+    // written by one call readable by the next.
+    try testing.expectEqual(i64, WireRead(types.Timestamp));
+    try testing.expectEqual(i64, WireWrite(types.Timestamp));
+    try testing.expectEqual([]const u8, WireRead(types.Uuid));
+    try testing.expectEqual([types.Uuid.byte_len]u8, WireWrite(types.Uuid));
+    try testing.expectEqual([]const u8, WireRead(types.Json(struct { a: u8 })));
+
+    // And a type the driver already understands is left alone.
+    try testing.expectEqual(i32, WireRead(i32));
+    try testing.expectEqual(i32, WireWrite(i32));
+}
+
+test "a uuid column that is not sixteen bytes is refused rather than trimmed" {
+    try testing.expectError(error.QueryFailed, uuidOf("short"));
+    const ok = try uuidOf(&[_]u8{0xab} ** types.Uuid.byte_len);
+    try testing.expectEqual(@as(u8, 0xab), ok.bytes[15]);
 }
 
 test "a borrowed row is the same row with its Strs told the truth" {
@@ -857,6 +1095,39 @@ test "a transaction rolls back when nobody commits it" {
     try testing.expectEqual(@as(usize, 1), db.wire.?.rolled_back);
     // The trap's counter is back to zero, which is what `deinit` asserts.
     if (traps_enabled) try testing.expectEqual(@as(usize, 0), db.open_transactions);
+}
+
+/// A handler that opens a result set, closes it, and closes it again. The
+/// second `close` is the subject: a `Streamed` is a value the handler holds,
+/// so nothing stops one being closed twice, and a counter that went down
+/// twice would underflow and take the process with it.
+fn streamAndClose(db: *FakeDb, c: *nilo.Ctx) !void {
+    var rows = try db.stream(Person, c, .{});
+    if (traps_enabled) try testing.expectEqual(@as(usize, 1), db.open_streams);
+    rows.close();
+    rows.close();
+}
+
+test "a result set that is closed is not still counted as held" {
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = 2 };
+
+    var app = nilo.App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    try app.get("/stream", streamAndClose);
+
+    var client = try nilo.testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+    const answer = try client.get(&app, "/stream");
+    try testing.expectEqual(@as(u16, 200), answer.status);
+
+    // Zero rather than "not one": `deinit` panics on anything else, and the
+    // trap exists because an abandoned result set holds a pool connection
+    // for as long as the process runs — which is worse than the abandoned
+    // transaction the counter beside it watches.
+    if (traps_enabled) try testing.expectEqual(@as(usize, 0), db.open_streams);
 }
 
 test "a committed transaction is not rolled back on the way out" {

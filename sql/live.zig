@@ -44,6 +44,7 @@ const db_mod = @import("db.zig");
 const dialect = @import("dialect.zig");
 const postgres = @import("postgres.zig");
 const schema = @import("schema.zig");
+const types = @import("types.zig");
 const wire_mod = @import("wire.zig");
 
 const builtin = @import("builtin");
@@ -74,18 +75,32 @@ const table = "nilo_live_people_" ++ switch (builtin.mode) {
 
 /// Created and dropped by `Live.open`, so a run leaves nothing behind and
 /// does not care what else is in the database.
+///
+/// The three columns Zig has no word for are in this table rather than in
+/// one of their own, and that is the whole lesson of them: `Timestamp`,
+/// `Uuid` and `Json` were each tested against what this module *believed*
+/// Postgres would say, and not one of them was ever read out of a real
+/// column. The fixture had `bigint`, `text` and `integer` and nothing else,
+/// so the compile error every Row carrying one of them produced was never
+/// reached by anything the suite built.
+///
+/// `seen_at` carries a DEFAULT so that the inserts written before it existed
+/// still say what they meant.
 const setup =
     "DROP TABLE IF EXISTS " ++ table ++ ";" ++
     "CREATE TABLE " ++ table ++ " (" ++
     "  id bigint PRIMARY KEY," ++
     "  email text NOT NULL," ++
     "  handle text," ++
-    "  age integer NOT NULL" ++
+    "  age integer NOT NULL," ++
+    "  seen_at timestamptz NOT NULL DEFAULT '2026-08-16T09:30:00Z'," ++
+    "  token uuid," ++
+    "  settings jsonb" ++
     ");" ++
-    "INSERT INTO " ++ table ++ " (id, email, handle, age) VALUES" ++
-    "  (1, 'ada@example.dev', 'ada', 36)," ++
-    "  (2, 'grace@example.dev', NULL, 45)," ++
-    "  (3, 'kid@example.dev', 'kid', 11);";
+    "INSERT INTO " ++ table ++ " (id, email, handle, age, token, settings) VALUES" ++
+    "  (1, 'ada@example.dev', 'ada', 36, '550e8400-e29b-41d4-a716-446655440000', '{\"theme\":\"dark\"}')," ++
+    "  (2, 'grace@example.dev', NULL, 45, NULL, NULL)," ++
+    "  (3, 'kid@example.dev', 'kid', 11, '550e8400-e29b-41d4-a716-446655440001', '{\"theme\":\"light\"}');";
 
 const Person = struct {
     pub const nilo_table = .{ .name = table, .key = .id };
@@ -595,6 +610,153 @@ test "the schema check runs from nilo_start and passes on a table that agrees" {
     db.checking(&.{Person});
 
     try testing.expectEqual(@as(usize, 0), try db.checkSchema(&.{Person}));
+}
+
+// -- the three column types Zig has no word for ---------------------------
+
+const Theme = struct { theme: []const u8 };
+
+/// A Row over the same table, reading only the columns `Person` leaves
+/// alone. Kept apart so that the bodies asserted above did not have to move
+/// when these columns arrived — and because what is being tested here is the
+/// three types, not the table.
+const Profile = struct {
+    pub const nilo_table = .{ .name = table, .key = .id };
+
+    id: i64,
+    seen_at: types.Timestamp,
+    token: ?types.Uuid,
+    settings: ?types.Json(Theme),
+};
+
+fn profiles(db: *db_mod.Db, c: *nilo.Ctx) ![]Profile {
+    return db.select(Profile, c, .{
+        .where = .{ .id = .{ .lte = @as(i64, 2) } },
+        .order = .{ .id = .asc },
+    });
+}
+
+test "a Timestamp, a Uuid and a Json column come back as themselves" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    // Every one of these used to be a compile error inside the driver, and
+    // the reason nobody saw it is that no fixture had the columns. The
+    // assertion is on the body rather than on the fields because it pins
+    // both halves at once: what was read out of the column, and what
+    // `jsonStringify` then wrote — which was equally untested.
+    try stack.app.get("/profiles", profiles);
+    const answer = try stack.client.get(&stack.app, "/profiles");
+
+    try testing.expectEqual(@as(u16, 200), answer.status);
+    try testing.expectEqualStrings(
+        "[{\"id\":1,\"seen_at\":\"2026-08-16T09:30:00Z\"," ++
+            "\"token\":\"550e8400-e29b-41d4-a716-446655440000\"," ++
+            "\"settings\":{\"theme\":\"dark\"}}," ++
+            "{\"id\":2,\"seen_at\":\"2026-08-16T09:30:00Z\"," ++
+            "\"token\":null,\"settings\":null}]",
+        answer.body,
+    );
+}
+
+fn touchProfile(db: *db_mod.Db, c: *nilo.Ctx) ![]Profile {
+    _ = try db.update(Profile, c, .{
+        .set = .{
+            // One day later than the fixture's default, so that a write that
+            // silently did nothing would still fail this test.
+            .seen_at = types.Timestamp.fromSeconds(1_786_959_000),
+            .token = @as(?types.Uuid, try types.Uuid.parse("11111111-2222-3333-4444-555555555555")),
+            .settings = @as(?types.Json(Theme), .{ .value = .{ .theme = "midnight" } }),
+        },
+        .where = .{ .id = @as(i64, 2) },
+    });
+    return db.select(Profile, c, .{ .where = .{ .id = @as(i64, 2) } });
+}
+
+test "the same three types go out to a column and come back unchanged" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    // The other half of the round trip. Reading them was a compile error;
+    // writing them was a `CannotBindStruct` the driver would only have
+    // raised at run time, which is worse.
+    try stack.app.get("/touch", touchProfile);
+    const answer = try stack.client.get(&stack.app, "/touch");
+
+    try testing.expectEqual(@as(u16, 200), answer.status);
+    try testing.expectEqualStrings(
+        "[{\"id\":2,\"seen_at\":\"2026-08-17T09:30:00Z\"," ++
+            "\"token\":\"11111111-2222-3333-4444-555555555555\"," ++
+            "\"settings\":{\"theme\":\"midnight\"}}]",
+        answer.body,
+    );
+}
+
+/// `Profile` without its Json column, because a streamed row allocates
+/// nothing and a document cannot be parsed without allocating — which is a
+/// Refusal rather than a footnote (`db.zig`, `assertStreamable`).
+const Seen = struct {
+    pub const nilo_table = Profile;
+
+    id: i64,
+    seen_at: types.Timestamp,
+    token: ?types.Uuid,
+};
+
+fn streamSeen(db: *db_mod.Db, c: *nilo.Ctx) ![]const u8 {
+    var rows = try db.stream(Seen, c, .{ .order = .{ .id = .asc }, .limit = 1 });
+    defer rows.close();
+
+    var out: std.ArrayList(u8) = .empty;
+    while (try rows.next()) |s| {
+        // Both types are assembled from bytes that were being read anyway,
+        // so a borrowed row still costs no allocation — which is the whole
+        // of what `stream` sells.
+        var buf: [80]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        try s.seen_at.writeRfc3339(&w);
+        try w.writeByte(':');
+        try s.token.?.writeText(&w);
+        try out.print(c.arena(), "{d}:{s};", .{ s.id, w.buffered() });
+    }
+    return out.toOwnedSlice(c.arena());
+}
+
+test "a borrowed row builds a Timestamp and a Uuid without allocating" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    try stack.app.get("/seen", streamSeen);
+    const answer = try stack.client.get(&stack.app, "/seen");
+
+    try testing.expectEqual(@as(u16, 200), answer.status);
+    try testing.expectEqualStrings(
+        "1:2026-08-16T09:30:00Z:550e8400-e29b-41d4-a716-446655440000;",
+        answer.body,
+    );
+}
+
+fn firstFew(db: *db_mod.Db, c: *nilo.Ctx) ![]Person {
+    // A page size held in a `usize`, which is the shape everybody writes and
+    // which used to stop with Zig's own message pointing inside `db.zig`.
+    var per_page: usize = 2;
+    _ = &per_page;
+    return db.select(Person, c, .{ .order = .{ .id = .asc }, .limit = per_page });
+}
+
+test "a limit held in a usize binds, rather than failing to coerce" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    try stack.app.get("/first-few", firstFew);
+    const answer = try stack.client.get(&stack.app, "/first-few");
+
+    try testing.expectEqual(@as(u16, 200), answer.status);
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, answer.body, "@example.dev"));
 }
 
 comptime {

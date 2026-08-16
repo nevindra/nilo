@@ -214,7 +214,15 @@ request*, with no asterisk, so text that does not is not called one. Copy it
 if you need to keep it.
 
 `defer rows.close()` is required. A result set walked away from half-read
-costs a connection.
+costs a connection — and unlike a transaction, which is rolled back when the
+request ends, nothing else will ever close this one. Forgetting it is caught
+in Debug by the same counter that watches transactions.
+
+A Row with a `sql.Json(T)` column cannot be streamed, and that is a compile
+error rather than a footnote. A borrowed row allocates nothing, which is what
+makes a million of them run flat; parsing a document costs one allocation per
+row. Read it with `select`, or read the column as `[]const u8` in a Row of
+its own and parse it where you need it.
 
 ## Past one table
 

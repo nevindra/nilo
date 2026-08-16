@@ -70,7 +70,12 @@ pub const Param = struct {
     /// The `column` of a parameter that is not a column.
     pub const none = "";
 
-    pub fn isBound(self: Param) bool {
+    /// Whether this parameter counts rows rather than carrying a column's
+    /// value — a `LIMIT` or an `OFFSET`, and nothing else. Named for what it
+    /// is rather than for what it is not: `db.zig` reads this to decide what
+    /// type the parameter binds as, and a name that answered the opposite
+    /// question read as the negation of the branch it guards.
+    pub fn isCount(self: Param) bool {
         return self.column.len == 0;
     }
 };

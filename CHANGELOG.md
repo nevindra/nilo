@@ -5,7 +5,7 @@ What was measured and what was got wrong on the way is in
 [`docs/history.md`](./docs/history.md); what is coming is in
 [`docs/roadmap.md`](./docs/roadmap.md).
 
-## 0.2.0
+## Unreleased
 
 **zfast is now nilo**, and the SQL module went from compiling queries to
 running them. Needs Zig 0.16.
@@ -45,9 +45,18 @@ real Postgres on every push.
   fills your struct, still uses the arena; gives up the column check only.
 - **`db.checking(&.{ User, Order })`** — each Row compared against its table
   while the server starts, instead of on whichever request got there first.
+- **`sql.Timestamp`, `sql.Uuid` and `sql.Json(T)`** — the three columns Zig
+  has no word for, read and written as themselves. A `timestamptz` arrives as
+  microseconds since the epoch, a `uuid` as its sixteen bytes and a `jsonb`
+  parsed into the struct you named; each writes itself into a JSON body the
+  way the API description promises.
 - Rows come out of the request arena. A streamed row is `sql.Borrowed(User)`,
   which is `User` with every `Str` replaced by `[]const u8` — because that
-  text dies at the next row, and the type says so.
+  text dies at the next row, and the type says so. `stream` refuses a Row
+  with a `Json` column: a borrowed row allocates nothing, and parsing a
+  document per row cannot.
+- **A `.limit` or an `.offset` binds as whatever integer you are holding**,
+  `usize` included, rather than only the ones that coerce to `i64`.
 
 Six more Refusals, for an insert or an update written wrong. The module is
 still not an ORM and still refuses joins, aggregates and migrations

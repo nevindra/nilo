@@ -51,6 +51,16 @@ Three times a guard turned out not to be guarding anything, and each time it was
 
 Writing ADR 0033 immediately produced a fourth instance. Its first draft listed four incidents of which two were the same one, and misdescribed the first — both caught by opening this file and reading it rather than remembering it.
 
+## The types that were only ever tested against themselves
+
+`sql.Timestamp`, `sql.Uuid` and `sql.Json(T)` each had unit tests — RFC 3339 out of a `Timestamp`, sixteen bytes into a hyphenated `Uuid`, the column name each one claims — and all of them passed. Not one of the three could be read out of a database. pg.zig decodes a struct only when it carries `fromPgzRow` and hits a `@compileError` when it does not, so **a Row with `created_at: Timestamp` in it did not compile** — which is the shape the README, the guide and [ADR 0039](./adr/0039-the-shape-of-a-query-is-settled-while-compiling.md) all open with.
+
+What hid it was the fixture. `sql/live.zig` created a table of `bigint`, `text` and `integer`, so every Row the suite built was made of types the driver already understood — and those live tests are also the module's *only* compile coverage of the driver, because everything else runs against the Fake and a generic method is analysed only where it is called. **A fixture standing in for the real thing has to be made of the hard cases, not the easy ones.** It now carries a `timestamptz`, a `uuid` and a `jsonb`, and asserts on the response body, which pins the read and the `jsonStringify` that was equally untested. The fix needed nothing from the driver — a `Timestamp` is read as the `i64` pg.zig has already moved to the epoch, a `Uuid` as its sixteen bytes, a `Json(T)` as the document's text — so `sql/postgres.zig` is still the only file that names pg.zig.
+
+## The rule that was published and then not followed
+
+[ADR 0011](./adr/0011-shared-services-need-a-lock-from-the-bulkhead.md) tells users that a Service is shared across threads and mutable state in one needs a lock. `Db` is a Service, and its Debug-only transaction counter was a plain `+= 1`. A trap that fires on correct code is worse than no trap: drift upward makes `deinit` accuse a program of a leak that never happened, drift downward underflows a `usize` and panics. Beside it sat the other half of the same oversight — the trap watched the **cheaper** mistake. An abandoned transaction holds a pool connection until the request ends; an abandoned `stream` holds one until the process does, and nothing was counting those at all.
+
 ## The bug that only exists in the mode you deploy in
 
 `Response(T).headers` was a `[]const Header` filled from a literal. When every part of such a literal is comptime-known Zig promotes the array to static memory and the slice is valid for ever; when any part is not — and a `Location` value never is — the array is a **temporary in the handler's own stack frame**, read after that frame is gone. In `Debug` the bytes happen to still be there, so 175 tests passed. In `ReleaseSafe` and `ReleaseFast` it was a segfault, reachable from the README's flagship example, in the mode the README tells people to deploy in.

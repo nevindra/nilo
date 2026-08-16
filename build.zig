@@ -71,6 +71,10 @@ const sql_refusals = [_]Refusal{
         .says = "`.any` holds a list of conditions and this one is a single condition.",
     },
     .{
+        .name = "streamed_json",
+        .says = "streamed_json.Account reads `settings` as a Json column, and a streamed row cannot hold one.",
+    },
+    .{
         .name = "borrowed_column_not_in_base",
         .says = "borrowed_column_not_in_base.UserCard reads `emial`, which borrowed_column_not_in_base.User does not have.",
     },
