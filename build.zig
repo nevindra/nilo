@@ -11,7 +11,7 @@ const std = @import("std");
 /// **Adding a module means adding a row here as well as to `.paths`.** Core
 /// shipped for a whole session with neither, and nothing noticed, because a
 /// list that does not name a directory cannot check it.
-const shipped_roots = [_][]const u8{ "core", "id", "http", "sql" };
+const shipped_roots = [_][]const u8{ "core", "id", "config", "http", "sql" };
 
 comptime {
     const manifest = @embedFile("build.zig.zon");
@@ -45,6 +45,14 @@ comptime {
 const layers = [_]Layer{
     .{ .root = "core", .may_import = &.{} },
     .{ .root = "id", .may_import = &.{} },
+    // A tool module may name Core and this one does not, which is the whole
+    // of why it can be read into `[]const u8` rather than a `Str` (ADR
+    // 0043). Settings are read once before the socket opens and held for
+    // the life of the process; the lifetime a `Str` carries would have
+    // nothing to say about them, and naming `nilo_core` to get one would
+    // cost the property that decides the layer — `zig test
+    // config/config.zig`, with no module graph at all.
+    .{ .root = "config", .may_import = &.{} },
     .{
         .root = "sql",
         .may_import = &.{ "nilo_core", "nilo_id", "pg", "live_config" },
@@ -177,6 +185,32 @@ const sql_refusals = [_]Refusal{
     .{
         .name = "unknown_select_option",
         .says = "a select on unknown_select_option.User was given `.limti`, which is not one of its options.",
+    },
+};
+
+/// The same, for `config/refusals/`. A separate list for the same reason the
+/// SQL one is separate: a module's refusals belong beside the module rather
+/// than in one table every module edits (ADR 0041).
+const config_refusals = [_]Refusal{
+    .{
+        .name = "config_not_a_struct",
+        .says = "a Config is read into a struct, and u32 is not one.",
+    },
+    .{
+        .name = "config_with_no_fields",
+        .says = "the Config `config_with_no_fields.Empty` has no fields, so it would read nothing.",
+    },
+    .{
+        .name = "config_field_cannot_convert",
+        .says = "the field `tags: []const []const u8` of the Config `config_field_cannot_convert.Settings` is not something an environment variable can become.",
+    },
+    .{
+        .name = "config_unknown_field",
+        .says = "the Config `config_unknown_field.Settings` has no field `prot`.",
+    },
+    .{
+        .name = "config_not_a_source",
+        .says = "a Config is read from a source, and comptime_int cannot be one.",
     },
 };
 
@@ -495,6 +529,25 @@ fn idFor(
     });
 }
 
+/// A copy of `nilo_config` for one optimize mode (ADR 0043).
+///
+/// Unlike `idFor` this one has nothing to share with: a Config is a struct
+/// of the caller's own and no other module names a type from here, so two
+/// copies would only be wasteful rather than wrong. It is a function for the
+/// same reason the others are — a module carries the mode it was created
+/// with, so every root that reaches this needs one of its own.
+fn configFor(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    mode: std.builtin.OptimizeMode,
+) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("config/config.zig"),
+        .target = target,
+        .optimize = mode,
+    });
+}
+
 /// The step that reads `layers` and refuses an import that is not in it.
 ///
 /// A scan rather than a parse, and the trade is stated where the table is:
@@ -633,6 +686,20 @@ pub fn build(b: *std.Build) void {
     // `zig build layering` checks rather than trusts.
     const nilo_id = b.addModule("nilo_id", .{
         .root_source_file = b.path("id/id.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // The second tool module: a Config out of the environment (ADR 0043).
+    // It imports nothing at all, which is what `zig build layering` checks
+    // and what makes `zig test config/config.zig` the whole of its suite.
+    //
+    // Nothing else in this file names it. A project that serves HTTP and
+    // reads no settings from here links none of it, which is the same
+    // property ADR 0040 bought for the SQL module pointed at a module with
+    // no dependency to be lazy about.
+    const nilo_config = b.addModule("nilo_config", .{
+        .root_source_file = b.path("config/config.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -783,6 +850,49 @@ pub fn build(b: *std.Build) void {
         test_id_step.dependOn(&b.addRunArtifact(tests).step);
     }
     test_step.dependOn(test_id_step);
+
+    // And the same again for `nilo_config` (ADR 0043). `zig test
+    // config/config.zig` is this without `build.zig` at all, and a change
+    // that stops that working has broken the layering rather than the test.
+    const test_config_step = b.step(
+        "test-config",
+        "Run nilo_config's tests — no Engine, no module graph",
+    );
+    for (test_modes) |mode| {
+        const tests = b.addTest(.{ .root_module = configFor(b, target, mode) });
+        test_config_step.dependOn(&b.addRunArtifact(tests).step);
+    }
+
+    // This module's Refusals, held the way every other module's are (ADR
+    // 0027). They hang off `test-config` rather than `test-sql`'s pattern of
+    // sitting outside the loop, because this module is in the bottom layer
+    // and its checks are the ones a Config gets wrong at the moment somebody
+    // writes it — a field that is a list, a name that is a typo.
+    //
+    // Measured warm on Zig 0.16, all five are **284ms** of `zig build test`:
+    // 30–38ms each except `config_unknown_field` at 149ms, which is the one
+    // whose `@compileError` is reached through a generic function rather than
+    // from the type itself. That is well under the ~270ms each ADR 0027
+    // records for the framework's own, and the reason is worth knowing rather
+    // than rounding away: these stop while analysing a module that imports
+    // nothing, so there is no Engine in front of the failure.
+    const refusals_config_step = b.step(
+        "refusals-config",
+        "Check that each Config mistake stops in nilo's own words",
+    );
+    for (config_refusals) |refusal| {
+        const module = b.createModule(.{
+            .root_source_file = b.path(b.fmt("config/refusals/{s}.zig", .{refusal.name})),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{.{ .name = "nilo_config", .module = nilo_config }},
+        });
+        const refused = b.addObject(.{ .name = refusal.name, .root_module = module });
+        refused.expect_errors = .{ .contains = b.fmt("error: nilo: {s}", .{refusal.says}) };
+        refusals_config_step.dependOn(&refused.step);
+    }
+    test_config_step.dependOn(refusals_config_step);
+    test_step.dependOn(test_config_step);
 
     // The layering, held by something other than a paragraph (ADR 0042).
     test_step.dependOn(Layering.step(b));

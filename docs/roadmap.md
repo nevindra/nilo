@@ -24,6 +24,7 @@ can be worked at the same time, by two people or by one person on two days.
 |---|---|---|---|
 | Core | `nilo_core` | needs none | [below](#nilo_core--the-vocabulary) |
 | Core | `nilo_id` | needs none | [below](#nilo_id--identifiers) |
+| Core | `nilo_config` | needs none | [below](#nilo_config--settings) |
 | App | `nilo_http` | owns it | [below](#nilo_http--the-server) |
 | Service | `nilo_sql` | needs it, does not own it | [below](#nilo_sql--postgres) |
 
@@ -81,14 +82,21 @@ to live. `nilo_id` sits beside it in the same layer and below is only `std`
 
 ### Not decided
 
-- **Where `convert` belongs.** Turning text into a type is what a Core wants —
-  a configuration module would reuse it — but `convert.zig` reaches the
-  Bulkhead to say a request failed. Either its failures come back as a value
-  the caller turns into a 400, or it stays in the App layer and Core gets a
-  smaller converter under the same rules. Deciding it wants the second caller
-  to exist first, so there is something to design against rather than a guess.
-  `percent.zig` is the same shape of question and the most likely file to earn
-  its way down next, for the same reason: signing a URL needs the encoding half.
+- **Where `convert` belongs.** Turning text into a type is what a Core wants,
+  but `convert.zig` reaches the Bulkhead to say a request failed. Either its
+  failures come back as a value the caller turns into a 400, or it stays in the
+  App layer and Core gets a smaller converter under the same rules.
+
+  This was written down as waiting for a configuration module to be its second
+  caller. `nilo_config` was built and **is not one**
+  ([ADR 0043](./adr/0043-a-setting-is-a-field-and-every-bad-one-is-named-at-once.md)):
+  sharing means naming `nilo_core` for `Str`, and a bottom-layer module that
+  does gives up running under a plain `zig test`, which ADR 0042 made the entry
+  condition for the layer. So the question is unchanged and the shape of its
+  answer is not — **the caller that moves this has to be in the App or Service
+  layer**, because one below cannot afford to reach for it. `percent.zig` is the
+  likelier candidate for the same reason it always was: signing a URL needs the
+  encoding half, and whoever signs one is not down here.
 
 ---
 
@@ -123,6 +131,57 @@ all, which is the strongest form of what the bottom layer is for.
   which is a different job from making one nothing has ever used — and they need
   MD5 and SHA-1, which means this module would ship two broken hashes for the
   first caller who asks.
+
+---
+
+## `nilo_config` — settings
+
+A struct of your own filled from the environment, with **every** bad setting
+named at once rather than the first
+([ADR 0043](./adr/0043-a-setting-is-a-field-and-every-bad-one-is-named-at-once.md)).
+It imports nothing, allocates nothing, and is over before the socket opens.
+
+### Next
+
+1. **A name that is not the field's own.** `database_url` reads
+   `DATABASE_URL` and there is no way to say otherwise, so a platform that
+   already owns a name — `PGURL`, `PORT` meaning something else in the same
+   container — has to be met by renaming the field. A marker in the reader's
+   own struct is the shape the rest of nilo uses (`nilo_table`,
+   `nilo_resolve`), and the work is one comptime lookup. What is missing is a
+   caller who cannot rename the field, which is the same test every other
+   marker had to pass.
+
+### Known gaps
+
+- **`config.Env` is POSIX only.** It reads the environment block where it lies,
+  which is what makes the whole module allocate nothing — and Windows moves
+  that block, so `getPosix` cannot be used there at all. `config.Map` is the
+  portable half and takes the `environ_map` that `std.process.Init` already
+  hands to `main`, so nothing is unreachable; it just costs the map. The
+  `@compileError` on `Env.get` says which to use rather than letting the
+  failure come out of the standard library.
+- **A prefix is per reading, not per Config.** `fromWith(T, .{ .prefix = … })`
+  has to be written at each call, so two places reading one Config can disagree
+  about it. Making the prefix part of the type would fix that and cost
+  `Read(T)` its one-type-per-`T` property, which is what lets a function take a
+  reading without naming the prefix it was read with.
+
+### Not decided
+
+- **`.env`, and whether reading one file is still refusing file formats.** The
+  refusal is real and argued — a parser is a dependency every importer carries,
+  and `Fixed` is the seam for a program that wants one. But a `.env` is fifty
+  lines rather than two thousand, it needs no dependency, and it is the one
+  format whose whole purpose is to hold what this module already reads. Nobody
+  has decided whether that makes it the exception or makes it the first step
+  down the slope the refusal exists to avoid.
+- **Whether a Config can say a setting is secret.** Marking one would let
+  `report` and any future logging print `PGPASSWORD=***` rather than the value.
+  It is a small feature with a large blast radius if it is trusted and wrong —
+  a value marked secret and printed anyway is worse than one nobody claimed
+  anything about — and nothing here logs a Config today, so there is nothing to
+  redact yet.
 
 ---
 
@@ -488,6 +547,18 @@ module the change is in.
   This is a refusal of templates, **not** of everything on that side of the
   line. Whether some other convenience from the batteries-included world earns
   its place gets decided one feature at a time, against the two numbers above.
+- **A config file parser — TOML, YAML, or any other.** `nilo_config` reads the
+  environment and hands `Fixed` to a program that has parsed something itself
+  ([ADR 0043](./adr/0043-a-setting-is-a-field-and-every-bad-one-is-named-at-once.md)).
+  Writing one means weeks to reach where somebody else already is; depending on
+  one means every project importing the module fetches it. For TOML that
+  somebody is [sam701/zig-toml](https://github.com/sam701/zig-toml) — ~2,000
+  lines, arena-backed, already on 0.16's `std.Io`. For YAML there is no
+  finished answer to depend on and that is the argument rather than a gap:
+  [kubkon/zig-yaml](https://github.com/kubkon/zig-yaml) skips 322 of the ~400
+  cases in the official suite, written by a Zig core contributor, and a partial
+  YAML parser misreads real files quietly instead of refusing them. `.env` is
+  the one that stays open, in that module's own list.
 - **A `recover` middleware.** Zig cannot recover from a panic at all, so there
   is nothing to build ([ADR 0008](./adr/0008-no-recover-middleware.md)).
 - **TLS.** Terminated in front, and that is the answer rather than the plan

@@ -18,13 +18,19 @@ of them be worked on at once. Nothing under `http/` may be imported by `sql/`,
 and the way a Service reaches request-lifetime memory is a Scope, not a `Ctx`.
 
 **The bottom layer holds more than one module** (ADR 0042). `core/` is the
-vocabulary and sits under the rest of it; `id/` is the first **tool module** —
-one job, no event loop, imports nothing above it. A Service may import a tool
-module, which is downward. **The rule is a build step, not a paragraph**: `zig
-build layering` reads the `@import`s under `core/`, `id/` and `sql/` and
-refuses one that is not in that module's row of the `layers` table in
-`build.zig`. Adding a module means adding a row — there and in
-`shipped_roots`, and in `.paths` in `build.zig.zon`.
+vocabulary and sits under the rest of it; `id/` and `config/` are **tool
+modules** — one job, no event loop, imports nothing above them. A Service may
+import a tool module, which is downward. **The rule is a build step, not a
+paragraph**: `zig build layering` reads the `@import`s under `core/`, `id/`,
+`config/` and `sql/` and refuses one that is not in that module's row of the
+`layers` table in `build.zig`. Adding a module means adding a row — there and
+in `shipped_roots`, and in `.paths` in `build.zig.zon`.
+
+A tool module *may* name `nilo_core` and neither of them does, which is not an
+accident: naming it costs the property that decides the layer — running under a
+plain `zig test`, with no module graph. ADR 0043 is where that was settled, and
+it is why `nilo_config` reads `[]const u8` rather than `Str` and carries forty
+lines of converter of its own instead of sharing `http/convert.zig`.
 
 **The framework's one dependency is [zio](https://github.com/lalinsky/zio)**,
 pinned in `build.zig.zon`. The SQL module adds
@@ -38,11 +44,13 @@ Three files carry context this one deliberately does not repeat:
 - **`CONTEXT.md`** — the project's vocabulary, and the words it refuses to use
   (Ctx not "Context", Str not "string", keep not "dupe", Refusal not "negative
   test"). Match it in code, comments, docs and commit messages.
-- **`docs/adr/`** — 42 binding decisions, each naming the alternative it
+- **`docs/adr/`** — 43 binding decisions, each naming the alternative it
   rejected. Check here before proposing a design change; "why not X?" usually
   already has an answer on file. **ADR 0041 decides which module new work goes
   in and ADR 0042 decides what that module may import**, and they are the two
-  to read before adding a file anywhere but `http/`.
+  to read before adding a file anywhere but `http/`. ADR 0043 is the first
+  reading of 0042 under load, and worth the five minutes before adding a sixth
+  module.
 - **`docs/reference.md`** — the whole public API on one page.
 
 ## Commands
@@ -52,6 +60,7 @@ zig build test         # the loop: the suite in Debug, plus the refusals
 zig build test-all     # the above, plus the same suite in ReleaseSafe — what CI runs
 zig build test-core    # only Core, both modes — no Engine, no module graph
 zig build test-id      # only nilo_id, the same way
+zig build test-config  # only nilo_config, the same way, plus its refusals
 zig build layering     # check that no module imports upward or sideways
 zig build refusals     # only the compile-error checks
 zig build examples     # build all seven examples
@@ -88,8 +97,10 @@ module graph, so `zig build test` is the only way to run it.
 ```
 zig test core/core.zig                  # the vocabulary, no build.zig
 zig test id/id.zig                      # nilo_id, likewise
+zig test config/config.zig              # nilo_config, likewise
 zig build test-core                     # the same, both optimize modes
 zig build test-id
+zig build test-config
 ```
 
 A module that needs no event loop is a module whose tests need no module graph,

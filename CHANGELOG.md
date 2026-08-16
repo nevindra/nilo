@@ -83,8 +83,15 @@ real Postgres on every push.
 - **A `.limit` or an `.offset` binds as whatever integer you are holding**,
   `usize` included, rather than only the ones that coerce to `i64`.
 
-Six more Refusals, for an insert or an update written wrong. The module is
-still not an ORM and still refuses joins, aggregates and migrations
+- A failure inside a transaction is now reported as its own. `translate`
+  reads the server's code off the connection, and a transaction holds one
+  across statements — so a broken pipe after a unique violation came back as
+  `AlreadyExists`, the previous statement's answer. Narrow, and wrong when it
+  happened.
+
+Nine more Refusals, for an insert, an update or a condition written wrong.
+The module is still not an ORM and still refuses joins, aggregates and
+migrations
 ([ADR 0039](./docs/adr/0039-the-shape-of-a-query-is-settled-while-compiling.md)).
 
 ### Also
@@ -160,6 +167,59 @@ try w.print("/users/{s}", .{&key.toText()});
   all. For a module down there that is the entry condition rather than a
   nicety.
 
+### `nilo_config`, and a fifth module
+
+Settings, read into a struct of your own before the socket opens
+([ADR 0043](./docs/adr/0043-a-setting-is-a-field-and-every-bad-one-is-named-at-once.md)).
+The second tool module, and it imports nothing either.
+
+```zig
+const config = @import("nilo_config");
+
+const Settings = struct {
+    port: u16 = 8080,
+    database_url: []const u8,
+    log_level: enum { debug, info, warn } = .info,
+    workers: ?u8 = null,
+};
+
+pub fn main(init: std.process.Init) !void {
+    const read = config.fromEnv(Settings, init.minimal.environ);
+    const settings = read.value() orelse {
+        try read.report(stderr);
+        std.process.exit(2);
+    };
+}
+```
+
+- **The field is the setting and its name is the variable.** `database_url` is
+  read from `DATABASE_URL`, a default is what "not set" means, and a `?T` is a
+  setting that may be absent — the same three sentences a `Query(T)` follows.
+  `fromWith(T, .{ .prefix = "NILO_" }, …)` puts a prefix in front of every one.
+- **Every bad setting is named at once**, which is the reason this exists
+  rather than the reading. `value()` is `?T` the way `Bound`'s is, so there is
+  no way to reach past a failure into a half-filled struct:
+
+  ```
+  3 settings could not be read from the environment:
+    PORT has to be a whole number, not "soon"
+    DATABASE_URL is not set
+    LOG_LEVEL has to be one of debug, info, warn, not "verbose"
+  ```
+
+  `read.failures()` walks them if you would rather write your own.
+- **It parses no files, and that is a decision.** `config.Fixed` is the seam a
+  program hands its own parsed pairs through, so TOML is a dependency you pick
+  rather than one this module makes every project carry. `std.zon.parse` is in
+  the standard library and costs nothing.
+- **Text is `[]const u8`, not `Str`.** Settings are read once and held for the
+  life of the process; the lifetime a `Str` carries has nothing to say about
+  them, and `config.Env` reads the environment block where it lies rather than
+  copying out of it. On Windows use `config.Map` with the `environ_map`
+  `std.process.Init` already hands to `main`.
+- **`zig build test-config`**, and `zig test config/config.zig` with no
+  `build.zig` at all — the same entry condition `nilo_id` has.
+
 ### What it costs
 
 A project that does not import `nilo_sql` links none of it — not the driver,
@@ -169,8 +229,11 @@ rest is pg.zig's TLS dependency. Allocations per request, memory per idle
 connection and p99 are unchanged.
 
 Splitting Core out cost **zero bytes**, measured on three binaries rather than
-assumed, and adding `nilo_id` beside it cost the same three binaries nothing at
-all. A program that does import it and generates a v7 pays **16 bytes**.
+assumed; adding `nilo_id` beside it cost the same three binaries nothing at
+all, and adding `nilo_config` cost them nothing again — the same three numbers,
+read a third time. A program that does import `nilo_id` and generates a v7 pays
+**16 bytes**; one that reads a two-field Config and reports its failures pays
+**3,392 bytes**.
 
 ## 0.1.0
 

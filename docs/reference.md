@@ -5,7 +5,7 @@ The whole surface, as a list. For what any of it is *for*, see
 
 ## The modules
 
-Four ship, and a project links only what it imports
+Five ship, and a project links only what it imports
 ([ADR 0041](./adr/0041-a-module-sits-where-the-loop-puts-it.md),
 [ADR 0042](./adr/0042-the-bottom-layer-holds-more-than-one-module.md)).
 
@@ -14,12 +14,14 @@ Four ship, and a project links only what it imports
 | `nilo_http` | the server — everything on this page unless it says otherwise | [below](#app) |
 | `nilo_sql` | Postgres | [below](#nilo_sql) |
 | `nilo_id` | UUIDs | [below](#nilo_id) |
+| `nilo_config` | settings out of the environment | [below](#nilo_config) |
 | `nilo_core` | `Str` and the [Scope](#scope), shared by the rest | [below](#run) |
 
 ```zig
 const nilo = @import("nilo_http");    // the alias everybody writes
 const sql = @import("nilo_sql");      // only if you talk to Postgres
 const id = @import("nilo_id");        // only if you make identifiers
+const config = @import("nilo_config");// only if you read settings
 ```
 
 **There is no module called `nilo`.** The word names the project — the `nilo: `
@@ -374,6 +376,67 @@ so `v4` and `v7` take what they need rather than fetching it. A v4 built from a
 seeded `std.Random.DefaultPrng` is fine in a test and is a session token
 anybody can predict in production. ADR 0042 has the argument and what the
 missing seam would be.
+
+## `nilo_config`
+
+Settings, read into a struct of your own before the socket opens
+([ADR 0043](./adr/0043-a-setting-is-a-field-and-every-bad-one-is-named-at-once.md)).
+Nothing here allocates and nothing here does IO.
+
+```zig
+const config = @import("nilo_config");
+
+const Settings = struct {
+    port: u16 = 8080,                                   // a default is "not set"
+    database_url: []const u8,                           // no default: required
+    log_level: enum { debug, info, warn } = .info,
+    workers: ?u8 = null,                                // may be absent
+};
+
+pub fn main(init: std.process.Init) !void {
+    const read = config.fromEnv(Settings, init.minimal.environ);
+    const settings = read.value() orelse {
+        try read.report(stderr);
+        std.process.exit(2);
+    };
+    // an ordinary struct — `app.provide(&settings)` makes it a Service
+}
+```
+
+The field name upper-cased is the variable: `database_url` is read from
+`DATABASE_URL`. A field is text, a number, a `bool`, an enum, or any of those
+wrapped in `?`; anything else is a Refusal.
+
+| | |
+|---|---|
+| `config.fromEnv(T, environ)` | `Read(T)` out of the process environment |
+| `config.from(T, source)` | out of anything with `get(name) ?[]const u8` |
+| `config.fromWith(T, .{ .prefix = "NILO_" }, source)` | the same, with a prefix on every name |
+
+| | |
+|---|---|
+| `r.value()` | `?T` — the Config, or null when any setting failed |
+| `r.report(w)` | every failure, one per line, into a `*std.Io.Writer`. Writes nothing when there are none |
+| `r.failed()`, `r.failedCount()` | |
+| `r.failures()` | an iterator of `Failure`, in the order the struct declares them |
+| `r.given("port")` | the text that arrived, converted or not. Field name checked while compiling |
+| `r.nameOf("port")` | `"PORT"`, prefix and all |
+
+A `Failure` is `.field`, `.name`, `.reason`, `.given`, `.expected`, and
+`.say(w)` writes nilo's own sentence for it. `Reason` is `missing`,
+`not_a_number`, `not_true_or_false`, `not_a_choice` — four, and it stays four:
+whether the port is one this machine may bind is your question.
+
+| Source | |
+|---|---|
+| `config.Env{ .environ = … }` | the environment block, read where it lies. Allocates nothing. POSIX only |
+| `config.Map{ .map = init.environ_map }` | the portable half, and what Windows uses |
+| `config.Fixed{ .pairs = &.{ .{ "PORT", "9000" } } }` | pairs of your own — the seam for a file you parsed yourself |
+
+**It parses no files.** `std.zon.parse` is in the standard library;
+[sam701/zig-toml](https://github.com/sam701/zig-toml) is the one to reach for
+if the file has to be TOML. Either way the pairs come back as a `Fixed` and
+this module never had to carry the dependency.
 
 ## `Dir`
 

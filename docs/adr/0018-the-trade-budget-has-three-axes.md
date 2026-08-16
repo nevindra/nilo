@@ -50,6 +50,7 @@ Measured stripped, `ReleaseFast`, on the examples in this repository.
 | Holding the rule about error messages ([ADR 0027](./0027-the-rule-about-error-messages-is-held-by-a-build-step.md)) | +0 | +0 |
 | Core as a module of its own, and a Scope in place of a `Ctx` ([ADR 0041](./0041-a-module-sits-where-the-loop-puts-it.md)) | +0 | +0 |
 | A second module in the bottom layer, `nilo_id` ([ADR 0042](./0042-the-bottom-layer-holds-more-than-one-module.md)) | +0 | +0 |
+| A third, `nilo_config` ([ADR 0043](./0043-a-setting-is-a-field-and-every-bad-one-is-named-at-once.md)) | +0 | +0 |
 
 The second row is one measurement of six changes because they landed together, which is a worse record than the first row and is noted as such. The split it does show is the useful part: `hello` has one route returning text and pays +6 KB, which is the failure-body writer and nothing else — that part is unconditional. The remaining +8 KB on `rest` is the body describer and the schema walker, and those are generated per body type, so they are paid by applications that have bodies.
 

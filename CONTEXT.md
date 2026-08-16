@@ -114,6 +114,14 @@ _Avoid_: Server, Router, Engine
 A long-lived thing registered once when the App is built — a database connection, config, a logger — then asked for by handlers according to its type. Shared across every request being served at once, so one that gets written to needs a `nilo.Mutex`.
 _Avoid_: dependency, state, context value, DI container
 
+**Config**:
+A struct of the caller's own, one field per setting, filled from the environment before the socket opens. Field names are the variable names upper-cased, a field's default is what "not set" means, and reading one either answers the struct or names every setting that could not be read. It is text and numbers and nothing else: a Config parses no files, and what it cannot become is a compile error rather than a startup one.
+_Avoid_: settings object, options, env, dotenv, configuration file
+
+**Setting**:
+One field of a Config, and the one environment variable it is read from. Its type is the whole of what it may be — text, a number, a bool, an enum, or any of those wrapped in `?` — and nilo's opinion about it stops at whether the text converts.
+_Avoid_: option, flag, variable, key, parameter, knob
+
 **Middleware**:
 A piece of work that runs before and after a handler, operates at the Ctx layer, and produces no value for the handler. Middleware enforces; a Resolved value provides.
 _Avoid_: filter, interceptor, hook, guard
