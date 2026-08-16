@@ -178,6 +178,11 @@ pub fn insertManyFor(comptime Row: type, comptime Values: type) statement.Statem
     return comptime statement.insertMany(Postgres, Row, Values);
 }
 
+/// The batch `UPDATE`: the same arrays, joined against the table.
+pub fn updateManyFor(comptime Row: type, comptime Values: type) statement.Statement {
+    return comptime statement.updateMany(Postgres, Row, Values);
+}
+
 /// The two upserts. `on` is the conflict target — a column written the way a
 /// key is, `.email`, or a tuple of them for a constraint spanning more than
 /// one. It is a value rather than a type because the column *names* are what

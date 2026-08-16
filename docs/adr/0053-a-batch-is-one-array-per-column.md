@@ -130,5 +130,11 @@ statement everywhere else.
   without a transaction around it.
 - `arrayOf` joins the Dialect's contract. A second dialect has to name the
   array form of every column type it accepts, or refuse the batch.
-- There is no `updateMany`. The same `unnest` shape writes one, and nobody has
-  asked for it yet.
+- `updateMany` is the same arrays joined against the table rather than
+  selected into it, so it arrived as a second statement over this machinery
+  rather than as a second design. Each row of the batch carries the Row's key
+  and is found by it, which is why there is no `.where` to write and why a
+  batch missing the key is a compile error. Two things a join will not
+  promise and this call therefore does not either: the order rows come back
+  in, and that a key named twice is applied twice. `db.update` in a loop is
+  the shape where either matters.

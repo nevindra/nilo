@@ -157,6 +157,14 @@ const sql_refusals = [_]Refusal{
         .says = "streamed_list.Ticket reads `tags` as a list column, and a streamed row cannot hold one.",
     },
     .{
+        .name = "batch_update_without_key",
+        .says = "a batch update of batch_update_without_key.User does not carry `id`.",
+    },
+    .{
+        .name = "batch_update_nothing_to_set",
+        .says = "a batch update of batch_update_nothing_to_set.User has nothing to set.",
+    },
+    .{
         .name = "batch_of_a_list_column",
         .says = "a batch insert into batch_of_a_list_column.Ticket cannot send `tags`, which it reads as []const []const u8.",
     },

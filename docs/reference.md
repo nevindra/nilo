@@ -845,6 +845,7 @@ request ([ADR 0041](./adr/0041-a-module-sits-where-the-loop-puts-it.md)).
 | `db.insertOrIgnore(User, c, .{ … }, .email)` | `!?User` — the stored row, or `null` when one was already there. `ON CONFLICT … DO NOTHING` |
 | `db.insertOrUpdate(User, c, .{ … }, .email)` | `!User` — stored, or the existing row with these values written over it. `ON CONFLICT … DO UPDATE` |
 | `db.update(User, c, .{ .set = …, .where = … })` | `!usize` — rows changed. Both halves required |
+| `db.updateMany(User, c, rows)` | `![]User` — a whole batch in one statement, found by the Row's key. No `.where`: the join is the condition; see below |
 | `db.updateReturning(User, c, .{ .set = …, .where = … })` | `![]User` — the rows as they now are. One statement where an update and a select are two and a race |
 | `db.delete(User, c, .{ .where = … })` | `!usize` — rows deleted. `.where` required |
 | `db.deleteReturning(User, c, .{ .where = … })` | `![]User` — the rows that were removed |
@@ -870,6 +871,22 @@ from the element type. Two columns cannot be batched and both say so at
 compile time: a list column, because `unnest` would flatten it, and an enum
 that has not declared `nilo_column`, because the cast has to name a type that
 lives in the database.
+
+`updateMany` is the mirror, joined against the table instead of selected into
+it. Each row of the batch carries the Row's **key**, which is what it is found
+by and the one field the struct must have; every other field it carries is
+set.
+
+```zig
+const Change = struct { id: i64, qty: i32 };
+const changed = try db.updateMany(Item, c, changes);   // []const Change
+```
+
+A key the table does not have matches nothing, so a shorter answer than the
+batch is how you tell which landed. Two things it does not promise, both
+because a join is a join: the **order** is the planner's, and a batch naming
+one key twice changes that row once. `db.update` in a loop is the answer where
+either matters.
 
 ### Upserts
 

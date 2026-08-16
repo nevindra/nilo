@@ -494,6 +494,115 @@ pub fn insertMany(comptime D: type, comptime Row: type, comptime V: type) Statem
     };
 }
 
+/// The relation aliases a batched update needs. Two names in one place, so
+/// the four fragments that have to agree about them cannot drift.
+const batch_target = "t";
+const batch_source = "v";
+
+/// `UPDATE`, one statement for however many rows there are.
+///
+/// The mirror of `insertMany`, and the same array-per-column trick joined
+/// against the table instead of selected into it:
+///
+/// ```sql
+/// UPDATE "items" AS t SET "qty" = v."qty"
+/// FROM unnest($1::int8[], $2::int4[]) AS v("id", "qty")
+/// WHERE t."id" = v."id"
+/// RETURNING t."id", t."sku", t."qty"
+/// ```
+///
+/// **The key is a column of the batch and is what each row is found by**, so
+/// it is the one field `V` has to carry; everything else it carries is set.
+/// That is the same division `insertOrUpdate` already makes — a key
+/// identifies, it is not written — and it is why this needs no `.where`:
+/// the condition is the join, and a batched update with a condition of its
+/// own would be two ideas in one call.
+///
+/// **Order is not promised and duplicates are not merged.** A join is a join:
+/// which row `RETURNING` answers with first is the planner's business, and a
+/// batch naming the same key twice updates that row once, from whichever of
+/// the two Postgres reached. Both are properties of the shape rather than
+/// choices, and `db.update` in a loop is the answer where either matters.
+pub fn updateMany(comptime D: type, comptime Row: type, comptime V: type) Statement {
+    return comptime blk: {
+        dialect_mod.assertDialect(D);
+        row_mod.assertRow(Row);
+
+        const info = switch (@typeInfo(V)) {
+            .@"struct" => |s| s,
+            else => @compileError(
+                "nilo: a batch update of " ++ @typeName(Row) ++ " takes a slice of " ++
+                    "structs of columns, and its element is a " ++ @typeName(V) ++ ".\n" ++
+                    "  Give the rows a named struct: `const Change = struct { id: i64, " ++
+                    "qty: i32 };` and pass a `[]const Change`.",
+            ),
+        };
+
+        const key = row_mod.keyOf(Row);
+        var has_key = false;
+        for (info.fields) |f| {
+            if (std.mem.eql(u8, f.name, key)) has_key = true;
+        }
+        if (!has_key) @compileError(
+            "nilo: a batch update of " ++ @typeName(Row) ++ " does not carry `" ++ key ++
+                "`.\n  Every row in a batch is found by its key, because the join is " ++
+                "the condition — there is no `.where` to write instead. Add `" ++ key ++
+                "` to the struct the rows are written as.",
+        );
+        if (info.fields.len < 2) @compileError(
+            "nilo: a batch update of " ++ @typeName(Row) ++ " has nothing to set.\n" ++
+                "  It carries `" ++ key ++ "` and no other column, so every row would " ++
+                "be found and then left alone.",
+        );
+
+        var arrays: []const u8 = "";
+        var aliases: []const u8 = "";
+        var sets: []const u8 = "";
+        var written: usize = 0;
+        var paths: []const where_mod.Path = &.{};
+        var params: []const where_mod.Param = &.{};
+
+        for (info.fields, 0..) |f, i| {
+            if (!row_mod.hasColumn(Row, f.name)) {
+                row_mod.noSuchColumn(Row, f.name, "a batch update");
+            }
+            const F = row_mod.ColumnType(Row, f.name);
+            const cast = D.arrayOf(F) orelse noArrayForm(D, Row, f.name, F);
+            if (i > 0) {
+                arrays = arrays ++ ", ";
+                aliases = aliases ++ ", ";
+            }
+            arrays = arrays ++ D.placeholder(i + 1) ++ "::" ++ cast;
+            aliases = aliases ++ D.quote(f.name);
+
+            // The key joins rather than being written. Postgres would take
+            // `SET "id" = v."id"` without complaint and renumber nothing,
+            // but it is a column in the SET list that can never change and
+            // reads as though it might — the same argument `upserting` makes.
+            if (!std.mem.eql(u8, f.name, key)) {
+                if (written > 0) sets = sets ++ ", ";
+                sets = sets ++ D.quote(f.name) ++ " = " ++ batch_source ++ "." ++ D.quote(f.name);
+                written += 1;
+            }
+
+            paths = paths ++ &[_]where_mod.Path{&[_][]const u8{f.name}};
+            params = params ++ &[_]where_mod.Param{.{ .column = f.name, .list = true }};
+        }
+
+        const quoted_key = D.quote(key);
+        break :blk .{
+            .sql = "UPDATE " ++ relation(D, Row) ++ " AS " ++ batch_target ++
+                " SET " ++ sets ++
+                " FROM unnest(" ++ arrays ++ ") AS " ++ batch_source ++ "(" ++ aliases ++ ")" ++
+                " WHERE " ++ batch_target ++ "." ++ quoted_key ++
+                " = " ++ batch_source ++ "." ++ quoted_key ++
+                " RETURNING " ++ columnListFrom(D, Row, batch_target ++ "."),
+            .paths = paths,
+            .params = params,
+        };
+    };
+}
+
 /// The Refusal for a column a batch cannot send as one parameter. Two
 /// different mistakes reach it and each gets its own sentence, because the
 /// fix is different: a list column cannot be batched at all, and an enum
@@ -791,10 +900,23 @@ fn updating(
 /// The `SELECT` list, each column asked for the way its type wants — see
 /// `dialect.readAs`, which is where the one exception lives.
 fn columnList(comptime D: type, comptime Row: type) []const u8 {
+    return comptime columnListFrom(D, Row, "");
+}
+
+/// The same list, every column reached through a relation alias. Wanted by
+/// exactly one statement — a batched update, whose `FROM` puts a second
+/// relation with the same column names in scope, so an unqualified
+/// `RETURNING "id"` is *column reference "id" is ambiguous* rather than an
+/// answer.
+fn columnListFrom(
+    comptime D: type,
+    comptime Row: type,
+    comptime prefix: []const u8,
+) []const u8 {
     comptime {
         var out: []const u8 = "";
         for (row_mod.columnsOf(Row), 0..) |c, i| {
-            const asked = D.readAs(D.quote(c), row_mod.ColumnType(Row, c));
+            const asked = D.readAs(prefix ++ D.quote(c), row_mod.ColumnType(Row, c));
             out = out ++ (if (i == 0) "" else ", ") ++ asked;
         }
         return out;
@@ -1155,6 +1277,36 @@ test "a batch insert is one array per column, and the text never mentions a coun
     try testing.expectEqual(@as(usize, 2), found.paramCount());
     try testing.expect(found.params[0].list);
     try testing.expect(found.params[1].list);
+}
+
+test "a batch update joins the arrays against the table and sets the rest" {
+    const Change = struct { id: i64, email: []const u8, age: i32 };
+    try testing.expectEqualStrings(
+        "UPDATE \"users\" AS t SET \"email\" = v.\"email\", \"age\" = v.\"age\"" ++
+            " FROM unnest($1::int8[], $2::text[], $3::int4[]) AS v(\"id\", \"email\", \"age\")" ++
+            " WHERE t.\"id\" = v.\"id\"" ++
+            " RETURNING t.\"id\", t.\"email\", t.\"age\", t.\"created_at\"",
+        comptime updateMany(Pg, User, Change).sql,
+    );
+}
+
+test "a batch update returns through the alias, because the join made the name ambiguous" {
+    // `RETURNING "id"` with a second relation in scope is *column reference
+    // "id" is ambiguous*, and Postgres says so at run time. The alias is what
+    // keeps it a compile-time-settled statement that actually runs.
+    const Change = struct { id: i64, age: i32 };
+    const sql_text = comptime updateMany(Pg, User, Change).sql;
+    try testing.expect(std.mem.containsAtLeast(u8, sql_text, 1, "RETURNING t.\"id\""));
+    try testing.expect(!std.mem.containsAtLeast(u8, sql_text, 1, "RETURNING \"id\""));
+}
+
+test "the key of a batch update joins rather than being written" {
+    const Change = struct { id: i64, age: i32 };
+    const sql_text = comptime updateMany(Pg, User, Change).sql;
+    // It is in the arrays, in the alias list and in the join — and not in
+    // the SET list, where it could only ever set a column to itself.
+    try testing.expect(std.mem.containsAtLeast(u8, sql_text, 1, "SET \"age\" = v.\"age\" FROM"));
+    try testing.expect(!std.mem.containsAtLeast(u8, sql_text, 1, "\"id\" = v.\"id\","));
 }
 
 test "a batch names the array of what the column is, not of what was written" {

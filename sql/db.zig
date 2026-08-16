@@ -430,6 +430,41 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             );
         }
 
+        /// Change many rows in one statement, and give back the ones that
+        /// were there to change.
+        ///
+        /// ```zig
+        /// const Change = struct { id: i64, qty: i32 };
+        /// const changed = try db.updateMany(Item, c, changes);   // []const Change
+        /// ```
+        ///
+        /// **Each row is found by the Row's key, which is why there is no
+        /// `.where`**: the condition is the join against the batch
+        /// (`statement.zig`). A key the table does not have simply matches
+        /// nothing, so the answer can be shorter than the batch — that is how
+        /// to tell which ones landed.
+        ///
+        /// The same one-allocation-per-column cost as `insertMany`, and two
+        /// properties it does not share: **the order is the planner's**, and a
+        /// batch naming one key twice changes that row once. Both come from
+        /// this being a join; `db.update` in a loop is the answer where either
+        /// matters.
+        pub fn updateMany(self: *Self, comptime Row: type, c: anytype, rows: anytype) ![]Row {
+            comptime core.checkScope(@TypeOf(c), "db.updateMany");
+            const V = comptime batchElement(Row, @TypeOf(rows));
+            const stmt = comptime statement.updateMany(D, Row, V);
+            const items: []const V = rows;
+            return fill(
+                Row,
+                items.len,
+                try self.wireOf(),
+                null,
+                c,
+                stmt.sql,
+                try batchValuesOf(stmt, Row, V, items, c),
+            );
+        }
+
         /// Store the row, or leave the one that is already there alone —
         /// `null` when that is what happened.
         ///
@@ -685,6 +720,22 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
                 comptime core.checkScope(@TypeOf(c), "tx.insertMany");
                 const V = comptime batchElement(Row, @TypeOf(rows));
                 const stmt = comptime statement.insertMany(D, Row, V);
+                const items: []const V = rows;
+                return fill(
+                    Row,
+                    items.len,
+                    self.w,
+                    &self.inner,
+                    c,
+                    stmt.sql,
+                    try batchValuesOf(stmt, Row, V, items, c),
+                );
+            }
+
+            pub fn updateMany(self: *Tx, comptime Row: type, c: anytype, rows: anytype) ![]Row {
+                comptime core.checkScope(@TypeOf(c), "tx.updateMany");
+                const V = comptime batchElement(Row, @TypeOf(rows));
+                const stmt = comptime statement.updateMany(D, Row, V);
                 const items: []const V = rows;
                 return fill(
                     Row,
@@ -1690,6 +1741,9 @@ fn commitTransaction(db: *FakeDb, c: *nilo.Ctx) !void {
 /// a slice of anonymous literals has no element type to name.
 const Line = struct { email: []const u8, age: i32 };
 
+/// One row of a batch update, which carries the key it is found by.
+const Change = struct { id: i64, age: i32 };
+
 /// Every call on `Db` and on `Tx`, in one handler.
 ///
 /// A method on a generic struct is only analysed where it is called, so a
@@ -1702,6 +1756,7 @@ fn touchEverything(db: *FakeDb, c: *nilo.Ctx) !void {
     _ = try db.find(Person, c, @as(i64, 1));
     _ = try db.insert(Person, c, .{ .email = "a@b.c", .age = @as(i32, 1) });
     _ = try db.insertMany(Person, c, &[_]Line{.{ .email = "a@b.c", .age = 1 }});
+    _ = try db.updateMany(Person, c, &[_]Change{.{ .id = 1, .age = 2 }});
     _ = try db.update(Person, c, .{ .set = .{ .age = @as(i32, 2) }, .where = .{ .id = @as(i64, 1) } });
     _ = try db.updateReturning(Person, c, .{ .set = .{ .age = @as(i32, 2) }, .where = .{ .id = @as(i64, 1) } });
     _ = try db.delete(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
@@ -1738,6 +1793,7 @@ fn touchEverything(db: *FakeDb, c: *nilo.Ctx) !void {
     _ = try tx.exists(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
     _ = try tx.insert(Person, c, .{ .email = "a@b.c", .age = @as(i32, 1) });
     _ = try tx.insertMany(Person, c, &[_]Line{.{ .email = "a@b.c", .age = 1 }});
+    _ = try tx.updateMany(Person, c, &[_]Change{.{ .id = 1, .age = 2 }});
     _ = try tx.update(Person, c, .{ .set = .{ .age = @as(i32, 3) }, .where = .{ .id = @as(i64, 1) } });
     _ = try tx.updateReturning(Person, c, .{ .set = .{ .age = @as(i32, 3) }, .where = .{ .id = @as(i64, 1) } });
     _ = try tx.delete(Person, c, .{ .where = .{ .id = @as(i64, 1) } });

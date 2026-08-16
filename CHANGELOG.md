@@ -266,6 +266,13 @@ Nothing about the API changed to get any of it. What *did* change:
   ReleaseFast. A Row that reads an array cannot be streamed, for the reason a
   `Json` column cannot: a streamed row holds only what the read buffer already
   holds.
+- **`db.updateMany(Row, c, rows)`** — the batch's other half, and the same
+  `unnest` joined against the table rather than selected into it. Each row
+  carries the Row's key and is found by it, so there is no `.where` and a
+  batch that does not carry the key is a compile error. `tx.updateMany` is
+  the same call inside a transaction. Order is the planner's and a repeated
+  key changes its row once — both are what a join is, and `db.update` in a
+  loop is the answer where either matters.
 - **A table can be qualified.** `.name = "app.users"` is a schema and a
   table now, quoted as two identifiers and introspected in that schema.
   Before, it was quoted as *one* identifier — `"app.users"`, a relation

@@ -416,6 +416,31 @@ Two columns cannot be batched, and both say so at compile time: a list column,
 because `unnest` would flatten it into one row per element, and an enum that
 has not declared what its Postgres type is called.
 
+`updateMany` is the same trick joined against the table rather than selected
+into it:
+
+```zig
+const Change = struct { id: i64, qty: i32 };
+const changed = try db.updateMany(Item, c, changes);
+```
+
+```sql
+UPDATE "items" AS t SET "qty" = v."qty"
+FROM unnest($1::int8[], $2::int4[]) AS v("id", "qty")
+WHERE t."id" = v."id"
+RETURNING t."id", t."sku", t."qty"
+```
+
+Each row carries the Row's **key** and is found by it — that is why there is
+no `.where` to write, and why a batch that does not carry the key is a compile
+error. A key the table does not have matches nothing, so an answer shorter
+than the batch tells you which landed.
+
+Two things it does not promise, and both are properties of a join rather than
+choices: the **order** rows come back in is the planner's, and a batch naming
+the same key twice changes that row once, from whichever of the two Postgres
+reached. Where either matters, `db.update` in a loop is the honest shape.
+
 ### Giving back the rows instead of the count
 
 A `PATCH` endpoint changes a row and answers with it. Written with `update`

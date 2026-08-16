@@ -377,9 +377,6 @@ of it — measured at 0 bytes.
    - `SELECT … FOR UPDATE`, savepoints, and an isolation level on `begin`.
      A `Tx` today is one connection and five verbs, which is not enough to
      write anything that actually contends.
-   - `updateMany`. `insertMany` writes the `unnest` shape and an update is the
-     same one joined against the table, so this is a morning's work behind a
-     question nobody has asked yet.
 2. **Prepared statements, measured first.** Every statement this module sends
    is already a comptime constant, which is the property that makes a cache
    cheap here and impossible in a framework that assembles its SQL per
@@ -530,7 +527,6 @@ Two whole areas come off before the list starts.
 
 **Writing**
 
-- [ ] `updateMany` → Next 1
 - [ ] Several statements in one round trip
 
 **Connection and session**

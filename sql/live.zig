@@ -1857,6 +1857,85 @@ test "a batch inside a transaction is undone with the rest of it" {
     try testing.expectEqual(before, try stack.db.count(Person, &run, .{}));
 }
 
+/// One row of a batch update: the key it is found by, and what changes.
+const Bump = struct {
+    id: i64,
+    age: i32,
+};
+
+test "a batch update changes many rows in one statement" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const changed = try stack.db.updateMany(Person, &run, &[_]Bump{
+        .{ .id = 1, .age = 37 },
+        .{ .id = 3, .age = 12 },
+    });
+    try testing.expectEqual(@as(usize, 2), changed.len);
+
+    // Read back rather than trusting `RETURNING`, and read the row the batch
+    // did *not* name too — a join that matched too much would show here.
+    try testing.expectEqual(@as(i32, 37), (try stack.db.find(Person, &run, @as(i64, 1))).?.age);
+    try testing.expectEqual(@as(i32, 45), (try stack.db.find(Person, &run, @as(i64, 2))).?.age);
+    try testing.expectEqual(@as(i32, 12), (try stack.db.find(Person, &run, @as(i64, 3))).?.age);
+}
+
+test "a key the table does not have matches nothing, and the answer is shorter" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    // The join is the condition, so a key that is not there is not an error —
+    // it simply finds no row. A shorter answer than the batch is how a caller
+    // tells, which is why this is the documented way to find out.
+    const changed = try stack.db.updateMany(Person, &run, &[_]Bump{
+        .{ .id = 1, .age = 38 },
+        .{ .id = 999, .age = 1 },
+    });
+    try testing.expectEqual(@as(usize, 1), changed.len);
+    try testing.expectEqual(@as(i64, 1), changed[0].id);
+    try testing.expectEqual(@as(usize, 3), try stack.db.count(Person, &run, .{}));
+}
+
+test "an empty batch update is a statement that changes nothing" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const none: []const Bump = &.{};
+    const changed = try stack.db.updateMany(Person, &run, none);
+    try testing.expectEqual(@as(usize, 0), changed.len);
+    try testing.expectEqual(@as(i32, 36), (try stack.db.find(Person, &run, @as(i64, 1))).?.age);
+}
+
+test "a batch update inside a transaction is undone with the rest of it" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    {
+        var tx = try stack.db.begin(&run);
+        defer tx.deinit();
+        const changed = try tx.updateMany(Person, &run, &[_]Bump{.{ .id = 1, .age = 99 }});
+        try testing.expectEqual(@as(usize, 1), changed.len);
+        // and no commit
+    }
+    try testing.expectEqual(@as(i32, 36), (try stack.db.find(Person, &run, @as(i64, 1))).?.age);
+}
+
 /// One row of a batch over the columns Zig has no word for, which is where a
 /// batch could quietly go wrong: each of these binds as something other than
 /// itself, and an array of them has to bind as an array of that.
