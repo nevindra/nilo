@@ -61,6 +61,7 @@ Measured stripped, `ReleaseFast`, on the examples in this repository.
 | Set operations, CTEs and pipelining, all refused ([ADRs 0058](./0058-a-set-operation-over-one-table-is-a-condition.md)–[0059](./0059-a-round-trip-is-not-the-cost-worth-chasing.md)) | +0 | +0 |
 | A second database as a second type ([ADR 0060](./0060-a-second-database-is-a-second-type.md)) | +0 | +0 |
 | A second Dialect, SQL half only ([ADR 0061](./0061-the-second-dialect-is-the-test-of-the-seam.md)) | +0 | +0 |
+| Parsing the database URL rather than letting a driver drop half the options ([ADR 0062](./0062-a-pool-that-dialled-itself-whatever-it-was-told.md)) | +0 | +0 |
 
 The second row is one measurement of six changes because they landed together, which is a worse record than the first row and is noted as such. The split it does show is the useful part: `hello` has one route returning text and pays +6 KB, which is the failure-body writer and nothing else — that part is unconditional. The remaining +8 KB on `rest` is the body describer and the schema walker, and those are generated per body type, so they are paid by applications that have bodies.
 

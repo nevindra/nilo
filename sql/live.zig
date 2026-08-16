@@ -226,7 +226,24 @@ const Live = struct {
         threaded.* = .init(gpa, .{});
         errdefer threaded.deinit();
 
-        var wire = try postgres.Wire.open(threaded.io(), gpa, url, .{ .size = 2 });
+        // `connect_on_init = 2` — the whole pool, dialled here — and it is
+        // not a preference. Anything less leaves pg.zig's reconnector to
+        // fill the rest from a `Thread.spawn`ed OS thread, and that thread
+        // takes an `xsync.Mutex` against the `Io` it was given.
+        // `std.Io.Threaded` cannot park a caller that is not one of its own
+        // tasks, so the mutex reaches `unreachable` and takes the test
+        // runner with it — 77 of them, the first time this was tried.
+        //
+        // Under the engine it is fine: zio parks across threads, and
+        // `bench/sql_server.zig` boots with the database switched off,
+        // connects when it comes up and shuts down clean
+        // ([ADR 0062](../docs/adr/0062-a-pool-that-dialled-itself-whatever-it-was-told.md)).
+        // So this is a constraint on the *test harness*, and it is written
+        // where the harness is.
+        var wire = try postgres.Wire.open(threaded.io(), gpa, url, .{
+            .size = 2,
+            .connect_on_init = 2,
+        });
         errdefer wire.close();
 
         var arena = std.heap.ArenaAllocator.init(gpa);

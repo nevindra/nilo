@@ -77,7 +77,15 @@ pub fn main(init: std.process.Init) !void {
     // Sized so the pool is not what runs out first: the question is whether
     // a waiting fiber frees the thread, and a pool of ten would cap the
     // answer at ten in flight whatever the loop does.
-    var db = sql.Db.init(gpa, url, .{ .size = 64, .connect_on_init = 8 });
+    //
+    // `POOL_SIZE` overrides it, because "how many connections" turned out to
+    // be the one knob users are told to raise and nobody had measured the
+    // curve behind it (ADR 0062).
+    const size: u16 = if (init.minimal.environ.getPosix("POOL_SIZE")) |text|
+        std.fmt.parseInt(u16, text, 10) catch 64
+    else
+        64;
+    var db = sql.Db.init(gpa, url, .{ .size = size, .connect_on_init = @min(size, 8) });
     defer db.deinit();
 
     var app = nilo.App.init(gpa);

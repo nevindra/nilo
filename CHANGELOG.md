@@ -160,6 +160,21 @@ A SQLite Wire is not built: it is a blocking file read rather than a socket,
 and which of "hold the thread" or "pay a `nilo.blocking` hop" is right is a
 measurement nobody has taken.
 
+**Fixed: a server whose database was down refused to start.** `connect_on_init`
+defaults to zero and is documented as "the pool is allocated, nothing is
+dialled" — and it never worked, because `pg.Pool.initUri` copies two fields of
+the options it is given and drops the third. So every pool opened `size`
+connections at startup and died on the first refusal, which also made a `size`
+larger than the server's `max_connections` a server that would not boot. nilo
+parses the URL itself now
+([ADR 0062](./docs/adr/0062-a-pool-that-dialled-itself-whatever-it-was-told.md)).
+
+One sharp edge comes with it: **driving a `Db` from a `std.Io.Threaded` wants
+`connect_on_init = size`.** Anything less hands the rest to pg.zig's
+reconnector, whose thread cannot park against a `Threaded` Io. Under the
+engine it is fine — a server boots with Postgres down, connects when it comes
+up and serves 135,000 requests a second at a pool of eight.
+
 **28 Refusals** hold the module's own error messages — a Row written wrong, a
 column misspelled, an update with no condition, a key where a condition
 belongs. Each is a program in `sql/refusals/` that must fail to compile with

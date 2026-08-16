@@ -300,9 +300,19 @@ pub const Wire = struct {
     ///
     /// With `connect_on_init` at zero — the default — this reaches the
     /// database not at all: the URL is parsed, the pool is allocated, and
-    /// the first connection is made by the first query. That is what lets a
-    /// server start with Postgres switched off, and it is pg.zig's own
-    /// option rather than one invented here (`connect_on_init_count`).
+    /// the first connection is made by pg.zig's reconnector in the
+    /// background. That is what lets a server start with Postgres switched
+    /// off.
+    ///
+    /// **`pg.Pool.initUri` cannot be used, and finding out why is
+    /// [ADR 0062](../docs/adr/0062-a-pool-that-dialled-itself-whatever-it-was-told.md).**
+    /// It copies exactly two fields of the `Opts` it is given onto the ones
+    /// it parsed out of the URI — `size` and `timeout` — and drops
+    /// `connect_on_init_count`, which then defaults to `orelse size` inside
+    /// `Pool.init`. So every pool nilo ever opened dialled itself in full at
+    /// startup and died on the first refusal, whatever this option said. The
+    /// URI is parsed here instead, which is forty lines and the only way to
+    /// hand `Pool.init` a whole `Opts`.
     pub fn open(
         io: std.Io,
         gpa: std.mem.Allocator,
@@ -310,12 +320,88 @@ pub const Wire = struct {
         opts: wire.OpenOpts,
     ) !Wire {
         const uri = try std.Uri.parse(url);
-        const pool = try pg.Pool.initUri(io, gpa, uri, .{
-            .size = opts.size,
-            .timeout = opts.timeout_ms,
-            .connect_on_init_count = opts.connect_on_init,
-        });
+
+        // The strings below point into this arena or into `url`; `Pool.init`
+        // dupes what it keeps into an arena of its own, so this one goes
+        // back before `open` returns.
+        var scratch = std.heap.ArenaAllocator.init(gpa);
+        defer scratch.deinit();
+
+        const pool = try pg.Pool.init(io, gpa, try poolOpts(uri, scratch.allocator(), opts));
         return .{ .pool = pool };
+    }
+
+    /// Everything `pg.Pool.init` needs, in one value — which is the point:
+    /// `initUri` builds this internally and lets three of its fields be
+    /// overwritten, so the fourth is silently whatever it parsed. Built here
+    /// it is one struct literal a test can read (ADR 0062).
+    fn poolOpts(
+        uri: std.Uri,
+        arena: std.mem.Allocator,
+        opts: wire.OpenOpts,
+    ) !pg.Pool.Opts {
+        var out = try dialOpts(uri, arena);
+        out.size = opts.size;
+        out.timeout = opts.timeout_ms;
+        out.connect_on_init_count = opts.connect_on_init;
+        return out;
+    }
+
+    /// A URI taken apart into what pg.zig needs to dial with.
+    ///
+    /// This mirrors pg.zig's own `parseOpts`, which is not reachable through
+    /// its module root — the same two query parameters, the same defaults,
+    /// and the same refusal of a third. **A parameter this does not know is
+    /// an error rather than a shrug**, because a `sslmode` nobody read is a
+    /// connection that is plaintext while the URL says otherwise.
+    fn dialOpts(uri: std.Uri, arena: std.mem.Allocator) !pg.Pool.Opts {
+        if (!std.mem.eql(u8, uri.scheme, "postgresql") and
+            !std.mem.eql(u8, uri.scheme, "postgres")) return error.InvalidUriScheme;
+
+        var tls: pg.Conn.Opts.TLS = .off;
+        var tcp_user_timeout: ?u32 = null;
+
+        if (uri.query) |query| {
+            var it = std.mem.splitScalar(u8, try query.toRawMaybeAlloc(arena), '&');
+            while (it.next()) |param| {
+                var pair = std.mem.splitScalar(u8, param, '=');
+                const key = pair.first();
+                const value = pair.rest();
+                if (std.mem.eql(u8, key, "tcp_user_timeout")) {
+                    tcp_user_timeout = try std.fmt.parseInt(u32, value, 10);
+                } else if (std.mem.eql(u8, key, "sslmode")) {
+                    if (std.mem.eql(u8, value, "require")) {
+                        tls = .require;
+                    } else if (std.mem.eql(u8, value, "verify-full")) {
+                        tls = .{ .verify_full = null };
+                    } else if (!std.mem.eql(u8, value, "disable")) {
+                        return error.UnsupportedSSLModeValue;
+                    }
+                } else return error.UnsupportedConnectionParam;
+            }
+        }
+
+        const path = std.mem.trimStart(u8, try uri.path.toRawMaybeAlloc(arena), "/");
+
+        return .{
+            // Both overwritten by the caller; named here so that a field
+            // added to `Pool.Opts` upstream is a compile error rather than a
+            // default nobody chose.
+            .size = 0,
+            .timeout = 0,
+            .connect_on_init_count = null,
+            .auth = .{
+                .username = if (uri.user) |u| try u.toRawMaybeAlloc(arena) else "postgres",
+                .password = if (uri.password) |pw| try pw.toRawMaybeAlloc(arena) else null,
+                .database = if (path.len == 0) null else path,
+                .timeout = tcp_user_timeout orelse 10_000,
+            },
+            .connect = .{
+                .tls = tls,
+                .port = uri.port,
+                .host = if (uri.host) |h| try h.toRawMaybeAlloc(arena) else null,
+            },
+        };
     }
 
     pub fn close(self: *Wire) void {
@@ -617,4 +703,89 @@ test "what a transaction was begun with is spelled onto the BEGIN itself" {
         comptime Wire.beginText(.{ .isolation = .read_committed }),
     );
     try testing.expectEqualStrings("BEGIN READ ONLY", comptime Wire.beginText(.{ .read_only = true }));
+}
+
+test "how many connections to dial reaches the pool, which it did not" {
+    // The bug this holds: `pg.Pool.initUri` copies `size` and `timeout` onto
+    // the Opts it parsed and **drops `connect_on_init_count`**, which then
+    // falls to `orelse size` inside `Pool.init`. So every pool nilo opened
+    // dialled itself in full at startup and died on the first refusal —
+    // which made `connect_on_init = 0`, the default, mean the opposite of
+    // what three files said it meant (ADR 0062).
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const uri = try std.Uri.parse("postgres://app:hunter2@db.internal:5433/shop");
+    const opts = try Wire.poolOpts(uri, arena.allocator(), .{
+        .size = 10,
+        .connect_on_init = 0,
+        .timeout_ms = 3_000,
+    });
+
+    // Zero, not ten. The whole defect is that this was ten.
+    try testing.expectEqual(@as(?u16, 0), opts.connect_on_init_count);
+    try testing.expectEqual(@as(u16, 10), opts.size);
+    try testing.expectEqual(@as(u32, 3_000), opts.timeout);
+}
+
+test "a URL is taken apart the way pg.zig would have taken it apart" {
+    // `parseOpts` is not reachable through pg.zig's module root, so this is
+    // a copy — and a copy that drifts is worse than the call it replaced.
+    // These are pg.zig's own defaults, asserted here so that a change to
+    // them is a failing test rather than a connection to the wrong database.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    const full = try Wire.dialOpts(
+        try std.Uri.parse("postgres://app:hunter2@db.internal:5433/shop?sslmode=require"),
+        aa,
+    );
+    try testing.expectEqualStrings("app", full.auth.username);
+    try testing.expectEqualStrings("hunter2", full.auth.password.?);
+    try testing.expectEqualStrings("shop", full.auth.database.?);
+    try testing.expectEqualStrings("db.internal", full.connect.host.?);
+    try testing.expectEqual(@as(?u16, 5433), full.connect.port);
+    try testing.expect(full.connect.tls == .require);
+
+    // Nothing given: `postgres` as the user, no database, no port, no TLS,
+    // and a ten-second auth timeout.
+    const bare = try Wire.dialOpts(try std.Uri.parse("postgres:///"), aa);
+    try testing.expectEqualStrings("postgres", bare.auth.username);
+    try testing.expectEqual(@as(?[]const u8, null), bare.auth.password);
+    try testing.expectEqual(@as(?[]const u8, null), bare.auth.database);
+    try testing.expectEqual(@as(?u16, null), bare.connect.port);
+    try testing.expect(bare.connect.tls == .off);
+    try testing.expectEqual(@as(u32, 10_000), bare.auth.timeout);
+
+    // `tcp_user_timeout` is the other parameter, and it lands on the auth
+    // timeout rather than anywhere that sounds like it.
+    const timed = try Wire.dialOpts(
+        try std.Uri.parse("postgres://h/db?tcp_user_timeout=5678"),
+        aa,
+    );
+    try testing.expectEqual(@as(u32, 5678), timed.auth.timeout);
+}
+
+test "a URL nobody can read is refused rather than half understood" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    // A scheme that is not Postgres, a `sslmode` nobody has heard of, and a
+    // parameter nobody has heard of. The third is the one worth refusing:
+    // a URL carrying a setting the driver ignores is a deployment that
+    // believes something the connection does not do.
+    try testing.expectError(
+        error.InvalidUriScheme,
+        Wire.dialOpts(try std.Uri.parse("mysql://h/db"), aa),
+    );
+    try testing.expectError(
+        error.UnsupportedSSLModeValue,
+        Wire.dialOpts(try std.Uri.parse("postgres://h/db?sslmode=prefer"), aa),
+    );
+    try testing.expectError(
+        error.UnsupportedConnectionParam,
+        Wire.dialOpts(try std.Uri.parse("postgres://h/db?application_name=nilo"), aa),
+    );
 }

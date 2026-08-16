@@ -818,8 +818,8 @@ database switched off, and the first request that needs it gets
 
 | `Opts` | |
 |---|---|
-| `size` | connections held open. Default 10 |
-| `connect_on_init` | how many to dial during `listen()`. Default 0 |
+| `size` | connections held open. Default 10. The knob with a real curve behind it: 8 → 133k req/s, 16 → 148k, 32 → 180k, 64 → 206k on the loopback bench, with p99 best at 32. Each one is a Postgres backend and a slot against `max_connections` |
+| `connect_on_init` | how many to dial during `listen()`. Default 0 — set it to `size` when driving a `Db` from a `std.Io.Threaded` ([ADR 0062](./adr/0062-a-pool-that-dialled-itself-whatever-it-was-told.md)) |
 | `timeout_ms` | how long a caller waits for a free connection. Default 10,000 |
 | `schema_mismatch_is_fatal` | whether a Row that disagrees with its table stops startup. Default true |
 | `prepared` | whether a statement is kept prepared on the connection it went down. Default true |

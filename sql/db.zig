@@ -18,7 +18,10 @@
 //!
 //! That is also what makes a server boot with its database switched off:
 //! `connect_on_init` defaults to zero, so startup asks for a pool rather
-//! than for a connection. Somebody working on an endpoint that never
+//! than for a connection. **That sentence was false for as long as it had
+//! been written** — see `Opts.connect_on_init` and ADR 0062 — and what
+//! holds it now is `bench/sql_server.zig`, which boots against a port
+//! nothing is listening on. Somebody working on an endpoint that never
 //! touches Postgres does not need Postgres running. The first request that
 //! *does* touch it gets `error.Disconnected`, which reaches the client as a
 //! 500 like any other error a handler did not catch — `AlreadyExists` is
@@ -179,6 +182,22 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             size: u16 = 10,
             /// How many to dial during `listen()`. Zero on purpose: see the
             /// header. Raise it to fail fast on a bad URL in production.
+            ///
+            /// **This did not work until it was measured, and the reason is
+            /// worth knowing** ([ADR 0062](../docs/adr/0062-a-pool-that-dialled-itself-whatever-it-was-told.md)):
+            /// `pg.Pool.initUri` dropped the field on the way past, so every
+            /// pool dialled itself in full at startup and a server whose
+            /// database was down refused to start — the opposite of what the
+            /// header promised. The URI is parsed in `sql/postgres.zig` now.
+            ///
+            /// **Under `std.Io.Threaded`, set this to `size`.** Anything
+            /// less leaves pg.zig's reconnector to fill the rest from a
+            /// spawned OS thread, and that thread parks on an `xsync.Mutex`
+            /// against the `Io` it was handed — which `Threaded` cannot do
+            /// for a caller that is not one of its tasks, so it reaches
+            /// `unreachable`. Under the engine it is fine, because zio parks
+            /// across threads; this is a constraint on a test harness rather
+            /// than on a server.
             connect_on_init: u16 = 0,
             /// How long a caller waits for a free connection.
             timeout_ms: u32 = 10 * std.time.ms_per_s,
