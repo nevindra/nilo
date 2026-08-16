@@ -5,7 +5,7 @@ middleware, and is registered with `app.get` like everything else — the only
 difference is that it doesn't return for a while:
 
 ```zig
-fn chat(c: *zfast.Ctx, room: *Room) !void {
+fn echo(c: *zfast.Ctx) !void {
     var socket = try c.upgrade();
     var buf: [16 * 1024]u8 = undefined;
     while (try socket.receive(&buf)) |message| {
@@ -13,7 +13,7 @@ fn chat(c: *zfast.Ctx, room: *Room) !void {
     }
 }
 
-try app.get("/ws", chat);
+try app.get("/ws", echo);
 ```
 
 zfast does the handshake, the frame headers, the masking, the fragment
@@ -60,7 +60,7 @@ frame looks to the other end like a crash.
 Your own reasons go through `close`:
 
 ```zig
-if (!room.allows(user)) return socket.close(.policy, "not a member");
+if (!members.allows(user)) return socket.close(.policy, "not a member");
 ```
 
 `.normal`, `.going_away`, `.protocol_error`, `.unsupported`, `.invalid_payload`,
@@ -68,49 +68,98 @@ if (!room.allows(user)) return socket.close(.policy, "not a member");
 
 ## Shared state
 
-A socket handler is the natural place to want other people's messages, and the
-usual shape is a service holding the room:
+A socket handler takes services by type like any other handler, so anything the
+connections share is an ordinary service:
 
 ```zig
-const Room = struct {
+const Transcript = struct {
     lock: zfast.Mutex = .init,
-    history: std.ArrayList([]u8) = .empty,
+    messages: std.ArrayList([]u8) = .empty,
 };
 
-fn chat(c: *zfast.Ctx, room: *Room) !void { … }
+fn chat(c: *zfast.Ctx, transcript: *Transcript) !void { … }
 ```
 
 `zfast.Mutex`, not `std.Thread.Mutex` — see [Services](./services.md).
 
-## What isn't here
+That is for state of your own. Reaching the *other connections* is not something
+to hand-roll on top of it — see below.
 
-**Sending to a socket you don't hold.** A connection's write buffer belongs to
-the fiber serving it, so two fibers writing into it interleave frames — a corrupt
-stream rather than a slow one. A lock per socket fixes that much.
+## Sending to a socket you don't hold
 
-It fixes nothing else, and this is worth knowing before you try it in your own
-code. The broadcast is performed by the *speaker's* fiber: it walks the
+`zfast.Room` is a service like any other: provide one, take it by type, `join` on
+the way in and `defer leave` on the way out.
+
+```zig
+var room = try zfast.Room.init(gpa);
+defer room.deinit();
+try app.provide(&room);
+
+fn chat(c: *zfast.Ctx, room: *zfast.Room) !void {
+    var socket = try c.upgrade();
+    try room.join(&socket);
+    defer room.leave(&socket);
+
+    var buf: [16 * 1024]u8 = undefined;
+    while (try socket.receive(&buf)) |message| {
+        try room.say(message.kind, message.data);
+    }
+}
+```
+
+That loop is the one an echo server writes. Nothing in it mentions the other
+connections and nothing handles an incoming broadcast — `receive` writes those
+out on the way past, from the fiber that owns the socket. The rest of the API is
+in [the reference](../reference.md#room). `defer room.leave(&socket)` is the part
+that isn't optional: Zig has no destructor, and a seat nobody gives up is one the
+next connection can't have.
+
+**Why it isn't a lock around a loop**, which is worth knowing before you write
+one in your own code. A connection's write buffer belongs to the fiber serving
+it, so two fibers writing into it interleave frames — a corrupt stream rather
+than a slow one. A lock per socket fixes that much and nothing else: the
+broadcast is then performed by the *speaker's* fiber, which walks the
 connections, reaches one whose client has stopped reading, and blocks there. It
 never gets back to reading its own socket, so everybody's messages stop because
 one client stopped. Measured, with two healthy clients wanting only to talk to
 each other and one wedged client in the same room: their messages never arrived
 at all, at either lock granularity.
 
-The write has to be done by something whose stalling costs only the slow
-connection — which today means a second fiber per connection, at 8,673 bytes
-each against a per-connection budget of 8,767. So it is not here, and
-[ADR 0029](../adr/0029-a-spawned-fiber-belongs-to-the-server.md) records both the
-number and the one upstream change that would remove it.
+So `say` doesn't write. It rings a bell on each seat, and the connection's own
+fiber does the writing — which is why one client that stops reading costs that
+client and nobody else, and why a full backlog is a policy named at the room
+(`.drop_oldest` by default, or `.drop_newest`, with `room.missed(&socket)` saying
+how many went) rather than a disconnect
+([ADR 0038](../adr/0038-a-broadcast-rings-a-bell-it-does-not-write.md)). It adds
+4 measured bytes per idle connection. The design that needed a second fiber per
+connection was 8,673 against a budget of 8,767, which is what kept this off the
+list for two stages ([ADR 0029](../adr/0029-a-spawned-fiber-belongs-to-the-server.md)).
 
-What did come out of that work is [`zfast.spawn`](../reference.md#concurrency),
+What else came out of that work is [`zfast.spawn`](../reference.md#concurrency),
 for work that is not a request at all.
 
-Also absent: `permessage-deflate`, and any read deadline. A socket is allowed to
-sit quiet — a chat tab with nobody typing is working correctly — so what catches
-a client that vanished is the write limit, on the next thing the server sends it.
-A ping it fails to answer is what would catch one nobody writes to, and that is a
-feature this doesn't have yet
+## A connection that goes quiet
+
+There is no read deadline, and there shouldn't be: a socket is *allowed* to sit
+quiet — a chat tab with nobody typing is working correctly, and closing it after
+thirty seconds would be a framework breaking a working connection. What catches a
+client that vanished without a FIN is `.idle_ms`, and it's a ping rather than a
+deadline. Silence asks whether the client is still there; an answer buys another
+stretch; a client that misses the next one is closed with `1001`.
+
+```zig
+var socket = try c.upgradeWith(.{ .idle_ms = 60_000 });  // 30s by default, 0 waits forever
+```
+
+Thirty seconds costs a dead connection about a minute to notice and a live one
+two frames a minute. Proxies that drop quiet connections usually do so at sixty
 ([ADR 0023](../adr/0023-a-deadline-belongs-to-an-operation-not-to-a-request.md)).
+
+## What isn't here
+
+`permessage-deflate`. It's negotiated in the handshake, and a compressor per
+connection is a 64 KB window against a budget of 8,767 bytes — so it needs a
+design rather than a switch.
 
 One number worth knowing before a chat server meets its users: an open socket is
 an open connection, and `max_connections` bounds those at 10,000 by default. A

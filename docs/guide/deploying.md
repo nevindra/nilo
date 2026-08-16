@@ -334,9 +334,8 @@ HTTP/2. Neither follows from "no TLS" on its own, which is why both are here.
 
 ## What isn't here yet
 
-`permessage-deflate`, compression of a handler's response (files are compressed —
-see [Static files](./static-files.md#compression)), and broadcasting to
-WebSockets a handler doesn't hold.
+`permessage-deflate`, and compression of a handler's response (files are
+compressed — see [Static files](./static-files.md#compression)).
 
 Templates are a refusal rather than a backlog item: zfast is for building APIs
 and services, and rendering pages is not what it is for. The reasoning is in

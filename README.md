@@ -301,7 +301,7 @@ And when you want to know *why* rather than *how*:
 | [`docs/adr/`](./docs/adr/) | design decisions, one per file, each with the alternative it rejected |
 | [`CONTEXT.md`](./CONTEXT.md) | the project's vocabulary: what a Service is, what a Str is, what words are avoided |
 | [`docs/roadmap.md`](./docs/roadmap.md) | what's next, what's refused, what nobody has decided yet |
-| [`docs/history.md`](./docs/history.md) | how 0.1.0 got built, and what has been measured |
+| [`docs/history.md`](./docs/history.md) | what was measured, and what was got wrong on the way |
 | [`CHANGELOG.md`](./CHANGELOG.md) | what changed, per release |
 
 ## What it won't do

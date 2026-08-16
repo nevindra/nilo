@@ -1,8 +1,9 @@
 # Roadmap
 
-What is coming, what is refused, and what nobody has decided yet. How each piece
-of 0.1.0 got built — and what has already been finished and measured — is in
-[`history.md`](./history.md); the decisions that are binding are in
+What is coming, what is refused, and what nobody has decided yet — and nothing
+else. Once something is built its entry leaves this file: what shipped is in
+[`CHANGELOG.md`](../CHANGELOG.md), what was measured and learned on the way is in
+[`history.md`](./history.md), and the decisions that are binding are in
 [`adr/`](./adr/).
 
 What this document is measured against is
@@ -15,109 +16,7 @@ it has to say what it is for.
 
 In order.
 
-1. ~~**Sending to a WebSocket a handler does not hold.**~~ **Built** —
-   `zfast.Room`, [ADR 0038](./adr/0038-a-broadcast-rings-a-bell-it-does-not-write.md).
-   4 bytes per idle connection, measured; throughput unmoved. What follows is
-   the record of how it was found, kept because the wrong answer was written
-   down twice on the way and both times it looked like a fact.
-
-   The API is `zio.CompletionQueue`, already public in the v0.17.0 that zfast
-   pins, along with `ev.NetPoll`, `ev.Async` and `ev.Completion`
-   ([zio#668](https://github.com/lalinsky/zio/issues/668)); nothing upstream has
-   to change to make it reachable. The worry that it might inherit
-   [zio#667](https://github.com/lalinsky/zio/issues/667) — a waiter node pushed
-   onto a queue it is already linked into, which hangs `ReleaseFast` 17 runs in
-   20 — was settled by [`spike/completion_queue/`](../spike/completion_queue/):
-   **it does not.** A fiber parked on a `NetPoll(.recv)` and an `Async` at once,
-   woken from a plain OS thread, then cancelled mid-park, is clean 30 runs in 30
-   in Debug, ReleaseSafe and ReleaseFast alike. `ownerCallback` removes a node
-   from `pending` before pushing it to `completed`, which is the discipline
-   `BroadcastChannel` fails to keep.
-
-   **A second defect was found on the way, and it is real.** Handing a
-   completion that has already fired straight back to `submit` — the obvious
-   thing to write, and what a connection would do forever — crashes zio 90 runs
-   in 90. `CompletionQueue.submit` sets `c.group.owner` and
-   `c.group.owner_callback`, then calls `loop.add`, which for a completion in
-   phase `.dead` calls `Completion.reset()` and clears both
-   (`ev/loop.zig:831`, `ev/completion.zig:411-414`). The completion then fires
-   as a task wake with a null `userdata` and panics in `runtime.zig:1085`.
-   `CompletionQueue`'s own tests never re-submit, which is why it has not been
-   seen. It is on file as
-   [zio#673](https://github.com/lalinsky/zio/issues/673), opened by lalinsky's
-   own automation which found it independently while documenting the queue,
-   and still open.
-
-   **What it does not do is block zfast, and the first pass got that wrong.**
-   Rebuilding the completion before re-submitting clears the crash. The first
-   pass then measured that the rebuild costs a wakeup — `Async.init()` clears
-   `pending`, so a notify landing in the re-arm window is dropped — and
-   concluded broadcast had to wait. It does not, because there are two ways to
-   rebuild and only one of them is that one. `pending` is a field of `Async`,
-   not of `Completion` (`ev/completion.zig:571-574`), so rebuilding **only the
-   completion** — `wake.c = .init(.async)` — dodges the crash the same way and
-   keeps the flag. A notify landing in the window then arrives late instead of
-   never: the next `submit` reaches `checkAndSetAsyncResult`
-   (`ev/loop.zig:872-883`), which finds the flag and completes the handle on the
-   spot. Held to a number in the spike's `--window` mode, which has the fiber
-   hold that window open and posts into it deliberately: rebuilding the whole
-   handle loses the post **30 runs in 30**, rebuilding only the completion keeps
-   it **30 runs in 30**, identical in Debug, ReleaseSafe and ReleaseFast. 630
-   runs across the full matrix, no hangs and no flakes.
-
-   [ADR 0022](./adr/0022-a-websocket-is-a-handler-that-does-not-return.md)
-   guessed at a per-socket outbox with its own lock; a spike measured that and
-   it is exactly as dead as the naive version, because the problem is not
-   locking — the speaker's own fiber does the writing, so it blocks on the first
-   connection that has stopped reading. `zfast.spawn` shipped out of that work;
-   broadcast did not.
-
-   **What was left, and is now done**, none of it upstream:
-
-   - The wait itself, in `src/engine/zio.zig` and then as a new item in the
-     Bulkhead's contract — `Waker`, and every future Engine has to supply it.
-   - A registry of live sockets — the `Room`'s seats, taken up front so its
-     memory is a number rather than a function of who turned up.
-   - The mailbox, and who owns a post's bytes. Answered: one refcounted
-     allocation per `say`, freed by whichever seat drains it last. A `Str` dies
-     with the arena of the request that made it (ADR 0004), so the bytes are
-     copied once — not once per recipient, which is what an inline ring would
-     have cost and what would have made the per-connection budget a function of
-     the message ceiling.
-   - A policy for a full mailbox — drop oldest, drop newest, disconnect.
-     [ADR 0020](./adr/0020-a-request-that-lasts-is-still-one-request.md) refused
-     exactly this on the record, so ADR 0038 amends it and the policy is named
-     at the room rather than hidden under the connection. Disconnecting is not
-     offered: a server that drops connections because it was slow has its worst
-     behaviour when it is busiest.
-   - ~~The per-connection cost~~ — **measured**, in
-     [`spike/mailbox/`](../spike/mailbox/), by ADR 0029's protocol at 4,000
-     idle connections. The shape adds no fiber, which was the whole of the
-     8,673 bytes, and what is left is **320 bytes of machinery plus 16 per
-     mailbox slot**: a `CompletionQueue`, an `Async`, a `NetPoll` and the
-     ring's head and tail. A four-slot mailbox held inline in the connection
-     is 384 bytes, **4.4% of ADR 0018's 8,767** where the rejected shape was
-     98.9%.
-
-     One warning came out of it that belongs in the implementation rather than
-     in an ADR: give the mailbox its *own* allocation and the cost is not the
-     struct but the next power of two above it — 320 bytes measured as 512,
-     576 as 1,024, 1,344 as 2,046, every row exact. Fold it into the
-     connection state that is already allocated and that rounding does not
-     happen. That warning is what the implementation did: the `Wake` lives in
-     the connection's own fiber frame.
-
-     **On the real server, at 2,000 idle connections in `ReleaseFast`: 8,777
-     bytes before, 8,773 after.** The 320 bytes are absorbed by stack pages
-     that were already mapped, so the feature costs nothing per connection at
-     all. Throughput held at ~1.10M req/s across two 15-second runs of each
-     build, with p99 varying more between repeats of one build than between
-     builds.
-
-   The handler's loop did not have to change, and did not. `receive` waits on
-   both and writes a post out itself, returning only when the client actually
-   said something — so ADR 0022's signature stands exactly as written.
-2. **Reloading without a restart — static files, then the server.** A
+1. **Reloading without a restart — static files, then the server.** A
    development annoyance rather than a design hole: a deploy restarts anyway.
    The static half is a watch option on `staticWith`, re-reading a directory
    that has changed. The other half is the whole process, and it cannot live
@@ -131,25 +30,19 @@ In order.
    to disk: a spilled file's length and ETag are recorded at load while its bytes
    are read per request, so a file edited under a running server can now be
    served inconsistently rather than merely staying stale (known gaps, below).
-3. **`permessage-deflate`.** Negotiated in the handshake, and a compressor per
+2. **`permessage-deflate`.** Negotiated in the handshake, and a compressor per
    connection is memory that has not been budgeted.
 
 ## Known gaps
 
 Things that are wrong or missing today, with what fixing them would take.
 
-- **There are no counters.** The correlation half of this is done —
-  `logger.with(.{ .format = .json, .request_id = true })` writes one JSON object
-  per line and puts an `X-Request-Id` on every response, and `c.requestId()`
-  reaches the same id from a handler whether or not the logger is installed. The
-  id is a field on `Ctx` rather than a resolved value, because the logger needs
-  it on every request and a resolved value only exists once a handler asks for
-  one; anybody who wants it declared by its type can wrap it in one line.
-
-  What is still missing is metrics — how many requests, at what statuses, how
-  long. That is a much larger surface than a log line: where the numbers live,
-  who reads them out, whether there is a registry, and whether any of it can be
-  had without an allocation per request. Nobody has designed it.
+- **There are no counters.** Correlation is covered — request ids and JSON log
+  lines ([Errors and logging](./guide/errors.md)) — but metrics are not: how many
+  requests, at what statuses, how long. That is a much larger surface than a log
+  line: where the numbers live, who reads them out, whether there is a registry,
+  and whether any of it can be had without an allocation per request. Nobody has
+  designed it.
 - **A response body is never compressed, and only a held file is.** Static files
   under the spill threshold are gzipped once while the App is built, which is the
   shape that costs nothing per request
@@ -178,7 +71,7 @@ Things that are wrong or missing today, with what fixing them would take.
   ETag, which is a complete, correct-looking response carrying a prefix of a file
   that has moved on. Both are the same instruction as before, that changing a
   file means restarting, but a held file could not fail this way and a spilled
-  one can. The fix is the watch option in item 2 above, which is why this is not
+  one can. The fix is the watch option in item 1 above, which is why this is not
   a separate one.
 - **A 404 or a 405 with middleware registered costs one allocation.** Routes and
   static files have their chains resolved at `listen()`, so neither pays for the
@@ -213,50 +106,13 @@ Things that are wrong or missing today, with what fixing them would take.
   latency.** One line per request is the contract, and a stream's line arrives
   when the stream ends. Time to first byte is a different number and wants a
   different feature.
-- **The router is still a linear scan**, but the first segment is indexed now
-  and the scan is roughly half of what it was. `zig build profile` measures two
-  route sets at five sizes, wanted route last so nothing is captured early.
-  **Mixed** is what an app looks like — four methods, three depths — so nearly
-  every route is thrown out on the method or the segment count. **Same shape**
-  is every route `GET /thingN/:id/leaf`, where not one can be rejected cheaply;
-  no real app looks like that, and it is the ceiling.
-
-  | routes | 1 | 5 | 25 | 50 | 100 |
-  |---|---|---|---|---|---|
-  | mixed, before | 26ns | 48ns | 62ns | 116ns | 193ns |
-  | **mixed** | 28ns | 48ns | **45ns** | **81ns** | **108ns** |
-  | same shape, before | 52ns | 82ns | 245ns | 445ns | 855ns |
-  | **same shape** | 55ns | 60ns | **99ns** | **150ns** | **271ns** |
-
-  What was added is four bytes per route standing for its first segment — its
-  length, first byte, last byte and middle byte — compared as one `u32` before
-  any `mem.eql` runs. That is the first level of a radix tree without the tree,
-  and it leaves specificity ordering exactly where it was, so
-  [ADR 0013](./adr/0013-the-most-specific-route-wins-and-duplicates-are-refused.md)
-  costs nothing extra to keep. A key collision is not a correctness problem — it
-  only means the `mem.eql` that would have run anyway does run.
-
-  **It is not a clean win, and the row that says so is the first one.** At one
-  route the key is computed and nothing can be skipped with it, so matching goes
-  26ns → 28ns. Three nanoseconds of a ~600ns request, spent to take 44% off a
-  hundred-route app.
-
-  Where that leaves the bar: one request is ~610ns of zfast's own work, so a
-  25-route app spends ~7% of it matching, a 50-route app ~13%, and a 100-route
-  app ~18%. **The scan passes
-  [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md)'s 10% bar at
-  around 40 routes.** Measured in-process with no kernel in it, so it is a share
-  of zfast's work rather than of a request's wall clock.
-
-  Two things were tried before this and are worth not repeating. A packed
-  parallel array of the four fields the scan reads made **mixed 7% faster and
-  same-shape 10% slower** — a wash bought with eight bytes per route of
-  duplicated state, reverted. And a real hash of the first segment was the
-  obvious version of what shipped, but a hash worth the name costs more at one
-  route than the `mem.eql` it saves, which is the size most apps are.
-
-  What is left is the actual tree, for the app with hundreds of routes. The
-  numbers no longer point at it urgently.
+- **The router is still a linear scan.** Indexing the first segment took 44% off
+  a hundred-route app and moved
+  [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md)'s 10% bar out
+  to around 40 routes, so what is left is the actual tree, for the app with
+  hundreds of them. The numbers no longer point at it urgently; `zig build
+  profile` is the harness for the day they do, and two attempts that lost are
+  written up in [`history.md`](./history.md) so they are not repeated.
 
 ## Not coming
 
@@ -292,11 +148,9 @@ Not "later" — decided against, with the reasoning written down.
   `.trusted_hops` are this decision's other half.
 - **Auth contents.** The mechanism is provided — middleware, resolved values —
   and the policy is yours.
-- **Benchmark claims without a benchmark machine.** The condition has since been
-  met, so the README carries numbers — but the rule it was protecting still
-  holds, and the README states the caveats in the same breath as the figures:
-  what the throughput number does *not* mean, and that a handler touching a
-  database flattens the whole comparison
+- **Benchmark claims without a benchmark machine.** A figure gets published only
+  alongside what it does *not* mean — and that a handler touching a database
+  flattens the whole comparison
   ([ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md)).
 
 ## Not decided
@@ -320,13 +174,12 @@ Not "later" — decided against, with the reasoning written down.
   streaming version wants a parser that resumes across reads and an `Upload`
   that is a reader rather than bytes.
 
-  This used to be filed as waiting for `sendfile`, which has since shipped
-  ([ADR 0037](./adr/0037-a-file-too-big-to-hold-is-opened-not-read.md)) — so the
-  outgoing direction is settled and this is the half that is left. It did not
-  inherit an answer from that work: sending is a length and a descriptor handed
-  to the kernel, and receiving is a parser that has to hold its place across
-  reads. Until somebody designs it the answer is `c.bodyStream()`, which holds
-  nothing and makes the framing the handler's problem.
+  It inherits no answer from `sendfile`, which settled the outgoing direction
+  ([ADR 0037](./adr/0037-a-file-too-big-to-hold-is-opened-not-read.md)): sending
+  is a length and a descriptor handed to the kernel, and receiving is a parser
+  that has to hold its place across reads. Until somebody designs it the answer
+  is `c.bodyStream()`, which holds nothing and makes the framing the handler's
+  problem.
 - **The name.** `zfast` is a working name. The `z-` prefix is crowded in the Zig
   ecosystem already (`zap`, `zzz`, `zon`, a dozen `zig-*`), so it is easy to
   confuse. The module name has to stay easy to change without touching user
@@ -352,7 +205,7 @@ pattern too.
 | A panic in any handler takes the whole process down, and Go people will assume otherwise | Cannot be fixed in Zig. Said plainly in the docs, `ReleaseSafe` and a supervisor recommended, and the in-flight request named in the crash ([ADR 0008](./adr/0008-no-recover-middleware.md)) |
 | A response could differ from what `std.json` would have written, now that something else usually writes it | `covers()` decides while compiling which types the generated writer may touch, and it errs narrow: a tuple, a `[N]u8`, a type with its own `jsonStringify`, anything unrecognised, all fall back. Floats are handed to `std.json` field by field rather than reimplemented |
 | Deadlines are on by default, so a client on a genuinely bad link could be cut off where it used to be served | The numbers are generous and each bounds one wait rather than a whole request, so nothing legitimate and slow — a big upload, an hour-long stream — is hurried by any of them ([ADR 0023](./adr/0023-a-deadline-belongs-to-an-operation-not-to-a-request.md)) |
-| A WebSocket has no read limit, so a client that vanishes without a FIN holds a fiber | Caught by the write limit as soon as the server sends anything. A connection nobody writes to is not, and the answer to that is a ping it fails to answer — a WebSocket feature with its own design, not a number in `Options` |
+| A WebSocket has no read limit, so a client that vanishes without a FIN holds a fiber | Caught by the write limit as soon as the server sends anything. A connection nobody writes to is caught by `.idle_ms` — 30 seconds by default, `0` waits forever. It is a ping rather than a deadline, because a quiet WebSocket is a working one: silence asks whether the client is still there, an answer buys another stretch, and a client that misses the next one is closed with 1001 ([ADR 0022](./adr/0022-a-websocket-is-a-handler-that-does-not-return.md)) |
 | The request head is the one thing a stranger writes directly, and every test of it was an input somebody thought of | `src/fuzz.zig` states properties instead: the head boundary and the framing fields are checked against a byte-at-a-time reference implementation, over a corpus on every `zig build test` and over a million generated inputs on every CI run (`zig build fuzz`). Coverage-guided fuzzing is not available — `zig build test --fuzz` fails to compile inside std's own test runner on Zig 0.16.0 — so the generator is the substitute, and the targets are written to become coverage-guided the day that is fixed |
 | Nothing bounds how many connections one process holds | `.max_connections`, 10,000 by default. Past it a connection is accepted and closed at once, so the failure mode is a client that finds out immediately rather than an OOM kill that takes every in-flight request with it |
 | Spawned work can capture a `Str`, or call a fail function, and both compile | Neither can be caught: Zig has no ownership tracking, and `spawn` takes a plain function that nothing marks as being outside a request. Documented at the function, in the reference and in [ADR 0029](./adr/0029-a-spawned-fiber-belongs-to-the-server.md), and `spawn` takes its arguments by value so the copy is at least the obvious thing to write. A `Str` that escapes this way is the debug staleness trap's problem, and it is the case that trap cannot watch |

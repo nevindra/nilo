@@ -138,6 +138,25 @@ in a new `docs/adr/` file, what got built and what was measured goes in
 `docs/history.md`, what is next or refused goes in `docs/roadmap.md`, and a
 released change goes in `CHANGELOG.md`.
 
+**The roadmap holds nothing that is built.** It is what is coming, what is
+refused and what nobody has decided — a plan, not a record. The moment something
+ships, its entry leaves `docs/roadmap.md` entirely: no strikethrough, no
+"**Built**", no account of how it went. What was measured and what was learned
+moves to `docs/history.md`, which is the record; the item is then cut, not
+annotated. A gap only *partly* closed keeps one sentence scoping what is left,
+never a paragraph about the half that landed. The test is that the roadmap can
+be read top to bottom as work outstanding.
+
+**`docs/history.md` stays short, and that is a constraint rather than a wish** —
+it gains an entry every stage forever, so left alone it becomes the longest file
+in the repository and the least read. An entry earns its place only by changing
+what somebody would do next time: a number that was measured, a premise that
+turned out false, a design that was tried and lost. Not what shipped, which is
+the CHANGELOG's job, and not per-stage bookkeeping like test and refusal counts.
+Once a lesson has been promoted into an ADR, history keeps the sentence and the
+link rather than the story — the ADR is the canonical copy from then on. Prune
+while writing, not later.
+
 ## Refused on the record
 
 Templates, TLS, HTTP/2 and gRPC are not gaps — they are decisions (README "What

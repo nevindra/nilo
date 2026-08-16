@@ -1,8 +1,9 @@
 # Changelog
 
 What changed between one tag and the next — not what changed between commits.
-How each piece got built is in [`docs/history.md`](./docs/history.md); what is
-coming is in [`docs/roadmap.md`](./docs/roadmap.md).
+What was measured and what was got wrong on the way is in
+[`docs/history.md`](./docs/history.md); what is coming is in
+[`docs/roadmap.md`](./docs/roadmap.md).
 
 ## 0.1.0
 
