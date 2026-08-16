@@ -308,9 +308,14 @@ And when you want to know *why* rather than *how*:
 
 ### Queued up
 
-`permessage-deflate`, compressing a handler's response, streaming a multipart
-upload rather than holding it, and broadcasting to WebSockets a handler doesn't
-hold — each with its reason in [`docs/roadmap.md`](./docs/roadmap.md).
+`permessage-deflate`, compressing a handler's response, and streaming a
+multipart upload rather than holding it — each with its reason in
+[`docs/roadmap.md`](./docs/roadmap.md).
+
+Broadcasting to WebSockets a handler doesn't hold used to be on this list. It
+is [`zfast.Room`](./docs/reference.md#room) now, at 4 measured bytes per idle
+connection
+([ADR 0038](./docs/adr/0038-a-broadcast-rings-a-bell-it-does-not-write.md)).
 
 ### Refused on the record
 

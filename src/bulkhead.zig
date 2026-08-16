@@ -9,8 +9,8 @@
 //!   deadline. The struct itself is declared here, not by the Engine, so
 //!   that swapping the Engine cannot change what a user writes.
 //! - `serve(gpa, options, stop, state, handler)` — listen, accept
-//!   connections, and run `handler(state, in, out, deadlines, peer)` for
-//!   each one concurrently until that connection is done. `state` is
+//!   connections, and run `handler(state, in, out, deadlines, waker, peer)`
+//!   for each one concurrently until that connection is done. `state` is
 //!   carried through as-is (normally `*App`). Returns when `stop` is set.
 //! - `Peer` — who is at the other end of a connection. `accept` already
 //!   knows, so this asks the Engine for nothing it did not have.
@@ -19,6 +19,13 @@
 //!   is what a failure was. An Engine that waits on sockets already has to
 //!   be able to wait with a limit, so this asks for nothing new of it
 //!   (ADR 0023).
+//! - `Waker.wait`/`Waker.post` — park a connection until its socket is
+//!   readable *or* another fiber has something to say to it, and wake one
+//!   from anywhere. Everything else in zfast is woken by the client at the
+//!   other end, which is what makes a broadcast impossible without this. An
+//!   Engine that waits on sockets can already wait on two things — it has to,
+//!   to wait with a deadline at all — so this asks for nothing new of it
+//!   beyond a handle to say so with.
 //! - `Stop`/`explained` — the flag that ends `serve`, and which startup
 //!   failures it has already explained in words.
 //! - `debug_io` — wired into `std_options_debug_io` so that `std.log`
@@ -302,11 +309,13 @@ pub fn serve(
             in: *std.Io.Reader,
             out: *std.Io.Writer,
             clocks: *engine.Clocks,
+            wake: *engine.Wake,
             peer: Peer,
         ) void {
             var deadlines = carried.limits;
             deadlines.target = clocks;
-            handler(carried.state, in, out, deadlines, peer);
+            const waker: Waker = .{ .vtable = &engine_waker, .target = wake };
+            handler(carried.state, in, out, deadlines, waker, peer);
         }
     };
 
@@ -321,6 +330,26 @@ pub fn serve(
         },
     }, Bridge.run);
 }
+
+const engine_waker: Waker.VTable = .{
+    .wait = struct {
+        fn f(target: ?*anyopaque, limit_ms: u32) Woken {
+            const wake: *engine.Wake = @ptrCast(@alignCast(target.?));
+            return switch (wake.wait(limit_ms)) {
+                .readable => .readable,
+                .posted => .posted,
+                .timed_out => .timed_out,
+                .closed => .closed,
+            };
+        }
+    }.f,
+    .post = struct {
+        fn f(target: ?*anyopaque) void {
+            const wake: *engine.Wake = @ptrCast(@alignCast(target.?));
+            wake.post();
+        }
+    }.f,
+};
 
 const engine_deadlines: Deadlines.VTable = .{
     .limit = struct {
@@ -610,6 +639,64 @@ pub const Limit = union(enum) {
 /// `.off` is a complete working instance that does nothing. That is what a
 /// test driving `App` directly gets, and what a server with every limit set
 /// to zero ends up with, so "no deadlines" needs no branch anywhere.
+/// What ended a `Waker.wait` — the Engine's `Woken`, re-declared here so the
+/// layers above never name the Engine.
+pub const Woken = enum { readable, posted, timed_out, closed };
+
+/// A connection that can be woken by somebody who is not the client on the
+/// other end of it.
+///
+/// The same shape as `Deadlines` and for the same reason: the Engine owns the
+/// machinery, zfast owns the concept, and neither has to know the other's
+/// half. It travels the connection chain by value the way `Deadlines` does,
+/// and it defaults to a vtable with no Engine behind it — which is what makes
+/// the whole HTTP suite runnable against in-memory buffers with no server.
+///
+/// That default answers `.readable` to everything. A test driving `App`
+/// straight has bytes in a fixed buffer or it does not; there is nobody to
+/// post to it, and a `receive` that parked waiting for one would hang the
+/// suite rather than fail it.
+pub const Waker = struct {
+    target: ?*anyopaque = null,
+    vtable: *const VTable = &no_engine,
+
+    pub const VTable = struct {
+        wait: *const fn (target: ?*anyopaque, limit_ms: u32) Woken,
+        post: *const fn (target: ?*anyopaque) void,
+    };
+
+    /// No Engine underneath: every wait says "go and read", every post is
+    /// dropped. `App.handleRequest` called from a test gets this.
+    pub const off: Waker = .{};
+
+    const no_engine: VTable = .{
+        .wait = struct {
+            fn f(_: ?*anyopaque, _: u32) Woken {
+                return .readable;
+            }
+        }.f,
+        .post = struct {
+            fn f(_: ?*anyopaque) void {}
+        }.f,
+    };
+
+    /// Park until the socket has something to read, somebody posts, or
+    /// `limit_ms` goes by with neither. Zero waits with no limit.
+    ///
+    /// The caller must have drained its read buffer first — a reader with
+    /// bytes still in it is readable whatever the socket thinks, and this
+    /// would park a connection that is holding a whole frame already.
+    pub fn wait(self: Waker, limit_ms: u32) Woken {
+        return self.vtable.wait(self.target, limit_ms);
+    }
+
+    /// Wake the connection. The one call another fiber makes, and the reason
+    /// this exists at all.
+    pub fn post(self: Waker) void {
+        self.vtable.post(self.target);
+    }
+};
+
 pub const Deadlines = struct {
     target: ?*anyopaque = null,
     vtable: *const VTable = &noop,

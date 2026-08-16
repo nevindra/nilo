@@ -186,6 +186,15 @@ direction.
   So this is blocked on one upstream line, not on a design. It is the right
   shape and it is where this should go.
 
+  > **Resolved, and the premise here was wrong.**
+  > [ADR 0038](./0038-a-broadcast-rings-a-bell-it-does-not-write.md) built it.
+  > There *is* an exported way to park a fiber on a completion —
+  > `zio.CompletionQueue`, public in the v0.17.0 this repo already pinned when
+  > the paragraph above was written. The shape was right, the price was right,
+  > and what stood in the way was a missing search rather than a missing line
+  > upstream. It costs 4 bytes per idle connection, measured, which is to say
+  > nothing: the machinery lives in the connection's own fiber frame.
+
 ## Consequences
 
 - The Bulkhead grows one item: `spawn`, joined to the server's lifetime.
@@ -196,6 +205,9 @@ direction.
   rather than a shrug.** ADR 0022 said "a project rather than a function";
   it is more precise than that — it is one measurement away from being
   affordable, and the measurement is upstream.
+
+  > **It was one measurement away, and the measurement was not upstream.**
+  > See ADR 0038: 8,777 bytes per idle connection before, 8,773 after.
 
 - The OTel batching exporter and periodic jobs are unblocked, because they
   need `spawn` and none of the rest of this.

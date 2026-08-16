@@ -20,7 +20,9 @@
 
 const std = @import("std");
 
+const bulkhead = @import("bulkhead.zig");
 const http1 = @import("http1.zig");
+const room_mod = @import("room.zig");
 
 /// The string every WebSocket handshake in the world hashes against. It has
 /// no meaning; it is there so that a server which merely echoes the key
@@ -32,6 +34,28 @@ pub const Options = struct {
     /// agrees to nothing, which is what a client that asked for nothing
     /// expects.
     protocol: []const u8 = "",
+
+    /// How long this connection may say nothing before it is asked whether it
+    /// is still there. Zero waits forever, which is what zfast did before this
+    /// existed.
+    ///
+    /// **Not a deadline, and the difference is the whole design.** A WebSocket
+    /// is *allowed* to sit quiet — a chat tab with nobody typing is working
+    /// correctly, and closing it after thirty seconds would be a framework
+    /// breaking a working connection. So silence does not end anything: it
+    /// sends a ping. A client that answers has proved it is there and gets
+    /// another stretch. A client that does not answer the next one has gone,
+    /// and gets closed with 1001.
+    ///
+    /// That is ADR 0022's recorded answer to the hole ADR 0020 first named —
+    /// "a client that opens a socket and never speaks holds a fiber until TCP
+    /// gives up" — written down long before there was a wait that could carry
+    /// a limit.
+    ///
+    /// Thirty seconds costs a dead connection about a minute to notice, and
+    /// costs a live one two frames a minute. Proxies that drop quiet
+    /// connections usually do so at sixty.
+    idle_ms: u32 = 30_000,
 };
 
 // There is deliberately no `max_message` here. The buffer handed to
@@ -102,6 +126,23 @@ pub const Socket = struct {
     /// simply ending. Read through `closedCleanly`.
     _said_goodbye: bool = false,
 
+    /// How somebody who is not the client at the other end wakes this
+    /// connection. `.off` — the default, and what a Socket over a fixed
+    /// buffer in a test gets — answers "go and read" to everything, so
+    /// `receive` behaves exactly as it did before any of this existed.
+    _waker: bulkhead.Waker = .off,
+    /// Where this connection is sitting, once it has joined a Room. Null is
+    /// the ordinary case: a socket that echoes needs none of this.
+    _room: ?*room_mod.Room = null,
+    _ticket: ?room_mod.Ticket = null,
+
+    /// How long silence is allowed to last before this end asks after the
+    /// other. Zero waits forever — see `Options.idle_ms`.
+    _idle_ms: u32 = 0,
+    /// A ping has gone out and nothing has come back yet. The next stretch of
+    /// silence is what turns that into a verdict.
+    _awaiting_pong: bool = false,
+
     /// The next message, or null once the connection is over.
     ///
     /// Null covers both ways it ends: a close frame, and a client that
@@ -120,6 +161,47 @@ pub const Socket = struct {
         var kind: ?Kind = null;
 
         while (true) {
+            // Anything the room posted while this connection was quiet goes
+            // out here, written by the fiber that owns the socket — which is
+            // the whole of ADR 0029's finding, in three lines. A handler never
+            // sees a post and never writes a branch for one.
+            try self.deliver();
+
+            // Only park when there is nothing already in hand: a reader
+            // holding a buffered frame is readable whatever the socket
+            // thinks, and asking the kernel instead would park a connection
+            // that has a whole message sitting in memory.
+            if (self._in.seek == self._in.end) {
+                switch (self._waker.wait(self._idle_ms)) {
+                    // Round again, and the `deliver` above writes it out.
+                    .posted => continue,
+                    .readable => {},
+                    .timed_out => {
+                        // Silence, for as long as this connection allows. The
+                        // first stretch asks a question; the second reads the
+                        // lack of an answer as a verdict. Anything at all from
+                        // the other end clears it — a pong is what a live
+                        // client sends, but a message proves the same thing.
+                        if (self._awaiting_pong) {
+                            self.closeWith(.going_away) catch {};
+                            return null;
+                        }
+                        self._awaiting_pong = true;
+                        self.ping("") catch {
+                            self._closed = true;
+                            return null;
+                        };
+                        continue;
+                    },
+                    .closed => {
+                        self._closed = true;
+                        return null;
+                    },
+                }
+            }
+            // Something arrived, so the question is answered whatever it was.
+            self._awaiting_pong = false;
+
             const frame = self.readFrameHeader(buf.len) catch |err| switch (err) {
                 error.EndOfStream => {
                     self._closed = true;
@@ -204,6 +286,39 @@ pub const Socket = struct {
     /// stopping. Only meaningful once `receive` has returned null.
     pub fn closedCleanly(self: *const Socket) bool {
         return self._said_goodbye;
+    }
+
+    // ---- what a Room needs, and nothing more ----
+
+    pub fn waker(self: *const Socket) bulkhead.Waker {
+        return self._waker;
+    }
+
+    pub fn ticket(self: *const Socket) ?room_mod.Ticket {
+        return self._ticket;
+    }
+
+    pub fn seatedIn(self: *Socket, in_room: *room_mod.Room, t: room_mod.Ticket) void {
+        self._room = in_room;
+        self._ticket = t;
+    }
+
+    pub fn unseat(self: *Socket) void {
+        self._room = null;
+        self._ticket = null;
+    }
+
+    /// Write out everything waiting for this connection. Called at the top of
+    /// every `receive`, and by `receive` alone: a post is written by the fiber
+    /// that owns the socket or it is not written at all.
+    fn deliver(self: *Socket) Error!void {
+        const in_room = self._room orelse return;
+        const t = self._ticket orelse return;
+        while (in_room.take(t)) |post| {
+            defer in_room.release(post);
+            const held = in_room.contentsOf(post);
+            try self.writeFrame(if (held.kind == .text) .text else .binary, held.data);
+        }
     }
 
     /// Whether the server still wants this connection running. Goes false on
@@ -442,6 +557,103 @@ pub fn writeAcceptance(
 // ---- tests ----
 
 const testing = std.testing;
+
+/// A `Waker` that reports silence a fixed number of times and then says the
+/// socket is readable.
+///
+/// The heartbeat is the one behaviour here that a real clock would make a
+/// slow, flaky test of — and `Waker` is a vtable and a pointer, so a test can
+/// supply its own and the waiting costs nothing. ADR 0033: a guard that has
+/// never been seen to fire is not a guard.
+const Quiet = struct {
+    silences: u32,
+    asked: u32 = 0,
+    /// What the socket was told to wait, recorded so a test can check the
+    /// limit actually travelled.
+    last_limit_ms: u32 = 0,
+
+    fn waker(self: *Quiet) bulkhead.Waker {
+        return .{ .vtable = &vtable, .target = self };
+    }
+
+    const vtable: bulkhead.Waker.VTable = .{
+        .wait = struct {
+            fn f(target: ?*anyopaque, limit_ms: u32) bulkhead.Woken {
+                const q: *Quiet = @ptrCast(@alignCast(target.?));
+                q.last_limit_ms = limit_ms;
+                if (q.asked < q.silences) {
+                    q.asked += 1;
+                    return .timed_out;
+                }
+                return .readable;
+            }
+        }.f,
+        .post = struct {
+            fn f(_: ?*anyopaque) void {}
+        }.f,
+    };
+};
+
+test "a connection that says nothing is asked whether it is still there" {
+    var quiet = Quiet{ .silences = 1 };
+    var in = std.Io.Reader.fixed("");
+    var bytes: [64]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    var socket: Socket = .{
+        ._in = &in,
+        ._out = &out,
+        ._stopping = null,
+        ._waker = quiet.waker(),
+        ._idle_ms = 30_000,
+    };
+
+    // One stretch of silence, then a readable socket with nothing on it.
+    try testing.expect(try socket.receive(&bytes) == null);
+
+    // The limit reached the Engine rather than being dropped on the way.
+    try testing.expectEqual(@as(u32, 30_000), quiet.last_limit_ms);
+    // An empty ping: 0x89, length 0. Asking, not closing.
+    try testing.expectEqualStrings("\x89\x00", out.buffered());
+}
+
+test "a connection that never answers the question is closed with 1001" {
+    var quiet = Quiet{ .silences = 2 };
+    var in = std.Io.Reader.fixed("");
+    var bytes: [64]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    var socket: Socket = .{
+        ._in = &in,
+        ._out = &out,
+        ._stopping = null,
+        ._waker = quiet.waker(),
+        ._idle_ms = 1_000,
+    };
+
+    try testing.expect(try socket.receive(&bytes) == null);
+
+    // The ping, then a close frame carrying 1001 — `going_away`, which is
+    // what a client that stopped answering has done.
+    try testing.expectEqualStrings("\x89\x00\x88\x02\x03\xe9", out.buffered());
+}
+
+test "silence with no limit set waits, exactly as it did before heartbeats" {
+    var quiet = Quiet{ .silences = 0 };
+    var in = std.Io.Reader.fixed("");
+    var bytes: [64]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    var socket: Socket = .{
+        ._in = &in,
+        ._out = &out,
+        ._stopping = null,
+        ._waker = quiet.waker(),
+        ._idle_ms = 0,
+    };
+
+    try testing.expect(try socket.receive(&bytes) == null);
+    try testing.expectEqual(@as(u32, 0), quiet.last_limit_ms);
+    // Nothing sent: zero means wait, and waiting is not an event.
+    try testing.expectEqualStrings("", out.buffered());
+}
 
 /// A client, for driving a Socket from the other side.
 const Peer = struct {

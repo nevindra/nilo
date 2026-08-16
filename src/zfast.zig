@@ -160,6 +160,14 @@ pub const Socket = @import("websocket.zig").Socket;
 /// Everything else WebSocket: `Message`, `Kind`, `Close`, `Options`.
 pub const websocket = @import("websocket.zig");
 
+/// Saying something to sockets a handler does not hold. Provide one as a
+/// service, `join` on the way in, `defer leave` on the way out, and `say`
+/// reaches everybody in it.
+pub const Room = @import("room.zig").Room;
+
+/// Everything else Room: `Options`, `Full`, `Ticket`.
+pub const room = @import("room.zig");
+
 /// One message on an event stream: `.{ .name = "token", .data = text }`.
 pub const Event = @import("stream.zig").Event;
 
@@ -500,6 +508,7 @@ test {
     _ = @import("range.zig");
     _ = @import("sendfile.zig");
     _ = @import("websocket.zig");
+    _ = @import("room.zig");
     _ = @import("testing.zig");
     _ = @import("middleware.zig");
     _ = @import("typed.zig");

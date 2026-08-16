@@ -385,11 +385,129 @@ pub const Clocks = struct {
     }
 };
 
-/// Run `handler(state, in, out, clocks, peer)` for every accepted
+/// What ended a `Wake.wait`.
+pub const Woken = enum {
+    /// The socket has something to read.
+    readable,
+    /// Somebody else has something to say to this connection.
+    posted,
+    /// Nothing happened for as long as the caller was willing to wait. What a
+    /// heartbeat is built on: silence is not an error, it is a question worth
+    /// asking the other end.
+    timed_out,
+    /// The connection is going away — cancelled at shutdown, or the queue
+    /// emptied under us. Either way the caller stops.
+    closed,
+};
+
+/// A connection's second way to be woken: not by the client at the other end
+/// of its socket, but by another fiber with something to say to it.
+///
+/// Everything else in zfast is woken by the client. That is what makes the
+/// per-connection numbers in ADR 0018 as small as they are, and it is exactly
+/// what a broadcast cannot live with — a connection sitting in a read cannot
+/// be told anything until whoever is on the other end happens to speak.
+///
+/// ADR 0029 measured the alternative and rejected it: a second fiber per
+/// connection to do the writing, 8,673 bytes each, against a whole-connection
+/// budget of 8,767. It named this shape as the right one and recorded it as
+/// unreachable, because zio exported no way to park on a completion. It does
+/// — `zio.CompletionQueue` is public in the pinned v0.17.0 — and
+/// `spike/completion_queue/` holds the cancel path and the re-arm to 630 runs
+/// across three optimize modes.
+///
+/// **The struct lives in the connection's own fiber frame**, not in an
+/// allocation of its own. `spike/mailbox/` measured why: given its own
+/// allocation the cost is not the struct but the next power of two above it
+/// — 320 bytes measured as 512, every row exact. Here it is 320 bytes of a
+/// stack that is already mapped.
+///
+/// `post` is the only call another fiber makes, and `zio.ev.Async.notify` is
+/// documented thread-safe. Everything else is the owning fiber's.
+pub const Wake = struct {
+    cq: zio.CompletionQueue,
+    wake: zio.ev.Async,
+    poll: zio.ev.NetPoll,
+    armed: bool = false,
+
+    pub fn init(handle: zio.ev.Backend.NetHandle) Wake {
+        return .{
+            .cq = zio.CompletionQueue.init(),
+            .wake = zio.ev.Async.init(),
+            // `NetPoll` rather than `NetRecv`, which is the exception zio's
+            // author named when he said to prefer the latter: the connection's
+            // buffered `std.Io.Reader` does its own reading, so what is wanted
+            // here is readiness, not bytes. Level-triggered, so data left
+            // unread simply fires again — which is correct, because the caller
+            // reads on every `.readable`.
+            .poll = zio.ev.NetPoll.init(handle, .recv),
+        };
+    }
+
+    /// Park until the socket has something to read or somebody posts.
+    ///
+    /// Only correct with the connection's read buffer already drained — a
+    /// reader holding buffered bytes is readable whatever the socket says, and
+    /// asking the kernel instead would park on a connection that has a whole
+    /// frame sitting in memory. The WebSocket layer checks that before calling
+    /// this; the Engine cannot, because it does not know what a frame is.
+    /// `limit_ms` of 0 waits with no limit at all.
+    pub fn wait(self: *Wake, limit_ms: u32) Woken {
+        if (!self.armed) {
+            self.cq.submit(&self.poll.c);
+            self.cq.submit(&self.wake.c);
+            self.armed = true;
+        }
+
+        while (true) {
+            // The limit belongs to the wait, not to the connection: it is
+            // measured from *this* call, so a client that spoke a moment ago
+            // gets a full stretch of silence before anybody asks after it.
+            // `CompletionQueue` carries this already, which is why there is no
+            // timer completion here to arm, cancel and re-arm.
+            const done = (self.cq.timedWait(if (limit_ms == 0)
+                .none
+            else
+                .{ .duration = .fromMilliseconds(limit_ms) }) catch |err| {
+                return if (err == error.Timeout) .timed_out else .closed;
+            }) orelse return .closed;
+
+            // Rebuilding only the completion, never the handle around it.
+            // Handing a fired completion straight back to `submit` crashes
+            // zio 90 runs in 90 (zio#673, fix in flight as zio#674), and
+            // rebuilding the *whole* `Async` clears the `pending` flag that
+            // holds a notify landing in this window — 30 runs in 30 in the
+            // spike's `--window` mode. `pending` belongs to `Async`, the
+            // phase belongs to `Completion`, and only one of them needs
+            // resetting.
+            if (done == &self.wake.c) {
+                self.wake.c = .init(.async);
+                self.cq.submit(&self.wake.c);
+                return .posted;
+            }
+            if (done == &self.poll.c) {
+                self.poll.c = .init(.net_poll);
+                self.cq.submit(&self.poll.c);
+                return .readable;
+            }
+            // Neither of ours. Nothing else is ever submitted to this queue,
+            // so this cannot happen; going round again is the harmless
+            // reading of a thing that cannot happen.
+        }
+    }
+
+    /// Wake the fiber holding this connection. Thread-safe, and the only call
+    /// another fiber makes on a `Wake` it does not own.
+    pub fn post(self: *Wake) void {
+        self.wake.notify();
+    }
+};
+
+/// Run `handler(state, in, out, clocks, wake, peer)` for every accepted
 /// connection, each in its own fiber, until that connection is done. The
 /// Reader/Writer are already buffered; the handler does not need to know
 /// there is a socket behind them. `handler` must be
-/// `fn (@TypeOf(state), *std.Io.Reader, *std.Io.Writer, *Clocks, Peer) void`.
+/// `fn (@TypeOf(state), *std.Io.Reader, *std.Io.Writer, *Clocks, *Wake, Peer) void`.
 ///
 /// Returns when `stop` is set — by a signal, or by somebody calling
 /// `App.shutdown()` — once the connections still being served have
@@ -514,12 +632,18 @@ pub fn serve(
             var writer = stream.writer(write_buf);
             var clocks = Clocks{ .reader = &reader, .writer = &writer };
 
+            // In the fiber's own frame, so it costs pages that are already
+            // mapped rather than an allocation of its own — see `Wake`. An
+            // ordinary request never touches it; it is armed on the first
+            // `wait`, which only a WebSocket reaches.
+            var wake = Wake.init(stream.socket.handle);
+
             // `accept` already returned who this is, so this costs no
             // syscall — only the formatting, once per connection.
             var peer: Peer = .{ .port = portOf(stream.socket.address) };
             peer._len = writePeer(&peer._text, stream.socket.address);
 
-            handler(st, &reader.interface, &writer.interface, &clocks, peer);
+            handler(st, &reader.interface, &writer.interface, &clocks, &wake, peer);
         }
     };
 

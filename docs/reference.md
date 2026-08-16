@@ -334,8 +334,57 @@ the 404 a file that was never there gets.
 | `s.closedCleanly()` | whether the other end said goodbye |
 | `s.live()` | false once the server is stopping |
 
+`c.upgradeWith(.{ .idle_ms = 30_000 })` — how long this connection may say
+nothing before zfast pings it. No answer by the end of the next stretch closes
+it with 1001. Not a deadline: a quiet WebSocket is a working one, so silence
+asks a question rather than ending anything. `0` waits forever.
+
 `Close`: `.normal`, `.going_away`, `.protocol_error`, `.unsupported`,
 `.invalid_payload`, `.policy`, `.too_big`, `.internal`, or a number.
+
+## `Room`
+
+Saying something to sockets a handler does not hold
+([ADR 0038](adr/0038-a-broadcast-rings-a-bell-it-does-not-write.md)). A
+service like any other: provide one, take it by type.
+
+```zig
+var room = try zfast.Room.init(gpa);
+defer room.deinit();
+try app.provide(&room);
+
+fn chat(c: *zfast.Ctx, room: *zfast.Room) !void {
+    var socket = try c.upgrade();
+    try room.join(&socket);
+    defer room.leave(&socket);
+
+    var buf: [16 * 1024]u8 = undefined;
+    while (try socket.receive(&buf)) |message| {
+        try room.say(message.kind, message.data);
+    }
+}
+```
+
+| | |
+|---|---|
+| `zfast.Room.init(gpa)` | `!Room` — 1,024 seats, backlog of 4 |
+| `zfast.Room.initWith(gpa, .{ .seats = …, .backlog = … })` | `!Room` |
+| `room.deinit()` | |
+| `room.join(&socket)` | `!void` — `error.RoomFull` when every seat is taken |
+| `room.leave(&socket)` | safe twice, safe without joining — pair it with `defer` |
+| `room.say(kind, data)` | to everybody in the room, sender included |
+| `room.sayText(text)` / `room.sayBinary(bytes)` | |
+| `room.count()` | how many connections are in it |
+| `room.missed(&socket)` | posts this connection was too slow to take |
+| `room.full = .drop_oldest` | or `.drop_newest`, when a connection's backlog fills |
+
+The loop is the one an echo server writes: nothing in it mentions the other
+connections, and nothing handles an incoming broadcast. `receive` writes those
+out on the way past, from the fiber that owns the socket — which is why one
+client that stops reading costs that client and nobody else.
+
+`defer room.leave(&socket)` is not optional. Zig has no destructor, and a seat
+nobody gives up is one the next connection cannot have.
 
 ## Failing
 
@@ -396,9 +445,9 @@ into a response. Copy what you borrow, and log instead of failing.
 try zfast.spawn(flushMetrics, .{&exporter});
 ```
 
-Sending to a WebSocket somebody else's connection is holding is **not** here.
-[ADR 0029](adr/0029-a-spawned-fiber-belongs-to-the-server.md) has the
-measurement that says why.
+Sending to a WebSocket somebody else's connection is holding does not need
+this — see [`Room`](#room). It needs no fiber of its own, which is the whole
+of [ADR 0038](adr/0038-a-broadcast-rings-a-bell-it-does-not-write.md).
 
 ## Built-in middleware
 

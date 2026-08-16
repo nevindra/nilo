@@ -15,8 +15,11 @@ it has to say what it is for.
 
 In order.
 
-1. **Sending to a WebSocket a handler does not hold.** Not blocked on a design
-   and not blocked on a missing API — blocked on a defect upstream.
+1. ~~**Sending to a WebSocket a handler does not hold.**~~ **Built** —
+   `zfast.Room`, [ADR 0038](./adr/0038-a-broadcast-rings-a-bell-it-does-not-write.md).
+   4 bytes per idle connection, measured; throughput unmoved. What follows is
+   the record of how it was found, kept because the wrong answer was written
+   down twice on the way and both times it looked like a fact.
 
    The API is `zio.CompletionQueue`, already public in the v0.17.0 that zfast
    pins, along with `ev.NetPoll`, `ev.Async` and `ev.Completion`
@@ -31,7 +34,7 @@ In order.
    from `pending` before pushing it to `completed`, which is the discipline
    `BroadcastChannel` fails to keep.
 
-   **What blocks it is a different defect, found on the way.** Handing a
+   **A second defect was found on the way, and it is real.** Handing a
    completion that has already fired straight back to `submit` — the obvious
    thing to write, and what a connection would do forever — crashes zio 90 runs
    in 90. `CompletionQueue.submit` sets `c.group.owner` and
@@ -40,20 +43,80 @@ In order.
    (`ev/loop.zig:831`, `ev/completion.zig:411-414`). The completion then fires
    as a task wake with a null `userdata` and panics in `runtime.zig:1085`.
    `CompletionQueue`'s own tests never re-submit, which is why it has not been
-   seen. Building the completion again first works around it, but not for free:
-   re-initialising an `Async` clears its `pending` flag, so a notify landing in
-   the gap is lost — fine for a spike, not fine for a broadcast, where the whole
-   point is that anyone may notify at any time. **Report it upstream before
-   building on top.**
+   seen. It is on file as
+   [zio#673](https://github.com/lalinsky/zio/issues/673), opened by lalinsky's
+   own automation which found it independently while documenting the queue,
+   and still open.
 
-   A connection's fiber has to re-arm its wakeup after every message, which is
-   exactly the crashing case, so this waits on a two-line fix upstream.
+   **What it does not do is block zfast, and the first pass got that wrong.**
+   Rebuilding the completion before re-submitting clears the crash. The first
+   pass then measured that the rebuild costs a wakeup — `Async.init()` clears
+   `pending`, so a notify landing in the re-arm window is dropped — and
+   concluded broadcast had to wait. It does not, because there are two ways to
+   rebuild and only one of them is that one. `pending` is a field of `Async`,
+   not of `Completion` (`ev/completion.zig:571-574`), so rebuilding **only the
+   completion** — `wake.c = .init(.async)` — dodges the crash the same way and
+   keeps the flag. A notify landing in the window then arrives late instead of
+   never: the next `submit` reaches `checkAndSetAsyncResult`
+   (`ev/loop.zig:872-883`), which finds the flag and completes the handle on the
+   spot. Held to a number in the spike's `--window` mode, which has the fiber
+   hold that window open and posts into it deliberately: rebuilding the whole
+   handle loses the post **30 runs in 30**, rebuilding only the completion keeps
+   it **30 runs in 30**, identical in Debug, ReleaseSafe and ReleaseFast. 630
+   runs across the full matrix, no hangs and no flakes.
+
    [ADR 0022](./adr/0022-a-websocket-is-a-handler-that-does-not-return.md)
    guessed at a per-socket outbox with its own lock; a spike measured that and
    it is exactly as dead as the naive version, because the problem is not
    locking — the speaker's own fiber does the writing, so it blocks on the first
    connection that has stopped reading. `zfast.spawn` shipped out of that work;
    broadcast did not.
+
+   **What was left, and is now done**, none of it upstream:
+
+   - The wait itself, in `src/engine/zio.zig` and then as a new item in the
+     Bulkhead's contract — `Waker`, and every future Engine has to supply it.
+   - A registry of live sockets — the `Room`'s seats, taken up front so its
+     memory is a number rather than a function of who turned up.
+   - The mailbox, and who owns a post's bytes. Answered: one refcounted
+     allocation per `say`, freed by whichever seat drains it last. A `Str` dies
+     with the arena of the request that made it (ADR 0004), so the bytes are
+     copied once — not once per recipient, which is what an inline ring would
+     have cost and what would have made the per-connection budget a function of
+     the message ceiling.
+   - A policy for a full mailbox — drop oldest, drop newest, disconnect.
+     [ADR 0020](./adr/0020-a-request-that-lasts-is-still-one-request.md) refused
+     exactly this on the record, so ADR 0038 amends it and the policy is named
+     at the room rather than hidden under the connection. Disconnecting is not
+     offered: a server that drops connections because it was slow has its worst
+     behaviour when it is busiest.
+   - ~~The per-connection cost~~ — **measured**, in
+     [`spike/mailbox/`](../spike/mailbox/), by ADR 0029's protocol at 4,000
+     idle connections. The shape adds no fiber, which was the whole of the
+     8,673 bytes, and what is left is **320 bytes of machinery plus 16 per
+     mailbox slot**: a `CompletionQueue`, an `Async`, a `NetPoll` and the
+     ring's head and tail. A four-slot mailbox held inline in the connection
+     is 384 bytes, **4.4% of ADR 0018's 8,767** where the rejected shape was
+     98.9%.
+
+     One warning came out of it that belongs in the implementation rather than
+     in an ADR: give the mailbox its *own* allocation and the cost is not the
+     struct but the next power of two above it — 320 bytes measured as 512,
+     576 as 1,024, 1,344 as 2,046, every row exact. Fold it into the
+     connection state that is already allocated and that rounding does not
+     happen. That warning is what the implementation did: the `Wake` lives in
+     the connection's own fiber frame.
+
+     **On the real server, at 2,000 idle connections in `ReleaseFast`: 8,777
+     bytes before, 8,773 after.** The 320 bytes are absorbed by stack pages
+     that were already mapped, so the feature costs nothing per connection at
+     all. Throughput held at ~1.10M req/s across two 15-second runs of each
+     build, with p99 varying more between repeats of one build than between
+     builds.
+
+   The handler's loop did not have to change, and did not. `receive` waits on
+   both and writes a post out itself, returning only when the client actually
+   said something — so ADR 0022's signature stands exactly as written.
 2. **Reloading without a restart — static files, then the server.** A
    development annoyance rather than a design hole: a deploy restarts anyway.
    The static half is a watch option on `staticWith`, re-reading a directory
@@ -297,4 +360,4 @@ pattern too.
 | A file response's bytes leave by a route the tests never take | **Not handled.** Every test runs through `testing.Client`, whose writer is `std.Io.Writer.fixed` and carries no `sendFile` in its vtable, so the suite takes std's read/drain fallback — the right bytes, by the route a platform without `sendfile` uses. The splice chain the feature exists for needs a real socket and nothing in the suite opens one. The fix is a build step that listens on port 0 and pulls a file over it; it is not written |
 | A file response holds a descriptor for as long as the send takes | One per request in flight, so `.max_connections` bounds it — the same number an operator already multiplies for memory. It is closed on every exit from `sendfile.send` including the error ones, and a test counts `/proc/self/fd` across a request so it stays that way ([ADR 0037](./adr/0037-a-file-too-big-to-hold-is-opened-not-read.md)) |
 | A spilled file's ETag is its mtime and size, so two different contents could share one | Accepted, and argued rather than assumed: the alternative is hashing gigabytes at startup, and a weak validator would make `If-Range` unusable for exactly the large downloads that need resuming. It is the tag nginx has served by default for twenty years. A held file is unaffected — it keeps its content hash |
-| `zio.BroadcastChannel` aborts, or in `ReleaseFast` deadlocks, when a fiber parked in `receive` is cancelled | Not used, and now reported upstream with a standalone reproduction. A waiter node is pushed onto a queue it is already linked into (`simple_queue.zig:43`, from `broadcast_channel.zig:72`). Debug aborts 10 runs in 10, ReleaseSafe 3 in 3, and `ReleaseFast` — which has no such assertion — **hangs 17 runs in 20** where a clean run takes 200ms. Cancellation is what reaches it: the same program closing the channel and waiting is clean 5 in 5. A shared ring forces the cancel, having no per-consumer close ([ADR 0029](./adr/0029-a-spawned-fiber-belongs-to-the-server.md), [zio#667](https://github.com/lalinsky/zio/issues/667)) |
+| `zio.BroadcastChannel` aborts, or in `ReleaseFast` deadlocks, when a fiber parked in `receive` is cancelled | Not used, reported upstream with a standalone reproduction, and **fixed upstream** — a fresh `Waiter` per receive attempt, in zio `ab6873eb`. Not in a release yet: v0.17.0 predates it and is what `build.zig.zon` pins, so the fix arrives whenever zfast next moves the pin. Nothing here depends on it. A waiter node was pushed onto a queue it was already linked into (`simple_queue.zig:43`, from `broadcast_channel.zig:72`). Debug aborted 10 runs in 10, ReleaseSafe 3 in 3, and `ReleaseFast` — which has no such assertion — **hung 17 runs in 20** where a clean run takes 200ms. Cancellation was what reached it: the same program closing the channel and waiting was clean 5 in 5. A shared ring forces the cancel, having no per-consumer close ([ADR 0029](./adr/0029-a-spawned-fiber-belongs-to-the-server.md), [zio#667](https://github.com/lalinsky/zio/issues/667)) |

@@ -747,3 +747,34 @@ The roadmap's third item said `sendfile` "contradicts [ADR 0010](./adr/0010-stat
 **What the suite still cannot see is written down rather than left implicit.** Every test runs through `testing.Client`, whose writer is `std.Io.Writer.fixed` and carries no `sendFile` in its vtable — so all twenty-four new tests take std's read/drain fallback. That is the right bytes by the route a platform without `sendfile` would use, and it is not the splice chain the feature exists for. Nothing in the suite opens a socket. It is a row in the roadmap's risk table marked **Not handled**, because the alternative was to let the headline mechanism ship looking tested.
 
 Twenty-four new tests and one new refusal: 523 and 56.
+
+## The blocker that was a missing search
+
+Broadcast to a WebSocket somebody else's handler is holding was the last item on the roadmap, and the only one recorded as not-here twice. ADR 0022 called it "a project rather than a function". ADR 0029 measured it at 8,673 bytes per connection, named the shape that would cost nothing, and wrote down why that shape was unreachable: zio exported no way to park a fiber on a completion. It shipped `zfast.spawn` out of that work and left broadcast on the shelf.
+
+**The blocking sentence was false when it was written.** `zio.CompletionQueue` was public in the v0.17.0 this repo already pinned, and had been for the whole time the item sat on the roadmap. What stood in the way was a search that was not done, not a line that was not exported. The upstream issue asking for `waitForIo` ([zio#668](https://github.com/lalinsky/zio/issues/668)) got the answer "there is already `CompletionQueue`" and the premise of the issue was the mistake.
+
+**Then the same thing happened again, one level down.** A spike proved the wait works and the cancel path holds — 30 runs in 30 across three optimize modes — and found a real defect on the way: handing a completion that has already fired straight back to `submit` crashes zio 90 runs in 90 ([zio#673](https://github.com/lalinsky/zio/issues/673)). The workaround is to rebuild the completion first, and the spike measured that the rebuild drops a wakeup, and the roadmap recorded broadcast as blocked on an upstream fix.
+
+That was wrong too, and for a reason worth keeping: **there are two ways to rebuild and the spike only tried one.** `Async.init()` returns a fresh struct, so it clears the `pending` flag that holds a notify landing in the re-arm window. `wake.c = .init(.async)` rebuilds only the completion — same escape from the crash, because the phase that triggers it lives on `Completion` — and leaves `pending` alone, so the notify arrives late instead of never. Two of the four cells in that table had never been run.
+
+**The hammer that should have found it could not.** Firing five posts as fast as an OS thread can go — what a broadcast under load looks like — passes with *either* rebuild. All five land before the fiber is scheduled once, `notify` coalesces them by design, and the re-arm window is never occupied. The mode that separates them holds the window open on purpose and places a post inside it: 30 runs in 30 lost with the lossy rebuild, 30 in 30 kept with the other, identical in Debug, ReleaseSafe and ReleaseFast. **A race narrow enough that the obvious stress test cannot reach it is a race the stress test will certify as absent.** 630 runs across the full matrix, no hangs, no flakes.
+
+Upstream found the same defect independently while documenting the queue, and the fix in flight ([zio#674](https://github.com/lalinsky/zio/pull/674)) carries a test whose comment says the same sentence from the other side: the latch is on the handle, so handing the completion back is lossless and re-initialising it is not.
+
+**The price was the other half of the delay, and it came out at zero.** ADR 0029's 8,673 bytes were a *fiber*, and the mailbox shape adds none — the connection already has one, it just gains a second way to be woken. A spike measured the machinery at 320 bytes plus 16 per mailbox slot, and turned up a warning worth more than the number: given its own allocation, what you pay is not the struct but the next power of two above it — 320 measured as 512, 576 as 1,024, 1,344 as 2,046, every row exact, in both optimize modes. So the implementation put it in the connection's own fiber frame, and on the real server at 2,000 idle connections the figure went **8,777 bytes before, 8,773 after**. Throughput held at ~1.10M req/s, with p99 varying more between two runs of one build than between builds.
+
+**The API did not move, which was the point.** ADR 0022's loop is what a handler still writes:
+
+```zig
+while (try socket.receive(&buf)) |message| {
+    try room.say(message.kind, message.data);
+}
+```
+
+Nothing in it mentions the other connections and nothing handles an incoming broadcast — `receive` writes those out on the way past, from the fiber that owns the socket. That is not a convenience, it is the whole finding restated: any design where fiber A writes to socket B ties A's liveness to B's readiness to read, and ADR 0029 measured two healthy clients going silent because a third stopped reading.
+
+**One refusal had to be amended rather than routed around.** ADR 0020 says in as many words that a queue with a policy is what a pub/sub layer wants and that zfast is not one. A Room is one. The honest move was to amend it and say what survives — the connection layer still has no queue and no policy — rather than to ship the queue and hope nobody read the old ADR.
+
+**And one guard came out of writing the tests rather than the code.** The first version of `join` refused a socket with no Engine behind it, on the reasoning that nothing could ever ring its bell. That was correct and it made the entire feature untestable without a running server, which is how a feature ends up tested by hand. Seating it anyway costs nothing, because `receive` drains its seat before it reads either way — so the posts arrive on the next pass, and eight tests drive the whole thing over fixed buffers.
+

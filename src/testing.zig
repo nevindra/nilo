@@ -232,6 +232,9 @@ pub const Client = struct {
             &out,
             // There is no socket here, so there is nothing to time out.
             .off,
+            // And nobody to post to it: a `receive` answers out of the fixed
+            // buffer it was handed and never parks.
+            .off,
             self.peer,
         );
         // One request, then everything it allocated goes — exactly as a

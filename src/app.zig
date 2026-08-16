@@ -627,6 +627,7 @@ pub const App = struct {
         in: *std.Io.Reader,
         out: *std.Io.Writer,
         deadlines: bulkhead.Deadlines,
+        waker: bulkhead.Waker,
         peer: bulkhead.Peer,
     ) void {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
@@ -667,7 +668,7 @@ pub const App = struct {
             // has just served a request is idle again from now, not from
             // whenever it was accepted.
             deadlines.armIdle();
-            const keep_going = self.handleRequest(arena.allocator(), &lifetime, &in_flight, in, out, deadlines, peer);
+            const keep_going = self.handleRequest(arena.allocator(), &lifetime, &in_flight, in, out, deadlines, waker, peer);
             // The request is done: every Str of its goes stale, then the
             // bag is emptied in one go.
             //
@@ -720,6 +721,7 @@ pub const App = struct {
         in: *std.Io.Reader,
         out: *std.Io.Writer,
         deadlines: bulkhead.Deadlines,
+        waker: bulkhead.Waker,
         peer: bulkhead.Peer,
     ) bool {
         const failure = &in_flight.failure;
@@ -807,6 +809,7 @@ pub const App = struct {
             ._head_borrowed = borrowed,
             ._watch = &in_flight.watch,
             ._deadlines = deadlines,
+            ._waker = waker,
             ._peer = peer,
             ._limits = self.limits,
             // A pointer to the App's copy, not the copy: the key is 32 bytes
@@ -1591,7 +1594,7 @@ const Harness = struct {
     fn send(self: *Harness, app: *App, request: []const u8) struct { response: []const u8, keep_alive: bool } {
         var in = std.Io.Reader.fixed(request);
         var out = std.Io.Writer.fixed(&self.buf);
-        const keep_alive = app.handleRequest(self.arena.allocator(), &self.lifetime, &self.in_flight, &in, &out, .off, self.peer);
+        const keep_alive = app.handleRequest(self.arena.allocator(), &self.lifetime, &self.in_flight, &in, &out, .off, .off, self.peer);
         self.lifetime.end();
         _ = self.arena.reset(.retain_capacity);
         return .{ .response = out.buffered(), .keep_alive = keep_alive };
@@ -3022,7 +3025,7 @@ test "a chunked body nobody read is still stepped over" {
             "GET /ignore HTTP/1.1\r\n\r\n",
     );
     var out = std.Io.Writer.fixed(&h.buf);
-    try testing.expect(app.handleRequest(h.arena.allocator(), &h.lifetime, &h.in_flight, &in, &out, .off, .{}));
+    try testing.expect(app.handleRequest(h.arena.allocator(), &h.lifetime, &h.in_flight, &in, &out, .off, .off, .{}));
 
     const next = try http1.readRequest(&in);
     try testing.expectEqualStrings("/ignore", next.target);
@@ -3211,7 +3214,7 @@ test "the request path stays inside its allocation budget" {
         fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
             var in = std.Io.Reader.fixed(request);
             var out = std.Io.Writer.fixed(b);
-            _ = a.handleRequest(gpa, l, f, &in, &out, .off, .{});
+            _ = a.handleRequest(gpa, l, f, &in, &out, .off, .off, .{});
             l.end();
         }
     }.once;
@@ -3353,7 +3356,7 @@ test "a request with a body copies the head, so its Strs survive reading it" {
 
         var conn = Trickle.init(wire, per_read, &read_buf);
         var out = std.Io.Writer.fixed(&out_buf);
-        _ = app.handleRequest(arena.allocator(), &lifetime, &in_flight, &conn.reader, &out, .off, .{});
+        _ = app.handleRequest(arena.allocator(), &lifetime, &in_flight, &conn.reader, &out, .off, .off, .{});
 
         try testing.expect(std.mem.startsWith(u8, out.buffered(), "HTTP/1.1 200"));
         try testing.expect(std.mem.endsWith(u8, out.buffered(), "example.dev|hello world|/echo"));
@@ -3393,7 +3396,7 @@ test "a head arriving a byte at a time is still parsed, and its Strs are sound" 
 
         var conn = Trickle.init(wire, per_read, &read_buf);
         var out = std.Io.Writer.fixed(&out_buf);
-        _ = app.handleRequest(arena.allocator(), &lifetime, &in_flight, &conn.reader, &out, .off, .{});
+        _ = app.handleRequest(arena.allocator(), &lifetime, &in_flight, &conn.reader, &out, .off, .off, .{});
 
         try testing.expect(std.mem.endsWith(
             u8,
@@ -3440,6 +3443,7 @@ test "two requests on one trickling connection do not borrow each other's head" 
             &in_flight,
             &conn.reader,
             &out,
+            .off,
             .off,
             .{},
         ));
@@ -3592,6 +3596,7 @@ const Deadline = struct {
             &conn.reader,
             &out,
             self.clock.with(test_limits),
+            .off,
             .{},
         );
         return .{ .response = out.buffered(), .keep_alive = keep_alive };
@@ -4524,7 +4529,7 @@ test "a route that resolves nothing still costs what it always did" {
         fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
             var in = std.Io.Reader.fixed("GET /users/7 HTTP/1.1\r\nHost: x\r\n\r\n");
             var out = std.Io.Writer.fixed(b);
-            _ = a.handleRequest(gpa, l, f, &in, &out, .off, .{});
+            _ = a.handleRequest(gpa, l, f, &in, &out, .off, .off, .{});
             l.end();
         }
     }.once;
@@ -4692,7 +4697,7 @@ test "a stream allocates once, however many pieces it writes" {
         fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
             var in = std.Io.Reader.fixed("GET /many HTTP/1.1\r\nHost: x\r\n\r\n");
             var out = std.Io.Writer.fixed(b);
-            _ = a.handleRequest(gpa, l, f, &in, &out, .off, .{});
+            _ = a.handleRequest(gpa, l, f, &in, &out, .off, .off, .{});
             l.end();
         }
     }.once;
@@ -4903,7 +4908,7 @@ test "a body read in pieces allocates nothing" {
         fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
             var in = std.Io.Reader.fixed(request);
             var out = std.Io.Writer.fixed(b);
-            _ = a.handleRequest(gpa, l, f, &in, &out, .off, .{});
+            _ = a.handleRequest(gpa, l, f, &in, &out, .off, .off, .{});
             l.end();
         }
     }.once;
@@ -5131,7 +5136,7 @@ test "a WebSocket allocates nothing per message, however many it carries" {
         fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
             var in = std.Io.Reader.fixed(conversation);
             var out = std.Io.Writer.fixed(b);
-            _ = a.handleRequest(gpa, l, f, &in, &out, .off, .{});
+            _ = a.handleRequest(gpa, l, f, &in, &out, .off, .off, .{});
             l.end();
         }
     }.once;
@@ -5547,7 +5552,7 @@ test "serving a gzipped static file allocates nothing, middleware included" {
         fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
             var in = std.Io.Reader.fixed(request);
             var out = std.Io.Writer.fixed(b);
-            _ = a.handleRequest(gpa, l, f, &in, &out, .off, .{});
+            _ = a.handleRequest(gpa, l, f, &in, &out, .off, .off, .{});
             l.end();
         }
     }.once;
@@ -5663,7 +5668,7 @@ test "reading a cookie allocates nothing" {
     for (0..3) |_| {
         var warm_in = std.Io.Reader.fixed(request);
         var warm_out = std.Io.Writer.fixed(&buf);
-        _ = app.handleRequest(counting.allocator(), &lifetime, &in_flight, &warm_in, &warm_out, .off, .{});
+        _ = app.handleRequest(counting.allocator(), &lifetime, &in_flight, &warm_in, &warm_out, .off, .off, .{});
         lifetime.end();
         _ = arena.reset(.{ .retain_with_limit = arena_keep });
     }
@@ -5671,7 +5676,7 @@ test "reading a cookie allocates nothing" {
     counting.reset();
     var in = std.Io.Reader.fixed(request);
     var out = std.Io.Writer.fixed(&buf);
-    _ = app.handleRequest(counting.allocator(), &lifetime, &in_flight, &in, &out, .off, .{});
+    _ = app.handleRequest(counting.allocator(), &lifetime, &in_flight, &in, &out, .off, .off, .{});
 
     try testing.expectEqual(@as(usize, 0), counting.allocs);
 }

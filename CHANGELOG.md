@@ -50,7 +50,33 @@ Without the `?ref=` you get whatever `main` is that day.
   segment at a time, and the path handed to the kernel never comes from a
   request.
 - **Streamed responses and server-sent events.**
-- **WebSocket** — handshake, framing, masking, pings, closing handshake.
+- **WebSocket** — handshake, framing, masking, pings, closing handshake. A
+  connection that goes quiet is asked whether it is still there and closed with
+  1001 if it does not answer; a quiet WebSocket is a working one, so this is a
+  ping rather than a deadline (`.idle_ms`, 30 seconds, `0` waits forever).
+- **Broadcast — `zfast.Room`.** Saying something to sockets a handler does not
+  hold. Provide a `Room` like any other service, `join` on the way in,
+  `defer leave` on the way out, and `say` reaches everybody in it:
+
+  ```zig
+  fn chat(c: *zfast.Ctx, room: *zfast.Room) !void {
+      var socket = try c.upgrade();
+      try room.join(&socket);
+      defer room.leave(&socket);
+
+      var buf: [16 * 1024]u8 = undefined;
+      while (try socket.receive(&buf)) |message| {
+          try room.say(message.kind, message.data);
+      }
+  }
+  ```
+
+  That loop is the one an echo server writes. A post arriving while a
+  connection is quiet is written out by *that connection's own fiber*, inside
+  `receive`, so a handler never sees one — and one client that stops reading
+  costs that client and nobody else. It adds **4 measured bytes per idle
+  connection**, with throughput and p99 unmoved
+  ([ADR 0038](./docs/adr/0038-a-broadcast-rings-a-bell-it-does-not-write.md)).
 - **A generated OpenAPI document**, written from the signatures rather than from
   annotations ([ADR 0017](./docs/adr/0017-the-api-description-comes-from-the-signatures.md)).
 - **Failure in zfast's own words.** Get a handler wrong and compilation stops
@@ -59,6 +85,11 @@ Without the `?ref=` you get whatever `main` is that day.
   ([ADR 0027](./docs/adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)).
 - **`zfast.spawn`** for work that is not a request, owned by the server so
   shutdown counts it ([ADR 0029](./docs/adr/0029-a-spawned-fiber-belongs-to-the-server.md)).
+
+A full `Room` backlog drops the oldest post by default, or the newest if you say
+so, and `room.missed(&socket)` says how many were dropped. That amends
+[ADR 0020](./docs/adr/0020-a-request-that-lasts-is-still-one-request.md), which
+refused to have such a queue at all.
 
 ### What it holds itself to
 
@@ -74,8 +105,6 @@ the same harness in [`docs/comparison.md`](./docs/comparison.md).
 - **Templates** — a refusal rather than a backlog item. zfast is for building
   APIs and services; rendering pages is not what it is for, and the reasoning is
   in [the roadmap](./docs/roadmap.md#not-coming).
-- **Broadcasting to a WebSocket a handler does not hold.** The `chat` example
-  echoes; two tabs do not see each other.
 - **Counters.** Requests carry an id and lines can be JSON, but how many
   requests, at what statuses, and how long is not collected anywhere.
 - **TLS**, and with it HTTP/2 and a gRPC server. This is a refusal rather than a

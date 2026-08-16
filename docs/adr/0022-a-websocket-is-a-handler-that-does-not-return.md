@@ -62,9 +62,13 @@ Sending to *other* connections needs a registry of live sockets and a way to wri
 
 It is recorded here rather than half-built, because a broadcast that works in a test and interleaves under load is worse than one that does not exist.
 
-> **Both of those guesses were wrong, and ADR 0029 has the measurements.** The interleaving is real and a lock per socket does fix it — and fixes nothing else, because the writing is done by the *speaker's* fiber, which then blocks on the first connection that has stopped reading. That is not a locking problem and no lock granularity touches it. The second guess, a mailbox the owning fiber drains, is the right shape and is not reachable: it needs a wait that ends on either the socket becoming readable or a post arriving, and zio exports no way to park a fiber on a completion. What did come out of that work is `zfast.spawn`.
+> **This is no longer true, and [ADR 0038](./0038-a-broadcast-rings-a-bell-it-does-not-write.md) is how it stopped being.** A `zfast.Room` says things to sockets a handler does not hold, and the loop above is unchanged — `receive` writes out anything posted to this connection on its way past, so a handler still never sees a broadcast and never writes a branch for one. The registry is the Room's seats; the way to write to a socket from a different fiber is not to, which was the whole finding.
+>
+> **Both of the guesses below were wrong, and ADR 0029 has the measurements.** The interleaving is real and a lock per socket does fix it — and fixes nothing else, because the writing is done by the *speaker's* fiber, which then blocks on the first connection that has stopped reading. That is not a locking problem and no lock granularity touches it. The second guess, a mailbox the owning fiber drains, is the right shape and is not reachable: it needs a wait that ends on either the socket becoming readable or a post arriving, and zio exports no way to park a fiber on a completion. What did come out of that work is `zfast.spawn`.
 
 Also not here: `permessage-deflate` (negotiated in the handshake, and a compressor per connection is memory zfast has not budgeted), and any deadline at all — a client that opens a socket and never speaks holds a fiber until TCP gives up. That last one is the same hole ADR 0020 recorded, and WebSocket makes it cheaper to exploit.
+
+> **The hole is closed, by the answer this ADR already named.** `Options.idle_ms`, 30 seconds by default: silence sends a ping, and silence after an unanswered ping closes with 1001. Still not a deadline, for the reason given above — a quiet WebSocket is a working one, so the framework asks rather than assumes. What made it buildable was [ADR 0038](./0038-a-broadcast-rings-a-bell-it-does-not-write.md), which gave the connection a wait that can carry a limit; before that there was no way to time a WebSocket read without also breaking the quiet-is-fine promise. Set it to `0` for the old behaviour.
 
 ## Consequences
 

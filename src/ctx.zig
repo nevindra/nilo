@@ -96,6 +96,11 @@ pub const Ctx = struct {
     /// is the default, and what a test driving App directly gets — makes
     /// every one of those calls do nothing.
     _deadlines: bulkhead.Deadlines = .off,
+    /// The connection's second way to be woken — by another fiber rather than
+    /// by the client. Only a WebSocket that has been registered for broadcast
+    /// ever uses it; `.off` is the default, and what a test driving App
+    /// directly gets, and it answers "go and read" to everything.
+    _waker: bulkhead.Waker = .off,
     /// Who the connection came from, as the socket reports it. Empty when
     /// there is no socket — a test driving App directly, a Unix socket.
     _peer: bulkhead.Peer = .{},
@@ -983,7 +988,15 @@ pub const Ctx = struct {
         // out the client stopped listening.
         self._deadlines.readForever();
 
-        return .{ ._in = self._in, ._out = self._out, ._stopping = self._stopping };
+        return .{
+            ._in = self._in,
+            ._out = self._out,
+            ._stopping = self._stopping,
+            // How this socket can be told something by a fiber that is not
+            // holding it. Nothing uses it until the handler joins a Room.
+            ._waker = self._waker,
+            ._idle_ms = options.idle_ms,
+        };
     }
 
     pub fn events(self: *Ctx) !stream_mod.Events {
