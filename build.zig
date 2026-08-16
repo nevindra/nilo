@@ -240,6 +240,10 @@ const pw_refusals = [_]Refusal{
         .name = "pw_cost_with_no_passes",
         .says = "a password Cost with no passes is not a hash.",
     },
+    .{
+        .name = "pw_cost_more_lanes_than_memory",
+        .says = "a password Cost of 2048 lanes needs at least 16384 KiB of memory, and it has 8192.",
+    },
 };
 
 /// One entry per file in `refusals/`: a program written wrong on purpose, and

@@ -140,7 +140,15 @@ inline fn loneIo(t: *std.Io.Threaded) std.Io {
 }
 
 /// Hash a password at the default Cost.
-pub fn hash(gpa: std.mem.Allocator, password: []const u8, salt: [salt_len]u8) Error!Hash {
+///
+/// The error set is one member wide on purpose: `NotAHash` is something only
+/// a *stored* string can be, so a caller that hashes has one thing to handle
+/// and no impossible arm to write.
+pub fn hash(
+    gpa: std.mem.Allocator,
+    password: []const u8,
+    salt: [salt_len]u8,
+) error{OutOfMemory}!Hash {
     return hashWith(.default, gpa, password, salt);
 }
 
@@ -151,7 +159,7 @@ pub fn hashWith(
     gpa: std.mem.Allocator,
     password: []const u8,
     salt: [salt_len]u8,
-) Error!Hash {
+) error{OutOfMemory}!Hash {
     comptime checkCost(cost);
 
     var threaded: std.Io.Threaded = undefined;
@@ -161,9 +169,13 @@ pub fn hashWith(
     argon2.kdf(gpa, &digest, password, &salt, comptime cost.params(), .argon2id, io) catch |err|
         return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
-            // Every other member of the set is a parameter the comptime check
-            // above has already refused, or a cancellation this Io cannot
-            // produce.
+            // Every other member of the set is a parameter `checkCost` has
+            // already refused — a Cost too small, no passes, no lanes, more
+            // lanes than memory — or a cancellation this Io cannot produce.
+            // The salt and the digest are this module's own constants and
+            // both are inside argon2's bounds. What is left is a password of
+            // more than 4 GiB, which is not a password; `max_body` bounds a
+            // request's at one MiB.
             else => unreachable,
         };
 
@@ -190,17 +202,32 @@ pub fn hashWith(
 /// the work anyway, against a hash of nothing, and answers false (ADR 0048).
 /// There is no way to write the fast wrong version.
 pub fn verify(gpa: std.mem.Allocator, stored: ?[]const u8, password: []const u8) Error!bool {
+    return verifyWith(.default, gpa, stored, password);
+}
+
+/// The same, telling it what a hash of yours costs.
+///
+/// **The Cost is what the no-account path is timed against**, and that is the
+/// whole of what this argument is for: `verify` does the work of a hash when
+/// there is nothing to check, and work at 19 MiB against a deployment that
+/// stores 46 MiB hashes is a stopwatch away from being the same early return
+/// the optional exists to make impossible. Pass the Cost you hash with
+/// (ADR 0049).
+///
+/// A stored hash is checked at the parameters *it* carries either way — that
+/// is what makes an old hash still readable after the Cost goes up.
+pub fn verifyWith(
+    comptime cost: Cost,
+    gpa: std.mem.Allocator,
+    stored: ?[]const u8,
+    password: []const u8,
+) Error!bool {
     const encoded = stored orelse {
-        _ = try decoy(gpa);
+        _ = try decoy(cost, gpa);
         return false;
     };
 
-    const parsed = phc.deserialize(Encoded, encoded) catch return error.NotAHash;
-    if (!std.mem.eql(u8, parsed.alg_id, "argon2id")) return error.NotAHash;
-    if (parsed.alg_version) |v| {
-        if (v != 19) return error.NotAHash;
-    }
-    if (parsed.t < 1 or parsed.p < 1 or parsed.m < 8) return error.NotAHash;
+    const parsed = try parse(encoded);
 
     const expected = parsed.hash.constSlice();
     if (expected.len < 4 or expected.len > 64) return error.NotAHash;
@@ -244,14 +271,62 @@ fn sameBytes(a: []const u8, b: []const u8) bool {
     return differing == 0;
 }
 
+/// Whether a stored hash is weaker than one made now would be, so that the
+/// one moment the plaintext is in hand — the sign-in that just succeeded —
+/// is the moment it gets written again at the Cost in force.
+///
+/// ```zig
+/// if (!try pw.verify(gpa, stored, form.password)) return nilo.fail(401, "…");
+/// if (try pw.needsRehash(stored.?, .default)) {
+///     const fresh = try c.hashPassword(pw.huge_pages, form.password);
+///     _ = try db.update(User, c, .{
+///         .set = .{ .password = fresh.text() },
+///         .where = .{ .id = user.id },
+///     });
+/// }
+/// ```
+///
+/// Weaker means *less work or less to guess against*: fewer kibibytes, fewer
+/// passes, a shorter salt or a shorter digest. Lanes are not in it — a hash
+/// somebody else's library made at `p = 4` is the same work as one at `p = 1`,
+/// and rewriting every row for it would be churn rather than an upgrade.
+///
+/// A string that is not an argon2id hash answers `NotAHash` rather than
+/// true, for the reason `verify` does: a hash the module cannot read is the
+/// database's problem, and re-hashing on the strength of it would write the
+/// password back over a row nobody has explained yet.
+pub fn needsRehash(stored: []const u8, comptime cost: Cost) Error!bool {
+    comptime checkCost(cost);
+
+    const parsed = try parse(stored);
+    return parsed.m < cost.memory_kib or
+        parsed.t < cost.passes or
+        parsed.salt.constSlice().len < salt_len or
+        parsed.hash.constSlice().len < hash_len;
+}
+
+/// The PHC string, read and checked as far as this module can check it
+/// without doing the work. Shared by `verifyWith` and `needsRehash` so that
+/// what counts as a hash is one answer rather than two.
+fn parse(stored: []const u8) Error!Encoded {
+    const parsed = phc.deserialize(Encoded, stored) catch return error.NotAHash;
+    if (!std.mem.eql(u8, parsed.alg_id, "argon2id")) return error.NotAHash;
+    if (parsed.alg_version) |v| {
+        if (v != 19) return error.NotAHash;
+    }
+    if (parsed.t < 1 or parsed.p < 1 or parsed.m < 8) return error.NotAHash;
+    return parsed;
+}
+
 /// The work `verify` does when there is no account: a hash of a fixed
-/// password at the default Cost, so the two paths cost the same.
+/// password at the Cost the caller hashes with, so the two paths cost the
+/// same.
 ///
 /// The salt is a constant rather than entropy, which is the one place that is
 /// safe: nothing is stored, nothing is compared, and the only property wanted
 /// is that it takes as long.
-fn decoy(gpa: std.mem.Allocator) Error!Hash {
-    return hashWith(.default, gpa, "nilo has no account under that name", @splat(0x5a));
+fn decoy(comptime cost: Cost, gpa: std.mem.Allocator) Error!Hash {
+    return hashWith(cost, gpa, "nilo has no account under that name", @splat(0x5a));
 }
 
 fn checkCost(comptime cost: Cost) void {
@@ -270,6 +345,18 @@ fn checkCost(comptime cost: Cost) void {
         "nilo: a password Cost with no lanes cannot be computed.\n" ++
             "  `.lanes` is argon2id's parallelism and it has to be at least 1. nilo writes 1.",
     );
+    // The last parameter argon2 checks for itself, and the one that decides
+    // whether the `unreachable` in `hashWith` is sound: a lane needs eight
+    // kibibytes to divide its memory into segments, so `.lanes` above
+    // `.memory_kib / 8` is a hash that cannot be computed. Refused here, at
+    // the one moment somebody is reading the Cost they wrote.
+    if (cost.memory_kib / 8 < cost.lanes) @compileError(std.fmt.comptimePrint(
+        "nilo: a password Cost of {d} lanes needs at least {d} KiB of memory, and it has {d}.\n" ++
+            "  argon2id divides its memory into four segments per lane and each one has to\n" ++
+            "  hold two blocks, so a lane costs 8 KiB before it hashes anything.\n" ++
+            "  Raise `.memory_kib` or lower `.lanes`; nilo writes 1 lane.",
+        .{ cost.lanes, @as(u64, cost.lanes) * 8, cost.memory_kib },
+    ));
 }
 
 const testing = std.testing;
@@ -314,7 +401,81 @@ test "two hashes of one password differ, because the salt does" {
 test "no account is checked anyway, and answers false" {
     // The point is that it does the work rather than returning early. What is
     // asserted here is the answer; the timing is what ADR 0048 records.
-    try testing.expect(!try verify(testing.allocator, null, "hunter2"));
+    const cheap: Cost = .{ .memory_kib = 8 * 1024, .passes = 1 };
+    try testing.expect(!try verifyWith(cheap, testing.allocator, null, "hunter2"));
+}
+
+test "the work done for an account that is not there is the work a Cost is" {
+    // The claim `verifyWith` exists to keep, checked by the one thing about a
+    // hash that can be observed without timing it: argon2 asks for `m` KiB
+    // and nothing else, so the size of that allocation says which Cost ran.
+    // Before ADR 0049 the no-account path was always `.default` — 19 MiB of
+    // work against a deployment storing 8 MiB hashes, which is a stopwatch
+    // away from the early return the optional exists to prevent.
+    const cost: Cost = .{ .memory_kib = 8 * 1024, .passes = 1 };
+
+    var counted: usize = 0;
+    var counting = Counting{ .child = testing.allocator, .largest = &counted };
+    try testing.expect(!try verifyWith(cost, counting.allocator(), null, "hunter2"));
+    try testing.expectEqual(bytesFor(cost), counted);
+
+    // And it is the same allocation a real one of that Cost makes.
+    var against: usize = 0;
+    var counting_real = Counting{ .child = testing.allocator, .largest = &against };
+    const h = try hashWith(cost, testing.allocator, "hunter2", @splat(1));
+    try testing.expect(try verifyWith(cost, counting_real.allocator(), h.text(), "hunter2"));
+    try testing.expectEqual(counted, against);
+}
+
+test "a hash made at a lower Cost is one to write again" {
+    const gpa = testing.allocator;
+    const cheap: Cost = .{ .memory_kib = 8 * 1024, .passes = 1 };
+    const dearer: Cost = .{ .memory_kib = 16 * 1024, .passes = 2 };
+
+    const old = try hashWith(cheap, gpa, "hunter2", @splat(1));
+    try testing.expect(try needsRehash(old.text(), dearer));
+    // Against its own Cost it is current, which is the answer that stops a
+    // sign-in rewriting a row it has no reason to.
+    try testing.expect(!try needsRehash(old.text(), cheap));
+
+    // Memory and passes are read apart: more of one does not excuse less of
+    // the other.
+    try testing.expect(try needsRehash(old.text(), .{ .memory_kib = 8 * 1024, .passes = 2 }));
+    try testing.expect(try needsRehash(old.text(), .{ .memory_kib = 9 * 1024, .passes = 1 }));
+
+    // A string that is not a hash is the database's problem, not a reason to
+    // write a password back over it.
+    try testing.expectError(error.NotAHash, needsRehash("$2b$10$abcdefghijklmnopqrstuv", cheap));
+}
+
+test "a hash somebody else made with a short salt is one to write again" {
+    // Sixteen bytes of salt is what this module writes; a library that wrote
+    // eight left less to guess against, and the parameters in the string are
+    // where that shows.
+    const gpa = testing.allocator;
+    var threaded: std.Io.Threaded = undefined;
+    const io = loneIo(&threaded);
+
+    const params = argon2.Params{ .t = 1, .m = 8 * 1024, .p = 1 };
+    var digest: [hash_len]u8 = undefined;
+    const short_salt: [8]u8 = @splat(3);
+    try argon2.kdf(gpa, &digest, "hunter2", &short_salt, params, .argon2id, io);
+
+    var buf: [max_text]u8 = undefined;
+    const encoded = try phc.serialize(Encoded{
+        .alg_id = "argon2id",
+        .alg_version = 19,
+        .m = params.m,
+        .t = params.t,
+        .p = params.p,
+        .salt = try phc.BinValue(64).fromSlice(&short_salt),
+        .hash = try phc.BinValue(64).fromSlice(&digest),
+    }, &buf);
+
+    const same_work: Cost = .{ .memory_kib = 8 * 1024, .passes = 1 };
+    try testing.expect(try needsRehash(encoded, same_work));
+    // It still verifies, which is the point of reading it at all.
+    try testing.expect(try verifyWith(same_work, gpa, encoded, "hunter2"));
 }
 
 test "a stored string that is not a hash says so rather than answering false" {

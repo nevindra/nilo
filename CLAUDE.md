@@ -56,7 +56,7 @@ Three files carry context this one deliberately does not repeat:
 - **`CONTEXT.md`** — the project's vocabulary, and the words it refuses to use
   (Ctx not "Context", Str not "string", keep not "dupe", Refusal not "negative
   test"). Match it in code, comments, docs and commit messages.
-- **`docs/adr/`** — 48 binding decisions, each naming the alternative it
+- **`docs/adr/`** — 49 binding decisions, each naming the alternative it
   rejected. Check here before proposing a design change; "why not X?" usually
   already has an answer on file. **ADR 0041 decides which module new work goes
   in and ADR 0042 decides what that module may import**, and they are the two
@@ -75,7 +75,7 @@ goes in an ADR, a number goes in `docs/history.md`, a rule goes in a build step.
 
 Two of those rules are build steps rather than paragraphs, and they are the ones
 to lean on: `zig build layering` refuses an import that goes upward or sideways,
-and `zig build refusals` checks the wording of 91 error messages. Prefer making
+and `zig build refusals` checks the wording of 92 error messages. Prefer making
 a new rule enforceable that way over writing it down here — a paragraph nobody
 runs is the thing that rots.
 

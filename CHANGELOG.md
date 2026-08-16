@@ -299,12 +299,12 @@ The third tool module, and it imports nothing either.
 
 ```zig
 // signing up
-const stored = try c.hashPassword(gpa, form.password);
+const stored = try c.hashPassword(pw.huge_pages, form.password);
 _ = try db.insert(User, conn, .{ .email = form.email, .password = stored.text() });
 
 // signing in
 const row = try db.find(User, conn, .{ .email = form.email });
-if (!try c.verifyPassword(gpa, if (row) |r| r.password else null, form.password))
+if (!try c.verifyPassword(pw.huge_pages, if (row) |r| r.password else null, form.password))
     return nilo.fail(401, "that is not a sign-in");
 ```
 
@@ -326,9 +326,27 @@ if (!try c.verifyPassword(gpa, if (row) |r| r.password else null, form.password)
 - **The stored form is the PHC string everybody else writes** —
   `$argon2id$v=19$m=19456,t=2,p=1$…` — so a hash of nilo's can be migrated off,
   and one made elsewhere at any parallelism verifies here.
-- **A Cost below OWASP's weakest published configuration is a compile error.**
-  Turning it down to make a test suite fast is the mistake worth catching,
-  because a weak hash looks exactly like a strong one afterwards.
+- **A Cost below OWASP's weakest published configuration is a compile error**,
+  and so is one with more lanes than memory to divide between them. Turning the
+  Cost down to make a test suite fast is the mistake worth catching, because a
+  weak hash looks exactly like a strong one afterwards.
+- **`pw.huge_pages` is the allocator to hand it.** The same 19 MiB asked for in
+  2 MiB pages rather than 4,864 of 4 KiB: **13.6 ms a hash becomes 11.0**, and
+  nothing is held between hashes
+  ([ADR 0049](./docs/adr/0049-a-hash-asks-for-the-pages-it-walks.md)). It is
+  `std.heap.page_allocator` on anything that is not Linux, so a call site does
+  not have to ask what it is running on.
+- **`c.verifyPasswordWith(cost, …)` if you hash at anything but the default.**
+  The no-account path does the work of a hash rather than returning early, and
+  the Cost is what that work is measured out at — left at the default while
+  your rows are 46 MiB, the two answers take visibly different lengths of time
+  and the form is a list of addresses again.
+- **`pw.needsRehash(stored, .default)`** answers whether a row was written at a
+  weaker Cost than the one in force, for the sign-in that just succeeded to
+  write it forward. Fewer kibibytes, fewer passes, a shorter salt or a shorter
+  digest; lanes are not in it.
+- **`pw.hash` fails one way**, `error.OutOfMemory`. `NotAHash` is something only
+  a stored string can be, and hashing never answered it.
 - **`zig build test-pw`**, and `zig test pw/pw.zig` with no `build.zig` at all
    — the same entry condition `nilo_id` and `nilo_config` have.
 
@@ -337,7 +355,8 @@ if (!try c.verifyPassword(gpa, if (row) |r| r.password else null, form.password)
 A project that never signs anybody in links **0 bytes** of `nilo_pw` — measured,
 a stripped `ReleaseFast` build before and after is byte-identical in every
 section. One that calls `Ctx.hashPassword` pays **149 KB**, which is argon2id,
-blake2b, the PHC encoder and the Gate.
+blake2b, the PHC encoder and the Gate, plus **820 bytes** if it uses
+`huge_pages`, `verifyWith` and `needsRehash` as well.
 
 A project that does not import `nilo_sql` links none of it — not the driver,
 not TLS — and pays **560 bytes** for the startup hook. One that uses the

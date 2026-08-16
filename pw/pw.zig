@@ -17,7 +17,14 @@
 //! const row = try db.find(User, conn, .{ .email = form.email });
 //! if (!try pw.verify(gpa, if (row) |r| r.password else null, form.password))
 //!     return nilo.fail(401, "that is not a sign-in");
+//!
+//! // the one moment the plaintext is in hand, and the Cost may have gone up
+//! if (try pw.needsRehash(row.?.password, .default)) { … }
 //! ```
+//!
+//! **`pw.huge_pages` is what to hand it for `gpa`.** The 19 MiB is asked for
+//! in the 2 MiB pages argon2 walks it in rather than 4,864 of 4 KiB, which is
+//! 13.6 ms a hash against 11.0 and nothing held between them (ADR 0049).
 //!
 //! **The salt and the allocator are arguments**, for the reason `nilo_id`
 //! takes entropy and a millisecond as arguments (ADR 0042): both are things a
@@ -41,6 +48,7 @@
 //! (ADR 0035).
 
 const argon2id = @import("argon2id.zig");
+const pages = @import("pages.zig");
 
 /// A stored password hash, in the PHC form everybody else writes.
 pub const Hash = argon2id.Hash;
@@ -68,6 +76,19 @@ pub const hashWith = argon2id.hashWith;
 /// there was no account, and costs exactly what an account costs.
 pub const verify = argon2id.verify;
 
+/// The same, told what a hash of yours costs — which is what the no-account
+/// path is timed against (ADR 0049).
+pub const verifyWith = argon2id.verifyWith;
+
+/// Whether a stored hash is weaker than one made now would be, for the sign-in
+/// that just succeeded to write again at the Cost in force.
+pub const needsRehash = argon2id.needsRehash;
+
+/// The 19 MiB, asked for in the 2 MiB pages argon2 walks it in: -19% on one
+/// hash, and nothing held between them (ADR 0049).
+pub const huge_pages = pages.huge_pages;
+
 test {
     _ = argon2id;
+    _ = pages;
 }

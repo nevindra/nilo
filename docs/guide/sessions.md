@@ -165,13 +165,15 @@ line it draws around [middleware and resolved values](./middleware.md).
 wrong is quiet:
 
 ```zig
+const pw = @import("nilo_pw"); // the hashing module, for `pw.huge_pages` and `pw.Cost`
+
 fn signIn(c: *nilo.Ctx, s: nilo.Session(User), form: nilo.Form(SignIn)) !Redirect(303) {
     const db = c.service(*Db).?;
     const conn = try db.acquire();
     defer conn.release();
 
     const row = try db.find(Account, conn, .{ .email = form.email });
-    if (!try c.verifyPassword(db.gpa, if (row) |r| r.password else null, form.password))
+    if (!try c.verifyPassword(pw.huge_pages, if (row) |r| r.password else null, form.password))
         return nilo.fail.unauthorized("that is not a sign-in", .{});
 
     try s.set(.{ .id = row.?.id });
@@ -179,23 +181,43 @@ fn signIn(c: *nilo.Ctx, s: nilo.Session(User), form: nilo.Form(SignIn)) !Redirec
 }
 ```
 
-Two things about that call are the whole reason it exists
-([ADR 0048](../adr/0048-a-password-hash-is-gated-because-forgetting-is-silent.md)):
+Three things about that call are the whole reason it exists
+([ADR 0048](../adr/0048-a-password-hash-is-gated-because-forgetting-is-silent.md),
+[ADR 0049](../adr/0049-a-hash-asks-for-the-pages-it-walks.md)):
 
 - **The stored hash is optional, and `null` means there is no such account.**
   It does the work anyway and answers false. Returning early when the address
   is unknown answers in a millisecond instead of thirty, which turns the form
-  into a query for which addresses are registered.
+  into a query for which addresses are registered. If you hash at a Cost of
+  your own, say so here too — `c.verifyPasswordWith(cost, …)` — because that
+  Cost is what the no-account path is measured out at.
 - **It is a `Ctx` method rather than a call to `nilo_pw`.** One hash is 13 ms
   and 19 MiB — under `block_warning_ms`, so calling the module directly holds
   the thread on every sign-in and nothing in the log says so. The method parks
   the fiber and holds one of `password_hashes_at_once` permits.
+- **The allocator is `pw.huge_pages` rather than `db.gpa`.** The 19 MiB arrives
+  in ten pages instead of 4,864, which is 11.0 ms a hash against 13.6 and
+  nothing held between them. Any allocator works; this is the one that is
+  fastest, and on anything that is not Linux it *is* `page_allocator`.
 
 Signing somebody up is the other direction:
 
 ```zig
-const stored = try c.hashPassword(db.gpa, form.password);
+const stored = try c.hashPassword(pw.huge_pages, form.password);
 _ = try db.insert(Account, conn, .{ .email = form.email, .password = stored.text() });
+```
+
+And when a sign-in succeeds is the one moment the plaintext is in hand, so it
+is the only place a row written at an older Cost can be written forward:
+
+```zig
+if (try pw.needsRehash(row.?.password, .default)) {
+    const fresh = try c.hashPassword(pw.huge_pages, form.password);
+    _ = try db.update(Account, c, .{
+        .set = .{ .password = fresh.text() },
+        .where = .{ .id = row.?.id },
+    });
+}
 ```
 
 ## Testing

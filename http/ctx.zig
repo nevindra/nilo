@@ -448,6 +448,24 @@ pub const Ctx = struct {
         return password_mod.verify(self, gpa, stored, password);
     }
 
+    /// The same, told what a hash of yours costs.
+    ///
+    /// **Pass the Cost you hash with, and pass it here too.** The no-account
+    /// path does the work of a hash rather than returning early, and the Cost
+    /// is what that work is measured out at — left at the default while your
+    /// rows are 46 MiB, the two answers take different lengths of time and the
+    /// form is a list of addresses again (ADR 0049). A stored hash is always
+    /// checked at the parameters it carries.
+    pub fn verifyPasswordWith(
+        self: *const Ctx,
+        comptime cost: password_mod.Cost,
+        gpa: std.mem.Allocator,
+        stored: ?[]const u8,
+        password: []const u8,
+    ) !bool {
+        return password_mod.verifyWith(cost, self, gpa, stored, password);
+    }
+
     /// The cookie called `name`, or null if the request carries no such one
     /// (ADR 0030).
     ///

@@ -62,6 +62,11 @@ pub fn setLimit(at_once: u16) void {
 /// call site. The request arena is the wrong allocator for it: the arena is
 /// reset per request keeping `arena_keep` bytes, and 19 MiB through it would
 /// spend the one axis ADR 0018 treats as an invariant.
+///
+/// **`pw.huge_pages` is the allocator this call is fastest out of** — the
+/// same 19 MiB in 2 MiB pages rather than 4,864 of 4 KiB, which is 13.6 ms a
+/// hash against 11.0 and nothing held between hashes (ADR 0049). It is opt-in
+/// for the reason the allocator is an argument at all.
 pub fn hash(c: *const Ctx, gpa: std.mem.Allocator, password: []const u8) !pw.Hash {
     return hashWith(.default, c, gpa, password);
 }
@@ -111,12 +116,48 @@ pub fn verify(
     stored: ?[]const u8,
     password: []const u8,
 ) !bool {
+    return verifyWith(.default, c, gpa, stored, password);
+}
+
+/// The same, told what a hash of yours costs.
+///
+/// The Cost is what the no-account path is worked against, so a deployment
+/// that hashes at anything but the default has one call to make rather than a
+/// timing difference to explain (ADR 0049).
+pub fn verifyWith(
+    comptime cost: pw.Cost,
+    c: *const Ctx,
+    gpa: std.mem.Allocator,
+    stored: ?[]const u8,
+    password: []const u8,
+) !bool {
     _ = c;
     try gate.enter();
     defer gate.leave();
 
-    return bulkhead.blocking(pw.verify, .{ gpa, stored, password });
+    // Bound here for the reason `hashWith` binds its own: a comptime
+    // parameter is not something `std.meta.ArgsTuple` can describe, so the
+    // Cost is settled before anything crosses to the thread-pool worker.
+    const Bound = struct {
+        fn run(
+            gpa_: std.mem.Allocator,
+            stored_: ?[]const u8,
+            password_: []const u8,
+        ) pw.Error!bool {
+            return pw.verifyWith(cost, gpa_, stored_, password_);
+        }
+    };
+    return bulkhead.blocking(Bound.run, .{ gpa, stored, password });
 }
+
+/// Whether a stored hash is weaker than one made now would be.
+///
+/// **Not a method on Ctx and not behind the Gate**, because it reads the
+/// parameters out of the string and hashes nothing: `pw.needsRehash(stored,
+/// .default)` is the whole call, and what it leads to — `c.hashPassword` on
+/// the plaintext that just verified — is gated like any other hash. Named
+/// here only so that this file lists everything a sign-in touches.
+pub const needsRehash = pw.needsRehash;
 
 const testing = std.testing;
 const App = @import("app.zig").App;
@@ -133,15 +174,30 @@ fn signsInAndBackOut(c: *Ctx) anyerror!void {
 
     const stored = try hashWith(test_cost, c, gpa, "hunter2");
 
-    if (!try verify(c, gpa, stored.text(), "hunter2")) return c.sendText(500, "right one failed");
-    if (try verify(c, gpa, stored.text(), "hunter3")) return c.sendText(500, "wrong one passed");
-    // No account at all, which is the signature that cannot be got wrong.
-    if (try verify(c, gpa, null, "hunter2")) return c.sendText(500, "nobody passed");
+    if (!try verifyWith(test_cost, c, gpa, stored.text(), "hunter2"))
+        return c.sendText(500, "right one failed");
+    if (try verifyWith(test_cost, c, gpa, stored.text(), "hunter3"))
+        return c.sendText(500, "wrong one passed");
+    // No account at all, which is the signature that cannot be got wrong. At
+    // `test_cost` rather than the default because the Cost is what the
+    // no-account path works at — which is the whole of why `verifyWith` takes
+    // one (ADR 0049), and incidentally why this test is 7 MiB and not 19.
+    if (try verifyWith(test_cost, c, gpa, null, "hunter2"))
+        return c.sendText(500, "nobody passed");
 
     // Twice, because the salt comes from the Ctx and two hashes of one
-    // password have to differ.
-    const again = try hashWith(test_cost, c, gpa, "hunter2");
+    // password have to differ. The second one out of `pw.huge_pages`, which
+    // is the allocator the documentation points a sign-in at and therefore
+    // one a handler has to be able to name.
+    const again = try hashWith(test_cost, c, pw.huge_pages, "hunter2");
     if (std.mem.eql(u8, stored.text(), again.text())) return c.sendText(500, "same salt twice");
+    if (!try verifyWith(test_cost, c, pw.huge_pages, again.text(), "hunter2"))
+        return c.sendText(500, "the pages answered differently");
+
+    // Made at the Cost in force, so nothing here is behind.
+    if (try needsRehash(stored.text(), test_cost)) return c.sendText(500, "fresh hash is stale");
+    if (!try needsRehash(stored.text(), .{ .memory_kib = 32 * 1024, .passes = 3 }))
+        return c.sendText(500, "a weaker hash reads as current");
 
     try c.sendText(200, stored.text());
 }

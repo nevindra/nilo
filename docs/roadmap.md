@@ -186,14 +186,15 @@ of it — measured at 0 bytes.
 
 ### Known gaps
 
-- **A hash is never re-hashed at a higher Cost.** The stored PHC string carries
-  the parameters it was made with, so a deployment that raises the Cost keeps
-  verifying old hashes at the old one forever, and nothing says which rows are
-  behind. What closes it is small — the parameters are already parsed, so a
-  `needsRehash` reading them against the current Cost is a comparison, and the
-  re-hash itself belongs to the one moment the plaintext is in hand, which is
-  the sign-in that just succeeded. What is missing is a caller: nobody has
-  raised a Cost yet.
+- **The Cost floor only weighs memory.** `Cost.floor_memory_kib` refuses
+  anything under 7 MiB, which is OWASP's weakest published configuration — but
+  that configuration is 7 MiB *and five passes*, and `.{ .memory_kib = 7 *
+  1024, .passes = 1 }` is a quarter of the work and compiles. A floor on
+  `memory_kib * passes` would catch it and would also refuse this repository's
+  own test Cost, which is how the suite affords two optimize modes. What is
+  missing is a way to be cheap in a test suite that is not also a way to be
+  cheap in production
+  ([ADR 0049](./adr/0049-a-hash-asks-for-the-pages-it-walks.md)).
 - **A password longer than a page costs what it is.** Argon2 hashes the whole
   input, so a client posting a megabyte gets a megabyte hashed. `max_body`
   bounds it at one megabyte by default and the Gate bounds how many at once,
@@ -211,6 +212,14 @@ of it — measured at 0 bytes.
   password hashing is its only caller. A second one (image resizing, a report
   that holds a core) would decide whether it is a public name or stays
   internal.
+- **Who sends `std` a vectorised argon2.** `std.crypto.pwhash.argon2` does its
+  16-word permutation one word at a time. Written as four `@Vector(4, u64)`
+  lanes — the shape the reference implementation has had since 2015 — the same
+  hash is **11.19 ms instead of 13.78**, and 8.98 out of `pw.huge_pages`, with
+  byte-identical output at every shape it was checked at. nilo will not carry a
+  copy of somebody else's crypto to get it
+  ([ADR 0049](./adr/0049-a-hash-asks-for-the-pages-it-walks.md)); the patch is
+  upstream's to take, and what is missing is somebody to send it.
 
 ---
 
