@@ -410,10 +410,19 @@ fn nullSafeSpelling(comptime name: []const u8) ?[]const u8 {
 /// question asked of every element instead of the negation of a whole
 /// comparison — and it keeps the shape of the fragment identical to `in`'s,
 /// so one placeholder still holds the whole list however long it is.
-fn listSpelling(comptime name: []const u8) ?[]const u8 {
+/// Which of the two list operators this is, rather than how it is spelled.
+///
+/// It used to answer `"= ANY"` and `"<> ALL"` — Postgres's words, handed
+/// straight to the writer. That worked while one Dialect existed and stopped
+/// the moment a second one spelled the same test another way, so the
+/// question this answers is now *which operator* and the spelling belongs to
+/// the branch that knows the dialect (ADR 0061).
+const ListOp = enum { in, not_in };
+
+fn listSpelling(comptime name: []const u8) ?ListOp {
     comptime {
-        if (std.mem.eql(u8, name, "in")) return "= ANY";
-        if (std.mem.eql(u8, name, "not_in")) return "<> ALL";
+        if (std.mem.eql(u8, name, "in")) return .in;
+        if (std.mem.eql(u8, name, "not_in")) return .not_in;
         return null;
     }
 }
@@ -448,13 +457,27 @@ fn operator(
 
         assertNotOptional(column, op.name, op.T);
 
-        if (listSpelling(op.name)) |form| {
+        if (listSpelling(op.name)) |list_op| {
+            // Taken once, outside the switch: the counter is what numbers
+            // every placeholder in the statement, and a branch that took it
+            // twice or not at all would renumber everything after it.
+            const bound = D.bindAs(
+                D.placeholder(state.take(path, .{ .column = column, .list = true })),
+                row_mod.ColumnType(Row, column),
+                true,
+            );
             return switch (D.list_form) {
-                .any_array => quoted ++ " " ++ form ++ "(" ++ D.bindAs(
-                    D.placeholder(state.take(path, .{ .column = column, .list = true })),
-                    row_mod.ColumnType(Row, column),
-                    true,
-                ) ++ ")",
+                .any_array => quoted ++ switch (list_op) {
+                    .in => " = ANY(",
+                    .not_in => " <> ALL(",
+                } ++ bound ++ ")",
+                // The list arrives as one JSON array and the statement takes
+                // it apart, which is how a database with no array type keeps
+                // the text a constant.
+                .json_each => quoted ++ switch (list_op) {
+                    .in => " IN ",
+                    .not_in => " NOT IN ",
+                } ++ "(SELECT value FROM json_each(" ++ bound ++ "))",
                 // Expanding the list into one placeholder each would make the
                 // statement depend on a length only known at runtime, which is
                 // the half of ADR 0039's rule this module exists to keep.

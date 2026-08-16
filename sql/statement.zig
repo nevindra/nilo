@@ -1108,6 +1108,7 @@ fn assertOptions(
 
 const testing = std.testing;
 const Pg = dialect_mod.Postgres;
+const Lite = dialect_mod.SQLite;
 
 const User = struct {
     pub const nilo_table = .{ .name = "users", .key = .id };
@@ -1661,4 +1662,125 @@ test "a plan name is an identifier Postgres will accept" {
     try testing.expect(name.len < 63);
     try testing.expect(std.mem.startsWith(u8, name, "nilo_"));
     for (name) |ch| try testing.expect(std.ascii.isAlphanumeric(ch) or ch == '_');
+}
+
+
+// -- the second Dialect ----------------------------------------------------
+//
+// The seam's whole claim is that the SQL is written through a Dialect rather
+// than spelled inline, and until a second one existed nothing tested it
+// (ADR 0061). These run the same compiler over `SQLite` and read what comes
+// out — no database, because a Dialect touches no I/O.
+
+test "the second dialect owes everything the first does" {
+    // `assertDialect` is what a `DbOf` calls, and it is the list of thirteen
+    // at the top of `sql/dialect.zig`. Running it here means the seam is
+    // checked even though no `Db` is built over SQLite yet — the whole point
+    // of a Dialect being comptime and I/O-free.
+    comptime dialect_mod.assertDialect(Lite);
+}
+
+test "the same select compiles to two dialects, differing only where they do" {
+    const options = .{ .where = .{ .age = .{ .gt = 18 } }, .limit = 10 };
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"email\", \"age\", \"created_at\" FROM \"users\"" ++
+            " WHERE \"age\" > $1 LIMIT 10",
+        comptime select(Pg, User, @TypeOf(options)).sql,
+    );
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"email\", \"age\", \"created_at\" FROM \"users\"" ++
+            " WHERE \"age\" > ?1 LIMIT 10",
+        comptime select(Lite, User, @TypeOf(options)).sql,
+    );
+}
+
+test "a list is one parameter in both dialects, by two different routes" {
+    // The one that did not fit the seam. Postgres binds an array; SQLite has
+    // no array type, so it binds a JSON document and takes it apart in the
+    // statement. **Both keep the text a constant however long the list is**,
+    // which is the property ADR 0039 is about and the reason `.expanded` was
+    // never an option for either.
+    const options = .{ .where = .{ .id = .{ .in = &[_]i64{ 1, 2, 3 } } } };
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"email\", \"age\", \"created_at\" FROM \"users\"" ++
+            " WHERE \"id\" = ANY($1)",
+        comptime select(Pg, User, @TypeOf(options)).sql,
+    );
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"email\", \"age\", \"created_at\" FROM \"users\"" ++
+            " WHERE \"id\" IN (SELECT value FROM json_each(?1))",
+        comptime select(Lite, User, @TypeOf(options)).sql,
+    );
+
+    // And the negation, which is the half a `= ANY` → `IN` rewrite gets
+    // wrong if it only looks at the positive case.
+    const without = .{ .where = .{ .id = .{ .not_in = &[_]i64{7} } } };
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"email\", \"age\", \"created_at\" FROM \"users\"" ++
+            " WHERE \"id\" <> ALL($1)",
+        comptime select(Pg, User, @TypeOf(without)).sql,
+    );
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"email\", \"age\", \"created_at\" FROM \"users\"" ++
+            " WHERE \"id\" NOT IN (SELECT value FROM json_each(?1))",
+        comptime select(Lite, User, @TypeOf(without)).sql,
+    );
+}
+
+test "a text column is cast in the grammar each dialect has for casting" {
+    // Postgres writes a suffix, SQLite writes a function. A seam that had
+    // asked the Dialect for "the cast suffix" would have had to be rewritten
+    // for the second dialect; asking for the whole expression did not.
+    const Wallet = struct {
+        pub const nilo_table = .{ .name = "wallets", .key = .id };
+        id: i64,
+        balance: types_mod.Decimal,
+    };
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        comptime select(Pg, Wallet, @TypeOf(.{})).sql,
+        1,
+        "\"balance\"::text",
+    ));
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        comptime select(Lite, Wallet, @TypeOf(.{})).sql,
+        1,
+        "CAST(\"balance\" AS TEXT)",
+    ));
+}
+
+test "a write compiles to both, RETURNING included" {
+    // SQLite has had `RETURNING` since 3.35, which is what lets `insert`
+    // mean the same thing on both — a row back, generated key and all. Had
+    // it not, the seam would have needed a way to say so, and the Dialect
+    // would have been the wrong place to put it.
+    const written = .{ .email = "a@b.com", .age = @as(i32, 30) };
+    try testing.expectEqualStrings(
+        "INSERT INTO \"users\" (\"email\", \"age\") VALUES ($1, $2)" ++
+            " RETURNING \"id\", \"email\", \"age\", \"created_at\"",
+        comptime insert(Pg, User, @TypeOf(written)).sql,
+    );
+    try testing.expectEqualStrings(
+        "INSERT INTO \"users\" (\"email\", \"age\") VALUES (?1, ?2)" ++
+            " RETURNING \"id\", \"email\", \"age\", \"created_at\"",
+        comptime insert(Lite, User, @TypeOf(written)).sql,
+    );
+}
+
+test "the two dialects judge a column against the types their database has" {
+    // Postgres has five integer-ish column types and SQLite has one, so the
+    // check the schema comparison can make is coarser here — and coarse in
+    // the safe direction: a `u64` does not fit an SQLite INTEGER and is
+    // declined rather than accepted optimistically.
+    try testing.expectEqualStrings("int4", Pg.accepts(i32).?[0]);
+    try testing.expectEqualStrings("INTEGER", Lite.accepts(i32).?[0]);
+    try testing.expectEqualStrings("INTEGER", Lite.accepts(i64).?[0]);
+    try testing.expectEqual(@as(dialect_mod.Accepts, null), Lite.accepts(u64));
+
+    // And an array column has nowhere to live at all, where Postgres names
+    // one — which is `insertMany` refusing on SQLite rather than writing an
+    // `unnest` the database has never heard of.
+    try testing.expectEqualStrings("int8[]", Pg.arrayOf(i64).?);
+    try testing.expectEqual(@as(?[]const u8, null), Lite.arrayOf(i64));
 }

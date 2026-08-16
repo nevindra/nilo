@@ -145,6 +145,21 @@ fails silently. There is no query cache for the same kind of reason:
 invalidation cannot be right from a module that sees only its own writes
 ([ADR 0060](./docs/adr/0060-a-second-database-is-a-second-type.md)).
 
+**A second Dialect, to find out whether the seam holds.** `sql.dialect.SQLite`
+is the SQL half only — a Dialect is comptime and touches no I/O, so it can be
+finished and tested with no dependency and no database. **Twelve of the
+thirteen declarations fitted with nothing changed outside it.** The thirteenth
+widened `ListForm` from three answers to four: the seam's answer for SQLite
+would have been *refuse `IN`*, and SQLite's own idiom —
+`IN (SELECT value FROM json_each(?1))` — keeps the statement a constant on a
+database with no array type. It also found a Postgres spelling that had leaked
+into the condition walker, which survived a year because there was nothing to
+disagree with it
+([ADR 0061](./docs/adr/0061-the-second-dialect-is-the-test-of-the-seam.md)).
+A SQLite Wire is not built: it is a blocking file read rather than a socket,
+and which of "hold the thread" or "pay a `nilo.blocking` hop" is right is a
+measurement nobody has taken.
+
 **28 Refusals** hold the module's own error messages — a Row written wrong, a
 column misspelled, an update with no condition, a key where a condition
 belongs. Each is a program in `sql/refusals/` that must fail to compile with

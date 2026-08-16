@@ -13,15 +13,27 @@
 //! fitting the seam now costs a call to `placeholder` instead of a literal
 //! `$`, and fitting it later would cost a rewrite of every generated string.
 //!
-//! A Dialect is also allowed to **refuse**. Postgres writes `in` as
-//! `= ANY($1)`, which keeps the SQL a constant however long the list is;
-//! SQLite has no arrays and would have to expand the list into placeholders,
-//! which makes the statement depend on a runtime length and breaks ADR 0039's
-//! rule. A Dialect that cannot express something says so at compile time
-//! rather than emitting something that means something else.
+//! A Dialect is also allowed to **refuse**, and SQLite does — a row lock and
+//! `insertMany` are both compile errors naming it, because there is nothing
+//! to write that would mean what they mean. A Dialect that cannot express
+//! something says so at compile time rather than emitting something that
+//! means something else.
 //!
-//! What ships is one Dialect. The point of the seam is that `$1` is not
-//! hardcoded, not that a second one exists yet.
+//! This paragraph used to say `in` was one of those refusals, on the
+//! reasoning that SQLite has no arrays and would have to expand the list into
+//! placeholders. That was right about the constraint and wrong about the
+//! conclusion: SQLite binds the list as one JSON document and takes it apart
+//! in the statement, which keeps the text a constant. **The prediction
+//! survived a year because nobody wrote the Dialect** (ADR 0061).
+//!
+//! **Two Dialects ship and one of them has a Wire.** `SQLite` below is the
+//! SQL half only, written to answer whether this seam is in the right place
+//! rather than because anything can run it yet — a Dialect is comptime and
+//! touches no I/O, so it can be finished and tested with no dependency, no
+//! database and no event loop. Twelve of the thirteen declarations fitted
+//! with nothing changed outside it; the thirteenth is why `ListForm` has
+//! four values instead of three
+//! ([ADR 0061](../docs/adr/0061-the-second-dialect-is-the-test-of-the-seam.md)).
 
 const std = @import("std");
 const core = @import("nilo_core");
@@ -36,6 +48,15 @@ pub const ListForm = enum {
     /// `col IN ($1, $2, …)`, one placeholder per element. Correct SQL, and it
     /// makes the statement depend on a length only known at runtime.
     expanded,
+    /// `col IN (SELECT value FROM json_each(?1))`, one parameter carrying a
+    /// JSON array as text. SQLite's own idiom, and the reason this enum has
+    /// four values rather than three: it keeps the statement a constant on a
+    /// database with no array type, which `.expanded` does not and
+    /// `.unsupported` gives up on (ADR 0061).
+    ///
+    /// What it asks of a Wire is the one thing that is not free — the list
+    /// has to arrive as JSON text rather than as a native array.
+    json_each,
     /// Not available. `in` becomes a Refusal naming the Dialect.
     unsupported,
 };
@@ -391,6 +412,208 @@ pub const Postgres = struct {
             0...16 => &.{ "int2", "int4", "int8" },
             17...32 => &.{ "int4", "int8" },
             33...64 => &.{"int8"},
+            else => null,
+        };
+    }
+};
+
+/// SQLite, which is here to answer whether the seam holds
+/// ([ADR 0061](../docs/adr/0061-the-second-dialect-is-the-test-of-the-seam.md)).
+///
+/// **It writes SQL and there is no Wire behind it**, which is the honest
+/// scope: a Dialect is comptime and touches no I/O, so it can be finished and
+/// tested on its own, and finishing it is what turns "we think the seam is in
+/// the right place" into a list of the four things SQLite actually disagrees
+/// with Postgres about. Three of them the seam already had a place for. The
+/// fourth did not fit and the seam was widened.
+///
+/// A program can use it today by writing a Wire — `DbOf` takes both halves
+/// separately for exactly this reason. What a SQLite Wire has to do that a
+/// Postgres one does not is written in the ADR.
+pub const SQLite = struct {
+    pub const name = "sqlite";
+
+    /// `?1`, numbered, and numbered rather than bare `?` for the same reason
+    /// Postgres numbers: the walker counts, and a condition that writes two
+    /// parameters must not lose track of which is which.
+    pub fn placeholder(comptime n: usize) []const u8 {
+        return "?" ++ std.fmt.comptimePrint("{d}", .{n});
+    }
+
+    /// Identical to Postgres, and not by accident: SQLite takes double
+    /// quotes around an identifier too, and a column honestly named `order`
+    /// needs them in both. The one difference is a trap rather than a
+    /// grammar — SQLite falls back to reading `"foo"` as the *string* `foo`
+    /// when no such column exists, so an unquoted-by-mistake name here would
+    /// be a silent constant rather than an error. Quoting everything is what
+    /// keeps that unreachable.
+    pub fn quote(comptime ident: []const u8) []const u8 {
+        return Postgres.quote(ident);
+    }
+
+    /// SQLite's schemas are attached databases — `main`, `temp`, and
+    /// whatever `ATTACH` named. The spelling is the same two identifiers, so
+    /// a Row that names a schema means the attached database rather than a
+    /// namespace inside one. Same text, different meaning, and the Row does
+    /// not have to know.
+    pub fn qualify(comptime schema: ?[]const u8, comptime table: []const u8) []const u8 {
+        return Postgres.qualify(schema, table);
+    }
+
+    /// **The one that did not fit.** SQLite has no array type, so `= ANY($1)`
+    /// is not available and expanding the list into placeholders breaks
+    /// ADR 0039. Before this Dialect existed the seam had three answers and
+    /// SQLite would have taken the third, `.unsupported` — `.in` refused
+    /// outright, on a database where every real schema uses it.
+    ///
+    /// It has a fourth answer now, and it is SQLite's own idiom: bind the
+    /// list as one JSON array and take it apart in the statement. One
+    /// parameter, constant text, whatever the length.
+    pub const list_form: ListForm = .json_each;
+
+    pub fn limit(comptime placeholder_text: []const u8) []const u8 {
+        return " LIMIT " ++ placeholder_text;
+    }
+
+    /// SQLite refuses `OFFSET` without a `LIMIT` in front of it, where
+    /// Postgres allows either alone. Nothing here can see the other clause,
+    /// so this writes what it is asked for and a caller who offsets without
+    /// limiting gets SQLite's own syntax error — which names the statement.
+    pub fn offset(comptime placeholder_text: []const u8) []const u8 {
+        return " OFFSET " ++ placeholder_text;
+    }
+
+    /// None. SQLite serialises writers with a lock over the whole database,
+    /// so there is no row to hold against anybody and nothing to write that
+    /// would mean what `.lock` means. The caller gets the Refusal
+    /// `noRowLock` writes, which names this Dialect.
+    pub fn lock(comptime mode: Lock) ?[]const u8 {
+        _ = mode;
+        return null;
+    }
+
+    /// `CAST(… AS TEXT)`, which is the same idea as Postgres's `::text` in a
+    /// different grammar — and the reason `readAs` returns the whole
+    /// expression rather than a suffix. A seam that had asked a Dialect for
+    /// "the cast suffix" would have had to be rewritten here.
+    ///
+    /// What it is asked *for* is thinner: SQLite has no `numeric`, no
+    /// `interval` and no `inet`, so a `sql.Decimal` column is a `TEXT`
+    /// column holding digits and the cast is a no-op that costs nothing and
+    /// keeps one code path.
+    pub fn readAs(comptime quoted: []const u8, comptime T: type) []const u8 {
+        return if (comptime types.asText(T) != null) "CAST(" ++ quoted ++ " AS TEXT)" else quoted;
+    }
+
+    /// The mirror, and the place the two databases differ most quietly.
+    /// Postgres casts the bound text *back* to the column's type — `$1::numeric`
+    /// — because the column has one. Here there is no type to cast back to,
+    /// so the text is bound as text and the column's affinity does the rest.
+    ///
+    /// `list` is `.in`, whose parameter is a JSON array rather than a SQL
+    /// one, and `json_each` reads it out of text. So the list case is the
+    /// plain placeholder too.
+    pub fn bindAs(
+        comptime placeholder_text: []const u8,
+        comptime T: type,
+        comptime list: bool,
+    ) []const u8 {
+        _ = T;
+        _ = list;
+        return placeholder_text;
+    }
+
+    /// None, so `insertMany` is a Refusal here. SQLite has no `unnest` and
+    /// no array parameter; the batch form it *does* have is
+    /// `VALUES (…), (…), (…)`, whose text grows with the batch — a statement
+    /// that is no longer a constant, which is the rule this module is built
+    /// on rather than a preference (ADR 0039).
+    ///
+    /// A row at a time inside one transaction is the answer, and on SQLite
+    /// it is a cheaper answer than it sounds: there is no round trip to pay
+    /// per statement.
+    pub fn arrayOf(comptime T: type) ?[]const u8 {
+        _ = T;
+        return null;
+    }
+
+    /// `pragma_table_info` as a table-valued function, which is the modern
+    /// spelling and the only one that composes into a `SELECT`.
+    ///
+    /// **The schema is not a parameter and cannot be**, because it qualifies
+    /// the function's own name rather than sitting in a `WHERE`. So a SQLite
+    /// Wire has to read the `schema` argument `columnsOf` hands it and put it
+    /// in the text, where the Postgres Wire binds it. That is the seam's one
+    /// loose joint and it is written down here rather than found later: the
+    /// contract says a Wire is given the query *and* both values, and a Wire
+    /// is allowed to use them however its database needs.
+    ///
+    /// The three columns are the same three: name, type, and a nullability
+    /// with three answers. `notnull` is 0 or 1 and a SQLite view answers 0
+    /// for every column exactly as a Postgres view does, so `UNKNOWN` is
+    /// reached the same way (ADR 0056) — through `sqlite_master.type`.
+    pub const introspect =
+        \\SELECT i.name,
+        \\       upper(i.type),
+        \\       CASE WHEN m.type = 'view' THEN 'UNKNOWN'
+        \\            WHEN i."notnull" = 1 THEN 'NO'
+        \\            ELSE 'YES' END
+        \\FROM pragma_table_info(?1) i
+        \\LEFT JOIN sqlite_master m ON m.name = ?1
+        \\ORDER BY i.cid
+    ;
+
+    /// **The widest difference, and the one that decides how much a schema
+    /// check is worth here.** A SQLite column's declared type is free text;
+    /// what the database enforces is one of five *affinities* derived from
+    /// it by a substring rule. `VARCHAR(255)`, `NVARCHAR` and `CLOB` are all
+    /// TEXT affinity, and a column declared `BANANA` is NUMERIC.
+    ///
+    /// So this answers with the affinity names rather than with type names,
+    /// and the check it enables is weaker than the Postgres one by exactly
+    /// as much as SQLite is weaker: it catches a `Str` field over an
+    /// `INTEGER` column, and it does not catch an `i32` field over a column
+    /// holding values that do not fit. **The honest thing is to say which
+    /// half is checked**, which is what this comment is for.
+    pub fn accepts(comptime T: type) Accepts {
+        return comptime acceptsSqlite(T);
+    }
+
+    fn acceptsSqlite(comptime T: type) Accepts {
+        const Inner = switch (@typeInfo(T)) {
+            .optional => |o| o.child,
+            else => T,
+        };
+
+        if (Inner == core.Str) return &.{ "TEXT", "VARCHAR", "CLOB", "CHARACTER" };
+
+        // A type that declared its Postgres column name declared a Postgres
+        // one. `timestamptz` and `jsonb` are both TEXT here, which is what
+        // SQLite stores them as and what every SQLite date function reads.
+        if (types.declaredColumn(Inner) != null) return &.{ "TEXT", "VARCHAR", "CLOB" };
+
+        // No array type at all, so a list column has nowhere to live and
+        // this declines rather than naming something that would not hold it.
+        if (types.listElement(Inner) != null) return null;
+
+        return switch (@typeInfo(Inner)) {
+            // No boolean either: SQLite stores 0 and 1 in an INTEGER, and
+            // `BOOLEAN` is a declared type with NUMERIC affinity.
+            .bool => &.{ "INTEGER", "BOOLEAN", "NUMERIC" },
+            .float => &.{ "REAL", "DOUBLE", "FLOAT", "NUMERIC" },
+            // One integer type, and it is 64 bits. Every Zig width that fits
+            // in an i64 reads out of it, which makes the check coarser than
+            // the Postgres one and correct rather than optimistic — a `u64`
+            // does not fit and is refused.
+            .int => |i| if (i.bits > 64 or (i.signedness == .unsigned and i.bits >= 64))
+                null
+            else
+                &.{ "INTEGER", "INT", "BIGINT", "NUMERIC" },
+            .@"enum" => &.{ "TEXT", "VARCHAR" },
+            .pointer => |ptr| if (ptr.size == .slice and ptr.child == u8)
+                &.{ "TEXT", "VARCHAR", "CLOB", "BLOB" }
+            else
+                null,
             else => null,
         };
     }

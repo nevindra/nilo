@@ -117,8 +117,10 @@ pub const Db = db.Db;
 /// ([ADR 0060](../docs/adr/0060-a-second-database-is-a-second-type.md)).
 pub const Named = db.Named;
 
-/// The Dialect used unless something says otherwise. One exists; the seam is
-/// there so that the second one is an addition rather than a rewrite.
+/// The Dialect used unless something says otherwise — and the only one with
+/// a Wire behind it. `sql.dialect.SQLite` is the second, SQL half only, and
+/// what it found is in
+/// [ADR 0061](../docs/adr/0061-the-second-dialect-is-the-test-of-the-seam.md).
 pub const Postgres = dialect.Postgres;
 
 pub const Timestamp = types.Timestamp;

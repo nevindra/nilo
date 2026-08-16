@@ -367,14 +367,20 @@ of it — measured at 0 bytes.
 
 ### Next
 
-1. **A second Dialect.** The seam is fitted and only Postgres is filled in,
-   so nothing is known about whether it holds. SQLite is the useful test,
-   because it disagrees about the three things the seam abstracts:
-   placeholders, list form (`sql/dialect.zig` already refuses a dialect with
-   no `ANY(array)` rather than expanding a list into placeholders) and now
-   casts — `readAs`, `bindAs` and `arrayOf` write `::text`, `::numeric` and
-   `::int4[]`, where SQLite spells a cast `CAST(… AS …)`, has no `numeric` to
-   cast to and has no array at all.
+1. **A SQLite Wire.** The Dialect is written and the seam held — twelve of
+   thirteen declarations fitted unchanged, and the thirteenth widened
+   `ListForm` to four values
+   ([ADR 0061](./adr/0061-the-second-dialect-is-the-test-of-the-seam.md)). What
+   is left is the half that speaks to the database, and it has a design
+   question in front of it rather than a coding one: **SQLite is a blocking
+   file read, not a socket.** A Postgres wait suspends the fiber and frees the
+   thread, which is what buys 215,000 requests a second
+   ([ADR 0059](./adr/0059-a-round-trip-is-not-the-cost-worth-chasing.md)); a
+   SQLite call has no descriptor to wait on, so it either holds its thread or
+   pays a `nilo.blocking` hop, and which is right depends on numbers nobody
+   has — a local read is microseconds, a write behind a contended database
+   lock is not. Measure that before writing anything. The C dependency is the
+   smaller half.
 
 ### Known gaps
 
@@ -512,7 +518,7 @@ Two whole areas come off before the list starts.
 
 **Connection and session**
 
-- [ ] A second driver → Next 1
+- [ ] A second driver — the Dialect is written, the Wire is Next 1
 - Read replicas: the mechanism is built and the routing is refused
   ([ADR 0060](./adr/0060-a-second-database-is-a-second-type.md)).
   `sql.Named("replica")` is a second `Db` type, so two pools are two services
