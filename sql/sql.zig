@@ -103,6 +103,20 @@ pub const db = @import("db.zig");
 /// rather than after (ADR 0006).
 pub const Db = db.Db;
 
+/// A second database, told apart from the first by its name — a read
+/// replica, a reporting warehouse, a database somebody else owns.
+///
+/// ```zig
+/// const Replica = sql.Named("replica");
+/// fn listing(rdb: *Replica, c: *nilo.Ctx) ![]Product { … }
+/// ```
+///
+/// Two names are two types and two types are two services (ADR 0011), so
+/// which pool a statement takes is written where a reader will see it: the
+/// handler's argument list
+/// ([ADR 0060](../docs/adr/0060-a-second-database-is-a-second-type.md)).
+pub const Named = db.Named;
+
 /// The Dialect used unless something says otherwise. One exists; the seam is
 /// there so that the second one is an addition rather than a rewrite.
 pub const Postgres = dialect.Postgres;

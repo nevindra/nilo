@@ -878,6 +878,46 @@ which is usually a migration that has not run.
 
 Set `.schema_mismatch_is_fatal = false` to log and carry on.
 
+### A second database
+
+The Service registry is keyed by type, so `*sql.Db` is *the* database and a
+second one had nowhere to live. `sql.Named` gives it a type of its own:
+
+```zig
+const Replica = sql.Named("replica");
+
+fn listing(rdb: *Replica, c: *nilo.Ctx) ![]Product {     // may be stale
+    return rdb.select(Product, c, .{ .order = .{ .name = .asc } });
+}
+
+fn buy(db: *sql.Db, c: *nilo.Ctx) !Order {               // must not be
+    return db.insert(Order, c, .{ … });
+}
+```
+
+Two names are two types and two types are two services, so both are
+`app.provide`d and both are checked at `listen()` like any other. **Which
+pool a statement takes is in the argument list**, which is where you can see
+it without leaving the line.
+
+Nothing routes anything, and that is deliberate. A reader that sent writes to
+the primary and reads to a replica would need health checking, lag awareness
+and read-after-write safety — three background tasks this module does not
+have, and the last one fails *silently*
+([ADR 0060](../adr/0060-a-second-database-is-a-second-type.md)). Writing
+`*Replica` in a signature is you saying "stale is fine here", once, on
+purpose.
+
+It is not only for replicas: a reporting warehouse, a second tenant, a
+database somebody else owns. `sql.Named("")` is a compile error, because the
+name is the whole mechanism.
+
+There is no query cache and there will not be one. The speed case is the
+strong half — a round trip is 24 µs and the query inside it is 2 — but
+invalidation cannot be right from here, because this module sees only the
+writes that go through it. Hold the value in a Service of your own, where the
+rule for when it goes stale is a rule you know.
+
 ### Statements are prepared, and you did nothing to ask for it
 
 Every statement this module sends is settled while compiling, so there is a

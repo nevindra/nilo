@@ -82,18 +82,63 @@ const builtin = @import("builtin");
 /// What a handler writes: `*sql.Db`. The Wire is chosen here rather than
 /// spelled by the caller, so that a signature says what it means and not
 /// which driver is behind it.
-pub const Db = DbOf(postgres.Wire, dialect.Postgres);
+pub const Db = DbOf(postgres.Wire, dialect.Postgres, "");
+
+/// A **second** database, told apart from the first by its name.
+///
+/// The Service registry is keyed by type (ADR 0011), so one `*sql.Db` is
+/// all a program could ask for and a read replica had nowhere to live. A
+/// name makes a distinct type, and two distinct types are two services:
+///
+/// ```zig
+/// const Replica = sql.Named("replica");
+///
+/// fn listing(db: *Replica, c: *nilo.Ctx) ![]Product { … }   // may be stale
+/// fn buy(db: *sql.Db, c: *nilo.Ctx) !Order { … }            // must not be
+/// ```
+///
+/// **Which pool a statement takes is written in the handler's argument
+/// list**, which is where the rest of this framework puts that kind of
+/// decision. Nothing routes anything, and that is the design rather than
+/// the first half of one — see
+/// [ADR 0060](../docs/adr/0060-a-second-database-is-a-second-type.md) for
+/// what a router would have had to know and could not.
+pub fn Named(comptime name: []const u8) type {
+    if (name.len == 0) @compileError(
+        "nilo: `sql.Named(\"\")` has no name, so it is `sql.Db` with extra steps.\n" ++
+            "  Give it the one a reader would want in the argument list: " ++
+            "`sql.Named(\"replica\")`, `sql.Named(\"warehouse\")`.",
+    );
+    return DbOf(postgres.Wire, dialect.Postgres, name);
+}
 
 /// Everything above, over any Wire and any Dialect. Generic so that the
 /// tests can drive the whole path against `wire.Fake` with no database
 /// anywhere — the same reason `App.handleRequest` takes a Reader and a
 /// Writer rather than a socket.
-pub fn DbOf(comptime W: type, comptime D: type) type {
+///
+/// `name` tells two otherwise identical `Db`s apart, and has to be *kept*
+/// to do it: Zig memoises a generic on the type it returns, so a parameter
+/// the body never mentions gives back the same type twice. `db_name` below
+/// is where it is kept, and the trap messages read it — which is the reason
+/// it is not merely a marker.
+pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type {
     comptime wire_mod.assertWire(W);
     comptime dialect.assertDialect(D);
 
     return struct {
         const Self = @This();
+
+        /// Empty for the ordinary `sql.Db`, the caller's word for a
+        /// `sql.Named`. Read by the traps so a panic says *which* database
+        /// leaked the connection, which is the whole difficulty of having
+        /// two.
+        pub const db_name = name;
+
+        /// `db_name` as it goes into a message: the ordinary `Db` is "the
+        /// database", a named one is quoted. Comptime, so a trap that never
+        /// fires costs nothing to have worded well.
+        const whoami = if (name.len == 0) "the database" else "`sql.Named(\"" ++ name ++ "\")`";
 
         gpa: std.mem.Allocator,
         url: []const u8,
@@ -172,19 +217,20 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             if (traps_enabled) {
                 const open = self.heldCount(&self.open_transactions);
                 if (open != 0) std.debug.panic(
-                    "nilo_sql: {d} transaction(s) were begun and never ended. Every `begin` " ++
-                        "wants `defer tx.deinit()` on the line after it, or the connection " ++
-                        "never goes back to the pool.",
-                    .{open},
+                    "nilo_sql: {d} transaction(s) were begun on {s} and never ended. Every " ++
+                        "`begin` wants `defer tx.deinit()` on the line after it, or the " ++
+                        "connection never goes back to the pool.",
+                    .{ open, whoami },
                 );
                 const streaming = self.heldCount(&self.open_streams);
                 if (streaming != 0) std.debug.panic(
-                    "nilo_sql: {d} result set(s) were opened with `stream` and never closed. " ++
+                    "nilo_sql: {d} result set(s) were opened with `stream` on {s} and never " ++
+                        "closed. " ++
                         "Every `stream` wants `defer rows.close()` on the line after it, or the " ++
                         "connection never goes back to the pool at all — an abandoned " ++
                         "transaction costs one until the request ends, an abandoned result set " ++
                         "costs one for as long as the process runs.",
-                    .{streaming},
+                    .{ streaming, whoami },
                 );
             }
             if (self.wire) |*w| w.close();
@@ -1774,7 +1820,11 @@ test "a password never reaches the log" {
 }
 
 /// A Db over the Fake: the whole of `db.zig` with no database behind it.
-const FakeDb = DbOf(wire_mod.Fake, dialect.Postgres);
+const FakeDb = DbOf(wire_mod.Fake, dialect.Postgres, "");
+
+/// The same, named — a second service of the same shape, which is the whole
+/// of what a read replica needs from this module (ADR 0060).
+const FakeReplica = DbOf(wire_mod.Fake, dialect.Postgres, "replica");
 
 const Person = struct {
     pub const nilo_table = .{ .name = "people", .key = .id };
@@ -2765,4 +2815,68 @@ test "a Db told to keep no plans sends none, whatever the statement is" {
 
     _ = try db.count(Person, &run, .{});
     try testing.expectEqual(@as(?[]const u8, null), db.wire.?.last_plan);
+}
+
+
+// -- a second database ----------------------------------------------------
+
+/// A handler holding both. The signature is the routing: this one reads
+/// from the replica and writes to the primary, and a reader can see that
+/// without leaving the line.
+fn readsOneWritesTheOther(db: *FakeDb, rdb: *FakeReplica, c: *nilo.Ctx) ![]Person {
+    _ = try db.insert(Person, c, .{
+        .id = @as(i64, 1),
+        .email = "a@b.com",
+        .nickname = @as(?[]const u8, null),
+        .age = @as(i32, 30),
+    });
+    return rdb.select(Person, c, .{ .where = .{ .age = .{ .gt = 18 } } });
+}
+
+test "two databases are two types, so the registry holds both" {
+    // The registry is keyed by type (ADR 0011), which is why one `*sql.Db`
+    // was all a program could ask for. A name is what makes the second type
+    // — and it has to be a name the struct *keeps*, because Zig memoises a
+    // generic on the type it gives back and a parameter the body never
+    // mentions gives back the same one twice.
+    try testing.expect(FakeDb != FakeReplica);
+    try testing.expect(sql_named_a != sql_named_b);
+    try testing.expectEqualStrings("replica", FakeReplica.db_name);
+    try testing.expectEqualStrings("", FakeDb.db_name);
+
+    var primary = FakeDb.init(testing.allocator, "postgres://test/primary", .{});
+    defer primary.deinit();
+    primary.wire = .{ .answers = 1 };
+
+    var replica = FakeReplica.init(testing.allocator, "postgres://test/replica", .{});
+    defer replica.deinit();
+    replica.wire = .{ .answers = 2 };
+
+    var app = nilo.App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&primary);
+    try app.provide(&replica);
+    try app.get("/both", readsOneWritesTheOther);
+
+    var client = try nilo.testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+    const answer = try client.get(&app, "/both");
+    try testing.expectEqual(@as(u16, 200), answer.status);
+
+    // Each statement went down its own Wire, which is the property the two
+    // types buy: the write is on the primary and the read is not.
+    try testing.expect(std.mem.startsWith(u8, primary.wire.?.last_sql, "INSERT INTO"));
+    try testing.expect(std.mem.startsWith(u8, replica.wire.?.last_sql, "SELECT"));
+}
+
+const sql_named_a = DbOf(wire_mod.Fake, dialect.Postgres, "a");
+const sql_named_b = DbOf(wire_mod.Fake, dialect.Postgres, "b");
+
+test "a named database says which one it is when a connection is left behind" {
+    // The name is not decoration: with two pools open, "a transaction was
+    // begun and never ended" without saying *where* is a message that sends
+    // somebody to read both. The trap panics, so what is asserted here is
+    // the wording it would use.
+    try testing.expectEqualStrings("the database", FakeDb.whoami);
+    try testing.expectEqualStrings("`sql.Named(\"replica\")`", FakeReplica.whoami);
 }

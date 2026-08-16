@@ -513,8 +513,16 @@ Two whole areas come off before the list starts.
 **Connection and session**
 
 - [ ] A second driver → Next 1
-- [ ] Read replicas — a second pool, and a rule for which one a statement takes
-- [ ] A query cache
+- Read replicas: the mechanism is built and the routing is refused
+  ([ADR 0060](./adr/0060-a-second-database-is-a-second-type.md)).
+  `sql.Named("replica")` is a second `Db` type, so two pools are two services
+  and which one a statement takes is written in the handler's argument list.
+  An automatic reader needs health checking, lag awareness and read-after-write
+  safety — three background tasks this module does not have, and getting the
+  last one wrong is silent.
+- A query cache: refused, same ADR. Invalidation cannot be right from here —
+  the module sees only the writes that go through it. A TTL is a policy and
+  tagging is annotation; the value belongs in a Service of your own.
 
 **Tooling.** None of it exists, and all of it is a CLI rather than a server —
 which is why none of it can spend an axis, and why a `Run` is all any of it

@@ -89,6 +89,10 @@ const Example = struct { name: []const u8, about: []const u8 };
 /// module it does not import (ADR 0039).
 const sql_refusals = [_]Refusal{
     .{
+        .name = "a_second_database_with_no_name",
+        .says = "`sql.Named(\"\")` has no name, so it is `sql.Db` with extra steps.",
+    },
+    .{
         .name = "any_empty",
         .says = "`.any` is empty.",
     },

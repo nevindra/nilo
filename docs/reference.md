@@ -824,6 +824,14 @@ database switched off, and the first request that needs it gets
 | `schema_mismatch_is_fatal` | whether a Row that disagrees with its table stops startup. Default true |
 | `prepared` | whether a statement is kept prepared on the connection it went down. Default true |
 
+`sql.Named("replica")` is a **second `Db` type**, so a second database is a
+second service and which pool a statement takes is written in the handler's
+argument list. Nothing routes between them: an automatic reader needs health
+checking, lag awareness and read-after-write safety, and the last fails
+silently ([ADR 0060](./adr/0060-a-second-database-is-a-second-type.md)).
+`sql.Named("")` is a Refusal. There is no query cache — invalidation cannot
+be right from a module that sees only its own writes.
+
 Every statement this module sends is a comptime constant, so it is kept
 prepared on its connection under a name derived from its own text — worth
 **30% of a key lookup and 14% of a page with a sort**, ~12 µs either way

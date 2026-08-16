@@ -135,6 +135,16 @@ query in every one** because a waiting fiber frees its thread
 ([ADR 0059](./docs/adr/0059-a-round-trip-is-not-the-cost-worth-chasing.md)).
 `bench/sql_server.zig` is that measurement, and it is in the repository.
 
+**A second database is a second type.** `sql.Named("replica")` gives back a
+`Db` distinguished by its name, so two pools are two services and which one a
+statement takes is written where a reader sees it — the handler's argument
+list. Good for a read replica, a reporting warehouse, or a database somebody
+else owns. Nothing routes between them, because an automatic reader needs
+health checking, lag awareness and read-after-write safety and the last one
+fails silently. There is no query cache for the same kind of reason:
+invalidation cannot be right from a module that sees only its own writes
+([ADR 0060](./docs/adr/0060-a-second-database-is-a-second-type.md)).
+
 **28 Refusals** hold the module's own error messages — a Row written wrong, a
 column misspelled, an update with no condition, a key where a condition
 belongs. Each is a program in `sql/refusals/` that must fail to compile with
