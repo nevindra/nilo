@@ -80,6 +80,7 @@ read, no status sent
 | `u32`, `f64`, `Str`, `bool`, an enum | a path param, positionally |
 | `Query(T)` | the query string as a struct |
 | `Form(T)` | the body as an HTML form — urlencoded or multipart |
+| `Bound(W)` | any of the three above, with its failures instead of a 400 |
 | `Session(T)` | the session, out of its cookie |
 | `std.mem.Allocator` | the request arena |
 | a type with `zfast_resolve` | a resolved value |
@@ -93,6 +94,26 @@ A body field may be `Patch(T)`, which tells "not sent" from "sent as null":
 asking for both is a compile error. A `Form(T)` field is a `Str`, a number, a
 `bool`, an enum or an `Upload`, optionally in a `?`; a default is what "not
 sent" means. See [Forms](./guide/forms.md).
+
+### `Bound(W)`
+
+`Bound(Form(T))`, `Bound(Query(T))`, `Bound(T)` for a JSON body. Occupies the
+same slot as what it wraps.
+
+| | |
+|---|---|
+| `b.value()` | `?T` — the binding, or null if **any** field failed |
+| `b.fail()` | a 422 naming every field that did not bind |
+| `b.failed()`, `b.failedCount()` | whether, and how many |
+| `b.failures()` | an iterator of `Failure` |
+| `b.given("name")` | `Str` — the text that arrived, bound or not. Name checked while compiling |
+
+A `Failure` carries `field`, `reason`, `given`, `kind`, `expected`, and
+`say(w)` — zfast's own sentence for it. `reason` is one of `.missing`,
+`.not_a_number`, `.not_true_or_false`, `.not_a_choice`, `.wrong_kind`; that is
+the whole list, and it is not a validator. Nothing is allocated per failed
+field. See [Forms](./guide/forms.md#when-one-field-is-wrong-and-the-rest-are-fine)
+and [ADR 0036](./adr/0036-a-binding-hands-its-failures-to-the-handler.md).
 
 ## Handler returns
 
@@ -134,6 +155,9 @@ Redirect(303).with("/welcome", .of(&.{…}))                 // …with headers 
 | `c.body()` | `!Str` — the whole body, up to `max_body` (1 MB) |
 | `c.json(T)` | `!T` — the body parsed as JSON |
 | `c.form(T)` | `!T` — the body parsed as a form, urlencoded or multipart |
+| `c.jsonCollecting(T, &outcomes)` | `!T` — as `json`, recording why each field failed |
+| `c.formCollecting(T, &outcomes)` | `!T` — as `form`, recording why each field failed |
+| `c.requestId()` | `Str` — this request's id, from `X-Request-Id` or generated |
 | `c.bodyStream()` | `!Body` — the body in pieces |
 | `c.bodyStreamWith(.{ .max_bytes = … })` | the same, with a ceiling. Default 64 MB |
 | `c.peer()` | the address the connection came from — the proxy's, if there is one |
@@ -346,7 +370,9 @@ measurement that says why.
 
 ```zig
 zfast.logger.standard                                    // one info line per request
-zfast.logger.with(.{ .level = .info, .slow_micros = 0 }) // slower than this → .warn
+zfast.logger.with(.{ .level = .info, .slow_micros = 0,   // slower than this → .warn
+                     .format = .text,                    // or .json, one object per line
+                     .request_id = false })              // X-Request-Id out, and on the line
 
 zfast.cors.permissive                                    // origin "*", no credentials
 zfast.cors.with(.{ .origin = …, .methods = …, .headers = …,

@@ -198,6 +198,32 @@ pub const Form = @import("form.zig").Form;
 /// so it is a label to show, never a path to write to.
 pub const Upload = @import("form.zig").Upload;
 
+/// A binding that hands its failures back, instead of ending the request.
+///
+/// ```zig
+/// fn signUp(b: zfast.Bound(zfast.Form(SignUp))) !zfast.Redirect(303) {
+///     const form = b.value() orelse return b.fail();
+///     …
+/// }
+/// ```
+///
+/// Wraps whichever slot it is given: `Bound(Form(T))`, `Bound(Query(T))`, or
+/// `Bound(T)` for a JSON body. Without it, one field that will not convert is
+/// a 400 and the request is over with nothing saying which field; with it, the
+/// handler gets the binding *and* its failures by name and chooses what to
+/// answer. `b.fail()` is the shortcut — a 422 naming every field that did not
+/// bind — and `b.failures()` is there for a body of your own shape.
+///
+/// `value()` is optional on purpose: a field that did not bind holds nothing
+/// worth reading, and there is no way past that into a half-filled struct.
+/// What a form showing itself again wants is `b.given("email")`, the text the
+/// person actually typed.
+///
+/// Nothing is allocated per failed field, and this is not a validation
+/// layer — zfast's job stops at "this did not convert to a `u32`", and
+/// whether the age is plausible stays yours.
+pub const Bound = @import("bound.zig").Bound;
+
 /// A response that sends the client somewhere else, with the status in the
 /// type so the API description can name it (ADR 0032).
 ///
@@ -413,6 +439,7 @@ test {
     _ = @import("cookie.zig");
     _ = @import("session.zig");
     _ = @import("form.zig");
+    _ = @import("bound.zig");
     _ = @import("redirect.zig");
     _ = @import("http1.zig");
     _ = @import("bulkhead.zig");

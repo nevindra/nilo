@@ -16,7 +16,8 @@ each one assumes the ones above it — and jump straight in afterwards.
 
 4. [Requests](./requests.md) — path params, query structs, JSON bodies, and
    bodies too big to hold.
-5. [Forms](./forms.md) — an HTML form as a struct of yours, and file uploads.
+5. [Forms](./forms.md) — an HTML form as a struct of yours, file uploads, and
+   the binding that names the field that broke instead of refusing the lot.
 6. [Responses](./responses.md) — statuses, headers and redirects, and the `Ctx`
    layer underneath the typed one.
 7. [Cookies](./cookies.md) — reading them, setting them, and the signed-in
@@ -35,8 +36,8 @@ each one assumes the ones above it — and jump straight in afterwards.
     about blocking calls.
 13. [Static files](./static-files.md) — a directory held in memory, with ETags
     and range requests.
-14. [Errors](./errors.md) — failing a request from anywhere, and what a client
-    is told.
+14. [Errors](./errors.md) — failing a request from anywhere, what a client is
+    told, and request ids for tying a failure to its log line.
 
 ## Shipping it
 

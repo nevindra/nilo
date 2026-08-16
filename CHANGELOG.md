@@ -22,13 +22,23 @@ Without the `?ref=` you get whatever `main` is that day.
 - **Requests** — path params, query strings and JSON bodies as structs of your
   own; bodies too big to hold, read as a stream.
 - **HTML forms and file uploads**, url-encoded and multipart.
+- **Bindings that name the field that broke.** `Bound(Form(T))`, `Bound(T)` and
+  `Bound(Query(T))` hand the handler every field that would not bind, by name,
+  with the text that arrived — a 422 listing them is one line, and a page
+  showing the form again with one box marked is a few more
+  ([ADR 0036](./docs/adr/0036-a-binding-hands-its-failures-to-the-handler.md)).
 - **Responses** — a status in the type (`Status(201, T)`), typed redirects,
   response headers, and a `Ctx` layer underneath for full control.
 - **Cookies, and sessions sealed into one** with `XChaCha20Poly1305` — no server
   store, no expiry sweep, nothing added to what an idle connection costs
   ([ADR 0035](./docs/adr/0035-a-session-is-sealed-into-the-cookie.md)).
 - **Middleware** as an onion of `Ctx` functions, and resolved values declared by
-  their type.
+  their type. A group prefix may carry a param — `app.group("/orgs/:org")` —
+  and middleware scoped to it matches whole segments.
+- **Request ids and JSON log lines.**
+  `logger.with(.{ .format = .json, .request_id = true })` writes one JSON object
+  per line and puts an `X-Request-Id` on every response, adopting the proxy's id
+  when it sent a usable one. `c.requestId()` reaches the same id from a handler.
 - **Static files** held in memory, gzipped once at startup, with ETags and range
   requests.
 - **Streamed responses and server-sent events.**
@@ -37,7 +47,7 @@ Without the `?ref=` you get whatever `main` is that day.
   annotations ([ADR 0017](./docs/adr/0017-the-api-description-comes-from-the-signatures.md)).
 - **Failure in zfast's own words.** Get a handler wrong and compilation stops
   with a sentence naming your route, your argument and the fix; `refusals/` is
-  50 programs written wrong on purpose that keep it that way
+  54 programs written wrong on purpose that keep it that way
   ([ADR 0027](./docs/adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)).
 - **`zfast.spawn`** for work that is not a request, owned by the server so
   shutdown counts it ([ADR 0029](./docs/adr/0029-a-spawned-fiber-belongs-to-the-server.md)).
@@ -56,13 +66,10 @@ the same harness in [`docs/comparison.md`](./docs/comparison.md).
 - **Templates** — a refusal rather than a backlog item. zfast is for building
   APIs and services; rendering pages is not what it is for, and the reasoning is
   in [the roadmap](./docs/roadmap.md#not-coming).
-- **A binding failure that names the field.** A `Form(T)` or body field that
-  will not convert fails the whole request with a 400, and nothing says which
-  field it was. First item on the roadmap.
 - **Broadcasting to a WebSocket a handler does not hold.** The `chat` example
   echoes; two tabs do not see each other.
-- **A request id.** One plain-text log line per request, with nothing tying it
-  to anything else.
+- **Counters.** Requests carry an id and lines can be JSON, but how many
+  requests, at what statuses, and how long is not collected anywhere.
 - **TLS**, and with it HTTP/2 and a gRPC server. This is a refusal rather than a
   gap — terminate in front
   ([ADR 0028](./docs/adr/0028-tls-is-terminated-in-front.md)).

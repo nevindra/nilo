@@ -1095,7 +1095,9 @@ pub fn Group(comptime prefix: []const u8) type {
     };
 }
 
-/// A group prefix is literal text with a leading slash and no trailing one.
+/// A group prefix has a leading slash, no trailing one, and no catch-all.
+/// A param is allowed: `use` scopes middleware by matching whole segments,
+/// and a `:name` segment matches whatever is opposite it (`middleware.zig`).
 fn checkPrefix(comptime prefix: []const u8) void {
     comptime {
         // The root group, which is what a plugin mounted at the top gets.
@@ -1112,14 +1114,15 @@ fn checkPrefix(comptime prefix: []const u8) void {
                 "registered inside bring their own leading slash, and two would make " ++
                 "\"" ++ prefix ++ "/users\".",
         );
-        if (std.mem.indexOfAny(u8, prefix, ":*") != null) @compileError(
-            "zfast: the group prefix \"" ++ prefix ++ "\" has a `:` or a `*` in it, and a group " ++
-                "prefix is literal text.\n" ++
-                "  The reason is `use`: middleware on a group is scoped by comparing the front of " ++
-                "the request path against the prefix, and \"" ++ prefix ++ "\" is not the front " ++
-                "of any real path — so every middleware on this group would quietly never run.\n" ++
-                "  Put the param in the route patterns instead: " ++
-                "`app.get(\"" ++ prefix ++ "/…\", …)`.",
+        if (std.mem.indexOfScalar(u8, prefix, '*') != null) @compileError(
+            "zfast: the group prefix \"" ++ prefix ++ "\" has a `*` in it, and a catch-all " ++
+                "cannot be a prefix.\n" ++
+                "  A `*` matches the whole rest of the path, so there would be nothing left for " ++
+                "the routes inside the group to match — every one of them would be unreachable.\n" ++
+                "  A `*` belongs at the end of a route pattern, where it is the last thing that " ++
+                "matches: `app.get(\"" ++ prefix[0 .. std.mem.indexOfScalar(u8, prefix, '*').? - 1] ++
+                "/*\", …)`.\n" ++
+                "  A `:` in a prefix is fine — `app.group(\"/orgs/:org\")` works.",
         );
     }
 }
@@ -1462,6 +1465,7 @@ const Str = str_mod.Str;
 // one place that wants to go back the other way.
 const zfast_testing = @import("testing.zig");
 const form_mod = @import("form.zig");
+const bound_mod = @import("bound.zig");
 const redirect_mod = @import("redirect.zig");
 
 const Harness = struct {
@@ -2744,6 +2748,34 @@ test "a prefix scopes middleware to the routes under it" {
 
     const on = h.send(&app, "GET /api/thing HTTP/1.1\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, on.response, "X-Inner: yes") != null);
+
+    const off = h.send(&app, "GET /health HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, off.response, "X-Inner") == null);
+}
+
+test "a prefix carrying a param scopes middleware the same way" {
+    // The multi-tenant shape, which used to be a compile error. Three things
+    // have to hold: the route under it, the 404 under it — that one was
+    // genuinely broken, because the cold path matches against the real path
+    // rather than the pattern — and a neighbouring tree staying untouched.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+
+    var orgs = app.group("/orgs/:org");
+    try orgs.use(tagInner);
+    try orgs.get("/members", plainOk);
+    try app.get("/health", plainOk);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const on = h.send(&app, "GET /orgs/acme/members HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, on.response, "X-Inner: yes") != null);
+
+    const missing = h.send(&app, "GET /orgs/acme/nothing-here HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, missing.response, "HTTP/1.1 404"));
+    try testing.expect(std.mem.indexOf(u8, missing.response, "X-Inner: yes") != null);
 
     const off = h.send(&app, "GET /health HTTP/1.1\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, off.response, "X-Inner") == null);
@@ -5700,6 +5732,272 @@ test "a form that does not fit is a 400 naming the field, like a query param" {
         "Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}");
     try testing.expect(std.mem.startsWith(u8, wrong_type.response, "HTTP/1.1 400"));
     try testing.expect(try Harness.saysFailure(wrong_type.response, "this endpoint takes a form"));
+}
+
+// ---- request ids ----
+
+const logger_mod = @import("logger.zig");
+
+fn echoesItsRequestId(c: *Ctx) ![]const u8 {
+    return c.requestId().view();
+}
+
+test "a request with no id of its own is given one, and told which" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(logger_mod.with(.{ .request_id = true }));
+    try app.get("/x", echoesItsRequestId);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const answer = h.send(&app, "GET /x HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 200"));
+
+    // Sixteen hex characters, and the handler and the response header agree
+    // about which — one id per request, worked out once.
+    const sent = sentHeader(answer.response, "X-Request-Id").?;
+    try testing.expectEqual(@as(usize, 16), sent.len);
+    for (sent) |ch| try testing.expect(std.ascii.isHex(ch));
+    try testing.expect(std.mem.endsWith(u8, answer.response, sent));
+}
+
+test "an id from the proxy in front is adopted rather than replaced" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(logger_mod.with(.{ .request_id = true }));
+    try app.get("/x", echoesItsRequestId);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const answer = h.send(&app, "GET /x HTTP/1.1\r\nX-Request-Id: 2f8a4c1e-5b6d\r\n\r\n");
+    try testing.expectEqualStrings("2f8a4c1e-5b6d", sentHeader(answer.response, "X-Request-Id").?);
+    try testing.expect(std.mem.endsWith(u8, answer.response, "2f8a4c1e-5b6d"));
+}
+
+test "an id that would smuggle something is ignored, not repeated" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(logger_mod.with(.{ .request_id = true }));
+    try app.get("/x", echoesItsRequestId);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    // A header value cannot carry a bare CR or LF this far — the parser
+    // stops that — so the shape that does arrive is the one with characters
+    // a JSON log line or a downstream reader would take as structure.
+    const answer = h.send(&app, "GET /x HTTP/1.1\r\nX-Request-Id: \"quoted, and long\"\r\n\r\n");
+    const sent = sentHeader(answer.response, "X-Request-Id").?;
+    try testing.expectEqual(@as(usize, 16), sent.len);
+    for (sent) |ch| try testing.expect(std.ascii.isHex(ch));
+
+    // And an over-long one is dropped for the same reason.
+    const long = h.send(&app, "GET /x HTTP/1.1\r\nX-Request-Id: " ++ ("a" ** 65) ++ "\r\n\r\n");
+    try testing.expectEqual(@as(usize, 16), sentHeader(long.response, "X-Request-Id").?.len);
+}
+
+test "a request nobody asks about is given no id at all" {
+    // The option costs a header on every response, so it is off by default
+    // and `c.requestId()` is what a handler reaches for when it wants one.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(logger_mod.standard);
+    try app.get("/x", plainOk);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const answer = h.send(&app, "GET /x HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, answer.response, "X-Request-Id") == null);
+}
+
+/// One response header's value, for the tests above.
+fn sentHeader(response: []const u8, name: []const u8) ?[]const u8 {
+    const head_end = std.mem.indexOf(u8, response, "\r\n\r\n") orelse response.len;
+    var lines = std.mem.splitSequence(u8, response[0..head_end], "\r\n");
+    _ = lines.next();
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[0..colon], " "), name)) {
+            return std.mem.trim(u8, line[colon + 1 ..], " ");
+        }
+    }
+    return null;
+}
+
+// ---- a binding that hands its failures back ----
+
+const Registration = struct {
+    email: Str,
+    age: u32,
+    newsletter: bool = false,
+};
+
+/// The shortcut: everything or a 422 naming what went wrong.
+fn register(b: bound_mod.Bound(form_mod.Form(Registration))) ![]const u8 {
+    const form = b.value() orelse return b.fail();
+    return form.email.view();
+}
+
+/// The other way in: the handler decides what a failure looks like, and
+/// reads back the text that was typed so a page could show it again.
+fn registerShowingTheForm(
+    arena: std.mem.Allocator,
+    b: bound_mod.Bound(form_mod.Form(Registration)),
+) !struct { wrong: []const []const u8, typed_age: []const u8 } {
+    var wrong: std.ArrayList([]const u8) = .empty;
+    var it = b.failures();
+    while (it.next()) |f| try wrong.append(arena, f.field);
+    return .{ .wrong = wrong.items, .typed_age = b.given("age").view() };
+}
+
+test "a form binding hands every failed field back at once" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/register", register);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    // Two things wrong at once. The all-or-nothing `Form(T)` would have said
+    // only the first, which is the gap this exists to close.
+    const answer = h.send(&app, "POST /register HTTP/1.1\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 9\r\n\r\n" ++
+        "age=soon&");
+    try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 422"));
+    try testing.expect(try Harness.saysFailure(answer.response, "2 fields did not fit"));
+    try testing.expect(try Harness.saysFailure(answer.response, "the form is missing \"email\" (text)"));
+    try testing.expect(try Harness.saysFailure(
+        answer.response,
+        "\"age\" has to be a whole number, not \"soon\"",
+    ));
+}
+
+test "a binding that bound answers exactly as the plain form would have" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/register", register);
+
+    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    const answer = try client.postWith(
+        &app,
+        "/register",
+        "application/x-www-form-urlencoded",
+        "email=wati%40example.dev&age=31",
+    );
+    try testing.expectEqual(@as(u16, 200), answer.status);
+    try testing.expectEqualStrings("wati@example.dev", answer.body);
+}
+
+test "a handler can answer its own way, and read back what was typed" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/register", registerShowingTheForm);
+
+    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    const answer = try client.postWith(
+        &app,
+        "/register",
+        "application/x-www-form-urlencoded",
+        "age=soon",
+    );
+    // 200, because the handler chose to answer rather than to fail.
+    try testing.expectEqual(@as(u16, 200), answer.status);
+    try testing.expectEqualStrings(
+        "{\"wrong\":[\"email\",\"age\"],\"typed_age\":\"soon\"}",
+        answer.body,
+    );
+}
+
+/// The same, on a JSON body rather than a form.
+const NewOrder = struct {
+    reference: Str,
+    quantity: u32,
+    priority: enum { low, high } = .low,
+};
+
+fn placeBoundOrder(b: bound_mod.Bound(NewOrder)) ![]const u8 {
+    const order = b.value() orelse return b.fail();
+    return order.reference.view();
+}
+
+test "a JSON body binding names every field that did not bind" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/orders", placeBoundOrder);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const body = "{\"quantity\":\"soon\",\"priority\":\"sideways\"}";
+    var head_buf: [128]u8 = undefined;
+    const head = std.fmt.bufPrint(&head_buf, "POST /orders HTTP/1.1\r\n" ++
+        "Content-Type: application/json\r\nContent-Length: {d}\r\n\r\n", .{body.len}) catch unreachable;
+
+    var request_buf: [256]u8 = undefined;
+    const request = std.fmt.bufPrint(&request_buf, "{s}{s}", .{ head, body }) catch unreachable;
+
+    const answer = h.send(&app, request);
+    try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 422"));
+    try testing.expect(try Harness.saysFailure(answer.response, "3 fields did not fit"));
+    try testing.expect(try Harness.saysFailure(
+        answer.response,
+        "the request body is missing \"reference\" (text)",
+    ));
+    // Not `not "soon"`, the way a form would say it. In JSON a quoted value
+    // is *text*, and sending text where a number belongs is a mistake about
+    // the kind rather than about what the characters spell — which is the
+    // sentence the body parser has always given, and this does not get to
+    // reword it just because it collected several.
+    try testing.expect(try Harness.saysFailure(
+        answer.response,
+        "\"quantity\" has to be a whole number, not text",
+    ));
+    try testing.expect(try Harness.saysFailure(
+        answer.response,
+        "\"priority\" is not one of the known choices (low, high): \"sideways\"",
+    ));
+}
+
+test "what leaves no binding to hand back is still a plain 400" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/orders", placeBoundOrder);
+    try app.post("/register", register);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    // A field the endpoint has never heard of: naming the typo ends the
+    // search, where "reference is missing" would not.
+    const unknown = h.send(&app, "POST /orders HTTP/1.1\r\n" ++
+        "Content-Type: application/json\r\nContent-Length: 14\r\n\r\n" ++
+        "{\"refrence\":1}");
+    try testing.expect(std.mem.startsWith(u8, unknown.response, "HTTP/1.1 400"));
+    try testing.expect(try Harness.saysFailure(unknown.response, "a field \"refrence\" this endpoint does not know"));
+
+    // Text that is not JSON at all is not a mistake about any one field.
+    const garbage = h.send(&app, "POST /orders HTTP/1.1\r\n" ++
+        "Content-Type: application/json\r\nContent-Length: 5\r\n\r\n" ++
+        "{[[[[");
+    try testing.expect(std.mem.startsWith(u8, garbage.response, "HTTP/1.1 400"));
+    try testing.expect(try Harness.saysFailure(garbage.response, "not valid JSON"));
+
+    // And a body that is not a form at all, on the form side.
+    const not_a_form = h.send(&app, "POST /register HTTP/1.1\r\n" ++
+        "Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}");
+    try testing.expect(std.mem.startsWith(u8, not_a_form.response, "HTTP/1.1 400"));
+    try testing.expect(try Harness.saysFailure(not_a_form.response, "this endpoint takes a form"));
 }
 
 const NewAvatar = struct {

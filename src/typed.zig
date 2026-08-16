@@ -48,6 +48,7 @@ const str_mod = @import("str.zig");
 const resolve = @import("resolve.zig");
 const openapi = @import("openapi.zig");
 const patch_mod = @import("patch.zig");
+const bound_mod = @import("bound.zig");
 
 const Ctx = ctx_mod.Ctx;
 const Str = str_mod.Str;
@@ -264,6 +265,16 @@ const Role = union(enum) {
     /// A value zfast works out from the request before the handler runs —
     /// the signed-in user, usually (ADR 0016).
     resolved,
+    /// The same three slots again, read as a binding that hands its failures
+    /// to the handler instead of ending the request (`bound.zig`).
+    ///
+    /// Three variants rather than one carrying a slot, so that every place
+    /// which has to treat a binding exactly like the slot it occupies says
+    /// so by naming both — `Bound(Form(T))` beside a `Form(U)` is asking for
+    /// the form twice, and the message for that already exists.
+    bound_body,
+    bound_form,
+    bound_query,
 };
 
 /// Turn `f` into an ordinary `Ctx` handler. `pattern` comes along so the
@@ -292,6 +303,25 @@ pub fn wrap(comptime pattern: []const u8, comptime f: anytype) router.CtxHandler
                     .form => args[i] = .{ .value = try c.form(P.zfast_form) },
                     .arena => args[i] = c._arena,
                     .resolved => args[i] = try resolve.value(P, c),
+                    // The outcomes live here, on the stack of the fiber that
+                    // is already serving this request, and are copied into
+                    // the binding. Sized while compiling, so a field that did
+                    // not bind costs no allocation (ADR 0018).
+                    .bound_body => {
+                        var outcomes: P.Outcomes = undefined;
+                        const filled = try c.jsonCollecting(P.Value, &outcomes);
+                        args[i] = .from(filled, outcomes);
+                    },
+                    .bound_form => {
+                        var outcomes: P.Outcomes = undefined;
+                        const filled = try c.formCollecting(P.Value, &outcomes);
+                        args[i] = .from(filled, outcomes);
+                    },
+                    .bound_query => {
+                        var outcomes: P.Outcomes = undefined;
+                        const filled = queryValueCollecting(P.Value, c, &outcomes);
+                        args[i] = .from(filled, outcomes);
+                    },
                 }
             }
             return sendResult(c, @call(.auto, f, args));
@@ -387,6 +417,19 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
                 body_kind = if (form_mod.holdsAFile(Fields)) .multipart else .urlencoded;
                 can_reject = true;
             },
+            // Described exactly as the slot it binds — the request looks the
+            // same on the wire either way — but `can_reject` stays false, and
+            // that is the whole difference. zfast no longer refuses this
+            // request before the handler runs; what the handler answers
+            // instead is a line in a function body, and the document promises
+            // what the signature settles and nothing else (ADR 0024).
+            .bound_body => body = openapi.schemaOf(readInto(roles[i], p.type.?)),
+            .bound_form => {
+                const Fields = readInto(roles[i], p.type.?);
+                body = openapi.schemaOf(Fields);
+                body_kind = if (form_mod.holdsAFile(Fields)) .multipart else .urlencoded;
+            },
+            .bound_query => query = queryFields(readInto(roles[i], p.type.?)),
             else => {},
         };
 
@@ -568,7 +611,7 @@ fn rolesOf(
                 // which of the two was meant to be the body, so a message
                 // that blamed only the second would send people to fix the
                 // one argument that was probably already right.
-                .body => {
+                .body, .bound_body => {
                     if (body_at) |first| @compileError(
                         "zfast: the handler for route \"" ++ pattern ++ "\" takes two structs by " ++
                             "value — argument " ++ num(first + 1) ++ " is a " ++
@@ -585,7 +628,7 @@ fn rolesOf(
                 // same mistake as asking for two bodies. Worth its own
                 // message because the fix is not "make one a pointer": one
                 // of the two has to go.
-                .form => {
+                .form, .bound_form => {
                     if (form_at) |first| @compileError(
                         "zfast: the handler for route \"" ++ pattern ++ "\" asks for the form " ++
                             "twice — argument " ++ num(first + 1) ++ " and argument " ++
@@ -594,12 +637,14 @@ fn rolesOf(
                             "ask for that.",
                     );
                     form_at = i;
-                    form_mod.checkFields(
-                        P.zfast_form,
-                        "the `Form(" ++ naming.of(P.zfast_form) ++ ")` on route \"" ++ pattern ++ "\"",
-                    );
+                    const Fields = readInto(roles[i], P);
+                    form_mod.checkFields(Fields, if (roles[i] == .form)
+                        "the `Form(" ++ naming.of(Fields) ++ ")` on route \"" ++ pattern ++ "\""
+                    else
+                        "the `Bound(Form(" ++ naming.of(Fields) ++ "))` on route \"" ++
+                            pattern ++ "\"");
                 },
-                .query => {
+                .query, .bound_query => {
                     if (query_at) |first| @compileError(
                         "zfast: the handler for route \"" ++ pattern ++ "\" asks for the query " ++
                             "string twice — argument " ++ num(first + 1) ++ " and argument " ++
@@ -608,7 +653,7 @@ fn rolesOf(
                             "and ask for that.",
                     );
                     query_at = i;
-                    checkQueryFields(pattern, P.zfast_query, i);
+                    checkQueryFields(pattern, readInto(roles[i], P), i);
                 },
                 // Checked here, at the first place anybody names the type,
                 // rather than deep inside the call that works it out. The
@@ -646,10 +691,30 @@ fn rolesOf(
     }
 }
 
+/// The struct behind an argument that reads one, reaching through a binding
+/// when there is one. `Form(T)`, `Query(T)` and `Bound(Form(T))` all answer
+/// `T`, which is what every check on the fields wants to be given.
+fn readInto(comptime role: Role, comptime P: type) type {
+    return switch (role) {
+        .body => P,
+        .form => P.zfast_form,
+        .query => P.zfast_query,
+        .bound_body, .bound_form, .bound_query => P.Value,
+        else => comptime unreachable,
+    };
+}
+
 fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Role {
     if (P == *Ctx or P == *const Ctx) return .ctx;
     if (P == Str) return .{ .param = 0 };
     if (P == std.mem.Allocator) return .arena;
+    // Before the two below it: a binding wraps one of them, and it is the
+    // outer type that says how failures are answered.
+    if (comptime hasNamedDecl(P, bound_mod.marker)) return switch (P.zfast_bound_slot) {
+        .body => .bound_body,
+        .form => .bound_form,
+        .query => .bound_query,
+    };
     if (comptime hasNamedDecl(P, "zfast_query")) return .query;
     if (comptime hasNamedDecl(P, form_mod.marker)) return .form;
     // Before `.@"struct" => .body`, and with a message of its own: an
@@ -825,6 +890,44 @@ fn queryValue(comptime T: type, c: *const Ctx) !T {
             @field(out, f.name) = null;
         } else {
             return fail.badRequest("{s} is required", .{label});
+        }
+    }
+    return out;
+}
+
+/// Read the query string into `T`, recording why each field that would not
+/// bind did not rather than stopping at the first one.
+///
+/// Cannot fail: a query string is always there to be read — an absent one is
+/// every field missing — so there is nothing here to return an error for.
+fn queryValueCollecting(
+    comptime T: type,
+    c: *const Ctx,
+    outcomes: *[@typeInfo(T).@"struct".fields.len]converting.Outcome,
+) T {
+    var out: T = undefined;
+    inline for (@typeInfo(T).@"struct".fields, 0..) |f, i| {
+        outcomes[i] = .{};
+        const Inner = switch (@typeInfo(f.type)) {
+            .optional => |o| o.child,
+            else => f.type,
+        };
+
+        if (c.query(f.name)) |s| {
+            outcomes[i].given = s;
+            var converted: Inner = undefined;
+            if (converting.tryConvert(Inner, s, &converted)) |reason| {
+                outcomes[i].reason = reason;
+                if (f.defaultValue()) |default| @field(out, f.name) = default;
+            } else {
+                @field(out, f.name) = converted;
+            }
+        } else if (f.defaultValue()) |default| {
+            @field(out, f.name) = default;
+        } else if (@typeInfo(f.type) == .optional) {
+            @field(out, f.name) = null;
+        } else {
+            outcomes[i].reason = .missing;
         }
     }
     return out;

@@ -15,24 +15,7 @@ it has to say what it is for.
 
 In order.
 
-1. **A binding failure that names the field.** `Form(T)` and a JSON body today
-   either bind or fail: one field that will not convert is a 400 out of `fail`
-   and the request is over, with nothing saying *which* field. For a framework
-   whose claim is that the signature is the contract, not being able to name the
-   field that broke the contract is the gap that contradicts the most.
-
-   The wanted shape is a handler that can ask for the binding *and* its
-   failures, by field name, and choose what to answer — a 422 naming the fields
-   is what a REST client expects, and it is the same mechanism a server-rendered
-   form would need. jetzig has the thin version (`expectParams(T)` returns null
-   when anything is missing), which says *something* was wrong and not *what*;
-   naming the fields is the part worth building.
-
-   Two constraints it has to hold: nothing allocated per failed field, and it
-   does not become a validation language — zfast's job stops at "this did not
-   convert to a `u32`", and whether the age is plausible stays the
-   application's.
-2. **Sending to a WebSocket a handler does not hold.** Not blocked on a design
+1. **Sending to a WebSocket a handler does not hold.** Not blocked on a design
    and not blocked on a missing API — blocked on a defect upstream.
 
    The API is `zio.CompletionQueue`, already public in the v0.17.0 that zfast
@@ -71,7 +54,7 @@ In order.
    locking — the speaker's own fiber does the writing, so it blocks on the first
    connection that has stopped reading. `zfast.spawn` shipped out of that work;
    broadcast did not.
-3. **Reloading without a restart — static files, then the server.** A
+2. **Reloading without a restart — static files, then the server.** A
    development annoyance rather than a design hole: a deploy restarts anyway.
    The static half is a watch option on `staticWith`, re-reading a directory
    that has changed. The other half is the whole process, and it cannot live
@@ -80,28 +63,29 @@ In order.
    times of its source tree and rebuilds when the sum moves, which is about as
    much machinery as this deserves; the part to be careful about is that neither
    half can end up in a release binary.
-4. **`sendfile`, and serving a file too big to hold in memory.** This is the
+3. **`sendfile`, and serving a file too big to hold in memory.** This is the
    part that contradicts
    [ADR 0010](./adr/0010-static-files-are-held-in-memory.md) rather than
    extending it, so it wants its own argument before any code.
-5. **`permessage-deflate`.** Negotiated in the handshake, and a compressor per
+4. **`permessage-deflate`.** Negotiated in the handshake, and a compressor per
    connection is memory that has not been budgeted.
 
 ## Known gaps
 
 Things that are wrong or missing today, with what fixing them would take.
 
-- **Nothing ties a log line to anything else.** The logger writes one plain-text
-  line per request — `GET /users/7 200 59µs` — with no request id, no structured
-  output, and no counters. Behind the proxy that
-  [ADR 0028](./adr/0028-tls-is-terminated-in-front.md) assumes, that is the one
-  thing an operator cannot reconstruct afterwards: which log lines belong to the
-  request that timed out. The people this is aimed at arrive from ecosystems
-  where a correlation id is the default, and it is cheap here — an id read from
-  a header or generated per request, carried on `Ctx`, and a JSON line shape as
-  an option on `logger.with`. What needs deciding is whether the id is a
-  resolved value (so a handler can log with it) or purely the logger's business,
-  and metrics are a separate question with a much larger surface.
+- **There are no counters.** The correlation half of this is done —
+  `logger.with(.{ .format = .json, .request_id = true })` writes one JSON object
+  per line and puts an `X-Request-Id` on every response, and `c.requestId()`
+  reaches the same id from a handler whether or not the logger is installed. The
+  id is a field on `Ctx` rather than a resolved value, because the logger needs
+  it on every request and a resolved value only exists once a handler asks for
+  one; anybody who wants it declared by its type can wrap it in one line.
+
+  What is still missing is metrics — how many requests, at what statuses, how
+  long. That is a much larger surface than a log line: where the numbers live,
+  who reads them out, whether there is a registry, and whether any of it can be
+  had without an allocation per request. Nobody has designed it.
 - **A response body is never compressed, only a file is.** Static files are
   gzipped once while the App is built, which is the shape that costs nothing per
   request ([static files](./guide/static-files.md#compression)). A handler
@@ -145,10 +129,6 @@ Things that are wrong or missing today, with what fixing them would take.
   bad field is a plain 400 again. Same limit as the schema walker and the
   staleness trap, and for the same reason: a type holding one of its own has to
   stop somewhere.
-- **A group prefix cannot carry a param.** `app.group("/orgs/:org")` is refused,
-  because `use` scopes middleware by comparing the front of the request path
-  against the prefix and `/orgs/:org` is the front of no real path. Making it
-  work means teaching middleware scoping to match patterns rather than prefixes.
 - **The logged duration of a streamed response is its lifetime, not its
   latency.** One line per request is the contract, and a stream's line arrives
   when the stream ends. Time to first byte is a different number and wants a
@@ -214,8 +194,9 @@ Not "later" — decided against, with the reasoning written down.
   string interpolation, which is a worse `std.fmt`. [jetzig](https://www.jetzig.dev/)
   is built for that job and does it with zmpl; that is a better outcome for
   everybody than a second half-answer here. A `<form>` posted to a handler
-  still works — [`examples/forms`](../examples/forms/) is that, and item 1 above
-  is what makes its failures legible.
+  still works — [`examples/forms`](../examples/forms/) is that, and
+  `Bound(Form(T))` is what makes its failures legible
+  ([ADR 0036](./adr/0036-a-binding-hands-its-failures-to-the-handler.md)).
 
   This is a refusal of templates, **not** of everything on that side of the
   line. Whether some other convenience from the batteries-included world earns

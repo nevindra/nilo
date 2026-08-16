@@ -54,7 +54,7 @@ The two v1 items that belonged to no stage are in as well: **chunked bodies** (r
 - **Registration order silently decided which route won**, and a duplicate route was accepted without a word ([ADR 0013](./adr/0013-the-most-specific-route-wins-and-duplicates-are-refused.md)).
 - **`AddressInUse` printed a stack trace through zio's internals** — the single most common way a server fails to start, answered with a tour of the Engine. ADR 0002 says the Engine is not the user's business; a crash log is where that matters most.
 - **The two root-file wiring lines were undocumented**, and forgetting either failed quietly: `std.log` blocking the event loop looks like a slow server, and the Engine's debug output looks like your own logs are missing. `listen()` now names whichever one is absent.
-- **`zig build test` printed `failed command` on a passing suite**, because Zig's build runner reads any stderr from a test binary as failure. Tests run under their own root now, with logging off.
+- **`zig build test` printed `failed command` on a passing suite**, because Zig's build runner reads any stderr from a test binary as failure. Tests were given their own root with logging off — which did not work, and was not found out for a long time. See "the suite that was never failing" below.
 
 Two things turned up while writing the examples, which is what examples are for:
 
@@ -69,8 +69,7 @@ The benchmark script has lived in the repo since stage 1, even unrun in anger, s
 - **A wrong verb on a real path was a 404**, so `DELETE /users` on a path with a `GET` and a `POST` on it said "not found" — which sends you hunting for a route registration bug that is not there. Now a 405 with `Allow`, and an `OPTIONS` nobody registered is answered rather than refused.
 - **There was no way to stop a server.** `listen()` blocked forever and the only exit was a signal killing the process mid-response. Now `App.shutdown()`, plus SIGINT and SIGTERM by default: stop accepting, finish what is in flight, say `Connection: close` on the way out. What is waited on is requests, not connections — waiting on connections put the full grace period behind every idle browser tab, which was the first version of this and was worse than nothing.
 - **The one-line startup messages were still followed by a stack trace**, because `listen()` returned the error and Zig prints a trace for an error reaching `main`. Stage 6 got the trace out of zio; it was still touring zfast. `listen()` now stops the process after saying why, and `tryListen()` is there for a caller that wants the value instead.
-- **A forgotten `provide()` printed once per route**, so five routes sharing a `*Db` printed the same sentence and the same fix five times. One line per service now, naming the routes.
-- **`address` was IPv4 only** — `parseIp4`, so `"::1"` was refused by a message that did not mention IPv6 existed. Now `parseIp`.
+- **Two messages were repeated per route rather than per cause**: a forgotten `provide()` printed the same fix once for each of five routes sharing a `*Db`, and `address` was IPv4-only (`parseIp4`), refusing `"::1"` without mentioning IPv6 existed.
 - **`Ctx` was undocumented.** The README called it "the way out when you need full control" without once saying what it could do, so the first guess at a method name was a compile error. Its surface is a table in the README now — and the two things it cannot do, streaming a response and a body over 1 MB, are written down as limits rather than left to be discovered.
 
 8. ~~**A third pass, from the outside, reading the docs as instructions.**~~ *Done.* Stage 6 found what writing handlers exposes and stage 7 what running them exposes. This one followed the README literally — copying each snippet into a fresh project and compiling it — and found that the documentation had drifted from the code in places where the code was right.
@@ -115,41 +114,13 @@ That is the same lesson [ADR 0017](./adr/0017-the-api-description-comes-from-the
 
 Found while running the suite in `ReleaseSafe` and `ReleaseFast` during v2. **It was a v1 bug, present since stage 6.** Fixed by making a `Response` own its headers — `.headers = .of(&.{…})`, a breaking change to a public type ([ADR 0019](./adr/0019-a-response-owns-its-headers.md)). Kept here because how it hid matters more than what it was.
 
-```zig
-return .{
-    .status = 201,
-    .headers = &.{.{
-        .name = "Location",
-        .value = try std.fmt.allocPrint(arena, "/users/{d}", .{created.id}),
-    }},
-    .value = created,
-};
-```
-
-`headers` is a `[]const Header`. When every part of that literal is comptime-known, Zig promotes the array to static memory and the slice is valid for ever. When any part is not — and a `Location` header never is — the array is a **temporary in the handler's own stack frame**, and returning a slice of it is a use-after-return. `sendResult` reads it after the frame is gone.
+`headers` was a `[]const Header` filled with `&.{ .{ .name = "Location", .value = try std.fmt.allocPrint(arena, …) } }`. When every part of such a literal is comptime-known, Zig promotes the array to static memory and the slice is valid for ever. When any part is not — and a `Location` header never is — the array is a **temporary in the handler's own stack frame**, and `sendResult` reads it after that frame is gone.
 
 In `Debug` the bytes happen to still be there, so every test passed. In `ReleaseSafe` and `ReleaseFast` it was a segfault.
 
-Two tests failed on it, and they were exactly the two that compute a header value:
+**What hid it was which tests existed.** Two failed, and they were exactly the two that compute a header value — `a handler can ask for the request arena to build a header in`, and `createUser refuses a body that does not make sense` in the rest example. The one that passed, `Response(T) carries headers of its own`, uses literal values only.
 
-- `app.test.a handler can ask for the request arena to build a header in`
-- `main.test.createUser refuses a body that does not make sense` (the rest example)
-
-The test that passed — `Response(T) carries headers of its own` — uses literal values only, which is what hid this.
-
-### Why it was bad beyond the two tests
-
-It was in the README's flagship `Response(T)` example, in the rest example, and `ReleaseSafe` is the mode the README tells people to deploy in (ADR 0008). Stage 6 added `Response.headers` specifically so a 201 with a `Location` would not need a `*Ctx`; that is the exact shape that broke.
-
-### What fixing it took
-
-No fix keeps `&.{…}` with a runtime value, because the lifetime is the problem and not the contents — `sendResult` cannot copy from a pointer that is already dangling when it receives it. So `Response(T)` owns its headers by value now, which is a breaking change to a public type:
-
-```zig
-.headers = .of(&.{.{ .name = "Location", .value = … }}),
-```
-
-`Headers` is an inline array of eight, and `of` copies the list at the call site while it is still alive. Taking the list as `anytype` rather than `[]const Header` keeps its length in the type, so a ninth header is a compile error naming both numbers instead of a truncation. Reading them back is `.view()`. `c.setHeader` never had the problem and still has no cap.
+And it was reachable from the README's flagship `Response(T)` example, in a mode the README tells people to deploy in (ADR 0008). Stage 6 added `Response.headers` specifically so a 201 with a `Location` would not need a `*Ctx`; that is the exact shape that broke.
 
 ### The finding underneath it
 
@@ -418,7 +389,7 @@ The general lesson is the one [ADR 0001](./adr/0001-dx-wins-below-the-10-percent
 
 And one price named in an ADR turned out to have quietly stopped being real: [ADR 0027](./adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md) recorded the 39 refusals as "about 9 seconds on every `zig build test`" that "never cache". On Zig 0.16 they cache, and they are 0.5s. Nothing was done to earn that, which is exactly why it needed checking.
 
-*It needed checking harder. Re-run later against a clean checkout of this very commit, `zig build refusals` is **10.6s** warm for those 39 — they never started caching, and the 0.5s was a bad measurement. The paragraph above stays where it is because it is the mistake it warns about, made in the same breath: "a number is not a finding until you know what is in it", followed immediately by a number nobody looked into. See [ADR 0027](./adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md), which now carries the corrected figure.*
+*It needed checking harder — they never started caching, and the 0.5s was a bad measurement. The paragraph above stays because it is the mistake it warns about, made in the same breath: "a number is not a finding until you know what is in it", followed immediately by a number nobody looked into. Corrected below, and in ADR 0027.*
 
 **What was left alone.** Memory per idle connection is 16,961 bytes and seventh of nine — http.zig holds a connection in 11.2 KB, Bun in 338 bytes. zfast is the leaner one below about a thousand connections and is not above it, so the README's "low memory" needs the qualifier or the number needs to come down. Not fixed here, and written down rather than left to be discovered, which is the only part of that sentence this project has earned yet.
 
@@ -656,39 +627,17 @@ Applied unchanged, the replace rule would have meant a handler setting a session
 
 ### The thing that is refused rather than escaped
 
-```zig
-try c.setCookie(.{ .name = "session", .value = "abc; Path=/admin" });
-```
+`try c.setCookie(.{ .name = "session", .value = "abc; Path=/admin" })` is not a malformed cookie. It is a cookie **with a path nobody wrote** — `;` separates attributes and RFC 6265's grammar has no escaping to defend with, and a `\r\n` in the same position is response splitting outright. There is nothing to encode it as, so it is refused rather than mangled. Base64 and hex, which is what a session token actually is, pass untouched.
 
-That is not a malformed cookie. It is a cookie **with a path nobody wrote**, because `;` separates attributes and RFC 6265's grammar has no escaping to defend with. A `\r\n` in the same position is response splitting outright.
+### What the multipart parser is careful about
 
-There is nothing to encode it as, so it is refused before anything is allocated — a 500 naming the character and saying to encode the value first. A 500 and not a 400: the request did nothing wrong. Base64 and hex, which is what a session token actually is, pass untouched.
+Three things, and [ADR 0031](./adr/0031-a-form-is-the-body-read-by-another-rule.md) lists them. What belongs here is why they were worth the care: **none of them fails loudly.** A boundary matched mid-line truncates only the uploads that happen to contain the boundary string; a byte wrong in the framing corrupts every file and looks fine on a text one; a `filename` part read as a text field puts an empty string where a handler expected an `Upload`.
 
-### Two rules that made the form parser one function shorter each
-
-`Query(T)` and `Form(T)` convert their fields the same way and must say the same thing when the text does not fit. That was going to be two copies of `convert`, so it is now `convert.zig` — one module, used by path params, query values and form fields alike. `"age" has to be a whole number, not "soon"` is the sentence a bad `?age=` has always produced, and now a bad form field produces it too because it is the same line of code.
-
-The other rule is that **a form is the body.** `Form(T)` sits exactly where a plain struct argument would have read JSON, so asking for both is a compile error with its own message — the two-bodies advice ("make one a pointer, so it is a service") is wrong here, because one of the two genuinely has to go.
-
-### What the multipart parser is careful about, and why each is silent
-
-Three, and none of them fails loudly when got wrong:
-
-- **The boundary is matched at the start of a line only.** A boundary string occurring inside a file is data. An `indexOf` that did not check would truncate the upload there, and only for files that happened to contain it.
-- **The line break in front of the boundary is framing.** A byte too many or too few corrupts every file that goes through. A text upload would look fine.
-- **A part with a `filename` is a file even when it is empty.** That is a browser saying "the field was there and nothing was chosen". Reading it as a text field puts an empty string where a handler expected an `Upload`.
-
-Each has a test named after the mistake rather than after the feature. The one that pins the file's bytes to the body's own address is there because "it works" and "it does not memcpy a 900 KB upload" look identical from outside.
-
-The part count is capped at 256. The arrays are sized from a count of boundaries in the body, and without a cap a megabyte of nothing but boundaries — about 15,000 of them under the default `max_body` — is half a megabyte of arena for a request carrying no data at all. That is the client choosing how much memory to spend, which is the shape of every limit in this project.
+So each has a test named after the mistake rather than after the feature — including the one pinning the file's bytes to the body's own address, because "it works" and "it does not memcpy a 900 KB upload" look identical from outside.
 
 ### The compile error that is really documentation
 
-`Redirect(200)` stops compilation, and the message lists the five statuses that carry a `Location` with what each is for. That sentence is the whole reason `Redirect` is worth more than a header helper:
-
-> 303 (see other — what a form POST answers with, so the reload does not post again)
-
-**303 after a POST is the one people get wrong**, and getting it wrong means a browser's reload button submits the form a second time. Putting it in the compile error puts it where somebody is already reading, which is [ADR 0027](./adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)'s argument applied to a thing that is not a mistake in zfast's own terms at all.
+`Redirect(200)` stops compilation with the five statuses that carry a `Location` and what each is for. **303 after a POST is the one people get wrong**, and getting it wrong means a browser's reload button submits the form again — so the sentence lives in the compile error, where somebody is already reading. That is [ADR 0027](./adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)'s argument applied to something that is not a mistake in zfast's own terms at all.
 
 ### What it cost
 
@@ -702,11 +651,9 @@ Seven new refusals, bringing it to 46. `examples/forms` is the seventh example a
 
 ### The measurement that had quietly stopped being true
 
-Counting the refusals meant touching the sentence next to the count, which said they cache on Zig 0.16 and cost 0.5s. They do not, and they never did.
+Counting the refusals meant touching the sentence next to the count — the "they cache now, 0.5s" claim from the section above. Measured warm: 46 refusals are ~12.8s of a ~17s `zig build test`, about 270ms each, and a clean checkout of the commit that made the claim puts its 39 at 10.6s. They never cached.
 
-Measured warm on this machine: 46 refusals are ~12.8s of a ~17s `zig build test`, at about 270ms each. Re-run against a clean checkout of the commit that made the claim, the 39 that existed then are 10.6s — not 0.5s. The original entry, "about 9 seconds", was right the whole time and had been struck through in favour of a number nobody checked.
-
-The lesson is not about caching. That correction sits four paragraphs below this file's own line about a number not being a finding until you know what is in it, which makes it the mistake it warns about committed in the same breath. **A number saying a cost went away on its own deserves more scrutiny than one saying work made something faster**, not less — there is nobody to argue with it. [ADR 0027](./adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md) carries the corrected figure and keeps the wrong one visible.
+The lesson is not about caching. **A number saying a cost went away on its own deserves more scrutiny than one saying work made something faster**, not less — there is nobody to argue with it.
 
 ## The rule that only ever passed, and the stopwatch that came out of it
 
@@ -754,3 +701,27 @@ Six hundred times, paid by a request that had nothing to wait for. [ADR 0014](./
 Which is [ADR 0033](./adr/0033-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md) applied to the first thing built after it. A handler that busy-waits 30ms is caught; the same wait through `zfast.blocking` is not; a stream is not; a server with `block_warning_ms = 0` is not. Half of a detector's job is not firing — one that cries wolf gets switched off, and then it is worth less than nothing, because its absence looks exactly like its silence.
 
 They cost about 150ms of wall clock to prove something about wall clock. Paid rather than skipped.
+
+## Naming the field that broke the contract
+
+The roadmap's first item: `Form(T)` and a JSON body were all-or-nothing, so one field that would not convert was a 400 with nothing saying which field. The design is [ADR 0036](./adr/0036-a-binding-hands-its-failures-to-the-handler.md). What belongs here is that most of the hard parts were already solved, and finding that out cost reading rather than building.
+
+**The flag was already there.** The worry going in was the API description: if a handler can now answer a 422, must the document say so? `typed.zig` had answered it — a flag called `can_reject`, commented *"whether zfast can refuse this request before the handler runs"*, which is exactly what a binding turns off. It was named for one purpose and described a more general fact than the one it was written for. The alternative, a `documents_422` beside it, would have compiled just as well and been a second thing to keep in step.
+
+**The gap was two thirds smaller than its own description.** The roadmap and the compile error both said a param prefix meant *"every middleware on this group would quietly never run"*. `mw.chainFor` has three callers, and two of them — routes at `listen()`, and static files — resolve against the route **pattern**, which contains the param text, so `startsWith("/orgs/:org/members", "/orgs/:org")` was already true. Only the third was broken: the cold path for a request that matched no route, which compares against the real path. Middleware would run for `/orgs/acme/members` and not for the 404 beside it. The fix is one function.
+
+**And the refusal is what kept the wrong diagnosis alive.** `refusals/group_prefix_has_param.zig` asserted the compile error's wording, so the sentence was enforced, tested and re-read on every `zig build test` — and none of that made it true. A guard on the wording of an explanation is not a guard on the explanation.
+
+**One of two places knew a rule.** `covers` used `std.mem.startsWith`, so `app.use("/api", …)` also covered `/apiary`. `static.zig` has had `underPrefix` doing the whole-segment comparison correctly since static files were built. No symptom until somebody names a route badly, and then no explanation at all.
+
+**Splitting `convert` found a bug in passing.** The sentence for text that will not convert now has one home, printed into a stack buffer and handed on as a single `{s}`, with a test asserting the fail-fast path and the binding path are byte-identical rather than trusting it — [ADR 0033](./adr/0033-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md) applied to a property that would otherwise only ever have been observed holding. Going through `{s}` fixed something nobody had noticed: a message containing `{d}` used to reach the formatter as a format string.
+
+**The note was already in the file.** The generated request id wanted randomness, and `std.crypto.random` does not exist on Zig 0.16 — but the compile error was the less useful half of the answer. `session.zig` already carried the other half:
+
+> Through the Bulkhead rather than `std.crypto.random`, because this is a syscall and a syscall made straight from a fiber stops every request sharing its thread.
+
+A correlation id on every request is exactly the wrong place for a syscall. The base is drawn once per process, and what is left on the request path is one atomic add. The comment was written for the session nonce and applied unchanged to a feature that did not exist yet.
+
+**The example had to carry the part with no framework behind it.** `examples/forms` gained `/register` — a mistyped age, and the page back with everything else still in it. There is no template layer and there is not going to be one, so the page is concatenated by hand and the value going back into the box is a stranger's text. The example carries a twelve-line `writeEscaped` and a test that posts `<script>alert(1)</script>` as an age. Skipping it would have been shorter and would have taught the mistake.
+
+Twelve new tests and five new refusals: 499 and 54. One replaced `group_prefix_has_param` with `group_prefix_has_wildcard`, since a `*` in a prefix is still refused for a reason that survives.

@@ -21,6 +21,26 @@ const refusals = [_]Refusal{
         .says = "argument 1 of the handler for route \"/users/:id\" is a [4]u8, which zfast does not recognise.",
     },
     .{
+        .name = "bound_field_cannot_convert",
+        .says = "the field `tags: []const u8` of the `Bound(Form(bound_field_cannot_convert.SignUp))` on route \"/sign-up\" is not something a form value can become.",
+    },
+    .{
+        .name = "bound_form_and_form",
+        .says = "the handler for route \"/sign-up\" asks for the form twice — argument 1 and argument 2.",
+    },
+    .{
+        .name = "bound_given_unknown_field",
+        .says = "`bound_given_unknown_field.SignUp` has no field `e_mail`.",
+    },
+    .{
+        .name = "bound_not_a_struct",
+        .says = "`Bound(u32)` — a binding is read into a struct.",
+    },
+    .{
+        .name = "bound_of_a_bound",
+        .says = "`Bound(Bound(…))` — a binding is already a binding.",
+    },
+    .{
         .name = "colon_mid_segment",
         .says = "the segment \"id:id\" of route \"/users/id:id\" has a `:` in the middle of it, so it is matched as literal text.",
     },
@@ -57,8 +77,8 @@ const refusals = [_]Refusal{
         .says = "the route pattern \"users\" inside the group \"/api\" does not start with a slash.",
     },
     .{
-        .name = "group_prefix_has_param",
-        .says = "the group prefix \"/orgs/:org\" has a `:` or a `*` in it, and a group prefix is literal text.",
+        .name = "group_prefix_has_wildcard",
+        .says = "the group prefix \"/files/*\" has a `*` in it, and a catch-all cannot be a prefix.",
     },
     .{
         .name = "group_trailing_slash",

@@ -12,6 +12,10 @@
 //! curl localhost:8787/me -b 'session=…'                # the cookie coming back
 //! curl -i -X POST localhost:8787/sign-out -b 'session=…'
 //!
+//! curl -i -X POST localhost:8787/register \
+//!   -d 'age=soon'                                      # 422, the page back with both
+//!                                                      # problems and "soon" still in it
+//!
 //! curl -i -X POST localhost:8787/avatars \
 //!   -F 'caption=me, squinting' -F 'image=@some.png'    # multipart, with a file
 //!
@@ -19,7 +23,7 @@
 //! curl localhost:8787/openapi.json                     # forms and redirects, described
 //! ```
 //!
-//! The three things worth taking from this file:
+//! The four things worth taking from this file:
 //!
 //! - **A form is the body.** `Form(T)` sits where a plain struct argument
 //!   would have read JSON, and reads urlencoded or multipart without the
@@ -28,6 +32,10 @@
 //!   is what stops a reload posting the form a second time.
 //! - **A cookie is read by a resolved value**, so every handler behind the
 //!   sign-in asks for a `SignedIn` and none of them parses a header.
+//! - **A form that comes back with one box marked.** `Bound(Form(T))` hands
+//!   the failures to the handler instead of ending the request, so `/register`
+//!   can re-show the page with what was typed still in it. Escaping that text
+//!   on the way back out is the part with no framework behind it.
 
 const std = @import("std");
 const zfast = @import("zfast");
@@ -220,7 +228,89 @@ fn uploadAvatar(user: SignedIn, incoming: zfast.Form(NewAvatar)) !zfast.Status(2
     } };
 }
 
+// ---- a form that comes back with one box marked ----
+
+/// The other half of forms: what happens when one field is wrong.
+///
+/// `Form(T)` is all-or-nothing — the first field that will not convert is a
+/// 400, and everything else the person typed is gone. `Bound(Form(T))` hands
+/// the failures over instead, so the page can come back with the boxes still
+/// filled in and the bad one named.
+const Registration = struct {
+    email: Str,
+    age: u32,
+    newsletter: Str = .static(""),
+};
+
+fn register(
+    c: *zfast.Ctx,
+    arena: std.mem.Allocator,
+    incoming: zfast.Bound(zfast.Form(Registration)),
+) !void {
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+
+    if (incoming.value()) |form| {
+        try w.writeAll(page_head ++ "<h1>Registered</h1><p>");
+        try writeEscaped(&w, form.email.view());
+        try w.print(", {d}. <a href=\"/\">back</a></p>", .{form.age});
+        return c.send(200, "text/html; charset=utf-8", try arena.dupe(u8, buf[0..w.end]));
+    }
+
+    // Everything that did not bind, in zfast's own words. Writing the
+    // sentence yourself would be a second wording of the same mistake.
+    try w.writeAll(page_head ++ "<h1>Register</h1><ul class=\"problems\">");
+    var it = incoming.failures();
+    while (it.next()) |problem| {
+        var sentence: [fail.max_message]u8 = undefined;
+        var s = std.Io.Writer.fixed(&sentence);
+        problem.say(&s) catch {};
+
+        try w.writeAll("<li>");
+        try writeEscaped(&w, sentence[0..s.end]);
+        try w.writeAll("</li>");
+    }
+    try w.writeAll("</ul><form method=\"post\" action=\"/register\">");
+
+    // The boxes hold what was typed, not what it would have become: somebody
+    // who wrote "soon" in the age box needs to see "soon" to fix it.
+    try writeField(&w, "email", incoming.given("email").view());
+    try writeField(&w, "age", incoming.given("age").view());
+    try w.writeAll("<button>Register</button></form>");
+
+    // 422 rather than 400: the request was understood and its contents were
+    // not. `incoming.fail()` is the one-liner if a JSON body is all you owe.
+    return c.send(422, "text/html; charset=utf-8", try arena.dupe(u8, buf[0..w.end]));
+}
+
+fn writeField(w: *std.Io.Writer, comptime name: []const u8, value: []const u8) !void {
+    try w.writeAll("<input name=\"" ++ name ++ "\" value=\"");
+    try writeEscaped(w, value);
+    try w.writeAll("\">");
+}
+
+/// Text going into a page, with the characters that would otherwise be markup
+/// turned into entities.
+///
+/// Twelve lines rather than a dependency, and **not optional**: `age` goes
+/// back to the page as whatever was typed, and what was typed may be
+/// `<script>`. zfast has no template layer to do this for you and is not
+/// getting one ([the roadmap](../../docs/roadmap.md#not-coming) says why), so
+/// it is yours to remember — and this is what remembering it looks like.
+fn writeEscaped(w: *std.Io.Writer, text: []const u8) !void {
+    for (text) |ch| switch (ch) {
+        '&' => try w.writeAll("&amp;"),
+        '<' => try w.writeAll("&lt;"),
+        '>' => try w.writeAll("&gt;"),
+        '"' => try w.writeAll("&quot;"),
+        '\'' => try w.writeAll("&#39;"),
+        else => try w.writeByte(ch),
+    };
+}
+
 // ---- the page ----
+
+const page_head = "<!doctype html><meta charset=\"utf-8\"><title>zfast forms</title>";
 
 const page =
     \\<!doctype html><meta charset="utf-8"><title>zfast forms</title>
@@ -230,6 +320,12 @@ const page =
     \\  <input name="password" type="password" value="hunter2">
     \\  <label><input name="remember" type="checkbox"> remember me</label>
     \\  <button>Sign in</button>
+    \\</form>
+    \\<h1>Register</h1>
+    \\<form method="post" action="/register">
+    \\  <input name="email" value="wati@example.dev">
+    \\  <input name="age" value="soon">
+    \\  <button>Register</button>
     \\</form>
     \\<h1>Upload</h1>
     \\<form method="post" action="/avatars" enctype="multipart/form-data">
@@ -269,6 +365,7 @@ pub fn main() !void {
     try app.post("/sign-in", signIn);
     try app.post("/sign-out", signOut);
     try app.get("/me", me);
+    try app.post("/register", register);
     try app.post("/avatars", uploadAvatar);
 
     app.docs(.{ .title = "Forms", .version = "1.0.0" });
@@ -459,6 +556,71 @@ test "the same endpoint sent a form that cannot carry a file says which to send"
     ));
     try testing.expectEqual(@as(u16, 400), answer.status);
     try testing.expect(std.mem.indexOf(u8, answer.body, "multipart/form-data") != null);
+}
+
+test "a registration with two bad fields comes back with both, and with what was typed" {
+    var app = zfast.App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/register", register);
+
+    var client = try zfast.testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    const answer = try client.postWith(
+        &app,
+        "/register",
+        "application/x-www-form-urlencoded",
+        "age=soon",
+    );
+
+    // Understood, and its contents refused.
+    try testing.expectEqual(@as(u16, 422), answer.status);
+
+    // Both, not just the first — which is the whole difference from `Form(T)`.
+    try testing.expect(std.mem.indexOf(u8, answer.body, "the form is missing &quot;email&quot;") != null);
+    try testing.expect(std.mem.indexOf(u8, answer.body, "has to be a whole number") != null);
+
+    // And the box still holds what was typed, so it can be corrected.
+    try testing.expect(std.mem.indexOf(u8, answer.body, "name=\"age\" value=\"soon\"") != null);
+}
+
+test "what was typed comes back escaped, not as markup" {
+    // The failure this example exists to not demonstrate. `age` is echoed
+    // into the page, so an age of `<script>` has to arrive as text.
+    var app = zfast.App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/register", register);
+
+    var client = try zfast.testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    const answer = try client.postWith(
+        &app,
+        "/register",
+        "application/x-www-form-urlencoded",
+        "email=a%40b.dev&age=%3Cscript%3Ealert(1)%3C%2Fscript%3E",
+    );
+    try testing.expectEqual(@as(u16, 422), answer.status);
+    try testing.expect(std.mem.indexOf(u8, answer.body, "<script>") == null);
+    try testing.expect(std.mem.indexOf(u8, answer.body, "&lt;script&gt;") != null);
+}
+
+test "a registration that binds is an ordinary answer" {
+    var app = zfast.App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/register", register);
+
+    var client = try zfast.testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    const answer = try client.postWith(
+        &app,
+        "/register",
+        "application/x-www-form-urlencoded",
+        "email=wati%40example.dev&age=31",
+    );
+    try testing.expectEqual(@as(u16, 200), answer.status);
+    try testing.expect(std.mem.indexOf(u8, answer.body, "wati@example.dev, 31") != null);
 }
 
 test "the old address is a permanent redirect to the new one" {

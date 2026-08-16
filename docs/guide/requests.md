@@ -105,6 +105,29 @@ staleness trap follow — and below that a mistake is a plain 400 again.
 A `Str` field lives in the request arena, so — like every `Str` — it stops being
 valid when the request ends. `keep` it if the value goes into a service.
 
+### Every bad field at once, rather than the first
+
+The 400 above names one field, because the parse stops at the first thing it
+cannot do. `Bound(T)` collects them all and hands them to the handler:
+
+```zig
+fn placeOrder(b: zfast.Bound(NewOrder)) !zfast.Status(201, Order) {
+    const order = b.value() orelse return b.fail();
+    ...
+}
+```
+
+`b.fail()` is a 422 naming each one; `b.failures()` is there when the answer
+wants a shape of its own. `Bound(Query(T))` does the same for the query string,
+and the full account — including the three cases that stay a plain 400 — is
+under [Forms](./forms.md#when-one-field-is-wrong-and-the-rest-are-fine), where
+it matters most.
+
+One difference worth knowing here: in JSON a quoted value **is** text, so
+`{"quantity":"12"}` fails as `"quantity" has to be a whole number, not text`
+rather than as a number that would not parse. A form has only text to work
+with; a body says what kind each value is.
+
 ### PATCH: telling "not sent" from "sent as null"
 
 `?T` has two states and a PATCH needs three. With `due: ?Str = null`, the bodies

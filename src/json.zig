@@ -114,7 +114,11 @@ fn writeValue(comptime T: type, w: *std.Io.Writer, value: T) std.Io.Writer.Error
 /// A JSON string. Only three things need escaping — a quote, a backslash, and
 /// anything below a space — so the run of bytes up to the next one of those is
 /// found 32 at a time and written whole.
-fn writeString(w: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
+///
+/// Public because the logger writes JSON lines of its own and a request path
+/// is a stranger's text: a newline in one would forge a log line. One escaper
+/// rather than two is what keeps that true in both places.
+pub fn writeString(w: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
     try w.writeByte('"');
     var at: usize = 0;
     while (nextEscape(text, at)) |i| {

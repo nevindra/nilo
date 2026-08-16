@@ -161,6 +161,40 @@ pub fn readInto(
     content_type: ?[]const u8,
     body: []const u8,
 ) !T {
+    const fields = try parsedFor(T, arena, content_type, body);
+    return fill(T, fields, lifetime);
+}
+
+/// Read a form body into `T`, recording why each field that would not bind
+/// did not, rather than stopping at the first one.
+///
+/// The two things that can still end the request outright are the two above
+/// `parsedFor`: a body that is not a form at all, and a form sent a way that
+/// cannot carry the file this endpoint wants. Neither is a field's failure —
+/// there is no binding to hand back and nothing to name — and the sentence
+/// each already gets says more than a list of fields would (`bound.zig`).
+pub fn readIntoCollecting(
+    comptime T: type,
+    arena: std.mem.Allocator,
+    lifetime: *const str_mod.Lifetime,
+    content_type: ?[]const u8,
+    body: []const u8,
+    outcomes: *[@typeInfo(T).@"struct".fields.len]convert.Outcome,
+) !T {
+    const fields = try parsedFor(T, arena, content_type, body);
+    return fillCollecting(T, fields, lifetime, outcomes);
+}
+
+/// Everything that has to be true before a form body is worth taking apart,
+/// and then taking it apart. Shared by both ways in, because what it refuses
+/// is refused the same way whether or not the caller wanted its failures
+/// back.
+fn parsedFor(
+    comptime T: type,
+    arena: std.mem.Allocator,
+    content_type: ?[]const u8,
+    body: []const u8,
+) !Fields {
     comptime checkFields(T, "the form struct " ++ naming.of(T));
 
     const kind = kindOf(content_type orelse "");
@@ -192,8 +226,7 @@ pub fn readInto(
         );
     }
 
-    const fields = try parse(arena, kind, body);
-    return fill(T, fields, lifetime);
+    return parse(arena, kind, body);
 }
 
 /// Take a form body apart, without yet knowing what struct it is going into.
@@ -242,6 +275,67 @@ fn fill(comptime T: type, fields: Fields, lifetime: *const str_mod.Lifetime) !T 
                 "the form is missing " ++ label ++ " ({s})",
                 .{comptime ctx_mod.expectedOf(f.type)},
             );
+        }
+    }
+    return out;
+}
+
+/// Fill `T` from an already-parsed form, recording why each field that would
+/// not bind did not, rather than stopping at the first one.
+///
+/// A field that did not bind is left as its default if it has one and
+/// `undefined` if it does not. That is safe rather than sloppy: the only way
+/// to this struct is `Bound.value()`, which hands back nothing at all while
+/// any outcome still carries a reason. The text that arrived is kept either
+/// way, which is what a form showing itself again needs.
+fn fillCollecting(
+    comptime T: type,
+    fields: Fields,
+    lifetime: *const str_mod.Lifetime,
+    outcomes: *[@typeInfo(T).@"struct".fields.len]convert.Outcome,
+) T {
+    var out: T = undefined;
+    inline for (@typeInfo(T).@"struct".fields, 0..) |f, i| {
+        const Inner = switch (@typeInfo(f.type)) {
+            .optional => |o| o.child,
+            else => f.type,
+        };
+        outcomes[i] = .{};
+
+        if (Inner == Upload) {
+            if (fields.file(f.name)) |part| {
+                @field(out, f.name) = Upload{
+                    .filename = Str.fromRequest(part.filename, lifetime),
+                    .content_type = Str.fromRequest(part.content_type, lifetime),
+                    .bytes = Str.fromRequest(part.bytes, lifetime),
+                };
+            } else if (f.defaultValue()) |default| {
+                @field(out, f.name) = default;
+            } else if (@typeInfo(f.type) == .optional) {
+                @field(out, f.name) = null;
+            } else {
+                outcomes[i].reason = .missing;
+            }
+        } else if (fields.find(f.name)) |raw| {
+            const arrived = Str.fromRequest(raw, lifetime);
+            // Kept before the conversion is tried, and kept whether or not
+            // it works: the box a form puts back on the page holds what was
+            // typed, not what it would have become.
+            outcomes[i].given = arrived;
+
+            var converted: Inner = undefined;
+            if (convert.tryConvert(Inner, arrived, &converted)) |reason| {
+                outcomes[i].reason = reason;
+                if (f.defaultValue()) |default| @field(out, f.name) = default;
+            } else {
+                @field(out, f.name) = converted;
+            }
+        } else if (f.defaultValue()) |default| {
+            @field(out, f.name) = default;
+        } else if (@typeInfo(f.type) == .optional) {
+            @field(out, f.name) = null;
+        } else {
+            outcomes[i].reason = .missing;
         }
     }
     return out;

@@ -92,6 +92,39 @@ defer parsed.deinit();
 try expectEqualStrings("no user 99", parsed.value.object.get("error").?.string);
 ```
 
+## Tying a failure to its log line
+
+Behind the proxy that zfast assumes in front
+([ADR 0028](../adr/0028-tls-is-terminated-in-front.md)), the one thing you
+cannot reconstruct afterwards is *which* log lines belong to the request that
+went wrong. Switch on request ids and the answer is on the response:
+
+```zig
+try app.use(logger.with(.{ .format = .json, .request_id = true }));
+```
+
+```
+$ curl -i localhost:8787/users/99
+HTTP/1.1 404 Not Found
+X-Request-Id: 4f2ba81c9d3e7a05
+
+{"method":"GET","path":"/users/99","status":404,"us":59,"request_id":"4f2ba81c9d3e7a05"}
+```
+
+Somebody reports "it failed around 14:02" and pastes the header; you grep for
+it. `c.requestId()` reaches the same id from inside a handler, so anything you
+log yourself can carry it too — and it works whether or not the logger is
+installed.
+
+If the proxy already sent an `X-Request-Id`, that one is used, so the id is the
+same on both sides. **A client's id is checked, not trusted**: up to 64 bytes of
+letters, digits, `.`, `_` and `-` — which every id generator in use produces —
+and anything else is ignored in favour of one of zfast's own. Otherwise a
+newline in a header would forge a log line and split a response.
+
+Both options are off by default: the id costs a header on every response, and
+the plain-text line is what a person reads in a terminal.
+
 ## Errors zfast writes for you
 
 You don't have to write any of these; they are what the request never reaching

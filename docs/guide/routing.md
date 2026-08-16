@@ -69,16 +69,21 @@ A group has the same methods an App does — `get`, `post`, `use`, `useOn`,
 `provide`, `static`, `group` — so anything you can register on the App you can
 register on a group.
 
-**A prefix is literal text.** `app.group("/orgs/:org")` is a compile error.
-Middleware is scoped by comparing the front of the request path against the
-prefix, and `/orgs/:org` is the front of no real path, so every middleware on
-that group would quietly never run. Put the param in the route patterns instead:
+**A prefix may carry a param**, which is what a multi-tenant path wants:
 
 ```zig
-const orgs = app.group("/orgs");
-try orgs.use(requireMembership);
-try orgs.get("/:org/members", listMembers);
+const orgs = app.group("/orgs/:org");
+try orgs.use(requireMembership);        // /orgs/acme/… and /orgs/acme/anything
+try orgs.get("/members", listMembers);  // → /orgs/:org/members
 ```
+
+Middleware scoped to a group matches **whole segments**, and a `:name` segment
+in the prefix matches whatever is opposite it. So `requireMembership` runs for
+routes under the group *and* for a 404 under it, and `app.use("/api", …)` does
+not reach `/apiary`.
+
+A `*` in a prefix is still refused: a catch-all matches the whole rest of the
+path, leaving nothing for the routes inside the group to match.
 
 ## Plugins
 

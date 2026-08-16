@@ -99,6 +99,77 @@ is the one with no ceiling.
 Inside the ceiling nothing is copied: a file's bytes are a slice of the body
 that was already read, not a second copy of it.
 
+## When one field is wrong and the rest are fine
+
+`Form(T)` is all-or-nothing: the first field that will not convert is a 400 and
+the request is over. For an API that is usually what you want. For a page, it
+is not — somebody mistypes their age and loses everything else they typed.
+
+`Bound(Form(T))` hands the failures to the handler instead:
+
+```zig
+fn signUp(b: zfast.Bound(zfast.Form(SignUp))) !zfast.Redirect(303) {
+    const form = b.value() orelse return b.fail();
+    ...
+}
+```
+
+`b.fail()` is a **422** naming every field that did not bind:
+
+```
+2 fields did not fit: the form is missing "email" (text);
+"age" has to be a whole number, not "soon"
+```
+
+`value()` is an optional and there is no way past it. A field that did not bind
+holds nothing worth reading, so the binding withholds the whole struct rather
+than letting you read a zero nobody sent.
+
+### Showing the form again
+
+What a page needs is not the converted values — it is **what the person
+typed**. You put `soon` back in the age box, not `0`. That is `given`, and it
+works for every field whether or not it bound:
+
+```zig
+fn signUp(arena: std.mem.Allocator, b: zfast.Bound(zfast.Form(SignUp))) !Page {
+    if (b.value()) |form| return welcome(form);
+
+    var wrong: std.ArrayList(Problem) = .empty;
+    var it = b.failures();
+    while (it.next()) |f| {
+        f.field      // "age"
+        f.reason     // .not_a_number
+        f.given      // Str "soon" — what arrived
+        f.expected   // "a whole number"
+        try f.say(w) // zfast's own sentence, so yours cannot drift from it
+    }
+
+    return signUpPage(.{
+        .email = b.given("email").view(),   // still in the box
+        .age = b.given("age").view(),       // "soon", so they can see it
+        .problems = wrong.items,
+    });
+}
+```
+
+The field name in `given("…")` is checked while compiling — a typo there would
+otherwise be an empty box nobody notices.
+
+### What it does not do
+
+The reasons are exactly the conversions zfast already performs: `.missing`,
+`.not_a_number`, `.not_true_or_false`, `.not_a_choice`, `.wrong_kind`. **This
+is not a validator.** Whether the age is plausible, whether the email has an
+`@`, whether the two passwords match — all yours.
+
+And three things stay a plain 400, because none of them leaves a binding to
+hand back: a body that is not a form at all, text that is not JSON, and a field
+the endpoint has never heard of.
+
+The same wrapper works on the other two slots: `Bound(T)` for a JSON body and
+`Bound(Query(T))` for the query string.
+
 ## A form is the body
 
 `Form(T)` sits exactly where a plain struct argument would have read JSON.
@@ -122,6 +193,9 @@ fn signIn(c: *zfast.Ctx) !void {
     ...
 }
 ```
+
+`c.formCollecting(T, &outcomes)` and `c.jsonCollecting(T, &outcomes)` are what
+`Bound(…)` is built on, for a `*Ctx` handler that wants the failures.
 
 ## Testing one
 
@@ -162,3 +236,6 @@ See [OpenAPI](./openapi.md).
 - [ADR 0031](../adr/0031-a-form-is-the-body-read-by-another-rule.md) — why
   `Form(T)` is explicit rather than sniffed, and what the multipart parser is
   careful about.
+- [ADR 0036](../adr/0036-a-binding-hands-its-failures-to-the-handler.md) — why
+  `value()` is an optional, why the reason list stops where it does, and what
+  stays a plain 400.

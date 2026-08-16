@@ -50,9 +50,37 @@ pub const Scoped = struct {
     middleware: Middleware,
 
     pub fn covers(self: Scoped, path: []const u8) bool {
-        return self.prefix.len == 0 or std.mem.startsWith(u8, path, self.prefix);
+        if (self.prefix.len == 0) return true;
+        return underPrefix(self.prefix, path);
     }
 };
+
+/// Whether `path` sits under `prefix`, comparing whole segments, with a
+/// `:name` segment in the prefix matching any one segment of the path.
+///
+/// Both halves matter. **Whole segments** is what `static.zig`'s
+/// `underPrefix` has always done and this had not: `startsWith` alone put
+/// `/api` middleware on `/apiary`.
+///
+/// **A `:name` segment** is what lets a group prefix carry a param. This is
+/// asked two different questions and has to answer both: at `listen()` the
+/// chain for each route is resolved against its *pattern*, where `/orgs/:org`
+/// is compared with `/orgs/:org/members`; per request, on the cold path where
+/// nothing matched, it is compared with a real path like `/orgs/acme/members`.
+/// A prefix segment that begins with `:` matches whatever is opposite it,
+/// which answers both without either caller having to say which it is asking.
+fn underPrefix(prefix: []const u8, path: []const u8) bool {
+    if (std.mem.eql(u8, prefix, "/")) return true;
+
+    var wanted = std.mem.tokenizeScalar(u8, prefix, '/');
+    var got = std.mem.tokenizeScalar(u8, path, '/');
+    while (wanted.next()) |want| {
+        const have = got.next() orelse return false;
+        if (want.len > 0 and want[0] == ':') continue;
+        if (!std.mem.eql(u8, want, have)) return false;
+    }
+    return true;
+}
 
 /// The chain for `path`, in registration order. The caller owns the
 /// result. Resolved once per route at `listen()`; for a request that
@@ -151,6 +179,49 @@ test "a prefix scopes a middleware to the routes under it" {
     defer testing.allocator.free(off_api);
     try testing.expectEqual(@as(usize, 1), off_api.len);
     try testing.expect(off_api[0] == markA);
+}
+
+test "a prefix only covers whole segments" {
+    const scoped = [_]Scoped{.{ .prefix = "/api", .middleware = markA }};
+
+    const inside = try chainFor(testing.allocator, &scoped, "/api/users");
+    defer testing.allocator.free(inside);
+    try testing.expectEqual(@as(usize, 1), inside.len);
+
+    // The group's own path, with nothing under it.
+    const itself = try chainFor(testing.allocator, &scoped, "/api");
+    defer testing.allocator.free(itself);
+    try testing.expectEqual(@as(usize, 1), itself.len);
+
+    // `startsWith` used to put this middleware on a route that merely began
+    // with the same letters. `static.zig` had the right rule all along.
+    const apiary = try chainFor(testing.allocator, &scoped, "/apiary");
+    defer testing.allocator.free(apiary);
+    try testing.expectEqual(@as(usize, 0), apiary.len);
+}
+
+test "a prefix carrying a param covers a pattern and a real path alike" {
+    const scoped = [_]Scoped{.{ .prefix = "/orgs/:org", .middleware = markA }};
+
+    // What `listen()` asks: the chain for each route, against its pattern.
+    const pattern = try chainFor(testing.allocator, &scoped, "/orgs/:org/members");
+    defer testing.allocator.free(pattern);
+    try testing.expectEqual(@as(usize, 1), pattern.len);
+
+    // What a request that matched no route asks: against the real path.
+    const real = try chainFor(testing.allocator, &scoped, "/orgs/acme/members");
+    defer testing.allocator.free(real);
+    try testing.expectEqual(@as(usize, 1), real.len);
+
+    // A param matches one segment, not the rest of the path.
+    const elsewhere = try chainFor(testing.allocator, &scoped, "/teams/acme/members");
+    defer testing.allocator.free(elsewhere);
+    try testing.expectEqual(@as(usize, 0), elsewhere.len);
+
+    // Too short to be under it at all.
+    const short = try chainFor(testing.allocator, &scoped, "/orgs");
+    defer testing.allocator.free(short);
+    try testing.expectEqual(@as(usize, 0), short.len);
 }
 
 test "registration order is the run order, prefix or not" {

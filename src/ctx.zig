@@ -11,6 +11,7 @@
 const std = @import("std");
 const body_mod = @import("body.zig");
 const bulkhead = @import("bulkhead.zig");
+const convert_mod = @import("convert.zig");
 const cookie_mod = @import("cookie.zig");
 const http1 = @import("http1.zig");
 const json_mod = @import("json.zig");
@@ -97,6 +98,13 @@ pub const Ctx = struct {
     /// Who the connection came from, as the socket reports it. Empty when
     /// there is no socket — a test driving App directly, a Unix socket.
     _peer: bulkhead.Peer = .{},
+    /// This request's id, once somebody has asked for one. Null until then,
+    /// so a request nobody ties to anything pays nothing for the option.
+    _request_id: ?Str = null,
+    /// Where a generated id is written. Sixteen hex characters, on the Ctx
+    /// and therefore on the fiber's stack — not on the connection, whose
+    /// 8,767 idle bytes are an invariant rather than a budget (ADR 0018).
+    _request_id_buf: [16]u8 = undefined,
     /// What this request may do, from `listen()`. Defaults when App was
     /// never listened on, which is what a test gets.
     _limits: Limits = .{},
@@ -270,6 +278,47 @@ pub const Ctx = struct {
             if (std.ascii.eqlIgnoreCase(h.name, name)) return Str.fromRequest(h.value, self._lifetime);
         }
         return null;
+    }
+
+    /// This request's id — the one thing that ties a log line, a response,
+    /// and a client's report of "it was slow at 14:02" to each other.
+    ///
+    /// Taken from the `X-Request-Id` a proxy in front sent when there is one
+    /// and it is usable, and generated otherwise. Worked out on the first
+    /// call and kept, so a request that never asks pays nothing.
+    ///
+    /// **A client's id is checked, not trusted.** It goes into log lines and
+    /// back out as a response header, so whatever a stranger can put in it is
+    /// something they can put in your logs — a newline forges a line of its
+    /// own, and in a response header it splits the response. What passes is
+    /// 1 to 64 bytes of letters, digits, `.`, `_` and `-`, which is what
+    /// every id anybody generates already looks like. Anything else is
+    /// ignored in favour of one of zfast's own, rather than refused: a
+    /// request is not worth failing over the shape of a correlation id.
+    pub fn requestId(self: *Ctx) Str {
+        if (self._request_id) |id| return id;
+
+        const id = if (self.header("X-Request-Id")) |given| given: {
+            break :given if (usableRequestId(given.view())) given else self.generatedId();
+        } else self.generatedId();
+
+        self._request_id = id;
+        return id;
+    }
+
+    fn generatedId(self: *Ctx) Str {
+        // Rendered by hand rather than through `std.fmt`: this is on the
+        // path of every request the logger is switched on for, and sixteen
+        // shifts is less than reaching for the formatter.
+        const hex = "0123456789abcdef";
+        var value = nextId();
+        var i: usize = self._request_id_buf.len;
+        while (i > 0) {
+            i -= 1;
+            self._request_id_buf[i] = hex[@intCast(value & 0xf)];
+            value >>= 4;
+        }
+        return Str.fromRequest(self._request_id_buf[0..], self._lifetime);
     }
 
     /// The cookie called `name`, or null if the request carries no such one
@@ -475,6 +524,52 @@ pub const Ctx = struct {
         const content_type = if (self.header("Content-Type")) |h| h.view() else null;
         const b = (try self.body()).view();
         return @import("form.zig").readInto(T, self._arena, self._lifetime, content_type, b);
+    }
+
+    /// The same as `form`, but recording why each field that would not bind
+    /// did not, rather than stopping at the first one — the `*Ctx` way in to
+    /// what `Bound(Form(T))` does for a typed handler.
+    ///
+    /// What is refused outright is what leaves no binding to hand back: a
+    /// body that is not a form at all, and a form sent a way that cannot
+    /// carry the file this endpoint wants (`bound.zig`).
+    pub fn formCollecting(
+        self: *Ctx,
+        comptime T: type,
+        outcomes: *[@typeInfo(T).@"struct".fields.len]convert_mod.Outcome,
+    ) !T {
+        const content_type = if (self.header("Content-Type")) |h| h.view() else null;
+        const b = (try self.body()).view();
+        return @import("form.zig").readIntoCollecting(
+            T,
+            self._arena,
+            self._lifetime,
+            content_type,
+            b,
+            outcomes,
+        );
+    }
+
+    /// The same as `json`, but recording why each field that would not bind
+    /// did not — the `*Ctx` way in to what `Bound(T)` does for a typed
+    /// handler.
+    ///
+    /// The body that parses pays for none of this: one parse, no second
+    /// pass, and every outcome left clear.
+    pub fn jsonCollecting(
+        self: *Ctx,
+        comptime T: type,
+        outcomes: *[@typeInfo(T).@"struct".fields.len]convert_mod.Outcome,
+    ) !T {
+        const b = (try self.body()).view();
+        if (std.json.parseFromSliceLeaky(T, self._arena, b, .{})) |parsed| {
+            var value = parsed;
+            str_mod.stamp(&value, self._lifetime);
+            for (outcomes) |*o| o.* = .{};
+            return value;
+        } else |err| {
+            return collectBadBody(T, self._arena, self._lifetime, b, err, outcomes);
+        }
     }
 
     /// Whether this connection is offered for another request.
@@ -931,6 +1026,117 @@ fn describeBadBody(
     return describeObject(T, arena, dynamic.object, "", max_body_depth) orelse err;
 }
 
+/// Turn a failed body parse into one outcome per field of `T`, instead of
+/// into the first sentence that explains it.
+///
+/// Same second parse `describeBadBody` pays for, and for the same reason:
+/// the request was going to be refused anyway, and a body that parses never
+/// comes here. What differs is where it stops — this one keeps going, so a
+/// client that sent three bad fields learns about three.
+///
+/// **Three things stay a hard 400**, and they are the three that leave no
+/// binding to hand back. Text that is not JSON, or a body that is not an
+/// object, is not a mistake about any particular field. A field this
+/// endpoint has never heard of is not one of `T`'s fields, so there is no
+/// outcome to record it against — and "you sent `nme`" ends the search where
+/// "`name` is missing" would not. And a mistake *nested* inside a field is
+/// about the shape of the request rather than about which of this endpoint's
+/// own fields to show again; `describeField` names it down to eight levels,
+/// which is more than a list of top-level names could say.
+fn collectBadBody(
+    comptime T: type,
+    arena: std.mem.Allocator,
+    lifetime: *const str_mod.Lifetime,
+    body: []const u8,
+    err: anyerror,
+    outcomes: *[@typeInfo(T).@"struct".fields.len]convert_mod.Outcome,
+) !T {
+    if (std.mem.trim(u8, body, " \t\r\n").len == 0) return fail.badRequest(
+        "the request body is empty. This endpoint expects a JSON object with: {s}",
+        .{comptime fieldList(T)},
+    );
+
+    var scanner = std.json.Scanner.initCompleteInput(arena, body);
+    defer scanner.deinit();
+    var diagnostics: std.json.Diagnostics = .{};
+    scanner.enableDiagnostics(&diagnostics);
+
+    const dynamic = std.json.parseFromTokenSourceLeaky(
+        std.json.Value,
+        arena,
+        &scanner,
+        .{},
+    ) catch return fail.badRequest(
+        "the request body is not valid JSON — it stops making sense at line {d}, column {d}",
+        .{ diagnostics.getLine(), diagnostics.getColumn() },
+    );
+
+    if (dynamic != .object) return fail.badRequest(
+        "the request body has to be a JSON object with: {s} — this is {s}",
+        .{ comptime fieldList(T), kindOf(dynamic) },
+    );
+
+    const object = dynamic.object;
+
+    var it = object.iterator();
+    while (it.next()) |entry| {
+        const name = entry.key_ptr.*;
+        if (!hasField(T, name)) return fail.badRequest(
+            "the request body has a field \"{s}\" this endpoint does not know. It takes: {s}",
+            .{ name, comptime fieldList(T) },
+        );
+    }
+
+    var out: T = undefined;
+    var any = false;
+
+    inline for (@typeInfo(T).@"struct".fields, 0..) |f, i| {
+        outcomes[i] = .{};
+
+        if (object.get(f.name)) |given| {
+            // Only a string has text to quote back. A list or an object is
+            // described by its kind instead, which is what `kind` is for.
+            if (given == .string) outcomes[i].given = Str.fromRequest(given.string, lifetime);
+
+            if (std.json.parseFromValueLeaky(f.type, arena, given, .{})) |value| {
+                @field(out, f.name) = value;
+            } else |_| if (!fits(f.type, given)) {
+                // A word that is not one of the choices is the one wrong
+                // value that is the right *kind*, and it gets the sentence a
+                // bad `?stage=` gets rather than one arguing with itself.
+                if (given == .string and comptime choicesOf(f.type) != null) {
+                    outcomes[i].reason = .not_a_choice;
+                } else {
+                    outcomes[i].reason = .wrong_kind;
+                    outcomes[i].kind = kindOf(given);
+                }
+                any = true;
+                if (f.defaultValue()) |default| @field(out, f.name) = default;
+            } else {
+                return describeField(f.type, arena, given, f.name, max_body_depth) orelse err;
+            }
+        } else if (f.default_value_ptr == null) {
+            outcomes[i].reason = .missing;
+            any = true;
+        } else {
+            @field(out, f.name) = f.defaultValue().?;
+        }
+    }
+
+    // The parse failed and nothing above accounts for it. Hand it to the
+    // walker that says the most, rather than answering with an empty list of
+    // failures and a binding nobody can use.
+    if (!any) return describeBadBody(T, arena, body, err);
+
+    // Deliberately not stamped. `stamp` walks the struct writing lifetime
+    // markers, and this struct has undefined fields in it — following an
+    // undefined slice is exactly the crash the marker exists to prevent. It
+    // costs nothing: `Bound.value()` withholds the struct while any outcome
+    // carries a reason, so nothing in here is reachable. The text that *is*
+    // reachable is `outcomes[i].given`, stamped one at a time above.
+    return out;
+}
+
 /// What is wrong inside one object, or null if nothing here explains the
 /// refusal. `where` is what to call this object in a message — empty at the
 /// top level, `address` one down, `lines[2]` inside a list — so a nested
@@ -1113,6 +1319,52 @@ fn fieldList(comptime T: type) []const u8 {
     }
 }
 
+/// Where generated request ids count from, and how far along they are.
+///
+/// A correlation id has to tell apart the requests somebody is reading logs
+/// for, and a counter starting at 1 in every process behind the same proxy
+/// does not do that — so the counting starts somewhere nobody can guess.
+///
+/// The base is drawn **once**, on the first request that asks. It goes
+/// through the Bulkhead, which is a syscall, and a syscall made per request
+/// would stop every other request sharing that thread (ADR 0002, ADR 0014).
+/// What is left on the request path is one atomic add.
+var id_base: std.atomic.Value(u64) = .init(0);
+var id_next: std.atomic.Value(u64) = .init(0);
+
+fn nextId() u64 {
+    var base = id_base.load(.monotonic);
+    if (base == 0) {
+        var bytes: [8]u8 = undefined;
+        // Nothing here is worth failing a request over: without a base the
+        // counter alone still tells this process's requests apart, which is
+        // what somebody reading one process's logs is doing with it.
+        bulkhead.randomSecure(&bytes) catch @memset(&bytes, 0);
+        // Forced odd so the base is never zero, which is the value standing
+        // for "not drawn yet".
+        base = std.mem.readInt(u64, &bytes, .little) | 1;
+        // A race just means two draws and one kept; whoever lost adopts the
+        // winner's base so every id in this process counts from one place.
+        if (id_base.cmpxchgStrong(0, base, .monotonic, .monotonic)) |already| base = already;
+    }
+    return base +% id_next.fetchAdd(1, .monotonic);
+}
+
+/// Whether a client-supplied request id is one zfast is willing to repeat.
+///
+/// Deliberately narrow. The id is written into log lines and into a response
+/// header, so the test is not "is this valid" but "can anything in here mean
+/// something somewhere else" — a newline, a quote, a control byte. Every id
+/// generator in use writes hex, a UUID, or base62, and all of those pass.
+fn usableRequestId(text: []const u8) bool {
+    if (text.len == 0 or text.len > 64) return false;
+    for (text) |ch| switch (ch) {
+        'a'...'z', 'A'...'Z', '0'...'9', '.', '_', '-' => {},
+        else => return false,
+    };
+    return true;
+}
+
 fn hasField(comptime T: type, name: []const u8) bool {
     inline for (@typeInfo(T).@"struct".fields) |f| {
         if (std.mem.eql(u8, f.name, name)) return true;
@@ -1231,6 +1483,32 @@ pub fn decodeParams(arena: std.mem.Allocator, params: []router.Param) !void {
 }
 
 const testing = std.testing;
+
+test "what a client may put in a request id, and what it may not" {
+    // Every id generator in use writes one of these.
+    try testing.expect(usableRequestId("0123456789abcdef"));
+    try testing.expect(usableRequestId("2f8a4c1e-5b6d-4a7f-9c3e-1d2b3a4c5d6e"));
+    try testing.expect(usableRequestId("req_7Kd9.Xy-2"));
+
+    // The two that matter: a newline forges a log line of its own, and in a
+    // response header it splits the response.
+    try testing.expect(!usableRequestId("abc\ndef"));
+    try testing.expect(!usableRequestId("abc\r\nSet-Cookie: admin=1"));
+    // A quote would end the string it is written into on the JSON line.
+    try testing.expect(!usableRequestId("a\"b"));
+    // And the shapeless ones.
+    try testing.expect(!usableRequestId(""));
+    try testing.expect(!usableRequestId("x" ** 65));
+    try testing.expect(usableRequestId("x" ** 64));
+}
+
+test "generated ids do not repeat" {
+    var seen: [64]u64 = undefined;
+    for (&seen) |*slot| slot.* = nextId();
+    for (seen, 0..) |a, i| {
+        for (seen[i + 1 ..]) |b| try testing.expect(a != b);
+    }
+}
 
 test "query pairs are split first, then decoded" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
