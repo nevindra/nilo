@@ -49,6 +49,7 @@ const std = @import("std");
 /// other layer anything — and what it asks is Core, not the framework
 /// (ADR 0041).
 const core = @import("nilo_core");
+const types_mod = @import("types.zig");
 
 /// The declaration a Row carries. Named the way `nilo_resolve`,
 /// `nilo_query` and `nilo_response` are, so the markers the compile-time
@@ -154,6 +155,12 @@ fn borrowedType(comptime T: type) type {
     comptime {
         if (T == core.Str) return []const u8;
         if (T == ?core.Str) return ?[]const u8;
+        // A `Decimal` is digits rather than a number, so it points into the
+        // read buffer exactly as text does and moves for the same reason. It
+        // becomes `[]const u8` rather than a borrowed `Decimal`, because a
+        // type whose whole content is a slice should say out loud how long
+        // that slice is good for.
+        if (types_mod.isDecimal(T)) return if (@typeInfo(T) == .optional) ?[]const u8 else []const u8;
         return T;
     }
 }

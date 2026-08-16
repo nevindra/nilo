@@ -66,12 +66,29 @@ const testing = std.testing;
 /// Postgres folds an unquoted identifier to lower case and the Dialect
 /// always quotes: `CREATE TABLE x_Debug` makes `x_debug`, and
 /// `SELECT … FROM "x_Debug"` then cannot find it.
-const table = "nilo_live_people_" ++ switch (builtin.mode) {
+const mode_suffix = switch (builtin.mode) {
     .Debug => "debug",
     .ReleaseSafe => "releasesafe",
     .ReleaseFast => "releasefast",
     .ReleaseSmall => "releasesmall",
 };
+
+const table = "nilo_live_people_" ++ mode_suffix;
+
+/// A Postgres enum type, which the fixture owns for the same reason it owns
+/// the table: two optimize modes run at once against one database, and a
+/// `DROP TYPE` from the other run mid-test is the same race by another name.
+const role_type = "nilo_live_role_" ++ mode_suffix;
+
+/// A second table, for the array columns.
+///
+/// A table of their own rather than two more columns on the first, and the
+/// reason is the fixture rather than tidiness: the rows an array needs are
+/// **rows that go wrong** — one holding a NULL among its elements, one holding
+/// an array two dimensions deep — and every count and every ordered body
+/// asserted against the first table would have had to move to make room for
+/// them. A wrong row is not something to hide in a table other tests read.
+const list_table = "nilo_live_tickets_" ++ mode_suffix;
 
 /// Created and dropped by `Live.open`, so a run leaves nothing behind and
 /// does not care what else is in the database.
@@ -86,21 +103,51 @@ const table = "nilo_live_people_" ++ switch (builtin.mode) {
 ///
 /// `seen_at` carries a DEFAULT so that the inserts written before it existed
 /// still say what they meant.
+///
+/// `role` is a Postgres enum, and **the third row holds a value the Zig enum
+/// in the test deliberately does not have.** That is not an oversight in the
+/// fixture, it is the case: `dialect.accepts` declines to judge an enum, so
+/// this is the one column type startup cannot check, and a table that has
+/// grown a value the code has not is the way it actually goes wrong.
 const setup =
     "DROP TABLE IF EXISTS " ++ table ++ ";" ++
+    "DROP TYPE IF EXISTS " ++ role_type ++ ";" ++
+    "CREATE TYPE " ++ role_type ++ " AS ENUM ('admin', 'member', 'moderator');" ++
     "CREATE TABLE " ++ table ++ " (" ++
     "  id bigint PRIMARY KEY," ++
-    "  email text NOT NULL," ++
+    // UNIQUE so that an upsert has a conflict target that is *not* the key —
+    // which is the case the conflict argument exists for, and the one a
+    // `.key`-only design could not have expressed.
+    "  email text NOT NULL UNIQUE," ++
     "  handle text," ++
     "  age integer NOT NULL," ++
     "  seen_at timestamptz NOT NULL DEFAULT '2026-08-16T09:30:00Z'," ++
     "  token uuid," ++
-    "  settings jsonb" ++
+    "  settings jsonb," ++
+    "  role " ++ role_type ++ " NOT NULL DEFAULT 'member'," ++
+    // Unconstrained `numeric`, so the precision this can hold is Postgres's
+    // rather than a column definition's — which is what makes the round-trip
+    // test below mean something.
+    "  balance numeric NOT NULL DEFAULT 0" ++
     ");" ++
-    "INSERT INTO " ++ table ++ " (id, email, handle, age, token, settings) VALUES" ++
-    "  (1, 'ada@example.dev', 'ada', 36, '550e8400-e29b-41d4-a716-446655440000', '{\"theme\":\"dark\"}')," ++
-    "  (2, 'grace@example.dev', NULL, 45, NULL, NULL)," ++
-    "  (3, 'kid@example.dev', 'kid', 11, '550e8400-e29b-41d4-a716-446655440001', '{\"theme\":\"light\"}');";
+    "INSERT INTO " ++ table ++ " (id, email, handle, age, token, settings, role) VALUES" ++
+    "  (1, 'ada@example.dev', 'ada', 36, '550e8400-e29b-41d4-a716-446655440000', '{\"theme\":\"dark\"}', 'admin')," ++
+    "  (2, 'grace@example.dev', NULL, 45, NULL, NULL, 'member')," ++
+    "  (3, 'kid@example.dev', 'kid', 11, '550e8400-e29b-41d4-a716-446655440001', '{\"theme\":\"light\"}', 'moderator');" ++
+    "DROP TABLE IF EXISTS " ++ list_table ++ ";" ++
+    "CREATE TABLE " ++ list_table ++ " (" ++
+    "  id bigint PRIMARY KEY," ++
+    "  tags text[] NOT NULL," ++
+    "  scores integer[]" ++
+    ");" ++
+    // Row 1 is the ordinary case, row 2 the two edge cases an array has that
+    // nothing else does — empty, and null — and rows 3 and 4 are the two
+    // shapes Postgres allows and a Zig slice cannot hold.
+    "INSERT INTO " ++ list_table ++ " (id, tags, scores) VALUES" ++
+    "  (1, ARRAY['urgent','billing'], ARRAY[10,20,30])," ++
+    "  (2, ARRAY[]::text[], NULL)," ++
+    "  (3, ARRAY['solo',NULL], NULL)," ++
+    "  (4, ARRAY['deep'], ARRAY[[1,2],[3,4]]);";
 
 const Person = struct {
     pub const nilo_table = .{ .name = table, .key = .id };
@@ -977,6 +1024,777 @@ test "a limit held in a usize binds, rather than failing to coerce" {
 
     try testing.expectEqual(@as(u16, 200), answer.status);
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, answer.body, "@example.dev"));
+}
+
+// -- numeric --------------------------------------------------------------
+
+/// `email` and `age` are here because the table requires both, which is the
+/// ordinary reason a Row reads a column it is not about.
+const Account = struct {
+    pub const nilo_table = .{ .name = table, .key = .id };
+
+    id: i64,
+    email: []const u8,
+    age: i32,
+    balance: types.Decimal,
+};
+
+test "a numeric survives the round trip with every digit it went in with" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    // Twenty-nine significant digits. An f64 carries about fifteen, so if the
+    // value went through one at any point in either direction this comes back
+    // rounded — which is the entire reason the column type exists.
+    const exact = "12345678901234567890.123456789";
+
+    const made = try stack.db.insert(Account, &run, .{
+        .id = @as(i64, 700),
+        .email = "exact@example.dev",
+        .age = @as(i32, 30),
+        .balance = types.Decimal{ .text = exact },
+    });
+    try testing.expectEqualStrings(exact, made.balance.text);
+
+    // And again on a fresh read, so the answer is Postgres's rather than an
+    // echo of what was sent.
+    const back = (try stack.db.find(Account, &run, @as(i64, 700))).?;
+    try testing.expectEqualStrings(exact, back.balance.text);
+}
+
+test "a numeric compares as a number rather than as the text it is carried in" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    _ = try stack.db.insert(Account, &run, .{
+        .id = @as(i64, 701),
+        .email = "poor@example.dev",
+        .age = @as(i32, 30),
+        .balance = types.Decimal{ .text = "9.99" },
+    });
+    _ = try stack.db.insert(Account, &run, .{
+        .id = @as(i64, 702),
+        .email = "rich@example.dev",
+        .age = @as(i32, 30),
+        .balance = types.Decimal{ .text = "100.00" },
+    });
+
+    // `"100.00" > "9.99"` is false as text and true as a number. The `::numeric`
+    // the Dialect puts on the placeholder is what decides which one this is.
+    const rich = try stack.db.select(Account, &run, .{
+        .where = .{ .balance = .{ .gt = types.Decimal{ .text = "50" } } },
+        .order = .{ .id = .asc },
+    });
+    try testing.expectEqual(@as(usize, 1), rich.len);
+    try testing.expectEqual(@as(i64, 702), rich[0].id);
+}
+
+fn richAccounts(db: *db_mod.Db, c: *nilo.Ctx) ![]Account {
+    return db.select(Account, c, .{
+        .where = .{ .balance = .{ .gt = types.Decimal{ .text = "50" } } },
+        .order = .{ .id = .asc },
+    });
+}
+
+test "a numeric leaves as a JSON string, so a consumer gets the digits" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+    _ = try stack.db.insert(Account, &run, .{
+        .id = @as(i64, 703),
+        .email = "json@example.dev",
+        .age = @as(i32, 30),
+        .balance = types.Decimal{ .text = "1234.56" },
+    });
+
+    try stack.app.get("/rich", richAccounts);
+    const answer = try stack.client.get(&stack.app, "/rich");
+
+    try testing.expectEqual(@as(u16, 200), answer.status);
+    // Quoted. A bare `1234.56` would be exact here and lose its last digits
+    // in whichever consumer calls `JSON.parse`.
+    try testing.expectEqualStrings(
+        "[{\"id\":703,\"email\":\"json@example.dev\",\"age\":30,\"balance\":\"1234.56\"}]",
+        answer.body,
+    );
+}
+
+test "a streamed numeric borrows its digits, and the type says so" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+    _ = try stack.db.insert(Account, &run, .{
+        .id = @as(i64, 704),
+        .email = "stream@example.dev",
+        .age = @as(i32, 30),
+        .balance = types.Decimal{ .text = "42.42" },
+    });
+
+    var rows = try stack.db.stream(Account, &run, .{ .where = .{ .id = @as(i64, 704) } });
+    defer rows.close();
+
+    const first = (try rows.next()).?;
+    // `[]const u8` rather than a `Decimal`, because the digits point into the
+    // read buffer and die at the next row — a Borrowed row makes that part of
+    // the type instead of a comment. `stream` therefore still allocates
+    // nothing, which `Json(T)` could not manage.
+    try testing.expectEqual([]const u8, @TypeOf(first.balance));
+    try testing.expectEqualStrings("42.42", first.balance);
+}
+
+// -- upserts --------------------------------------------------------------
+
+test "an upsert that ignores leaves the row that was already there alone" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    // Ada is row 1, and `email` is the unique column rather than the key —
+    // so this conflicts on something `db.find` could not have used.
+    const clash = try stack.db.insertOrIgnore(Person, &run, .{
+        .id = @as(i64, 99),
+        .email = "ada@example.dev",
+        .age = @as(i32, 1),
+    }, .email);
+    try testing.expectEqual(@as(?Person, null), clash);
+
+    // Nothing was written: not the age, and not a second row.
+    const ada = (try stack.db.find(Person, &run, @as(i64, 1))).?;
+    try testing.expectEqual(@as(i32, 36), ada.age);
+    try testing.expectEqual(@as(usize, 3), try stack.db.count(Person, &run, .{}));
+
+    // And a genuinely new row still goes in and comes back.
+    const made = try stack.db.insertOrIgnore(Person, &run, .{
+        .id = @as(i64, 4),
+        .email = "new@example.dev",
+        .age = @as(i32, 20),
+    }, .email);
+    try testing.expectEqual(@as(i64, 4), made.?.id);
+}
+
+test "an upsert that updates writes over the row that was there, and answers with it" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const back = try stack.db.insertOrUpdate(Person, &run, .{
+        .id = @as(i64, 99),
+        .email = "ada@example.dev",
+        .age = @as(i32, 37),
+    }, .email);
+
+    // The row that was already there, with the proposed values written over
+    // it — so the key is Ada's own `1` and not the `99` that was offered.
+    try testing.expectEqual(@as(i64, 1), back.id);
+    try testing.expectEqual(@as(i32, 37), back.age);
+    try testing.expectEqual(@as(usize, 3), try stack.db.count(Person, &run, .{}));
+}
+
+test "an upsert is one statement, so two of them cannot both insert" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    // The shape this replaces — catch `AlreadyExists`, then update — is two
+    // round trips with a window between them. Run the same upsert twice and
+    // the table gains exactly one row, which is the property that window
+    // cost.
+    const before = try stack.db.count(Person, &run, .{});
+    var round: usize = 0;
+    while (round < 3) : (round += 1) {
+        const back = try stack.db.insertOrUpdate(Person, &run, .{
+            .id = @as(i64, 50 + @as(i64, @intCast(round))),
+            .email = "repeat@example.dev",
+            .age = @as(i32, @intCast(round)),
+        }, .email);
+        try testing.expectEqual(@as(i32, @intCast(round)), back.age);
+    }
+    try testing.expectEqual(before + 1, try stack.db.count(Person, &run, .{}));
+}
+
+test "a statement that fails inside a transaction still leaves a rollback that works" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const dirty_before = try postgres.dirtyConnections();
+
+    {
+        var tx = try stack.db.begin(&run);
+        defer tx.deinit();
+        // `id` is the primary key and row 1 is already there.
+        try testing.expectError(error.AlreadyExists, tx.insert(Person, &run, .{
+            .id = @as(i64, 1),
+            .email = "clash@example.dev",
+            .age = @as(i32, 30),
+        }));
+    }
+
+    // The assertion the behaviour below cannot make. Postgres answers a
+    // failed statement in a transaction with ReadyForQuery `E`, pg.zig calls
+    // that `.fail`, and `canQuery` then refused the `ROLLBACK` — so the
+    // connection was destroyed and re-dialled on every failed statement
+    // inside a transaction. Nothing downstream could tell, which is why this
+    // reads the counter instead of the rows.
+    try testing.expectEqual(dirty_before, try postgres.dirtyConnections());
+
+    // The pool holds two, so five rounds reuse whatever came back.
+    var round: usize = 0;
+    while (round < 5) : (round += 1) {
+        var tx = try stack.db.begin(&run);
+        defer tx.deinit();
+        const found = try tx.select(Person, &run, .{ .where = .{ .id = @as(i64, 1) } });
+        try testing.expectEqual(@as(usize, 1), found.len);
+        try tx.commit();
+    }
+}
+
+// -- a statement with a deadline of its own -------------------------------
+
+/// One column of nothing, for a statement whose answer is not the point.
+const Slept = struct {
+    pub const nilo_table = .{ .name = "unused", .key = .ok };
+    ok: bool,
+};
+
+test "a statement past its deadline is cancelled by the database" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    var tx = try stack.db.begin(&run);
+    defer tx.deinit();
+
+    try tx.deadline(100);
+
+    // Ten seconds against a hundred milliseconds, so a slow machine cannot
+    // turn this into a flake in either direction.
+    const started = nilo.monotonicNanos();
+    const answer = tx.raw(Slept, &run, "SELECT pg_sleep(10) IS NULL", .{});
+    const waited_ms = @divFloor(nilo.monotonicNanos() - started, std.time.ns_per_ms);
+
+    // `57014` rather than a generic failure, which is the whole reason
+    // `TimedOut` exists: the handler that set the number is the one that can
+    // decide what to do about it.
+    try testing.expectError(error.TimedOut, answer);
+    try testing.expect(waited_ms < 5_000);
+}
+
+test "a deadline ends with its transaction, so the next one starts clean" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    {
+        var tx = try stack.db.begin(&run);
+        defer tx.deinit();
+        try tx.deadline(100);
+        try testing.expectError(
+            error.TimedOut,
+            tx.raw(Slept, &run, "SELECT pg_sleep(10) IS NULL", .{}),
+        );
+    }
+
+    // `SET LOCAL` is undone by the end of the transaction whichever way it
+    // ended — here a rollback, from the `defer` above. The pool is two
+    // connections, so this asks for more than that many in a row: a
+    // connection that went back still carrying a 100ms timeout would fail
+    // this on whichever round reused it.
+    var round: usize = 0;
+    while (round < 5) : (round += 1) {
+        var tx = try stack.db.begin(&run);
+        defer tx.deinit();
+        const slept = try tx.raw(Slept, &run, "SELECT pg_sleep(0.3) IS NULL", .{});
+        try testing.expectEqual(@as(usize, 1), slept.len);
+        try tx.commit();
+    }
+}
+
+// -- the column type nothing checks at startup ----------------------------
+
+/// The Row that reads `role`, and **`Role` is missing `moderator` on
+/// purpose** — the fixture's third row has it. This is a Zig enum that has
+/// fallen behind its Postgres one, which is what an `ALTER TYPE … ADD VALUE`
+/// leaves behind and the only way this column type goes wrong.
+const Staff = struct {
+    pub const nilo_table = .{ .name = table, .key = .id };
+
+    id: i64,
+    role: Role,
+
+    const Role = enum { admin, member };
+};
+
+fn staffUnderThree(db: *db_mod.Db, c: *nilo.Ctx) ![]Staff {
+    return db.select(Staff, c, .{
+        .where = .{ .id = .{ .lt = @as(i64, 3) } },
+        .order = .{ .id = .asc },
+    });
+}
+
+test "an enum column comes back as the Zig value of the same name" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    try stack.app.get("/staff", staffUnderThree);
+    const answer = try stack.client.get(&stack.app, "/staff");
+
+    try testing.expectEqual(@as(u16, 200), answer.status);
+    try testing.expectEqualStrings(
+        "[{\"id\":1,\"role\":\"admin\"},{\"id\":2,\"role\":\"member\"}]",
+        answer.body,
+    );
+}
+
+fn allStaff(db: *db_mod.Db, c: *nilo.Ctx) ![]Staff {
+    return db.select(Staff, c, .{ .order = .{ .id = .asc } });
+}
+
+test "an enum value the Zig enum does not have is a 500, not a dead process" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    // Both the framework's line for the failed request and this module's line
+    // naming the value are the behaviour under test rather than news.
+    const was = std.testing.log_level;
+    defer std.testing.log_level = was;
+    std.testing.log_level = .err;
+
+    try stack.app.get("/all-staff", allStaff);
+    const answer = try stack.client.get(&stack.app, "/all-staff");
+
+    // Before the decode moved out of the driver this was
+    // `std.meta.stringToEnum(T, str).?` and the third row took the process
+    // down — every in-flight request with it, because Zig cannot recover from
+    // a panic (ADR 0008). One request failing is the whole of the fix.
+    try testing.expectEqual(@as(u16, 500), answer.status);
+}
+
+test "a connection is usable again after an enum refused to decode" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    const was = std.testing.log_level;
+    defer std.testing.log_level = was;
+    std.testing.log_level = .err;
+
+    try stack.app.get("/all-staff", allStaff);
+    try stack.app.get("/staff", staffUnderThree);
+
+    // The rule the whole of `wire.zig` is built on: whatever the handler did,
+    // the connection goes back usable. A row that stopped mid-result-set is a
+    // result set left unread, so this asks for one more than the pool holds.
+    var round: usize = 0;
+    while (round < 4) : (round += 1) {
+        const failed = try stack.client.get(&stack.app, "/all-staff");
+        try testing.expectEqual(@as(u16, 500), failed.status);
+    }
+
+    const answer = try stack.client.get(&stack.app, "/staff");
+    try testing.expectEqual(@as(u16, 200), answer.status);
+}
+
+// -- array columns --------------------------------------------------------
+
+/// `tags` as `Str` and `scores` as a plain slice, which is the pair worth
+/// reading together: one goes through the second walk that attaches the
+/// lifetime marker, the other is handed straight over by the driver.
+const Ticket = struct {
+    pub const nilo_table = .{ .name = list_table, .key = .id };
+
+    id: i64,
+    tags: []const nilo.Str,
+    scores: ?[]const i32,
+};
+
+test "an array column comes back as a slice, empty and null included" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const found = try stack.db.select(Ticket, &run, .{
+        .where = .{ .id = .{ .lte = @as(i64, 2) } },
+        .order = .{ .id = .asc },
+    });
+    try testing.expectEqual(@as(usize, 2), found.len);
+
+    try testing.expectEqual(@as(usize, 2), found[0].tags.len);
+    try testing.expectEqualStrings("urgent", found[0].tags[0].view());
+    try testing.expectEqualStrings("billing", found[0].tags[1].view());
+    try testing.expectEqualSlices(i32, &.{ 10, 20, 30 }, found[0].scores.?);
+
+    // An empty array is a slice of length zero and **not** a null: Postgres
+    // tells the two apart and so does this, which is the whole reason the
+    // second row is in the fixture.
+    try testing.expectEqual(@as(usize, 0), found[1].tags.len);
+    try testing.expectEqual(@as(?[]const i32, null), found[1].scores);
+}
+
+fn ticketOne(db: *db_mod.Db, c: *nilo.Ctx) ![]Ticket {
+    return db.select(Ticket, c, .{ .where = .{ .id = @as(i64, 1) } });
+}
+
+test "an array column leaves as a JSON array" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    try stack.app.get("/ticket", ticketOne);
+    const answer = try stack.client.get(&stack.app, "/ticket");
+
+    try testing.expectEqual(@as(u16, 200), answer.status);
+    try testing.expectEqualStrings(
+        "[{\"id\":1,\"tags\":[\"urgent\",\"billing\"],\"scores\":[10,20,30]}]",
+        answer.body,
+    );
+}
+
+test "an array with a NULL in it is one failed request rather than a dead process" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    // The line naming what happened is the behaviour under test.
+    const was = std.testing.log_level;
+    defer std.testing.log_level = was;
+    std.testing.log_level = .err;
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    // Postgres lets any array hold a NULL and there is no column definition
+    // that forbids it, so this is not a fixture nobody would write — it is
+    // what `text[]` means. Left to pg.zig it is `assert(has_nulls == 0)`,
+    // which is a panic in Debug and a read past the end in ReleaseFast.
+    try testing.expectError(error.QueryFailed, stack.db.select(Ticket, &run, .{
+        .where = .{ .id = @as(i64, 3) },
+    }));
+}
+
+/// The same column, read the way it has to be read when the array really can
+/// hold a NULL. `?Str` in the slice rather than `?[]const Str` around it —
+/// the null is in an element, not in the column.
+const Loose = struct {
+    pub const nilo_table = .{ .name = list_table, .key = .id };
+
+    id: i64,
+    tags: []const ?nilo.Str,
+};
+
+test "a slice of optionals reads the array the strict one refused" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const found = try stack.db.select(Loose, &run, .{ .where = .{ .id = @as(i64, 3) } });
+    try testing.expectEqual(@as(usize, 1), found.len);
+    try testing.expectEqual(@as(usize, 2), found[0].tags.len);
+    try testing.expectEqualStrings("solo", found[0].tags[0].?.view());
+    try testing.expectEqual(@as(?nilo.Str, null), found[0].tags[1]);
+}
+
+test "an array two dimensions deep is refused, because a slice is one" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    const was = std.testing.log_level;
+    defer std.testing.log_level = was;
+    std.testing.log_level = .err;
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    // `integer[]` in the DDL accepts an array of any depth — Postgres does not
+    // enforce the dimensionality it was declared with. pg.zig asserts on it;
+    // this answers instead.
+    try testing.expectError(error.QueryFailed, stack.db.select(Ticket, &run, .{
+        .where = .{ .id = @as(i64, 4) },
+    }));
+}
+
+test "an array goes out to a column and comes back the same array" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    // A slice of literals, which is what a caller has — a value on its way to
+    // the database has no lifetime question, so it is not asked for as `Str`.
+    const made = try stack.db.insert(Ticket, &run, .{
+        .id = @as(i64, 800),
+        .tags = &.{ "written", "back" },
+        .scores = @as(?[]const i32, &.{ 7, 8 }),
+    });
+    try testing.expectEqualStrings("written", made.tags[0].view());
+    try testing.expectEqualSlices(i32, &.{ 7, 8 }, made.scores.?);
+
+    // And again on a fresh read, so the answer is Postgres's rather than an
+    // echo of what was sent.
+    const back = (try stack.db.find(Ticket, &run, @as(i64, 800))).?;
+    try testing.expectEqual(@as(usize, 2), back.tags.len);
+    try testing.expectEqualStrings("back", back.tags[1].view());
+
+    // An empty array written out is an empty array read back, and still not
+    // a null.
+    const empty = try stack.db.insert(Ticket, &run, .{
+        .id = @as(i64, 801),
+        .tags = &[_][]const u8{},
+        .scores = @as(?[]const i32, null),
+    });
+    try testing.expectEqual(@as(usize, 0), empty.tags.len);
+    try testing.expectEqual(@as(?[]const i32, null), empty.scores);
+}
+
+test "the schema comparison judges an array by the array it holds" {
+    const gpa = testing.allocator;
+    var live = (try Live.open(gpa)) orelse return error.SkipZigTest;
+    defer live.close(gpa);
+
+    var db = db_mod.Db.init(gpa, "already open", .{});
+    db.wire = live.wire;
+
+    try testing.expectEqual(@as(usize, 0), try db.checkSchema(&.{Ticket}));
+
+    // And it is exact rather than widening: an `int4[]` does not read into a
+    // `[]const i64`, because the driver picks its element decoder off the
+    // array's own OID. Startup is where that has to be said, not the first
+    // request to touch the column.
+    const Wide = struct {
+        pub const nilo_table = .{ .name = list_table, .key = .id };
+
+        id: i64,
+        scores: ?[]const i64,
+    };
+
+    // Through `compare` rather than `checkSchema`, because the latter's whole
+    // job is to log what it found and a logged `err` is a failed test run
+    // (`http/test_root.zig`). What is under test is the comparison.
+    const arena = live.arena.allocator();
+    const actual = try live.wire.columnsOf(arena, dialect.Postgres.introspect, list_table);
+
+    var problems: std.ArrayList(schema.Problem) = .empty;
+    const found = try schema.compare(dialect.Postgres, Wide, actual, &problems, arena);
+    try testing.expectEqual(@as(usize, 1), found);
+    try testing.expectEqual(schema.Mismatch.wrong_type, problems.items[0].kind);
+}
+
+// -- a batch in one statement ---------------------------------------------
+
+/// One row of a batch. A named struct rather than a literal, because a slice
+/// of anonymous literals has no element type for the statement to be compiled
+/// from.
+const Newcomer = struct {
+    id: i64,
+    email: []const u8,
+    age: i32,
+};
+
+test "a batch goes in as one statement and comes back in the order it was sent" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const before = try stack.db.count(Person, &run, .{});
+    const stored = try stack.db.insertMany(Person, &run, &[_]Newcomer{
+        .{ .id = 900, .email = "one@batch.dev", .age = 21 },
+        .{ .id = 901, .email = "two@batch.dev", .age = 22 },
+        .{ .id = 902, .email = "three@batch.dev", .age = 23 },
+    });
+
+    try testing.expectEqual(@as(usize, 3), stored.len);
+    // `unnest` walks the arrays in step, so the rows come back in the order
+    // they were given rather than in whatever order the table ended up in.
+    try testing.expectEqual(@as(i64, 900), stored[0].id);
+    try testing.expectEqualStrings("two@batch.dev", stored[1].email);
+    try testing.expectEqual(@as(i32, 23), stored[2].age);
+
+    try testing.expectEqual(before + 3, try stack.db.count(Person, &run, .{}));
+}
+
+test "an empty batch is a statement that stores nothing, not a special case" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const before = try stack.db.count(Person, &run, .{});
+    const none: []const Newcomer = &.{};
+    const stored = try stack.db.insertMany(Person, &run, none);
+
+    // `unnest` of empty arrays yields no rows, so the statement runs, inserts
+    // nothing and answers with nothing. Writing a `if (rows.len == 0) return`
+    // here would be a second answer to a question the database already has
+    // one for.
+    try testing.expectEqual(@as(usize, 0), stored.len);
+    try testing.expectEqual(before, try stack.db.count(Person, &run, .{}));
+}
+
+test "a batch that violates a constraint takes none of its rows with it" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const before = try stack.db.count(Person, &run, .{});
+    // Row 1's email is Ada's, which is UNIQUE. One statement means one
+    // failure: the two good rows beside it are not stored either, which is
+    // the property a loop of inserts does not have without a transaction
+    // around it.
+    try testing.expectError(error.AlreadyExists, stack.db.insertMany(Person, &run, &[_]Newcomer{
+        .{ .id = 910, .email = "fine@batch.dev", .age = 21 },
+        .{ .id = 911, .email = "ada@example.dev", .age = 22 },
+        .{ .id = 912, .email = "also-fine@batch.dev", .age = 23 },
+    }));
+    try testing.expectEqual(before, try stack.db.count(Person, &run, .{}));
+}
+
+test "a batch inside a transaction is undone with the rest of it" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const before = try stack.db.count(Person, &run, .{});
+    {
+        var tx = try stack.db.begin(&run);
+        defer tx.deinit();
+        const stored = try tx.insertMany(Person, &run, &[_]Newcomer{
+            .{ .id = 920, .email = "tx-one@batch.dev", .age = 31 },
+            .{ .id = 921, .email = "tx-two@batch.dev", .age = 32 },
+        });
+        try testing.expectEqual(@as(usize, 2), stored.len);
+        // and no commit
+    }
+    try testing.expectEqual(before, try stack.db.count(Person, &run, .{}));
+}
+
+/// One row of a batch over the columns Zig has no word for, which is where a
+/// batch could quietly go wrong: each of these binds as something other than
+/// itself, and an array of them has to bind as an array of that.
+const Reading = struct {
+    id: i64,
+    email: []const u8,
+    age: i32,
+    seen_at: types.Timestamp,
+    token: ?types.Uuid,
+    settings: ?types.Json(Theme),
+    balance: types.Decimal,
+};
+
+/// The Row those columns are read back through. `email` and `age` are here
+/// because the table requires both, which is the ordinary reason a Row reads
+/// a column it is not about.
+const Sample = struct {
+    pub const nilo_table = .{ .name = table, .key = .id };
+
+    id: i64,
+    email: []const u8,
+    age: i32,
+    seen_at: types.Timestamp,
+    token: ?types.Uuid,
+    settings: ?types.Json(Theme),
+    balance: types.Decimal,
+};
+
+test "a batch carries the column types that bind as something else" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    _ = try stack.db.insertMany(Sample, &run, &[_]Reading{
+        .{
+            .id = 930,
+            .email = "sample-one@batch.dev",
+            .age = 40,
+            .seen_at = types.Timestamp.fromSeconds(1_786_959_000),
+            .token = try types.Uuid.parse("11111111-2222-3333-4444-555555555555"),
+            .settings = .{ .value = .{ .theme = "midnight" } },
+            .balance = .{ .text = "10.25" },
+        },
+        .{
+            .id = 931,
+            .email = "sample-two@batch.dev",
+            .age = 41,
+            .seen_at = types.Timestamp.fromSeconds(1_787_045_400),
+            .token = null,
+            .settings = null,
+            .balance = .{ .text = "12345678901234567890.123456789" },
+        },
+    });
+
+    const back = try stack.db.select(Sample, &run, .{
+        .where = .{ .id = .{ .gte = @as(i64, 930) } },
+        .order = .{ .id = .asc },
+    });
+    try testing.expectEqual(@as(usize, 2), back.len);
+    try testing.expectEqual(@as(i64, 1_786_959_000 * std.time.us_per_s), back[0].seen_at.micros);
+    try testing.expectEqualStrings("10.25", back[0].balance.text);
+    // A NULL among the values, which is the case an array has and a single
+    // `INSERT` does not: one element of the parameter is null rather than the
+    // whole parameter.
+    try testing.expectEqual(@as(?types.Uuid, null), back[1].token);
+    try testing.expectEqual(@as(?types.Json(Theme), null), back[1].settings);
+    // The one column a batch pays per row for: the document is written out
+    // here rather than handed to the driver as a struct, because pg.zig
+    // encodes a `jsonb[]` element from bytes.
+    try testing.expectEqualStrings("midnight", back[0].settings.?.value.theme);
+    try testing.expectEqualStrings("12345678901234567890.123456789", back[1].balance.text);
 }
 
 comptime {

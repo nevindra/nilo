@@ -121,6 +121,18 @@ const sql_refusals = [_]Refusal{
         .says = "`.set` on update_empty_set.User is empty.",
     },
     .{
+        .name = "upsert_nothing_to_set",
+        .says = "`db.insertOrUpdate` on upsert_nothing_to_set.User has nothing to set.",
+    },
+    .{
+        .name = "upsert_target_not_a_column",
+        .says = "upsert_target_not_a_column.User has no column `emial`, asked for in an upsert.",
+    },
+    .{
+        .name = "upsert_target_not_a_name",
+        .says = "an upsert on upsert_target_not_a_name.User was given a *const [5:0]u8 as its conflict target.",
+    },
+    .{
         .name = "update_without_condition",
         .says = "an update on update_without_condition.User with no condition.",
     },
@@ -135,6 +147,18 @@ const sql_refusals = [_]Refusal{
     .{
         .name = "streamed_json",
         .says = "streamed_json.Account reads `settings` as a Json column, and a streamed row cannot hold one.",
+    },
+    .{
+        .name = "streamed_list",
+        .says = "streamed_list.Ticket reads `tags` as a list column, and a streamed row cannot hold one.",
+    },
+    .{
+        .name = "batch_of_a_list_column",
+        .says = "a batch insert into batch_of_a_list_column.Ticket cannot send `tags`, which it reads as []const []const u8.",
+    },
+    .{
+        .name = "batch_of_an_unnamed_enum",
+        .says = "a batch insert into batch_of_an_unnamed_enum.Staff cannot send `role`, which it reads as batch_of_an_unnamed_enum.Role.",
     },
     .{
         .name = "borrowed_column_not_in_base",

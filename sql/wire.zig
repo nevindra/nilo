@@ -36,6 +36,12 @@
 //!   `SELECT` list itself and therefore already knows the order at compile
 //!   time; a name lookup would be paying at run time for something that
 //!   stopped being a question while compiling (ADR 0039).
+//! - `readList(rows, T, col, arena)` — one column that holds an array, as a
+//!   `[]T` in the arena. **The one read that takes an allocator**, and it has
+//!   to: an array arrives as a length and a run of length-prefixed elements,
+//!   so there is no slice of `T` in the buffer to point at the way there is a
+//!   run of bytes for text. One allocation per array column per row, which is
+//!   why a Row that reads one cannot be streamed.
 //! - `drain(rows)` — throw away what is left. Not optional: pg.zig's pool
 //!   checks that a connection is idle on release and, finding it is not,
 //!   destroys the connection and dials a new one. Leaving rows unread is
@@ -53,6 +59,13 @@
 //!   Wire is in.
 //! - `Tx.commit` / `Tx.rollback` — and `rollback` has to be reachable from a
 //!   `defer`, because that is how it will be called.
+//! - `Tx.deadline(ms)` — bound how long the statements after it may run,
+//!   for as long as this transaction lasts. **On the Tx rather than on the
+//!   Wire, and that is the design rather than a limitation** (ADR 0047): a
+//!   deadline has to be set on the same connection the statement will travel
+//!   down, and holding one connection across two statements is the whole of
+//!   what a transaction is. A Wire whose `run` takes a fresh connection each
+//!   time has nowhere to put one.
 //!
 //! ## The rule all three of those are instances of
 //!
@@ -101,6 +114,16 @@ pub const Error = error{
     ConstraintViolated,
     /// The connection went away, or was never there.
     Disconnected,
+    /// A statement ran past the deadline the caller set with `tx.deadline`
+    /// and the database cancelled it. Separate from `QueryFailed` because a
+    /// deadline nobody can tell fired is half a feature: the handler that set
+    /// the number is the one that knows what to do about it — shed the
+    /// request, answer from a cache, try a narrower query.
+    ///
+    /// No default status, deliberately. A deadline means something different
+    /// every time it is set: a 504 for a report, a 503 for a health check, a
+    /// 200 with less in it for a page that has a fallback.
+    TimedOut,
     /// The database said no in a way this module does not translate. The text
     /// is logged; it does not reach the client (ADR 0025).
     QueryFailed,
@@ -135,9 +158,9 @@ pub const Column = struct {
 pub fn assertWire(comptime W: type) void {
     comptime {
         const owed = [_][]const u8{
-            "open",  "close", "run",       "exec",
-            "next",  "read",  "drain",     "begin",
-            "Tx",    "columnsOf",
+            "open", "close",     "run",   "exec",
+            "next", "read",      "drain", "begin",
+            "Tx",   "columnsOf", "readList",
         };
         for (owed) |decl| {
             if (!@hasDecl(W, decl)) @compileError(
@@ -166,9 +189,16 @@ pub const Fake = struct {
     /// same way — this exists to drive the filling code, not to stand in
     /// for a database.
     answers: usize = 0,
+    /// What every text column answers with. A field rather than a literal
+    /// because a column whose bytes have to *mean* something — an enum's tag
+    /// name — cannot be tested against a fixed `"fake"`, which is exactly the
+    /// value such a column must refuse.
+    text: []const u8 = "fake",
     began: usize = 0,
     committed: usize = 0,
     rolled_back: usize = 0,
+    /// The last deadline a transaction asked for, or null if none did.
+    deadline_ms: ?u32 = null,
 
     pub const Rows = struct {
         left: usize = 0,
@@ -207,16 +237,38 @@ pub const Fake = struct {
     /// is exactly what `db.zig` copies away, so the copy is exercised even
     /// though there is nothing here that would dangle without it.
     pub fn read(self: *Fake, rows: *const Rows, comptime T: type, col: usize) Error!T {
-        _ = self;
         _ = rows;
         _ = col;
-        if (T == []const u8 or T == ?[]const u8) return "fake";
+        if (T == []const u8 or T == ?[]const u8) return self.text;
         return switch (@typeInfo(T)) {
             .int, .float => 0,
             .bool => false,
             .optional => null,
             else => error.QueryFailed,
         };
+    }
+
+    /// Two of whatever the column holds, in the arena. Two rather than one
+    /// because a list is the first column that can be empty, single or many,
+    /// and a length of one hides an off-by-one in the code that fills it.
+    ///
+    /// The elements come from `read`, so a Fake has exactly one answer per
+    /// type whether it is asked for a column or for a column's contents.
+    pub fn readList(
+        self: *Fake,
+        rows: *const Rows,
+        comptime L: type,
+        col: usize,
+        arena: std.mem.Allocator,
+    ) Error!L {
+        const Slice = switch (@typeInfo(L)) {
+            .optional => |o| o.child,
+            else => L,
+        };
+        const Item = @typeInfo(Slice).pointer.child;
+        const out = arena.alloc(Item, 2) catch return error.QueryFailed;
+        for (out) |*item| item.* = try self.read(rows, Item, col);
+        return out;
     }
 
     pub fn drain(self: *Fake, rows: *Rows) void {
@@ -251,6 +303,14 @@ pub const Fake = struct {
             values: anytype,
         ) Error!usize {
             return self.wire.exec(arena, sql, values);
+        }
+
+        /// The number rather than the statement it becomes. What the SQL
+        /// looks like is `postgres.zig`'s business and is pinned against a
+        /// real Postgres in `live.zig`; what a Fake can say is whether the
+        /// call arrived and with what.
+        pub fn deadline(self: *Tx, ms: u32) Error!void {
+            self.wire.deadline_ms = ms;
         }
 
         pub fn commit(self: *Tx) Error!void {

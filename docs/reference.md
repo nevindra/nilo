@@ -841,6 +841,9 @@ request ([ADR 0041](./adr/0041-a-module-sits-where-the-loop-puts-it.md)).
 | `db.count(User, c, .{ .where = … })` | `!usize`. `.where` only, and optional — no condition counts the table |
 | `db.exists(User, c, .{ .where = … })` | `!bool` — `SELECT EXISTS(…)`, so it stops at the first match |
 | `db.insert(User, c, .{ .email = … })` | `!User` — the stored row, generated key included. A subset of the columns |
+| `db.insertMany(User, c, rows)` | `![]User` — a whole batch in one statement, back in the order it was sent. `rows` is a `[]const Line`, `Line` a named struct of the columns being written; see below |
+| `db.insertOrIgnore(User, c, .{ … }, .email)` | `!?User` — the stored row, or `null` when one was already there. `ON CONFLICT … DO NOTHING` |
+| `db.insertOrUpdate(User, c, .{ … }, .email)` | `!User` — stored, or the existing row with these values written over it. `ON CONFLICT … DO UPDATE` |
 | `db.update(User, c, .{ .set = …, .where = … })` | `!usize` — rows changed. Both halves required |
 | `db.updateReturning(User, c, .{ .set = …, .where = … })` | `![]User` — the rows as they now are. One statement where an update and a select are two and a race |
 | `db.delete(User, c, .{ .where = … })` | `!usize` — rows deleted. `.where` required |
@@ -848,6 +851,42 @@ request ([ADR 0041](./adr/0041-a-module-sits-where-the-loop-puts-it.md)).
 | `db.stream(User, c, .{ … })` | rows one at a time; see below |
 | `db.raw(User, c, sql, .{ … })` | `![]User` — a statement this module will not write |
 | `db.begin(c)` | `!Tx` |
+
+### A batch
+
+`insertMany` sends one array per column and lets Postgres `unnest` them, so
+the statement text is a constant and the batch size is data
+([ADR 0053](./adr/0053-a-batch-is-one-array-per-column.md)). One round trip
+whatever the size, one allocation per column, and — because it is one
+statement — a batch that violates a constraint stores none of its rows.
+
+```zig
+const Line = struct { sku: Str, qty: i32 };
+const stored = try db.insertMany(Item, c, lines);   // lines: []const Line
+```
+
+The rows are a slice of a **named** struct, because the statement is compiled
+from the element type. Two columns cannot be batched and both say so at
+compile time: a list column, because `unnest` would flatten it, and an enum
+that has not declared `nilo_column`, because the cast has to name a type that
+lives in the database.
+
+### Upserts
+
+The last argument is the conflict target — the column the database has a
+unique constraint on, written the way a key is. `.{ .tenant_id, .email }` for
+one spanning two columns. Postgres refuses the statement if no such constraint
+exists; a Row cannot name one, so nothing on this side can check it.
+
+Two calls rather than one option, because the answers differ:
+`DO NOTHING` stores no row and `RETURNING` then yields none, so ignoring
+returns `?User` and updating returns `User`.
+
+`insertOrUpdate` sets **every column you passed except the conflict target and
+the Row's key**. The target is what the rows were matched on; the key
+identifies the row that is already there, and `"id" = EXCLUDED."id"` would
+renumber it. A call where that leaves nothing to set is a compile error
+pointing at `insertOrIgnore`.
 
 ### Options
 
@@ -937,6 +976,15 @@ the role: `ALTER ROLE app SET statement_timeout = '30s'`.
 | `sql.Timestamp` | microseconds since the epoch, written as RFC 3339 in JSON. `timestamptz`. `.now()`, `.fromSeconds(s)`, `.seconds()` |
 | `sql.Uuid` | `nilo_id`'s [`Uuid`](#nilo_id), re-exported — the same type either import gives you. `uuid` |
 | `sql.Json(T)` | a `T` stored as `jsonb`, parsed per row into the request arena. Not available in `db.stream`, which allocates nothing |
+| `sql.Decimal` | a `numeric`, held as its digits. `.text` is the value; there is no arithmetic. Writes itself into JSON as a **string**, so a consumer's `JSON.parse` cannot round it into an `f64` ([ADR 0050](./adr/0050-a-numeric-is-digits-and-a-string-in-json.md)) |
+| a slice | an array column, with no wrapper: `[]const Str` is `text[]`, `[]const i32` is `int4[]`, `?[]const i32` a nullable one, `[]const ?i32` one whose elements may be NULL ([ADR 0051](./adr/0051-an-array-is-a-slice-and-a-slice-is-one-deep.md)). `[]const u8` is text, so a list of text is `[]const Str` or `[]const []const u8`. Not available in `db.stream` |
+| an enum | read out of `text`, a `varchar` or a Postgres enum. A value the Zig enum does not have fails the request. Add `pub const nilo_column = "user_role"` to it and the column is checked at startup — and can be batched |
+
+An array column is judged **exactly**: an `int4[]` reads into a `[]const i32`
+and not into a `[]const i64`, because the driver picks its element decoder off
+the array's own type. An array with a NULL in it read into a non-optional
+element, or an array more than one dimension deep, fails the request rather
+than the process.
 
 ### Errors
 

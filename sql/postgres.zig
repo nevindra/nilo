@@ -102,6 +102,36 @@ pub const Wire = struct {
             self.conn.err = null;
         }
 
+        /// Let the connection out of pg.zig's `.fail` when what actually
+        /// happened was an aborted transaction rather than a broken socket.
+        ///
+        /// Postgres answers a failed statement inside a transaction with a
+        /// ReadyForQuery whose status byte is `E`: *this transaction is
+        /// aborted*. That is a state the session recovers from with exactly
+        /// one command — `ROLLBACK` — and Postgres will take it down the same
+        /// connection. pg.zig reads the byte and maps it to `.fail`, which is
+        /// also what it sets when the socket itself dies, and `canQuery`
+        /// refuses both. So the rollback this module has to send came back
+        /// `ConnectionBusy`, and **every failed statement inside a
+        /// transaction cost a full reconnect** — a correct answer, at the
+        /// price of TCP, TLS and auth, on a path nothing was measuring.
+        ///
+        /// The two cases are told apart by whether the server answered:
+        /// `conn.err` is set only by an ErrorResponse, and `fresh` empties it
+        /// at the start of every statement — so a set `err` here means *this*
+        /// statement got a reply and the socket is alive. A transport failure
+        /// leaves it null and this does nothing, which is the case where
+        /// destroying the connection is right.
+        ///
+        /// Delete this when pg.zig tells an aborted transaction apart from a
+        /// broken connection. It is the only place in nilo that reads
+        /// `_state`, and `postgres.zig` is the one file allowed to (ADR 0039).
+        fn revive(self: *Tx) void {
+            if (self.conn.err == null) return;
+            if (self.conn._state != .fail) return;
+            self.conn._state = .transaction;
+        }
+
         pub fn run(
             self: *Tx,
             arena: std.mem.Allocator,
@@ -130,9 +160,36 @@ pub const Wire = struct {
             return @intCast(count orelse 0);
         }
 
+        /// `SET LOCAL statement_timeout`, which Postgres undoes at the end of
+        /// this transaction whichever way it ends. One round trip, and it is
+        /// the caller who asked for it.
+        ///
+        /// **The statement is built rather than a constant, and that does not
+        /// move ADR 0039's line.** The rule is about the shape of a query
+        /// being settled while compiling; this is a session command with a
+        /// `u32` this module printed itself. Nothing a request supplies
+        /// reaches it, and there is no `SET` that takes a placeholder — the
+        /// parameter form does not exist in Postgres, so a constant was never
+        /// on offer.
+        pub fn deadline(self: *Tx, ms: u32) wire.Error!void {
+            if (self.done) return error.QueryFailed;
+            self.fresh();
+            var buf: [48]u8 = undefined;
+            // `SET LOCAL statement_timeout = N` counts milliseconds, which is
+            // the unit the argument is named for.
+            const sql = std.fmt.bufPrint(&buf, "SET LOCAL statement_timeout = {d}", .{ms}) catch
+                unreachable;
+            _ = self.conn.exec(sql, .{}) catch |err| return translate(self.conn, err);
+        }
+
         pub fn commit(self: *Tx) wire.Error!void {
             if (self.done) return;
             self.done = true;
+            // Before `fresh`, which is what the discrimination depends on.
+            // A COMMIT on an aborted transaction is a ROLLBACK as far as
+            // Postgres is concerned, and reaching the server to be told so
+            // beats destroying the connection to avoid asking.
+            self.revive();
             self.fresh();
             defer self.conn.release();
             _ = self.conn.exec("COMMIT", .{}) catch |err| return translate(self.conn, err);
@@ -146,6 +203,9 @@ pub const Wire = struct {
         pub fn rollback(self: *Tx) void {
             if (self.done) return;
             self.done = true;
+            // The path this is here for: a statement failed, which is the
+            // usual reason anybody rolls back at all.
+            self.revive();
             defer self.conn.release();
             _ = self.conn.exec("ROLLBACK", .{}) catch |err| {
                 std.log.err(
@@ -236,6 +296,81 @@ pub const Wire = struct {
         return row.get(T, col) catch return error.QueryFailed;
     }
 
+    /// Column `col` as a slice of its elements, allocated in the arena.
+    ///
+    /// **The one read that allocates, and it has no choice.** An array
+    /// arrives as a header and a run of length-prefixed elements, so unlike
+    /// text there is no `[]T` sitting in the read buffer to point at. The
+    /// slice and, for text elements, the bytes are copied into the request
+    /// arena here — which means a Row that reads one has already ended the
+    /// borrow by the time `db.zig` sees it, and is also why such a Row cannot
+    /// be streamed.
+    pub fn readList(
+        self: *Wire,
+        rows: *const Rows,
+        comptime L: type,
+        col: usize,
+        arena: std.mem.Allocator,
+    ) wire.Error!L {
+        _ = self;
+        const row = rows.current orelse return error.QueryFailed;
+
+        const optional = @typeInfo(L) == .optional;
+        const Slice = if (optional) @typeInfo(L).optional.child else L;
+        const Item = @typeInfo(Slice).pointer.child;
+
+        const raw = row.values[col];
+        if (raw.is_null) {
+            if (optional) return null;
+            return error.QueryFailed;
+        }
+        try arrayFits(Item, raw.data);
+
+        const it = row.iterator(Item, col) catch return error.QueryFailed;
+        return it.alloc(arena) catch return error.QueryFailed;
+    }
+
+    /// The two array shapes pg.zig asserts on rather than refuses, checked
+    /// here so they answer with a 500 for one request instead of taking the
+    /// process down (ADR 0008, and the same argument as `db.zig`'s `enumOf`).
+    ///
+    /// This reads the array header out of the column's own bytes, which is
+    /// reaching past pg.zig's API — the second place in this file that does,
+    /// after `revive`. There is no way to ask first: `row.iterator` builds
+    /// the iterator and asserts in the same call, so by the time nilo holds
+    /// one the assert has already fired.
+    ///
+    /// The header is Postgres's binary array format and is fixed: dimension
+    /// count, a null flag, the element OID, then per dimension a length and a
+    /// lower bound. A zero-dimension array — Postgres's `'{}'` — stops after
+    /// the first three.
+    fn arrayFits(comptime Item: type, data: []const u8) wire.Error!void {
+        if (data.len < 12) return error.QueryFailed;
+        // The empty array, which has no dimension to describe.
+        if (data.len == 12) return;
+        if (data.len < 20) return error.QueryFailed;
+
+        if (std.mem.readInt(i32, data[0..4], .big) != 1) {
+            std.log.warn(
+                "nilo_sql: a column held an array of more than one dimension, " ++
+                    "and a Zig slice is one deep.",
+                .{},
+            );
+            return error.QueryFailed;
+        }
+
+        const has_nulls = std.mem.readInt(i32, data[4..8], .big) != 0;
+        if (has_nulls and @typeInfo(Item) != .optional) {
+            std.log.warn(
+                "nilo_sql: a column held an array with a NULL in it, read as {s}. " ++
+                    "Postgres lets any array hold one; declare the column as a " ++
+                    "slice of optionals to read it.",
+                .{@typeName(Item)},
+            );
+            return error.QueryFailed;
+        }
+    }
+
     /// Throw away what is left and give the connection back.
     ///
     /// Not optional, and not only good manners: pg.zig's pool checks that a
@@ -316,6 +451,13 @@ fn translate(conn: *pg.Conn, err: anyerror) wire.Error {
     if (conn.err) |server| {
         if (std.mem.eql(u8, server.code, "23505")) return error.AlreadyExists;
         if (std.mem.startsWith(u8, server.code, "23")) return error.ConstraintViolated;
+        // `57014` is `query_canceled`, which Postgres sends both for a
+        // `statement_timeout` and for a `pg_cancel_backend` from somewhere
+        // else. Nothing in this module issues a cancel, so inside nilo the
+        // code means the deadline fired — and an operator who cancels a query
+        // by hand has told the handler the same thing either way: this
+        // statement is not going to finish.
+        if (std.mem.eql(u8, server.code, "57014")) return error.TimedOut;
         // The text never reaches the client (ADR 0025); it goes here, where
         // whoever is reading the log is the person who can fix it.
         std.log.err("nilo_sql: {s} [{s}]", .{ server.message, server.code });
@@ -325,6 +467,39 @@ fn translate(conn: *pg.Conn, err: anyerror) wire.Error {
         error.ConnectionBusy, error.ConnectionResetByPeer, error.BrokenPipe => error.Disconnected,
         else => error.QueryFailed,
     };
+}
+
+/// How many connections the pool has thrown away rather than taken back,
+/// out of pg.zig's own `pg_pool_dirty` counter.
+///
+/// **Test-facing, and it exists because nothing else reveals the number.**
+/// `Pool.release` destroys a connection it cannot vouch for and dials a
+/// replacement on the spot, so a caller sees the same rows either way and the
+/// pool's own `stats()` reads the same too. A test written against behaviour
+/// therefore passes whether or not `revive` above is doing anything, which is
+/// the shape [ADR 0033](../docs/adr/0033-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md)
+/// is about. Reading the counter is what makes the fix falsifiable.
+///
+/// Parsed out of the metrics text because that is the only way pg.zig hands
+/// the number over; it is a process-wide counter, so a test compares two
+/// readings rather than trusting one.
+pub fn dirtyConnections() !usize {
+    var buf: [1024]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try pg.writeMetrics(&w);
+
+    const key = "pg_pool_dirty";
+    const at = std.mem.indexOf(u8, w.buffered(), key) orelse return error.NoSuchMetric;
+    // Prometheus text: `pg_pool_dirty <number>` on its own line, and the
+    // `# TYPE` line above it also contains the name — so the count is read
+    // off the line that has a number after the key rather than the first hit.
+    var lines = std.mem.splitScalar(u8, w.buffered()[at..], '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, key ++ " ")) continue;
+        const text = std.mem.trim(u8, line[key.len..], " \r");
+        return std.fmt.parseInt(usize, text, 10) catch continue;
+    }
+    return error.NoSuchMetric;
 }
 
 // -- tests ---------------------------------------------------------------

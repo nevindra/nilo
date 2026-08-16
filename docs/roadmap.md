@@ -374,15 +374,12 @@ of it — measured at 0 bytes.
    [ADR 0039](./adr/0039-the-shape-of-a-query-is-settled-while-compiling.md)'s
    line; what they cost is surface, and each wants its axis numbers before it
    is written.
-   - Insert many. One round trip per row is the only shape there is, and it
-     branches before it can be written: either the count is comptime, which
-     makes a statement per length, or it is `unnest($1, $2, …)` over array
-     parameters — and arrays are item 3 below. It is a decision, not a task.
-   - Upsert. `ON CONFLICT` has no spelling, so idempotent writes are a caught
-     `AlreadyExists` and a second statement, which is also a race.
    - `SELECT … FOR UPDATE`, savepoints, and an isolation level on `begin`.
-     A `Tx` today is one connection and three verbs, which is not enough to
+     A `Tx` today is one connection and five verbs, which is not enough to
      write anything that actually contends.
+   - `updateMany`. `insertMany` writes the `unnest` shape and an update is the
+     same one joined against the table, so this is a morning's work behind a
+     question nobody has asked yet.
 2. **Prepared statements, measured first.** Every statement this module sends
    is already a comptime constant, which is the property that makes a cache
    cheap here and impossible in a framework that assembles its SQL per
@@ -392,32 +389,31 @@ of it — measured at 0 bytes.
    harness; [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md)'s
    10% is the bar, and `sql/postgres.zig` already says out loud that this is
    the measurement nobody has taken.
-3. **The column types Postgres has and this module cannot read.** `numeric`
-   is the one that matters — money in an `f64` is wrong, and a service that
-   bills anybody needs it before it needs anything else on this list. Arrays
-   (`text[]`, `int[]`) are the other half: pg.zig encodes them and
-   `dialect.accepts` declines to judge them, so a Row that reads one fails to
-   compile inside the driver rather than stopping here. `interval` and `inet`
-   are the same shape of question and are worth less.
+3. **The column types after arrays.** `interval` and `inet` are the same shape
+   of question `text[]` and `numeric` were, and are worth less than either was.
 4. **A second Dialect.** The seam is fitted and only Postgres is filled in,
    so nothing is known about whether it holds. SQLite is the useful test,
-   because it disagrees about the two things the seam abstracts: placeholders
-   and list form (`sql/dialect.zig` already refuses a dialect with no
-   `ANY(array)` rather than expanding a list into placeholders, which is the
-   decision SQLite would challenge).
+   because it disagrees about the three things the seam abstracts:
+   placeholders, list form (`sql/dialect.zig` already refuses a dialect with
+   no `ANY(array)` rather than expanding a list into placeholders) and now
+   casts — `readAs`, `bindAs` and `arrayOf` write `::text`, `::numeric` and
+   `::int4[]`, where SQLite spells a cast `CAST(… AS …)`, has no `numeric` to
+   cast to and has no array at all.
 
 ### Known gaps
 
 - **A table can only be named, never qualified.** `.name = "app.users"` is
   quoted as one identifier, and the introspection query only looks in
   `current_schema()`. Anything with a `search_path` is out.
-- **An enum column is not checked at startup.** `dialect.accepts` declines to
-  judge one, because a Postgres enum's type name lives in the database and
-  guessing it would fail honest schemas. So a Zig enum that has fallen behind
-  its table is found by the first request that reads such a row rather than by
-  `checking`. Closing it means asking the database which values the type
-  actually has — a second introspection query, and a Dialect that can spell
-  it.
+- **An enum column that has not named its type is not checked at startup.**
+  An enum carrying `pub const nilo_column = "user_role"` is judged like any
+  other column; one that does not is not, because a Postgres enum's type name
+  lives in the database and guessing it would fail honest schemas. What is
+  still open either way is the *values*: nothing compares the Zig enum's tags
+  against the type's, so a Zig enum that has fallen behind its table is found
+  by the first request that reads such a row. Closing that means asking the
+  database which values the type has — a second introspection query, and a
+  Dialect that can spell it.
 - **Nothing tests what a transaction does when the socket dies.** `Tx.fresh`
   clears the connection's server error before each statement, so a broken
   pipe after a unique violation is no longer reported as `AlreadyExists` —
@@ -515,7 +511,7 @@ Two whole areas come off before the list starts.
 
 **Schema**
 
-- [ ] `numeric`, arrays, `interval`, `inet` → Next 3
+- [ ] `interval`, `inet` → Next 3
 - [ ] Indexes, unique constraints, foreign keys, check constraints. A Row names
       its columns and its key and nothing else about the table is sayable, so
       `checking` cannot notice a missing index and nothing could generate one.
@@ -523,10 +519,11 @@ Two whole areas come off before the list starts.
 - [ ] Views and materialized views
 - [ ] Schema qualification → known gaps, above
 - [ ] A column type declared by a project rather than by this module. The
-      schema half is already open — a struct with `pub const nilo_column` is
-      judged by `dialect.accepts` — and the wire half is closed: `db.zig` knows
-      `Str`, `Timestamp`, `Uuid` and `Json(T)` by identity, so anything else
-      fails to compile inside the driver.
+      schema half is already open — a struct or an enum with `pub const
+      nilo_column` is judged by `dialect.accepts` — and the wire half is
+      closed: `db.zig` knows `Str`, `Timestamp`, `Uuid`, `Decimal`, `Json(T)`
+      and a slice of any of the scalars by identity, so anything else fails to
+      compile inside the driver.
 - Row-level security and Postgres extensions: nobody has looked.
 
 **Reading**
@@ -542,7 +539,7 @@ Two whole areas come off before the list starts.
 
 **Writing**
 
-- [ ] Insert many, upsert → Next 1
+- [ ] `updateMany` → Next 1
 - [ ] Several statements in one round trip
 
 **Connection and session**
@@ -562,10 +559,10 @@ needs to hold.
 - [ ] `push` — the diff straight at a database, no files in between
 - [ ] `pull` — Zig structs out of a database that already exists
 - [ ] `check` — two migrations written against the same parent
-- [ ] Seeding. The cheapest thing on this page once insert many and the Scope
-      land: a seed is then an ordinary program calling `db.insert` in a loop,
-      with no design left in it. Deterministic values and per-table counts are
-      what `drizzle-seed` adds on top, and they are library, not mechanism.
+- [ ] Seeding. The cheapest thing on this page: a seed is an ordinary program
+      calling `db.insertMany` against a `Run`, with no design left in it.
+      Deterministic values and per-table counts are what `drizzle-seed` adds on
+      top, and they are library, not mechanism.
 - A GUI over the database: not from here.
 
 ---

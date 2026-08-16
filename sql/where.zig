@@ -316,7 +316,11 @@ fn condition(
             return out;
         }
 
-        return quoted ++ " = " ++ D.placeholder(state.take(path, .{ .column = column }));
+        return quoted ++ " = " ++ D.bindAs(
+            D.placeholder(state.take(path, .{ .column = column })),
+            row_mod.ColumnType(Row, column),
+            false,
+        );
     }
 }
 
@@ -385,14 +389,16 @@ fn operator(
     comptime state: *State,
 ) []const u8 {
     comptime {
-        _ = Row;
         const path = prefix ++ &[_][]const u8{op.name};
         assertNotOptional(column, op.name, op.T);
 
         if (listSpelling(op.name)) |form| {
             return switch (D.list_form) {
-                .any_array => quoted ++ " " ++ form ++ "(" ++
-                    D.placeholder(state.take(path, .{ .column = column, .list = true })) ++ ")",
+                .any_array => quoted ++ " " ++ form ++ "(" ++ D.bindAs(
+                    D.placeholder(state.take(path, .{ .column = column, .list = true })),
+                    row_mod.ColumnType(Row, column),
+                    true,
+                ) ++ ")",
                 // Expanding the list into one placeholder each would make the
                 // statement depend on a length only known at runtime, which is
                 // the half of ADR 0039's rule this module exists to keep.
@@ -414,7 +420,11 @@ fn operator(
             );
         }
 
-        return quoted ++ " " ++ spelled ++ " " ++ D.placeholder(state.take(path, .{ .column = column }));
+        return quoted ++ " " ++ spelled ++ " " ++ D.bindAs(
+            D.placeholder(state.take(path, .{ .column = column })),
+            row_mod.ColumnType(Row, column),
+            false,
+        );
     }
 }
 

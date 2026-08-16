@@ -31,6 +31,84 @@ irregular nouns.
 `.key` names the column that identifies a row, and defaults to `id` when
 there is a field called that.
 
+### Money
+
+`sql.Decimal` reads a `numeric` column, and it holds **text**:
+
+```zig
+const Invoice = struct {
+    pub const nilo_table = .{ .name = "invoices", .key = .id };
+
+    id: i64,
+    total: sql.Decimal,        // numeric
+};
+
+const total = invoice.total.text;                    // "1234.56"
+_ = try db.insert(Invoice, c, .{ .total = sql.Decimal{ .text = "9.99" } });
+```
+
+There is no `.add` and no `.round`, which is the same line `sql.Timestamp`
+holds: **a type here carries a value and knows how to write itself; it does
+not calculate.** Decimal arithmetic is a library and a bigger one than it
+looks — rounding modes alone are a standard. What this owes you is that the
+digits which went in are the digits that come out, which a live test checks
+with a value twenty-nine significant digits wide.
+
+Comparisons are numeric, not textual: `.{ .total = .{ .gt = sql.Decimal{ .text = "50" } } }`
+finds `100.00` and not `9.99`.
+
+**In a JSON body it is a string**, `"1234.56"` rather than `1234.56`. A bare
+number is exact on the wire and stops being exact in the consumer, where
+`JSON.parse` answers a double — the `f64` the column type was chosen to avoid,
+handed over silently on the far side of the network. A string arrives intact
+([ADR 0050](../adr/0050-a-numeric-is-digits-and-a-string-in-json.md)). It is
+also the only form that can carry `nan` and `inf`, which Postgres allows and
+JSON has no number syntax for.
+
+Unlike `sql.Json(T)` it **streams**: in a `Borrowed` row the field is a plain
+`[]const u8`, so `db.stream` still allocates nothing per row.
+
+### Lists
+
+An array column is a plain Zig slice, with nothing wrapped round it:
+
+```zig
+const Ticket = struct {
+    pub const nilo_table = .{ .name = "tickets", .key = .id };
+
+    id: i64,
+    tags: []const nilo.Str,    // text[]
+    scores: ?[]const i32,      // integer[], and the column may be null
+};
+
+for (ticket.tags) |tag| { … tag.view() … }
+```
+
+`[]const u8` is text and was spoken for long before arrays were, so a list of
+text is `[]const Str` or `[]const []const u8` and never `[]const u8`. Writing
+one is the shape you would write anyway:
+
+```zig
+_ = try db.insert(Ticket, c, .{ .tags = &.{ "urgent", "billing" }, .scores = null });
+```
+
+Two things about arrays that Postgres allows and a Zig slice cannot hold:
+
+- **A NULL among the elements.** Any Postgres array may have one, and there is
+  no column definition that forbids it. Read into `[]const Str` that fails the
+  request; read the column as `[]const ?nilo.Str` and the nulls come through.
+- **More than one dimension.** A column declared `integer[]` will happily
+  store `ARRAY[[1,2],[3,4]]`. A slice is one deep, so that fails the request
+  too.
+
+Both used to take the process down inside the driver
+([ADR 0051](../adr/0051-an-array-is-a-slice-and-a-slice-is-one-deep.md)).
+
+An array is judged **exactly** at startup: an `int4[]` column reads into a
+`[]const i32`, and not into a `[]const i64` the way a scalar `int4` reads into
+an `i64`. And a Row that reads an array cannot be `db.stream`ed, for the same
+reason a `Json` column cannot — see [Streaming](#streaming-a-result-set-too-big-to-hold).
+
 ## The query is a constant
 
 ```zig
@@ -274,6 +352,47 @@ error: nilo: an update on User with no condition.
        so where somebody reading the code can see it.
 ```
 
+### Many rows at once
+
+A loop of `db.insert` is a round trip per row, and inside a transaction it is
+a round trip per row holding a pool connection. `insertMany` is one statement:
+
+```zig
+const Line = struct { sku: nilo.Str, qty: i32 };
+
+fn receive(db: *sql.Db, c: *nilo.Ctx, body: []const Line) ![]Item {
+    return db.insertMany(Item, c, body);
+}
+```
+
+The rows come back in the order they were sent. `tx.insertMany` is the same
+call inside a transaction.
+
+The rows are a slice of a **named** struct rather than a tuple of literals,
+because the statement is compiled from the element type. What it compiles to
+is one array parameter per column:
+
+```sql
+INSERT INTO "items" ("sku", "qty")
+SELECT * FROM unnest($1::text[], $2::int4[])
+RETURNING "id", "sku", "qty"
+```
+
+Two placeholders for any number of rows, which is what keeps the statement a
+constant — the `VALUES ($1,$2),($3,$4),…` most libraries generate has the
+batch size *in* it, so the SQL would be rebuilt per call and Postgres would
+plan it again for every distinct size
+([ADR 0053](../adr/0053-a-batch-is-one-array-per-column.md)).
+
+It is one statement, so a batch that violates a constraint stores **none** of
+its rows — usually what was wanted, and the opposite of a loop of inserts with
+nothing around it. An empty batch runs the statement, stores nothing and
+answers with nothing.
+
+Two columns cannot be batched, and both say so at compile time: a list column,
+because `unnest` would flatten it into one row per element, and an enum that
+has not declared what its Postgres type is called.
+
 ### Giving back the rows instead of the count
 
 A `PATCH` endpoint changes a row and answers with it. Written with `update`
@@ -295,6 +414,60 @@ what it took. Both answer with a slice, because nothing in a condition says
 how many rows it matches — the single-row shape is the length check above.
 The clause they add is the `SELECT` list this module already writes, so
 neither costs a statement the compiler did not settle.
+
+### Writing a row that may already be there
+
+The shape everybody writes first is a caught error and a second statement:
+
+```zig
+const user = db.insert(User, c, .{ .email = email, .name = name }) catch |err| switch (err) {
+    error.AlreadyExists => try db.updateReturning(User, c, .{ … }),   // two round trips
+    else => return err,
+};
+```
+
+That is two round trips, and there is a window between them: two requests can
+both fail the insert, both run the update, and the second one wins whatever
+order they arrive in. `ON CONFLICT` is one statement and has no window.
+
+```zig
+// Leave the row that is there alone. `null` means it was already there.
+const made = try db.insertOrIgnore(User, c, .{ .email = email }, .email);
+
+// Or write these values over it. Either way a row comes back.
+const user = try db.insertOrUpdate(User, c, .{
+    .email = email,
+    .name = name,
+}, .email);
+```
+
+The last argument is the **conflict target**: the column the database has a
+unique constraint or index on, written the way a key is. For a constraint
+spanning two columns it is a tuple, `.{ .tenant_id, .email }`. It is not
+required to be the Row's key — an email is the ordinary case and is usually
+not — and nothing on this side can check that a constraint exists, because a
+constraint is not a column and a Row cannot name one. Postgres refuses the
+statement if there is none.
+
+**They are two calls rather than one call with an option**, because the answer
+is a different shape. `DO NOTHING` stores no row, and `RETURNING` on a row
+that was not stored gives nothing back — so `insertOrIgnore` returns `?User`
+where `insertOrUpdate` returns `User`. It is the same reason `one` is not
+`select` with a flag.
+
+`insertOrUpdate` sets every column you passed **except the conflict target and
+the key**. The target is the value the two rows were matched on. The key is
+left out because a caller passing `.id` is filling in the insert half — nobody
+means "renumber the row that is already there", and Postgres would do it
+quietly, along with every foreign key pointing at that row. If that leaves
+nothing to set, the compiler says so and names the call you wanted:
+
+```
+error: nilo: `db.insertOrUpdate` on User has nothing to set.
+       Every column it was given is either the conflict target or the key
+       `id`, and the update half writes neither.
+       `db.insertOrIgnore` is the statement with nothing to set, and says so.
+```
 
 ## Transactions
 
@@ -381,11 +554,14 @@ costs a connection — and unlike a transaction, which is rolled back when the
 request ends, nothing else will ever close this one. Forgetting it is caught
 in Debug by the same counter that watches transactions.
 
-A Row with a `sql.Json(T)` column cannot be streamed, and that is a compile
-error rather than a footnote. A borrowed row allocates nothing, which is what
-makes a million of them run flat; parsing a document costs one allocation per
-row. Read it with `select`, or read the column as `[]const u8` in a Row of
-its own and parse it where you need it.
+Two kinds of column cannot be streamed, and each is a compile error rather
+than a footnote: a `sql.Json(T)`, and an **array**. The rule behind both is one
+sentence — **a streamed row holds only what the read buffer already holds.**
+A borrowed row allocates nothing, which is what makes a million of them run
+flat; parsing a document costs one allocation per row, and so does building a
+slice out of a run of length-prefixed elements. Read either with `select`, or
+leave the column out of the Row being streamed — a Json column read as
+`[]const u8` streams as bytes you can parse where you need them.
 
 ## Past one table
 

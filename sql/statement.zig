@@ -43,6 +43,7 @@ const std = @import("std");
 const row_mod = @import("row.zig");
 const where_mod = @import("where.zig");
 const dialect_mod = @import("dialect.zig");
+const types_mod = @import("types.zig");
 
 /// The direction an order term reads. Always comptime — which way a sort runs
 /// is shape, and a sort direction chosen at runtime is two statements.
@@ -251,7 +252,8 @@ pub fn find(comptime D: type, comptime Row: type, comptime K: type) Statement {
         break :blk .{
             .sql = "SELECT " ++ columnList(D, Row) ++
                 " FROM " ++ D.quote(row_mod.tableOf(Row)) ++
-                " WHERE " ++ D.quote(key) ++ " = " ++ D.placeholder(1) ++
+                " WHERE " ++ D.quote(key) ++ " = " ++
+                D.bindAs(D.placeholder(1), row_mod.ColumnType(Row, key), false) ++
                 D.limit("1"),
             // The empty path is the value itself: `find` takes a key rather
             // than a struct to read one out of, and `where.valueAt` with
@@ -388,7 +390,11 @@ pub fn insert(comptime D: type, comptime Row: type, comptime V: type) Statement 
                 places = places ++ ", ";
             }
             names = names ++ D.quote(f.name);
-            places = places ++ D.placeholder(i + 1);
+            places = places ++ D.bindAs(
+                D.placeholder(i + 1),
+                row_mod.ColumnType(Row, f.name),
+                false,
+            );
             paths = paths ++ &[_]where_mod.Path{&[_][]const u8{f.name}};
             params = params ++ &[_]where_mod.Param{.{ .column = f.name }};
         }
@@ -399,6 +405,274 @@ pub fn insert(comptime D: type, comptime Row: type, comptime V: type) Statement 
                 " RETURNING " ++ columnList(D, Row),
             .paths = paths,
             .params = params,
+        };
+    };
+}
+
+/// `INSERT`, one statement for however many rows there are.
+///
+/// The shape is Postgres's own answer to "many rows, one statement, and the
+/// statement is still a constant":
+///
+/// ```sql
+/// INSERT INTO "items" ("sku", "qty")
+/// SELECT * FROM unnest($1::text[], $2::int4[])
+/// RETURNING "id", "sku", "qty"
+/// ```
+///
+/// **One parameter per column, holding that column for every row** — so the
+/// text does not depend on how many rows there are, which is what keeps it a
+/// comptime constant (ADR 0039). `VALUES ($1,$2),($3,$4),…` is the shape most
+/// libraries generate and it is the shape this cannot have: the placeholder
+/// count is the batch size, so the SQL would have to be built per call, and
+/// Postgres would re-plan it every time the batch size changed.
+///
+/// `RETURNING` is the Row's column list, the same as `insert`'s and for the
+/// same reason. Rows come back in the order the arrays were given.
+pub fn insertMany(comptime D: type, comptime Row: type, comptime V: type) Statement {
+    return comptime blk: {
+        dialect_mod.assertDialect(D);
+        row_mod.assertRow(Row);
+
+        const info = switch (@typeInfo(V)) {
+            .@"struct" => |s| s,
+            else => @compileError(
+                "nilo: a batch insert into " ++ @typeName(Row) ++ " takes a slice of " ++
+                    "structs of columns, and its element is a " ++ @typeName(V) ++ ".\n" ++
+                    "  Give the rows a named struct: `const Line = struct { sku: []const u8, " ++
+                    "qty: i32 };` and pass a `[]const Line`.",
+            ),
+        };
+        if (info.fields.len == 0) @compileError(
+            "nilo: a batch insert into " ++ @typeName(Row) ++ " with no columns.\n" ++
+                "  Every row would be nothing but defaults, and there would be no " ++
+                "array to say how many of them there are.",
+        );
+
+        var names: []const u8 = "";
+        var arrays: []const u8 = "";
+        var paths: []const where_mod.Path = &.{};
+        var params: []const where_mod.Param = &.{};
+
+        for (info.fields, 0..) |f, i| {
+            if (!row_mod.hasColumn(Row, f.name)) {
+                row_mod.noSuchColumn(Row, f.name, "a batch insert");
+            }
+            const F = row_mod.ColumnType(Row, f.name);
+            const cast = D.arrayOf(F) orelse noArrayForm(D, Row, f.name, F);
+            if (i > 0) {
+                names = names ++ ", ";
+                arrays = arrays ++ ", ";
+            }
+            names = names ++ D.quote(f.name);
+            arrays = arrays ++ D.placeholder(i + 1) ++ "::" ++ cast;
+            paths = paths ++ &[_]where_mod.Path{&[_][]const u8{f.name}};
+            // `.list` is what `Values` in `db.zig` reads to make the tuple
+            // field a slice of the column's type rather than one of it. It is
+            // the same field `.in` sets, because it is the same question:
+            // does this placeholder hold one value or many?
+            params = params ++ &[_]where_mod.Param{.{ .column = f.name, .list = true }};
+        }
+
+        break :blk .{
+            .sql = "INSERT INTO " ++ D.quote(row_mod.tableOf(Row)) ++
+                " (" ++ names ++ ") SELECT * FROM unnest(" ++ arrays ++ ")" ++
+                " RETURNING " ++ columnList(D, Row),
+            .paths = paths,
+            .params = params,
+        };
+    };
+}
+
+/// The Refusal for a column a batch cannot send as one parameter. Two
+/// different mistakes reach it and each gets its own sentence, because the
+/// fix is different: a list column cannot be batched at all, and an enum
+/// only needs to be told what it is called.
+fn noArrayForm(
+    comptime D: type,
+    comptime Row: type,
+    comptime column: []const u8,
+    comptime F: type,
+) noreturn {
+    const head = "nilo: a batch insert into " ++ @typeName(Row) ++ " cannot send `" ++
+        column ++ "`, which it reads as " ++ @typeName(F) ++ ".";
+
+    if (types_mod.listElement(F) != null) @compileError(
+        head ++ "\n  A batch sends one array per column and `unnest` flattens what it " ++
+            "is given, so a column that is itself a list would come back one element " ++
+            "per row. Insert those rows one at a time with `db.insert`.",
+    );
+
+    if (@typeInfo(F) == .@"enum") @compileError(
+        head ++ "\n  A Postgres enum's type name lives in the database, so nothing here " ++
+            "can work out what to cast the parameter to. Add `pub const nilo_column = " ++
+            "\"<the type name>\";` to " ++ @typeName(F) ++ " — the schema check will use " ++
+            "it too.",
+    );
+
+    @compileError(
+        head ++ "\n  The " ++ D.name ++ " dialect has no column type for it, so there is " ++
+            "no array of it to send either. `dialect.accepts` is the list of what it knows.",
+    );
+}
+
+/// What a conflict does to the row that was already there.
+const OnConflict = enum {
+    /// `DO NOTHING`. The statement answers with no rows, which is why the
+    /// call that compiles this returns an optional.
+    nothing,
+    /// `DO UPDATE SET`, every written column except the ones being conflicted
+    /// on, each taken from the row that was proposed.
+    update,
+};
+
+/// `INSERT … ON CONFLICT (…) DO NOTHING`, answering with the row when one was
+/// stored and with nothing when one was already there.
+pub fn insertOrIgnore(
+    comptime D: type,
+    comptime Row: type,
+    comptime V: type,
+    comptime on: anytype,
+) Statement {
+    return comptime upserting(D, Row, V, on, .nothing);
+}
+
+/// `INSERT … ON CONFLICT (…) DO UPDATE SET …`, which always answers with a
+/// row: the one that was stored, or the one that was already there with the
+/// proposed values written over it.
+pub fn insertOrUpdate(
+    comptime D: type,
+    comptime Row: type,
+    comptime V: type,
+    comptime on: anytype,
+) Statement {
+    return comptime upserting(D, Row, V, on, .update);
+}
+
+/// The columns a conflict is judged on, out of `.email` or
+/// `.{ .tenant_id, .email }`.
+///
+/// An enum literal rather than a string because that is how a column is
+/// already named everywhere else a caller writes one — `.key = .id` in a
+/// `nilo_table`, `.{ .email = … }` in a condition. A tuple is the composite
+/// case, and there is no third spelling.
+fn conflictColumns(comptime Row: type, comptime on: anytype) []const []const u8 {
+    comptime {
+        const On = @TypeOf(on);
+        var names: []const []const u8 = &.{};
+
+        if (On == @TypeOf(.enum_literal)) {
+            names = &[_][]const u8{@tagName(on)};
+        } else switch (@typeInfo(On)) {
+            .@"struct" => |s| {
+                if (!s.is_tuple) notAConflictTarget(Row, On);
+                if (s.fields.len == 0) @compileError(
+                    "nilo: an upsert on " ++ @typeName(Row) ++ " was given an empty conflict " ++
+                        "target.\n" ++
+                        "  Name the column the unique constraint is on: " ++
+                        "`db.insertOrIgnore(Row, c, values, .email)`.",
+                );
+                for (s.fields) |f| {
+                    const value = @field(on, f.name);
+                    if (@TypeOf(value) != @TypeOf(.enum_literal)) notAConflictTarget(Row, On);
+                    names = names ++ &[_][]const u8{@tagName(value)};
+                }
+            },
+            else => notAConflictTarget(Row, On),
+        }
+
+        for (names) |name| {
+            if (!row_mod.hasColumn(Row, name)) row_mod.noSuchColumn(Row, name, "an upsert");
+        }
+        return names;
+    }
+}
+
+fn notAConflictTarget(comptime Row: type, comptime On: type) noreturn {
+    @compileError(
+        "nilo: an upsert on " ++ @typeName(Row) ++ " was given a " ++ @typeName(On) ++
+            " as its conflict target.\n" ++
+            "  It takes the column the unique constraint is on, written the way a key is: " ++
+            "`.email`, or `.{ .tenant_id, .email }` for one spanning two columns.",
+    );
+}
+
+/// Both upserts, which differ by four words of SQL and by whether the answer
+/// can be empty.
+///
+/// **`ON CONFLICT` is why this exists at all.** Without it an idempotent write
+/// is a caught `AlreadyExists` and a second statement — two round trips, and a
+/// race between them that a retry does not close: two requests can both see
+/// nothing, both insert, and one of them still loses.
+fn upserting(
+    comptime D: type,
+    comptime Row: type,
+    comptime V: type,
+    comptime on: anytype,
+    comptime action: OnConflict,
+) Statement {
+    return comptime blk: {
+        const base = insert(D, Row, V);
+        const targets = conflictColumns(Row, on);
+
+        var conflict: []const u8 = "";
+        for (targets, 0..) |name, i| {
+            if (i > 0) conflict = conflict ++ ", ";
+            conflict = conflict ++ D.quote(name);
+        }
+
+        // `insert` has already refused a name that is not a column and a
+        // struct that is not one, so what is left to check is the overlap.
+        //
+        // **Two kinds of column are left out of the update.** The conflict
+        // target, because writing a column to the value it was matched on is
+        // a no-op with a footgun attached — and the Row's key, because a
+        // caller passing `.id` is filling in the *insert* half and nobody
+        // means "change the primary key of the row that is already there".
+        // Postgres would do it, quietly, and take every foreign key pointing
+        // at that row with it.
+        const key = row_mod.keyOf(Row);
+        var sets: []const u8 = "";
+        var written: usize = 0;
+        for (@typeInfo(V).@"struct".fields) |f| {
+            if (std.mem.eql(u8, key, f.name)) continue;
+            var is_target = false;
+            for (targets) |name| {
+                if (std.mem.eql(u8, name, f.name)) is_target = true;
+            }
+            if (is_target) continue;
+            if (written > 0) sets = sets ++ ", ";
+            // `EXCLUDED` is the row the insert proposed, so the update writes
+            // the values the caller passed without binding them a second time
+            // — the parameter tuple is `insert`'s, unchanged.
+            sets = sets ++ D.quote(f.name) ++ " = EXCLUDED." ++ D.quote(f.name);
+            written += 1;
+        }
+
+        if (action == .update and written == 0) @compileError(
+            "nilo: `db.insertOrUpdate` on " ++ @typeName(Row) ++ " has nothing to set.\n" ++
+                "  Every column it was given is either the conflict target or the key `" ++
+                key ++ "`, and the update half writes neither — the first is the value the " ++
+                "rows were matched on, and the second identifies the row that is already " ++
+                "there.\n" ++
+                "  `db.insertOrIgnore` is the statement with nothing to set, and says so.",
+        );
+
+        const clause = switch (action) {
+            .nothing => " ON CONFLICT (" ++ conflict ++ ") DO NOTHING",
+            .update => " ON CONFLICT (" ++ conflict ++ ") DO UPDATE SET " ++ sets,
+        };
+
+        // Rebuilt rather than patched: `RETURNING` has to come last, and
+        // `insert` has already put it on the end.
+        const marker = " RETURNING ";
+        const at = std.mem.lastIndexOf(u8, base.sql, marker).?;
+
+        break :blk .{
+            .sql = base.sql[0..at] ++ clause ++ base.sql[at..],
+            .paths = base.paths,
+            .params = base.params,
+            .reserve = 1,
         };
     };
 }
@@ -467,7 +741,11 @@ fn updating(
                 row_mod.noSuchColumn(Row, f.name, "`.set`");
             }
             if (i > 0) sql = sql ++ ", ";
-            sql = sql ++ D.quote(f.name) ++ " = " ++ D.placeholder(next);
+            sql = sql ++ D.quote(f.name) ++ " = " ++ D.bindAs(
+                D.placeholder(next),
+                row_mod.ColumnType(Row, f.name),
+                false,
+            );
             paths = paths ++ &[_]where_mod.Path{&[_][]const u8{ "set", f.name }};
             params = params ++ &[_]where_mod.Param{.{ .column = f.name }};
             next += 1;
@@ -500,11 +778,14 @@ fn updating(
 
 // -- the pieces ----------------------------------------------------------
 
+/// The `SELECT` list, each column asked for the way its type wants — see
+/// `dialect.readAs`, which is where the one exception lives.
 fn columnList(comptime D: type, comptime Row: type) []const u8 {
     comptime {
         var out: []const u8 = "";
         for (row_mod.columnsOf(Row), 0..) |c, i| {
-            out = out ++ (if (i == 0) "" else ", ") ++ D.quote(c);
+            const asked = D.readAs(D.quote(c), row_mod.ColumnType(Row, c));
+            out = out ++ (if (i == 0) "" else ", ") ++ asked;
         }
         return out;
     }
@@ -817,6 +1098,199 @@ test "an insert writes a subset, because the database fills the rest in" {
             " RETURNING \"id\", \"email\", \"age\", \"created_at\"",
         found.sql,
     );
+}
+
+test "a batch insert is one array per column, and the text never mentions a count" {
+    const Line = struct { email: []const u8, age: i32 };
+    const found = comptime insertMany(Pg, User, Line);
+    try testing.expectEqualStrings(
+        "INSERT INTO \"users\" (\"email\", \"age\")" ++
+            " SELECT * FROM unnest($1::text[], $2::int4[])" ++
+            " RETURNING \"id\", \"email\", \"age\", \"created_at\"",
+        found.sql,
+    );
+    // Two placeholders for any number of rows. That is the property: the SQL
+    // is the same constant for a batch of one and a batch of ten thousand,
+    // which is what lets it be built while compiling at all.
+    try testing.expectEqual(@as(usize, 2), found.paramCount());
+    try testing.expect(found.params[0].list);
+    try testing.expect(found.params[1].list);
+}
+
+test "a batch names the array of what the column is, not of what was written" {
+    // `age` is `i32` in the Row and a `comptime_int` in the literal a caller
+    // writes. The cast comes from the column, the same way the parameter tuple
+    // takes its type from the column.
+    const Ages = struct { age: i32 };
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        comptime insertMany(Pg, User, Ages).sql,
+        1,
+        "$1::int4[]",
+    ));
+
+    // And a widened one is named by what the Dialect would accept: a `u32`
+    // does not fit an `int4`, so `accepts` says `int8` and so does this.
+    const Wide = struct {
+        pub const nilo_table = .{ .name = "wide", .key = .id };
+        id: i64,
+        n: u32,
+    };
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        comptime insertMany(Pg, Wide, struct { n: u32 }).sql,
+        1,
+        "$1::int8[]",
+    ));
+}
+
+test "an enum column can be batched once it says what it is called" {
+    const Named = struct {
+        pub const nilo_table = .{ .name = "staff", .key = .id };
+        id: i64,
+        role: Role,
+
+        const Role = enum {
+            admin,
+            member,
+
+            pub const nilo_column = "user_role";
+        };
+    };
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        comptime insertMany(Pg, Named, struct { role: Named.Role }).sql,
+        1,
+        "$1::user_role[]",
+    ));
+
+    // And the same declaration is what lets the schema check judge the column
+    // at startup, which it otherwise declines to do.
+    try testing.expectEqualStrings("user_role", Pg.accepts(Named.Role).?[0]);
+}
+
+const Invoice = struct {
+    pub const nilo_table = .{ .name = "invoices", .key = .id };
+
+    id: i64,
+    total: types_mod.Decimal,
+    refunded: ?types_mod.Decimal,
+};
+
+test "a numeric column is read as text and written back as numeric" {
+    // Both casts in one statement, which is the whole of what makes the round
+    // trip exact — the digits never become a float in either direction.
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"total\"::text, \"refunded\"::text FROM \"invoices\"" ++
+            " WHERE \"total\" > $1::numeric",
+        comptime select(Pg, Invoice, @TypeOf(.{
+            .where = .{ .total = .{ .gt = types_mod.Decimal{ .text = "0" } } },
+        })).sql,
+    );
+}
+
+test "a numeric is cast where it is inserted, and where it is set" {
+    try testing.expectEqualStrings(
+        "INSERT INTO \"invoices\" (\"id\", \"total\") VALUES ($1, $2::numeric)" ++
+            " RETURNING \"id\", \"total\"::text, \"refunded\"::text",
+        comptime insert(Pg, Invoice, @TypeOf(.{
+            .id = 1,
+            .total = types_mod.Decimal{ .text = "1.00" },
+        })).sql,
+    );
+    try testing.expectEqualStrings(
+        "UPDATE \"invoices\" SET \"total\" = $1::numeric WHERE \"id\" = $2",
+        comptime update(Pg, Invoice, @TypeOf(.{
+            .set = .{ .total = types_mod.Decimal{ .text = "2.00" } },
+            .where = .{ .id = @as(i64, 1) },
+        })).sql,
+    );
+}
+
+test "a numeric in a list is cast as an array, so the statement stays a constant" {
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"total\"::text, \"refunded\"::text FROM \"invoices\"" ++
+            " WHERE \"total\" = ANY($1::numeric[])",
+        comptime select(Pg, Invoice, @TypeOf(.{
+            .where = .{ .total = .{ .in = &[_]types_mod.Decimal{} } },
+        })).sql,
+    );
+}
+
+test "an upsert that ignores a conflict adds four words and no parameters" {
+    const values = @TypeOf(.{ .email = "a@b.c", .age = 30 });
+    const found = comptime insertOrIgnore(Pg, User, values, .email);
+    try testing.expectEqualStrings(
+        "INSERT INTO \"users\" (\"email\", \"age\") VALUES ($1, $2)" ++
+            " ON CONFLICT (\"email\") DO NOTHING" ++
+            " RETURNING \"id\", \"email\", \"age\", \"created_at\"",
+        found.sql,
+    );
+    // The conflict clause binds nothing of its own, so this is the same tuple
+    // the plain insert builds.
+    try testing.expectEqual(
+        comptime insert(Pg, User, values).paramCount(),
+        found.paramCount(),
+    );
+}
+
+test "an upsert that updates writes every column it was given but the target" {
+    const found = comptime insertOrUpdate(
+        Pg,
+        User,
+        @TypeOf(.{ .email = "a@b.c", .age = 30, .created_at = 0 }),
+        .email,
+    );
+    try testing.expectEqualStrings(
+        "INSERT INTO \"users\" (\"email\", \"age\", \"created_at\") VALUES ($1, $2, $3)" ++
+            " ON CONFLICT (\"email\") DO UPDATE SET" ++
+            " \"age\" = EXCLUDED.\"age\", \"created_at\" = EXCLUDED.\"created_at\"" ++
+            " RETURNING \"id\", \"email\", \"age\", \"created_at\"",
+        found.sql,
+    );
+    // `EXCLUDED` is the proposed row, so the update half costs no second
+    // binding of the same values.
+    try testing.expectEqual(@as(usize, 3), found.paramCount());
+}
+
+test "the update half never writes the key, even when it was given one" {
+    // A caller passing `.id` is filling in the insert; Postgres would take
+    // `"id" = EXCLUDED."id"` at its word and renumber the row that was
+    // already there, along with every foreign key pointing at it.
+    const found = comptime insertOrUpdate(
+        Pg,
+        User,
+        @TypeOf(.{ .id = 99, .email = "a@b.c", .age = 30 }),
+        .email,
+    );
+    try testing.expectEqualStrings(
+        "INSERT INTO \"users\" (\"id\", \"email\", \"age\") VALUES ($1, $2, $3)" ++
+            " ON CONFLICT (\"email\") DO UPDATE SET \"age\" = EXCLUDED.\"age\"" ++
+            " RETURNING \"id\", \"email\", \"age\", \"created_at\"",
+        found.sql,
+    );
+    // Still bound, because the insert half needs it.
+    try testing.expectEqual(@as(usize, 3), found.paramCount());
+}
+
+test "a conflict target spanning two columns is a tuple, and stays one statement" {
+    const found = comptime insertOrIgnore(
+        Pg,
+        User,
+        @TypeOf(.{ .id = 1, .email = "a@b.c", .age = 30 }),
+        .{ .id, .email },
+    );
+    try testing.expectEqualStrings(
+        "INSERT INTO \"users\" (\"id\", \"email\", \"age\") VALUES ($1, $2, $3)" ++
+            " ON CONFLICT (\"id\", \"email\") DO NOTHING" ++
+            " RETURNING \"id\", \"email\", \"age\", \"created_at\"",
+        found.sql,
+    );
+}
+
+test "an upsert reserves one row, because at most one comes back" {
+    const one_row = comptime insertOrIgnore(Pg, User, @TypeOf(.{ .email = "a@b.c" }), .email);
+    try testing.expectEqual(@as(?usize, 1), one_row.reserve);
 }
 
 test "an update numbers its set columns before its condition" {

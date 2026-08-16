@@ -395,6 +395,111 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             return back[0];
         }
 
+        /// Insert many rows in one statement, and give back what the database
+        /// stored — in the order they were sent.
+        ///
+        /// ```zig
+        /// const Line = struct { sku: Str, qty: i32 };
+        /// const stored = try db.insertMany(Item, c, lines);   // lines: []const Line
+        /// ```
+        ///
+        /// **One round trip, whatever the batch size.** A thousand rows
+        /// inserted in a loop is a thousand round trips, and inside a
+        /// transaction it is a thousand round trips holding a connection.
+        /// This sends one array per column and lets Postgres `unnest` them
+        /// (`statement.zig`), so the statement text is a constant and the
+        /// batch size is data.
+        ///
+        /// The cost is **one allocation per column** — the array a column's
+        /// values are gathered into — and not one per row. An empty batch
+        /// sends the statement with empty arrays and answers with no rows,
+        /// which is the same thing the database would have said.
+        pub fn insertMany(self: *Self, comptime Row: type, c: anytype, rows: anytype) ![]Row {
+            comptime core.checkScope(@TypeOf(c), "db.insertMany");
+            const V = comptime batchElement(Row, @TypeOf(rows));
+            const stmt = comptime statement.insertMany(D, Row, V);
+            const items: []const V = rows;
+            return fill(
+                Row,
+                items.len,
+                try self.wireOf(),
+                null,
+                c,
+                stmt.sql,
+                try batchValuesOf(stmt, Row, V, items, c),
+            );
+        }
+
+        /// Store the row, or leave the one that is already there alone —
+        /// `null` when that is what happened.
+        ///
+        /// ```zig
+        /// const made = try db.insertOrIgnore(User, c, .{ .email = email }, .email);
+        /// if (made == null) { … it was already there … }
+        /// ```
+        ///
+        /// **The optional is the whole difference from `insert`.** `DO
+        /// NOTHING` stores no row, and `RETURNING` on a row that was not
+        /// stored answers with nothing — so an empty answer is the ordinary
+        /// outcome here where in `insert` it would mean the driver and
+        /// Postgres disagree. That is why this is a call of its own rather
+        /// than an option on `insert`: the shape of the answer changed, which
+        /// is the same reason `one` is not `select` and `updateReturning` is
+        /// not `update`.
+        ///
+        /// The conflict target is a column the database has a unique
+        /// constraint or index on. Postgres refuses the statement at run time
+        /// if it has not — nothing on this side can know, because the
+        /// constraint is not a column and a Row cannot name one.
+        pub fn insertOrIgnore(
+            self: *Self,
+            comptime Row: type,
+            c: anytype,
+            values: anytype,
+            comptime on: anytype,
+        ) !?Row {
+            comptime core.checkScope(@TypeOf(c), "db.insertOrIgnore");
+            const stmt = comptime statement.insertOrIgnore(D, Row, @TypeOf(values), on);
+            const back = try fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, values));
+            return if (back.len == 0) null else back[0];
+        }
+
+        /// Store the row, or write these values over the one that is already
+        /// there. Either way a row comes back.
+        ///
+        /// ```zig
+        /// const user = try db.insertOrUpdate(User, c, .{
+        ///     .email = email,
+        ///     .name = name,
+        /// }, .email);
+        /// ```
+        ///
+        /// What it sets is every column you passed except the ones being
+        /// conflicted on, each taken from the row the insert proposed. A call
+        /// where that leaves nothing to set is a Refusal pointing at
+        /// `insertOrIgnore`, which is the statement it was actually asking
+        /// for.
+        ///
+        /// **One round trip and no race.** The shape this replaces is a
+        /// caught `AlreadyExists` and a follow-up update, which is two round
+        /// trips and still loses when two requests arrive together.
+        pub fn insertOrUpdate(
+            self: *Self,
+            comptime Row: type,
+            c: anytype,
+            values: anytype,
+            comptime on: anytype,
+        ) !Row {
+            comptime core.checkScope(@TypeOf(c), "db.insertOrUpdate");
+            const stmt = comptime statement.insertOrUpdate(D, Row, @TypeOf(values), on);
+            const back = try fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, values));
+            // `DO UPDATE` always touches a row, so an empty answer here means
+            // the driver and Postgres disagree — the same reasoning as
+            // `insert`, and the reason this one is not an optional.
+            if (back.len == 0) return error.QueryFailed;
+            return back[0];
+        }
+
         /// Change every row matching `.where`, and say how many there were.
         ///
         /// Both halves are required: an update with no `.set` changes
@@ -492,6 +597,33 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
                 self.end();
             }
 
+            /// Bound how long each statement after this one may run, until
+            /// this transaction ends — `error.TimedOut` for one that goes
+            /// past it ([ADR 0047](../docs/adr/0047-a-deadline-needs-a-connection-you-hold.md)).
+            ///
+            /// ```zig
+            /// var tx = try db.begin(c);
+            /// defer tx.deinit();
+            /// try tx.deadline(2_000);
+            /// const rows = try tx.select(Report, c, .{ .where = … });
+            /// ```
+            ///
+            /// **One round trip, and it is the only honest price.** There is
+            /// no way to attach a deadline to a statement in the same message
+            /// as the statement, so this is a `SET LOCAL` of its own — which
+            /// is also why it lives here and not on `Db`. A `db.select`
+            /// outside a transaction takes whichever connection is free and
+            /// gives it straight back, so there is no *it* to set anything on.
+            ///
+            /// Postgres undoes a `SET LOCAL` at the end of the transaction
+            /// however it ends, so the connection goes back to the pool
+            /// carrying nothing — the rule the whole of `wire.zig` is built
+            /// on.
+            pub fn deadline(self: *Tx, ms: u32) !void {
+                if (self.finished) return error.QueryFailed;
+                return self.inner.deadline(ms);
+            }
+
             /// Roll back now rather than on the way out, for a handler that
             /// has decided the answer is no.
             pub fn rollback(self: *Tx) void {
@@ -545,6 +677,49 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
                 // `RETURNING` on a successful insert answers with exactly one
                 // row, so the list is sized for one and never grows.
                 const back = try fill(Row, 1, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, values));
+                if (back.len == 0) return error.QueryFailed;
+                return back[0];
+            }
+
+            pub fn insertMany(self: *Tx, comptime Row: type, c: anytype, rows: anytype) ![]Row {
+                comptime core.checkScope(@TypeOf(c), "tx.insertMany");
+                const V = comptime batchElement(Row, @TypeOf(rows));
+                const stmt = comptime statement.insertMany(D, Row, V);
+                const items: []const V = rows;
+                return fill(
+                    Row,
+                    items.len,
+                    self.w,
+                    &self.inner,
+                    c,
+                    stmt.sql,
+                    try batchValuesOf(stmt, Row, V, items, c),
+                );
+            }
+
+            pub fn insertOrIgnore(
+                self: *Tx,
+                comptime Row: type,
+                c: anytype,
+                values: anytype,
+                comptime on: anytype,
+            ) !?Row {
+                comptime core.checkScope(@TypeOf(c), "tx.insertOrIgnore");
+                const stmt = comptime statement.insertOrIgnore(D, Row, @TypeOf(values), on);
+                const back = try fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, values));
+                return if (back.len == 0) null else back[0];
+            }
+
+            pub fn insertOrUpdate(
+                self: *Tx,
+                comptime Row: type,
+                c: anytype,
+                values: anytype,
+                comptime on: anytype,
+            ) !Row {
+                comptime core.checkScope(@TypeOf(c), "tx.insertOrUpdate");
+                const stmt = comptime statement.insertOrUpdate(D, Row, @TypeOf(values), on);
+                const back = try fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, values));
                 if (back.len == 0) return error.QueryFailed;
                 return back[0];
             }
@@ -650,6 +825,13 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         fn borrowed(comptime B: type, value: WireRead(B)) !B {
             if (B == types.Timestamp) return .{ .micros = value };
             if (B == types.Uuid) return uuidOf(value);
+            // An enum costs no allocation to decode, so a streamed row is
+            // held to the same standard as a kept one rather than being let
+            // through to the driver's panic.
+            if (@typeInfo(B) == .@"enum") return enumOf(B, value);
+            // A `Decimal` column is `[]const u8` in a Borrowed row, so the
+            // digits arrive as themselves and there is nothing to assemble —
+            // `row.Borrowed` made the lifetime part of the type instead.
             return value;
         }
 
@@ -668,11 +850,17 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         /// place a transaction and a bare pool differ.
         /// Run a statement and fill a Row from each result.
         ///
-        /// `reserve` is the statement's own ceiling on how many rows can
-        /// arrive — a `LIMIT` that was written out, or the one `db.one`
-        /// compiles. When there is one the list is sized once and never
-        /// grows; when there is not, it doubles, and each doubling abandons
-        /// the buffer before it, because an arena cannot take one back.
+        /// `reserve` is the ceiling on how many rows can arrive — a `LIMIT`
+        /// that was written out, the one `db.one` compiles, or the length of
+        /// the batch `insertMany` sent. When there is one the list is sized
+        /// once and never grows; when there is not, it doubles, and each
+        /// doubling abandons the buffer before it, because an arena cannot
+        /// take one back.
+        ///
+        /// It is a runtime value rather than a comptime one **because of the
+        /// batch**: every other caller knows its ceiling while compiling, and
+        /// a batch knows it only when the slice arrives. What that costs is
+        /// one branch per statement, against a doubling per 2ⁿ rows.
         ///
         /// A ceiling is not a count, and that distinction is the one ADR 0039
         /// originally got wrong: `.limit = 100` answering with 3 rows reserves
@@ -685,7 +873,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         /// a cap on it would be an unstated magic number.
         fn fill(
             comptime Row: type,
-            comptime reserve: ?usize,
+            reserve: ?usize,
             w: *W,
             tx: ?*W.Tx,
             c: anytype,
@@ -704,7 +892,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             defer w.drain(&rows);
 
             var out: std.ArrayList(Row) = .empty;
-            if (comptime reserve) |ceiling| try out.ensureTotalCapacityPrecise(arena, ceiling);
+            if (reserve) |ceiling| try out.ensureTotalCapacityPrecise(arena, ceiling);
             while (try w.next(&rows)) {
                 var filled: Row = undefined;
                 inline for (comptime row_mod.columnsOf(Row), 0..) |column, i| {
@@ -756,6 +944,11 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             comptime col: usize,
             c: anytype,
         ) !F {
+            // A list is asked for through a call of its own, because it is the
+            // one column whose value cannot be pointed at — see `readList` in
+            // `wire.zig`. It is also the one that arrives already copied, so
+            // there is no borrow left for `kept` to end.
+            if (comptime types.listElement(F) != null) return keptList(F, w, rows, col, c);
             if (@typeInfo(F) == .optional) {
                 const Inner = @typeInfo(F).optional.child;
                 const on_wire = try w.read(rows, ?WireRead(Inner), col);
@@ -772,6 +965,10 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         fn kept(comptime F: type, value: WireRead(F), c: anytype) !F {
             if (F == core.Str) return c.str(try c.arena().dupe(u8, value));
             if (F == []const u8) return try c.arena().dupe(u8, value);
+            // Digits copied out of the read buffer, the same one call a text
+            // column costs — so a `numeric` adds no class of allocation the
+            // row was not already paying for.
+            if (F == types.Decimal) return .{ .text = try c.arena().dupe(u8, value) };
             if (F == types.Timestamp) return .{ .micros = value };
             if (F == types.Uuid) return uuidOf(value);
             if (comptime types.jsonPayload(F)) |Payload| {
@@ -783,9 +980,50 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
                         return error.QueryFailed,
                 };
             }
+            // A tag rather than a view of the bytes it was named by, so
+            // there is nothing here to copy either.
+            if (@typeInfo(F) == .@"enum") return enumOf(F, value);
             // Everything else is a value rather than a view of a buffer, so
             // there is nothing to outlive.
             return value;
+        }
+
+        /// A list column, kept.
+        ///
+        /// The Wire is asked for the elements it can actually decode — which
+        /// for text is `[]const u8`, the same substitution `WireRead` makes
+        /// for a scalar `Str` — and hands back a slice that is already the
+        /// arena's. When the Row asked for `Str` the slice is walked once more
+        /// to attach the lifetime marker, and **that second walk is a second
+        /// allocation per row**: one for the bytes and their slice, one for
+        /// the `[]Str`. It is the price of `Str`'s trap on a list, it is paid
+        /// only by a Row that asks for one, and a Row that reads the column as
+        /// `[]const []const u8` pays a single allocation.
+        ///
+        /// A `Str` cannot be made below this layer at all: the marker comes
+        /// from the Scope, and a Wire has none.
+        fn keptList(
+            comptime F: type,
+            w: *W,
+            rows: *const W.Rows,
+            comptime col: usize,
+            c: anytype,
+        ) !F {
+            const optional = comptime @typeInfo(F) == .optional;
+            const Slice = comptime if (optional) @typeInfo(F).optional.child else F;
+            const Item = comptime @typeInfo(Slice).pointer.child;
+            const OnWire = comptime WireList(F);
+
+            const answered = try w.readList(rows, OnWire, col, c.arena());
+            if (comptime OnWire == F) return answered;
+
+            const bytes = if (comptime optional) (answered orelse return null) else answered;
+            const out = try c.arena().alloc(Item, bytes.len);
+            for (out, bytes) |*item, b| item.* = if (comptime @typeInfo(Item) == .optional)
+                (if (b) |text| c.str(text) else null)
+            else
+                c.str(b);
+            return out;
         }
 
         /// Check every Row against the table it names, and log what does not
@@ -845,7 +1083,138 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             }
             return out;
         }
+
+        /// The same tuple, filled the other way round: one field per column,
+        /// each holding that column's value out of every row.
+        ///
+        /// A batch is the one statement whose parameters cannot be read
+        /// straight out of the caller's struct, because the caller has a slice
+        /// of structs and the wire wants a struct of slices. The transpose
+        /// happens here, in the request arena, and is **one allocation per
+        /// column** — the number of rows only decides how long each is.
+        fn batchValuesOf(
+            comptime stmt: statement.Statement,
+            comptime Row: type,
+            comptime V: type,
+            items: []const V,
+            c: anytype,
+        ) !BatchValues(Row, stmt) {
+            var out: BatchValues(Row, stmt) = undefined;
+            inline for (stmt.params, 0..) |param, i| {
+                const Column = comptime BatchWrite(row_mod.ColumnType(Row, param.column));
+                const gathered = try c.arena().alloc(Column, items.len);
+                // By pointer, because two of the conversions below hand back a
+                // slice of the value rather than a copy of it — and what they
+                // point at has to be the caller's row, which lives for the
+                // whole call, rather than a loop variable that does not.
+                for (items, gathered) |*item, *slot| {
+                    slot.* = try forBatch(Column, &@field(item, param.column), c);
+                }
+                out[i] = gathered;
+            }
+            return out;
+        }
     };
+}
+
+/// The parameter tuple for a batch: one field per column, each a slice of
+/// however many rows there are.
+///
+/// Not `Values` with `.list` set, though it is nearly that, and the difference
+/// is `BatchWrite` — two column types travel differently in an array than they
+/// do alone. Sharing the type would have meant a `WireWrite` that answered
+/// differently depending on who was asking, which is worse than two functions.
+fn BatchValues(comptime Row: type, comptime stmt: statement.Statement) type {
+    return comptime blk: {
+        var fields: [stmt.params.len]type = undefined;
+        for (stmt.params, 0..) |param, i| {
+            fields[i] = []const BatchWrite(row_mod.ColumnType(Row, param.column));
+        }
+        const frozen = fields;
+        break :blk std.meta.Tuple(&frozen);
+    };
+}
+
+/// What a column binds as **inside a batch** — `WireWrite`, with two
+/// differences, both of them forced by what the driver can encode an array of.
+///
+/// - A `Uuid` binds as a slice of its bytes rather than as the array of them.
+///   A single insert cannot do that: the tuple is all the driver has to read
+///   from, and a slice would point at the copy `where.valueAt` just returned.
+///   A batch has somewhere better to point — the caller's own slice of rows,
+///   which is alive for the whole call by definition. pg.zig has no encoder
+///   for an array of `[16]u8` and does have one for `uuid[]` given text.
+/// - A `Json(T)` binds as the document, written out here, because pg.zig
+///   encodes a `jsonb[]` element from bytes and will not take a struct. **That
+///   is one allocation per row for that column** — the same cost reading one
+///   already has, and the only place a batch pays per row rather than per
+///   column.
+fn BatchWrite(comptime F: type) type {
+    comptime {
+        if (F == types.Uuid) return []const u8;
+        if (F == ?types.Uuid) return ?[]const u8;
+        if (types.jsonPayload(F) != null) return []const u8;
+        if (@typeInfo(F) == .optional and types.jsonPayload(@typeInfo(F).optional.child) != null) {
+            return ?[]const u8;
+        }
+        return WireWrite(F);
+    }
+}
+
+/// One value taken apart for a batch, given a pointer to where it lives in the
+/// caller's row. `forWire` for everything the mapping above leaves alone.
+///
+/// The type it switches on is the *value's*, the way `forWire` does, and not
+/// the column's: a `Str` column is written as a `[]const u8`, so a row struct's
+/// field is whatever the caller wrote there.
+fn forBatch(comptime To: type, value: anytype, c: anytype) !To {
+    const V = @typeInfo(@TypeOf(value)).pointer.child;
+    if (V == types.Uuid) return &value.bytes;
+    if (V == ?types.Uuid) {
+        if (value.* == null) return null;
+        return &value.*.?.bytes;
+    }
+    if (comptime types.jsonPayload(V) != null) return jsonBytes(value.*, c);
+    if (comptime @typeInfo(V) == .optional and
+        types.jsonPayload(@typeInfo(V).optional.child) != null)
+    {
+        if (value.* == null) return null;
+        return try jsonBytes(value.*.?, c);
+    }
+    return forWire(To, value.*);
+}
+
+/// A `Json(T)` written out, in the request arena. `std.json` finds the
+/// `jsonStringify` on the wrapper and writes the `T` inside, which is the same
+/// document a single insert hands the driver to write.
+fn jsonBytes(value: anytype, c: anytype) ![]const u8 {
+    return std.json.Stringify.valueAlloc(c.arena(), value, .{}) catch error.QueryFailed;
+}
+
+/// The struct one row of a batch is written as, out of the slice it arrives
+/// in. A `[]const V` and a `&[_]V{…}` are both what a caller has, so both are
+/// taken; anything else is told what a batch looks like rather than left to
+/// Zig's own message about a field that is not there.
+fn batchElement(comptime Row: type, comptime R: type) type {
+    comptime {
+        switch (@typeInfo(R)) {
+            .pointer => |p| switch (p.size) {
+                .slice => if (p.child != u8) return p.child,
+                .one => switch (@typeInfo(p.child)) {
+                    .array => |a| return a.child,
+                    else => {},
+                },
+                else => {},
+            },
+            else => {},
+        }
+        @compileError(
+            "nilo: a batch insert into " ++ @typeName(Row) ++ " was given a " ++
+                @typeName(R) ++ ".\n" ++
+                "  It takes the rows as a slice: `[]const Line`, where `Line` is a " ++
+                "struct naming the columns being written. One row is `db.insert`.",
+        );
+    }
 }
 
 /// Whether the Debug-only traps are compiled in. The same rule `Str`'s
@@ -898,13 +1267,44 @@ fn Values(comptime Row: type, comptime O: type, comptime stmt: statement.Stateme
 /// - `Uuid` is its sixteen bytes, in the order the column stores them.
 /// - `Json(T)` is the bytes of the document. The driver hands back `jsonb`
 ///   with its version byte already off, so what arrives is text to parse.
+/// - An **enum** is its tag name, and asking for the bytes rather than for
+///   the enum is the whole of what stops the driver panicking on a value the
+///   Zig type does not have — see `enumOf`. The bytes are identical either
+///   way: pg.zig decodes an enum column by taking the text and calling
+///   `std.meta.stringToEnum` on it, so this reads what it would have read and
+///   makes the missing case an error instead of an unreachable.
 fn WireRead(comptime F: type) type {
     comptime {
         if (F == core.Str) return []const u8;
         if (F == types.Timestamp) return i64;
         if (F == types.Uuid) return []const u8;
         if (types.jsonPayload(F) != null) return []const u8;
+        if (@typeInfo(F) == .@"enum") return []const u8;
+        // A `Decimal` was asked for as `::text`, so what arrives is the
+        // digits — the Dialect did the conversion in the SELECT list rather
+        // than leaving a wire format for this layer to decode.
+        if (types.isDecimal(F)) return []const u8;
         return F;
+    }
+}
+
+/// What the Wire is asked for when a column is a list: `WireRead`'s rule
+/// applied to the element type, and only `Str` moves. Everything else a
+/// Dialect will accept in an array is already a type the driver decodes into,
+/// so for those this is `F` itself and `keptList` hands the slice straight
+/// back.
+fn WireList(comptime F: type) type {
+    comptime {
+        const optional = @typeInfo(F) == .optional;
+        const Slice = if (optional) @typeInfo(F).optional.child else F;
+        const Item = @typeInfo(Slice).pointer.child;
+        const OnWire = switch (Item) {
+            core.Str => []const u8,
+            ?core.Str => ?[]const u8,
+            else => Item,
+        };
+        if (OnWire == Item) return F;
+        return if (optional) ?[]const OnWire else []const OnWire;
     }
 }
 
@@ -916,15 +1316,58 @@ fn uuidOf(raw: []const u8) !types.Uuid {
     return .{ .bytes = raw[0..types.Uuid.byte_len].* };
 }
 
-/// A Row is streamable unless it reads a `Json` column.
+/// The tag whose name the column held, or a refusal naming the value.
 ///
-/// A borrowed row costs no allocation — that is the whole of what `stream`
-/// sells, and it is what makes a million-row export run flat. Parsing a
-/// document needs one per row, into an arena that is not reset until the
-/// request ends, so a streamed `Json` column would turn the one call with a
-/// bounded memory promise into the one that grows without limit. Refusing is
-/// the honest answer; `select` parses them, and a Row that reads the column
-/// as `[]const u8` streams it as bytes.
+/// **This is the one column type startup cannot check.** `dialect.accepts`
+/// declines to judge an enum on purpose — a Postgres enum's type name lives
+/// in the database and guessing it would fail honest schemas — so nothing
+/// before the first read can tell that `Role` is missing a value the table
+/// has. What stood behind it was the driver's own
+/// `std.meta.stringToEnum(T, str).?`, which made a row added by an
+/// `ALTER TYPE … ADD VALUE` take the whole process down: not this request,
+/// every request, because Zig cannot recover from a panic (ADR 0008).
+///
+/// A 500 for the one request is the answer, and the value goes in the log
+/// rather than to the client (ADR 0025) — it is the operator who has to go
+/// and add the case, and `moderator` is the whole of what they need to know.
+///
+/// **`warn` rather than `err`, and the reason is not the level of the
+/// problem.** The framework already logs the failed request; this is the
+/// sentence that says why, so it sits at the level of the failure it
+/// explains rather than announcing a second one. It also keeps the behaviour
+/// testable: the test runner counts an `err` line as a failed run and
+/// `std.testing.log_level` has nothing below `err` to turn down to, so a
+/// module that logs `err` on a reachable path is a module whose path no test
+/// can take (`http/test_root.zig`). `postgres.zig`'s `translate` logs `err`
+/// for the case nothing else explains, which is the other half of the same
+/// rule rather than an inconsistency with it.
+fn enumOf(comptime E: type, raw: []const u8) !E {
+    return std.meta.stringToEnum(E, raw) orelse {
+        std.log.warn(
+            "nilo_sql: a column held `{s}`, which is not a value of {s}. " ++
+                "The database has a value the Zig enum does not.",
+            .{ raw, @typeName(E) },
+        );
+        return error.QueryFailed;
+    };
+}
+
+/// A Row is streamable unless it reads a column that costs an allocation.
+///
+/// A borrowed row costs none — that is the whole of what `stream` sells, and
+/// it is what makes a million-row export run flat. Two column types cannot
+/// keep to it, and they fail the same way rather than for two reasons:
+///
+/// - a `Json` column is parsed per row, into an arena that is not reset until
+///   the request ends;
+/// - a **list** column is built per row, because an array arrives as a run of
+///   length-prefixed elements and there is no `[]T` in the read buffer to
+///   point at (`wire.zig`).
+///
+/// Either would turn the one call with a bounded memory promise into the one
+/// that grows without limit. Refusing is the honest answer; `select` reads
+/// both, and the symmetry is what makes the rule one sentence — **a streamed
+/// row holds only what the read buffer already holds.**
 fn assertStreamable(comptime Row: type) void {
     comptime {
         for (@typeInfo(Row).@"struct".fields) |f| {
@@ -932,14 +1375,21 @@ fn assertStreamable(comptime Row: type) void {
                 .optional => |o| o.child,
                 else => f.type,
             };
-            if (types.jsonPayload(Inner) == null) continue;
-            @compileError(
+            if (types.jsonPayload(Inner) != null) @compileError(
                 "nilo: " ++ @typeName(Row) ++ " reads `" ++ f.name ++ "` as a Json column, " ++
                     "and a streamed row cannot hold one.\n" ++
                     "  A borrowed row allocates nothing, which is what makes a million of " ++
                     "them run flat, and parsing a document costs one allocation per row. " ++
                     "Read the column with `select`, or as `[]const u8` in a Row of its own " ++
                     "and parse it where it is needed.",
+            );
+            if (types.listElement(Inner) != null) @compileError(
+                "nilo: " ++ @typeName(Row) ++ " reads `" ++ f.name ++ "` as a list column, " ++
+                    "and a streamed row cannot hold one.\n" ++
+                    "  A borrowed row allocates nothing, which is what makes a million of " ++
+                    "them run flat, and an array has to be built per row — there is no " ++
+                    "slice in the read buffer to point at. Read the column with `select`, " ++
+                    "or leave it out of the Row being streamed.",
             );
         }
     }
@@ -971,6 +1421,17 @@ fn WireWrite(comptime F: type) type {
         if (F == ?types.Timestamp) return ?i64;
         if (F == types.Uuid) return [types.Uuid.byte_len]u8;
         if (F == ?types.Uuid) return ?[types.Uuid.byte_len]u8;
+        // The digits, which the Dialect wrapped in a `::numeric` where the
+        // placeholder goes. The slice points at the caller's own text and
+        // only has to survive the call, which is the rule for everything on
+        // this side.
+        if (F == types.Decimal) return []const u8;
+        if (F == ?types.Decimal) return ?[]const u8;
+        // A list column binds as a list of what its elements bind as, which
+        // for text is `[]const u8` for the same reason a scalar `Str` is not
+        // asked for here. `.tags = &.{ "urgent", "billing" }` is the shape
+        // everybody writes, and it coerces to this and not to `[]const Str`.
+        if (types.listElement(F) != null) return WireList(F);
         return F;
     }
 }
@@ -985,6 +1446,8 @@ fn forWire(comptime To: type, value: anytype) To {
     if (V == ?types.Timestamp) return if (value) |t| t.micros else null;
     if (V == types.Uuid) return value.bytes;
     if (V == ?types.Uuid) return if (value) |u| u.bytes else null;
+    if (V == types.Decimal) return value.text;
+    if (V == ?types.Decimal) return if (value) |d| d.text else null;
     return value;
 }
 
@@ -1214,6 +1677,10 @@ fn commitTransaction(db: *FakeDb, c: *nilo.Ctx) !void {
     try tx.commit();
 }
 
+/// One row of a batch, which is a named struct rather than a literal because
+/// a slice of anonymous literals has no element type to name.
+const Line = struct { email: []const u8, age: i32 };
+
 /// Every call on `Db` and on `Tx`, in one handler.
 ///
 /// A method on a generic struct is only analysed where it is called, so a
@@ -1225,6 +1692,7 @@ fn touchEverything(db: *FakeDb, c: *nilo.Ctx) !void {
     _ = try db.one(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
     _ = try db.find(Person, c, @as(i64, 1));
     _ = try db.insert(Person, c, .{ .email = "a@b.c", .age = @as(i32, 1) });
+    _ = try db.insertMany(Person, c, &[_]Line{.{ .email = "a@b.c", .age = 1 }});
     _ = try db.update(Person, c, .{ .set = .{ .age = @as(i32, 2) }, .where = .{ .id = @as(i64, 1) } });
     _ = try db.updateReturning(Person, c, .{ .set = .{ .age = @as(i32, 2) }, .where = .{ .id = @as(i64, 1) } });
     _ = try db.delete(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
@@ -1260,6 +1728,7 @@ fn touchEverything(db: *FakeDb, c: *nilo.Ctx) !void {
     _ = try tx.count(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
     _ = try tx.exists(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
     _ = try tx.insert(Person, c, .{ .email = "a@b.c", .age = @as(i32, 1) });
+    _ = try tx.insertMany(Person, c, &[_]Line{.{ .email = "a@b.c", .age = 1 }});
     _ = try tx.update(Person, c, .{ .set = .{ .age = @as(i32, 3) }, .where = .{ .id = @as(i64, 1) } });
     _ = try tx.updateReturning(Person, c, .{ .set = .{ .age = @as(i32, 3) }, .where = .{ .id = @as(i64, 1) } });
     _ = try tx.delete(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
@@ -1580,4 +2049,235 @@ test "a Run is a Scope, so a query needs no request around it" {
         run.reset();
         try testing.expect(!held.alive());
     }
+}
+
+test "a deadline reaches the transaction, and only a transaction has one" {
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = 1 };
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    var tx = try db.begin(&run);
+    defer tx.deinit();
+
+    try testing.expectEqual(@as(?u32, null), db.wire.?.deadline_ms);
+    try tx.deadline(2_000);
+    try testing.expectEqual(@as(?u32, 2_000), db.wire.?.deadline_ms);
+
+    // The other half of the design, asserted rather than described: `Db` has
+    // no `deadline`, because a call that takes a connection and gives it
+    // straight back has nothing to set one on (ADR 0047).
+    try testing.expect(!@hasDecl(FakeDb, "deadline"));
+}
+
+test "a deadline on a finished transaction is refused rather than sent nowhere" {
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = 1 };
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    var tx = try db.begin(&run);
+    defer tx.deinit();
+    try tx.commit();
+
+    // A `SET LOCAL` after `COMMIT` would either land on somebody else's
+    // transaction or on nothing at all, and both are worse than an error.
+    try testing.expectError(error.QueryFailed, tx.deadline(2_000));
+    try testing.expectEqual(@as(?u32, null), db.wire.?.deadline_ms);
+}
+
+/// A Row with the one column type nothing checks at startup.
+const Account = struct {
+    pub const nilo_table = .{ .name = "accounts", .key = .id };
+
+    id: i64,
+    role: Role,
+
+    const Role = enum { admin, member };
+};
+
+test "a column holding a value the Zig enum has is read as that value" {
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = 1, .text = "member" };
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    const found = try db.select(Account, &run, .{});
+    try testing.expectEqual(@as(usize, 1), found.len);
+    try testing.expectEqual(Account.Role.member, found[0].role);
+}
+
+test "a column holding a value the Zig enum does not have is an error, not a panic" {
+    // The log line names the value, which is the point of it — turned down
+    // here so a passing run is not painted red.
+    const was = std.testing.log_level;
+    defer std.testing.log_level = was;
+    std.testing.log_level = .err;
+
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    // What an `ALTER TYPE … ADD VALUE` looks like from this side: a value the
+    // table has and `Role` does not. Before this was decoded here it was
+    // `std.meta.stringToEnum(T, str).?` inside the driver, and it took the
+    // process down rather than the request (ADR 0008).
+    db.wire = .{ .answers = 1, .text = "moderator" };
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    try testing.expectError(error.QueryFailed, db.select(Account, &run, .{}));
+}
+
+test "a streamed row holds an enum to the same standard as a kept one" {
+    const was = std.testing.log_level;
+    defer std.testing.log_level = was;
+    std.testing.log_level = .err;
+
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = 1, .text = "moderator" };
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    var rows = try db.stream(Account, &run, .{});
+    defer rows.close();
+    try testing.expectError(error.QueryFailed, rows.next());
+}
+
+test "a batch sends one statement, and it does not mention how many rows" {
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = 2 };
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    const stored = try db.insertMany(Person, &run, &[_]Line{
+        .{ .email = "a@b.c", .age = 1 },
+        .{ .email = "d@e.f", .age = 2 },
+    });
+    try testing.expectEqual(@as(usize, 2), stored.len);
+    try testing.expectEqualStrings(
+        "INSERT INTO \"people\" (\"email\", \"age\")" ++
+            " SELECT * FROM unnest($1::text[], $2::int4[])" ++
+            " RETURNING \"id\", \"email\", \"nickname\", \"age\"",
+        db.wire.?.last_sql,
+    );
+}
+
+test "the batch tuple is a slice per column, not a value per row" {
+    const stmt = comptime statement.insertMany(dialect.Postgres, Person, Line);
+    const Tuple = BatchValues(Person, stmt);
+    const fields = @typeInfo(Tuple).@"struct".fields;
+
+    // Two columns and any number of rows: the tuple's shape is the column
+    // list, which is what makes the statement a constant.
+    try testing.expectEqual(@as(usize, 2), fields.len);
+    try testing.expectEqual([]const []const u8, fields[0].type);
+    try testing.expectEqual([]const i32, fields[1].type);
+}
+
+test "the two column types that travel differently in a batch say so" {
+    // A `Uuid` alone is the array of its bytes, because a slice would point at
+    // a temporary; in a batch it points at the caller's row, which lives for
+    // the whole call — and pg.zig has no encoder for an array of `[16]u8`.
+    try testing.expectEqual([types.Uuid.byte_len]u8, WireWrite(types.Uuid));
+    try testing.expectEqual([]const u8, BatchWrite(types.Uuid));
+    try testing.expectEqual(?[]const u8, BatchWrite(?types.Uuid));
+
+    // A `Json(T)` is handed to the driver whole when it is alone and written
+    // out here when it is in a batch, which is the one place a batch pays per
+    // row rather than per column.
+    const Settings = types.Json(struct { theme: []const u8 });
+    try testing.expectEqual(Settings, WireWrite(Settings));
+    try testing.expectEqual([]const u8, BatchWrite(Settings));
+    try testing.expectEqual(?[]const u8, BatchWrite(?Settings));
+
+    // Everything else is the same both ways.
+    try testing.expectEqual(i64, BatchWrite(i64));
+    try testing.expectEqual(i64, BatchWrite(types.Timestamp));
+    try testing.expectEqual([]const u8, BatchWrite(core.Str));
+}
+
+/// A Row with a list column of each kind: text, which has to be rebuilt as
+/// `Str`, and a number, which the driver hands over as itself.
+const Ticket = struct {
+    pub const nilo_table = .{ .name = "tickets", .key = .id };
+
+    id: i64,
+    tags: []const nilo.Str,
+    scores: []const i32,
+};
+
+test "a list column comes back as a slice, and its text as Str" {
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = 1, .text = "urgent" };
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    const found = try db.select(Ticket, &run, .{});
+    try testing.expectEqual(@as(usize, 1), found.len);
+    try testing.expectEqual(@as(usize, 2), found[0].tags.len);
+    try testing.expectEqualStrings("urgent", found[0].tags[0].view());
+    try testing.expectEqualStrings("urgent", found[0].tags[1].view());
+    try testing.expectEqual(@as(usize, 2), found[0].scores.len);
+    try testing.expectEqual(@as(i32, 0), found[0].scores[0]);
+}
+
+test "a list column is selected as itself, with nothing wrapped round it" {
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = 1 };
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    _ = try db.select(Ticket, &run, .{});
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"tags\", \"scores\" FROM \"tickets\"",
+        db.wire.?.last_sql,
+    );
+}
+
+test "a list column binds as a list of what the driver takes, not of Str" {
+    // The mirror of the read: a value on the way out only has to survive the
+    // call, so the shape everybody writes — a slice of literals — is the
+    // shape the tuple wants.
+    try testing.expectEqual([]const []const u8, WireWrite([]const nilo.Str));
+    try testing.expectEqual([]const ?[]const u8, WireWrite([]const ?nilo.Str));
+    try testing.expectEqual(?[]const []const u8, WireWrite(?[]const nilo.Str));
+    // Everything the driver already decodes is left exactly alone, which is
+    // what keeps `keptList` a single allocation for it.
+    try testing.expectEqual([]const i32, WireWrite([]const i32));
+    try testing.expectEqual([]const i32, WireList([]const i32));
+}
+
+test "a list column that is null comes back as null rather than as no rows" {
+    const Optional = struct {
+        pub const nilo_table = .{ .name = "tickets", .key = .id };
+
+        id: i64,
+        tags: ?[]const nilo.Str,
+    };
+
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = 1, .text = "urgent" };
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    const found = try db.select(Optional, &run, .{});
+    // The Fake answers every column, so what is pinned here is that the
+    // optional survives the round trip as a type rather than being flattened.
+    try testing.expectEqual(@as(usize, 2), found[0].tags.?.len);
 }

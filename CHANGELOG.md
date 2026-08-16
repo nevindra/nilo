@@ -203,6 +203,28 @@ Nothing about the API changed to get any of it. What *did* change:
   ```
 - **`sql.Timestamp.now()`** — so `created_at` is a field a handler fills
   rather than a database default it has to remember to set.
+- **`sql.Decimal`** — a `numeric` column, which this module could not read at
+  all. Money in an `f64` is wrong quietly, and reading the column type that
+  exists to prevent that into a float gave the whole thing back. It holds the
+  digits, it does not calculate, and **in a JSON body it is a string** —
+  `"1234.56"`, not `1234.56`, because a bare number is exact on the wire and
+  becomes a double the moment a consumer parses it
+  ([ADR 0050](./docs/adr/0050-a-numeric-is-digits-and-a-string-in-json.md)).
+  Comparisons are numeric, it costs the same one arena copy a text column
+  always has, and unlike `sql.Json(T)` it streams.
+- **`db.insertOrIgnore` and `db.insertOrUpdate`** — `ON CONFLICT`, which had
+  no spelling, so an idempotent write was a caught `AlreadyExists` and a
+  second statement: two round trips with a window between them that a retry
+  does not close. Now one statement and no window. The conflict target is the
+  last argument, written the way a key is — `.email`, or
+  `.{ .tenant_id, .email }` — and does not have to be the Row's key, which is
+  the case it exists for.
+
+  Two calls rather than an option on `insert`, because the answers differ:
+  `DO NOTHING` stores no row so `insertOrIgnore` returns `?User`, and
+  `insertOrUpdate` returns `User`. `db.insert` is untouched. The update half
+  writes every column you passed except the conflict target and the key —
+  `"id" = EXCLUDED."id"` would renumber the row that was already there.
 - **`tx.deadline(ms)`** — bound how long each statement in a transaction may
   run, and get `error.TimedOut` when one goes past it
   ([ADR 0047](./docs/adr/0047-a-deadline-needs-a-connection-you-hold.md)). It
@@ -226,7 +248,42 @@ Nothing about the API changed to get any of it. What *did* change:
   ([ADR 0008](./docs/adr/0008-no-recover-middleware.md)). It is a 500 now, with
   the value and the type named in the log. Nothing changes for a Row whose enum
   is up to date, and the column is still the one type `checking` cannot judge
-  at startup.
+  at startup — unless it says what it is called: an enum carrying `pub const
+  nilo_column = "user_role"` is now compared against the column like any
+  other type.
+- **Array columns.** `text[]` and `int4[]` are read as plain Zig slices —
+  `tags: []const Str`, `scores: ?[]const i32` — with no wrapper type to learn
+  ([ADR 0051](./docs/adr/0051-an-array-is-a-slice-and-a-slice-is-one-deep.md)).
+  A Row that declared one used to fail to compile four frames inside pg.zig.
+  `[]const u8` is still text, so a list of text is `[]const Str` or
+  `[]const []const u8`, and an array whose elements can be NULL is read as a
+  slice of optionals.
+
+  Two shapes Postgres allows and a slice cannot hold — an array with a NULL in
+  it read into a non-optional element, and an array more than one dimension
+  deep — now fail the request. Both used to be an assert inside the driver:
+  a panic in Debug and ReleaseSafe, a read past the end of the buffer in
+  ReleaseFast. A Row that reads an array cannot be streamed, for the reason a
+  `Json` column cannot: a streamed row holds only what the read buffer already
+  holds.
+- **`db.insertMany(Row, c, rows)`** — a whole batch in one statement and one
+  round trip, whatever the batch size
+  ([ADR 0053](./docs/adr/0053-a-batch-is-one-array-per-column.md)). The rows
+  come back in the order they were sent:
+
+  ```zig
+  const Line = struct { sku: Str, qty: i32 };
+  const stored = try db.insertMany(Item, c, lines);   // lines: []const Line
+  ```
+
+  It sends one array per column and lets Postgres `unnest` them, rather than
+  the `VALUES ($1,$2),($3,$4),…` most libraries generate — whose placeholder
+  count *is* the batch size, so the SQL would have to be built per call and
+  Postgres would plan a new statement for every size. Here the text is a
+  constant and the size is data. `tx.insertMany` is the same call inside a
+  transaction. It costs one allocation per column, not per row; a batch that
+  violates a constraint takes all of its rows with it, because it is one
+  statement.
 
 ### A third module, below the other two
 

@@ -53,6 +53,7 @@ Measured stripped, `ReleaseFast`, on the examples in this repository.
 | A third, `nilo_config` ([ADR 0043](./0043-a-setting-is-a-field-and-every-bad-one-is-named-at-once.md)) | +0 | +0 |
 | A clock in Core and entropy on the `Ctx` ([ADR 0045](./0045-core-knows-what-time-it-is.md), [ADR 0046](./0046-entropy-belongs-to-the-loop.md)) | +0 | +0 |
 | One pass through a WebSocket message, and a broadcast framed once ([ADR 0052](./0052-a-message-is-copied-once-and-framed-once.md)) | +0 | +0 |
+| Everything `nilo_sql` gained in this cycle — `Decimal`, `ON CONFLICT`, `tx.deadline`, array columns, `insertMany` ([ADRs 0047](./0047-a-deadline-needs-a-connection-you-hold.md), [0050](./0050-a-numeric-is-digits-and-a-string-in-json.md)–[0051](./0051-an-array-is-a-slice-and-a-slice-is-one-deep.md), [0053](./0053-a-batch-is-one-array-per-column.md)) | +0 | +0 |
 
 The second row is one measurement of six changes because they landed together, which is a worse record than the first row and is noted as such. The split it does show is the useful part: `hello` has one route returning text and pays +6 KB, which is the failure-body writer and nothing else — that part is unconditional. The remaining +8 KB on `rest` is the body describer and the schema walker, and those are generated per body type, so they are paid by applications that have bodies.
 
@@ -61,6 +62,8 @@ The third row is nearly the same on both, which says what it is: the name render
 The fourth row is a real zero rather than a rounded one: the same three examples came out byte-for-byte identical, because both halves of that change — the message rewriting and the earlier check — happen while compiling and a message that is never produced is a string that never exists. It is a row rather than an omission because the rule is that a feature states its cost, and "none" is a number somebody may want to check later.
 
 The last row is +0 on both because neither example opens a WebSocket, which is the property that row exists to record: the linker still drops the whole of it. `chat`, which does, pays **+896 bytes** — the 128-wide unmasking, the close-frame validation, `print`, `json` and the room's roll. It is the first entry here measured on an example other than these two, because these two would have shown nothing.
+
+The `nilo_sql` row is +0 for a reason worth stating rather than glossing: **no example in this repository imports the module**, so none of the seven links a byte of it — not the driver, not its four transitive dependencies. That is [ADR 0040](./0040-a-service-that-needs-the-loop-is-finished-when-the-loop-exists.md)'s property observed rather than argued, and it is why a row of SQL work can be measured here at all. What the module's own additions cost is paid by a project that imports it, and inside that project each of these is instantiated per Row and per call site: a service that never reads an array column links no `readList`, and one that never batches links no `unnest` statement.
 
 `orders`, the largest example, is 1,327,992 bytes stripped. It is not a row here because it has no before.
 

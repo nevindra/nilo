@@ -110,6 +110,7 @@ pub const Postgres = dialect.Postgres;
 pub const Timestamp = types.Timestamp;
 pub const Uuid = types.Uuid;
 pub const Json = types.Json;
+pub const Decimal = types.Decimal;
 
 pub const Column = wire.Column;
 pub const Error = wire.Error;
@@ -169,6 +170,32 @@ pub fn deleteReturningFor(comptime Row: type, comptime Options: type) statement.
 /// The `INSERT`, with the Row's column list as its `RETURNING`.
 pub fn insertFor(comptime Row: type, comptime Values: type) statement.Statement {
     return comptime statement.insert(Postgres, Row, Values);
+}
+
+/// The batch `INSERT`: one array per column, `unnest`ed. `Values` is the type
+/// of one row of the batch, not of the slice.
+pub fn insertManyFor(comptime Row: type, comptime Values: type) statement.Statement {
+    return comptime statement.insertMany(Postgres, Row, Values);
+}
+
+/// The two upserts. `on` is the conflict target — a column written the way a
+/// key is, `.email`, or a tuple of them for a constraint spanning more than
+/// one. It is a value rather than a type because the column *names* are what
+/// the statement needs, and Zig keeps those on the literal.
+pub fn insertOrIgnoreFor(
+    comptime Row: type,
+    comptime Values: type,
+    comptime on: anytype,
+) statement.Statement {
+    return comptime statement.insertOrIgnore(Postgres, Row, Values, on);
+}
+
+pub fn insertOrUpdateFor(
+    comptime Row: type,
+    comptime Values: type,
+    comptime on: anytype,
+) statement.Statement {
+    return comptime statement.insertOrUpdate(Postgres, Row, Values, on);
 }
 
 /// The `UPDATE`. Both `.set` and `.where` are required, and the numbering

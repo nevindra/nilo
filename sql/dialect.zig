@@ -24,6 +24,7 @@
 //! hardcoded, not that a second one exists yet.
 
 const std = @import("std");
+const core = @import("nilo_core");
 const types = @import("types.zig");
 
 /// How a Dialect spells a list membership test, asked by the where walker
@@ -84,6 +85,92 @@ pub const Postgres = struct {
         return " OFFSET " ++ placeholder_text;
     }
 
+    /// How a column of type `T` is asked for in a `SELECT` list, given its
+    /// quoted name.
+    ///
+    /// Everything is asked for as itself except a `numeric`, which is asked
+    /// for as `::text` so that what arrives is the digits — which is what a
+    /// `Decimal` holds. Postgres stores and can send a `numeric` as sign,
+    /// weight, scale and base-10000 limbs, and decoding that above the driver
+    /// would put a wire format in the layer that is supposed to be about SQL.
+    ///
+    /// **Measured, and it is not load-bearing today.** With the cast removed,
+    /// the live round trip still comes back with every digit intact, so
+    /// pg.zig is handing this column over as text already. What the cast buys
+    /// is that the answer stops depending on a driver's choice of result
+    /// format — which is a choice nilo does not make, did not design, and
+    /// would find out about by getting binary where it expected digits. The
+    /// write half *is* load-bearing: see `bindAs`.
+    ///
+    /// Column *names* do not matter here: this module reads by position
+    /// because the caller wrote the `SELECT` list (ADR 0039), so a cast that
+    /// changes what Postgres would have called the column changes nothing.
+    pub fn readAs(comptime quoted: []const u8, comptime T: type) []const u8 {
+        return if (comptime types.isDecimal(T)) quoted ++ "::text" else quoted;
+    }
+
+    /// How a value of type `T` is bound, given its placeholder — the mirror
+    /// of `readAs`.
+    ///
+    /// A `Decimal` binds as its digits and is cast back. The alternative is
+    /// pg.zig's `Numeric` encoder, which takes a float and prints it: exactly
+    /// the round trip through binary floating point that a `numeric` column
+    /// is chosen to avoid.
+    ///
+    /// `list` is `.in` and `.not_in`, where one placeholder holds the whole
+    /// list and the cast has to name an array.
+    pub fn bindAs(
+        comptime placeholder_text: []const u8,
+        comptime T: type,
+        comptime list: bool,
+    ) []const u8 {
+        if (comptime !types.isDecimal(T)) return placeholder_text;
+        return placeholder_text ++ if (list) "::numeric[]" else "::numeric";
+    }
+
+    /// How a whole column's worth of values is named in a statement that
+    /// sends a batch as one parameter per column — `$1::int8[]` — or `null`
+    /// when this Dialect cannot name the type.
+    ///
+    /// The cast is not decoration. `unnest($1)` gives Postgres nothing to
+    /// infer a parameter type from, and it answers *could not determine data
+    /// type of parameter $1* rather than guessing. So the array form has to be
+    /// written out, and the name comes from the same table the schema check
+    /// reads: the first entry of `accepts` is the column type this Dialect
+    /// would expect, and the widening alternatives after it are for judging a
+    /// column rather than for naming one.
+    ///
+    /// A column whose own type is a list has no array form — `unnest` on a
+    /// two-dimensional array flattens it, which would insert one row per
+    /// element rather than one per array. `null`, and the caller gets a
+    /// Refusal naming the column.
+    pub fn arrayOf(comptime T: type) ?[]const u8 {
+        return comptime blk: {
+            if (types.listElement(T) != null) break :blk null;
+            // Digits, cast twice — the array form of what `bindAs` does to a
+            // single `numeric`, and for the same reason. `$1::numeric[]`
+            // alone would have the driver encode the text as binary numeric
+            // limbs; `::text[]` first says what is actually on the wire and
+            // lets Postgres do the conversion it is good at.
+            if (types.isDecimal(T)) break :blk "text[]::numeric[]";
+            // The document, cast the same way, and this one is a workaround
+            // rather than a design. pg.zig's `jsonb[]` encoder reserves five
+            // bytes of prefix for every element and writes four for a NULL —
+            // the version byte it counted is not written — so an array with a
+            // NULL in it is a byte too long and Postgres answers *incorrect
+            // binary data format*. Its `text[]` encoder gets the same case
+            // right, so the digits-and-cast route is taken here too. Delete
+            // this line when pg.zig's `encodeNullables` sizes what it writes.
+            const Inner = switch (@typeInfo(T)) {
+                .optional => |o| o.child,
+                else => T,
+            };
+            if (types.jsonPayload(Inner) != null) break :blk "text[]::jsonb[]";
+            const named = acceptsInner(T) orelse break :blk null;
+            break :blk named[0] ++ "[]";
+        };
+    }
+
     /// What the schema comparison asks, once, on the first connection that
     /// succeeds. `udt_name` rather than `data_type` because it answers `int4`
     /// and `timestamptz` — the names anyone writing a migration typed — where
@@ -116,12 +203,27 @@ pub const Postgres = struct {
             else => T,
         };
 
+        // Text, in the spelling this framework prefers. `Str` comes from Core,
+        // which knows nothing about databases, so the answer for it is here
+        // rather than on the type — the same arrangement `declaredColumn`
+        // makes for `Uuid`, and for the same reason (ADR 0042).
+        if (Inner == core.Str) return &.{ "text", "varchar", "bpchar", "char", "name" };
+
         if (types.declaredColumn(Inner)) |declared| {
             if (std.mem.eql(u8, declared, "timestamptz")) return &.{ "timestamptz", "timestamp" };
             if (std.mem.eql(u8, declared, "jsonb")) return &.{ "jsonb", "json" };
             const one = [_][]const u8{declared};
             return &one;
         }
+
+        // A list column, judged by what it holds. **Exact rather than
+        // widening, which is the opposite of the scalar rule below**: an
+        // `int4` reads into an `i64` happily, and an `int4[]` does not read
+        // into a `[]const i64` at all, because the driver picks its element
+        // decoder off the array's own OID and refuses a mismatch. Accepting
+        // `_int8` for a `[]const i32` here would move that refusal from
+        // `checking` at startup to the first request that reads the column.
+        if (types.listElement(Inner)) |Item| return listAccepts(Item);
 
         return switch (@typeInfo(Inner)) {
             .bool => &.{"bool"},
@@ -145,6 +247,47 @@ pub const Postgres = struct {
         };
     }
 
+    /// The array types a list of `Item` may be read out of. `null` means this
+    /// Dialect will not judge it, and `checking` then says so with the column
+    /// named — which beats the driver's own `@compileError` from four frames
+    /// inside pg.zig, which is what a Row reading an array used to get.
+    fn listAccepts(comptime Item: type) Accepts {
+        // A slice of optionals is how a column that holds NULLs among its
+        // elements is read, and it is the same array type either way — the
+        // null flag lives in the value rather than in the column.
+        const Bare = switch (@typeInfo(Item)) {
+            .optional => |o| o.child,
+            else => Item,
+        };
+
+        // Text has three spellings in a column and two as an array element:
+        // a `Str` and a `[]const u8` are the same bytes to a reader.
+        if (Bare == core.Str) return &.{ "_text", "_varchar" };
+
+        return switch (@typeInfo(Bare)) {
+            .bool => &.{"_bool"},
+            .float => |f| switch (f.bits) {
+                32 => &.{"_float4"},
+                64 => &.{"_float8"},
+                else => null,
+            },
+            .int => |i| if (i.signedness == .unsigned) null else switch (i.bits) {
+                16 => &.{"_int2"},
+                32 => &.{"_int4"},
+                64 => &.{"_int8"},
+                // Postgres has no unsigned array element and no width between
+                // these, so widening a `u32` the way the scalar rule does
+                // would name an array the driver cannot decode into it.
+                else => null,
+            },
+            .pointer => |p| if (p.size == .slice and p.child == u8)
+                &.{ "_text", "_varchar" }
+            else
+                null,
+            else => null,
+        };
+    }
+
     fn intAccepts(comptime info: std.builtin.Type.Int) Accepts {
         // Postgres has no unsigned integers, so an unsigned Zig type reads
         // out of the next width up — the one that can hold all of it.
@@ -164,8 +307,9 @@ pub const Postgres = struct {
 pub fn assertDialect(comptime D: type) void {
     comptime {
         const owed = [_][]const u8{
-            "name",     "placeholder", "quote", "list_form",
-            "limit",    "offset",      "accepts", "introspect",
+            "name",   "placeholder", "quote",   "list_form",
+            "limit",  "offset",      "accepts", "introspect",
+            "readAs", "bindAs",      "arrayOf",
         };
         for (owed) |decl| {
             if (!@hasDecl(D, decl)) @compileError(
@@ -248,4 +392,104 @@ test "postgres takes a list as one value, so a statement stays a constant" {
 
 test "postgres satisfies the contract this module asks of a Dialect" {
     comptime assertDialect(Postgres);
+}
+
+test "a numeric column is asked for as text, and everything else as itself" {
+    try testing.expectEqualStrings(
+        "\"total\"::text",
+        Postgres.readAs(Postgres.quote("total"), types.Decimal),
+    );
+    try testing.expectEqualStrings(
+        "\"total\"::text",
+        Postgres.readAs(Postgres.quote("total"), ?types.Decimal),
+    );
+    try testing.expectEqualStrings("\"age\"", Postgres.readAs(Postgres.quote("age"), i32));
+    try testing.expectEqualStrings(
+        "\"email\"",
+        Postgres.readAs(Postgres.quote("email"), []const u8),
+    );
+}
+
+test "a numeric is bound as digits and cast back, so nothing goes through a float" {
+    try testing.expectEqualStrings(
+        "$1::numeric",
+        Postgres.bindAs(Postgres.placeholder(1), types.Decimal, false),
+    );
+    // `.in` puts the whole list in one parameter, so the cast names an array.
+    try testing.expectEqualStrings(
+        "$2::numeric[]",
+        Postgres.bindAs(Postgres.placeholder(2), types.Decimal, true),
+    );
+    try testing.expectEqualStrings("$1", Postgres.bindAs(Postgres.placeholder(1), i64, false));
+    try testing.expectEqualStrings("$1", Postgres.bindAs(Postgres.placeholder(1), i64, true));
+}
+
+test "a list column reads out of the array of what it holds" {
+    try testing.expectEqualStrings("_text", Postgres.accepts([]const core.Str).?[0]);
+    try testing.expectEqualStrings("_varchar", Postgres.accepts([]const core.Str).?[1]);
+    try testing.expectEqualStrings("_text", Postgres.accepts([]const []const u8).?[0]);
+    try testing.expectEqualStrings("_int4", Postgres.accepts([]const i32).?[0]);
+    try testing.expectEqualStrings("_int8", Postgres.accepts([]const i64).?[0]);
+    try testing.expectEqualStrings("_bool", Postgres.accepts([]const bool).?[0]);
+    try testing.expectEqualStrings("_float8", Postgres.accepts([]const f64).?[0]);
+}
+
+test "an array is judged exactly, where a scalar is judged by what will hold it" {
+    // An `int4` reads into an `i64`, so the scalar rule names both.
+    try testing.expectEqual(@as(usize, 2), Postgres.accepts(i32).?.len);
+    // An `int4[]` does not read into a `[]const i64` at all: the driver picks
+    // its element decoder off the array's own OID. Naming `_int8` here would
+    // move the refusal from startup to the first request.
+    try testing.expectEqual(@as(usize, 1), Postgres.accepts([]const i32).?.len);
+    try testing.expectEqualStrings("_int4", Postgres.accepts([]const i32).?[0]);
+    // Postgres has no unsigned array element, and no width to widen into.
+    try testing.expectEqual(@as(Accepts, null), Postgres.accepts([]const u32));
+}
+
+test "a list of optionals is the same column as a list, because NULL is a value" {
+    try testing.expectEqualStrings("_text", Postgres.accepts([]const ?core.Str).?[0]);
+    try testing.expectEqualStrings("_int4", Postgres.accepts([]const ?i32).?[0]);
+    // And a nullable list column is judged by the list, the way every other
+    // optional column is judged by what it wraps.
+    try testing.expectEqualStrings("_int4", Postgres.accepts(?[]const i32).?[0]);
+}
+
+test "text is not a list, so a Str column is still a text column" {
+    try testing.expectEqualStrings("text", Postgres.accepts([]const u8).?[0]);
+    try testing.expectEqualStrings("text", Postgres.accepts(core.Str).?[0]);
+}
+
+test "a whole column's worth of values is named as an array of the column type" {
+    try testing.expectEqualStrings("int8[]", Postgres.arrayOf(i64).?);
+    try testing.expectEqualStrings("int4[]", Postgres.arrayOf(i32).?);
+    try testing.expectEqualStrings("text[]", Postgres.arrayOf(core.Str).?);
+    try testing.expectEqualStrings("text[]", Postgres.arrayOf([]const u8).?);
+    // Two casts, because what is on the wire is the digits — the array form
+    // of the `::numeric` a single one gets. A document goes the same way, for
+    // a reason that is the driver's rather than Postgres's.
+    try testing.expectEqualStrings("text[]::numeric[]", Postgres.arrayOf(types.Decimal).?);
+    try testing.expectEqualStrings(
+        "text[]::jsonb[]",
+        Postgres.arrayOf(?types.Json(struct { a: u8 })).?,
+    );
+    try testing.expectEqualStrings("timestamptz[]", Postgres.arrayOf(types.Timestamp).?);
+    try testing.expectEqualStrings("uuid[]", Postgres.arrayOf(types.Uuid).?);
+    // A nullable column is the same array; NULL is a value in it.
+    try testing.expectEqualStrings("int8[]", Postgres.arrayOf(?i64).?);
+}
+
+test "a column that is itself a list has no array form, because unnest flattens" {
+    try testing.expectEqual(@as(?[]const u8, null), Postgres.arrayOf([]const i32));
+    try testing.expectEqual(@as(?[]const u8, null), Postgres.arrayOf([]const core.Str));
+    // And neither has an enum that has not said what it is called — its type
+    // name lives in the database.
+    try testing.expectEqual(@as(?[]const u8, null), Postgres.arrayOf(enum { a, b }));
+}
+
+test "a numeric column reads out of numeric and nothing else" {
+    try testing.expectEqualStrings("numeric", Postgres.accepts(types.Decimal).?[0]);
+    try testing.expectEqual(@as(usize, 1), Postgres.accepts(types.Decimal).?.len);
+    // A float column is still a float column: `Decimal` is a choice about how
+    // to read `numeric`, not a claim on every number.
+    try testing.expectEqualStrings("float8", Postgres.accepts(f64).?[0]);
 }

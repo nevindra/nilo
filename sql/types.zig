@@ -116,6 +116,90 @@ pub const Timestamp = struct {
 /// break the second rule while keeping the first.
 pub const Uuid = id.Uuid;
 
+/// A `numeric` column — the digits, exactly as they are stored, and no
+/// arithmetic.
+///
+/// **Money in an `f64` is wrong**, and it is wrong quietly: `0.1 + 0.2` is the
+/// example everybody knows and a total that is out by a cent after a thousand
+/// lines is the version that reaches a customer. `numeric` is the column type
+/// that exists to stop it, and reading one into a float gives the whole thing
+/// back.
+///
+/// So this holds the text. That is the same line `Timestamp` holds and for
+/// the same reason — **a type here carries a value and knows how to write
+/// itself; it does not calculate.** Arbitrary-precision arithmetic is a
+/// library, and a much larger one than a database module has any business
+/// containing: rounding modes alone are a standard. What this owes is that
+/// the digits which went in are the digits that come out, and that whoever
+/// wants to add two of them can.
+///
+/// **It writes itself into JSON as a string**, which is a decision rather
+/// than an oversight. A bare JSON number is exact on the wire and stops being
+/// exact the moment a consumer parses it — `JSON.parse` answers a double, so
+/// a client would silently get back the `f64` the column type was chosen to
+/// avoid. A string arrives intact and makes the reader say what they want to
+/// do with it. It is also the only representation that can carry the values
+/// Postgres allows and JSON has no syntax for: `nan`, `inf`, `-inf`.
+///
+/// Read and written as text on the wire too — `"total"::text` on the way out
+/// and `$1::numeric` on the way in — because Postgres keeps a `numeric` in a
+/// binary form the driver can only build from a float. The cast is what makes
+/// the round trip exact, and it is the Dialect that writes it.
+pub const Decimal = struct {
+    /// The digits as Postgres printed them: `1234.56`, `-0.004`, `nan`.
+    /// Request-lifetime, like any other text a row comes back with.
+    text: []const u8,
+
+    pub const nilo_column = "numeric";
+
+    /// Asked by the Dialect, which has to know before it writes the SQL
+    /// rather than after the value arrives.
+    pub const nilo_decimal = {};
+
+    pub fn jsonStringify(self: Decimal, jw: anytype) !void {
+        try jw.write(self.text);
+    }
+};
+
+/// The element type of a list column — `text[]`, `int4[]` — or null when `T`
+/// is not one.
+///
+/// **A plain slice, with no wrapper**, and the reason is that a slice already
+/// says everything a wrapper would. `Array(T)` would sit beside `Json(T)` and
+/// look consistent, but `Json(T)` earns its parentheses: a bare struct field
+/// cannot say "this is a jsonb", and its `jsonStringify` has to unwrap so the
+/// response body is not `{"value":…}`. `[]const i32` can only mean one thing.
+/// The only slice with a second meaning is `[]const u8`, which is text and was
+/// already spoken for — so that one is *not* a list, and `[]const []const u8`
+/// is a list of text.
+///
+/// Nothing is refused here. A slice of something no Dialect will accept in a
+/// column is caught by `checking`, which is where every other unreadable
+/// column type is caught.
+pub fn listElement(comptime T: type) ?type {
+    const Inner = switch (@typeInfo(T)) {
+        .optional => |o| o.child,
+        else => T,
+    };
+    const info = @typeInfo(Inner);
+    if (info != .pointer) return null;
+    if (info.pointer.size != .slice) return null;
+    // Text, and the one slice this cannot claim.
+    if (info.pointer.child == u8) return null;
+    return info.pointer.child;
+}
+
+/// Whether `T` is a `Decimal`, optional included. The Dialect asks this while
+/// building a statement, so it is a comptime question about a type and never
+/// about a value.
+pub fn isDecimal(comptime T: type) bool {
+    const Inner = switch (@typeInfo(T)) {
+        .optional => |o| o.child,
+        else => T,
+    };
+    return @typeInfo(Inner) == .@"struct" and @hasDecl(Inner, "nilo_decimal");
+}
+
 /// A `json` or `jsonb` column, read into a struct of the caller's own.
 ///
 /// The fourth of a shape this repo already has three of — `Query(T)`,
@@ -150,13 +234,28 @@ pub fn jsonPayload(comptime T: type) ?type {
 /// The column type a nilo-provided type expects, when it has an opinion.
 /// The Dialect asks; a plain Zig type answers `null` and is mapped by the
 /// Dialect's own table instead.
+/// **An enum may declare it too, and that is the one case where the answer
+/// can only come from the caller.** A Postgres enum's type name lives in the
+/// database; nothing on the Zig side can derive it, which is why
+/// `dialect.accepts` declines to judge one. A Row that says so gets both
+/// halves back: the column is checked at startup like any other, and a batch
+/// insert can name the type its parameter casts to.
+///
+/// ```zig
+/// const Role = enum {
+///     admin,
+///     member,
+///
+///     pub const nilo_column = "user_role";
+/// };
+/// ```
 pub fn declaredColumn(comptime T: type) ?[]const u8 {
     // `Uuid` comes from `nilo_id`, which knows nothing about databases, so
     // the answer for it is here rather than on the type (ADR 0042). Every
     // type this module owns says so itself.
     if (T == Uuid) return "uuid";
     return switch (@typeInfo(T)) {
-        .@"struct" => if (@hasDecl(T, "nilo_column")) T.nilo_column else null,
+        .@"struct", .@"enum" => if (@hasDecl(T, "nilo_column")) T.nilo_column else null,
         else => null,
     };
 }
@@ -241,8 +340,64 @@ test "the types that have an opinion about their column say so" {
     try testing.expectEqual(@as(?[]const u8, null), declaredColumn(i64));
 }
 
+test "a Decimal keeps the digits it was given, however many there are" {
+    // Past f64's 15-or-so significant digits by a wide margin. The point of
+    // the type is that this sentence is boring.
+    const wide = Decimal{ .text = "12345678901234567890.123456789" };
+    try testing.expectEqualStrings("12345678901234567890.123456789", wide.text);
+}
+
+test "a Decimal writes itself into JSON as a string" {
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    var jw = std.json.Stringify{ .writer = &w };
+    try jw.write(Decimal{ .text = "1234.56" });
+    // Quoted, and that is the decision: a bare number is exact here and stops
+    // being exact in the consumer, where `JSON.parse` answers a double.
+    try testing.expectEqualStrings("\"1234.56\"", w.buffered());
+}
+
+test "a Decimal is the one column type that can carry what JSON has no number for" {
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    var jw = std.json.Stringify{ .writer = &w };
+    try jw.write(Decimal{ .text = "nan" });
+    try testing.expectEqualStrings("\"nan\"", w.buffered());
+}
+
+test "a Decimal is recognised through an optional, because a column may be null" {
+    try testing.expect(isDecimal(Decimal));
+    try testing.expect(isDecimal(?Decimal));
+    try testing.expect(!isDecimal(f64));
+    try testing.expect(!isDecimal([]const u8));
+    try testing.expect(!isDecimal(Timestamp));
+}
+
 test "a Json column names the type it carries" {
     const Settings = struct { theme: []const u8 };
     try testing.expectEqual(Settings, jsonPayload(Json(Settings)).?);
     try testing.expectEqual(@as(?type, null), jsonPayload(i64));
+}
+
+test "a slice is a list column, and says what it holds" {
+    try testing.expectEqual(i32, listElement([]const i32).?);
+    try testing.expectEqual(bool, listElement([]const bool).?);
+    // A nullable list column is still a list of the same thing.
+    try testing.expectEqual(i32, listElement(?[]const i32).?);
+    // And a list may hold NULLs, which is a property of the element.
+    try testing.expectEqual(?i32, listElement([]const ?i32).?);
+}
+
+test "text is the one slice that is not a list" {
+    // `[]const u8` was spoken for long before arrays were, so it stays text
+    // and a list of text is written out as a list of it.
+    try testing.expectEqual(@as(?type, null), listElement([]const u8));
+    try testing.expectEqual(@as(?type, null), listElement(?[]const u8));
+    try testing.expectEqual([]const u8, listElement([]const []const u8).?);
+}
+
+test "a value that is not a slice is not a list" {
+    try testing.expectEqual(@as(?type, null), listElement(i64));
+    try testing.expectEqual(@as(?type, null), listElement(Timestamp));
+    try testing.expectEqual(@as(?type, null), listElement(Json(struct { a: u8 })));
 }
