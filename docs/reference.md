@@ -911,6 +911,7 @@ Different fields are ANDed. Several operators on one field are ANDed too.
 | `.not_in = &.{ 1, 2, 3 }` | `<> ALL($1)` — one parameter likewise |
 | `.deleted_at = null` | `IS NULL` |
 | `.deleted_at = .{ .ne = null }` | `IS NOT NULL` |
+| `.handle = .{ .not_distinct_from = maybe }` | `IS NOT DISTINCT FROM $1` — `=` with null treated as a value. **The one operator an optional may reach**; `.distinct_from` is its negation |
 | `.any = .{ .{ … }, .{ … } }` | OR, bracketed. Not `.or`, which is a keyword — so `any` is a reserved column name |
 
 A column that does not exist is a compile error naming the near miss.
@@ -920,8 +921,12 @@ the compiler can see the null. An optional that *might* be null is a compile
 error, because whether the statement says `= $1` or `IS NULL` would then
 depend on a value that arrives after the statement is a constant — and
 `= NULL` is never true in SQL, so the query would run and answer nothing.
-Branch on it instead
-([ADR 0044](./adr/0044-a-condition-holds-a-value-not-a-maybe.md)).
+Reach for `.not_distinct_from` — one statement that means what you wanted —
+or branch
+([ADR 0044](./adr/0044-a-condition-holds-a-value-not-a-maybe.md)). The
+null-safe pair is the exception because its statement does **not** change
+when the value turns out to be null: `"handle" IS NOT DISTINCT FROM $1` is
+the same six words either way, so nothing is left until run time.
 
 ### Streaming
 

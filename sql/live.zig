@@ -1622,6 +1622,79 @@ test "the schema comparison judges an array by the array it holds" {
     try testing.expectEqual(schema.Mismatch.wrong_type, problems.items[0].kind);
 }
 
+// -- the null-safe comparison ---------------------------------------------
+
+test "a null-safe comparison finds the null row where = never could" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    // One of the three fixture rows has no handle. This is the shape a
+    // handler actually has: a filter that came off a request, where "no
+    // handle" is a value the client may send.
+    var wanted: ?[]const u8 = null;
+    _ = &wanted;
+
+    const nameless = try stack.db.select(Person, &run, .{
+        .where = .{ .handle = .{ .not_distinct_from = wanted } },
+    });
+    try testing.expectEqual(@as(usize, 1), nameless.len);
+    try testing.expectEqual(@as(i64, 2), nameless[0].id);
+
+    // The same statement, a value in the optional this time. Nothing about
+    // the SQL changed, which is the property that lets the optional in.
+    wanted = "ada";
+    const ada = try stack.db.select(Person, &run, .{
+        .where = .{ .handle = .{ .not_distinct_from = wanted } },
+    });
+    try testing.expectEqual(@as(usize, 1), ada.len);
+    try testing.expectEqual(@as(i64, 1), ada[0].id);
+
+    // And the negation is every row that is not that one — including the
+    // null row, which is what `<>` would silently drop.
+    wanted = "ada";
+    const others = try stack.db.select(Person, &run, .{
+        .where = .{ .handle = .{ .distinct_from = wanted } },
+        .order = .{ .id = .asc },
+    });
+    try testing.expectEqual(@as(usize, 2), others.len);
+    try testing.expectEqual(@as(i64, 2), others[0].id);
+    try testing.expectEqual(@as(i64, 3), others[1].id);
+}
+
+test "the ordinary comparison is the one that answers nothing, which is the point" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    // `"handle" = $1` with NULL in `$1` is legal SQL, runs, matches nothing
+    // and reports no error. Pinned through `raw` because the module refuses
+    // to compile it — this is the failure `distinct_from` exists to replace,
+    // kept where somebody can see the difference rather than described.
+    const none = try stack.db.raw(
+        Person,
+        &run,
+        "SELECT \"id\", \"email\", \"handle\", \"age\" FROM \"" ++ table ++ "\" WHERE \"handle\" = $1",
+        .{@as(?[]const u8, null)},
+    );
+    try testing.expectEqual(@as(usize, 0), none.len);
+
+    const one = try stack.db.raw(
+        Person,
+        &run,
+        "SELECT \"id\", \"email\", \"handle\", \"age\" FROM \"" ++ table ++
+            "\" WHERE \"handle\" IS NOT DISTINCT FROM $1",
+        .{@as(?[]const u8, null)},
+    );
+    try testing.expectEqual(@as(usize, 1), one.len);
+}
+
 // -- a batch in one statement ---------------------------------------------
 
 /// One row of a batch. A named struct rather than a literal, because a slice

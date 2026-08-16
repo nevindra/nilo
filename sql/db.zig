@@ -1117,6 +1117,12 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
     };
 }
 
+/// `?T`, unless it already is one. A column that may be null compared with a
+/// value that may be null is one `?`, not two.
+fn Maybe(comptime T: type) type {
+    return comptime if (@typeInfo(T) == .optional) T else ?T;
+}
+
 /// The parameter tuple for a batch: one field per column, each a slice of
 /// however many rows there are.
 ///
@@ -1245,8 +1251,10 @@ fn Values(comptime Row: type, comptime O: type, comptime stmt: statement.Stateme
             const F = WireWrite(row_mod.ColumnType(Row, param.column));
             // `.in` is one placeholder holding many values — `= ANY($1)` —
             // so what binds is a list of the column's type rather than one
-            // of them.
-            fields[i] = if (param.list) []const F else F;
+            // of them. `distinct_from` is the mirror: one value, which may be
+            // null even on a column that may not, because the comparison is
+            // null-safe and the statement says so either way (`where.zig`).
+            fields[i] = if (param.list) []const F else if (param.nullable) Maybe(F) else F;
         }
         const frozen = fields;
         break :blk std.meta.Tuple(&frozen);

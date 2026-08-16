@@ -38,6 +38,13 @@
 //! An optional that *might* be null is a Refusal — see `assertNotOptional`,
 //! which is ADR 0039's rule at its sharpest.
 //!
+//! **Except once, and the exception proves the rule rather than bending it.**
+//! `.{ .not_distinct_from = maybe }` takes an optional, because
+//! `IS NOT DISTINCT FROM` is `=` with null treated as an ordinary value: the
+//! statement reads the same whether the value turns out to be null or not, so
+//! nothing about its shape is left until run time. Every other operator would
+//! have had to *become* a different statement, and that is what is refused.
+//!
 //! **The SQL and the values are generated from one walk, not two.** `plan`
 //! produces the fragment and the list of paths to the values together, and
 //! `each` reads the values back along those same paths. Two walks that had to
@@ -71,6 +78,11 @@ pub const Param = struct {
     /// values, which is what keeps the statement a constant however long
     /// the list is.
     list: bool = false,
+    /// Whether the value binds as an optional even though the column is not
+    /// one. Set by `distinct_from` and by nothing else: it is the only
+    /// operator whose SQL does not change when its value turns out to be
+    /// null, so it is the only one an optional may reach (`nullSafeSpelling`).
+    nullable: bool = false,
 
     /// The `column` of a parameter that is not a column.
     pub const none = "";
@@ -341,7 +353,10 @@ fn operatorsOf(comptime T: type) ?[]const Operator {
         };
         if (info.is_tuple or info.fields.len == 0) return null;
         for (info.fields) |f| {
-            if (spelling(f.name) == null and listSpelling(f.name) == null) return null;
+            if (spelling(f.name) != null) continue;
+            if (listSpelling(f.name) != null) continue;
+            if (nullSafeSpelling(f.name) != null) continue;
+            return null;
         }
         var out: [info.fields.len]Operator = undefined;
         for (info.fields, 0..) |f, i| out[i] = .{ .name = f.name, .T = f.type };
@@ -362,6 +377,30 @@ fn spelling(comptime name: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, name, pair[0])) return pair[1];
     }
     return null;
+}
+
+/// The two operators that compare **null-safely**, and the one place an
+/// optional is allowed in a condition.
+///
+/// `IS DISTINCT FROM` is `<>` with NULL treated as an ordinary value: two
+/// nulls are not distinct, and a null against anything else is. That is the
+/// whole of why an optional may reach it and reaches nothing else — see
+/// `assertNotOptional`, whose argument is that the *shape* of the statement
+/// would otherwise depend on a value that arrives at run time. Here it does
+/// not: `"col" IS DISTINCT FROM $1` is the same six words whether `$1` turns
+/// out to be null or not, so nothing about the statement is left until run
+/// time and ADR 0039's rule is kept rather than bent.
+///
+/// This is also the operator that closes the branch `assertNotOptional` asks
+/// for. `if (maybe) |v| … else …` is two statements written out because the
+/// null case is a different question; `.{ .not_distinct_from = maybe }` is one
+/// statement because it is not.
+fn nullSafeSpelling(comptime name: []const u8) ?[]const u8 {
+    comptime {
+        if (std.mem.eql(u8, name, "distinct_from")) return "IS DISTINCT FROM";
+        if (std.mem.eql(u8, name, "not_distinct_from")) return "IS NOT DISTINCT FROM";
+        return null;
+    }
 }
 
 /// The operators that take a list rather than a value, and what each becomes
@@ -390,6 +429,23 @@ fn operator(
 ) []const u8 {
     comptime {
         const path = prefix ++ &[_][]const u8{op.name};
+
+        // Before the optional check, because this is the operator the check
+        // exists to send people to.
+        if (nullSafeSpelling(op.name)) |spelled| {
+            // A null written as a literal needs no parameter at all — the
+            // comparison is against NULL itself, which is a keyword.
+            if (@typeInfo(op.T) == .null) return quoted ++ " " ++ spelled ++ " NULL";
+            return quoted ++ " " ++ spelled ++ " " ++ D.bindAs(
+                D.placeholder(state.take(path, .{
+                    .column = column,
+                    .nullable = @typeInfo(op.T) == .optional,
+                })),
+                row_mod.ColumnType(Row, column),
+                false,
+            );
+        }
+
         assertNotOptional(column, op.name, op.T);
 
         if (listSpelling(op.name)) |form| {
@@ -443,6 +499,13 @@ fn operator(
 /// The two ways out were: refuse, or read an optional as `IS NULL` when it
 /// happens to be null. The second is one statement whose meaning changes with
 /// its parameter, which is the property this whole module exists not to have.
+///
+/// **There is a third way now, and it is SQL's own** (`nullSafeSpelling`).
+/// `IS NOT DISTINCT FROM` compares null-safely, so its statement reads the
+/// same whether the value turns out to be null or not — nothing is left until
+/// run time and the rule is kept rather than bent. An optional reaches that
+/// operator and no other, and the message below says so, because "branch"
+/// was the whole answer for a case where SQL has a one-liner.
 fn assertNotOptional(
     comptime column: []const u8,
     comptime op: ?[]const u8,
@@ -458,8 +521,10 @@ fn assertNotOptional(
                 "settled while compiling. An optional only answers at run time, and a " ++
                 "null one sends `= NULL`, which is never true in SQL: the query runs, " ++
                 "matches nothing, and says nothing.\n" ++
-                "  Branch where the two statements differ: `if (maybe) |value| … else …`, " ++
-                "with `." ++ column ++ " = null` on the null side.",
+                "  `." ++ column ++ " = .{ .not_distinct_from = maybe }` is one statement " ++
+                "that means what you want — it is `=` with null treated as a value. " ++
+                "Or branch: `if (maybe) |value| … else …`, with `." ++ column ++
+                " = null` on the null side.",
         );
     }
 }
@@ -578,6 +643,45 @@ test "not in is one placeholder too, so a longer list is the same statement" {
         @as(usize, 1),
         paramCount(Pg, User, @TypeOf(.{ .id = .{ .not_in = &longer } })),
     );
+}
+
+test "distinct_from is the one operator an optional may reach" {
+    // The statement is the same six words whether the value turns out to be
+    // null or not, which is exactly why the optional is allowed here and
+    // nowhere else: nothing about the shape is left until run time.
+    const maybe = @as(?i64, null);
+    try testing.expectEqualStrings(
+        "\"deleted_at\" IS NOT DISTINCT FROM $1",
+        sqlOf(.{ .deleted_at = .{ .not_distinct_from = maybe } }),
+    );
+    try testing.expectEqualStrings(
+        "\"deleted_at\" IS DISTINCT FROM $1",
+        sqlOf(.{ .deleted_at = .{ .distinct_from = maybe } }),
+    );
+
+    // And the parameter binds as an optional even on a column that is not
+    // one, because the comparison is about the value rather than the column.
+    const p = comptime plan(Pg, User, @TypeOf(.{ .age = .{ .distinct_from = @as(?i32, 1) } }), 1);
+    try testing.expect(p.params[0].nullable);
+    try testing.expect(!comptime plan(Pg, User, @TypeOf(.{ .age = .{ .gt = 1 } }), 1).params[0].nullable);
+}
+
+test "distinct_from takes a plain value too, and is then an ordinary comparison" {
+    try testing.expectEqualStrings(
+        "\"age\" IS DISTINCT FROM $1",
+        sqlOf(.{ .age = .{ .distinct_from = @as(i32, 30) } }),
+    );
+    try testing.expect(
+        !comptime plan(Pg, User, @TypeOf(.{ .age = .{ .distinct_from = @as(i32, 1) } }), 1).params[0].nullable,
+    );
+}
+
+test "distinct_from against a written null needs no parameter at all" {
+    // `IS DISTINCT FROM NULL` is a keyword on both sides, so there is nothing
+    // to bind — the same reason `= null` compiles to `IS NULL`.
+    const w = .{ .deleted_at = .{ .distinct_from = null } };
+    try testing.expectEqualStrings("\"deleted_at\" IS DISTINCT FROM NULL", sqlOf(w));
+    try testing.expectEqual(@as(usize, 0), paramCount(Pg, User, @TypeOf(w)));
 }
 
 test "a negation ANDs beside its positive, because it is an operator like any other" {

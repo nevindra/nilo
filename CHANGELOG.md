@@ -266,6 +266,22 @@ Nothing about the API changed to get any of it. What *did* change:
   ReleaseFast. A Row that reads an array cannot be streamed, for the reason a
   `Json` column cannot: a streamed row holds only what the read buffer already
   holds.
+- **`.distinct_from` and `.not_distinct_from`** — SQL's null-safe comparison,
+  and **the one operator a condition takes an optional for**:
+
+  ```zig
+  var handle: ?[]const u8 = maybe_from_the_request;
+  const found = try db.select(User, c, .{
+      .where = .{ .handle = .{ .not_distinct_from = handle } },
+  });
+  ```
+
+  Every other operator refuses an optional, because whether the statement
+  says `= $1` or `IS NULL` would depend on a value arriving after the
+  statement is a constant. This one does not have that problem: it is `=`
+  with null treated as an ordinary value, so the SQL is the same six words
+  either way. It also finds the null rows `<>` silently drops. The compile
+  error for an optional now points here first and at the branch second.
 - **`db.insertMany(Row, c, rows)`** — a whole batch in one statement and one
   round trip, whatever the batch size
   ([ADR 0053](./docs/adr/0053-a-batch-is-one-array-per-column.md)). The rows

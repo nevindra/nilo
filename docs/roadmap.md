@@ -528,11 +528,6 @@ Two whole areas come off before the list starts.
 
 **Reading**
 
-- [ ] `IS DISTINCT FROM`. The rest of the comparison language is there —
-      `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `not_like`,
-      `not_ilike`, `in`, `not_in`, `IS NULL` and `IS NOT NULL`. `between` is
-      deliberately absent, because two operators on one column are already
-      ANDed.
 - [ ] Set operations — `UNION`, `INTERSECT`, `EXCEPT`
 - [ ] Common table expressions
 - Joins, nested rows, aggregates and subqueries: one decision, above.

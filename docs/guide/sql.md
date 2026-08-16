@@ -169,7 +169,8 @@ misread.
 `.in` takes a list and compiles to `= ANY($1)` — **one** parameter, so the
 statement stays a constant no matter how long the list is. Its negation is
 `.not_in`, which is `<> ALL($1)` and costs the same one parameter;
-`.not_like` and `.not_ilike` are the other two.
+`.not_like` and `.not_ilike` are the other two. `.distinct_from` and
+`.not_distinct_from` are the null-safe pair — see below.
 
 ### A null is written, never held
 
@@ -185,7 +186,23 @@ The two readings are two different statements — `"handle" = $1` and
 `"handle" IS NULL` — and which one is right depends on a value that arrives
 after the statement is already a constant. Sending `= $1` with NULL in it is
 legal SQL and *never true*, so the query would run, match nothing and report
-nothing at all. Write the branch, because it is a branch:
+nothing at all.
+
+Usually what you meant is SQL's null-safe comparison, and that **is** one
+statement:
+
+```zig
+.where = .{ .handle = .{ .not_distinct_from = maybe } }   // ✓
+```
+
+`IS NOT DISTINCT FROM` is `=` with null treated as an ordinary value: two
+nulls match, and null against anything else does not. It takes an optional
+where nothing else does, and the reason is the same rule read the other way
+— the statement is the same six words whether the value turns out to be null
+or not, so nothing about its shape waits for run time. `.distinct_from` is
+the negation, and it finds the null rows that `<>` silently drops.
+
+Where the two cases really are two different queries, write the branch:
 
 ```zig
 const found = if (maybe) |handle|
