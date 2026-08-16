@@ -252,17 +252,49 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         pub fn select(self: *Self, comptime Row: type, c: anytype, options: anytype) ![]Row {
             comptime core.checkScope(@TypeOf(c), "db.select");
             const stmt = comptime statement.select(D, Row, @TypeOf(options));
-            return fill(Row, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, options));
+            return fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, options));
         }
 
         /// The first row matching `options`, or null.
         ///
         /// `?Row` is already a 404 in the typed layer (ADR 0024), so a
         /// handler that returns this and nothing else is a whole endpoint.
+        ///
+        /// The statement carries its own `LIMIT 1`, so a condition on a
+        /// column that is not unique costs one row rather than every match.
+        /// A `.limit` written alongside it is a Refusal.
         pub fn one(self: *Self, comptime Row: type, c: anytype, options: anytype) !?Row {
             comptime core.checkScope(@TypeOf(c), "db.one");
-            const found = try self.select(Row, c, options);
+            const stmt = comptime statement.one(D, Row, @TypeOf(options));
+            const found = try fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, options));
             return if (found.len == 0) null else found[0];
+        }
+
+        /// How many rows match `options`.
+        ///
+        /// Pagination needs a total, and the way to get one before this was
+        /// `db.raw` with a Row invented to hold a number. The condition is
+        /// compiled by the same walker `select` uses, so the count cannot
+        /// drift from the query it is counting. No `.where` counts the table.
+        pub fn count(self: *Self, comptime Row: type, c: anytype, options: anytype) !usize {
+            comptime core.checkScope(@TypeOf(c), "db.count");
+            const stmt = comptime statement.count(D, Row, @TypeOf(options));
+            const n = try only(i64, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, options));
+            // `count(*)` is a `bigint` and never negative. A negative one
+            // would mean the column read as something else entirely.
+            if (n < 0) return error.QueryFailed;
+            return @intCast(n);
+        }
+
+        /// Whether any row matches `options`.
+        ///
+        /// `EXISTS` rather than `count(…) > 0`: the database stops at the
+        /// first match instead of counting every one of them to answer a
+        /// question the first settles.
+        pub fn exists(self: *Self, comptime Row: type, c: anytype, options: anytype) !bool {
+            comptime core.checkScope(@TypeOf(c), "db.exists");
+            const stmt = comptime statement.exists(D, Row, @TypeOf(options));
+            return only(bool, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, options));
         }
 
         /// Rows read one at a time, for a result set too big to hold.
@@ -309,7 +341,9 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             values: anytype,
         ) ![]Row {
             comptime core.checkScope(@TypeOf(c), "db.raw");
-            return fill(Row, try self.wireOf(), null, c, sql, values);
+            // No ceiling: this module did not write the statement and so has
+            // nothing to say about how many rows it can answer with.
+            return fill(Row, null, try self.wireOf(), null, c, sql, values);
         }
 
         // -- writing ---------------------------------------------------------
@@ -323,7 +357,9 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         pub fn insert(self: *Self, comptime Row: type, c: anytype, values: anytype) !Row {
             comptime core.checkScope(@TypeOf(c), "db.insert");
             const stmt = comptime statement.insert(D, Row, @TypeOf(values));
-            const back = try fill(Row, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, values));
+            // `RETURNING` on a successful insert answers with exactly one
+            // row, so the list is sized for one and never grows.
+            const back = try fill(Row, 1, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, values));
             // `RETURNING` on a successful insert answers with exactly one
             // row. Reaching here with none would mean the driver and
             // Postgres disagree about what happened, which is not something
@@ -415,19 +451,36 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             pub fn select(self: *Tx, comptime Row: type, c: anytype, options: anytype) ![]Row {
                 comptime core.checkScope(@TypeOf(c), "tx.select");
                 const stmt = comptime statement.select(D, Row, @TypeOf(options));
-                return fill(Row, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, options));
+                return fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, options));
             }
 
             pub fn one(self: *Tx, comptime Row: type, c: anytype, options: anytype) !?Row {
                 comptime core.checkScope(@TypeOf(c), "tx.one");
-                const found = try self.select(Row, c, options);
+                const stmt = comptime statement.one(D, Row, @TypeOf(options));
+                const found = try fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, options));
                 return if (found.len == 0) null else found[0];
+            }
+
+            pub fn count(self: *Tx, comptime Row: type, c: anytype, options: anytype) !usize {
+                comptime core.checkScope(@TypeOf(c), "tx.count");
+                const stmt = comptime statement.count(D, Row, @TypeOf(options));
+                const n = try only(i64, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, options));
+                if (n < 0) return error.QueryFailed;
+                return @intCast(n);
+            }
+
+            pub fn exists(self: *Tx, comptime Row: type, c: anytype, options: anytype) !bool {
+                comptime core.checkScope(@TypeOf(c), "tx.exists");
+                const stmt = comptime statement.exists(D, Row, @TypeOf(options));
+                return only(bool, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, options));
             }
 
             pub fn insert(self: *Tx, comptime Row: type, c: anytype, values: anytype) !Row {
                 comptime core.checkScope(@TypeOf(c), "tx.insert");
                 const stmt = comptime statement.insert(D, Row, @TypeOf(values));
-                const back = try fill(Row, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, values));
+                // `RETURNING` on a successful insert answers with exactly one
+                // row, so the list is sized for one and never grows.
+                const back = try fill(Row, 1, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, values));
                 if (back.len == 0) return error.QueryFailed;
                 return back[0];
             }
@@ -452,7 +505,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
                 values: anytype,
             ) ![]Row {
                 comptime core.checkScope(@TypeOf(c), "tx.raw");
-                return fill(Row, self.w, &self.inner, c, sql, values);
+                return fill(Row, null, self.w, &self.inner, c, sql, values);
             }
         };
 
@@ -537,8 +590,26 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         /// Run a statement and fill a Row from each result. The one place
         /// the driver's borrowed text is copied into the arena, and the one
         /// place a transaction and a bare pool differ.
+        /// Run a statement and fill a Row from each result.
+        ///
+        /// `reserve` is the statement's own ceiling on how many rows can
+        /// arrive — a `LIMIT` that was written out, or the one `db.one`
+        /// compiles. When there is one the list is sized once and never
+        /// grows; when there is not, it doubles, and each doubling abandons
+        /// the buffer before it, because an arena cannot take one back.
+        ///
+        /// A ceiling is not a count, and that distinction is the one ADR 0039
+        /// originally got wrong: `.limit = 100` answering with 3 rows reserves
+        /// room for 100 and fills 3. What is reserved and unused is
+        /// `(ceiling - rows) * @sizeOf(Row)` bytes, and the `toOwnedSlice`
+        /// below hands them back whenever the list is still the arena's last
+        /// allocation — which it is for a Row of scalars, and is not for one
+        /// with text in it, because each row's `dupe` lands after the list.
+        /// The number the caller wrote is believed rather than second-guessed;
+        /// a cap on it would be an unstated magic number.
         fn fill(
             comptime Row: type,
+            comptime reserve: ?usize,
             w: *W,
             tx: ?*W.Tx,
             c: anytype,
@@ -557,6 +628,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             defer w.drain(&rows);
 
             var out: std.ArrayList(Row) = .empty;
+            if (comptime reserve) |ceiling| try out.ensureTotalCapacityPrecise(arena, ceiling);
             while (try w.next(&rows)) {
                 var filled: Row = undefined;
                 inline for (comptime row_mod.columnsOf(Row), 0..) |column, i| {
@@ -566,6 +638,34 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
                 try out.append(arena, filled);
             }
             return out.toOwnedSlice(arena);
+        }
+
+        /// Run a statement that answers with one row of one column, and read
+        /// it. What `count` and `exists` are built on.
+        ///
+        /// There is no Row here and no filling: the answer is a number or a
+        /// bool, and giving it a struct to live in is what `Tally` in
+        /// `live.zig` had to do back when `db.raw` was the only way to ask.
+        fn only(
+            comptime T: type,
+            w: *W,
+            tx: ?*W.Tx,
+            c: anytype,
+            sql: []const u8,
+            values: anytype,
+        ) !T {
+            const arena = c.arena();
+            var rows = if (tx) |t|
+                try t.run(arena, sql, values)
+            else
+                try w.run(arena, sql, values);
+            defer w.drain(&rows);
+
+            // An aggregate answers with exactly one row. None would mean the
+            // driver and Postgres disagree about what was sent, which is not
+            // something to paper over with a zero.
+            if (!try w.next(&rows)) return error.QueryFailed;
+            return w.read(&rows, T, 0);
         }
 
         /// One column, with the borrow ended if there was one.
@@ -1178,6 +1278,141 @@ test "Core is one module, so a Row's Str is the App's Str" {
     // before `kept` quietly stops recognising a `Str` column and leaves the
     // text pointing into a read buffer that is about to be reused.
     try testing.expect(core.Str == nilo.Str);
+}
+
+/// A Row of nothing but integers, so what a count measures is the list the
+/// rows go into rather than the text inside them. Four `i64` is 32 bytes.
+const Tick = struct {
+    pub const nilo_table = .{ .name = "ticks", .key = .id };
+
+    id: i64,
+    at: i64,
+    lo: i64,
+    hi: i64,
+};
+
+/// How many times a `select` of `rows` rows reaches past the arena for more
+/// memory. The arena is what the request holds; what is counted is the pages
+/// underneath it, which is the sense ADR 0018 measures an allocation in.
+fn allocationsFor(rows: usize, comptime options: anytype) !usize {
+    return allocationsOf(Tick, rows, options);
+}
+
+fn allocationsOf(comptime Row: type, rows: usize, comptime options: anytype) !usize {
+    var counting = std.testing.FailingAllocator.init(testing.allocator, .{});
+    var run = nilo.Run.init(counting.allocator());
+    defer run.deinit();
+
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = rows };
+
+    const found = try db.select(Row, &run, options);
+    try testing.expectEqual(rows, found.len);
+    return counting.allocations;
+}
+
+// The number ADR 0039 claims, held rather than asserted — the same job the
+// budget test in `http/app.zig` does for the request path, which this module
+// went without until the claim turned out to be false.
+test "a select with a written-out limit reaches past the arena exactly once" {
+    // One, at every size, because the ceiling is known before the first row
+    // arrives and the list is built to it. It was 1, 5 and 9 at these three
+    // sizes when the list doubled its way there, each doubling abandoning
+    // the buffer before it — an arena cannot take one back.
+    try testing.expectEqual(@as(usize, 1), try allocationsFor(10, .{ .limit = 10 }));
+    try testing.expectEqual(@as(usize, 1), try allocationsFor(1_000, .{ .limit = 1_000 }));
+    try testing.expectEqual(@as(usize, 1), try allocationsFor(100_000, .{ .limit = 100_000 }));
+
+    // A ceiling is not a count. Fewer rows than the limit is still one
+    // allocation — the reserved tail is what pays for that, and `fill` says
+    // how much of it there is.
+    try testing.expectEqual(@as(usize, 1), try allocationsFor(3, .{ .limit = 1_000 }));
+
+    // And it holds for a Row carrying text, where every row allocates again
+    // to copy its own bytes out of the read buffer.
+    try testing.expectEqual(@as(usize, 1), try allocationsOf(Person, 1_000, .{ .limit = 1_000 }));
+}
+
+// The other half of the same claim, and the reason it is worth writing down:
+// ADR 0039 only ever promised a number for the statement that says how many
+// rows it can answer with. Without a limit there is nothing to build the list
+// to, so it doubles — and this test exists so that the day somebody finds a
+// way to do better, the number moves here rather than staying a surprise.
+test "a select with no ceiling grows its list, and that is the cost of not saying" {
+    try testing.expectEqual(@as(usize, 2), try allocationsFor(10, .{}));
+    try testing.expectEqual(@as(usize, 3), try allocationsFor(100, .{}));
+    try testing.expectEqual(@as(usize, 5), try allocationsFor(1_000, .{}));
+    try testing.expectEqual(@as(usize, 9), try allocationsFor(100_000, .{}));
+}
+
+test "db.one asks the database for one row, not for every match" {
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = 1 };
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    // The whole point: `age > $1` matches many rows and this statement asks
+    // for one of them. Before, `one` called `select` and threw away the rest
+    // after Postgres had sent them and the arena had copied them.
+    _ = try db.one(Person, &run, .{ .where = .{ .age = .{ .gt = 18 } } });
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"email\", \"nickname\", \"age\" FROM \"people\"" ++
+            " WHERE \"age\" > $1 LIMIT 1",
+        db.wire.?.last_sql,
+    );
+
+    // And the ceiling reaches `fill`, so the row it does read costs one
+    // allocation rather than a list that grew into it.
+    try testing.expectEqual(@as(usize, 1), try allocationsOf(Person, 1, .{ .limit = 1 }));
+}
+
+test "an order survives the ceiling one puts on the end" {
+    // `ORDER BY … LIMIT 1` is the newest row; `LIMIT 1` alone is whichever
+    // row Postgres reached first. The clauses have to come out in that order
+    // or the statement means something else.
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = 0 };
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    const found = try db.one(Person, &run, .{ .order = .{ .age = .desc } });
+    try testing.expectEqual(@as(?Person, null), found);
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"email\", \"nickname\", \"age\" FROM \"people\"" ++
+            " ORDER BY \"age\" DESC LIMIT 1",
+        db.wire.?.last_sql,
+    );
+}
+
+test "count and exists are one statement each, and neither invents a Row" {
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = 1 };
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    // The Fake answers 0 for an integer, so what is asserted here is the
+    // statement and the plumbing; `live.zig` is where the number is real.
+    try testing.expectEqual(@as(usize, 0), try db.count(Person, &run, .{ .where = .{ .age = .{ .gt = 18 } } }));
+    try testing.expectEqualStrings(
+        "SELECT count(*) FROM \"people\" WHERE \"age\" > $1",
+        db.wire.?.last_sql,
+    );
+
+    try testing.expectEqual(@as(usize, 0), try db.count(Person, &run, .{}));
+    try testing.expectEqualStrings("SELECT count(*) FROM \"people\"", db.wire.?.last_sql);
+
+    try testing.expectEqual(false, try db.exists(Person, &run, .{ .where = .{ .id = 7 } }));
+    try testing.expectEqualStrings(
+        "SELECT EXISTS(SELECT 1 FROM \"people\" WHERE \"id\" = $1)",
+        db.wire.?.last_sql,
+    );
 }
 
 test "a Run is a Scope, so a query needs no request around it" {

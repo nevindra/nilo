@@ -134,9 +134,56 @@ when there is nothing — and the OpenAPI document says so, because the `?`
 already meant that. Two modules that never import each other, agreeing,
 because they read the same struct you wrote.
 
+It compiles its own `LIMIT 1`, so a condition on a column that is not unique
+costs one row rather than every match. Writing a `.limit` beside it is a
+compile error: the ceiling belongs to the call.
+
 Every call takes the `Ctx`. Not to read the request: for the request arena,
 which is where the rows go. They live exactly as long as the response that
 carries them, and nothing is freed by hand.
+
+## Counting
+
+```zig
+const total = try db.count(User, c, .{ .where = .{ .age = .{ .gt = 18 } } });
+const taken = try db.exists(User, c, .{ .where = .{ .email = email } });
+```
+
+`count` answers a `usize` and `exists` a `bool`. Both take a condition and
+nothing else — there is nothing to sort and nothing to narrow in an answer
+one row wide, so `.order` and `.limit` are compile errors rather than clauses
+quietly dropped. A `count` with no condition counts the table.
+
+`exists` is `SELECT EXISTS(…)` rather than a count compared against zero, so
+the database stops at the first matching row instead of counting every one of
+them to settle a question the first one settles.
+
+The condition goes through the same walker `select` uses, which is the point:
+a page and its total are one condition written once, and a column misspelled
+in either is the same compile error.
+
+```zig
+const where = .{ .status = "open" };
+const total = try db.count(Order, c, .{ .where = where });
+const page  = try db.select(Order, c, .{ .where = where, .order = .{ .id = .asc }, .limit = 20 });
+```
+
+## Why writing the limit out is worth it
+
+A `.limit` written as a literal is baked into the SQL, and that buys two
+things. Postgres gets a number to plan with, which `LIMIT $2` does not give
+it. And nilo knows before the first row arrives how many can possibly come,
+so the list they go into is built once at that size.
+
+Measured over a 32-byte row: **one** allocation with the limit written out,
+the same at ten rows and at a hundred thousand. Without it, 2, 3, 5 and 9 at
+ten, a hundred, a thousand and a hundred thousand — the list doubling its way
+there, and each doubling abandons the buffer before it, because a request
+arena has no way to take one back.
+
+The ceiling is not a promise about how many rows arrive. Asking for a
+thousand and getting three reserves room for a thousand, and the difference is
+held until the request ends. The number you wrote is believed.
 
 What it actually asks the `Ctx` for is two calls — `arena()` and `str()` — so
 what it takes is a **Scope**, and a `*Ctx` is one

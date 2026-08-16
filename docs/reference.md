@@ -629,7 +629,9 @@ request ([ADR 0041](./adr/0041-a-module-sits-where-the-loop-puts-it.md)).
 | | |
 |---|---|
 | `db.select(User, c, .{ … })` | `![]User` |
-| `db.one(User, c, .{ … })` | `!?User` — a handler returning this answers 404, and the document says so |
+| `db.one(User, c, .{ … })` | `!?User` — a handler returning this answers 404, and the document says so. Carries its own `LIMIT 1`, so a `.limit` beside it is refused |
+| `db.count(User, c, .{ .where = … })` | `!usize`. `.where` only, and optional — no condition counts the table |
+| `db.exists(User, c, .{ .where = … })` | `!bool` — `SELECT EXISTS(…)`, so it stops at the first match |
 | `db.insert(User, c, .{ .email = … })` | `!User` — the stored row, generated key included. A subset of the columns |
 | `db.update(User, c, .{ .set = …, .where = … })` | `!usize` — rows changed. Both halves required |
 | `db.delete(User, c, .{ .where = … })` | `!usize` — rows deleted. `.where` required |
@@ -643,7 +645,7 @@ request ([ADR 0041](./adr/0041-a-module-sits-where-the-loop-puts-it.md)).
 |---|---|
 | `.where` | a condition; see below |
 | `.order` | `.{ .created_at = .desc }`, one column per field |
-| `.limit` / `.offset` | a literal is baked into the SQL; a variable becomes a parameter |
+| `.limit` / `.offset` | a literal is baked into the SQL; a variable becomes a parameter. A literal limit is also the row ceiling, so the result list is allocated once |
 | `.set` | update only: columns to new values |
 
 ### Conditions

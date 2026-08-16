@@ -51,6 +51,10 @@ const sql_refusals = [_]Refusal{
         .says = "an insert into insert_nothing.User with no columns.",
     },
     .{
+        .name = "one_with_limit",
+        .says = "`db.one` on one_with_limit.User was given a `.limit`.",
+    },
+    .{
         .name = "insert_unknown_column",
         .says = "insert_unknown_column.User has no column `emial`, asked for in an insert.",
     },

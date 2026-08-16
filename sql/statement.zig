@@ -50,6 +50,14 @@ pub const Statement = struct {
     /// the parameter tuple in `db.zig`, which needs a definite type for a
     /// literal that was written without one.
     params: []const where_mod.Param,
+    /// The most rows this statement can answer with, when the statement says
+    /// so itself. Set by a `LIMIT` that was written out, and by `one`, which
+    /// compiles its own; null when the ceiling is a parameter or absent.
+    ///
+    /// This is a *ceiling* and not a count — knowing it bounds the list the
+    /// rows go into but never says how many arrive, which is the sentence
+    /// ADR 0039 originally got wrong. `fill` in `db.zig` is the only reader.
+    reserve: ?usize = null,
 
     pub fn paramCount(self: Statement) usize {
         return self.paths.len;
@@ -60,11 +68,55 @@ pub const Statement = struct {
 /// misspelled `.limti` stops at `zig build` rather than being ignored.
 const known = [_][]const u8{ "where", "order", "limit", "offset" };
 
+/// The same list without `.limit`, for `one` — which compiles its own and so
+/// has none to give away.
+const known_one = [_][]const u8{ "where", "order", "offset" };
+
+/// How many rows the caller is asking for. `one` is not a `select` somebody
+/// narrowed: the ceiling is the module's rather than the caller's, which is
+/// why writing a second one is a Refusal instead of a silent argument.
+const Answers = enum { many, first };
+
 /// Compile a `SELECT` for `Row` in `D`'s grammar from the options type `O`.
 pub fn select(comptime D: type, comptime Row: type, comptime O: type) Statement {
+    return comptime rowsOf(D, Row, O, .many);
+}
+
+/// The same statement with `LIMIT 1` on the end, for `db.one`.
+///
+/// It is compiled here rather than left to the caller because `one` answers
+/// with a row or with nothing: without the ceiling, a condition matching a
+/// thousand rows reads all thousand out of Postgres and copies every one into
+/// the arena on the way to dropping 999 of them. Nobody writing
+/// `db.one(User, c, .{ .where = .{ .email = e } })` is asking for that, and
+/// on a column that is not unique it is what they got.
+pub fn one(comptime D: type, comptime Row: type, comptime O: type) Statement {
+    return comptime rowsOf(D, Row, O, .first);
+}
+
+fn rowsOf(
+    comptime D: type,
+    comptime Row: type,
+    comptime O: type,
+    comptime answers: Answers,
+) Statement {
     return comptime blk: {
         dialect_mod.assertDialect(D);
-        assertOptions(Row, O, &known, "a select");
+
+        // Said before `assertOptions`, so that a `.limit` written on a `one`
+        // gets the sentence about `one` rather than the generic list of what
+        // a select takes.
+        if (answers == .first and @hasField(O, "limit")) @compileError(
+            "nilo: `db.one` on " ++ @typeName(Row) ++ " was given a `.limit`.\n" ++
+                "  It answers with one row or with none, and compiles its own " ++
+                "`LIMIT 1`. A page of rows is `db.select`.",
+        );
+        assertOptions(
+            Row,
+            O,
+            if (answers == .first) &known_one else &known,
+            if (answers == .first) "`db.one`" else "a select",
+        );
 
         var sql: []const u8 = "SELECT " ++ columnList(D, Row) ++
             " FROM " ++ D.quote(row_mod.tableOf(Row));
@@ -72,6 +124,7 @@ pub fn select(comptime D: type, comptime Row: type, comptime O: type) Statement 
         var paths: []const where_mod.Path = &.{};
         var params: []const where_mod.Param = &.{};
         var next: usize = 1;
+        var reserve: ?usize = null;
 
         if (@hasField(O, "where")) {
             const p = where_mod.planAt(D, Row, @FieldType(O, "where"), next, &.{"where"});
@@ -90,11 +143,17 @@ pub fn select(comptime D: type, comptime Row: type, comptime O: type) Statement 
         if (@hasField(O, "limit")) {
             const bound = boundary(D, O, "limit", next);
             sql = sql ++ D.limit(bound.text);
+            reserve = bound.written;
             if (bound.path) |path| {
                 paths = paths ++ &[_]where_mod.Path{path};
                 params = params ++ &[_]where_mod.Param{.{}};
                 next += 1;
             }
+        }
+
+        if (answers == .first) {
+            sql = sql ++ D.limit("1");
+            reserve = 1;
         }
 
         if (@hasField(O, "offset")) {
@@ -107,7 +166,62 @@ pub fn select(comptime D: type, comptime Row: type, comptime O: type) Statement 
             }
         }
 
-        break :blk .{ .sql = sql, .paths = paths, .params = params };
+        break :blk .{ .sql = sql, .paths = paths, .params = params, .reserve = reserve };
+    };
+}
+
+/// The option names an aggregate takes: a condition, and nothing else.
+///
+/// `.order` on a statement answering one number sorts nothing, and `.limit`
+/// on it truncates a result set of one. Both are Refusals rather than clauses
+/// quietly dropped.
+const known_tally = [_][]const u8{"where"};
+
+/// `SELECT count(*)`, for the total a page needs.
+///
+/// The condition is compiled by the same walker a `select` uses, so a
+/// misspelled column is the same Refusal in both and a count cannot drift
+/// from the query it is counting. No `.where` is allowed and means the whole
+/// table — unlike an update or a delete, a count with no condition is the
+/// obvious thing rather than the dangerous one.
+pub fn count(comptime D: type, comptime Row: type, comptime O: type) Statement {
+    return comptime tally(D, Row, O, "SELECT count(*) FROM ", "");
+}
+
+/// `SELECT EXISTS(SELECT 1 …)`, which stops at the first matching row.
+///
+/// A count compared against zero would read every match to answer a question
+/// that one row settles. What comes back is a `bool`, so the caller has
+/// nothing to compare.
+pub fn exists(comptime D: type, comptime Row: type, comptime O: type) Statement {
+    return comptime tally(D, Row, O, "SELECT EXISTS(SELECT 1 FROM ", ")");
+}
+
+fn tally(
+    comptime D: type,
+    comptime Row: type,
+    comptime O: type,
+    comptime opening: []const u8,
+    comptime closing: []const u8,
+) Statement {
+    return comptime blk: {
+        dialect_mod.assertDialect(D);
+        assertOptions(Row, O, &known_tally, "an aggregate");
+
+        var sql: []const u8 = opening ++ D.quote(row_mod.tableOf(Row));
+        var paths: []const where_mod.Path = &.{};
+        var params: []const where_mod.Param = &.{};
+
+        if (@hasField(O, "where")) {
+            const p = where_mod.planAt(D, Row, @FieldType(O, "where"), 1, &.{"where"});
+            if (!p.isEmpty()) {
+                sql = sql ++ " WHERE " ++ p.sql;
+                paths = p.paths;
+                params = p.params;
+            }
+        }
+
+        break :blk .{ .sql = sql ++ closing, .paths = paths, .params = params, .reserve = 1 };
     };
 }
 
@@ -352,6 +466,10 @@ fn writtenValue(comptime T: type, comptime field: []const u8, comptime As: type)
 const Bound = struct {
     text: []const u8,
     path: ?where_mod.Path,
+    /// The literal, when there was one. What reads it is `select`, which
+    /// carries it out as the statement's `reserve` so that the list the rows
+    /// go into is sized once instead of doubled into place.
+    written: ?usize = null,
 };
 
 /// `LIMIT`/`OFFSET`. A `comptime_int` is written into the statement; anything
@@ -371,7 +489,11 @@ fn boundary(
                     std.fmt.comptimePrint("{d}", .{value}) ++ ".\n" ++
                     "  It counts rows, so it cannot be negative.",
             );
-            return .{ .text = std.fmt.comptimePrint("{d}", .{value}), .path = null };
+            return .{
+                .text = std.fmt.comptimePrint("{d}", .{value}),
+                .path = null,
+                .written = value,
+            };
         }
         if (@typeInfo(T) != .int) @compileError(
             "nilo: `." ++ field ++ "` was given a " ++ @typeName(T) ++ ".\n" ++

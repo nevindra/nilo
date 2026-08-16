@@ -576,6 +576,90 @@ test "raw fills a Row from a statement this module would never write" {
     try testing.expectEqualStrings("[{\"n\":2,\"youngest\":36}]", answer.body);
 }
 
+test "count and exists answer with numbers Postgres worked out" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    // The fixture is three people, aged 36, 45 and 11.
+    try testing.expectEqual(@as(usize, 3), try stack.db.count(Person, &run, .{}));
+    try testing.expectEqual(
+        @as(usize, 2),
+        try stack.db.count(Person, &run, .{ .where = .{ .age = .{ .gt = 18 } } }),
+    );
+    try testing.expectEqual(
+        @as(usize, 0),
+        try stack.db.count(Person, &run, .{ .where = .{ .age = .{ .gt = 200 } } }),
+    );
+
+    // `EXISTS` answers a bool, so there is nothing for the caller to compare
+    // against zero and no way to get that comparison the wrong way round.
+    try testing.expect(try stack.db.exists(Person, &run, .{ .where = .{ .id = @as(i64, 1) } }));
+    try testing.expect(!try stack.db.exists(Person, &run, .{ .where = .{ .id = @as(i64, 99) } }));
+
+    // `IS NULL` reaches the count the same way it reaches a select, because
+    // it is the same walker: one person in the fixture has no handle.
+    try testing.expectEqual(
+        @as(usize, 1),
+        try stack.db.count(Person, &run, .{ .where = .{ .handle = null } }),
+    );
+}
+
+test "one asks Postgres for a single row even when many match" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    // `age > 18` matches two rows. Ordered, so which one comes back is the
+    // statement's business rather than the planner's.
+    const oldest = try stack.db.one(Person, &run, .{
+        .where = .{ .age = .{ .gt = 18 } },
+        .order = .{ .age = .desc },
+    });
+    try testing.expectEqual(@as(i64, 2), oldest.?.id);
+
+    const youngest = try stack.db.one(Person, &run, .{
+        .where = .{ .age = .{ .gt = 18 } },
+        .order = .{ .age = .asc },
+    });
+    try testing.expectEqual(@as(i64, 1), youngest.?.id);
+
+    // And nothing matching is still null rather than an error — the shape a
+    // handler returns as `!?Person` for its 404.
+    const nobody = try stack.db.one(Person, &run, .{ .where = .{ .id = @as(i64, 99) } });
+    try testing.expectEqual(@as(?Person, null), nobody);
+}
+
+test "a count and a page come from one condition written once" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    // What pagination actually is, and what needed `db.raw` and a Row that
+    // matched no table before this: a total, and a page of the same query.
+    const where = .{ .age = .{ .gt = 10 } };
+    const total = try stack.db.count(Person, &run, .{ .where = where });
+    const page = try stack.db.select(Person, &run, .{
+        .where = where,
+        .order = .{ .id = .asc },
+        .limit = 2,
+    });
+
+    try testing.expectEqual(@as(usize, 3), total);
+    try testing.expectEqual(@as(usize, 2), page.len);
+    try testing.expectEqual(@as(i64, 1), page[0].id);
+    try testing.expectEqual(@as(i64, 2), page[1].id);
+}
+
 fn byIds(db: *db_mod.Db, c: *nilo.Ctx) ![]Person {
     return db.select(Person, c, .{
         .where = .{ .id = .{ .in = &[_]i64{ 1, 3 } } },

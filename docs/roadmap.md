@@ -229,9 +229,6 @@ by having nowhere else to live.
    [ADR 0039](./adr/0039-the-shape-of-a-query-is-settled-while-compiling.md)'s
    line; what they cost is surface, and each wants its axis numbers before it
    is written.
-   - `db.count` / `db.exists`. Pagination needs a total, and the way to get
-     one today is `db.raw` with a Row carrying a `nilo_table` that matches no
-     table (`Tally` in `sql/live.zig` is that, and reads as the wart it is).
    - `db.find(Row, c, key)`. `row.keyOf` already works out the answer and has
      no caller — `.key` is a comptime check with nothing reading it.
    - Insert many. One round trip per row is the only shape there is.
@@ -269,21 +266,17 @@ by having nowhere else to live.
 
 ### Known gaps
 
-- **`db.one` reads the whole result set and keeps the first row.** It calls
-  `select` and indexes it, so a lookup on a column that is not unique pulls
-  every match out of Postgres and copies all of its text into the arena
-  before throwing it away. The fix is a `LIMIT 1` compiled into `one`'s own
-  statement, and a Refusal when the caller also wrote `.limit`.
-- **`select`'s allocation count is stated and not held, and the stated number
-  is wrong.** [ADR 0039](./adr/0039-the-shape-of-a-query-is-settled-while-compiling.md)
-  claims *exactly two when `.limit` is written out, since the row count is
-  then known before the first row arrives* — and `fill` never reads the
-  limit. Measured against `budget.Counting` over a 32-byte Row: 2 allocations
-  at 10 rows, 4 at 100, 6 at 1,000, 10 at 100,000, and 1.68× the bytes the
-  result actually needs, none of which an arena gives back. The fix is one
-  `ensureTotalCapacityPrecise` from the comptime limit — which makes the ADR's
-  sentence true — plus the test the HTTP path already has and this one does
-  not, and the number corrected in the ADR in place.
+- **A condition given an optional that happens to be null matches nothing,
+  quietly.** `.{ .handle = null }` is `IS NULL` because the literal is a
+  compile-time null. `.{ .handle = maybe }` with `maybe` a `?[]const u8` that
+  is null takes the parameter path instead and sends `"handle" = $1` with
+  NULL, which is never true in SQL — the query runs, answers nothing, and
+  says nothing. It is the same failure `refusals/compared_with_null.zig`
+  already refuses for `.{ .gt = null }`, reached by the other road. Filtering
+  on a value the caller may or may not have is an ordinary shape, so the fix
+  is a decision rather than a check: either an optional in a condition is a
+  Refusal telling the caller to branch, or it means `IS NULL` the way the
+  literal does. It cannot keep meaning `= NULL`.
 - **A table that is not there is reported as every column being missing.** The
   introspection query answers nothing, so each column reports
   `no_such_column` — ten lines for one mistake, and not the one that was
@@ -393,7 +386,6 @@ Two whole areas come off before the list starts.
 
 **Reading**
 
-- [ ] `count` / `exists` → Next 1
 - [ ] `not in`, `not like`, negation generally → Next 1. `eq`, `ne`, `gt`,
       `gte`, `lt`, `lte`, `like`, `ilike`, `in`, `IS NULL` and `IS NOT NULL`
       are there; `between` is deliberately absent, because two operators on one

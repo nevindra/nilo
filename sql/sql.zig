@@ -124,6 +124,24 @@ pub fn selectFor(comptime Row: type, comptime Options: type) statement.Statement
     return comptime statement.select(Postgres, Row, Options);
 }
 
+/// The same `SELECT` with the `LIMIT 1` `db.one` compiles for itself. A
+/// `.limit` written alongside it is a Refusal — the ceiling belongs to the
+/// call rather than to the caller.
+pub fn oneFor(comptime Row: type, comptime Options: type) statement.Statement {
+    return comptime statement.one(Postgres, Row, Options);
+}
+
+/// `SELECT count(*)`, and `SELECT EXISTS(…)`. Both take a condition and
+/// nothing else: there is nothing to order and nothing to narrow in an
+/// answer that is one row wide.
+pub fn countFor(comptime Row: type, comptime Options: type) statement.Statement {
+    return comptime statement.count(Postgres, Row, Options);
+}
+
+pub fn existsFor(comptime Row: type, comptime Options: type) statement.Statement {
+    return comptime statement.exists(Postgres, Row, Options);
+}
+
 /// The `DELETE`, likewise. It shares the where walker with `selectFor` rather
 /// than having one of its own, so a condition cannot read one way here and
 /// another way there.

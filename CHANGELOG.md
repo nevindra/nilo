@@ -46,7 +46,21 @@ real Postgres on every push.
 
 - **Reading** — `db.select`, `db.one`, and `db.stream` for a result set too
   big to hold. `one` returns `?Row`, so a handler returning `!?User` answers
-  404 and the OpenAPI document says so.
+  404 and the OpenAPI document says so, and it compiles its own `LIMIT 1` —
+  a lookup on a column that is not unique costs one row rather than every
+  match.
+- **`db.count` and `db.exists`** — the total a page needs, and whether
+  anything matches at all. Both take a condition and nothing else, both go
+  through the same walker `select` uses, so a page and its total are one
+  condition written once and a misspelled column is the same compile error in
+  both. `exists` is `SELECT EXISTS(…)`, which stops at the first row.
+- **A written-out `.limit` now costs one allocation, at any size.** The limit
+  is a ceiling known before the first row arrives, so the list the rows go
+  into is built to it instead of doubling its way there. Measured over a
+  32-byte row: one allocation from ten rows to a hundred thousand, against 2,
+  3, 5 and 9 without it. [ADR 0039](./docs/adr/0039-the-shape-of-a-query-is-settled-while-compiling.md)
+  claimed a number here for a year and the number was wrong; it is corrected
+  in place and a test now holds it.
 - **Writing** — `db.insert` (with `RETURNING`, so the generated key comes
   back), `db.update` and `db.delete`, both answering with the number of rows
   they touched and both refusing to compile without a condition.
