@@ -5,18 +5,21 @@ The whole surface, as a list. For what any of it is *for*, see
 
 ## The modules
 
-Three ship, and a project links only what it imports
-([ADR 0041](./adr/0041-a-module-sits-where-the-loop-puts-it.md)).
+Four ship, and a project links only what it imports
+([ADR 0041](./adr/0041-a-module-sits-where-the-loop-puts-it.md),
+[ADR 0042](./adr/0042-the-bottom-layer-holds-more-than-one-module.md)).
 
 | | | |
 |---|---|---|
 | `nilo_http` | the server — everything on this page unless it says otherwise | [below](#app) |
 | `nilo_sql` | Postgres | [below](#nilo_sql) |
-| `nilo_core` | `Str` and the [Scope](#scope), shared by the other two | [below](#run) |
+| `nilo_id` | UUIDs | [below](#nilo_id) |
+| `nilo_core` | `Str` and the [Scope](#scope), shared by the rest | [below](#run) |
 
 ```zig
 const nilo = @import("nilo_http");    // the alias everybody writes
 const sql = @import("nilo_sql");      // only if you talk to Postgres
+const id = @import("nilo_id");        // only if you make identifiers
 ```
 
 **There is no module called `nilo`.** The word names the project — the `nilo: `
@@ -331,6 +334,46 @@ than an error from inside the module.
 `nilo_core` is the module both live in. A project importing `nilo` never has to
 name it — `nilo.Str` and `nilo.Run` are the same declarations — but a program
 with no server in it can depend on `nilo_core` alone.
+
+## `nilo_id`
+
+UUIDs, as a module of their own
+([ADR 0042](./adr/0042-the-bottom-layer-holds-more-than-one-module.md)). The
+same `Uuid` `nilo_sql` reads a `uuid` column into, so a generated key goes
+straight into an insert. Nothing here allocates and nothing here does IO.
+
+```zig
+const id = @import("nilo_id");
+
+var random: [id.Uuid.v7_entropy]u8 = undefined;
+try fillUnguessably(&random);
+
+const key = id.v7(random, ms_since_the_epoch);
+_ = try db.insert(User, c, .{ .id = key, .email = form.email });
+```
+
+| | |
+|---|---|
+| `id.v4(entropy)` | random — 122 bits of the `[16]u8` you pass in |
+| `id.v7(entropy, ms)` | sortable — `ms` in the first six bytes, then the `[10]u8` |
+| `u.toText()` | `[36]u8` by value: `550e8400-e29b-41d4-a716-446655440000` |
+| `u.writeText(w)` | the same, into a `*std.Io.Writer` |
+| `id.Uuid.parse(text)` | `!Uuid`, `error.InvalidUuid`. Hyphens optional |
+| `u.version()` | `u4` — `4`, `7`, or whatever the bytes claim |
+| `u.millis()` | `?u64` — the millisecond a v7 carries, null for anything else |
+| `u.eql(other)`, `u.isNil()`, `id.Uuid.nil` | |
+| `id.Uuid.byte_len`, `.text_len`, `.v4_entropy`, `.v7_entropy` | 16, 36, 16, 10 |
+
+A `Uuid` in a returned struct leaves as its text rather than as sixteen
+numbers, and one in a Row is written and read as the `uuid` column.
+
+**The randomness is yours to supply, and nilo has nowhere to get it for you
+yet.** Entropy and the wall clock are both IO in Zig 0.16, `Ctx` exposes
+neither, and a module in the bottom layer has no Bulkhead to reach through —
+so `v4` and `v7` take what they need rather than fetching it. A v4 built from a
+seeded `std.Random.DefaultPrng` is fine in a test and is a session token
+anybody can predict in production. ADR 0042 has the argument and what the
+missing seam would be.
 
 ## `Dir`
 
@@ -695,7 +738,7 @@ by a counter asserted at `db.deinit()`.
 | | |
 |---|---|
 | `sql.Timestamp` | microseconds since the epoch, written as RFC 3339 in JSON. `timestamptz` |
-| `sql.Uuid` | 16 bytes, written as text in JSON. `uuid` |
+| `sql.Uuid` | `nilo_id`'s [`Uuid`](#nilo_id), re-exported — the same type either import gives you. `uuid` |
 | `sql.Json(T)` | a `T` stored as `jsonb`, parsed per row into the request arena. Not available in `db.stream`, which allocates nothing |
 
 ### Errors

@@ -123,6 +123,43 @@ Nothing you wrote changes. `nilo.Str` is the same declaration it always was.
   `zig test core/core.zig` runs it with no `build.zig` at all. That this works
   is the property the layering exists for, not a convenience.
 
+### `nilo_id`, and a fourth module
+
+The bottom layer holds more than one module now: `nilo_core` is the vocabulary
+and sits under the rest of it, and **`nilo_id`** is the first *tool module* —
+one job, no event loop, and it imports nothing at all
+([ADR 0042](./docs/adr/0042-the-bottom-layer-holds-more-than-one-module.md)).
+
+```zig
+const id = @import("nilo_id");
+
+const key = id.v7(random, ms);            // sortable — the millisecond first
+const token = id.v4(random);              // 122 random bits
+try w.print("/users/{s}", .{&key.toText()});
+```
+
+- **`sql.Uuid` is `nilo_id`'s `Uuid`.** Same declaration, re-exported, so
+  nothing you wrote changes and a generated key goes straight into
+  `db.insert`. What did *not* move down is the opinion about the column: a
+  module that has never heard of Postgres does not carry `nilo_column`.
+- **`v4` and `v7` are given their randomness rather than fetching it**, and
+  `v7` is given its millisecond. In Zig 0.16 entropy and the wall clock are
+  both IO, `Ctx` exposes neither, and a module in the bottom layer has no
+  Bulkhead to reach through — so this release ships the *format* and says so.
+  A v4 built from a seeded `DefaultPrng` is a session token anybody can
+  predict; the doc comment says that at the function. The seam is
+  [the roadmap's](./docs/roadmap.md) next item for `nilo_core`.
+- `toText()` answers a `[36]u8` by value, `parse` takes hyphens or not,
+  `millis()` reads a v7's clock back and answers null for anything else. A
+  `Uuid` in a returned struct leaves as text rather than as sixteen numbers.
+- **`zig build layering`** reads the `@import`s under `core/`, `id/` and
+  `sql/` and refuses one that is not in that module's row of the `layers`
+  table in `build.zig`. ADR 0041 said the layering needed a build step or it
+  was a paragraph; it has one, and it hangs off `zig build test`.
+- **`zig build test-id`**, and `zig test id/id.zig` with no `build.zig` at
+  all. For a module down there that is the entry condition rather than a
+  nicety.
+
 ### What it costs
 
 A project that does not import `nilo_sql` links none of it — not the driver,
@@ -132,7 +169,8 @@ rest is pg.zig's TLS dependency. Allocations per request, memory per idle
 connection and p99 are unchanged.
 
 Splitting Core out cost **zero bytes**, measured on three binaries rather than
-assumed.
+assumed, and adding `nilo_id` beside it cost the same three binaries nothing at
+all. A program that does import it and generates a v7 pays **16 bytes**.
 
 ## 0.1.0
 

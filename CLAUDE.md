@@ -17,6 +17,15 @@ the loop and is the HTTP framework; `sql/` needs the loop without owning it.
 of them be worked on at once. Nothing under `http/` may be imported by `sql/`,
 and the way a Service reaches request-lifetime memory is a Scope, not a `Ctx`.
 
+**The bottom layer holds more than one module** (ADR 0042). `core/` is the
+vocabulary and sits under the rest of it; `id/` is the first **tool module** —
+one job, no event loop, imports nothing above it. A Service may import a tool
+module, which is downward. **The rule is a build step, not a paragraph**: `zig
+build layering` reads the `@import`s under `core/`, `id/` and `sql/` and
+refuses one that is not in that module's row of the `layers` table in
+`build.zig`. Adding a module means adding a row — there and in
+`shipped_roots`, and in `.paths` in `build.zig.zon`.
+
 **The framework's one dependency is [zio](https://github.com/lalinsky/zio)**,
 pinned in `build.zig.zon`. The SQL module adds
 [pg.zig](https://github.com/lalinsky/pg.zig), which brings four of its own
@@ -29,10 +38,11 @@ Three files carry context this one deliberately does not repeat:
 - **`CONTEXT.md`** — the project's vocabulary, and the words it refuses to use
   (Ctx not "Context", Str not "string", keep not "dupe", Refusal not "negative
   test"). Match it in code, comments, docs and commit messages.
-- **`docs/adr/`** — 41 binding decisions, each naming the alternative it
+- **`docs/adr/`** — 42 binding decisions, each naming the alternative it
   rejected. Check here before proposing a design change; "why not X?" usually
   already has an answer on file. **ADR 0041 decides which module new work goes
-  in**, and it is the one to read before adding a file anywhere but `http/`.
+  in and ADR 0042 decides what that module may import**, and they are the two
+  to read before adding a file anywhere but `http/`.
 - **`docs/reference.md`** — the whole public API on one page.
 
 ## Commands
@@ -41,6 +51,8 @@ Three files carry context this one deliberately does not repeat:
 zig build test         # the loop: the suite in Debug, plus the refusals
 zig build test-all     # the above, plus the same suite in ReleaseSafe — what CI runs
 zig build test-core    # only Core, both modes — no Engine, no module graph
+zig build test-id      # only nilo_id, the same way
+zig build layering     # check that no module imports upward or sideways
 zig build refusals     # only the compile-error checks
 zig build examples     # build all seven examples
 zig build fuzz -- --iterations 1000000 --seed 0x…   # generated requests at the parser
@@ -70,16 +82,21 @@ That works for `cookie`, `percent`, `patch`, `names`, `json` and `range`.
 Everything else under `http/` imports the Engine transitively and needs the
 module graph, so `zig build test` is the only way to run it.
 
-**Core is the exception, and by design rather than by luck** (ADR 0041):
+**The bottom layer is the exception, and by design rather than by luck**
+(ADR 0041, ADR 0042):
 
 ```
-zig test core/core.zig                  # the whole bottom layer, no build.zig
+zig test core/core.zig                  # the vocabulary, no build.zig
+zig test id/id.zig                      # nilo_id, likewise
 zig build test-core                     # the same, both optimize modes
+zig build test-id
 ```
 
 A module that needs no event loop is a module whose tests need no module graph,
-which is the property the layering exists to buy. If a change to `core/` ever
-stops that command working, the layering has been broken rather than the test.
+which is the property the layering exists to buy. **For a module down there it
+is the entry condition rather than a nicety**: one whose tests need the module
+graph is in the wrong layer. If a change ever stops one of those commands
+working, the layering has been broken rather than the test.
 
 ## Architecture
 
@@ -88,6 +105,7 @@ Bottom to top. Each layer knows nothing about the one above it.
 | Layer | Files | What it is |
 |---|---|---|
 | **Core** | `core/` | `Str` and the Scope. The vocabulary every layer agrees about, and no IO at all — a separate module (`nilo_core`) that names no Engine, so `zig test core/core.zig` runs the whole of it (ADR 0041). |
+| **Tools** | `id/` | one job each, no event loop, and `nilo_core` is the most they may import. `nilo_id` is the first and imports nothing at all (ADR 0042). |
 | **Engine** | `http/engine/zio.zig` | accept, read, write. **The only file in the repo allowed to name zio** (ADR 0002). |
 | **Bulkhead** | `http/bulkhead.zig` | the entire contract nilo asks of an Engine, listed in that file's header. `Options` is declared here rather than by the Engine, so swapping engines cannot change what a user writes. |
 | **HTTP + App** | `http/http1.zig`, `http/router.zig`, `http/app.zig` | parse, match, dispatch. `App.handleRequest` takes only a `*std.Io.Reader`/`*std.Io.Writer`, which is why almost every HTTP behaviour is tested against in-memory buffers with no server. |

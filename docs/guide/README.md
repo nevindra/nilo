@@ -5,15 +5,17 @@ each one assumes the ones above it — and jump straight in afterwards.
 
 ## Which module a page is about
 
-nilo is three modules rather than one library, and which one a page belongs to
+nilo is four modules rather than one library, and which one a page belongs to
 is decided by a single question — does it need the event loop?
-([ADR 0041](../adr/0041-a-module-sits-where-the-loop-puts-it.md))
+([ADR 0041](../adr/0041-a-module-sits-where-the-loop-puts-it.md),
+[ADR 0042](../adr/0042-the-bottom-layer-holds-more-than-one-module.md))
 
 | Module | What it is | Pages |
 |---|---|---|
-| **`nilo_http`** | the server: routing, handlers, middleware, files, sockets | everything below except the two named on the right |
+| **`nilo_http`** | the server: routing, handlers, middleware, files, sockets | everything below except the ones named on the right |
 | **`nilo_sql`** | Postgres: your struct is the table | [Talking to Postgres](./sql.md) |
-| **`nilo_core`** | `Str`, and the Scope the other two share | [the reference](../reference.md#scope) |
+| **`nilo_id`** | UUIDs, v4 and v7 | [the reference](../reference.md#nilo_id) |
+| **`nilo_core`** | `Str`, and the Scope the rest share | [the reference](../reference.md#scope) |
 
 There is **no module called `nilo`** — the word names the project, and the
 server is `nilo_http`. Every example here writes the alias back, which is all it

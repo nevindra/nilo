@@ -38,11 +38,12 @@ b.installArtifact(exe);
 ```
 
 The package is `nilo`; the module is `nilo_http`. **The bare name is the
-project's, not any one module's** — `nilo_sql` and `nilo_core` sit beside the
-server, and you add a line here for each one you import and nothing for the ones
-you do not
-([ADR 0041](../adr/0041-a-module-sits-where-the-loop-puts-it.md)). In your own
-code the alias goes back:
+project's, not any one module's** — `nilo_sql`, `nilo_id` and `nilo_core` sit
+beside the server, and you add a line here for each one you import and nothing
+for the ones you do not
+([ADR 0041](../adr/0041-a-module-sits-where-the-loop-puts-it.md),
+[ADR 0042](../adr/0042-the-bottom-layer-holds-more-than-one-module.md)). In your
+own code the alias goes back:
 
 ```zig
 const nilo = @import("nilo_http");

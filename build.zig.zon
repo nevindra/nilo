@@ -28,6 +28,7 @@
         "build.zig",
         "build.zig.zon",
         "core",
+        "id",
         "http",
         "sql",
         "LICENSE",

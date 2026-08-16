@@ -136,17 +136,20 @@ without a search engine. So can your coding agent, and
 | | | |
 |---|---|---|
 | **`nilo_core`** | `Str` and the Scope — the vocabulary the others share. No event loop, no HTTP | **shipped** |
-| **`nilo`** | HTTP: routing, typed handlers, middleware, cookies and sessions, static files, streaming, WebSocket, OpenAPI | **shipped** |
+| **`nilo_id`** | UUIDs, v4 and v7. Imports nothing at all | **shipped**: the format. Where the randomness comes from is still yours |
+| **`nilo_http`** | HTTP: routing, typed handlers, middleware, cookies and sessions, static files, streaming, WebSocket, OpenAPI | **shipped** |
 | **`nilo_sql`** | Postgres: your struct is the table | **shipped**: reads, writes, transactions, streaming |
 
-Three modules today, and the shape is deliberate: **a toolkit whose largest
+Four modules today, and the shape is deliberate: **a toolkit whose largest
 module is a server**, rather than a server with things bolted beside it. Which
 module a file belongs in is settled by one question — does it need the event
 loop? — and a module imports downward only, never a sibling
-([ADR 0041](./docs/adr/0041-a-module-sits-where-the-loop-puts-it.md)). That's
-what lets two of them be worked on at once, and it's why `nilo_sql` takes a
-Scope rather than a `Ctx`: the same query runs in a handler, in a CLI, or in a
-test with no server in the process.
+([ADR 0041](./docs/adr/0041-a-module-sits-where-the-loop-puts-it.md),
+[ADR 0042](./docs/adr/0042-the-bottom-layer-holds-more-than-one-module.md)).
+That's what lets two of them be worked on at once, and it's why `nilo_sql` takes
+a Scope rather than a `Ctx`: the same query runs in a handler, in a CLI, or in a
+test with no server in the process. `zig build layering` is what holds the rule,
+rather than this paragraph.
 
 Config, CLI arguments and an HTTP client are the obvious next ones, because Zig
 makes you hand-roll all three.
@@ -275,9 +278,9 @@ const exe = b.addExecutable(.{
 ```
 
 The package is `nilo` and the module is `nilo_http`, because **the name belongs
-to the project rather than to any one module** — `nilo_sql` and `nilo_core` are
-its siblings, and you add a line above for each one you actually import. In your
-own code, alias it back:
+to the project rather than to any one module** — `nilo_sql`, `nilo_id` and
+`nilo_core` are its siblings, and you add a line above for each one you actually
+import. In your own code, alias it back:
 
 ```zig
 const nilo = @import("nilo_http");

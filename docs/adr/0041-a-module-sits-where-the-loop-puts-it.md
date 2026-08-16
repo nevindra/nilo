@@ -46,6 +46,12 @@ imports Core. A Service imports Core. **A Service never imports an App**, and
 nothing imports a sibling in its own layer. That rule is the whole of what makes
 a module a separate piece of work: two Services touch no file in common.
 
+> The last clause is amended by
+> [ADR 0042](./0042-the-bottom-layer-holds-more-than-one-module.md), which is
+> what happened the first time Core held two modules: the vocabulary is not a
+> sibling of anything, so a module beside it may import it. Everything else
+> here stands.
+
 **One directory per module, named after the module, and no module is called
 `nilo`.** The server moved out of `src/` and into `http/` and its module was
 renamed from `nilo` to `nilo_http`, which is the part of this decision that

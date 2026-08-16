@@ -11,7 +11,7 @@ const std = @import("std");
 /// **Adding a module means adding a row here as well as to `.paths`.** Core
 /// shipped for a whole session with neither, and nothing noticed, because a
 /// list that does not name a directory cannot check it.
-const shipped_roots = [_][]const u8{ "core", "http", "sql" };
+const shipped_roots = [_][]const u8{ "core", "id", "http", "sql" };
 
 comptime {
     const manifest = @embedFile("build.zig.zon");
@@ -25,6 +25,38 @@ comptime {
         );
     }
 }
+
+/// What each module below the App is allowed to name, and the whole of it
+/// (ADR 0042). A module imports downward only, and until now that was a
+/// sentence in a document — the same shape of rule
+/// [ADR 0027](docs/adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)
+/// took away from documents and gave to a build step, for the same reason.
+///
+/// The lists are short and that is the point: what a row grows by is the
+/// argument somebody has to make out loud.
+///
+/// **`in_tests` is allowed, not verified.** A module's tests may reach one
+/// layer up, because an `@import` referenced only from a `test` block is
+/// never analysed in a build that is not a test build (ADR 0041). Telling
+/// those apart needs a parser rather than a scan, so this file lists the
+/// exception instead of proving it — which still beats a rule that nothing
+/// checks at all, and which is why the lists live here where they can be
+/// read rather than inside the step.
+const layers = [_]Layer{
+    .{ .root = "core", .may_import = &.{} },
+    .{ .root = "id", .may_import = &.{} },
+    .{
+        .root = "sql",
+        .may_import = &.{ "nilo_core", "nilo_id", "pg", "live_config" },
+        .in_tests = &.{"nilo_http"},
+    },
+};
+
+const Layer = struct {
+    root: []const u8,
+    may_import: []const []const u8,
+    in_tests: []const []const u8 = &.{},
+};
 
 const examples = [_]Example{
     .{ .name = "hello", .about = "The smallest thing that serves" },
@@ -444,6 +476,137 @@ fn coreFor(
     });
 }
 
+/// A copy of `nilo_id` for one optimize mode, for the same reason (ADR 0042).
+///
+/// It has to be *shared* with whatever else in that mode names a `Uuid`, not
+/// merely built from the same file: two modules built from one root are two
+/// different modules to Zig, so a second copy would make `id.Uuid` and
+/// `sql.Uuid` two distinct types and `db.insert` would refuse a generated
+/// key with a message about a type that looks identical to the one it wants.
+fn idFor(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    mode: std.builtin.OptimizeMode,
+) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("id/id.zig"),
+        .target = target,
+        .optimize = mode,
+    });
+}
+
+/// The step that reads `layers` and refuses an import that is not in it.
+///
+/// A scan rather than a parse, and the trade is stated where the table is:
+/// it cannot see that an import is only reached from a `test` block, so the
+/// exception is listed. What it *can* see is every other way the layering
+/// erodes — a Core file naming the server, a tool module naming a sibling, a
+/// relative path climbing out of its own directory — and those are the ways
+/// it actually erodes, because they are the ones somebody in a hurry writes.
+const Layering = struct {
+    /// Every module root is scanned but `refusals/` is not: those are
+    /// programs written wrong on purpose, and they import their own module
+    /// by name the way a stranger's project would.
+    const skipped = "refusals";
+
+    fn step(b: *std.Build) *std.Build.Step {
+        const self = b.allocator.create(Layering) catch @panic("OOM");
+        self.* = .{ ._step = .init(.{
+            .id = .custom,
+            .name = "layering",
+            .owner = b,
+            .makeFn = make,
+        }) };
+        b.step("layering", "Check that no module imports upward or sideways")
+            .dependOn(&self._step);
+        return &self._step;
+    }
+
+    _step: std.Build.Step,
+
+    fn make(s: *std.Build.Step, _: std.Build.Step.MakeOptions) anyerror!void {
+        const b = s.owner;
+        const io = b.graph.io;
+        var refused: usize = 0;
+
+        for (layers) |layer| {
+            var dir = b.build_root.handle.openDir(io, layer.root, .{ .iterate = true }) catch |err|
+                return s.fail("nilo: cannot read `{s}/`: {s}", .{ layer.root, @errorName(err) });
+            defer dir.close(io);
+
+            var walker = try dir.walk(b.allocator);
+            defer walker.deinit();
+
+            while (try walker.next(io)) |entry| {
+                if (entry.kind != .file) continue;
+                if (!std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+                if (std.mem.indexOf(u8, entry.path, skipped) != null) continue;
+
+                const source = try dir.readFileAlloc(io, entry.path, b.allocator, .limited(4 << 20));
+                var at: usize = 0;
+                while (std.mem.indexOfPos(u8, source, at, "@import(\"")) |found| {
+                    const from = found + "@import(\"".len;
+                    const end = std.mem.indexOfScalarPos(u8, source, from, '"') orelse break;
+                    at = end + 1;
+
+                    const named = source[from..end];
+                    if (commented(source, found)) continue;
+                    if (permits(layer, named)) continue;
+                    refused += 1;
+                    try s.addError("nilo: {s}/{s}:{d} imports `{s}`, which a module in this layer may not name.\n" ++
+                        "  A module imports downward only (ADR 0042); `{s}/` may name {f}.", .{
+                        layer.root,
+                        entry.path,
+                        std.mem.count(u8, source[0..found], "\n") + 1,
+                        named,
+                        layer.root,
+                        List{ .of = layer.may_import },
+                    });
+                }
+            }
+        }
+
+        if (refused > 0) return error.MakeFailed;
+    }
+
+    /// Whether the line this sits on is a comment. Every module root in
+    /// this repository opens with a doc comment showing how somebody else
+    /// imports it, and a scan that could not tell those apart would refuse
+    /// the documentation for saying the true thing. Line-level is enough:
+    /// a real `@import` is never written after a `//` on the same line.
+    fn commented(source: []const u8, found: usize) bool {
+        const line = if (std.mem.lastIndexOfScalar(u8, source[0..found], '\n')) |nl| nl + 1 else 0;
+        const before = std.mem.trimStart(u8, source[line..found], " \t");
+        return std.mem.startsWith(u8, before, "//");
+    }
+
+    fn permits(layer: Layer, named: []const u8) bool {
+        if (std.mem.eql(u8, named, "std") or std.mem.eql(u8, named, "builtin")) return true;
+        // A file rather than a module. `..` is how one would reach out of
+        // its own directory, which is importing sideways by another name.
+        if (std.mem.endsWith(u8, named, ".zig"))
+            return std.mem.indexOf(u8, named, "..") == null;
+        for (layer.may_import) |allowed| if (std.mem.eql(u8, named, allowed)) return true;
+        for (layer.in_tests) |allowed| if (std.mem.eql(u8, named, allowed)) return true;
+        return false;
+    }
+
+    /// The allowed list, written out in the message. A module with an empty
+    /// one is the interesting case and it reads as a sentence rather than as
+    /// an empty pair of brackets.
+    const List = struct {
+        of: []const []const u8,
+
+        pub fn format(self: List, w: *std.Io.Writer) !void {
+            if (self.of.len == 0) return w.writeAll("nothing but `std` and files beside it");
+            for (self.of, 0..) |one, i| {
+                if (i > 0) try w.writeAll(", ");
+                try w.print("`{s}`", .{one});
+            }
+        }
+    };
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -460,6 +623,16 @@ pub fn build(b: *std.Build) void {
     // `zig test core/core.zig` runs the whole of it without this file.
     const nilo_core = b.addModule("nilo_core", .{
         .root_source_file = b.path("core/core.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // The bottom layer's second module, and the first that is not the
+    // vocabulary (ADR 0042). It needs no event loop, so it sits beside
+    // `nilo_core` rather than above it — and it imports nothing at all, which
+    // `zig build layering` checks rather than trusts.
+    const nilo_id = b.addModule("nilo_id", .{
+        .root_source_file = b.path("id/id.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -506,6 +679,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "nilo_core", .module = nilo_core },
+            .{ .name = "nilo_id", .module = nilo_id },
         },
     });
 
@@ -599,6 +773,20 @@ pub fn build(b: *std.Build) void {
     }
     test_step.dependOn(test_core_step);
 
+    // The same for `nilo_id`, and for the same reason rather than by
+    // analogy: a module in the bottom layer that cannot be tested without
+    // the module graph is a module in the wrong layer (ADR 0042).
+    // `zig test id/id.zig` is this without `build.zig` at all.
+    const test_id_step = b.step("test-id", "Run nilo_id's tests — no Engine, no module graph");
+    for (test_modes) |mode| {
+        const tests = b.addTest(.{ .root_module = idFor(b, target, mode) });
+        test_id_step.dependOn(&b.addRunArtifact(tests).step);
+    }
+    test_step.dependOn(test_id_step);
+
+    // The layering, held by something other than a paragraph (ADR 0042).
+    test_step.dependOn(Layering.step(b));
+
     // The SQL module keeps its own step, and `test` does not depend on it
     // (ADR 0039). Not for speed: it has a tier that cannot run without a
     // database at all, and mixing a step that needs Postgres into the one
@@ -681,6 +869,7 @@ pub fn build(b: *std.Build) void {
             .optimize = mode,
             .imports = &.{
                 .{ .name = "nilo_core", .module = core_mod },
+                .{ .name = "nilo_id", .module = idFor(b, target, mode) },
                 .{ .name = "nilo_http", .module = framework },
             },
         });
@@ -817,5 +1006,4 @@ pub fn build(b: *std.Build) void {
         run.setCwd(b.path(b.fmt("examples/{s}", .{example.name})));
         b.step(b.fmt("run-{s}", .{example.name}), example.about).dependOn(&run.step);
     }
-
 }

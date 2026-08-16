@@ -62,7 +62,7 @@
 //! | **Dialect** | `dialect.zig` | comptime, writes the SQL, may refuse |
 //! | **where** | `where.zig` | a condition into a fragment and a value list |
 //! | **statements** | `statement.zig` | all four, each as a constant |
-//! | **types** | `types.zig` | Timestamp, Uuid, Json — value, not arithmetic |
+//! | **types** | `types.zig` | Timestamp and Json — value, not arithmetic. `Uuid` is `nilo_id`'s |
 //! | **schema** | `schema.zig` | Row against table, while the server starts |
 //! | **Wire** | `wire.zig` | the contract a driver meets |
 //! | **the driver** | `postgres.zig` | pg.zig, and the only file that names it |
@@ -142,11 +142,28 @@ pub fn existsFor(comptime Row: type, comptime Options: type) statement.Statement
     return comptime statement.exists(Postgres, Row, Options);
 }
 
+/// The `SELECT … WHERE <key> = $1 LIMIT 1` behind `db.find`. `Key` is the
+/// type of the value handed in, which is the half that can be got wrong: a
+/// condition where a key goes is a Refusal.
+pub fn findFor(comptime Row: type, comptime Key: type) statement.Statement {
+    return comptime statement.find(Postgres, Row, Key);
+}
+
 /// The `DELETE`, likewise. It shares the where walker with `selectFor` rather
 /// than having one of its own, so a condition cannot read one way here and
 /// another way there.
 pub fn deleteFor(comptime Row: type, comptime Options: type) statement.Statement {
     return comptime statement.delete(Postgres, Row, Options);
+}
+
+/// The `UPDATE` and the `DELETE` that answer with their rows rather than with
+/// a count — the same statements with the `SELECT` list on the end.
+pub fn updateReturningFor(comptime Row: type, comptime Options: type) statement.Statement {
+    return comptime statement.updateReturning(Postgres, Row, Options);
+}
+
+pub fn deleteReturningFor(comptime Row: type, comptime Options: type) statement.Statement {
+    return comptime statement.deleteReturning(Postgres, Row, Options);
 }
 
 /// The `INSERT`, with the Row's column list as its `RETURNING`.

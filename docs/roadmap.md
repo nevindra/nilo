@@ -23,6 +23,7 @@ can be worked at the same time, by two people or by one person on two days.
 | Layer | Module | The loop | Its work |
 |---|---|---|---|
 | Core | `nilo_core` | needs none | [below](#nilo_core--the-vocabulary) |
+| Core | `nilo_id` | needs none | [below](#nilo_id--identifiers) |
 | App | `nilo_http` | owns it | [below](#nilo_http--the-server) |
 | Service | `nilo_sql` | needs it, does not own it | [below](#nilo_sql--postgres) |
 
@@ -38,33 +39,29 @@ the repository rather than any one module, and stay whole at the bottom.
 ## `nilo_core` — the vocabulary
 
 `Str`, the `Lifetime` behind it, and the `Scope` that lets a Service allocate
-for a request without naming a server. It is the newest of the three and the
-smallest on purpose: a file earns its way in by being needed by two layers, not
-by having nowhere else to live.
+for a request without naming a server. It is the smallest module on purpose: a
+file earns its way in by being needed by two layers, not by having nowhere else
+to live. `nilo_id` sits beside it in the same layer and below is only `std`
+([ADR 0042](./adr/0042-the-bottom-layer-holds-more-than-one-module.md)).
 
 ### Next
 
-1. **A build step that holds the layering.** ADR 0041 says a Core file may not
-   import upward and nothing checks it, which makes it a paragraph rather than
-   a rule — the same argument
-   [ADR 0027](./adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)
-   made about error messages, and it eroded there the first afternoon somebody
-   was in a hurry. An import scan over `core/` is a small step.
+1. **A seam for the two things a module down here cannot reach: entropy and the
+   wall clock.** Both are IO in Zig 0.16 and neither has a supported source
+   inside nilo — `Ctx` exposes no clock and no `randomSecure`, so `id.v7` takes
+   its millisecond and its randomness as arguments that a handler has nowhere
+   to get. It is the thing standing in front of the whole layer rather than in
+   front of one module: a password module needs to get *off* the loop, an S3
+   module needs to dial out, and this needs to reach the operating system at
+   all. One decision, three callers.
 
-   What it has to allow is the exception the wiring turned up: a module's
-   *tests* may name a layer above, because an import reached only from a `test`
-   block is never analysed in a build that is not a test build. A scan that
-   cannot tell those apart would refuse `sql/db.zig`, whose App-level tests are
-   the ones most worth having.
-2. **A second module in this layer, and the rule for what it may import.** The
-   layering says a module imports downward and never a sibling, and with one
-   Core module that has never been tested. `nilo_id` is the obvious first —
-   UUID v4 and v7, where v7 is the sortable one a row wants for a key — and it
-   immediately asks the question nobody has answered: `sql.Uuid` already
-   exists, so either the Service imports the tool module, which makes *tool*
-   a rank between Core and Service, or the type moves into Core, which the
-   two-layer rule permits and the "not a drawer" rule resists. Building it
-   without settling that is how the drawer starts.
+   Half of the design is settled by precedent. ADR 0040 grew `Ctx` a pair of
+   calls for exactly this shape of problem and Core then named the pair, which
+   is what a Scope is; a second pair would be checked the same way. What is not
+   settled is what a `Run` does with it — `arena()` and `str()` are pure
+   bookkeeping that Core implements with no IO, and entropy is not, so either
+   `Run` holds an `Io` (Core doing IO, a real amendment to what Core is) or the
+   second pair belongs to something that is not a Scope.
 
 ### Known gaps
 
@@ -73,7 +70,14 @@ by having nowhere else to live.
   pg.zig's own zio and a Service written here would have to name zio — which
   [ADR 0002](./adr/0002-zio-as-the-engine-behind-the-bulkhead.md) permits in
   exactly one file. It is not urgent with one Service. It is the bill the
-  second one arrives with, and it is its own decision.
+  second one arrives with, and it is half of the item above.
+- **The layering step cannot see that an import is only reached from a test.**
+  `zig build layering` refuses an import that is not in that module's row of
+  the `layers` table, and `sql/db.zig` legitimately names `nilo_http` from a
+  `test` block. Telling the two apart needs a parser rather than a scan, so the
+  table has an `in_tests` list the step allows and does not verify. A rule with
+  a listed exception still beats a rule in a document; this is the part of it
+  that is weaker than the rest.
 
 ### Not decided
 
@@ -85,6 +89,40 @@ by having nowhere else to live.
   to exist first, so there is something to design against rather than a guess.
   `percent.zig` is the same shape of question and the most likely file to earn
   its way down next, for the same reason: signing a URL needs the encoding half.
+
+---
+
+## `nilo_id` — identifiers
+
+A `Uuid` and the two layouts anybody writes, v4 and v7. It imports nothing at
+all, which is the strongest form of what the bottom layer is for.
+
+### Next
+
+1. **`id.v4()` and `id.v7()`, with no arguments.** What the module is for, and
+   it cannot be built here — it is `nilo_core`'s first item, above. Everything
+   else on this page is smaller than that one.
+
+### Known gaps
+
+- **A v7 is not sortable within a millisecond.** Two made in the same one come
+  back in random order relative to each other. RFC 9562 allows a counter in
+  `rand_a` and this has none, on the grounds that it buys ordering nobody asked
+  for at the price of a threadlocal — but a service inserting a batch in a tight
+  loop is exactly the caller who would notice, and nobody has looked at whether
+  that happens in practice.
+
+### Not decided
+
+- **Whether any other identifier belongs here.** ULID, nanoid and Snowflake are
+  each a different trade of length against sortability against coordination, and
+  a module that holds all of them is a catalogue rather than a decision. UUID is
+  here because a database column has that type; nothing else has that argument
+  yet, and "somebody might want it" is not one.
+- **Whether v3 and v5 belong here.** They are a hash of a name in a namespace,
+  which is a different job from making one nothing has ever used — and they need
+  MD5 and SHA-1, which means this module would ship two broken hashes for the
+  first caller who asks.
 
 ---
 
@@ -337,8 +375,9 @@ by having nowhere else to live.
   real caller of the Core layer
   ([ADR 0041](./adr/0041-a-module-sits-where-the-loop-puts-it.md)) and means it
   spends nothing on any of the four axes, because it is not in the process
-  those axes measure. That also fixes its position: behind `nilo_sql` naming a
-  Scope rather than a `Ctx`, which is Core's second item.
+  those axes measure. Nothing blocks it there any more: `nilo_sql` takes a
+  Scope rather than a `Ctx`, so a migration is an ordinary program holding a
+  `Run`.
 
 ### Measured against Drizzle
 
@@ -408,8 +447,8 @@ Two whole areas come off before the list starts.
 - [ ] A query cache
 
 **Tooling.** None of it exists, and all of it is a CLI rather than a server —
-which is why the whole group sits behind Core's Scope and why none of it can
-spend an axis.
+which is why none of it can spend an axis, and why a `Run` is all any of it
+needs to hold.
 
 - [ ] `generate` — DDL out of the diff `schema.compare` already computes
 - [ ] `migrate` — apply, and record what was applied

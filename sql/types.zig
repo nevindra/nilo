@@ -25,8 +25,14 @@
 //! stated, and anyone who wants arithmetic can build it on top in a package of
 //! their own without asking nilo's permission. This is the floor for that
 //! work, not a refusal of it.
+//!
+//! **`Uuid` is no longer one of these.** It is `nilo_id`'s, imported here and
+//! re-exported, because generating a key and reading one back are the same
+//! sixteen bytes and only one of those two jobs is about a database (ADR
+//! 0042). What stayed is this module's opinion about which column it goes in.
 
 const std = @import("std");
+const id = @import("nilo_id");
 
 /// A moment, as microseconds since 1970-01-01 UTC — the same integer Postgres
 /// keeps in a `timestamptz`, so reading one is a copy rather than a
@@ -82,58 +88,20 @@ pub const Timestamp = struct {
     }
 };
 
-/// Sixteen bytes, in the order Postgres stores them.
+/// Sixteen bytes, in the order Postgres stores them — `nilo_id`'s type
+/// rather than one of this module's own (ADR 0042).
 ///
-/// It exists for one reason: so that a Row carrying one can be returned from
-/// a handler and leave as `550e8400-e29b-41d4-a716-446655440000` rather than
-/// as an array of numbers. That is the whole of its job.
-pub const Uuid = struct {
-    bytes: [byte_len]u8,
-
-    pub const nilo_column = "uuid";
-
-    /// How many bytes a `uuid` column holds. Named because `db.zig` checks
-    /// the length of what the Wire handed back against it, and a literal
-    /// sixteen in two files is a literal sixteen that can disagree.
-    pub const byte_len = 16;
-
-    /// The hyphenated form, lowercase. 8-4-4-4-12, which is the only spelling
-    /// anything on the other side of an API expects.
-    pub fn writeText(self: Uuid, w: *std.Io.Writer) !void {
-        const hex = "0123456789abcdef";
-        for (self.bytes, 0..) |b, i| {
-            if (i == 4 or i == 6 or i == 8 or i == 10) try w.writeByte('-');
-            try w.writeByte(hex[b >> 4]);
-            try w.writeByte(hex[b & 0x0f]);
-        }
-    }
-
-    pub fn parse(text: []const u8) !Uuid {
-        var out: Uuid = .{ .bytes = undefined };
-        var at: usize = 0;
-        var i: usize = 0;
-        while (i < text.len) : (i += 1) {
-            if (text[i] == '-') continue;
-            if (at >= 32) return error.InvalidUuid;
-            const nibble = std.fmt.charToDigit(text[i], 16) catch return error.InvalidUuid;
-            if (at % 2 == 0) {
-                out.bytes[at / 2] = nibble << 4;
-            } else {
-                out.bytes[at / 2] |= nibble;
-            }
-            at += 1;
-        }
-        if (at != 32) return error.InvalidUuid;
-        return out;
-    }
-
-    pub fn jsonStringify(self: Uuid, jw: anytype) !void {
-        var buf: [36]u8 = undefined;
-        var w = std.Io.Writer.fixed(&buf);
-        try self.writeText(&w);
-        try jw.write(w.buffered());
-    }
-};
+/// It moved down a layer because two modules wanted it and only one of them
+/// is about databases: reading a `uuid` column and generating a key are the
+/// same value, and a Service declaring a second `Uuid` would have made
+/// `id.v7()` something a caller had to convert before inserting.
+///
+/// **What did not move is the opinion about the column.** `nilo_id` has
+/// never heard of Postgres, so `nilo_column = "uuid"` is not a declaration on
+/// the type; `declaredColumn` below answers for it. Imports point downward
+/// and so does knowledge — a marker on a Core-layer type is the easy way to
+/// break the second rule while keeping the first.
+pub const Uuid = id.Uuid;
 
 /// A `json` or `jsonb` column, read into a struct of the caller's own.
 ///
@@ -170,6 +138,10 @@ pub fn jsonPayload(comptime T: type) ?type {
 /// The Dialect asks; a plain Zig type answers `null` and is mapped by the
 /// Dialect's own table instead.
 pub fn declaredColumn(comptime T: type) ?[]const u8 {
+    // `Uuid` comes from `nilo_id`, which knows nothing about databases, so
+    // the answer for it is here rather than on the type (ADR 0042). Every
+    // type this module owns says so itself.
+    if (T == Uuid) return "uuid";
     return switch (@typeInfo(T)) {
         .@"struct" => if (@hasDecl(T, "nilo_column")) T.nilo_column else null,
         else => null,
@@ -227,29 +199,17 @@ test "seconds and microseconds are the same moment" {
     try testing.expectEqual(@as(i64, 1_786_951_800), t.seconds());
 }
 
-test "a Uuid writes itself hyphenated and lowercase" {
-    const u = Uuid{ .bytes = .{
-        0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4,
-        0xa7, 0x16, 0x44, 0x66, 0x55, 0x44, 0x00, 0x00,
-    } };
-    var buf: [36]u8 = undefined;
-    var w = std.Io.Writer.fixed(&buf);
-    try u.writeText(&w);
-    try testing.expectEqualStrings("550e8400-e29b-41d4-a716-446655440000", w.buffered());
+test "a uuid column and a generated key are the same type" {
+    // Not a tautology: two modules built from the same root file are two
+    // different modules to Zig, so a second `nilo_id` in the build graph
+    // would make `id.v7()` something `db.insert` refuses to bind. Nothing
+    // would fail to compile in either module on its own (ADR 0042).
+    try testing.expectEqual(id.Uuid, Uuid);
 }
 
-test "a Uuid read back from its own text is the same sixteen bytes" {
-    const text = "550e8400-e29b-41d4-a716-446655440000";
-    const u = try Uuid.parse(text);
-    var buf: [36]u8 = undefined;
-    var w = std.Io.Writer.fixed(&buf);
-    try u.writeText(&w);
-    try testing.expectEqualStrings(text, w.buffered());
-}
-
-test "text that is not a uuid is refused rather than half-read" {
-    try testing.expectError(error.InvalidUuid, Uuid.parse("550e8400"));
-    try testing.expectError(error.InvalidUuid, Uuid.parse("zzzzzzzz-e29b-41d4-a716-446655440000"));
+test "a Uuid knows which column it belongs in, and the type it comes from does not" {
+    try testing.expectEqualStrings("uuid", declaredColumn(Uuid).?);
+    try testing.expect(!@hasDecl(id.Uuid, "nilo_column"));
 }
 
 test "the types that have an opinion about their column say so" {

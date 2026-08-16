@@ -7,12 +7,16 @@ An HTTP framework for Zig that puts the comfort of writing code first, with perf
 ### Layers
 
 **Layer**:
-Where a module sits, decided by one question — does it need the event loop? Core needs none, an App owns one, a Service needs one and does not own it. A module imports downward only and never a sibling, which is what makes two modules two separate pieces of work.
+Where a module sits, decided by one question — does it need the event loop? Core needs none, an App owns one, a Service needs one and does not own it. A module imports downward only and never a sibling, which is what makes two modules two separate pieces of work. Core is the layer that holds more than one module, and the vocabulary sits under the rest of it.
 _Avoid_: tier, level, ring, package, workspace
 
 **Core**:
 The bottom module: the vocabulary every other layer agrees about, and no IO at all. A file earns its place here by being needed by two layers, not by having nowhere else to live. It names no Engine, so it runs under a plain `zig test` and links into a program with no server in it.
 _Avoid_: utils, common, shared, base, prelude
+
+**Tool module**:
+A module in the bottom layer that is not the vocabulary — one job, no event loop, and nothing above it in its imports. It may name Core, which is not a sibling because a vocabulary is not a peer of anything, and it may not name another tool module. Whether it runs under a plain `zig test` is the entry condition rather than a nicety: one that cannot is in the wrong layer.
+_Avoid_: helper, utility, library, plugin, package
 
 **Engine**:
 The bottom layer, the one that deals with the operating system: accepting connections, reading and writing bytes. Knows nothing about HTTP.
