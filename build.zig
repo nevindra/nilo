@@ -1310,7 +1310,15 @@ pub fn build(b: *std.Build) void {
     // If the loop somebody sits in gets too slow to sit in, the move is to
     // take them off `test` and leave them on `test-all` — not to stop
     // checking.
-    const refusals_step = b.step("refusals", "Check that each mistake stops in nilo's own words");
+    // Named for the framework rather than for all of them, because it only
+    // runs the framework's 56. The other three tables hang off their own
+    // module's test step (ADR 0027) and have their own `refusals-*` steps —
+    // and a name that over-promised sent one reader to run this, watch it
+    // pass, and believe a `sql/refusals/` file had been checked.
+    const refusals_step = b.step(
+        "refusals",
+        "Check the framework's 56 compile errors — see refusals-sql, -config, -pw for the rest",
+    );
     for (refusals) |refusal| {
         const module = b.createModule(.{
             .root_source_file = b.path(b.fmt("refusals/{s}.zig", .{refusal.name})),

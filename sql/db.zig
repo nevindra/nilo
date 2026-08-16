@@ -313,11 +313,30 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 .connect_on_init = self.opts.connect_on_init,
                 .timeout_ms = self.opts.timeout_ms,
             }) catch |err| {
-                std.log.err(
-                    "nilo could not open a connection pool for \"{s}\" ({s}). The URL is the " ++
-                        "one thing checked here — a database that is merely not running yet is " ++
-                        "fine, and the first request that needs it will say so.",
+                // Two failures reach here and they want different sentences.
+                // Before ADR 0062 the pool dialled itself whatever
+                // `connect_on_init` said, so *both* of them got the one
+                // about the URL — which sent people to check a URL that was
+                // correct while their database was down.
+                if (isUrlProblem(err)) std.log.err(
+                    "nilo could not read the database URL \"{s}\" ({s}). This is the URL " ++
+                        "itself rather than the database: the scheme has to be `postgres://` " ++
+                        "or `postgresql://`, and the only parameters understood are `sslmode` " ++
+                        "and `tcp_user_timeout`.",
                     .{ redacted(self.url), @errorName(err) },
+                ) else std.log.err(
+                    "nilo could not open {d} of the {d} connections to \"{s}\" ({s}). " ++
+                        "`connect_on_init` is {d}, so startup dials that many and stops when it " ++
+                        "cannot — the database may be down, the credentials wrong, or `size` " ++
+                        "past the server's `max_connections`. Set `connect_on_init = 0` to " ++
+                        "start anyway and let the first request that needs the database say so.",
+                    .{
+                        self.opts.connect_on_init,
+                        self.opts.size,
+                        redacted(self.url),
+                        @errorName(err),
+                        self.opts.connect_on_init,
+                    },
                 );
                 return err;
             };
@@ -1823,6 +1842,30 @@ fn redacted(url: []const u8) []const u8 {
     return url[0..colon];
 }
 
+/// Whether a failure to open a pool is about the URL or about the database.
+///
+/// **By name rather than by value, because the error set is the Wire's.** A
+/// `switch` here would name errors a second Wire may not have, and this file
+/// is generic over both. It costs a handful of string compares once, on a
+/// path that is about to stop the server.
+///
+/// Getting this wrong is the whole reason it exists: the message that shipped
+/// blamed the URL for every failure, so a database that was merely down sent
+/// somebody to read a URL that was correct (ADR 0062).
+fn isUrlProblem(err: anyerror) bool {
+    const name = @errorName(err);
+    for ([_][]const u8{
+        // nilo's own, from `dialOpts`.
+        "InvalidUriScheme",     "UnsupportedSSLModeValue", "UnsupportedConnectionParam",
+        // `std.Uri.parse`, and the integer parse behind `tcp_user_timeout`.
+        "UnexpectedCharacter",  "InvalidFormat",           "InvalidPort",
+        "InvalidCharacter",     "Overflow",
+    }) |known| {
+        if (std.mem.eql(u8, name, known)) return true;
+    }
+    return false;
+}
+
 // -- tests ---------------------------------------------------------------
 
 const testing = std.testing;
@@ -2898,4 +2941,22 @@ test "a named database says which one it is when a connection is left behind" {
     // the wording it would use.
     try testing.expectEqualStrings("the database", FakeDb.whoami);
     try testing.expectEqualStrings("`sql.Named(\"replica\")`", FakeReplica.whoami);
+}
+
+test "a bad URL and a database that is down get different sentences" {
+    // Which of the two a startup failure is decides what somebody does next,
+    // and the message that shipped said "the URL is the one thing checked
+    // here" for both — so a database that was merely down sent people to
+    // read a URL that was correct (ADR 0062).
+    try testing.expect(isUrlProblem(error.InvalidUriScheme));
+    try testing.expect(isUrlProblem(error.UnsupportedConnectionParam));
+    try testing.expect(isUrlProblem(error.UnsupportedSSLModeValue));
+    try testing.expect(isUrlProblem(error.InvalidPort));
+
+    // The ones that mean the database, which are the ones the old message
+    // was wrong about.
+    try testing.expect(!isUrlProblem(error.ConnectionRefused));
+    try testing.expect(!isUrlProblem(error.PG));
+    try testing.expect(!isUrlProblem(error.OutOfMemory));
+    try testing.expect(!isUrlProblem(error.Disconnected));
 }

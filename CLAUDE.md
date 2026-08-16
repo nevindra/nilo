@@ -75,7 +75,7 @@ goes in an ADR, a number goes in `docs/history.md`, a rule goes in a build step.
 
 Two of those rules are build steps rather than paragraphs, and they are the ones
 to lean on: `zig build layering` refuses an import that goes upward or sideways,
-and `zig build refusals` checks the wording of 96 error messages. Prefer making
+and the four `refusals` steps check the wording of 105 error messages. Prefer making
 a new rule enforceable that way over writing it down here — a paragraph nobody
 runs is the thing that rots.
 
@@ -95,7 +95,9 @@ zig build test-id      # only nilo_id, the same way
 zig build test-config  # only nilo_config, the same way, plus its refusals
 zig build test-pw      # only nilo_pw, the same way, plus its refusals
 zig build layering     # check that no module imports upward or sideways
-zig build refusals     # only the compile-error checks
+zig build refusals     # the framework's 56 compile-error checks — NOT the others
+zig build refusals-sql # nilo_sql's 41; also run by test-sql
+zig build refusals-config  # nilo_config's 5, and refusals-pw for nilo_pw's 3
 zig build examples     # build all seven examples
 zig build fuzz -- --iterations 1000000 --seed 0x…   # generated requests at the parser
 zig build bench-sql    # what a prepared statement is worth, against a real Postgres
@@ -213,7 +215,10 @@ session as much as to a diff, and a proposal that skips it is not finished.
 **Error messages are a feature, and a build step holds them.** Each file in
 `refusals/` is a program written wrong on purpose; it must fail to compile with
 a message nilo wrote. Adding a comptime check means adding **both** a file in
-`refusals/` and a row in the `refusals` table in `build.zig`. Leave the `nilo: `
+`refusals/` and a row in the matching table in `build.zig`. **There are four
+tables and four steps**, one per module — `refusals`, `sql_refusals`,
+`config_refusals`, `pw_refusals` — and adding a row to one while running
+another is a check that silently never ran. Leave the `nilo: `
 prefix off the `.says` text — the build step supplies it, which is what makes a
 failure inside the standard library impossible to record as passing. See
 `refusals/README.md` and ADR 0027.

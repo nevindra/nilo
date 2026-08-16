@@ -38,7 +38,8 @@ with a vibe.
 zig build test         # the loop: the suite in Debug, plus the refusals
 zig build test-all     # the above plus the same suite in ReleaseSafe. This is what CI runs
 zig build layering     # check that no module imports upward or sideways
-zig build refusals     # only the compile-error checks
+zig build refusals     # the framework's 56 compile-error checks — NOT the others
+zig build refusals-sql # nilo_sql's 41; refusals-config and refusals-pw for the rest
 zig build examples     # build all seven examples
 
 zig build test-core    # only nilo_core, both modes. No engine, no module graph
@@ -109,7 +110,10 @@ thing.
 That means a file in `refusals/` (or `sql/refusals/`, `config/refusals/`,
 `pw/refusals/`) and a row in the matching table in `build.zig`.
 [`refusals/README.md`](./refusals/README.md) shows exactly how, including the
-trick for finding out what to put in `.says`: guess, run `zig build refusals`,
+trick for finding out what to put in `.says`: guess, run the **matching** step —
+`refusals`, `refusals-sql`, `refusals-config` or `refusals-pw`, because each one
+runs only its own table and a row added to one while another is running is a
+check that silently never ran —
 and read what it prints.
 
 Leave the `nilo: ` prefix off the `.says` text. The build step adds it, which is
