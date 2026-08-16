@@ -89,7 +89,37 @@ a Row with a column called that is refused by name rather than quietly
 misread.
 
 `.in` takes a list and compiles to `= ANY($1)` — **one** parameter, so the
-statement stays a constant no matter how long the list is.
+statement stays a constant no matter how long the list is. Its negation is
+`.not_in`, which is `<> ALL($1)` and costs the same one parameter;
+`.not_like` and `.not_ilike` are the other two.
+
+### A null is written, never held
+
+`.deleted_at = null` above is `IS NULL` because the compiler can see the
+null. This is not:
+
+```zig
+const maybe: ?[]const u8 = c.query.handle;      // may or may not be there
+.where = .{ .handle = maybe }                   // ✗ compile error
+```
+
+The two readings are two different statements — `"handle" = $1` and
+`"handle" IS NULL` — and which one is right depends on a value that arrives
+after the statement is already a constant. Sending `= $1` with NULL in it is
+legal SQL and *never true*, so the query would run, match nothing and report
+nothing at all. Write the branch, because it is a branch:
+
+```zig
+const found = if (maybe) |handle|
+    try db.select(User, c, .{ .where = .{ .handle = handle } })
+else
+    try db.select(User, c, .{ .where = .{ .handle = null } });
+```
+
+Only the value you write is judged. A `?[]const u8` column compared against a
+plain `[]const u8` is an ordinary condition, and so is every `.set` and every
+`insert` — `SET handle = $1` with NULL in it means exactly one thing
+([ADR 0044](../adr/0044-a-condition-holds-a-value-not-a-maybe.md)).
 
 ## Wiring it up
 
@@ -137,6 +167,19 @@ because they read the same struct you wrote.
 It compiles its own `LIMIT 1`, so a condition on a column that is not unique
 costs one row rather than every match. Writing a `.limit` beside it is a
 compile error: the ceiling belongs to the call.
+
+A lookup by key is the same thing with the condition already filled in:
+
+```zig
+fn show(db: *sql.Db, c: *nilo.Ctx, id: i64) !?User {
+    return db.find(User, c, id);
+}
+```
+
+That is a whole endpoint. The column comes from the Row's `.key`, so it is
+not written out at every call site, and `?User` is the 404. A struct where
+the key goes is a compile error pointing at `one` — `find` takes the value
+itself.
 
 Every call takes the `Ctx`. Not to read the request: for the request arena,
 which is where the rows go. They live exactly as long as the response that
@@ -231,6 +274,28 @@ error: nilo: an update on User with no condition.
        so where somebody reading the code can see it.
 ```
 
+### Giving back the rows instead of the count
+
+A `PATCH` endpoint changes a row and answers with it. Written with `update`
+that is two round trips, and the second one may read what somebody else
+changed in between:
+
+```zig
+fn rename(db: *sql.Db, c: *nilo.Ctx, id: i64, body: Rename) !?User {
+    const changed = try db.updateReturning(User, c, .{
+        .set = .{ .name = body.name },
+        .where = .{ .id = id },
+    });
+    return if (changed.len == 0) null else changed[0];
+}
+```
+
+`deleteReturning` is the other half, for a delete that has to report or log
+what it took. Both answer with a slice, because nothing in a condition says
+how many rows it matches — the single-row shape is the length check above.
+The clause they add is the `SELECT` list this module already writes, so
+neither costs a statement the compiler did not settle.
+
 ## Transactions
 
 ```zig
@@ -320,6 +385,16 @@ Each Row is compared against the table it names, once, while the server
 starts. A column that is missing, or is `text` where the struct says `i32`,
 stops startup with a line naming it — instead of becoming a 500 at three in
 the morning on whichever request reached it first.
+
+A table that is not there at all is **one** line rather than one per column,
+because the mistake is one mistake:
+
+```
+nilo_sql: nilo: User reads table "users", and the database has no table by
+that name
+```
+
+which is usually a migration that has not run.
 
 Set `.schema_mismatch_is_fatal = false` to log and carry on.
 

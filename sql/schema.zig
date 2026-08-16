@@ -35,6 +35,9 @@ const row_mod = @import("row.zig");
 const wire_mod = @import("wire.zig");
 
 pub const Mismatch = enum {
+    /// There is no table of that name at all, so none of the columns below
+    /// can be asked about. Reported alone — see `compare`.
+    no_such_table,
     /// The Row reads a column the table does not have.
     no_such_column,
     /// The column is there and holds something else.
@@ -56,6 +59,10 @@ pub const Problem = struct {
 
     pub fn write(self: Problem, w: *std.Io.Writer) !void {
         switch (self.kind) {
+            .no_such_table => try w.print(
+                "nilo: {s} reads table \"{s}\", and the database has no table by that name",
+                .{ self.row, self.table },
+            ),
             .no_such_column => try w.print(
                 "nilo: {s}.{s} has no column in table \"{s}\"",
                 .{ self.row, self.column, self.table },
@@ -120,6 +127,14 @@ pub fn expectationsOf(comptime D: type, comptime Row: type) []const Expectation 
 /// not be null read into a `?T` — the second is harmless, so it is not
 /// reported. A check that flags things nobody needs to fix is a check people
 /// learn to skim.
+///
+/// **No columns at all is one problem, not one per column.** The
+/// introspection query answers nothing for a table that is not there, and
+/// every column then reports `no_such_column` — ten lines for one mistake,
+/// and not the mistake that was made. Forgetting to migrate is the most
+/// common way to reach this, so it gets a sentence of its own and the column
+/// walk is skipped: there is nothing to say about a column of a table that
+/// does not exist.
 pub fn compare(
     comptime D: type,
     comptime Row: type,
@@ -130,6 +145,18 @@ pub fn compare(
     const table = comptime row_mod.tableOf(Row);
     const name = comptime @typeName(Row);
     var found: usize = 0;
+
+    if (actual.len == 0) {
+        try out.append(gpa, .{
+            .row = name,
+            .table = table,
+            .column = "",
+            .kind = .no_such_table,
+            .expected = "",
+            .found = "",
+        });
+        return 1;
+    }
 
     for (comptime expectationsOf(D, Row)) |want| {
         if (problemFor(name, table, want, actual)) |problem| {
@@ -248,6 +275,23 @@ test "a column the table does not have is named, with the table" {
     var buf: [128]u8 = undefined;
     try testing.expectEqualStrings(
         "nilo: schema.User.email has no column in table \"users\"",
+        try textOf(problems.items[0], &buf),
+    );
+}
+
+test "a table that is not there is one sentence, not one per column" {
+    // The introspection query answers nothing, and every column used to
+    // report `no_such_column` off the back of it: five lines here, ten on a
+    // real Row, and none of them saying what actually happened.
+    var problems = try problemsFor(User, &.{});
+    defer problems.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), problems.items.len);
+    try testing.expectEqual(Mismatch.no_such_table, problems.items[0].kind);
+
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings(
+        "nilo: schema.User reads table \"users\", and the database has no table by that name",
         try textOf(problems.items[0], &buf),
     );
 }

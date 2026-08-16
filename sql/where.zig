@@ -33,6 +33,11 @@
 //! further out: a reader can predict what this does without opening the
 //! reference.
 //!
+//! **A null is written, never held.** `.deleted_at = null` is `IS NULL` and
+//! `.{ .ne = null }` is `IS NOT NULL`, because the compiler can see the null.
+//! An optional that *might* be null is a Refusal — see `assertNotOptional`,
+//! which is ADR 0039's rule at its sharpest.
+//!
 //! **The SQL and the values are generated from one walk, not two.** `plan`
 //! produces the fragment and the list of paths to the values together, and
 //! `each` reads the values back along those same paths. Two walks that had to
@@ -300,6 +305,7 @@ fn condition(
         // `= NULL` is never true in SQL, so reading it the other way would
         // produce a condition that silently matches nothing.
         if (@typeInfo(T) == .null) return quoted ++ " IS NULL";
+        assertNotOptional(column, null, T);
 
         if (operatorsOf(T)) |ops| {
             var out: []const u8 = "";
@@ -331,7 +337,7 @@ fn operatorsOf(comptime T: type) ?[]const Operator {
         };
         if (info.is_tuple or info.fields.len == 0) return null;
         for (info.fields) |f| {
-            if (spelling(f.name) == null and !std.mem.eql(u8, f.name, "in")) return null;
+            if (spelling(f.name) == null and listSpelling(f.name) == null) return null;
         }
         var out: [info.fields.len]Operator = undefined;
         for (info.fields, 0..) |f, i| out[i] = .{ .name = f.name, .T = f.type };
@@ -342,14 +348,31 @@ fn operatorsOf(comptime T: type) ?[]const Operator {
 
 fn spelling(comptime name: []const u8) ?[]const u8 {
     const table = .{
-        .{ "eq", "=" },      .{ "ne", "<>" },     .{ "gt", ">" },
-        .{ "gte", ">=" },    .{ "lt", "<" },      .{ "lte", "<=" },
-        .{ "like", "LIKE" }, .{ "ilike", "ILIKE" },
+        .{ "eq", "=" },              .{ "ne", "<>" },
+        .{ "gt", ">" },              .{ "gte", ">=" },
+        .{ "lt", "<" },              .{ "lte", "<=" },
+        .{ "like", "LIKE" },         .{ "ilike", "ILIKE" },
+        .{ "not_like", "NOT LIKE" }, .{ "not_ilike", "NOT ILIKE" },
     };
     inline for (table) |pair| {
         if (std.mem.eql(u8, name, pair[0])) return pair[1];
     }
     return null;
+}
+
+/// The operators that take a list rather than a value, and what each becomes
+/// in front of the one placeholder holding it.
+///
+/// `not_in` is `<> ALL` rather than `NOT (… = ANY(…))`, which is the same
+/// question asked of every element instead of the negation of a whole
+/// comparison — and it keeps the shape of the fragment identical to `in`'s,
+/// so one placeholder still holds the whole list however long it is.
+fn listSpelling(comptime name: []const u8) ?[]const u8 {
+    comptime {
+        if (std.mem.eql(u8, name, "in")) return "= ANY";
+        if (std.mem.eql(u8, name, "not_in")) return "<> ALL";
+        return null;
+    }
 }
 
 fn operator(
@@ -364,10 +387,11 @@ fn operator(
     comptime {
         _ = Row;
         const path = prefix ++ &[_][]const u8{op.name};
+        assertNotOptional(column, op.name, op.T);
 
-        if (std.mem.eql(u8, op.name, "in")) {
+        if (listSpelling(op.name)) |form| {
             return switch (D.list_form) {
-                .any_array => quoted ++ " = ANY(" ++
+                .any_array => quoted ++ " " ++ form ++ "(" ++
                     D.placeholder(state.take(path, .{ .column = column, .list = true })) ++ ")",
                 // Expanding the list into one placeholder each would make the
                 // statement depend on a length only known at runtime, which is
@@ -391,6 +415,42 @@ fn operator(
         }
 
         return quoted ++ " " ++ spelled ++ " " ++ D.placeholder(state.take(path, .{ .column = column }));
+    }
+}
+
+/// An optional in a condition is a Refusal, and it is ADR 0039's own rule
+/// rather than a taste: **the shape of a query is settled while compiling.**
+///
+/// `.handle = null` written as a literal is `IS NULL`, because the compiler
+/// can see the null. `.handle = maybe`, with `maybe` a `?[]const u8`, cannot
+/// be read the same way — whether the statement should say `= $1` or
+/// `IS NULL` would depend on a value that arrives at run time, and the
+/// statement is a constant by then. Sending `= $1` with NULL in it is legal
+/// SQL and never true, so the query runs, answers nothing, and reports no
+/// error at all. That is the same failure `compared_with_null` already
+/// refuses for `.{ .gt = null }`, reached by the other road.
+///
+/// The two ways out were: refuse, or read an optional as `IS NULL` when it
+/// happens to be null. The second is one statement whose meaning changes with
+/// its parameter, which is the property this whole module exists not to have.
+fn assertNotOptional(
+    comptime column: []const u8,
+    comptime op: ?[]const u8,
+    comptime T: type,
+) void {
+    comptime {
+        if (@typeInfo(T) != .optional) return;
+        const named = if (op) |name| " (as `" ++ name ++ "`)" else "";
+        @compileError(
+            "nilo: the condition on `" ++ column ++ "`" ++ named ++ " was given a " ++
+                @typeName(T) ++ ".\n" ++
+                "  Which SQL that is — `= $1` or `IS NULL` — is shape, and shape is " ++
+                "settled while compiling. An optional only answers at run time, and a " ++
+                "null one sends `= NULL`, which is never true in SQL: the query runs, " ++
+                "matches nothing, and says nothing.\n" ++
+                "  Branch where the two statements differ: `if (maybe) |value| … else …`, " ++
+                "with `." ++ column ++ " = null` on the null side.",
+        );
     }
 }
 
@@ -455,6 +515,14 @@ test "the other side of that is IS NOT NULL" {
     );
 }
 
+test "a column that may be null still takes a value that is not" {
+    // The Refusal `assertNotOptional` carries is about the type of the value
+    // *written*, never the column's: `deleted_at` is a `?i64` in the Row, and
+    // comparing it against a plain `i64` is an ordinary condition. This is
+    // also what each side of the branch it asks for produces.
+    try testing.expectEqualStrings("\"deleted_at\" = $1", sqlOf(.{ .deleted_at = @as(i64, 5) }));
+}
+
 test "in becomes = ANY on postgres, so the statement stays one constant" {
     const ids = [_]i64{ 1, 2, 3 };
     try testing.expectEqualStrings("\"id\" = ANY($1)", sqlOf(.{ .id = .{ .in = &ids } }));
@@ -472,6 +540,41 @@ test "every comparison has a spelling" {
     try testing.expectEqualStrings("\"age\" <= $1", sqlOf(.{ .age = .{ .lte = 1 } }));
     try testing.expectEqualStrings("\"email\" LIKE $1", sqlOf(.{ .email = .{ .like = "%@b.com" } }));
     try testing.expectEqualStrings("\"email\" ILIKE $1", sqlOf(.{ .email = .{ .ilike = "%@B.com" } }));
+}
+
+test "every comparison that has a spelling has the negation of it too" {
+    // `ne` was the only negation there was, so `not in` — which is as common
+    // as `in` — meant either a second query or `db.raw`.
+    try testing.expectEqualStrings(
+        "\"email\" NOT LIKE $1",
+        sqlOf(.{ .email = .{ .not_like = "%@spam.example" } }),
+    );
+    try testing.expectEqualStrings(
+        "\"email\" NOT ILIKE $1",
+        sqlOf(.{ .email = .{ .not_ilike = "%@SPAM.example" } }),
+    );
+}
+
+test "not in is one placeholder too, so a longer list is the same statement" {
+    const ids = [_]i64{ 1, 2, 3 };
+    try testing.expectEqualStrings("\"id\" <> ALL($1)", sqlOf(.{ .id = .{ .not_in = &ids } }));
+
+    // `<> ALL` rather than `NOT (… = ANY(…))`: the same question asked of
+    // every element, and the same shape as `in`, so the property that makes
+    // `in` a constant survives the negation.
+    const longer = [_]i64{ 1, 2, 3, 4, 5, 6, 7 };
+    try testing.expectEqualStrings("\"id\" <> ALL($1)", sqlOf(.{ .id = .{ .not_in = &longer } }));
+    try testing.expectEqual(
+        @as(usize, 1),
+        paramCount(Pg, User, @TypeOf(.{ .id = .{ .not_in = &longer } })),
+    );
+}
+
+test "a negation ANDs beside its positive, because it is an operator like any other" {
+    try testing.expectEqualStrings(
+        "\"email\" LIKE $1 AND \"email\" NOT LIKE $2",
+        sqlOf(.{ .email = .{ .like = "%@example.dev", .not_like = "%+test@%" } }),
+    );
 }
 
 test "any is OR, in brackets, and ANDs with what sits beside it" {

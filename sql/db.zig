@@ -45,11 +45,17 @@
 //!
 //! ## Reads and writes are the same shape
 //!
-//! `select`, `one`, `insert`, `update` and `delete` all take a Row, a Ctx
-//! and a struct written where it is used, and all of them settle their
-//! statement while compiling. `raw` is the way past that, for the joins and
+//! `select`, `one`, `count`, `exists`, `insert`, `update` and `delete` all
+//! take a Row, a Ctx and a struct written where it is used, and all of them
+//! settle their statement while compiling. `find` is the one exception and
+//! takes a key rather than a struct, because a Row's `.key` already says
+//! which column that is. `raw` is the way past all of it, for the joins and
 //! aggregates this module refuses; it fills a Row the same way and gives up
 //! the column check and nothing else.
+//!
+//! `update` and `delete` answer with a count; `updateReturning` and
+//! `deleteReturning` answer with the rows themselves, which is one statement
+//! where reading them separately is two and a race.
 
 const std = @import("std");
 const core = @import("nilo_core");
@@ -270,6 +276,27 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             return if (found.len == 0) null else found[0];
         }
 
+        /// The row a key identifies, or null.
+        ///
+        /// ```zig
+        /// fn show(db: *sql.Db, c: *nilo.Ctx, id: i64) !?User {
+        ///     return db.find(User, c, id);
+        /// }
+        /// ```
+        ///
+        /// The column comes from the Row's `.key`, so the same lookup is not
+        /// written out at every call site — and `?Row` is already a 404 in
+        /// the typed layer (ADR 0024), which makes the two lines above a
+        /// whole endpoint. It is `one` with the condition filled in, `LIMIT
+        /// 1` included; a struct where the key goes is a Refusal pointing at
+        /// `one`.
+        pub fn find(self: *Self, comptime Row: type, c: anytype, key: anytype) !?Row {
+            comptime core.checkScope(@TypeOf(c), "db.find");
+            const stmt = comptime statement.find(D, Row, @TypeOf(key));
+            const found = try fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, key));
+            return if (found.len == 0) null else found[0];
+        }
+
         /// How many rows match `options`.
         ///
         /// Pagination needs a total, and the way to get one before this was
@@ -380,12 +407,42 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             return w.exec(c.arena(), stmt.sql, valuesOf(stmt, Row, options));
         }
 
+        /// Change every row matching `.where` and give back what the database
+        /// now holds, rather than how many rows that was.
+        ///
+        /// The shape a `PATCH` endpoint is. Written with `update` it costs a
+        /// second `SELECT` — a round trip, and a read that may find what
+        /// somebody else changed in between. `RETURNING` is one statement,
+        /// and the column list is the one `select` already writes.
+        ///
+        /// A condition matching one row is the ordinary case and the answer
+        /// is still a slice, because nothing in the statement says how many
+        /// rows a condition matches. `changed[0]` after a length check is the
+        /// single-row shape.
+        pub fn updateReturning(self: *Self, comptime Row: type, c: anytype, options: anytype) ![]Row {
+            comptime core.checkScope(@TypeOf(c), "db.updateReturning");
+            const stmt = comptime statement.updateReturning(D, Row, @TypeOf(options));
+            return fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, options));
+        }
+
         /// Delete every row matching `options`, and say how many there were.
         pub fn delete(self: *Self, comptime Row: type, c: anytype, options: anytype) !usize {
             comptime core.checkScope(@TypeOf(c), "db.delete");
             const stmt = comptime statement.delete(D, Row, @TypeOf(options));
             const w = try self.wireOf();
             return w.exec(c.arena(), stmt.sql, valuesOf(stmt, Row, options));
+        }
+
+        /// The same, answering with the rows that were removed.
+        ///
+        /// What a delete that has to report, log or undo what it took needs.
+        /// Reading them first is two statements and a race: another writer can
+        /// change a row between the `SELECT` and the `DELETE`, and what comes
+        /// back then never existed.
+        pub fn deleteReturning(self: *Self, comptime Row: type, c: anytype, options: anytype) ![]Row {
+            comptime core.checkScope(@TypeOf(c), "db.deleteReturning");
+            const stmt = comptime statement.deleteReturning(D, Row, @TypeOf(options));
+            return fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, options));
         }
 
         // -- transactions ----------------------------------------------------
@@ -461,6 +518,13 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
                 return if (found.len == 0) null else found[0];
             }
 
+            pub fn find(self: *Tx, comptime Row: type, c: anytype, key: anytype) !?Row {
+                comptime core.checkScope(@TypeOf(c), "tx.find");
+                const stmt = comptime statement.find(D, Row, @TypeOf(key));
+                const found = try fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, key));
+                return if (found.len == 0) null else found[0];
+            }
+
             pub fn count(self: *Tx, comptime Row: type, c: anytype, options: anytype) !usize {
                 comptime core.checkScope(@TypeOf(c), "tx.count");
                 const stmt = comptime statement.count(D, Row, @TypeOf(options));
@@ -491,10 +555,22 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
                 return self.inner.exec(c.arena(), stmt.sql, valuesOf(stmt, Row, options));
             }
 
+            pub fn updateReturning(self: *Tx, comptime Row: type, c: anytype, options: anytype) ![]Row {
+                comptime core.checkScope(@TypeOf(c), "tx.updateReturning");
+                const stmt = comptime statement.updateReturning(D, Row, @TypeOf(options));
+                return fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, options));
+            }
+
             pub fn delete(self: *Tx, comptime Row: type, c: anytype, options: anytype) !usize {
                 comptime core.checkScope(@TypeOf(c), "tx.delete");
                 const stmt = comptime statement.delete(D, Row, @TypeOf(options));
                 return self.inner.exec(c.arena(), stmt.sql, valuesOf(stmt, Row, options));
+            }
+
+            pub fn deleteReturning(self: *Tx, comptime Row: type, c: anytype, options: anytype) ![]Row {
+                comptime core.checkScope(@TypeOf(c), "tx.deleteReturning");
+                const stmt = comptime statement.deleteReturning(D, Row, @TypeOf(options));
+                return fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, options));
             }
 
             pub fn raw(
@@ -1147,17 +1223,24 @@ fn commitTransaction(db: *FakeDb, c: *nilo.Ctx) !void {
 fn touchEverything(db: *FakeDb, c: *nilo.Ctx) !void {
     _ = try db.select(Person, c, .{ .where = .{ .age = .{ .gte = 18 } } });
     _ = try db.one(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
+    _ = try db.find(Person, c, @as(i64, 1));
     _ = try db.insert(Person, c, .{ .email = "a@b.c", .age = @as(i32, 1) });
     _ = try db.update(Person, c, .{ .set = .{ .age = @as(i32, 2) }, .where = .{ .id = @as(i64, 1) } });
+    _ = try db.updateReturning(Person, c, .{ .set = .{ .age = @as(i32, 2) }, .where = .{ .id = @as(i64, 1) } });
     _ = try db.delete(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
+    _ = try db.deleteReturning(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
     _ = try db.raw(Person, c, "SELECT 1", .{});
 
     // The condition shapes the guide shows and nothing else compiles.
+    // `.nickname = null` is the literal, which is `IS NULL`; a `?[]const u8`
+    // here is a Refusal, because whether that means `= $1` or `IS NULL`
+    // would depend on a value that arrives after the statement is a constant
+    // (`where.zig`, `assertNotOptional`).
     _ = try db.select(Person, c, .{ .where = .{
-        .nickname = @as(?[]const u8, null),
+        .nickname = null,
         .id = .{ .ne = null },
-        .email = .{ .like = "%@b.c" },
-        .age = .{ .in = &[_]i32{ 1, 2, 3 } },
+        .email = .{ .like = "%@b.c", .not_like = "%+test@%" },
+        .age = .{ .in = &[_]i32{ 1, 2, 3 }, .not_in = &[_]i32{ 9, 10 } },
         .any = .{ .{ .age = @as(i32, 1) }, .{ .age = @as(i32, 2) } },
     } });
 
@@ -1173,9 +1256,14 @@ fn touchEverything(db: *FakeDb, c: *nilo.Ctx) !void {
     defer tx.deinit();
     _ = try tx.select(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
     _ = try tx.one(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
+    _ = try tx.find(Person, c, @as(i64, 1));
+    _ = try tx.count(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
+    _ = try tx.exists(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
     _ = try tx.insert(Person, c, .{ .email = "a@b.c", .age = @as(i32, 1) });
     _ = try tx.update(Person, c, .{ .set = .{ .age = @as(i32, 3) }, .where = .{ .id = @as(i64, 1) } });
+    _ = try tx.updateReturning(Person, c, .{ .set = .{ .age = @as(i32, 3) }, .where = .{ .id = @as(i64, 1) } });
     _ = try tx.delete(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
+    _ = try tx.deleteReturning(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
     _ = try tx.raw(Person, c, "SELECT 1", .{});
     tx.rollback();
 }
@@ -1369,6 +1457,30 @@ test "db.one asks the database for one row, not for every match" {
     try testing.expectEqual(@as(usize, 1), try allocationsOf(Person, 1, .{ .limit = 1 }));
 }
 
+test "find compiles the condition the Row's key already described" {
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = 1 };
+
+    var counting = std.testing.FailingAllocator.init(testing.allocator, .{});
+    var run = nilo.Run.init(counting.allocator());
+    defer run.deinit();
+
+    const found = try db.find(Person, &run, @as(i64, 7));
+    try testing.expect(found != null);
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"email\", \"nickname\", \"age\" FROM \"people\"" ++
+            " WHERE \"id\" = $1 LIMIT 1",
+        db.wire.?.last_sql,
+    );
+
+    // One row is a ceiling the statement states, so the list is built to it
+    // rather than grown into it — one reach past the arena for the whole
+    // call, `Person`'s two text columns copied out of the read buffer
+    // included. The same number `db.one` holds, and for the same reason.
+    try testing.expectEqual(@as(usize, 1), counting.allocations);
+}
+
 test "an order survives the ceiling one puts on the end" {
     // `ORDER BY … LIMIT 1` is the newest row; `LIMIT 1` alone is whichever
     // row Postgres reached first. The clauses have to come out in that order
@@ -1411,6 +1523,34 @@ test "count and exists are one statement each, and neither invents a Row" {
     try testing.expectEqual(false, try db.exists(Person, &run, .{ .where = .{ .id = 7 } }));
     try testing.expectEqualStrings(
         "SELECT EXISTS(SELECT 1 FROM \"people\" WHERE \"id\" = $1)",
+        db.wire.?.last_sql,
+    );
+}
+
+test "a write that returns its rows sends one statement, not a write and a read" {
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = 1 };
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    const changed = try db.updateReturning(Person, &run, .{
+        .set = .{ .age = @as(i32, 31) },
+        .where = .{ .id = @as(i64, 7) },
+    });
+    try testing.expectEqual(@as(usize, 1), changed.len);
+    try testing.expectEqualStrings(
+        "UPDATE \"people\" SET \"age\" = $1 WHERE \"id\" = $2" ++
+            " RETURNING \"id\", \"email\", \"nickname\", \"age\"",
+        db.wire.?.last_sql,
+    );
+
+    const gone = try db.deleteReturning(Person, &run, .{ .where = .{ .id = @as(i64, 7) } });
+    try testing.expectEqual(@as(usize, 1), gone.len);
+    try testing.expectEqualStrings(
+        "DELETE FROM \"people\" WHERE \"id\" = $1" ++
+            " RETURNING \"id\", \"email\", \"nickname\", \"age\"",
         db.wire.?.last_sql,
     );
 }

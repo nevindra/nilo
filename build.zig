@@ -95,6 +95,14 @@ const sql_refusals = [_]Refusal{
         .says = "`db.one` on one_with_limit.User was given a `.limit`.",
     },
     .{
+        .name = "find_with_a_condition",
+        .says = "`db.find` on find_with_a_condition.User was given a struct where its key goes.",
+    },
+    .{
+        .name = "optional_in_a_condition",
+        .says = "the condition on `handle` was given a ?[]const u8.",
+    },
+    .{
         .name = "insert_unknown_column",
         .says = "insert_unknown_column.User has no column `emial`, asked for in an insert.",
     },

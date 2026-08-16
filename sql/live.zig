@@ -221,6 +221,34 @@ test "the schema comparison agrees with the table it was written against" {
     try testing.expectEqual(@as(usize, 0), found);
 }
 
+test "a table that is not there is one sentence rather than one per column" {
+    const gpa = testing.allocator;
+    var live = (try Live.open(gpa)) orelse return error.SkipZigTest;
+    defer live.close(gpa);
+
+    // The premise, checked against a real Postgres rather than assumed: the
+    // introspection query answers *nothing* for a table that is not there.
+    // Every column then reported `no_such_column` off the back of it, so
+    // forgetting to migrate — the most common way to arrive here — read as a
+    // Row that had been written wrong ten different ways.
+    const Missing = struct {
+        pub const nilo_table = .{ .name = "nilo_no_such_table", .key = .id };
+
+        id: i64,
+        email: []const u8,
+        age: i32,
+    };
+
+    const arena = live.arena.allocator();
+    const actual = try live.wire.columnsOf(arena, dialect.Postgres.introspect, "nilo_no_such_table");
+    try testing.expectEqual(@as(usize, 0), actual.len);
+
+    var problems: std.ArrayList(schema.Problem) = .empty;
+    const found = try schema.compare(dialect.Postgres, Missing, actual, &problems, arena);
+    try testing.expectEqual(@as(usize, 1), found);
+    try testing.expectEqual(schema.Mismatch.no_such_table, problems.items[0].kind);
+}
+
 test "a Row that disagrees with the table is caught, which is the point of the check" {
     const gpa = testing.allocator;
     var live = (try Live.open(gpa)) orelse return error.SkipZigTest;
@@ -658,6 +686,114 @@ test "a count and a page come from one condition written once" {
     try testing.expectEqual(@as(usize, 2), page.len);
     try testing.expectEqual(@as(i64, 1), page[0].id);
     try testing.expectEqual(@as(i64, 2), page[1].id);
+}
+
+test "find takes a key, and the column it compares comes from the Row" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const ada = try stack.db.find(Person, &run, @as(i64, 1));
+    try testing.expectEqualStrings("ada@example.dev", ada.?.email);
+
+    // Nothing there is null rather than an error, which is what makes
+    // `!?Person` a whole endpoint (ADR 0024).
+    try testing.expectEqual(
+        @as(?Person, null),
+        try stack.db.find(Person, &run, @as(i64, 99)),
+    );
+}
+
+test "a negation asks Postgres the opposite question, not a different one" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    // `<> ALL($1)` is one placeholder holding the whole list, exactly as
+    // `= ANY($1)` is — which is the property that keeps the statement a
+    // constant, and the reason `not_in` is spelled this way rather than as
+    // `NOT (… = ANY(…))`.
+    const rest = try stack.db.select(Person, &run, .{
+        .where = .{ .id = .{ .not_in = &[_]i64{ 1, 3 } } },
+        .order = .{ .id = .asc },
+    });
+    try testing.expectEqual(@as(usize, 1), rest.len);
+    try testing.expectEqual(@as(i64, 2), rest[0].id);
+
+    const grown = try stack.db.select(Person, &run, .{
+        .where = .{ .email = .{ .not_like = "kid%" } },
+        .order = .{ .id = .asc },
+    });
+    try testing.expectEqual(@as(usize, 2), grown.len);
+
+    // `NOT ILIKE` folds case and `NOT LIKE` does not, which is the whole of
+    // the difference and the reason both exist.
+    try testing.expectEqual(
+        @as(usize, 0),
+        (try stack.db.select(Person, &run, .{
+            .where = .{ .email = .{ .not_ilike = "%@EXAMPLE.DEV" } },
+        })).len,
+    );
+    try testing.expectEqual(
+        @as(usize, 3),
+        (try stack.db.select(Person, &run, .{
+            .where = .{ .email = .{ .not_like = "%@EXAMPLE.DEV" } },
+        })).len,
+    );
+}
+
+fn renameAda(db: *db_mod.Db, c: *nilo.Ctx) ![]Person {
+    return db.updateReturning(Person, c, .{
+        .set = .{ .handle = @as(?[]const u8, "ada.l") },
+        .where = .{ .id = @as(i64, 1) },
+    });
+}
+
+test "an update that returns its rows is a whole PATCH in one statement" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    // The body is the row *after* the write, straight out of the statement
+    // that made it. Written with `update` this needed a `SELECT` behind it,
+    // which is a second round trip and a second chance for somebody else's
+    // write to land in between.
+    try stack.app.get("/rename", renameAda);
+    const answer = try stack.client.get(&stack.app, "/rename");
+
+    try testing.expectEqual(@as(u16, 200), answer.status);
+    try testing.expectEqualStrings(
+        "[{\"id\":1,\"email\":\"ada@example.dev\",\"handle\":\"ada.l\",\"age\":36}]",
+        answer.body,
+    );
+}
+
+fn removeKids(db: *db_mod.Db, c: *nilo.Ctx) ![]Person {
+    return db.deleteReturning(Person, c, .{ .where = .{ .age = .{ .lt = @as(i32, 18) } } });
+}
+
+test "a delete that returns its rows says what it took" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    // Reading them first would be two statements and a race: a row can change
+    // between the `SELECT` and the `DELETE`, and what came back then never
+    // existed in that shape.
+    try stack.app.get("/remove-kids", removeKids);
+    const answer = try stack.client.get(&stack.app, "/remove-kids");
+
+    try testing.expectEqual(@as(u16, 200), answer.status);
+    try testing.expectEqualStrings(
+        "[{\"id\":3,\"email\":\"kid@example.dev\",\"handle\":\"kid\",\"age\":11}]",
+        answer.body,
+    );
 }
 
 fn byIds(db: *db_mod.Db, c: *nilo.Ctx) ![]Person {

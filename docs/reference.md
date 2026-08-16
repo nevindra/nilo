@@ -736,11 +736,14 @@ request ([ADR 0041](./adr/0041-a-module-sits-where-the-loop-puts-it.md)).
 |---|---|
 | `db.select(User, c, .{ … })` | `![]User` |
 | `db.one(User, c, .{ … })` | `!?User` — a handler returning this answers 404, and the document says so. Carries its own `LIMIT 1`, so a `.limit` beside it is refused |
+| `db.find(User, c, id)` | `!?User` — the same, on the column the Row's `.key` names. Takes the key itself, not a condition |
 | `db.count(User, c, .{ .where = … })` | `!usize`. `.where` only, and optional — no condition counts the table |
 | `db.exists(User, c, .{ .where = … })` | `!bool` — `SELECT EXISTS(…)`, so it stops at the first match |
 | `db.insert(User, c, .{ .email = … })` | `!User` — the stored row, generated key included. A subset of the columns |
 | `db.update(User, c, .{ .set = …, .where = … })` | `!usize` — rows changed. Both halves required |
+| `db.updateReturning(User, c, .{ .set = …, .where = … })` | `![]User` — the rows as they now are. One statement where an update and a select are two and a race |
 | `db.delete(User, c, .{ .where = … })` | `!usize` — rows deleted. `.where` required |
+| `db.deleteReturning(User, c, .{ .where = … })` | `![]User` — the rows that were removed |
 | `db.stream(User, c, .{ … })` | rows one at a time; see below |
 | `db.raw(User, c, sql, .{ … })` | `![]User` — a statement this module will not write |
 | `db.begin(c)` | `!Tx` |
@@ -763,13 +766,22 @@ Different fields are ANDed. Several operators on one field are ANDed too.
 | `.id = 7` | `"id" = $1` |
 | `.age = .{ .gt = 18, .lt = 65 }` | `"age" > $1 AND "age" < $2` |
 | `.eq` `.ne` `.gt` `.gte` `.lt` `.lte` | |
-| `.like` / `.ilike` | |
+| `.like` / `.ilike` | and `.not_like` / `.not_ilike` |
 | `.in = &.{ 1, 2, 3 }` | `= ANY($1)` — one parameter, so the statement stays a constant |
+| `.not_in = &.{ 1, 2, 3 }` | `<> ALL($1)` — one parameter likewise |
 | `.deleted_at = null` | `IS NULL` |
 | `.deleted_at = .{ .ne = null }` | `IS NOT NULL` |
 | `.any = .{ .{ … }, .{ … } }` | OR, bracketed. Not `.or`, which is a keyword — so `any` is a reserved column name |
 
 A column that does not exist is a compile error naming the near miss.
+
+**A null is written, never held.** The two lines above are `IS NULL` because
+the compiler can see the null. An optional that *might* be null is a compile
+error, because whether the statement says `= $1` or `IS NULL` would then
+depend on a value that arrives after the statement is a constant — and
+`= NULL` is never true in SQL, so the query would run and answer nothing.
+Branch on it instead
+([ADR 0044](./adr/0044-a-condition-holds-a-value-not-a-maybe.md)).
 
 ### Streaming
 
@@ -792,9 +804,11 @@ _ = try tx.insert(Order, c, .{ … });
 try tx.commit();
 ```
 
-`tx` carries `select`, `one`, `insert`, `update`, `delete` and `raw`, all
-down the one connection it holds. Forgetting the `defer` is caught in Debug
-by a counter asserted at `db.deinit()`.
+`tx` carries every read and write call above — `select`, `one`, `find`,
+`count`, `exists`, `insert`, `update`, `updateReturning`, `delete`,
+`deleteReturning` and `raw` — all down the one connection it holds.
+Forgetting the `defer` is caught in Debug by a counter asserted at
+`db.deinit()`.
 
 ### Types
 

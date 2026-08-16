@@ -61,7 +61,7 @@
 //! | **Row** | `row.zig` | the marker, the borrow chain, the column list |
 //! | **Dialect** | `dialect.zig` | comptime, writes the SQL, may refuse |
 //! | **where** | `where.zig` | a condition into a fragment and a value list |
-//! | **statements** | `statement.zig` | all four, each as a constant |
+//! | **statements** | `statement.zig` | every one of them, each as a constant |
 //! | **types** | `types.zig` | Timestamp and Json — value, not arithmetic. `Uuid` is `nilo_id`'s |
 //! | **schema** | `schema.zig` | Row against table, while the server starts |
 //! | **Wire** | `wire.zig` | the contract a driver meets |

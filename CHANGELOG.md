@@ -49,6 +49,9 @@ real Postgres on every push.
   404 and the OpenAPI document says so, and it compiles its own `LIMIT 1` —
   a lookup on a column that is not unique costs one row rather than every
   match.
+- **`db.find(User, c, id)`** — `one` with the condition already filled in,
+  on the column the Row's `.key` names. `fn show(db, c, id: i64) !?User` is
+  then a whole endpoint, 404 included.
 - **`db.count` and `db.exists`** — the total a page needs, and whether
   anything matches at all. Both take a condition and nothing else, both go
   through the same walker `select` uses, so a page and its total are one
@@ -64,12 +67,32 @@ real Postgres on every push.
 - **Writing** — `db.insert` (with `RETURNING`, so the generated key comes
   back), `db.update` and `db.delete`, both answering with the number of rows
   they touched and both refusing to compile without a condition.
+- **`db.updateReturning` and `db.deleteReturning`** — the rows themselves
+  rather than a count. A `PATCH` that changes a row and answers with it was
+  an update and then a select: two round trips, and a read that could find
+  what somebody else changed in between. The clause they add is the `SELECT`
+  list this module already writes.
+- **`.not_in`, `.not_like` and `.not_ilike`.** `.ne` was the only negation
+  there was, so `not in` — as common as `in` — meant a second query or
+  `db.raw`. `.not_in` is `<> ALL($1)`: one parameter however long the list
+  is, exactly as `.in` is.
+- **An optional in a condition no longer compiles.** `.handle = null` written
+  out is `IS NULL`; `.handle = maybe` with `maybe` a `?[]const u8` used to
+  take the parameter path and send `"handle" = $1` with NULL in it, which is
+  never true in SQL — the query ran, matched nothing and said nothing. Which
+  of the two statements is right depends on a value that arrives after the
+  statement is a constant, so it is a Refusal asking for the branch
+  ([ADR 0044](./docs/adr/0044-a-condition-holds-a-value-not-a-maybe.md)).
+  Writes are untouched: `.set = .{ .handle = maybe }` is how a column is set
+  to NULL and means one thing.
 - **Transactions** — `db.begin(c)`, held and released the way every other
   resource in nilo is: `defer tx.deinit()` rolls back unless committed.
 - **`db.raw`** — the way past *one table, conditions that filter rows*. Still
   fills your struct, still uses the arena; gives up the column check only.
 - **`db.checking(&.{ User, Order })`** — each Row compared against its table
-  while the server starts, instead of on whichever request got there first.
+  while the server starts, instead of on whichever request got there first. A
+  table that is not there at all is one line saying so, rather than one
+  `no_such_column` per column of a table nobody created.
 - **`sql.Timestamp`, `sql.Uuid` and `sql.Json(T)`** — the three columns Zig
   has no word for, read and written as themselves. A `timestamptz` arrives as
   microseconds since the epoch, a `uuid` as its sixteen bytes and a `jsonb`
@@ -89,7 +112,11 @@ real Postgres on every push.
   `AlreadyExists`, the previous statement's answer. Narrow, and wrong when it
   happened.
 
-Nine more Refusals, for an insert, an update or a condition written wrong.
+**28 Refusals** hold the module's own error messages — a Row written wrong, a
+column misspelled, an update with no condition, a key where a condition
+belongs. Each is a program in `sql/refusals/` that must fail to compile with
+the sentence nilo wrote
+([ADR 0027](./docs/adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)).
 The module is still not an ORM and still refuses joins, aggregates and
 migrations
 ([ADR 0039](./docs/adr/0039-the-shape-of-a-query-is-settled-while-compiling.md)).

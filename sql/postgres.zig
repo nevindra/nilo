@@ -82,6 +82,26 @@ pub const Wire = struct {
         /// second one does nothing and the connection is released once.
         done: bool = false,
 
+        /// Forget the last statement's server error before running the next.
+        ///
+        /// `translate` reads the code off the connection, because that is
+        /// where pg.zig leaves it — and pg.zig clears it in `release`, which
+        /// happens after every statement that came out of the pool. A
+        /// transaction is the one place that does not hold: it keeps its
+        /// connection from `BEGIN` to `COMMIT`, so the field outlives the
+        /// statement that set it. A unique violation followed by a broken
+        /// pipe was then reported as `AlreadyExists` — the older statement's
+        /// answer to a question nobody asked twice.
+        ///
+        /// Cleared here rather than reordered inside `translate`, because
+        /// ordering only fixes the failures that have a spelling of their own
+        /// (`BrokenPipe`, `ConnectionResetByPeer`); anything else would still
+        /// read the stale code. This is the whole of what is wrong: the field
+        /// is about a statement, so it is emptied when a statement starts.
+        fn fresh(self: *Tx) void {
+            self.conn.err = null;
+        }
+
         pub fn run(
             self: *Tx,
             arena: std.mem.Allocator,
@@ -89,6 +109,7 @@ pub const Wire = struct {
             values: anytype,
         ) wire.Error!Rows {
             if (self.done) return error.QueryFailed;
+            self.fresh();
             const result = self.conn.queryOpts(sql, values, .{ .allocator = arena }) catch |err| {
                 return translate(self.conn, err);
             };
@@ -102,6 +123,7 @@ pub const Wire = struct {
             values: anytype,
         ) wire.Error!usize {
             if (self.done) return error.QueryFailed;
+            self.fresh();
             const count = self.conn.execOpts(sql, values, .{ .allocator = arena }) catch |err| {
                 return translate(self.conn, err);
             };
@@ -111,6 +133,7 @@ pub const Wire = struct {
         pub fn commit(self: *Tx) wire.Error!void {
             if (self.done) return;
             self.done = true;
+            self.fresh();
             defer self.conn.release();
             _ = self.conn.exec("COMMIT", .{}) catch |err| return translate(self.conn, err);
         }
@@ -284,6 +307,11 @@ pub const Wire = struct {
 /// is the client having asked for something that is already there, which is
 /// a 409 and not a bug. The rest of class 23 usually means the code is
 /// wrong, so it stays undifferentiated on purpose.
+/// The connection's error field is read first, because pg.zig puts the
+/// server's answer there and hands back a generic error. That is only sound
+/// while the field is about the statement that just ran: the pool clears it
+/// on `release`, and a transaction clears it itself in `Tx.fresh`, which is
+/// where the reasoning is written down.
 fn translate(conn: *pg.Conn, err: anyerror) wire.Error {
     if (conn.err) |server| {
         if (std.mem.eql(u8, server.code, "23505")) return error.AlreadyExists;

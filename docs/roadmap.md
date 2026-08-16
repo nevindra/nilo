@@ -326,15 +326,12 @@ It imports nothing, allocates nothing, and is over before the socket opens.
    [ADR 0039](./adr/0039-the-shape-of-a-query-is-settled-while-compiling.md)'s
    line; what they cost is surface, and each wants its axis numbers before it
    is written.
-   - `db.find(Row, c, key)`. `row.keyOf` already works out the answer and has
-     no caller — `.key` is a comptime check with nothing reading it.
-   - Insert many. One round trip per row is the only shape there is.
+   - Insert many. One round trip per row is the only shape there is, and it
+     branches before it can be written: either the count is comptime, which
+     makes a statement per length, or it is `unnest($1, $2, …)` over array
+     parameters — and arrays are item 3 below. It is a decision, not a task.
    - Upsert. `ON CONFLICT` has no spelling, so idempotent writes are a caught
      `AlreadyExists` and a second statement, which is also a race.
-   - `RETURNING` on `update` and `delete`. Both answer with a count, so a
-     handler that wants the row it just changed pays for a second query.
-   - `not in`, `not like`, and negation generally. `.ne` exists; its list and
-     pattern halves do not.
    - `SELECT … FOR UPDATE`, savepoints, and an isolation level on `begin`.
      A `Tx` today is one connection and three verbs, which is not enough to
      write anything that actually contends.
@@ -363,22 +360,6 @@ It imports nothing, allocates nothing, and is over before the socket opens.
 
 ### Known gaps
 
-- **A condition given an optional that happens to be null matches nothing,
-  quietly.** `.{ .handle = null }` is `IS NULL` because the literal is a
-  compile-time null. `.{ .handle = maybe }` with `maybe` a `?[]const u8` that
-  is null takes the parameter path instead and sends `"handle" = $1` with
-  NULL, which is never true in SQL — the query runs, answers nothing, and
-  says nothing. It is the same failure `refusals/compared_with_null.zig`
-  already refuses for `.{ .gt = null }`, reached by the other road. Filtering
-  on a value the caller may or may not have is an ordinary shape, so the fix
-  is a decision rather than a check: either an optional in a condition is a
-  Refusal telling the caller to branch, or it means `IS NULL` the way the
-  literal does. It cannot keep meaning `= NULL`.
-- **A table that is not there is reported as every column being missing.** The
-  introspection query answers nothing, so each column reports
-  `no_such_column` — ten lines for one mistake, and not the one that was
-  made. Forgetting to migrate is the most common way to see this, so it
-  wants its own sentence: `schema.compare` checking `actual.len == 0` first.
 - **A table can only be named, never qualified.** `.name = "app.users"` is
   quoted as one identifier, and the introspection query only looks in
   `current_schema()`. Anything with a `search_path` is out.
@@ -387,11 +368,13 @@ It imports nothing, allocates nothing, and is over before the socket opens.
   `dialect.accepts` declines to judge enums, so this is the one column type
   that is unchecked at startup *and* fatal at run time. Reading it as
   `[]const u8` is the workaround; the fix is a decode that errors.
-- **`translate` reads `conn.err` before it reads the error it was given.**
-  pg.zig clears that field on `release`, so the pooled path is clean — but a
-  `Tx` holds its connection across statements, and a non-server failure after
-  a server one is reported with the older code. Narrow, and wrong when it
-  happens.
+- **Nothing tests what a transaction does when the socket dies.** `Tx.fresh`
+  clears the connection's server error before each statement, so a broken
+  pipe after a unique violation is no longer reported as `AlreadyExists` —
+  but the fix has no test under it, because provoking a transport failure
+  between two statements of one transaction needs a socket the suite never
+  opens. It is the same shape as the `sendfile` gap in the risks table below,
+  and it wants the same answer: a build step that listens on a real port.
 - **A query has no deadline of its own.** `timeout_ms` bounds the wait for a
   free connection and nothing bounds the statement,
   which [ADR 0023](./adr/0023-a-deadline-belongs-to-an-operation-not-to-a-request.md)
@@ -484,17 +467,18 @@ Two whole areas come off before the list starts.
 
 **Reading**
 
-- [ ] `not in`, `not like`, negation generally → Next 1. `eq`, `ne`, `gt`,
-      `gte`, `lt`, `lte`, `like`, `ilike`, `in`, `IS NULL` and `IS NOT NULL`
-      are there; `between` is deliberately absent, because two operators on one
-      column are already ANDed.
+- [ ] `IS DISTINCT FROM`. The rest of the comparison language is there —
+      `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `not_like`,
+      `not_ilike`, `in`, `not_in`, `IS NULL` and `IS NOT NULL`. `between` is
+      deliberately absent, because two operators on one column are already
+      ANDed.
 - [ ] Set operations — `UNION`, `INTERSECT`, `EXCEPT`
 - [ ] Common table expressions
 - Joins, nested rows, aggregates and subqueries: one decision, above.
 
 **Writing**
 
-- [ ] Insert many, upsert, `RETURNING` on `update` and `delete` → Next 1
+- [ ] Insert many, upsert → Next 1
 - [ ] Several statements in one round trip
 
 **Connection and session**

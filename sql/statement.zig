@@ -1,10 +1,17 @@
 //! A whole statement, built while compiling (ADR 0039).
 //!
-//! Four of them — `SELECT`, `INSERT`, `UPDATE`, `DELETE` — in one file
+//! `SELECT`, `INSERT`, `UPDATE`, `DELETE` and the aggregates, in one file
 //! because they share more than they differ: the same column list, the same
 //! table name, the same condition walker, the same Refusal when a column is
 //! misspelled. A reader who knows how a `select` narrows knows how a
 //! `delete` does, because it is the same code.
+//!
+//! Several come in pairs, and a pair is one function with a flag rather than
+//! two: `select`/`one` differ by a `LIMIT 1`, `update`/`updateReturning` and
+//! `delete`/`deleteReturning` by a trailing column list. Writing the second
+//! of each separately would be a second place for the condition rules to
+//! drift — an update with no `.where` has to be refused whether or not it
+//! reports what it rewrote.
 //!
 //! This is where the claim gets paid. Given a Row and a struct of options,
 //! what comes out is a `[]const u8` that exists before the program does:
@@ -225,10 +232,82 @@ fn tally(
     };
 }
 
+/// `SELECT … WHERE <key> = $1 LIMIT 1` — the one row a key identifies.
+///
+/// The shape `db.one(Row, c, .{ .where = .{ .id = id } })` already wrote,
+/// with the column name taken from the Row's `.key` rather than repeated at
+/// every call site. That is what `.key` was for: until this, `row.keyOf` had
+/// no caller at all and the marker was a comptime check with nothing reading
+/// it.
+///
+/// `K` is the type of the value handed in, and it is here only to be refused
+/// when it is a condition — see `assertKeyValue`.
+pub fn find(comptime D: type, comptime Row: type, comptime K: type) Statement {
+    return comptime blk: {
+        dialect_mod.assertDialect(D);
+        const key = row_mod.keyOf(Row);
+        assertKeyValue(Row, key, K);
+
+        break :blk .{
+            .sql = "SELECT " ++ columnList(D, Row) ++
+                " FROM " ++ D.quote(row_mod.tableOf(Row)) ++
+                " WHERE " ++ D.quote(key) ++ " = " ++ D.placeholder(1) ++
+                D.limit("1"),
+            // The empty path is the value itself: `find` takes a key rather
+            // than a struct to read one out of, and `where.valueAt` with
+            // nothing to follow answers with what it was given. So the same
+            // `valuesOf` builds this statement's parameter tuple as builds
+            // every other one's, and there is no second way to bind.
+            .paths = &.{&.{}},
+            .params = &.{.{ .column = key }},
+            .reserve = 1,
+        };
+    };
+}
+
+/// A key is one value. A struct where one goes is almost always a condition
+/// written out of habit — `db.find(User, c, .{ .where = .{ .id = id } })` —
+/// and the sentence it needs is the name of the call that does take one.
+///
+/// The check is by type rather than by shape, because the types that *are*
+/// legitimately structs are the column's own: a `Uuid` key is the ordinary
+/// case, and it is exactly `ColumnType(Row, key)`.
+fn assertKeyValue(comptime Row: type, comptime key: []const u8, comptime K: type) void {
+    comptime {
+        if (@typeInfo(K) != .@"struct") return;
+        if (K == row_mod.ColumnType(Row, key)) return;
+        @compileError(
+            "nilo: `db.find` on " ++ @typeName(Row) ++ " was given a struct where its " ++
+                "key goes.\n" ++
+                "  It takes the value of `" ++ key ++ "` itself: `db.find(Row, c, id)`. " ++
+                "A condition — `.{ .where = … }` — is `db.one`.",
+        );
+    }
+}
+
 /// `DELETE`, which is a `SELECT` with no columns and no ordering. Sharing the
 /// where walker rather than growing a second one is the point: a condition
 /// that reads one way in a select cannot read another way in a delete.
 pub fn delete(comptime D: type, comptime Row: type, comptime O: type) Statement {
+    return comptime deleting(D, Row, O, false);
+}
+
+/// The same, answering with the rows it removed rather than with how many.
+///
+/// A handler that has to say what it deleted paid for a `SELECT` before the
+/// `DELETE` and raced anything running beside it; `RETURNING` is one
+/// statement and no race. It costs the `SELECT` list, which is the one this
+/// file already writes.
+pub fn deleteReturning(comptime D: type, comptime Row: type, comptime O: type) Statement {
+    return comptime deleting(D, Row, O, true);
+}
+
+fn deleting(
+    comptime D: type,
+    comptime Row: type,
+    comptime O: type,
+    comptime returning: bool,
+) Statement {
     return comptime blk: {
         dialect_mod.assertDialect(D);
         assertOptions(Row, O, &[_][]const u8{"where"}, "a delete");
@@ -257,6 +336,7 @@ pub fn delete(comptime D: type, comptime Row: type, comptime O: type) Statement 
                 "somebody reading the code can see it.",
         );
 
+        if (returning) sql = sql ++ " RETURNING " ++ columnList(D, Row);
         break :blk .{ .sql = sql, .paths = paths, .params = params };
     };
 }
@@ -334,6 +414,26 @@ const update_known = [_][]const u8{ "set", "where" };
 /// both, `SET` first, which is why the where walker takes a starting number
 /// rather than always beginning at one.
 pub fn update(comptime D: type, comptime Row: type, comptime O: type) Statement {
+    return comptime updating(D, Row, O, false);
+}
+
+/// The same, answering with the rows as they now are rather than with how
+/// many were touched.
+///
+/// This is the shape a `PATCH` endpoint is: change one row, answer with it.
+/// Written without `RETURNING` it is an `UPDATE` and then a `SELECT` — two
+/// round trips, and a second statement that may read what somebody else has
+/// changed in between.
+pub fn updateReturning(comptime D: type, comptime Row: type, comptime O: type) Statement {
+    return comptime updating(D, Row, O, true);
+}
+
+fn updating(
+    comptime D: type,
+    comptime Row: type,
+    comptime O: type,
+    comptime returning: bool,
+) Statement {
     return comptime blk: {
         dialect_mod.assertDialect(D);
         assertOptions(Row, O, &update_known, "an update");
@@ -393,6 +493,7 @@ pub fn update(comptime D: type, comptime Row: type, comptime O: type) Statement 
                 "so where somebody reading the code can see it.",
         );
 
+        if (returning) sql = sql ++ " RETURNING " ++ columnList(D, Row);
         break :blk .{ .sql = sql, .paths = paths, .params = params };
     };
 }
@@ -658,6 +759,41 @@ test "a delete carries its condition and nothing else" {
     try testing.expectEqual(@as(usize, 1), s.paramCount());
 }
 
+test "find takes the key column out of the Row rather than the call site" {
+    const s = comptime find(Pg, User, i64);
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"email\", \"age\", \"created_at\" FROM \"users\"" ++
+            " WHERE \"id\" = $1 LIMIT 1",
+        s.sql,
+    );
+    try testing.expectEqual(@as(usize, 1), s.paramCount());
+    try testing.expectEqualStrings("id", s.params[0].column);
+    try testing.expectEqual(@as(?usize, 1), s.reserve);
+}
+
+test "find on a Row whose key is not id reads that column instead" {
+    const Membership = struct {
+        pub const nilo_table = .{ .name = "memberships", .key = .user_id };
+
+        user_id: i64,
+        plan: []const u8,
+    };
+    try testing.expectEqualStrings(
+        "SELECT \"user_id\", \"plan\" FROM \"memberships\" WHERE \"user_id\" = $1 LIMIT 1",
+        comptime find(Pg, Membership, i64).sql,
+    );
+}
+
+test "the value a find binds is the one handed in, reached by an empty path" {
+    // `find` takes a key rather than a struct holding one, so the path the
+    // statement carries has nothing to follow — which is what lets the same
+    // `valuesOf` in `db.zig` build this tuple as builds every other.
+    const s = comptime find(Pg, User, i64);
+    const key: i64 = 7;
+    try testing.expectEqual(@as(usize, 0), s.paths[0].len);
+    try testing.expectEqual(@as(i64, 7), where_mod.valueAt(key, s.paths[0]));
+}
+
 // -- writes ---------------------------------------------------------------
 
 test "an insert names the columns it was given and returns the whole row" {
@@ -703,6 +839,41 @@ test "an update's condition is the same language a select's is" {
     }));
     try testing.expectEqualStrings(
         "UPDATE \"users\" SET \"age\" = $1 WHERE \"age\" < $2 AND \"email\" LIKE $3",
+        found.sql,
+    );
+}
+
+test "an update that returns its rows carries the same column list a select does" {
+    const found = comptime updateReturning(Pg, User, @TypeOf(.{
+        .set = .{ .age = 31 },
+        .where = .{ .id = 7 },
+    }));
+    try testing.expectEqualStrings(
+        "UPDATE \"users\" SET \"age\" = $1 WHERE \"id\" = $2" ++
+            " RETURNING \"id\", \"email\", \"age\", \"created_at\"",
+        found.sql,
+    );
+    // The clause is on the end and changes nothing about the numbering, which
+    // is why it can be a flag on the same walk rather than a second statement.
+    try testing.expectEqual(@as(usize, 2), found.paramCount());
+}
+
+test "a delete that returns its rows says what it removed, in one statement" {
+    const found = comptime deleteReturning(Pg, User, @TypeOf(.{ .where = .{ .id = 7 } }));
+    try testing.expectEqualStrings(
+        "DELETE FROM \"users\" WHERE \"id\" = $1" ++
+            " RETURNING \"id\", \"email\", \"age\", \"created_at\"",
+        found.sql,
+    );
+}
+
+test "the condition rules survive the returning clause, because it is the same walk" {
+    // A delete with no condition still empties the table, whether or not it
+    // reports what it emptied. The Refusal is `deleting`'s and both callers
+    // reach it — `refusals/delete_without_condition.zig` holds the other side.
+    const found = comptime deleteReturning(Pg, UserCard, @TypeOf(.{ .where = .{ .id = 7 } }));
+    try testing.expectEqualStrings(
+        "DELETE FROM \"users\" WHERE \"id\" = $1 RETURNING \"id\", \"email\"",
         found.sql,
     );
 }
