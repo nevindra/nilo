@@ -1,38 +1,160 @@
 # zfast
 
-**An HTTP framework for Zig, built to be hard to get wrong — by you, or by your
-coding agent.**
+Zig hands you a compiler and gets out of the way. Everything above it (routing,
+parsing a request, talking to Postgres) you write yourself, or you don't ship.
 
-Write a plain Zig function. zfast reads its arguments while compiling and hands
-back a routed endpoint, typed input, a 400 for anything that doesn't fit, and an
-OpenAPI document. Nothing is annotated. One function is your route, your test
-and your API description
-([ADR 0015](./docs/adr/0015-what-zfast-borrows-and-from-whom.md)).
+**zfast is that layer, and it has exactly one idea: your types are the contract,
+and the compiler is the check.**
 
-That design pays off twice. It is pleasant to write by hand — and it is why
-Claude Code and the rest land working code here, instead of something that
-compiles and quietly does the wrong thing:
+Here is what that buys. This is a route:
 
-- Get an argument wrong → the build stops, in a sentence naming the fix.
-- Register a route twice, or forget a service → the server refuses to start.
-- Change a handler → the API document changes with it. There is no second copy.
+```zig
+fn getUser(db: *Db, id: u32) !?User {
+    return db.find(id);
+}
+```
 
-The whole API surface is [one page](./docs/reference.md), small enough to hand a
-model in full. [More on that](#writing-an-app-against-it--by-hand-or-with-an-agent).
+Not a handler you hang a decorator on. The route. zfast reads that signature
+while compiling and hands back URL matching, an `id` already parsed into a
+`u32`, a **400** with a real sentence when it isn't a number, a **404** when
+`null` comes back, and an OpenAPI document that says all three.
 
-Zig has needed one of these. If you're coming from Go or Node the handler will
-look familiar — the bill won't: **one allocation per request**, **8,767 bytes
-per idle connection**, and a p99 the
-[comparison table](./docs/comparison.md) puts **9× below Go's `net/http`** and
-**11× below Fiber**.
+Delete the `?` and the 404 leaves the document too. There is no second copy of
+anything to keep in step, because there is no second copy of anything.
 
-Rendering HTML pages is somebody else's job. There is no template layer and
-[none is planned](#refused-on-the-record).
+One rule covers the whole argument list:
+
+> **A pointer is a service. A value is request data.**
+
+That's it. That's the API. No decorators, no macros, no codegen step, no
+`schema.yaml`.
 
 > **0.1.0**, the first release · needs **Zig 0.16** · `zfast` is a working name
-> and may change before 1.0.
+> and will probably change before 1.0.
 
-## What it looks like
+## Then we did it again, to SQL
+
+If the idea is any good it should survive leaving HTTP. So: a plain struct is a
+table.
+
+```zig
+const User = struct {
+    pub const zfast_table = .{ .name = "users", .key = .id };
+
+    id: i64,
+    email: zfast.Str,
+    age: i32,
+    created_at: sql.Timestamp,
+};
+
+const adults = try db.select(User, c, .{
+    .where = .{ .age = .{ .gt = 18 } },
+    .order = .{ .created_at = .desc },
+    .limit = 10,
+});
+```
+
+No tags. No schema file. No generated client you re-run a CLI to refresh.
+
+And here's the part worth stopping on. **That query is already a `const` in your
+binary before the program starts:**
+
+```sql
+SELECT "id", "email", "age", "created_at" FROM "users"
+WHERE "age" > $1 ORDER BY "created_at" DESC LIMIT 10
+```
+
+Exactly one thing reaches run time, and it's the `18`. Drizzle, whose approach
+this borrows, rebuilds that string on every single request, because JavaScript
+has nowhere else to do it. Zig has somewhere else.
+
+Which means this is a **build error**, not a 500 at 3am:
+
+```
+$ zig build
+error: zfast: User has no column `agee`, asked for in a condition.
+       Did you mean `age`?
+```
+
+> **Where it actually is.** The compile-time half is built and tested: Rows, the
+> Postgres dialect, conditions, `SELECT`/`DELETE`, the schema check, 17
+> refusals, 70 tests in two optimize modes. Nothing reaches a socket yet, so you
+> **can't query a database with this today**. Design and reasoning:
+> [ADR 0039](./docs/adr/0039-the-shape-of-a-query-is-settled-while-compiling.md).
+
+One more thing falls out for free. `db.one(...)` returns `?User`, so a handler
+returning `!?User` answers 404 **and the OpenAPI document says so**, because the
+`?` already meant that. Two modules that never import each other, agreeing,
+because they read the same types you wrote.
+
+It is **not an ORM** and won't become one. No change tracking, which is a copy
+of every row. No lazy relations, which are queries nobody wrote. No identity
+map, which is a lifetime bug waiting for a language with no GC. Joins and
+aggregates go through `db.raw`, which still fills your struct. The line is one
+sentence: *one table, conditions that filter rows.*
+
+## The bill
+
+Most frameworks say "fast" and "lightweight". Here are numbers instead:
+
+| | |
+|---|---|
+| **1 allocation** | per request. Held by a test that fails if it becomes 2. |
+| **8,767 bytes** | per idle connection. Flat from 1,000 connections to 10,000. |
+| **57µs** | p99, **9× below** Go's `net/http` and **11× below** Fiber |
+| **5.4 MB** | idle server |
+
+The throughput number (1.4M req/s) is the *least* interesting one and
+[the benchmarks page says so](./docs/benchmarks.md): at this payload the top of
+the table is five servers making identical syscalls. The two that are actually
+properties of the design are the 8,767 and the 1.
+
+## 73 programs written wrong on purpose
+
+Everyone tests that their code works. This repo also tests **that its error
+messages still say the right thing**, with 73 programs that are *supposed* to
+fail to compile and a build step that checks the wording of every failure.
+
+Because an error message is only a feature until someone refactors it into
+mush.
+
+```
+$ zig build
+error: zfast: route "/users/:user/pets/:pet" has 2 path params (:user, :pet), but its handler only takes 1.
+       Path params are matched by position, so the ones at the end would never be read.
+       Add the arguments (`id: u32`, `name: zfast.Str`, …), drop the unused `:` from the
+       pattern, or ask for a `*Ctx` if you would rather fetch them yourself with `c.param("…")`.
+```
+
+Every refusal names what you did **and** what to do instead. Fix it in one pass,
+without a search engine. So can your coding agent, and
+[that's a whole section](#writing-an-app-against-it-by-hand-or-with-an-agent).
+
+## What's here, honestly
+
+| | | |
+|---|---|---|
+| **`zfast`** | HTTP: routing, typed handlers, middleware, cookies and sessions, static files, streaming, WebSocket, OpenAPI | **shipped** |
+| **`zfast_sql`** | Postgres: your struct is the table | **half-built**: compiles queries, can't run them |
+
+Two modules today. Config, CLI arguments and an HTTP client are the obvious next
+ones, because Zig makes you hand-roll all three.
+
+But this isn't going to become a junk drawer, because there's a bar to clear:
+
+> **A part gets in if it's expressible as a type you already wrote, checked
+> while compiling, with its cost written down.**
+
+Need an annotation to work? Not it. Can't say what it costs? Doesn't ship until
+it can ([ADR 0018](./docs/adr/0018-the-trade-budget-has-three-axes.md)).
+Templates are the first thing that bar turns away
+([here's why](#what-it-wont-do)).
+
+Modules stay separate, and it's not tidiness: Zig doesn't compile what nothing
+imports, so an HTTP-only project pays **zero bytes** for `zfast_sql` and never
+fetches a Postgres driver.
+
+## A whole server
 
 ```zig
 const std = @import("std");
@@ -70,16 +192,13 @@ Four things in those two signatures, all settled while compiling:
 
 | Written | Means |
 |---|---|
-| `db: *Db` | a **pointer** is a service — the one you handed to `provide` |
-| `id: u32` | a **value** is request data — here `:id`, converted, or a 400 if it won't |
-| `!?User` | it may not be there, so `null` goes out as a **404** — and the API document says the endpoint answers 404 |
+| `db: *Db` | a **pointer** is a service, the one you handed to `provide` |
+| `id: u32` | a **value** is request data, here `:id`, converted, or a 400 if it won't |
+| `!?User` | it may not be there, so `null` goes out as a **404**, and the API document says the endpoint answers 404 |
 | `!Status(201, User)` | the status is in the type, so the API document names it |
 
-That is the whole rule for an argument list: **a pointer is a service, a value
-is request data.** There is no second rule, no decorator and no macro.
-
-Answering with a file is the same shape — a return type, not a side effect, so
-the generated document can still see it:
+Answering with a file is the same shape, a return type rather than a side
+effect, so the generated document can still see it:
 
 ```zig
 fn invoice(files: *Files, id: u32) !?zfast.FileBody {
@@ -88,7 +207,7 @@ fn invoice(files: *Files, id: u32) !?zfast.FileBody {
 }
 ```
 
-The file is opened inside a directory a Service opened at startup — never a path
+The file is opened inside a directory a Service opened at startup, never a path
 worked out from the request. The bytes go straight from the file to the socket
 without passing through your process. `Range`, `If-Range` and `If-None-Match`
 work as they do for a static file, and the `?` is still a 404
@@ -102,16 +221,16 @@ video in it now serves instead of failing to load.
 
 | | |
 |---|---|
-| **Handlers are ordinary functions** | a test calls one directly — no server, no fake request, no fixture |
+| **Handlers are ordinary functions** | a test calls one directly. No server, no fake request, no fixture |
 | **Mistakes are refused, in words** | at compile time or at startup, a sentence naming your route, your argument and the fix |
-| **Order decides nothing** | routes, middleware and `docs()` register in any order — no shadowing, no precedence to keep in your head |
+| **Order decides nothing** | routes, middleware and `docs()` register in any order. No shadowing, no precedence to keep in your head |
 | **The API document writes itself** | OpenAPI 3.1 read off the same signatures, so it can't drift from the code |
-| **The memory has a number on it** | 8,767 bytes per idle connection, flat, and one allocation per request — both held by tests |
-| **It says what it won't do** | templates, TLS, HTTP/2 — refused on the record rather than left as a maybe |
+| **The memory has a number on it** | 8,767 bytes per idle connection, flat, and one allocation per request. Both held by tests |
+| **It says what it won't do** | templates, TLS, HTTP/2, all refused on the record rather than left as a maybe |
 
 ## Install
 
-Zig 0.16 and nothing else — no C library, no system package.
+Zig 0.16 and nothing else. No C library, no system package.
 
 ```
 zig init                                                          # only if you have no build.zig.zon yet
@@ -160,10 +279,10 @@ Read **`rest`** first. Reach for **`orders`** when you hit "yes, but what
 about…": resources inside resources, a body with structs and lists in it, a
 state machine that answers 409, an upsert whose status is not known until it
 runs, and a service that owns everything it was handed. **`forms`** is the one
-for people building a web page rather than an API — a `<form>` posted, a session
+for people building a web page rather than an API: a `<form>` posted, a session
 cookie set, a file uploaded, and a 303 so the reload button behaves.
 
-## Writing an app against it — by hand, or with an agent
+## Writing an app against it, by hand or with an agent
 
 The same design that makes this pleasant by hand is what makes an agent reliable
 on it. A model doesn't need a special API. It needs three things it can't supply
@@ -174,7 +293,7 @@ for itself:
 - a build that says what's wrong, instead of a server that starts anyway
 
 **One rule covers the whole argument list.** Pointer is a service, value is
-request data. There is no second rule, so there is very little to misremember —
+request data. There is no second rule, so there is very little to misremember,
 and very little to invent something else in place of.
 
 **Order decides nothing.** Register routes in any order: `/users/new` and
@@ -182,25 +301,19 @@ and very little to invent something else in place of.
 route rather than the first one
 ([ADR 0013](./docs/adr/0013-the-most-specific-route-wins-and-duplicates-are-refused.md)).
 `use` after `get` still applies. `docs()` before or after your routes. So a new
-route can be appended anywhere without reading what is above it — which is how
+route can be appended anywhere without reading what is above it, which is how
 both a person in a hurry and an agent actually edit a file.
 
 **A mistake is refused rather than tolerated**, in three places, in the order
 you would meet them.
 
-*While compiling* — an argument zfast can't make sense of, a pattern that can't
-work, two request bodies, a `Form` and a JSON body in the same handler:
+*While compiling:* an argument zfast can't make sense of, a pattern that can't
+work, two request bodies, a `Form` and a JSON body in the same handler, a column
+that isn't on your struct. [The one up top](#73-programs-written-wrong-on-purpose)
+is a fair sample of the register.
 
-```
-$ zig build
-error: zfast: route "/users/:user/pets/:pet" has 2 path params (:user, :pet), but its handler only takes 1.
-       Path params are matched by position, so the ones at the end would never be read.
-       Add the arguments (`id: u32`, `name: zfast.Str`, …), drop the unused `:` from the
-       pattern, or ask for a `*Ctx` if you would rather fetch them yourself with `c.param("…")`.
-```
-
-*At startup, before a single request is served* — a route registered twice, a
-service nobody provided, a line of root wiring missing:
+*At startup, before a single request is served:* a route registered twice, a
+service nobody provided, a line of root wiring missing.
 
 ```
 error: the route "GET /users/:name" answers the same requests as "/users/:id", which is
@@ -212,8 +325,8 @@ error: service *Db was never registered, but 3 routes need it ("/users/:id", "/u
        "/users/:id/orders") — call app.provide() before app.listen()
 ```
 
-*While running* — the two mistakes no compiler can see. Holding request data
-past the request is trapped in a `Debug` build:
+*While running:* the two mistakes no compiler can see. Holding request data past
+the request is trapped in a `Debug` build.
 
 ```
 panic: Str used after its request finished. Request data dies with the request; copy it
@@ -233,10 +346,13 @@ Every one of those names what you did and what to do instead. A person reads one
 and fixes it in a single pass; so does an agent, at build or boot time rather
 than by shipping a 500 and reading the logs afterwards.
 
-The compile-time ones are held in place, not left to drift:
-[`refusals/`](./refusals/) is **56 programs written wrong on purpose**, and the
-build checks the wording of the message each one produces
+Those messages don't drift, because
+[`refusals/`](./refusals/) and [`sql/refusals/`](./sql/refusals/) hold **73
+programs written wrong on purpose** (56 for HTTP, 17 for SQL) and the build
+checks the wording of every one
 ([ADR 0027](./docs/adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)).
+It's also how a module earns its way in: by bringing its own refusals, not by
+being useful.
 
 **Tests are calls, not scaffolding.** A handler takes only what it needs, so a
 test hands it those things and calls it:
@@ -253,149 +369,80 @@ No server, no socket, no fake request, no fixture file. Scaffolding is exactly
 the part that goes wrong when it's written from a half-remembered example.
 
 **Nothing has to be kept in step.** `app.docs(…)` serves an OpenAPI 3.1 document
-read from the same signatures the router reads. Nothing is annotated, so there
-is no second copy of the contract to leave stale — and where a signature doesn't
-say something, the document says `default` rather than guessing
+read from the same signatures the router reads. There's no second copy of the
+contract to leave stale, and where a signature doesn't say something the
+document says `default` rather than guessing
 ([ADR 0017](./docs/adr/0017-the-api-description-comes-from-the-signatures.md)).
-Your own app serves it at `/openapi.json`, so whatever consumes your API — a
-generated client, or an agent writing against it — can read the contract back
-out of the running server.
+Your app serves it at `/openapi.json`, so a generated client or an agent can
+read the contract back out of the running server.
 
 > **Pointing an agent at zfast:** [`docs/reference.md`](./docs/reference.md) is
-> the whole API surface on one page and [`CONTEXT.md`](./CONTEXT.md) is the
-> project's vocabulary. About 26 KB together — small enough to hand over whole,
-> and enough to write against without guessing. Every
-> [ADR](./docs/adr/) names the alternative it rejected, so "why not X?" has an
-> answer on file rather than being argued out again.
+> the whole API surface on one page, [`CONTEXT.md`](./CONTEXT.md) is the
+> project's vocabulary. About 26 KB together, small enough to hand over whole.
+> And every [ADR](./docs/adr/) names the alternative it rejected, so "why not
+> X?" has an answer on file instead of being argued out again.
 
 ## Documentation
 
-**[The guide](./docs/guide/)** is the place to start — one page per thing you
-might want to do, in the order you would meet them:
+**[The guide](./docs/guide/)** is 17 pages, one per thing you might want to do,
+in the order you'd meet them: getting started, handlers, routing, requests,
+forms, responses, cookies, sessions, streaming, WebSocket, middleware, services,
+static files, errors, testing, OpenAPI, deploying.
+
+When you want *why* rather than *how*:
 
 | | |
 |---|---|
-| [Getting started](./docs/guide/getting-started.md) | install, the two root lines, your first server |
-| [Handlers](./docs/guide/handlers.md) | what a handler may ask for, and what it may return |
-| [Routing](./docs/guide/routing.md) | patterns, precedence, groups, plugins |
-| [Requests](./docs/guide/requests.md) | path params, query structs, JSON bodies, large uploads |
-| [Forms](./docs/guide/forms.md) | an HTML form as a struct of yours, and file uploads |
-| [Responses](./docs/guide/responses.md) | statuses, headers, redirects, and `Ctx` when you want full control |
-| [Cookies](./docs/guide/cookies.md) | reading and setting them, and the signed-in user |
-| [Sessions](./docs/guide/sessions.md) | a struct of yours, sealed into one cookie |
-| [Streaming](./docs/guide/streaming.md) | answers written in pieces, and server-sent events |
-| [WebSocket](./docs/guide/websocket.md) | upgrading a connection, and what it costs |
-| [Middleware](./docs/guide/middleware.md) | the onion, plus the signed-in user as a resolved value |
-| [Services](./docs/guide/services.md) | shared state, locks, and the rule about blocking |
-| [Static files](./docs/guide/static-files.md) | a directory held in memory, ETags, range requests |
-| [Errors](./docs/guide/errors.md) | `fail` functions, the mapping table, what the client sees |
-| [Testing](./docs/guide/testing.md) | handlers as functions, and the test client for the rest |
-| [OpenAPI](./docs/guide/openapi.md) | a document written from the signatures |
-| [Deploying](./docs/guide/deploying.md) | startup errors, panics, shutdown, tuning |
-
-And when you want to know *why* rather than *how*:
-
-| | |
-|---|---|
-| [`docs/reference.md`](./docs/reference.md) | the same surface as a list — every `Ctx` method, every `App` method, every options struct, one page |
-| [`docs/adr/`](./docs/adr/) | design decisions, one per file, each with the alternative it rejected |
-| [`CONTEXT.md`](./CONTEXT.md) | the project's vocabulary: what a Service is, what a Str is, what words are avoided |
-| [`docs/roadmap.md`](./docs/roadmap.md) | what's next, what's refused, what nobody has decided yet |
-| [`docs/history.md`](./docs/history.md) | what was measured, and what was got wrong on the way |
-| [`CHANGELOG.md`](./CHANGELOG.md) | what changed, per release |
+| [`docs/reference.md`](./docs/reference.md) | the entire API surface on one page |
+| [`docs/adr/`](./docs/adr/) | 39 decisions, each naming the alternative it rejected |
+| [`CONTEXT.md`](./CONTEXT.md) | the vocabulary, and the words this project refuses |
+| [`docs/roadmap.md`](./docs/roadmap.md) | what's next, what's refused, what's undecided |
+| [`docs/history.md`](./docs/history.md) | what was measured, and what was got wrong |
 
 ## What it won't do
 
-### Queued up
+**Templates.** Rendering means building a string per request, which is an
+allocation per request, and that number is an invariant here rather than
+something to trade. If your app's job is HTML, [jetzig](https://www.jetzig.dev/)
+is built for that.
 
-`permessage-deflate`, compressing a handler's response, and streaming a
-multipart upload rather than holding it — each with its reason in
-[`docs/roadmap.md`](./docs/roadmap.md).
-
-Broadcasting to WebSockets a handler doesn't hold used to be on this list. It
-is [`zfast.Room`](./docs/reference.md#room) now, at 4 measured bytes per idle
-connection
-([ADR 0038](./docs/adr/0038-a-broadcast-rings-a-bell-it-does-not-write.md)).
-
-### Refused on the record
-
-**Templates.** There is no template layer and none is planned, because rendering
-a page means allocating per request and the two numbers below are what zfast is
-for. Forms, file uploads, cookies, sessions and redirects all work — a `<form>`
-posted to a handler is an ordinary request. But if your application's job is to
-produce HTML, [jetzig](https://www.jetzig.dev/) is built for that and this
-isn't.
-
-**TLS.** Terminate it in front. The
+**TLS**, and therefore **HTTP/2** and **gRPC**. Terminate it in front; the
 [deploying guide](./docs/guide/deploying.md#tls-and-the-proxy-in-front) has the
-five lines that do it
-([ADR 0028](./docs/adr/0028-tls-is-terminated-in-front.md)). HTTP/2 and a gRPC
-server follow from the same decision. Static files *are* compressed, once, when
-the App is built.
+five lines ([ADR 0028](./docs/adr/0028-tls-is-terminated-in-front.md)).
 
-### Sharp edges in 0.1.0
+**Revoking a session.** `Session(T)` is sealed into the cookie, so there's no
+table, no sweep, no lock, and no revocation
+([ADR 0035](./docs/adr/0035-a-session-is-sealed-into-the-cookie.md)).
 
-**The `chat` example is an echo server**, not a chat room. zfast does the
-handshake, framing, masking, pings and the closing handshake, and a handler
-holds its own connection — but sending to a connection some *other* handler
-holds is the roadmap item above, blocked on an upstream defect. Two browser tabs
-will not see each other yet.
+**Query a database.** Not yet. See above.
 
-**A session cannot be revoked.** `Session(T)` seals a struct of yours into one
-cookie with `XChaCha20Poly1305`, so there is no table, no expiry sweep, no lock,
-and nothing added to what an idle connection costs
-([ADR 0035](./docs/adr/0035-a-session-is-sealed-into-the-cookie.md)). What that
-buys is the flat number below; what it costs is revocation, and the
-[guide](./docs/guide/sessions.md#what-it-cannot-do) says so in the same breath.
-What a password check is, and where the secret lives, stay yours — the same line
-zfast draws around authentication.
+Everything refused has an ADR naming the alternative it lost to. Everything
+queued has a reason in [`docs/roadmap.md`](./docs/roadmap.md).
 
-## The numbers
+## How decisions get made
 
-One quiet machine, four physical cores, loopback, a routed `GET` with a path
-param returning ~1 KB of JSON. The method, and everything it does not cover, is
-in [`docs/benchmarks.md`](./docs/benchmarks.md); eight other servers through the
-same harness are in [`docs/comparison.md`](./docs/comparison.md).
-
-| | |
-|---|---|
-| Throughput | 1,456,636 req/s |
-| p99 | 57µs |
-| Memory per idle connection | 8,767 bytes, flat from 1,000 to 10,000 |
-| Idle server | 5.4 MB |
-| Allocations per request | 1 — the JSON body; a POST with a body pays more |
-
-**The throughput number is the least useful one here.** zfast's own code is
-about 4% of a request's CPU; the rest is `epoll`, `recv`, `send` and the TCP
-path. At this payload the top of that comparison is five servers making the same
-syscalls and landing in the same place, so the honest reading is that zfast is
-*in* the fastest group, not ahead of it. And a handler that touches a database
-makes every row of that comparison identical to everybody else's.
-
-The two worth anything are the flat 8,767 and the single allocation, because
-they are properties of the design rather than of the machine.
-
-## How the trade-offs get made
-
-Developer experience comes first; performance is pursued as long as it doesn't
-make life harder for the user
+DX first, performance as long as it doesn't cost you anything
 ([ADR 0001](./docs/adr/0001-dx-wins-below-the-10-percent-threshold.md)). That
-trade has a budget, and it isn't one number
+trade runs on four axes, not one
 ([ADR 0018](./docs/adr/0018-the-trade-budget-has-three-axes.md)):
 
 | | |
 |---|---|
 | Throughput and p99 | DX wins below 10% |
-| Allocations per request | a hard invariant — currently 1, held by a test |
-| Memory per idle connection | a hard invariant — every feature states its cost |
+| Allocations per request | invariant. Currently 1, held by a test |
+| Memory per idle connection | invariant. Every feature states its cost |
+| Binary size | a feature the linker can't drop states its measured cost |
 
-Throughput is elastic and the bottom two aren't: an extra allocation isn't 10%
-slower on average, it's fine a million times and then it's the tail. Those two
-rows are what lets zfast say "low memory" at all.
+Throughput is elastic; the middle two aren't. An extra allocation isn't 10%
+slower on average, it's fine a million times and then it's your tail latency.
 
-Where the design is borrowed from — FastAPI for the signature, Elysia for
-resolved values and plugins, nginx and TigerBeetle for the memory discipline,
-Elm for the error messages — is
+Two rules keep that from eroding as more parts land: **a feature that can't be
+made to fit doesn't ship in a worse shape**, and **every change is measured
+against all four before it's written**, not after.
+
+Borrowed from FastAPI (the signature), Elysia (resolved values, plugins), nginx
+and TigerBeetle (memory discipline), Elm (error messages), Drizzle (the query
+shape). Credit and reasoning:
 [ADR 0015](./docs/adr/0015-what-zfast-borrows-and-from-whom.md).
 
 ## License
