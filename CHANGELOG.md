@@ -266,6 +266,16 @@ Nothing about the API changed to get any of it. What *did* change:
   ReleaseFast. A Row that reads an array cannot be streamed, for the reason a
   `Json` column cannot: a streamed row holds only what the read buffer already
   holds.
+- **A column type can come from outside this module.** Any struct or enum with
+  `nilo_column`, `nilo_read(text, arena)` and `nilo_write(arena)` is one, and
+  it travels as the text Postgres prints — so an `interval`, a `money`, a
+  PostGIS `geometry` or anything an extension adds is readable without this
+  module knowing it exists. `sql.AsText("money")` is that protocol's smallest
+  instance ([ADR 0055](docs/adr/0055-a-column-type-can-come-from-outside-this-module.md)).
+- **`sql.Interval` and `sql.Inet`**, which are two lines of `AsText` each.
+  **`sql.Decimal` is now one too** — same field, same JSON-as-a-string, no
+  special case left in the Dialect or the driver.
+
 - **A transaction takes what it is on the `BEGIN`.** `db.begin(c, .{ .isolation
   = .serializable, .read_only = true })` — comptime, folded into the statement,
   so neither option costs a round trip. **`db.begin` now takes an options

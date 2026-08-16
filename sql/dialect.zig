@@ -141,34 +141,39 @@ pub const Postgres = struct {
     /// How a column of type `T` is asked for in a `SELECT` list, given its
     /// quoted name.
     ///
-    /// Everything is asked for as itself except a `numeric`, which is asked
-    /// for as `::text` so that what arrives is the digits — which is what a
-    /// `Decimal` holds. Postgres stores and can send a `numeric` as sign,
-    /// weight, scale and base-10000 limbs, and decoding that above the driver
-    /// would put a wire format in the layer that is supposed to be about SQL.
+    /// Everything is asked for as itself except a **text column** — a type
+    /// that reads and writes itself as the text Postgres prints, which is
+    /// `Decimal`, `Interval`, `Inet` and anything a project declared the same
+    /// way (ADR 0055). Those are asked for as `::text`, because that is the
+    /// one representation every Postgres type has and the only one a module
+    /// that does not know the type can decode.
     ///
-    /// **Measured, and it is not load-bearing today.** With the cast removed,
-    /// the live round trip still comes back with every digit intact, so
-    /// pg.zig is handing this column over as text already. What the cast buys
-    /// is that the answer stops depending on a driver's choice of result
-    /// format — which is a choice nilo does not make, did not design, and
-    /// would find out about by getting binary where it expected digits. The
-    /// write half *is* load-bearing: see `bindAs`.
+    /// **Measured on `numeric`, and it is not load-bearing there today.**
+    /// With the cast removed, the live round trip still comes back with every
+    /// digit intact, so pg.zig is handing that column over as text already.
+    /// What the cast buys is that the answer stops depending on a driver's
+    /// choice of result format — which is a choice nilo does not make, did not
+    /// design, and would find out about by getting binary where it expected
+    /// digits. For a type the driver has never heard of it is load-bearing on
+    /// both sides.
     ///
     /// Column *names* do not matter here: this module reads by position
     /// because the caller wrote the `SELECT` list (ADR 0039), so a cast that
     /// changes what Postgres would have called the column changes nothing.
     pub fn readAs(comptime quoted: []const u8, comptime T: type) []const u8 {
-        return if (comptime types.isDecimal(T)) quoted ++ "::text" else quoted;
+        return if (comptime types.asText(T) != null) quoted ++ "::text" else quoted;
     }
 
     /// How a value of type `T` is bound, given its placeholder — the mirror
     /// of `readAs`.
     ///
-    /// A `Decimal` binds as its digits and is cast back. The alternative is
-    /// pg.zig's `Numeric` encoder, which takes a float and prints it: exactly
-    /// the round trip through binary floating point that a `numeric` column
-    /// is chosen to avoid.
+    /// A text column binds as its text and is cast back to the type it named:
+    /// `$1::numeric`, `$1::interval`. **This half is load-bearing even where
+    /// the read half is not.** For a `Decimal` the alternative is pg.zig's
+    /// `Numeric` encoder, which takes a float and prints it — exactly the trip
+    /// through binary floating point that a `numeric` column is chosen to
+    /// avoid; for a type the driver has never heard of there is no encoder at
+    /// all, and the cast is what makes text enough.
     ///
     /// `list` is `.in` and `.not_in`, where one placeholder holds the whole
     /// list and the cast has to name an array.
@@ -177,8 +182,10 @@ pub const Postgres = struct {
         comptime T: type,
         comptime list: bool,
     ) []const u8 {
-        if (comptime !types.isDecimal(T)) return placeholder_text;
-        return placeholder_text ++ if (list) "::numeric[]" else "::numeric";
+        return comptime blk: {
+            const named = types.asText(T) orelse break :blk placeholder_text;
+            break :blk placeholder_text ++ "::" ++ named ++ if (list) "[]" else "";
+        };
     }
 
     /// How a whole column's worth of values is named in a statement that
@@ -205,7 +212,7 @@ pub const Postgres = struct {
             // alone would have the driver encode the text as binary numeric
             // limbs; `::text[]` first says what is actually on the wire and
             // lets Postgres do the conversion it is good at.
-            if (types.isDecimal(T)) break :blk "text[]::numeric[]";
+            if (types.asText(T)) |named| break :blk "text[]::" ++ named ++ "[]";
             // The document, cast the same way, and this one is a workaround
             // rather than a design. pg.zig's `jsonb[]` encoder reserves five
             // bytes of prefix for every element and writes four for a NULL —

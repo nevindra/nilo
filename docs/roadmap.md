@@ -376,9 +376,7 @@ of it — measured at 0 bytes.
    harness; [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md)'s
    10% is the bar, and `sql/postgres.zig` already says out loud that this is
    the measurement nobody has taken.
-2. **The column types after arrays.** `interval` and `inet` are the same shape
-   of question `text[]` and `numeric` were, and are worth less than either was.
-3. **A second Dialect.** The seam is fitted and only Postgres is filled in,
+2. **A second Dialect.** The seam is fitted and only Postgres is filled in,
    so nothing is known about whether it holds. SQLite is the useful test,
    because it disagrees about the three things the seam abstracts:
    placeholders, list form (`sql/dialect.zig` already refuses a dialect with
@@ -495,18 +493,11 @@ Two whole areas come off before the list starts.
 
 **Schema**
 
-- [ ] `interval`, `inet` → Next 2
 - [ ] Indexes, unique constraints, foreign keys, check constraints. A Row names
       its columns and its key and nothing else about the table is sayable, so
       `checking` cannot notice a missing index and nothing could generate one.
 - [ ] Sequences, identity columns, generated columns
 - [ ] Views and materialized views
-- [ ] A column type declared by a project rather than by this module. The
-      schema half is already open — a struct or an enum with `pub const
-      nilo_column` is judged by `dialect.accepts` — and the wire half is
-      closed: `db.zig` knows `Str`, `Timestamp`, `Uuid`, `Decimal`, `Json(T)`
-      and a slice of any of the scalars by identity, so anything else fails to
-      compile inside the driver.
 - Row-level security and Postgres extensions: nobody has looked.
 
 **Reading**
@@ -522,7 +513,7 @@ Two whole areas come off before the list starts.
 **Connection and session**
 
 - [ ] Prepared statements → Next 1
-- [ ] A second driver → Next 3
+- [ ] A second driver → Next 2
 - [ ] Read replicas — a second pool, and a rule for which one a statement takes
 - [ ] A query cache
 

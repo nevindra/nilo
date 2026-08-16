@@ -62,7 +62,7 @@
 //! | **Dialect** | `dialect.zig` | comptime, writes the SQL, may refuse |
 //! | **where** | `where.zig` | a condition into a fragment and a value list |
 //! | **statements** | `statement.zig` | every one of them, each as a constant |
-//! | **types** | `types.zig` | Timestamp and Json — value, not arithmetic. `Uuid` is `nilo_id`'s |
+//! | **types** | `types.zig` | Timestamp and Json — value, not arithmetic. `Uuid` is `nilo_id`'s, and `AsText` is the door out |
 //! | **schema** | `schema.zig` | Row against table, while the server starts |
 //! | **Wire** | `wire.zig` | the contract a driver meets |
 //! | **the driver** | `postgres.zig` | pg.zig, and the only file that names it |
@@ -111,6 +111,15 @@ pub const Timestamp = types.Timestamp;
 pub const Uuid = types.Uuid;
 pub const Json = types.Json;
 pub const Decimal = types.Decimal;
+pub const Interval = types.Interval;
+pub const Inet = types.Inet;
+
+/// A column type declared by whoever owns it rather than by this module: any
+/// struct or enum with `nilo_column`, `nilo_read(text, arena)` and
+/// `nilo_write(arena)`. `AsText("money")` is the smallest instance of that
+/// protocol — the value *is* the text Postgres prints
+/// ([ADR 0055](../docs/adr/0055-a-column-type-can-come-from-outside-this-module.md)).
+pub const AsText = types.AsText;
 
 pub const Column = wire.Column;
 pub const Error = wire.Error;

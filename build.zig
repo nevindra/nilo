@@ -157,6 +157,14 @@ const sql_refusals = [_]Refusal{
         .says = "streamed_list.Ticket reads `tags` as a list column, and a streamed row cannot hold one.",
     },
     .{
+        .name = "half_a_column_type",
+        .says = "half_a_column_type.Money is being used as a column type and has `nilo_write` without `nilo_read`.",
+    },
+    .{
+        .name = "a_column_type_with_no_column",
+        .says = "a_column_type_with_no_column.Span reads and writes itself as text and has not said which column it is.",
+    },
+    .{
         .name = "row_lock_outside_a_transaction",
         .says = "`db.select` on row_lock_outside_a_transaction.User was given a `.lock`, and there is no transaction to hold it.",
     },

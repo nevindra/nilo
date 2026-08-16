@@ -115,6 +115,60 @@ An array is judged **exactly** at startup: an `int4[]` column reads into a
 an `i64`. And a Row that reads an array cannot be `db.stream`ed, for the same
 reason a `Json` column cannot — see [Streaming](#streaming-a-result-set-too-big-to-hold).
 
+### A column type of your own
+
+The types above are the ones this module chose to know about, and Postgres has
+hundreds more — `interval`, `inet`, `money`, `tsvector`, everything an
+extension installs. The list is not closed:
+
+```zig
+const Money = sql.AsText("money");
+
+const Sale = struct {
+    pub const nilo_table = .{ .name = "sales", .key = .id };
+
+    id: i64,
+    amount: Money,           // money
+};
+
+const shown = sale.amount.text;    // "$1,234.56", as Postgres printed it
+```
+
+`sql.Interval` and `sql.Inet` are two of those written out for you, and
+`sql.Decimal` is a third — there is no special case underneath any of them.
+
+A type that wants **structure** rather than text writes the protocol itself.
+Three declarations make anything a column type:
+
+```zig
+const Cents = struct {
+    value: i64,
+
+    pub const nilo_column = "numeric";
+
+    pub fn nilo_read(text: []const u8, arena: std.mem.Allocator) !Cents {
+        … parse "12.34" into 1234 …
+    }
+
+    pub fn nilo_write(self: Cents, arena: std.mem.Allocator) ![]const u8 {
+        return std.fmt.allocPrint(arena, "{d}.{d:0>2}", .{ … });
+    }
+};
+```
+
+It travels as the text Postgres prints — `"amount"::text` on the way out,
+`$1::numeric` on the way in — which is the one representation every Postgres
+type has, and it is why this module does not need to know what your type is
+([ADR 0055](../adr/0055-a-column-type-can-come-from-outside-this-module.md)).
+The column is checked against the table at startup like any other, and the
+type works everywhere a column type works: conditions, `.set`, `insert`, a
+batch.
+
+Two mistakes stop at compile time — one of `nilo_read`/`nilo_write` without
+the other, and both without a `nilo_column`. One thing is still closed: an
+**array** of one is not read, the same boundary `[]const sql.Decimal` has
+always had.
+
 ## The query is a constant
 
 ```zig

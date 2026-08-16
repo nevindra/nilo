@@ -135,12 +135,18 @@ const setup =
     // Unconstrained `numeric`, so the precision this can hold is Postgres's
     // rather than a column definition's — which is what makes the round-trip
     // test below mean something.
-    "  balance numeric NOT NULL DEFAULT 0" ++
+    "  balance numeric NOT NULL DEFAULT 0," ++
+    // Two column types this module has never had a Zig word for, and the
+    // reason they are here rather than in a table of their own: they are read
+    // through the same protocol a project's own column type uses, so a test
+    // that they round-trip is a test that the protocol does (ADR 0055).
+    "  stay interval," ++
+    "  origin inet" ++
     ");" ++
-    "INSERT INTO " ++ table ++ " (id, email, handle, age, token, settings, role) VALUES" ++
-    "  (1, 'ada@example.dev', 'ada', 36, '550e8400-e29b-41d4-a716-446655440000', '{\"theme\":\"dark\"}', 'admin')," ++
-    "  (2, 'grace@example.dev', NULL, 45, NULL, NULL, 'member')," ++
-    "  (3, 'kid@example.dev', 'kid', 11, '550e8400-e29b-41d4-a716-446655440001', '{\"theme\":\"light\"}', 'moderator');" ++
+    "INSERT INTO " ++ table ++ " (id, email, handle, age, token, settings, role, stay, origin) VALUES" ++
+    "  (1, 'ada@example.dev', 'ada', 36, '550e8400-e29b-41d4-a716-446655440000', '{\"theme\":\"dark\"}', 'admin', '3 days 04:05:06', '192.168.0.1')," ++
+    "  (2, 'grace@example.dev', NULL, 45, NULL, NULL, 'member', NULL, NULL)," ++
+    "  (3, 'kid@example.dev', 'kid', 11, '550e8400-e29b-41d4-a716-446655440001', '{\"theme\":\"light\"}', 'moderator', '1 mon', '10.0.0.7/24');" ++
     "DROP TABLE IF EXISTS " ++ list_table ++ ";" ++
     "CREATE TABLE " ++ list_table ++ " (" ++
     "  id bigint PRIMARY KEY," ++
@@ -1354,6 +1360,171 @@ test "a deadline ends with its transaction, so the next one starts clean" {
         try testing.expectEqual(@as(usize, 1), slept.len);
         try tx.commit();
     }
+}
+
+// -- a column type this module did not choose -----------------------------
+
+/// The two the checklist named, read through the protocol rather than through
+/// a branch of their own.
+const Booking = struct {
+    pub const nilo_table = .{ .name = table, .key = .id };
+
+    id: i64,
+    email: []const u8,
+    age: i32,
+    stay: ?types.Interval,
+    origin: ?types.Inet,
+};
+
+test "an interval and an inet round-trip as the text postgres prints" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const read = (try stack.db.find(Booking, &run, @as(i64, 1))).?;
+    try testing.expectEqualStrings("3 days 04:05:06", read.stay.?.text);
+    // With the mask, because `inet::text` always prints one — `inet_out` and
+    // `host()` do not, and the text a text column carries is the cast's.
+    try testing.expectEqualStrings("192.168.0.1/32", read.origin.?.text);
+
+    // A null in either is a null, the way it is for every other column.
+    const empty = (try stack.db.find(Booking, &run, @as(i64, 2))).?;
+    try testing.expectEqual(@as(?types.Interval, null), empty.stay);
+    try testing.expectEqual(@as(?types.Inet, null), empty.origin);
+
+    // And the write half, which is the one that cannot work without the cast:
+    // pg.zig has no encoder for either type, so what makes this land is
+    // `$4::interval` rather than anything the driver knows.
+    const made = try stack.db.insert(Booking, &run, .{
+        .id = @as(i64, 720),
+        .email = "span@example.dev",
+        .age = @as(i32, 30),
+        .stay = @as(?types.Interval, .{ .text = "2 days 01:00:00" }),
+        .origin = @as(?types.Inet, .{ .text = "172.16.0.9/32" }),
+    });
+    defer _ = stack.db.delete(Booking, &run, .{ .where = .{ .id = @as(i64, 720) } }) catch {};
+
+    try testing.expectEqualStrings("2 days 01:00:00", made.stay.?.text);
+    try testing.expectEqualStrings("172.16.0.9/32", made.origin.?.text);
+}
+
+test "an interval column is judged at startup like any other" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+
+    const columns = try stack.live.wire.columnsOf(
+        arena.allocator(),
+        dialect.Postgres.introspect,
+        null,
+        table,
+    );
+    var problems: std.ArrayList(schema.Problem) = .empty;
+
+    // The schema half was already open — this is the check that the name a
+    // text column declares is the name the comparison uses, so a Row reading
+    // `stay` as an `Inet` would be caught before the first request.
+    try testing.expectEqual(@as(usize, 0), try schema.compare(
+        dialect.Postgres,
+        Booking,
+        columns,
+        &problems,
+        arena.allocator(),
+    ));
+
+    const Wrong = struct {
+        pub const nilo_table = .{ .name = table, .key = .id };
+        id: i64,
+        stay: ?types.Inet,
+    };
+    try testing.expect(try schema.compare(
+        dialect.Postgres,
+        Wrong,
+        columns,
+        &problems,
+        arena.allocator(),
+    ) > 0);
+}
+
+/// A column type a **project** declared, holding structure rather than text.
+///
+/// This is the case `AsText` cannot stand in for and the reason `nilo_read`
+/// and `nilo_write` take an allocator: the value is an integer, the column is
+/// a `numeric`, and going either way means building bytes that were not there
+/// before.
+const Cents = struct {
+    value: i64,
+
+    pub const nilo_column = "numeric";
+
+    pub fn nilo_read(raw: []const u8, arena: std.mem.Allocator) !Cents {
+        _ = arena;
+        const dot = std.mem.indexOfScalar(u8, raw, '.') orelse
+            return .{ .value = try std.fmt.parseInt(i64, raw, 10) * 100 };
+        const whole = try std.fmt.parseInt(i64, raw[0..dot], 10);
+        // Two digits, padded, so `1.5` is 150 rather than 15.
+        var fraction: i64 = 0;
+        for (0..2) |i| {
+            const digit: i64 = if (dot + 1 + i < raw.len) raw[dot + 1 + i] - '0' else 0;
+            fraction = fraction * 10 + digit;
+        }
+        return .{ .value = whole * 100 + fraction };
+    }
+
+    pub fn nilo_write(self: Cents, arena: std.mem.Allocator) ![]const u8 {
+        // `@abs` because the remainder of a negative carries the sign, and a
+        // padded `-4` is not two digits of a `numeric`.
+        return std.fmt.allocPrint(arena, "{d}.{d:0>2}", .{
+            @divTrunc(self.value, 100),
+            @abs(@rem(self.value, 100)),
+        });
+    }
+};
+
+const Purse = struct {
+    pub const nilo_table = .{ .name = table, .key = .id };
+
+    id: i64,
+    email: []const u8,
+    age: i32,
+    balance: Cents,
+};
+
+test "a column type a project wrote reads and writes through the same seam" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const made = try stack.db.insert(Purse, &run, .{
+        .id = @as(i64, 721),
+        .email = "cents@example.dev",
+        .age = @as(i32, 30),
+        .balance = Cents{ .value = 1234 },
+    });
+    defer _ = stack.db.delete(Purse, &run, .{ .where = .{ .id = @as(i64, 721) } }) catch {};
+
+    // `12.34` went down the wire, and an integer came back — neither of which
+    // this module knows anything about. `nilo_write` allocated the digits in
+    // the request arena, which is the whole reason it is handed one.
+    try testing.expectEqual(@as(i64, 1234), made.balance.value);
+
+    const back = (try stack.db.find(Purse, &run, @as(i64, 721))).?;
+    try testing.expectEqual(@as(i64, 1234), back.balance.value);
+
+    // And it is a condition like any other, cast the same way.
+    const found = try stack.db.select(Purse, &run, .{
+        .where = .{ .id = @as(i64, 721), .balance = .{ .gt = Cents{ .value = 1000 } } },
+    });
+    try testing.expectEqual(@as(usize, 1), found.len);
 }
 
 // -- what a transaction is begun with, and what a read holds --------------

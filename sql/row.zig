@@ -197,7 +197,7 @@ fn borrowedType(comptime T: type) type {
         // becomes `[]const u8` rather than a borrowed `Decimal`, because a
         // type whose whole content is a slice should say out loud how long
         // that slice is good for.
-        if (types_mod.isDecimal(T)) return if (@typeInfo(T) == .optional) ?[]const u8 else []const u8;
+        if (types_mod.asText(T) != null) return if (@typeInfo(T) == .optional) ?[]const u8 else []const u8;
         return T;
     }
 }

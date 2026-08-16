@@ -1061,8 +1061,40 @@ than asking the server to release a mark it no longer has.
 | `sql.Uuid` | `nilo_id`'s [`Uuid`](#nilo_id), re-exported — the same type either import gives you. `uuid` |
 | `sql.Json(T)` | a `T` stored as `jsonb`, parsed per row into the request arena. Not available in `db.stream`, which allocates nothing |
 | `sql.Decimal` | a `numeric`, held as its digits. `.text` is the value; there is no arithmetic. Writes itself into JSON as a **string**, so a consumer's `JSON.parse` cannot round it into an `f64` ([ADR 0050](./adr/0050-a-numeric-is-digits-and-a-string-in-json.md)) |
+| `sql.Interval`, `sql.Inet` | an `interval` and an `inet`, held as the text Postgres prints. `.text` is the value |
+| `sql.AsText("money")` | any Postgres type at all, held as its text — the door out of this table. A column type of your own is any struct or enum with `nilo_column`, `nilo_read(text, arena)` and `nilo_write(arena)`; see below |
 | a slice | an array column, with no wrapper: `[]const Str` is `text[]`, `[]const i32` is `int4[]`, `?[]const i32` a nullable one, `[]const ?i32` one whose elements may be NULL ([ADR 0051](./adr/0051-an-array-is-a-slice-and-a-slice-is-one-deep.md)). `[]const u8` is text, so a list of text is `[]const Str` or `[]const []const u8`. Not available in `db.stream` |
 | an enum | read out of `text`, a `varchar` or a Postgres enum. A value the Zig enum does not have fails the request. Add `pub const nilo_column = "user_role"` to it and the column is checked at startup — and can be batched |
+
+#### A column type of your own
+
+The list above is what this module chose to know about, and it is not closed.
+A struct or an enum carrying three declarations is a column type:
+
+```zig
+const Cents = struct {
+    value: i64,
+
+    pub const nilo_column = "numeric";
+
+    pub fn nilo_read(text: []const u8, arena: std.mem.Allocator) !Cents { … }
+    pub fn nilo_write(self: Cents, arena: std.mem.Allocator) ![]const u8 { … }
+};
+```
+
+It travels as the text Postgres prints — `"col"::text` on the way out,
+`$1::numeric` on the way in — which is the one representation every Postgres
+type has, including the ones that arrive with an extension
+([ADR 0055](./adr/0055-a-column-type-can-come-from-outside-this-module.md)).
+The column is judged at startup like any other, and the type works everywhere
+a column type does: conditions, `.set`, `insert`, a batch.
+
+`sql.AsText(name)` is the whole of that for a type that is just the text, and
+`sql.Decimal`, `sql.Interval` and `sql.Inet` are three instances of it.
+
+Two mistakes stop at compile time: one of `nilo_read`/`nilo_write` without the
+other, and both without a `nilo_column`. **An array of one is not read** —
+`[]const Decimal` is the same boundary it always was.
 
 An array column is judged **exactly**: an `int4[]` reads into a `[]const i32`
 and not into a `[]const i64`, because the driver picks its element decoder off

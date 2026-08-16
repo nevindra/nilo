@@ -261,7 +261,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
                 "Begin one and ask there: `var tx = try db.begin(c, .{}); defer tx.deinit();` " ++
                     "and then `tx.select(…)`.");
             const stmt = comptime statement.select(D, Row, @TypeOf(options));
-            return fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, options));
+            return fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, try valuesOf(stmt, Row, options, c));
         }
 
         /// The first row matching `options`, or null.
@@ -278,7 +278,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
                 "Begin one and ask there: `var tx = try db.begin(c, .{}); defer tx.deinit();` " ++
                     "and then `tx.one(…)`.");
             const stmt = comptime statement.one(D, Row, @TypeOf(options));
-            const found = try fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, options));
+            const found = try fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, try valuesOf(stmt, Row, options, c));
             return if (found.len == 0) null else found[0];
         }
 
@@ -299,7 +299,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         pub fn find(self: *Self, comptime Row: type, c: anytype, key: anytype) !?Row {
             comptime core.checkScope(@TypeOf(c), "db.find");
             const stmt = comptime statement.find(D, Row, @TypeOf(key));
-            const found = try fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, key));
+            const found = try fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, try valuesOf(stmt, Row, key, c));
             return if (found.len == 0) null else found[0];
         }
 
@@ -312,7 +312,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         pub fn count(self: *Self, comptime Row: type, c: anytype, options: anytype) !usize {
             comptime core.checkScope(@TypeOf(c), "db.count");
             const stmt = comptime statement.count(D, Row, @TypeOf(options));
-            const n = try only(i64, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, options));
+            const n = try only(i64, try self.wireOf(), null, c, stmt.sql, try valuesOf(stmt, Row, options, c));
             // `count(*)` is a `bigint` and never negative. A negative one
             // would mean the column read as something else entirely.
             if (n < 0) return error.QueryFailed;
@@ -327,7 +327,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         pub fn exists(self: *Self, comptime Row: type, c: anytype, options: anytype) !bool {
             comptime core.checkScope(@TypeOf(c), "db.exists");
             const stmt = comptime statement.exists(D, Row, @TypeOf(options));
-            return only(bool, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, options));
+            return only(bool, try self.wireOf(), null, c, stmt.sql, try valuesOf(stmt, Row, options, c));
         }
 
         /// Rows read one at a time, for a result set too big to hold.
@@ -356,7 +356,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
                     "what comes back.");
             const stmt = comptime statement.select(D, Row, @TypeOf(options));
             const w = try self.wireOf();
-            const rows = try w.run(c.arena(), stmt.sql, valuesOf(stmt, Row, options));
+            const rows = try w.run(c.arena(), stmt.sql, try valuesOf(stmt, Row, options, c));
             // Counted only once the statement is away, so a `stream` that
             // never opened is not a `stream` that was never closed.
             if (traps_enabled) self.hold(&self.open_streams, .Add);
@@ -397,7 +397,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             const stmt = comptime statement.insert(D, Row, @TypeOf(values));
             // `RETURNING` on a successful insert answers with exactly one
             // row, so the list is sized for one and never grows.
-            const back = try fill(Row, 1, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, values));
+            const back = try fill(Row, 1, try self.wireOf(), null, c, stmt.sql, try valuesOf(stmt, Row, values, c));
             // `RETURNING` on a successful insert answers with exactly one
             // row. Reaching here with none would mean the driver and
             // Postgres disagree about what happened, which is not something
@@ -506,7 +506,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         ) !?Row {
             comptime core.checkScope(@TypeOf(c), "db.insertOrIgnore");
             const stmt = comptime statement.insertOrIgnore(D, Row, @TypeOf(values), on);
-            const back = try fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, values));
+            const back = try fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, try valuesOf(stmt, Row, values, c));
             return if (back.len == 0) null else back[0];
         }
 
@@ -538,7 +538,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         ) !Row {
             comptime core.checkScope(@TypeOf(c), "db.insertOrUpdate");
             const stmt = comptime statement.insertOrUpdate(D, Row, @TypeOf(values), on);
-            const back = try fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, values));
+            const back = try fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, try valuesOf(stmt, Row, values, c));
             // `DO UPDATE` always touches a row, so an empty answer here means
             // the driver and Postgres disagree — the same reasoning as
             // `insert`, and the reason this one is not an optional.
@@ -555,7 +555,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             comptime core.checkScope(@TypeOf(c), "db.update");
             const stmt = comptime statement.update(D, Row, @TypeOf(options));
             const w = try self.wireOf();
-            return w.exec(c.arena(), stmt.sql, valuesOf(stmt, Row, options));
+            return w.exec(c.arena(), stmt.sql, try valuesOf(stmt, Row, options, c));
         }
 
         /// Change every row matching `.where` and give back what the database
@@ -573,7 +573,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         pub fn updateReturning(self: *Self, comptime Row: type, c: anytype, options: anytype) ![]Row {
             comptime core.checkScope(@TypeOf(c), "db.updateReturning");
             const stmt = comptime statement.updateReturning(D, Row, @TypeOf(options));
-            return fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, options));
+            return fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, try valuesOf(stmt, Row, options, c));
         }
 
         /// Delete every row matching `options`, and say how many there were.
@@ -581,7 +581,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             comptime core.checkScope(@TypeOf(c), "db.delete");
             const stmt = comptime statement.delete(D, Row, @TypeOf(options));
             const w = try self.wireOf();
-            return w.exec(c.arena(), stmt.sql, valuesOf(stmt, Row, options));
+            return w.exec(c.arena(), stmt.sql, try valuesOf(stmt, Row, options, c));
         }
 
         /// The same, answering with the rows that were removed.
@@ -593,7 +593,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         pub fn deleteReturning(self: *Self, comptime Row: type, c: anytype, options: anytype) ![]Row {
             comptime core.checkScope(@TypeOf(c), "db.deleteReturning");
             const stmt = comptime statement.deleteReturning(D, Row, @TypeOf(options));
-            return fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, options));
+            return fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, try valuesOf(stmt, Row, options, c));
         }
 
         // -- transactions ----------------------------------------------------
@@ -822,27 +822,27 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             pub fn select(self: *Tx, comptime Row: type, c: anytype, options: anytype) ![]Row {
                 comptime core.checkScope(@TypeOf(c), "tx.select");
                 const stmt = comptime statement.select(D, Row, @TypeOf(options));
-                return fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, options));
+                return fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, try valuesOf(stmt, Row, options, c));
             }
 
             pub fn one(self: *Tx, comptime Row: type, c: anytype, options: anytype) !?Row {
                 comptime core.checkScope(@TypeOf(c), "tx.one");
                 const stmt = comptime statement.one(D, Row, @TypeOf(options));
-                const found = try fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, options));
+                const found = try fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, try valuesOf(stmt, Row, options, c));
                 return if (found.len == 0) null else found[0];
             }
 
             pub fn find(self: *Tx, comptime Row: type, c: anytype, key: anytype) !?Row {
                 comptime core.checkScope(@TypeOf(c), "tx.find");
                 const stmt = comptime statement.find(D, Row, @TypeOf(key));
-                const found = try fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, key));
+                const found = try fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, try valuesOf(stmt, Row, key, c));
                 return if (found.len == 0) null else found[0];
             }
 
             pub fn count(self: *Tx, comptime Row: type, c: anytype, options: anytype) !usize {
                 comptime core.checkScope(@TypeOf(c), "tx.count");
                 const stmt = comptime statement.count(D, Row, @TypeOf(options));
-                const n = try only(i64, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, options));
+                const n = try only(i64, self.w, &self.inner, c, stmt.sql, try valuesOf(stmt, Row, options, c));
                 if (n < 0) return error.QueryFailed;
                 return @intCast(n);
             }
@@ -850,7 +850,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             pub fn exists(self: *Tx, comptime Row: type, c: anytype, options: anytype) !bool {
                 comptime core.checkScope(@TypeOf(c), "tx.exists");
                 const stmt = comptime statement.exists(D, Row, @TypeOf(options));
-                return only(bool, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, options));
+                return only(bool, self.w, &self.inner, c, stmt.sql, try valuesOf(stmt, Row, options, c));
             }
 
             pub fn insert(self: *Tx, comptime Row: type, c: anytype, values: anytype) !Row {
@@ -858,7 +858,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
                 const stmt = comptime statement.insert(D, Row, @TypeOf(values));
                 // `RETURNING` on a successful insert answers with exactly one
                 // row, so the list is sized for one and never grows.
-                const back = try fill(Row, 1, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, values));
+                const back = try fill(Row, 1, self.w, &self.inner, c, stmt.sql, try valuesOf(stmt, Row, values, c));
                 if (back.len == 0) return error.QueryFailed;
                 return back[0];
             }
@@ -904,7 +904,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             ) !?Row {
                 comptime core.checkScope(@TypeOf(c), "tx.insertOrIgnore");
                 const stmt = comptime statement.insertOrIgnore(D, Row, @TypeOf(values), on);
-                const back = try fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, values));
+                const back = try fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, try valuesOf(stmt, Row, values, c));
                 return if (back.len == 0) null else back[0];
             }
 
@@ -917,7 +917,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             ) !Row {
                 comptime core.checkScope(@TypeOf(c), "tx.insertOrUpdate");
                 const stmt = comptime statement.insertOrUpdate(D, Row, @TypeOf(values), on);
-                const back = try fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, values));
+                const back = try fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, try valuesOf(stmt, Row, values, c));
                 if (back.len == 0) return error.QueryFailed;
                 return back[0];
             }
@@ -925,25 +925,25 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             pub fn update(self: *Tx, comptime Row: type, c: anytype, options: anytype) !usize {
                 comptime core.checkScope(@TypeOf(c), "tx.update");
                 const stmt = comptime statement.update(D, Row, @TypeOf(options));
-                return self.inner.exec(c.arena(), stmt.sql, valuesOf(stmt, Row, options));
+                return self.inner.exec(c.arena(), stmt.sql, try valuesOf(stmt, Row, options, c));
             }
 
             pub fn updateReturning(self: *Tx, comptime Row: type, c: anytype, options: anytype) ![]Row {
                 comptime core.checkScope(@TypeOf(c), "tx.updateReturning");
                 const stmt = comptime statement.updateReturning(D, Row, @TypeOf(options));
-                return fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, options));
+                return fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, try valuesOf(stmt, Row, options, c));
             }
 
             pub fn delete(self: *Tx, comptime Row: type, c: anytype, options: anytype) !usize {
                 comptime core.checkScope(@TypeOf(c), "tx.delete");
                 const stmt = comptime statement.delete(D, Row, @TypeOf(options));
-                return self.inner.exec(c.arena(), stmt.sql, valuesOf(stmt, Row, options));
+                return self.inner.exec(c.arena(), stmt.sql, try valuesOf(stmt, Row, options, c));
             }
 
             pub fn deleteReturning(self: *Tx, comptime Row: type, c: anytype, options: anytype) ![]Row {
                 comptime core.checkScope(@TypeOf(c), "tx.deleteReturning");
                 const stmt = comptime statement.deleteReturning(D, Row, @TypeOf(options));
-                return fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, options));
+                return fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, try valuesOf(stmt, Row, options, c));
             }
 
             pub fn raw(
@@ -1166,7 +1166,11 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             // Digits copied out of the read buffer, the same one call a text
             // column costs — so a `numeric` adds no class of allocation the
             // row was not already paying for.
-            if (F == types.Decimal) return .{ .text = try c.arena().dupe(u8, value) };
+            // A text column builds itself, and keeps whatever it keeps: the
+            // bytes handed over are the read buffer's and die at the next row.
+            if (comptime types.asText(F) != null) {
+                return F.nilo_read(value, c.arena()) catch return error.QueryFailed;
+            }
             if (F == types.Timestamp) return .{ .micros = value };
             if (F == types.Uuid) return uuidOf(value);
             if (comptime types.jsonPayload(F)) |Payload| {
@@ -1271,14 +1275,19 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         /// nullable column is set to NULL, and there is nothing to strip it
         /// to. `= null` in a condition never reaches here at all, because it
         /// compiled to `IS NULL`, which takes no parameter (`where.zig`).
+        /// `c` is here for the one conversion that can need memory: a text
+        /// column that builds its text rather than holding it (ADR 0055).
+        /// Everything else is a copy, so the error set this infers is empty
+        /// for a Row with no such column and the `try` costs nothing.
         fn valuesOf(
             comptime stmt: statement.Statement,
             comptime Row: type,
             options: anytype,
-        ) Values(Row, @TypeOf(options), stmt) {
+            c: anytype,
+        ) !Values(Row, @TypeOf(options), stmt) {
             var out: Values(Row, @TypeOf(options), stmt) = undefined;
             inline for (stmt.paths, 0..) |path, i| {
-                out[i] = forWire(@TypeOf(out[i]), where_mod.valueAt(options, path));
+                out[i] = try forWire(@TypeOf(out[i]), where_mod.valueAt(options, path), c);
             }
             return out;
         }
@@ -1386,7 +1395,7 @@ fn forBatch(comptime To: type, value: anytype, c: anytype) !To {
         if (value.* == null) return null;
         return try jsonBytes(value.*.?, c);
     }
-    return forWire(To, value.*);
+    return forWire(To, value.*, c);
 }
 
 /// A `Json(T)` written out, in the request arena. `std.json` finds the
@@ -1487,10 +1496,12 @@ fn WireRead(comptime F: type) type {
         if (F == types.Uuid) return []const u8;
         if (types.jsonPayload(F) != null) return []const u8;
         if (@typeInfo(F) == .@"enum") return []const u8;
-        // A `Decimal` was asked for as `::text`, so what arrives is the
-        // digits — the Dialect did the conversion in the SELECT list rather
-        // than leaving a wire format for this layer to decode.
-        if (types.isDecimal(F)) return []const u8;
+        // A text column was asked for as `::text`, so what arrives is what
+        // Postgres printed — the Dialect did the conversion in the SELECT
+        // list rather than leaving a wire format for this layer to decode.
+        // It is the whole of how a type this module has never heard of is
+        // read at all (ADR 0055).
+        if (types.asText(F) != null) return []const u8;
         return F;
     }
 }
@@ -1661,12 +1672,9 @@ fn WireWrite(comptime F: type) type {
         if (F == ?types.Timestamp) return ?i64;
         if (F == types.Uuid) return [types.Uuid.byte_len]u8;
         if (F == ?types.Uuid) return ?[types.Uuid.byte_len]u8;
-        // The digits, which the Dialect wrapped in a `::numeric` where the
-        // placeholder goes. The slice points at the caller's own text and
-        // only has to survive the call, which is the rule for everything on
-        // this side.
-        if (F == types.Decimal) return []const u8;
-        if (F == ?types.Decimal) return ?[]const u8;
+        // The text, which the Dialect wrapped in a `::numeric`, `::interval`
+        // or whatever the type named, where the placeholder goes.
+        if (types.asText(F) != null) return if (@typeInfo(F) == .optional) ?[]const u8 else []const u8;
         // A list column binds as a list of what its elements bind as, which
         // for text is `[]const u8` for the same reason a scalar `Str` is not
         // asked for here. `.tags = &.{ "urgent", "billing" }` is the shape
@@ -1680,14 +1688,23 @@ fn WireWrite(comptime F: type) type {
 /// understands is handed over unchanged and coerced by the assignment; the
 /// two types carrying a column shape Zig has no word for are opened here,
 /// which is the same conversion `kept` makes coming back.
-fn forWire(comptime To: type, value: anytype) To {
+fn forWire(comptime To: type, value: anytype, c: anytype) !To {
     const V = @TypeOf(value);
     if (V == types.Timestamp) return value.micros;
     if (V == ?types.Timestamp) return if (value) |t| t.micros else null;
     if (V == types.Uuid) return value.bytes;
     if (V == ?types.Uuid) return if (value) |u| u.bytes else null;
-    if (V == types.Decimal) return value.text;
-    if (V == ?types.Decimal) return if (value) |d| d.text else null;
+    // A text column writes itself. The arena is here for one that has to
+    // build its text rather than hold it; the ones this module ships hold it
+    // and never touch the allocator, which is why nothing extra is allocated
+    // by a statement that does not carry such a column (ADR 0055).
+    if (comptime types.asText(V) != null) {
+        if (comptime @typeInfo(V) == .optional) {
+            const Inner = comptime @typeInfo(V).optional.child;
+            return if (value) |held| try Inner.nilo_write(held, c.arena()) else null;
+        }
+        return V.nilo_write(value, c.arena());
+    }
     return value;
 }
 

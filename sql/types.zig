@@ -30,6 +30,20 @@
 //! re-exported, because generating a key and reading one back are the same
 //! sixteen bytes and only one of those two jobs is about a database (ADR
 //! 0042). What stayed is this module's opinion about which column it goes in.
+//!
+//! ## The list is not closed
+//!
+//! Everything above is a type this module *chose* to know about, and a list
+//! chosen by one module is a list that stops somewhere. Past it is a
+//! protocol: a struct or an enum carrying `nilo_column`, `nilo_read(text,
+//! arena)` and `nilo_write(arena)` is a column type, whoever wrote it, and it
+//! travels as the text Postgres prints — `"col"::text` out, `$1::inet` in.
+//!
+//! `AsText(name)` is that protocol's smallest instance, `Interval` and `Inet`
+//! are two instances of `AsText`, and **`Decimal` is one too** — which is the
+//! argument for the protocol rather than a coincidence. The hardest column
+//! type this module ships is expressible in it, so the door is wide enough
+//! (ADR 0055).
 
 const std = @import("std");
 const core = @import("nilo_core");
@@ -145,21 +159,120 @@ pub const Uuid = id.Uuid;
 /// and `$1::numeric` on the way in — because Postgres keeps a `numeric` in a
 /// binary form the driver can only build from a float. The cast is what makes
 /// the round trip exact, and it is the Dialect that writes it.
-pub const Decimal = struct {
-    /// The digits as Postgres printed them: `1234.56`, `-0.004`, `nan`.
-    /// Request-lifetime, like any other text a row comes back with.
-    text: []const u8,
+pub const Decimal = AsText("numeric");
 
-    pub const nilo_column = "numeric";
+/// A column read and written as **text**, whichever Postgres type it is.
+///
+/// This is the escape hatch the rest of this file used not to have. Every
+/// other type here is one this module chose to know about; past them the wire
+/// half was closed, so a project with an `interval`, an `inet`, a `money` or
+/// a PostGIS `geometry` could name the column in a schema check and then not
+/// read it. `AsText` opens it, and it opens it with the one representation
+/// Postgres guarantees for everything it has: `column::text` on the way out,
+/// `$1::interval` on the way in.
+///
+/// ```zig
+/// const Money = sql.AsText("money");
+///
+/// const Sale = struct {
+///     pub const nilo_table = .{ .name = "sales", .key = .id };
+///     id: i64,
+///     amount: Money,
+/// };
+/// ```
+///
+/// The value is the text Postgres prints, kept in the request arena like any
+/// other text a row comes back with, and written into JSON as a string. What
+/// it means is the caller's business — this type carries a value and knows
+/// how to write itself, which is the line every type in this file holds.
+///
+/// **A project that wants structure rather than text writes the protocol
+/// itself** rather than using this: any struct or enum with `nilo_column`,
+/// `nilo_read(text, arena)` and `nilo_write(arena)` is a column type, and
+/// this is that protocol's smallest instance
+/// ([ADR 0055](../docs/adr/0055-a-column-type-can-come-from-outside-this-module.md)).
+pub fn AsText(comptime column: []const u8) type {
+    return struct {
+        const Self = @This();
 
-    /// Asked by the Dialect, which has to know before it writes the SQL
-    /// rather than after the value arrives.
-    pub const nilo_decimal = {};
+        /// Exactly what Postgres printed: `1234.56`, `3 days 04:05:06`,
+        /// `192.168.0.1/24`.
+        text: []const u8,
 
-    pub fn jsonStringify(self: Decimal, jw: anytype) !void {
-        try jw.write(self.text);
-    }
-};
+        pub const nilo_column = column;
+
+        /// Kept, because the bytes handed over are the driver's read buffer
+        /// and die at the next row (`wire.zig`).
+        pub fn nilo_read(raw: []const u8, arena: std.mem.Allocator) !Self {
+            return .{ .text = try arena.dupe(u8, raw) };
+        }
+
+        /// The text as it stands. Nothing to build, so the arena goes unused
+        /// — a type that has to format itself is the reason the parameter is
+        /// there at all.
+        pub fn nilo_write(self: Self, arena: std.mem.Allocator) ![]const u8 {
+            _ = arena;
+            return self.text;
+        }
+
+        pub fn jsonStringify(self: Self, jw: anytype) !void {
+            try jw.write(self.text);
+        }
+    };
+}
+
+/// A `interval` column, as Postgres prints it — `3 days 04:05:06`.
+///
+/// Text rather than a struct of months, days and microseconds, for the reason
+/// at the top of this file: an interval is only *useful* as a struct if
+/// something adds it to a date, and calendar arithmetic is the half of a date
+/// library that has nothing to do with a database.
+pub const Interval = AsText("interval");
+
+/// An `inet` column — an address, with an optional mask: `192.168.0.1/24`,
+/// `::1`. `cidr` is `AsText("cidr")` and is a different column type, so it is
+/// not this one under another name.
+pub const Inet = AsText("inet");
+
+/// The Postgres type a text column names, or null when `T` is not one.
+///
+/// A type is one when it carries `nilo_read` and `nilo_write` beside its
+/// `nilo_column`. Carrying one of the pair and not the other is a Refusal
+/// rather than a type quietly treated as something else: the two are how a
+/// value gets there and back, and half of that is a column that can be
+/// written and never read.
+pub fn asText(comptime T: type) ?[]const u8 {
+    return comptime blk: {
+        const Inner = switch (@typeInfo(T)) {
+            .optional => |o| o.child,
+            else => T,
+        };
+        switch (@typeInfo(Inner)) {
+            .@"struct", .@"enum" => {},
+            else => break :blk null,
+        }
+
+        const reads = @hasDecl(Inner, "nilo_read");
+        const writes = @hasDecl(Inner, "nilo_write");
+        if (!reads and !writes) break :blk null;
+        if (reads != writes) @compileError(
+            "nilo: " ++ @typeName(Inner) ++ " is being used as a column type and has `" ++
+                (if (reads) "nilo_read" else "nilo_write") ++ "` without `" ++
+                (if (reads) "nilo_write" else "nilo_read") ++ "`.\n" ++
+                "  A column type travels both ways: `nilo_read(text, arena)` builds one " ++
+                "out of what Postgres printed, `nilo_write(arena)` gives back the text to " ++
+                "send. `sql.AsText(\"…\")` is both of them for a type that is just the text.",
+        );
+
+        break :blk declaredColumn(Inner) orelse @compileError(
+            "nilo: " ++ @typeName(Inner) ++ " reads and writes itself as text and has not " ++
+                "said which column it is.\n" ++
+                "  Add `pub const nilo_column = \"interval\"` — the Postgres type name, " ++
+                "which is what the cast on both sides of the wire has to spell and what " ++
+                "the schema check compares against.",
+        );
+    };
+}
 
 /// The element type of a list column — `text[]`, `int4[]` — or null when `T`
 /// is not one.
@@ -187,17 +300,6 @@ pub fn listElement(comptime T: type) ?type {
     // Text, and the one slice this cannot claim.
     if (info.pointer.child == u8) return null;
     return info.pointer.child;
-}
-
-/// Whether `T` is a `Decimal`, optional included. The Dialect asks this while
-/// building a statement, so it is a comptime question about a type and never
-/// about a value.
-pub fn isDecimal(comptime T: type) bool {
-    const Inner = switch (@typeInfo(T)) {
-        .optional => |o| o.child,
-        else => T,
-    };
-    return @typeInfo(Inner) == .@"struct" and @hasDecl(Inner, "nilo_decimal");
 }
 
 /// A `json` or `jsonb` column, read into a struct of the caller's own.
@@ -365,12 +467,57 @@ test "a Decimal is the one column type that can carry what JSON has no number fo
     try testing.expectEqualStrings("\"nan\"", w.buffered());
 }
 
-test "a Decimal is recognised through an optional, because a column may be null" {
-    try testing.expect(isDecimal(Decimal));
-    try testing.expect(isDecimal(?Decimal));
-    try testing.expect(!isDecimal(f64));
-    try testing.expect(!isDecimal([]const u8));
-    try testing.expect(!isDecimal(Timestamp));
+test "a text column is recognised through an optional, because a column may be null" {
+    try testing.expectEqualStrings("numeric", asText(Decimal).?);
+    try testing.expectEqualStrings("numeric", asText(?Decimal).?);
+    try testing.expectEqual(@as(?[]const u8, null), asText(f64));
+    try testing.expectEqual(@as(?[]const u8, null), asText([]const u8));
+    // The other types with an opinion about their column are not text
+    // columns: each has a shape on the wire this module already decodes.
+    try testing.expectEqual(@as(?[]const u8, null), asText(Timestamp));
+    try testing.expectEqual(@as(?[]const u8, null), asText(Uuid));
+    try testing.expectEqual(@as(?[]const u8, null), asText(Json(struct { a: u8 })));
+}
+
+test "the text columns this module ships name the postgres types they are" {
+    try testing.expectEqualStrings("numeric", asText(Decimal).?);
+    try testing.expectEqualStrings("interval", asText(Interval).?);
+    try testing.expectEqualStrings("inet", asText(Inet).?);
+    // And one a project declared, which is the point of the escape hatch.
+    const Money = AsText("money");
+    try testing.expectEqualStrings("money", asText(Money).?);
+    try testing.expectEqualStrings("money", declaredColumn(Money).?);
+}
+
+test "a text column keeps what it was given rather than the read buffer" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var buffer = [_]u8{ '1', '.', '5' };
+    const held = try Decimal.nilo_read(&buffer, arena.allocator());
+    // The bytes the driver hands over die at the next row, so a column type
+    // that pointed at them would be a dangling read one statement later.
+    buffer = [_]u8{ '9', '9', '9' };
+    try testing.expectEqualStrings("1.5", held.text);
+
+    const back = try held.nilo_write(arena.allocator());
+    try testing.expectEqualStrings("1.5", back);
+}
+
+test "a text column keeps a name a reader can act on" {
+    // `AsText` is a generic, so its instances are named after the call. That
+    // name reaches every Refusal that prints a column type, which is the one
+    // place a reader sees it — `types.AsText("numeric")` says both what it is
+    // and which column, where a bare `Decimal` said only the first.
+    try testing.expect(std.mem.indexOf(u8, @typeName(Decimal), "numeric") != null);
+    try testing.expect(std.mem.indexOf(u8, @typeName(Interval), "interval") != null);
+}
+
+test "two text columns of different types are two types" {
+    // Not a tautology: they are the same struct body, and if the column name
+    // did not reach the type then an `interval` would bind as an `inet`.
+    try testing.expect(Interval != Inet);
+    try testing.expect(AsText("money") == AsText("money"));
 }
 
 test "a Json column names the type it carries" {

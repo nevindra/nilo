@@ -55,6 +55,7 @@ Measured stripped, `ReleaseFast`, on the examples in this repository.
 | One pass through a WebSocket message, and a broadcast framed once ([ADR 0052](./0052-a-message-is-copied-once-and-framed-once.md)) | +0 | +0 |
 | Everything `nilo_sql` gained in this cycle — `Decimal`, `ON CONFLICT`, `tx.deadline`, array columns, `insertMany` ([ADRs 0047](./0047-a-deadline-needs-a-connection-you-hold.md), [0050](./0050-a-numeric-is-digits-and-a-string-in-json.md)–[0051](./0051-an-array-is-a-slice-and-a-slice-is-one-deep.md), [0053](./0053-a-batch-is-one-array-per-column.md)) | +0 | +0 |
 | Isolation levels, row locks and savepoints ([ADR 0054](./0054-contention-is-what-a-transaction-is-for.md)) | +0 | +0 |
+| A column type declared outside this module ([ADR 0055](./0055-a-column-type-can-come-from-outside-this-module.md)) | +0 | +0 |
 
 The second row is one measurement of six changes because they landed together, which is a worse record than the first row and is noted as such. The split it does show is the useful part: `hello` has one route returning text and pays +6 KB, which is the failure-body writer and nothing else — that part is unconditional. The remaining +8 KB on `rest` is the body describer and the schema walker, and those are generated per body type, so they are paid by applications that have bodies.
 
