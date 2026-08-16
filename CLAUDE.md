@@ -166,9 +166,19 @@ is the design rationale, including the alternatives that were measured and
 dropped. Keep that habit — several of them exist because a number was measured
 wrong once and corrected in place.
 
-**Commit subjects are imperative sentences about the effect**, not conventional-
-commit prefixes: "Stop the router reading routes that cannot match", "Give an
-idle connection its pages back".
+**Commits are conventional-commit prefixes, and the body is short.** The subject
+is `type: imperative sentence about the effect` — `feat`, `fix`, `refactor`,
+`perf`, `docs`, `test`, `build`, `chore`, with `!` for a break. Say what
+changed, not which files: `fix: stop the router reading routes that cannot
+match`, not `fix: router.zig`.
+
+The body is optional and earns its place by explaining *why* or naming a number
+— **a few sentences, not three paragraphs.** The long-form account belongs in
+the places built for it: what was measured and what turned out false in
+`docs/history.md`, the decision and its rejected alternative in `docs/adr/`,
+what a reader has to change in `CHANGELOG.md`. A commit body that repeats those
+is a fourth copy to keep in step. Commits before `b662f01` are bare imperative
+sentences with long bodies, which is the older convention rather than a mistake.
 
 **Documentation is part of the change**, not a follow-up: a design decision goes
 in a new `docs/adr/` file, what got built and what was measured goes in
