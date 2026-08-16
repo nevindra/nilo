@@ -49,6 +49,35 @@ const types_mod = @import("types.zig");
 /// is shape, and a sort direction chosen at runtime is two statements.
 pub const Direction = enum { asc, desc };
 
+/// The name a statement is prepared under, on a connection that keeps plans.
+///
+/// **Derived from the text, which is what makes it possible at all.** Every
+/// statement this module sends is a comptime constant (ADR 0039), so the same
+/// query always hashes to the same name and the set of names a program can
+/// ever use is fixed when the binary is built. A library that assembles its
+/// SQL per request has neither property: its cache would be keyed on a string
+/// it just built, and would grow with traffic rather than with the program.
+///
+/// **Two independent 64-bit hashes rather than one, and the reason is what a
+/// collision would do.** A cache hit re-binds against the *stored* describe
+/// without looking at the SQL again, so two statements sharing a name means
+/// one of them silently runs the other's plan. pg.zig catches the case where
+/// the parameter counts differ — that is how this was found — and says
+/// nothing at all when they match. At 128 bits, a thousand distinct
+/// statements collide with probability around 10⁻³⁴; at 64 it would be 10⁻¹⁴,
+/// which is small and is not the same kind of small as impossible
+/// ([ADR 0057](../docs/adr/0057-a-statement-that-is-a-constant-can-be-prepared-once.md)).
+///
+/// 37 characters, comfortably inside Postgres's 63-byte identifier limit.
+pub fn planName(comptime sql: []const u8) []const u8 {
+    return comptime blk: {
+        @setEvalBranchQuota(20 * sql.len + 1_000);
+        const low = std.hash.Wyhash.hash(0, sql);
+        const high = std.hash.Wyhash.hash(0x9e3779b97f4a7c15, sql);
+        break :blk std.fmt.comptimePrint("nilo_{x:0>16}{x:0>16}", .{ low, high });
+    };
+}
+
 /// The Row's table, quoted, with its schema in front when the Row named one.
 /// One function rather than seven call sites, because a `FROM` and an
 /// `INSERT INTO` have to spell the same relation the same way.
@@ -1604,4 +1633,32 @@ test "a write on a narrower Row goes to the table it borrows" {
         "INSERT INTO \"users\" (\"email\") VALUES ($1) RETURNING \"id\", \"email\"",
         found.sql,
     );
+}
+
+test "two statements that differ by one character are prepared under two names" {
+    // The failure this rules out is silent: a cache hit re-binds against the
+    // stored describe without reading the SQL, so a shared name means one
+    // statement quietly runs the other's plan. `email`/`emaiL` is the
+    // smallest difference SQL can have.
+    const a = comptime planName("SELECT \"email\" FROM \"people\" WHERE \"id\" = $1");
+    const b = comptime planName("SELECT \"emaiL\" FROM \"people\" WHERE \"id\" = $1");
+    try testing.expect(!std.mem.eql(u8, a, b));
+
+    // And the same text always gives the same name, or nothing would ever
+    // hit the cache at all.
+    try testing.expectEqualStrings(
+        a,
+        comptime planName("SELECT \"email\" FROM \"people\" WHERE \"id\" = $1"),
+    );
+}
+
+test "a plan name is an identifier Postgres will accept" {
+    // 63 bytes is Postgres's limit, and a name over it is silently truncated
+    // — which turns a unique name back into a colliding one. The leading
+    // character has to be a letter or an underscore, so the prefix is not
+    // decoration.
+    const name = comptime planName(select(Pg, User, @TypeOf(.{})).sql);
+    try testing.expect(name.len < 63);
+    try testing.expect(std.mem.startsWith(u8, name, "nilo_"));
+    for (name) |ch| try testing.expect(std.ascii.isAlphanumeric(ch) or ch == '_');
 }

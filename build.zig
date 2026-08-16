@@ -1096,6 +1096,58 @@ pub fn build(b: *std.Build) void {
     const live_config = b.addOptions();
     live_config.addOption(?[]const u8, "database_url", database_url);
 
+    // What a per-connection statement cache is worth, which ADR 0001's 10%
+    // needed a number for before anything was built (ADR 0057). Its own step
+    // rather than part of `profile`, because it needs a database and that
+    // one deliberately needs nothing.
+    //
+    // It names pg.zig, which is allowed outside the module: `sql/wire.zig`
+    // says so, and what is being measured *is* the driver.
+    const bench_core = coreFor(b, target, .ReleaseFast);
+    const bench_engine = b.dependency("zio", .{ .target = target, .optimize = .ReleaseFast });
+    const bench_http = b.createModule(.{
+        .root_source_file = b.path("http/http.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .imports = &.{
+            .{ .name = "zio", .module = bench_engine.module("zio") },
+            .{ .name = "nilo_core", .module = bench_core },
+        },
+    });
+    const bench_nilo_sql = b.createModule(.{
+        .root_source_file = b.path("sql/sql.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .imports = &.{
+            .{ .name = "nilo_core", .module = bench_core },
+            .{ .name = "nilo_id", .module = idFor(b, target, .ReleaseFast) },
+            .{ .name = "nilo_http", .module = bench_http },
+        },
+    });
+    // One options module shared by both, rather than `addOptions` twice: two
+    // calls make two modules with the same root file, which Zig refuses.
+    const bench_live_config = live_config.createModule();
+    bench_nilo_sql.addImport("live_config", bench_live_config);
+
+    const bench_sql_module = b.createModule(.{
+        .root_source_file = b.path("bench/sql.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .strip = stripMeasured(strip, .ReleaseFast),
+        .imports = &.{
+            .{ .name = "nilo_http", .module = bench_http },
+            .{ .name = "nilo_sql", .module = bench_nilo_sql },
+        },
+    });
+    if (b.lazyDependency("pg", .{ .target = target, .optimize = .ReleaseFast })) |pg| {
+        bench_sql_module.addImport("pg", pg.module("pg"));
+        bench_nilo_sql.addImport("pg", pg.module("pg"));
+    }
+    bench_sql_module.addImport("live_config", bench_live_config);
+    const bench_sql = b.addExecutable(.{ .name = "nilo-bench-sql", .root_module = bench_sql_module });
+    b.step("bench-sql", "Time a statement parsed every call against one prepared once")
+        .dependOn(&b.addRunArtifact(bench_sql).step);
+
     // Each mode needs its own copy of everything the module imports, down to
     // zio: a module carries the optimize mode it was created with, and this
     // module's tests drive a whole request through `nilo.testing.Client`.

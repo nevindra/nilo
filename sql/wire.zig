@@ -20,12 +20,19 @@
 //!   through the given event loop, and take it down. The `std.Io` is the
 //!   whole reason a `Db` is built in two halves: it does not exist until
 //!   `listen()` has started the loop (ADR 0040).
-//! - `run(arena, sql, values)` — a statement and its parameters, in
+//! - `run(arena, sql, values, plan)` — a statement and its parameters, in
 //!   placeholder order, giving back something rows can be pulled from one
 //!   at a time. The arena is the request's, and is where the driver reads
 //!   into when a row does not fit its own buffer — so a big row costs the
 //!   request arena rather than the general allocator, and is freed by the
 //!   reset that ends the request (ADR 0004).
+//!
+//!   `plan` is the name to keep this statement prepared under on the
+//!   connection, or **null for do not keep it**. Null is not a hint: it is
+//!   the answer for `db.raw`, whose text arrives at run time, and a Wire that
+//!   cached it anyway would grow a map with traffic instead of with the
+//!   program (ADR 0057). Everything else hands over a name derived from the
+//!   statement, which is a comptime constant and therefore so is the name.
 //! - `next(rows)` — advance to the next row, or false at the end. **The
 //!   text in a row is valid only until the next call.** That is not a rule
 //!   invented here; it is pg.zig's own, and passing it along unwrapped is
@@ -47,7 +54,7 @@
 //!   destroys the connection and dials a new one. Leaving rows unread is
 //!   therefore a correctness-safe, expensive mistake, and it is this module's
 //!   job not to make it.
-//! - `exec(arena, sql, values)` — a statement that answers with a count
+//! - `exec(arena, sql, values, plan)` — a statement that answers with a count
 //!   rather than with rows, giving the count back. "Did that update
 //!   anything" has no other answer, and Postgres sends the number in
 //!   `CommandComplete` rather than as a result set.
@@ -270,6 +277,10 @@ pub const Fake = struct {
     /// SQL that actually reached the database rather than on the constant
     /// the comptime half produced.
     last_sql: []const u8 = "",
+    /// The name the last statement asked to be kept under, or null when it
+    /// asked not to be. `db.raw` is the one that asks not to be, and a test
+    /// that could not see the difference would not be testing the rule.
+    last_plan: ?[]const u8 = null,
     /// How many rows the next `run` hands back. Every one of them reads the
     /// same way — this exists to drive the filling code, not to stand in
     /// for a database.
@@ -311,10 +322,17 @@ pub const Fake = struct {
         _ = self;
     }
 
-    pub fn run(self: *Fake, arena: std.mem.Allocator, sql: []const u8, values: anytype) Error!Rows {
+    pub fn run(
+        self: *Fake,
+        arena: std.mem.Allocator,
+        sql: []const u8,
+        values: anytype,
+        plan: ?[]const u8,
+    ) Error!Rows {
         _ = arena;
         _ = values;
         self.last_sql = sql;
+        self.last_plan = plan;
         return .{ .left = self.answers };
     }
 
@@ -371,10 +389,17 @@ pub const Fake = struct {
         rows.drained = true;
     }
 
-    pub fn exec(self: *Fake, arena: std.mem.Allocator, sql: []const u8, values: anytype) Error!usize {
+    pub fn exec(
+        self: *Fake,
+        arena: std.mem.Allocator,
+        sql: []const u8,
+        values: anytype,
+        plan: ?[]const u8,
+    ) Error!usize {
         _ = arena;
         _ = values;
         self.last_sql = sql;
+        self.last_plan = plan;
         return self.answers;
     }
 
@@ -386,8 +411,9 @@ pub const Fake = struct {
             arena: std.mem.Allocator,
             sql: []const u8,
             values: anytype,
+            plan: ?[]const u8,
         ) Error!Rows {
-            return self.wire.run(arena, sql, values);
+            return self.wire.run(arena, sql, values, plan);
         }
 
         pub fn exec(
@@ -395,8 +421,9 @@ pub const Fake = struct {
             arena: std.mem.Allocator,
             sql: []const u8,
             values: anytype,
+            plan: ?[]const u8,
         ) Error!usize {
-            return self.wire.exec(arena, sql, values);
+            return self.wire.exec(arena, sql, values, plan);
         }
 
         /// The number rather than the statement it becomes. What the SQL

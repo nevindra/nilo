@@ -822,6 +822,33 @@ which is usually a migration that has not run.
 
 Set `.schema_mismatch_is_fatal = false` to log and carry on.
 
+### Statements are prepared, and you did nothing to ask for it
+
+Every statement this module sends is settled while compiling, so there is a
+fixed set of them and each one is kept prepared on the connection it went
+down. The second time a connection sends it, Postgres skips Parse and
+Describe.
+
+It is worth about **12 µs a query** — 30% of a key lookup, 14% of a page with
+a sort and a range
+([ADR 0057](../adr/0057-a-statement-that-is-a-constant-can-be-prepared-once.md)).
+A fixed saving, so the cheap queries a service runs most of are the ones it
+helps most. Nothing in your code changes.
+
+`db.raw` is the one exception, and it has to be: its text arrives at run time,
+so there is no bound on how many names there would be.
+
+**Turn it off behind pgbouncer in transaction mode.**
+
+```zig
+var db = sql.Db.init(gpa, url, .{ .prepared = false });
+```
+
+A transaction-mode pooler hands out a different server connection per
+transaction, so a statement prepared on one is missing on the next. The
+failure is loud — Postgres says the prepared statement does not exist — which
+is why the default is the fast one rather than the safe one.
+
 ### Views, and the one thing a check cannot know
 
 A Row can name a **view** or a **materialized view** instead of a table, and

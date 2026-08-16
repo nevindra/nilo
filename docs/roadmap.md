@@ -367,16 +367,7 @@ of it — measured at 0 bytes.
 
 ### Next
 
-1. **Prepared statements, measured first.** Every statement this module sends
-   is already a comptime constant, which is the property that makes a cache
-   cheap here and impossible in a framework that assembles its SQL per
-   request — the key can be the statement's own identity. What is unknown is
-   the number: `conn.queryOpts` re-parses and re-plans on every call, and
-   nobody has measured what that is worth. `zig build profile` is the
-   harness; [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md)'s
-   10% is the bar, and `sql/postgres.zig` already says out loud that this is
-   the measurement nobody has taken.
-2. **A second Dialect.** The seam is fitted and only Postgres is filled in,
+1. **A second Dialect.** The seam is fitted and only Postgres is filled in,
    so nothing is known about whether it holds. SQLite is the useful test,
    because it disagrees about the three things the seam abstracts:
    placeholders, list form (`sql/dialect.zig` already refuses a dialect with
@@ -513,8 +504,7 @@ Two whole areas come off before the list starts.
 
 **Connection and session**
 
-- [ ] Prepared statements → Next 1
-- [ ] A second driver → Next 2
+- [ ] A second driver → Next 1
 - [ ] Read replicas — a second pool, and a rule for which one a statement takes
 - [ ] A query cache
 

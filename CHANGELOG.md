@@ -112,6 +112,17 @@ real Postgres on every push.
   `AlreadyExists`, the previous statement's answer. Narrow, and wrong when it
   happened.
 
+**Statements are kept prepared, and nothing in your code asks for it.** Every
+statement this module sends is settled while compiling, so each is kept on the
+connection it went down under a name derived from its own text — the second
+send skips Parse and Describe. Measured at **30% of a key lookup and 14% of a
+page with a sort**, ~12 µs a query either way, which is a fixed cost and so
+worth most to the cheap queries a service runs most of
+([ADR 0057](./docs/adr/0057-a-statement-that-is-a-constant-can-be-prepared-once.md)).
+`db.raw` is never prepared, because its text arrives at run time. Behind
+**pgbouncer in transaction mode** set `.prepared = false`, or a statement
+prepared on one server connection is missing on the next.
+
 **28 Refusals** hold the module's own error messages — a Row written wrong, a
 column misspelled, an update with no condition, a key where a condition
 belongs. Each is a program in `sql/refusals/` that must fail to compile with

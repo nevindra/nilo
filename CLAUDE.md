@@ -56,7 +56,7 @@ Three files carry context this one deliberately does not repeat:
 - **`CONTEXT.md`** — the project's vocabulary, and the words it refuses to use
   (Ctx not "Context", Str not "string", keep not "dupe", Refusal not "negative
   test"). Match it in code, comments, docs and commit messages.
-- **`docs/adr/`** — 56 binding decisions, each naming the alternative it
+- **`docs/adr/`** — 57 binding decisions, each naming the alternative it
   rejected. Check here before proposing a design change; "why not X?" usually
   already has an answer on file. **ADR 0041 decides which module new work goes
   in and ADR 0042 decides what that module may import**, and they are the two
@@ -98,6 +98,7 @@ zig build layering     # check that no module imports upward or sideways
 zig build refusals     # only the compile-error checks
 zig build examples     # build all seven examples
 zig build fuzz -- --iterations 1000000 --seed 0x…   # generated requests at the parser
+zig build bench-sql    # what a prepared statement is worth, against a real Postgres
 zig build run          # the benchmark server (bench/main.zig): GET /users/:id, ~1 KB JSON
 zig build profile      # where the time inside one request goes
 zig build run-{hello,rest,orders,forms,spa,stream,chat}   # run one example

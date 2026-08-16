@@ -822,6 +822,15 @@ database switched off, and the first request that needs it gets
 | `connect_on_init` | how many to dial during `listen()`. Default 0 |
 | `timeout_ms` | how long a caller waits for a free connection. Default 10,000 |
 | `schema_mismatch_is_fatal` | whether a Row that disagrees with its table stops startup. Default true |
+| `prepared` | whether a statement is kept prepared on the connection it went down. Default true |
+
+Every statement this module sends is a comptime constant, so it is kept
+prepared on its connection under a name derived from its own text — worth
+**30% of a key lookup and 14% of a page with a sort**, ~12 µs either way
+([ADR 0057](./adr/0057-a-statement-that-is-a-constant-can-be-prepared-once.md)).
+`db.raw` is never prepared, because its text arrives at run time. Set
+`.prepared = false` behind a **connection pooler in transaction mode**
+(pgbouncer), which hands out a different server connection per transaction.
 
 A Row may name a **view** or a **materialized view** as well as a table. The
 column types are checked there; nullability is not, because Postgres does not

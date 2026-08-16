@@ -137,10 +137,14 @@ pub const Wire = struct {
             arena: std.mem.Allocator,
             sql: []const u8,
             values: anytype,
+            plan: ?[]const u8,
         ) wire.Error!Rows {
             if (self.done) return error.QueryFailed;
             self.fresh();
-            const result = self.conn.queryOpts(sql, values, .{ .allocator = arena }) catch |err| {
+            const result = self.conn.queryOpts(sql, values, .{
+                .allocator = arena,
+                .cache_name = plan,
+            }) catch |err| {
                 return translate(self.conn, err);
             };
             return .{ .conn = self.conn, .result = result, .owns_conn = false };
@@ -151,10 +155,14 @@ pub const Wire = struct {
             arena: std.mem.Allocator,
             sql: []const u8,
             values: anytype,
+            plan: ?[]const u8,
         ) wire.Error!usize {
             if (self.done) return error.QueryFailed;
             self.fresh();
-            const count = self.conn.execOpts(sql, values, .{ .allocator = arena }) catch |err| {
+            const count = self.conn.execOpts(sql, values, .{
+                .allocator = arena,
+                .cache_name = plan,
+            }) catch |err| {
                 return translate(self.conn, err);
             };
             return @intCast(count orelse 0);
@@ -324,11 +332,15 @@ pub const Wire = struct {
         arena: std.mem.Allocator,
         sql: []const u8,
         values: anytype,
+        plan: ?[]const u8,
     ) wire.Error!Rows {
         var conn = self.pool.acquire() catch return error.Disconnected;
         errdefer conn.release();
 
-        const result = conn.queryOpts(sql, values, .{ .allocator = arena }) catch |err| {
+        const result = conn.queryOpts(sql, values, .{
+            .allocator = arena,
+            .cache_name = plan,
+        }) catch |err| {
             return translate(conn, err);
         };
         return .{ .conn = conn, .result = result };
@@ -458,10 +470,14 @@ pub const Wire = struct {
         arena: std.mem.Allocator,
         sql: []const u8,
         values: anytype,
+        plan: ?[]const u8,
     ) wire.Error!usize {
         var conn = self.pool.acquire() catch return error.Disconnected;
         defer conn.release();
-        const count = conn.execOpts(sql, values, .{ .allocator = arena }) catch |err| {
+        const count = conn.execOpts(sql, values, .{
+            .allocator = arena,
+            .cache_name = plan,
+        }) catch |err| {
             return translate(conn, err);
         };
         return @intCast(count orelse 0);
@@ -478,7 +494,9 @@ pub const Wire = struct {
         schema: ?[]const u8,
         table: []const u8,
     ) wire.Error![]const wire.Column {
-        var rows = try self.run(arena, query, .{ schema, table });
+        // No plan: this runs once per Row while the server starts, so a kept
+        // plan would be memory held for a statement nothing sends again.
+        var rows = try self.run(arena, query, .{ schema, table }, null);
         defer rows.close();
 
         var found: std.ArrayList(wire.Column) = .empty;

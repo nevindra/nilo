@@ -238,7 +238,7 @@ const Live = struct {
         while (it.next()) |raw| {
             const statement = std.mem.trim(u8, raw, " \n\r\t");
             if (statement.len == 0) continue;
-            var rows = try wire.run(arena.allocator(), statement, .{});
+            var rows = try wire.run(arena.allocator(), statement, .{}, null);
             wire.drain(&rows);
         }
 
@@ -261,7 +261,7 @@ test "a select the comptime half wrote comes back from a real Postgres" {
     const options = .{ .where = .{ .age = .{ .gt = 18 } }, .order = .{ .id = .asc } };
     const stmt = comptime @import("statement.zig").select(dialect.Postgres, Person, @TypeOf(options));
 
-    var rows = try live.wire.run(live.arena.allocator(), stmt.sql, .{@as(i32, 18)});
+    var rows = try live.wire.run(live.arena.allocator(), stmt.sql, .{@as(i32, 18)}, null);
     defer live.wire.drain(&rows);
 
     var seen: usize = 0;
@@ -286,6 +286,7 @@ test "a null column reads as null and a present one does not" {
         live.arena.allocator(),
         "SELECT \"handle\" FROM \"" ++ table ++ "\" ORDER BY \"id\"",
         .{},
+        null,
     );
     defer live.wire.drain(&rows);
 
@@ -379,6 +380,7 @@ test "a unique violation is AlreadyExists rather than a message nobody translate
         live.arena.allocator(),
         "INSERT INTO \"" ++ table ++ "\" (id, email, age) VALUES ($1, $2, $3)",
         .{ @as(i64, 1), @as([]const u8, "dup@example.dev"), @as(i32, 30) },
+        null,
     );
     try testing.expectError(error.AlreadyExists, err);
 }
@@ -396,12 +398,12 @@ test "a connection comes back usable after a result set is left unread" {
     // would run out or reconnect its way through the pool.
     var round: usize = 0;
     while (round < 6) : (round += 1) {
-        var rows = try live.wire.run(arena, all, .{});
+        var rows = try live.wire.run(arena, all, .{}, null);
         try testing.expect(try live.wire.next(&rows));
         live.wire.drain(&rows);
     }
 
-    var rows = try live.wire.run(arena, all, .{});
+    var rows = try live.wire.run(arena, all, .{}, null);
     defer live.wire.drain(&rows);
     var seen: usize = 0;
     while (try live.wire.next(&rows)) : (seen += 1) {}
@@ -2635,4 +2637,63 @@ test "a batch carries the column types that bind as something else" {
 
 comptime {
     _ = wire_mod;
+}
+
+// -- prepared statements ---------------------------------------------------
+
+test "statements interleaved on one connection keep their own prepared plans" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    // Four shapes with three different parameter counts, sent round and
+    // round down the same connection. The failure this is here for is not
+    // hypothetical: reusing one cache name for two statements is what
+    // `bench/sql.zig` did by accident, and Postgres answered the *second*
+    // statement's parameters against the *first* statement's describe. Two
+    // statements with the same arity would not have said anything at all
+    // (ADR 0057), which is why the round trip below asserts the answers
+    // rather than only that nothing errored.
+    var round: usize = 0;
+    while (round < 8) : (round += 1) {
+        const ada = try stack.db.find(Person, &run, @as(i64, 1));
+        try testing.expectEqualStrings("ada@example.dev", ada.?.email);
+
+        const grown = try stack.db.select(Person, &run, .{
+            .where = .{ .age = .{ .gt = 18 } },
+            .order = .{ .id = .asc },
+        });
+        try testing.expectEqual(@as(usize, 2), grown.len);
+
+        try testing.expectEqual(@as(usize, 3), try stack.db.count(Person, &run, .{}));
+        try testing.expect(try stack.db.exists(Person, &run, .{ .where = .{ .id = @as(i64, 2) } }));
+
+        run.reset();
+    }
+}
+
+test "a Db told to keep no plans still answers, one Parse at a time" {
+    const gpa = testing.allocator;
+    var live = (try Live.open(gpa)) orelse return error.SkipZigTest;
+    defer live.close(gpa);
+
+    // The pgbouncer setting, against a real server. It is the same rows or
+    // the escape hatch is not an escape hatch — a caller reaching for it has
+    // a pooler in transaction mode and no third option.
+    var db = db_mod.Db.init(gpa, "already open", .{ .prepared = false });
+    db.wire = live.wire;
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    var round: usize = 0;
+    while (round < 4) : (round += 1) {
+        const ada = try db.find(Person, &run, @as(i64, 1));
+        try testing.expectEqualStrings("ada@example.dev", ada.?.email);
+        try testing.expectEqual(@as(usize, 3), try db.count(Person, &run, .{}));
+        run.reset();
+    }
 }
