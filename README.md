@@ -137,10 +137,12 @@ without a search engine. So can your coding agent, and
 |---|---|---|
 | **`nilo_core`** | `Str` and the Scope — the vocabulary the others share. No event loop, no HTTP | **shipped** |
 | **`nilo_id`** | UUIDs, v4 and v7. Imports nothing at all | **shipped**: the format. Where the randomness comes from is still yours |
+| **`nilo_config`** | settings out of the environment, into a struct of your own. Imports nothing at all | **shipped**: text, numbers, bools, enums. It parses no files, and that is a decision |
+| **`nilo_pw`** | password hashing: argon2id, stored as PHC. Imports nothing at all | **shipped**: hashing and checking. Rate limiting the endpoint is still yours |
 | **`nilo_http`** | HTTP: routing, typed handlers, middleware, cookies and sessions, static files, streaming, WebSocket, OpenAPI | **shipped** |
 | **`nilo_sql`** | Postgres: your struct is the table | **shipped**: reads, writes, transactions, streaming |
 
-Four modules today, and the shape is deliberate: **a toolkit whose largest
+Six modules today, and the shape is deliberate: **a toolkit whose largest
 module is a server**, rather than a server with things bolted beside it. Which
 module a file belongs in is settled by one question — does it need the event
 loop? — and a module imports downward only, never a sibling

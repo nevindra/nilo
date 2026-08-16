@@ -30,6 +30,7 @@
         "core",
         "id",
         "config",
+        "pw",
         "http",
         "sql",
         "LICENSE",

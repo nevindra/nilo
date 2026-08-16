@@ -11,7 +11,7 @@ const std = @import("std");
 /// **Adding a module means adding a row here as well as to `.paths`.** Core
 /// shipped for a whole session with neither, and nothing noticed, because a
 /// list that does not name a directory cannot check it.
-const shipped_roots = [_][]const u8{ "core", "id", "config", "http", "sql" };
+const shipped_roots = [_][]const u8{ "core", "id", "config", "pw", "http", "sql" };
 
 comptime {
     const manifest = @embedFile("build.zig.zon");
@@ -53,6 +53,12 @@ const layers = [_]Layer{
     // cost the property that decides the layer — `zig test
     // config/config.zig`, with no module graph at all.
     .{ .root = "config", .may_import = &.{} },
+    // The third tool module, and it names nothing either (ADR 0048). What it
+    // wanted from a layer above was entropy, a thread to hold and a count of
+    // how many hashes are already running — and all three are arguments or
+    // the caller's, which is what keeps `zig test pw/pw.zig` the whole of its
+    // suite. `http/password.zig` is the half that has a Bulkhead.
+    .{ .root = "pw", .may_import = &.{} },
     .{
         .root = "sql",
         .may_import = &.{ "nilo_core", "nilo_id", "pg", "live_config" },
@@ -219,6 +225,20 @@ const config_refusals = [_]Refusal{
     .{
         .name = "config_not_a_source",
         .says = "a Config is read from a source, and comptime_int cannot be one.",
+    },
+};
+
+/// The same, for `pw/refusals/`. They hang off `test-pw` for the reason the
+/// Config ones hang off `test-config`: a module in the bottom layer keeps its
+/// own (ADR 0048).
+const pw_refusals = [_]Refusal{
+    .{
+        .name = "pw_cost_below_the_floor",
+        .says = "a password Cost of 64 KiB of memory is below the floor of 7168 KiB.",
+    },
+    .{
+        .name = "pw_cost_with_no_passes",
+        .says = "a password Cost with no passes is not a hash.",
     },
 };
 
@@ -556,6 +576,23 @@ fn configFor(
     });
 }
 
+/// A copy of `nilo_pw` for one optimize mode (ADR 0048).
+///
+/// Shared rather than merely built from the same file, for the reason `idFor`
+/// is: `http/password.zig` names `pw.Hash` and so does a caller's own row, and
+/// two modules built from one root are two types to Zig.
+fn pwFor(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    mode: std.builtin.OptimizeMode,
+) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("pw/pw.zig"),
+        .target = target,
+        .optimize = mode,
+    });
+}
+
 /// The step that reads `layers` and refuses an import that is not in it.
 ///
 /// A scan rather than a parse, and the trade is stated where the table is:
@@ -712,6 +749,21 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // The third tool module: argon2id as a pure function (ADR 0048). It
+    // imports nothing at all, which `zig build layering` checks.
+    //
+    // Unlike `nilo_config`, `nilo_http` below does name this one — because
+    // the Gate and the blocking call are the half a handler must not be
+    // trusted to remember. What a project that never signs anybody in pays
+    // for that is a linker question rather than a build one: nothing
+    // references `http/password.zig` unless a handler calls it, so argon2 and
+    // blake2b are never analysed. The measured cost is in ADR 0048.
+    const nilo_pw = b.addModule("nilo_pw", .{
+        .root_source_file = b.path("pw/pw.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // The server, under the name it is imported by. Everything else here —
     // the benchmark server, every example — depends on this exactly the way
     // somebody else's project would.
@@ -731,6 +783,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "zio", .module = zio.module("zio") },
             .{ .name = "nilo_core", .module = nilo_core },
+            .{ .name = "nilo_pw", .module = nilo_pw },
         },
     });
 
@@ -902,6 +955,37 @@ pub fn build(b: *std.Build) void {
     test_config_step.dependOn(refusals_config_step);
     test_step.dependOn(test_config_step);
 
+    // And the same again for `nilo_pw` (ADR 0048). `zig test pw/pw.zig` is
+    // this without `build.zig` at all — the entry condition for the layer,
+    // and a change that stops it working has broken the layering rather than
+    // the test.
+    const test_pw_step = b.step(
+        "test-pw",
+        "Run nilo_pw's tests — no Engine, no module graph",
+    );
+    for (test_modes) |mode| {
+        const tests = b.addTest(.{ .root_module = pwFor(b, target, mode) });
+        test_pw_step.dependOn(&b.addRunArtifact(tests).step);
+    }
+
+    const refusals_pw_step = b.step(
+        "refusals-pw",
+        "Check that each password Cost mistake stops in nilo's own words",
+    );
+    for (pw_refusals) |refusal| {
+        const module = b.createModule(.{
+            .root_source_file = b.path(b.fmt("pw/refusals/{s}.zig", .{refusal.name})),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{.{ .name = "nilo_pw", .module = nilo_pw }},
+        });
+        const refused = b.addObject(.{ .name = refusal.name, .root_module = module });
+        refused.expect_errors = .{ .contains = b.fmt("error: nilo: {s}", .{refusal.says}) };
+        refusals_pw_step.dependOn(&refused.step);
+    }
+    test_pw_step.dependOn(refusals_pw_step);
+    test_step.dependOn(test_pw_step);
+
     // The layering, held by something other than a paragraph (ADR 0042).
     test_step.dependOn(Layering.step(b));
 
@@ -1014,6 +1098,10 @@ pub fn build(b: *std.Build) void {
         // One Core per mode here too, for the reason spelled out above the
         // SQL module's copy: a second one would be a second set of types.
         const core_mod = coreFor(b, target, mode);
+        // And one `nilo_pw` per mode, shared by both roots below for the
+        // reason Core is: `Ctx.hashPassword` answers a `pw.Hash`, and a second
+        // copy would make that a different type from the one an example names.
+        const pw_mod = pwFor(b, target, mode);
 
         const lib_tests = b.createModule(.{
             .root_source_file = b.path("http/test_root.zig"),
@@ -1022,6 +1110,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "zio", .module = engine.module("zio") },
                 .{ .name = "nilo_core", .module = core_mod },
+                .{ .name = "nilo_pw", .module = pw_mod },
             },
         });
 
@@ -1032,6 +1121,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "zio", .module = engine.module("zio") },
                 .{ .name = "nilo_core", .module = core_mod },
+                .{ .name = "nilo_pw", .module = pw_mod },
             },
         });
 

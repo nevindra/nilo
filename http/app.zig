@@ -25,6 +25,7 @@ const openapi = @import("openapi.zig");
 const budget = @import("budget.zig");
 const watchdog = @import("watchdog.zig");
 const session_mod = @import("session.zig");
+const password_mod = @import("password.zig");
 
 const Ctx = ctx_mod.Ctx;
 
@@ -570,6 +571,11 @@ pub const App = struct {
             .trusted_hops = options_.trusted_hops,
             .block_warning_ms = options_.block_warning_ms,
         };
+        // Not on the App, because there is one memory controller per process
+        // rather than one per App: two Apps hashing eight each would be
+        // sixteen, which is the number the measurement in ADR 0048 says not
+        // to run.
+        password_mod.setLimit(options_.password_hashes_at_once);
         // Here rather than at the first request that reads a cookie: a secret
         // of the wrong length is a deployment mistake, and the moment somebody
         // is watching for one is startup. The key is copied onto the App, so

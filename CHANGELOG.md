@@ -153,6 +153,30 @@ migrations
   ```
 - **`sql.Timestamp.now()`** — so `created_at` is a field a handler fills
   rather than a database default it has to remember to set.
+- **`tx.deadline(ms)`** — bound how long each statement in a transaction may
+  run, and get `error.TimedOut` when one goes past it
+  ([ADR 0047](./docs/adr/0047-a-deadline-needs-a-connection-you-hold.md)). It
+  is on the transaction rather than on `Db` because a deadline is always a
+  second command and has to travel down the same connection as the statement
+  it bounds — which is what a transaction already holds and a plain
+  `db.select` does not. One round trip, paid by the caller who asks for it.
+- **A failed statement inside a transaction no longer costs a reconnect.**
+  Postgres marks an aborted transaction with a ReadyForQuery status pg.zig
+  maps to the same state it uses for a dead socket, so the `ROLLBACK` that
+  follows was refused and nilo destroyed the connection rather than return
+  one it could not vouch for. Nothing downstream could tell — the pool
+  re-dialled — so this is a latency and connection-churn fix rather than a
+  correctness one, and it applies to every failed statement in a transaction,
+  not only a timed-out one.
+- **An enum column that has fallen behind its table fails the request instead
+  of the process.** A Postgres enum grows a value with `ALTER TYPE … ADD
+  VALUE`; a Zig enum that has not grown it used to reach
+  `std.meta.stringToEnum(T, str).?` inside the driver and panic, which in Zig
+  takes every in-flight request with it
+  ([ADR 0008](./docs/adr/0008-no-recover-middleware.md)). It is a 500 now, with
+  the value and the type named in the log. Nothing changes for a Row whose enum
+  is up to date, and the column is still the one type `checking` cannot judge
+  at startup.
 
 ### A third module, below the other two
 
@@ -266,7 +290,54 @@ pub fn main(init: std.process.Init) !void {
 - **`zig build test-config`**, and `zig test config/config.zig` with no
   `build.zig` at all — the same entry condition `nilo_id` has.
 
+### `nilo_pw`, and a sixth module
+
+Password hashing: argon2id, and the two `Ctx` methods that make it safe to call
+from a handler
+([ADR 0048](./docs/adr/0048-a-password-hash-is-gated-because-forgetting-is-silent.md)).
+The third tool module, and it imports nothing either.
+
+```zig
+// signing up
+const stored = try c.hashPassword(gpa, form.password);
+_ = try db.insert(User, conn, .{ .email = form.email, .password = stored.text() });
+
+// signing in
+const row = try db.find(User, conn, .{ .email = form.email });
+if (!try c.verifyPassword(gpa, if (row) |r| r.password else null, form.password))
+    return nilo.fail(401, "that is not a sign-in");
+```
+
+- **`stored` is optional, and null means there is no such account.** It does
+  the work anyway and answers false, which costs the same as an account that
+  exists. A sign-in that returns early on an unknown address answers in a
+  millisecond instead of thirty and turns the form into a query for which
+  addresses are registered. There is no signature here that lets the fast
+  wrong version be written.
+- **The methods are on `Ctx` because forgetting is silent.** One hash is 13 ms
+  and 19 MiB. Thirteen milliseconds is *under* `block_warning_ms`, so a
+  handler calling the pure module directly holds its thread on every sign-in
+  and nothing in the log ever says so. These take the salt from `c.entropy`,
+  park the fiber on the blocking pool, and hold a permit from a Gate.
+- **`Options.password_hashes_at_once` defaults to 8**, and the number is
+  measured. Argon2id is bound by memory bandwidth, not cores: on 16 cores the
+  throughput ceiling is ~280 hash/s and eight reaches 91% of it for 152 MiB,
+  where the ungated 32 reaches *less* for 608 MiB.
+- **The stored form is the PHC string everybody else writes** —
+  `$argon2id$v=19$m=19456,t=2,p=1$…` — so a hash of nilo's can be migrated off,
+  and one made elsewhere at any parallelism verifies here.
+- **A Cost below OWASP's weakest published configuration is a compile error.**
+  Turning it down to make a test suite fast is the mistake worth catching,
+  because a weak hash looks exactly like a strong one afterwards.
+- **`zig build test-pw`**, and `zig test pw/pw.zig` with no `build.zig` at all
+   — the same entry condition `nilo_id` and `nilo_config` have.
+
 ### What it costs
+
+A project that never signs anybody in links **0 bytes** of `nilo_pw` — measured,
+a stripped `ReleaseFast` build before and after is byte-identical in every
+section. One that calls `Ctx.hashPassword` pays **149 KB**, which is argon2id,
+blake2b, the PHC encoder and the Gate.
 
 A project that does not import `nilo_sql` links none of it — not the driver,
 not TLS — and pays **560 bytes** for the startup hook. One that uses the

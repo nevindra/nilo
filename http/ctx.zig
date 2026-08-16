@@ -15,6 +15,7 @@ const convert_mod = @import("convert.zig");
 const cookie_mod = @import("cookie.zig");
 const http1 = @import("http1.zig");
 const json_mod = @import("json.zig");
+const password_mod = @import("password.zig");
 const router = @import("router.zig");
 const scan = @import("scan.zig");
 const sendfile_mod = @import("sendfile.zig");
@@ -386,6 +387,65 @@ pub const Ctx = struct {
         var out: [n]u8 = undefined;
         try bulkhead.randomSecure(&out);
         return out;
+    }
+
+    /// Hash a password: salted from `Ctx.entropy`, off the loop, and behind
+    /// the Gate that says how many may run at once (ADR 0048).
+    ///
+    /// ```zig
+    /// const stored = try c.hashPassword(gpa, form.password);
+    /// _ = try db.insert(User, conn, .{ .email = form.email, .password = stored.text() });
+    /// ```
+    ///
+    /// **A method for the reason `entropy` is one, and more so.** One hash is
+    /// 13 ms of CPU and 19 MiB, and 13 ms is *under* `block_warning_ms` — so
+    /// calling `nilo_pw` straight from a handler holds the thread on every
+    /// sign-in and nothing in the log ever says so. This is the call that
+    /// cannot forget.
+    ///
+    /// `gpa` is an argument rather than something nilo reaches for, because
+    /// 19 MiB is worth seeing at the call site — and because the request
+    /// arena is the wrong place for it (ADR 0018).
+    pub fn hashPassword(
+        self: *const Ctx,
+        gpa: std.mem.Allocator,
+        password: []const u8,
+    ) !password_mod.Hash {
+        return password_mod.hash(self, gpa, password);
+    }
+
+    /// The same, at a Cost of the caller's own. Below the floor it is a
+    /// Refusal rather than a weak hash nobody notices.
+    pub fn hashPasswordWith(
+        self: *const Ctx,
+        comptime cost: password_mod.Cost,
+        gpa: std.mem.Allocator,
+        password: []const u8,
+    ) !password_mod.Hash {
+        return password_mod.hashWith(cost, self, gpa, password);
+    }
+
+    /// Whether `password` is the one `stored` was made from.
+    ///
+    /// ```zig
+    /// const row = try db.find(User, conn, .{ .email = form.email });
+    /// if (!try c.verifyPassword(gpa, if (row) |r| r.password else null, form.password))
+    ///     return nilo.fail(401, "that is not a sign-in");
+    /// ```
+    ///
+    /// **`stored` is optional, and null is the point rather than a
+    /// convenience.** A sign-in for an address with no account has no hash to
+    /// check; returning early there answers in a millisecond instead of
+    /// thirteen and turns the form into a list of which addresses are
+    /// registered. Passing null does the work anyway and answers false. There
+    /// is no signature here that lets the fast wrong version be written.
+    pub fn verifyPassword(
+        self: *const Ctx,
+        gpa: std.mem.Allocator,
+        stored: ?[]const u8,
+        password: []const u8,
+    ) !bool {
+        return password_mod.verify(self, gpa, stored, password);
     }
 
     /// The cookie called `name`, or null if the request carries no such one

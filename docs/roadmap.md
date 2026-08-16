@@ -25,6 +25,7 @@ can be worked at the same time, by two people or by one person on two days.
 | Core | `nilo_core` | needs none | [below](#nilo_core--the-vocabulary) |
 | Core | `nilo_id` | needs none | [below](#nilo_id--identifiers) |
 | Core | `nilo_config` | needs none | [below](#nilo_config--settings) |
+| Core | `nilo_pw` | needs none | [below](#nilo_pw--hashing-a-password) |
 | App | `nilo_http` | owns it | [below](#nilo_http--the-server) |
 | Service | `nilo_sql` | needs it, does not own it | [below](#nilo_sql--postgres) |
 
@@ -172,6 +173,44 @@ It imports nothing, allocates nothing, and is over before the socket opens.
   a value marked secret and printed anyway is worse than one nobody claimed
   anything about — and nothing here logs a Config today, so there is nothing to
   redact yet.
+
+---
+
+## `nilo_pw` — hashing a password
+
+argon2id as a pure function of a password, a salt and a Cost, plus the two `Ctx`
+methods that take the salt from the loop and a permit from the Gate
+([ADR 0048](./adr/0048-a-password-hash-is-gated-because-forgetting-is-silent.md)).
+It imports nothing at all, and a project that never signs anybody in links none
+of it — measured at 0 bytes.
+
+### Known gaps
+
+- **A hash is never re-hashed at a higher Cost.** The stored PHC string carries
+  the parameters it was made with, so a deployment that raises the Cost keeps
+  verifying old hashes at the old one forever, and nothing says which rows are
+  behind. What closes it is small — the parameters are already parsed, so a
+  `needsRehash` reading them against the current Cost is a comparison, and the
+  re-hash itself belongs to the one moment the plaintext is in hand, which is
+  the sign-in that just succeeded. What is missing is a caller: nobody has
+  raised a Cost yet.
+- **A password longer than a page costs what it is.** Argon2 hashes the whole
+  input, so a client posting a megabyte gets a megabyte hashed. `max_body`
+  bounds it at one megabyte by default and the Gate bounds how many at once,
+  so it is not an opening — but everybody else truncates at 72 bytes or
+  pre-hashes with SHA-512, and nilo does neither and has not decided which.
+
+### Not decided
+
+- **Whether a memory-bound deployment gets bcrypt.** It is in `std`, it costs
+  zero heap against argon2id's 19 MiB, and it is 2.6× slower for the trouble
+  (ADR 0048 has the numbers). The trade is real for a small machine holding
+  many connections; what is missing is somebody on one.
+- **Whether the Gate belongs to more than passwords.** `bulkhead.Gate` is
+  general — a counting lock that tells the detector it is waiting — and
+  password hashing is its only caller. A second one (image resizing, a report
+  that holds a core) would decide whether it is a public name or stays
+  internal.
 
 ---
 
@@ -353,11 +392,13 @@ It imports nothing, allocates nothing, and is over before the socket opens.
 - **A table can only be named, never qualified.** `.name = "app.users"` is
   quoted as one identifier, and the introspection query only looks in
   `current_schema()`. Anything with a `search_path` is out.
-- **An enum column holding a value the Zig enum does not have panics.** It is
-  `std.meta.stringToEnum(T, str).?` inside the driver, and
-  `dialect.accepts` declines to judge enums, so this is the one column type
-  that is unchecked at startup *and* fatal at run time. Reading it as
-  `[]const u8` is the workaround; the fix is a decode that errors.
+- **An enum column is not checked at startup.** `dialect.accepts` declines to
+  judge one, because a Postgres enum's type name lives in the database and
+  guessing it would fail honest schemas. So a Zig enum that has fallen behind
+  its table is found by the first request that reads such a row rather than by
+  `checking`. Closing it means asking the database which values the type
+  actually has — a second introspection query, and a Dialect that can spell
+  it.
 - **Nothing tests what a transaction does when the socket dies.** `Tx.fresh`
   clears the connection's server error before each statement, so a broken
   pipe after a unique violation is no longer reported as `AlreadyExists` —
@@ -365,10 +406,24 @@ It imports nothing, allocates nothing, and is over before the socket opens.
   between two statements of one transaction needs a socket the suite never
   opens. It is the same shape as the `sendfile` gap in the risks table below,
   and it wants the same answer: a build step that listens on a real port.
-- **A query has no deadline of its own.** `timeout_ms` bounds the wait for a
-  free connection and nothing bounds the statement,
-  which [ADR 0023](./adr/0023-a-deadline-belongs-to-an-operation-not-to-a-request.md)
-  says an operation should have.
+
+  It now carries a second passenger. `Tx.revive` reads `conn.err` to tell an
+  aborted transaction from a dead connection
+  ([ADR 0047](./adr/0047-a-deadline-needs-a-connection-you-hold.md)), and only
+  the first half of that has a test: a server error is easy to provoke and a
+  transport failure mid-transaction is the thing the suite cannot stage.
+- **A query outside a transaction still has no deadline.** `tx.deadline(ms)`
+  covers the operation that holds a connection
+  ([ADR 0047](./adr/0047-a-deadline-needs-a-connection-you-hold.md)); a plain
+  `db.select` takes whichever connection is free and gives it straight back,
+  so there is nowhere to put one that is not a second round trip per query.
+  What would close it is a pool-wide floor handed over in the startup packet,
+  which costs nothing per statement and **cannot be built against the pinned
+  driver**: pg.zig's `auth.zig` builds its startup message without the
+  `startup_parameters` map it accepts, so the field goes nowhere. One line
+  upstream, then an option here. Until then it is
+  `ALTER ROLE app SET statement_timeout`, from the side that can already do
+  it.
 
 ### Not decided
 
@@ -502,15 +557,6 @@ A section rather than a list inside somebody else's, because what decides
 whether one of these gets built is a repository-level seam rather than anything
 in a module that is already here.
 
-- **`nilo_pw` — hashing a password.** Unblocked, and in the shape `nilo_id`
-  already has: argon2id as a pure function of a password, a salt and its
-  parameters, with the caller supplying the salt from
-  [`c.entropy`](./adr/0046-entropy-belongs-to-the-loop.md) and wrapping the call
-  in `nilo.blocking`, because hashing deliberately takes 100ms and that is a
-  held thread if it happens on the loop. What is left to decide is smaller than
-  it looks: which parameters are the default, and whether the encoded form is
-  the PHC string everyone else writes — it is, and the only reason to say so is
-  that a hash nobody else can read is a hash nobody can migrate off.
 - **`nilo_s3` — object storage.** Blocked, and not on the same thing. It needs
   an outbound socket, and the Bulkhead covers the way in only — see `nilo_core`'s
   known gaps. Signing a request is the half that is ready: it needs `percent`

@@ -316,6 +316,41 @@ wrote.
 
 Forgetting it is caught in Debug by a counter checked at `db.deinit()`.
 
+### Giving a statement a deadline
+
+`timeout_ms` on the pool bounds how long you wait *for a connection*. It stops
+the moment you get one, so a query that turns out to be expensive runs until
+somebody notices. `tx.deadline` bounds the statements themselves:
+
+```zig
+var tx = try db.begin(c);
+defer tx.deinit();
+
+try tx.deadline(2_000);             // milliseconds, one round trip
+
+const rows = tx.select(Report, c, .{ .where = .{ .month = month } }) catch |err| switch (err) {
+    error.TimedOut => return nilo.fail.status(504, "that report is taking too long", .{}),
+    else => return err,
+};
+try tx.commit();
+```
+
+Postgres undoes it when the transaction ends, whichever way it ends, so the
+connection goes back to the pool carrying nothing.
+
+**Only a transaction has one.** A deadline is always a second command — SQL
+has no way to attach one to a statement in the same message — so it has to
+travel down the same connection as the statement it bounds. `db.select` takes
+whichever connection is free and hands it straight back, so there is nothing
+to set one on ([ADR 0047](../adr/0047-a-deadline-needs-a-connection-you-hold.md)).
+
+For a floor under *everything*, including the queries that are not in a
+transaction, set it beside the database rather than in your code:
+
+```sql
+ALTER ROLE app SET statement_timeout = '30s';
+```
+
 ## Streaming a result set too big to hold
 
 ```zig
@@ -400,13 +435,14 @@ Set `.schema_mismatch_is_fatal = false` to log and carry on.
 
 ## Errors
 
-The module raises four, and they read:
+The module raises five, and they read:
 
 | | |
 |---|---|
 | `error.AlreadyExists` | a unique violation — **409** by default |
 | `error.ConstraintViolated` | foreign key, check or not-null — 500 |
 | `error.Disconnected` | the database went away, or was never there |
+| `error.TimedOut` | a statement ran past the `tx.deadline` you set |
 | `error.QueryFailed` | anything else. The server's text is logged, never sent |
 
 Only the first has a default answer, and that is on purpose. A duplicate

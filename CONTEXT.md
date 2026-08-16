@@ -146,6 +146,14 @@ _Avoid_: offload, thread pool, async, await
 What a handler that forgot the rule above is doing: running without yielding while the requests sharing its thread wait. The compiler cannot see it and one request cannot feel it, so the server times each handler — everything it spent legitimately waiting subtracted — and says so in the log by name.
 _Avoid_: event loop lag, starvation, watchdog, stall
 
+**Gate**:
+A lock that lets a fixed number of requests through at once and parks the rest. What a Mutex is with a number bigger than one, and what `nilo.blocking` is not: blocking says *do this off the loop*, a Gate says *and not more than this many at a time*. For work that is expensive rather than slow, where the ceiling the Engine's pool happens to have is the wrong one.
+_Avoid_: semaphore, limiter, throttle, pool, permit
+
+**Password hash**:
+What is stored instead of a password: argon2id over the password and a salt, written as the PHC string every other library reads. A value rather than a thing with a lifetime — there is nothing to free and nothing to keep. Checking one is the same work as making one, which is why a sign-in for an address with no account does it anyway.
+_Avoid_: digest, encrypted password, credential, secret
+
 **Fail function**:
 A function callable from anywhere to stop a request with a given status and message, without having to hold a Ctx.
 _Avoid_: abort, throw, bail

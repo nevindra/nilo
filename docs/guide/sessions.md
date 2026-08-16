@@ -157,9 +157,46 @@ swapping places, which no size check would catch.
 ## A session is not authentication
 
 It is where a user's id lives once something else has established it. What
-checks the password, what talks to the identity provider, what a role means —
-all yours. nilo provides the mechanism and no policy, the same line it draws
-around [middleware and resolved values](./middleware.md).
+talks to the identity provider, what a role means, how many sign-in attempts an
+address gets — all yours. nilo provides the mechanism and no policy, the same
+line it draws around [middleware and resolved values](./middleware.md).
+
+**Checking the password is the one half nilo does provide**, because getting it
+wrong is quiet:
+
+```zig
+fn signIn(c: *nilo.Ctx, s: nilo.Session(User), form: nilo.Form(SignIn)) !Redirect(303) {
+    const db = c.service(*Db).?;
+    const conn = try db.acquire();
+    defer conn.release();
+
+    const row = try db.find(Account, conn, .{ .email = form.email });
+    if (!try c.verifyPassword(db.gpa, if (row) |r| r.password else null, form.password))
+        return nilo.fail.unauthorized("that is not a sign-in", .{});
+
+    try s.set(.{ .id = row.?.id });
+    return .{ .location = "/" };
+}
+```
+
+Two things about that call are the whole reason it exists
+([ADR 0048](../adr/0048-a-password-hash-is-gated-because-forgetting-is-silent.md)):
+
+- **The stored hash is optional, and `null` means there is no such account.**
+  It does the work anyway and answers false. Returning early when the address
+  is unknown answers in a millisecond instead of thirty, which turns the form
+  into a query for which addresses are registered.
+- **It is a `Ctx` method rather than a call to `nilo_pw`.** One hash is 13 ms
+  and 19 MiB — under `block_warning_ms`, so calling the module directly holds
+  the thread on every sign-in and nothing in the log says so. The method parks
+  the fiber and holds one of `password_hashes_at_once` permits.
+
+Signing somebody up is the other direction:
+
+```zig
+const stored = try c.hashPassword(db.gpa, form.password);
+_ = try db.insert(Account, conn, .{ .email = form.email, .password = stored.text() });
+```
 
 ## Testing
 

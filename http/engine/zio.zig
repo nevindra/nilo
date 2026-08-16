@@ -783,6 +783,16 @@ pub fn randomSecure(buffer: []u8) !void {
 /// handler holding one still testable as an ordinary function (ADR 0003).
 pub const Mutex = zio.Mutex;
 
+/// A counting lock: N fibers through at once and the rest park.
+///
+/// A Mutex is this with N of 1, and the reason both are here is that the one
+/// caller nilo has wants a number bigger than 1 and much smaller than the
+/// blocking pool — see `http/password.zig` and ADR 0048.
+///
+/// Uncontended it takes the Mutex and nothing else, so a test driving an App
+/// with no server running never reaches the fiber-parking half of it.
+pub const Semaphore = zio.Semaphore;
+
 /// Run a blocking call on the Engine's thread pool, parking this fiber
 /// until it comes back, so the other fibers sharing this thread keep
 /// running (ADR 0014).

@@ -247,6 +247,27 @@ pub const Options = struct {
     /// so the socket's own address is used rather than a guess.
     trusted_hops: u8 = 0,
 
+    /// How many password hashes may be in flight at once (ADR 0048).
+    ///
+    /// Eight, and the number is measured rather than picked. Argon2id at the
+    /// default Cost is bound by memory bandwidth, not by cores: on a 16-core
+    /// machine the throughput ceiling is ~280 hash/s and it is reached at 8
+    /// concurrent, not at 32. Going to 32 buys nothing — 263 hash/s, slightly
+    /// *worse* — and costs 608 MiB of transient allocation instead of 152 MiB
+    /// and 110 ms per hash instead of 31 ms.
+    ///
+    /// Left ungated, the ceiling would be the Engine's blocking pool, which
+    /// is twice the core count and sized for calls that wait on a disk rather
+    /// than calls that eat a core and 19 MiB. That matters beyond the hashing
+    /// itself: `Ctx.entropy` goes to the same pool, so a flood of sign-ins
+    /// with no Gate in front of them would queue every session cookie in the
+    /// server behind it.
+    ///
+    /// This bounds concurrency, not queueing. Past it, requests wait their
+    /// turn — a sign-in gets slower, and `header_timeout_ms` is what
+    /// eventually answers a client that will not wait.
+    password_hashes_at_once: u16 = 8,
+
     /// How long a handler may run without yielding before nilo says so in
     /// the log. 0 turns it off (ADR 0034).
     ///
@@ -479,6 +500,41 @@ pub const Mutex = struct {
 
     pub fn unlock(self: *Mutex) void {
         self._inner.unlock();
+    }
+};
+
+/// A lock that lets a fixed number through at once, and parks the rest.
+///
+/// A wrapper rather than a re-export for the reason `Mutex` is: waiting for a
+/// turn is not the handler holding its thread, and the detector has to be
+/// told or a busy Gate reads as a blocking handler (ADR 0034).
+///
+/// **What it is for is a call that is expensive rather than slow.**
+/// `nilo.blocking` already keeps a slow call off the loop, and the Engine's
+/// pool already caps how many run at once — at twice the core count, which is
+/// the right ceiling for a call that is waiting on a disk and the wrong one
+/// for a call that is eating 19 MiB and a core. Password hashing is the
+/// caller this exists for and the numbers are in ADR 0048.
+pub const Gate = struct {
+    _inner: engine.Semaphore,
+
+    /// A Gate that lets `at_once` through. Zero would be a Gate nothing gets
+    /// through, so it is read as one.
+    pub fn open(at_once: usize) Gate {
+        return .{ ._inner = .{ .permits = @max(1, at_once) } };
+    }
+
+    /// Wait for a turn. `error.Canceled` if the request went away first,
+    /// which is the same answer `Mutex.lock` gives.
+    pub fn enter(self: *Gate) error{Canceled}!void {
+        const w = watchdog.waitingAnywhere();
+        defer watchdog.waitedAnywhere(w);
+        return self._inner.wait();
+    }
+
+    /// Give the turn back. Never waits, so there is nothing to forgive.
+    pub fn leave(self: *Gate) void {
+        self._inner.post();
     }
 };
 

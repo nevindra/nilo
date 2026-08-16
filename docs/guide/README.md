@@ -45,7 +45,7 @@ const nilo = @import("nilo_http");
 7. [Cookies](./cookies.md) — reading them, setting them, and the signed-in
    user.
 8. [Sessions](./sessions.md) — a struct of yours, sealed into one cookie, with
-   nothing kept on the server.
+   nothing kept on the server, and checking the password that opens one.
 9. [Streaming](./streaming.md) — writing an answer whose length nobody knows
    yet, and server-sent events.
 10. [WebSocket](./websocket.md) — a handler that doesn't return for a while.

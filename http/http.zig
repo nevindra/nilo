@@ -69,6 +69,26 @@ pub const std_options: std.Options = .{
 /// ```
 pub const Mutex = @import("bulkhead.zig").Mutex;
 
+/// A Mutex with a number bigger than one: `n` fibers through at once and the
+/// rest park (ADR 0048).
+///
+/// For a call that is *expensive* rather than slow. `nilo.blocking` already
+/// keeps a slow call off the loop and the Engine's pool already caps how many
+/// run at once — at twice the core count, which is right for a call waiting on
+/// a disk and wrong for one eating a core and a lot of memory.
+///
+/// ```zig
+/// var resizing: nilo.Gate = .open(4);
+///
+/// try resizing.enter();
+/// defer resizing.leave();
+/// const thumb = try nilo.blocking(shrink, .{ gpa, bytes });
+/// ```
+///
+/// nilo's own caller is password hashing, and there the Gate is already
+/// applied for you — see `Ctx.hashPassword`.
+pub const Gate = @import("bulkhead.zig").Gate;
+
 /// Somewhere to put work that is not a request: a fiber of its own, owned
 /// by the server rather than by whatever started it (ADR 0029).
 ///
@@ -514,6 +534,7 @@ test {
     _ = @import("convert.zig");
     _ = @import("cookie.zig");
     _ = @import("session.zig");
+    _ = @import("password.zig");
     _ = @import("form.zig");
     _ = @import("bound.zig");
     _ = @import("redirect.zig");

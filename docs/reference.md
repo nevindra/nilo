@@ -5,7 +5,7 @@ The whole surface, as a list. For what any of it is *for*, see
 
 ## The modules
 
-Five ship, and a project links only what it imports
+Six ship, and a project links only what it imports
 ([ADR 0041](./adr/0041-a-module-sits-where-the-loop-puts-it.md),
 [ADR 0042](./adr/0042-the-bottom-layer-holds-more-than-one-module.md)).
 
@@ -15,6 +15,7 @@ Five ship, and a project links only what it imports
 | `nilo_sql` | Postgres | [below](#nilo_sql) |
 | `nilo_id` | UUIDs | [below](#nilo_id) |
 | `nilo_config` | settings out of the environment | [below](#nilo_config) |
+| `nilo_pw` | password hashing | [below](#nilo_pw) |
 | `nilo_core` | `Str` and the [Scope](#scope), shared by the rest | [below](#run) |
 
 ```zig
@@ -22,6 +23,7 @@ const nilo = @import("nilo_http");    // the alias everybody writes
 const sql = @import("nilo_sql");      // only if you talk to Postgres
 const id = @import("nilo_id");        // only if you make identifiers
 const config = @import("nilo_config");// only if you read settings
+const pw = @import("nilo_pw");        // only if you hash passwords
 ```
 
 **There is no module called `nilo`.** The word names the project — the `nilo: `
@@ -201,6 +203,9 @@ with `format: binary` whatever the content type is at run time. See
 | `c.formCollecting(T, &outcomes)` | `!T` — as `form`, recording why each field failed |
 | `c.requestId()` | `Str` — this request's id, from `X-Request-Id` or generated |
 | `c.entropy(n)` | `![n]u8` — unguessable bytes from the OS, off the event loop. `n` is comptime |
+| `c.hashPassword(gpa, text)` | `!pw.Hash` — argon2id, salted, off the loop and behind the Gate |
+| `c.hashPasswordWith(cost, gpa, text)` | the same, at a `pw.Cost` of your own |
+| `c.verifyPassword(gpa, stored, text)` | `!bool` — `stored` is `?[]const u8`; null means no such account |
 | `c.bodyStream()` | `!Body` — the body in pieces |
 | `c.bodyStreamWith(.{ .max_bytes = … })` | the same, with a ceiling. Default 64 MB |
 | `c.peer()` | the address the connection came from — the proxy's, if there is one |
@@ -436,6 +441,54 @@ whether the port is one this machine may bind is your question.
 if the file has to be TOML. Either way the pairs come back as a `Fixed` and
 this module never had to carry the dependency.
 
+## `nilo_pw`
+
+Password hashing
+([ADR 0048](./adr/0048-a-password-hash-is-gated-because-forgetting-is-silent.md)).
+Argon2id, in the PHC form everybody else writes.
+
+```zig
+// signing up
+const stored = try c.hashPassword(gpa, form.password);
+_ = try db.insert(User, conn, .{ .email = form.email, .password = stored.text() });
+
+// signing in
+const row = try db.find(User, conn, .{ .email = form.email });
+if (!try c.verifyPassword(gpa, if (row) |r| r.password else null, form.password))
+    return nilo.fail(401, "that is not a sign-in");
+```
+
+| | |
+|---|---|
+| `c.hashPassword(gpa, text)` | `!pw.Hash` — the call a handler makes |
+| `c.verifyPassword(gpa, stored, text)` | `!bool` — `stored` is `?[]const u8` |
+| `stored.text()` | the PHC string, `$argon2id$v=19$m=19456,t=2,p=1$…` |
+| `pw.Cost.default` | OWASP's first recommendation: 19 MiB, 2 passes, 1 lane |
+| `pw.Cost.floor_memory_kib` | 7168 — below it is a compile error |
+| `pw.salt_len` | 16 |
+| `pw.bytesFor(cost)` | what one hash asks the allocator for. 19,922,944 at the default |
+| `pw.hash` / `pw.hashWith` / `pw.verify` | the pure functions, for a program with no server |
+
+**Call the `Ctx` methods, not `nilo_pw` directly.** One hash is 13 ms and
+19 MiB. Thirteen milliseconds is *under* `block_warning_ms`, so calling the
+module straight from a handler holds the thread on every sign-in and **nothing
+in the log ever says so**. The methods take the salt from `c.entropy`, park the
+fiber on the blocking pool, and hold one of
+`listen(.{ .password_hashes_at_once = 8 })` permits.
+
+**`stored` is optional and null is the point.** A sign-in for an address with
+no account has no hash to check; returning early there answers in a millisecond
+instead of thirty and turns the form into a query for which addresses are
+registered. Passing null does the work anyway and answers false.
+
+**`gpa` is an argument because 19 MiB is worth seeing.** Not `c.arena()` — the
+request arena is reset per request keeping `arena_keep` bytes, and pushing
+19 MiB through it spends the one budget nilo treats as an invariant.
+
+**A hash made elsewhere verifies here**, at any parallelism, and a hash made
+here can be read by anything that reads PHC. That is the only reason to have a
+format.
+
 ## `Dir`
 
 A directory, opened once and held open — what a service hands a `FileBody`.
@@ -574,6 +627,7 @@ failure, whatever the endpoint returns when it works.
 |---|---|
 | `nilo.Mutex` | `.init`, then `try lock()`, `unlock()`, `tryLock()` |
 | `nilo.blocking(f, args)` | run a blocking call off the event loop |
+| `nilo.Gate` | `.open(n)`, then `try enter()`, `leave()` — a lock that lets `n` through |
 | `nilo.sleep(ms)` | wait without parking the thread |
 | `nilo.spawn(f, args)` | run something that is not a request |
 | `nilo.randomSecure(&buf)` | fill a buffer you already hold, off the event loop |
@@ -825,6 +879,25 @@ try tx.commit();
 Forgetting the `defer` is caught in Debug by a counter asserted at
 `db.deinit()`.
 
+| | |
+|---|---|
+| `tx.deadline(ms)` | bound every statement after it, for the life of this transaction. `error.TimedOut` past it |
+
+```zig
+var tx = try db.begin(c);
+defer tx.deinit();
+try tx.deadline(2_000);                   // one round trip
+const rows = try tx.select(Report, c, .{ .where = … });
+```
+
+**Only a transaction has one**, and that is the design
+([ADR 0047](./adr/0047-a-deadline-needs-a-connection-you-hold.md)): a deadline
+is always a second command, so it has to go down the same connection as the
+statement it bounds. `db.select` takes whichever connection is free and gives
+it straight back, so there is nothing to set one on. Postgres undoes it when
+the transaction ends, however it ends. For a floor under everything, set it on
+the role: `ALTER ROLE app SET statement_timeout = '30s'`.
+
 ### Types
 
 | | |
@@ -840,4 +913,5 @@ Forgetting the `defer` is caught in Debug by a counter asserted at
 | `error.AlreadyExists` | a unique violation. **409** by default — the only one with a default |
 | `error.ConstraintViolated` | foreign key, check or not-null. 500: usually the code is wrong |
 | `error.Disconnected` | the database went away, or was never there |
+| `error.TimedOut` | a statement ran past `tx.deadline`. No default status — what a deadline means is the handler's to decide |
 | `error.QueryFailed` | anything else. The server's text is logged, never sent |

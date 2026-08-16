@@ -18,11 +18,11 @@ of them be worked on at once. Nothing under `http/` may be imported by `sql/`,
 and the way a Service reaches request-lifetime memory is a Scope, not a `Ctx`.
 
 **The bottom layer holds more than one module** (ADR 0042). `core/` is the
-vocabulary and sits under the rest of it; `id/` and `config/` are **tool
+vocabulary and sits under the rest of it; `id/`, `config/` and `pw/` are **tool
 modules** — one job, no event loop, imports nothing above them. A Service may
 import a tool module, which is downward. **The rule is a build step, not a
 paragraph**: `zig build layering` reads the `@import`s under `core/`, `id/`,
-`config/` and `sql/` and refuses one that is not in that module's row of the
+`config/`, `pw/` and `sql/` and refuses one that is not in that module's row of the
 `layers` table in `build.zig`. Adding a module means adding a row — there and
 in `shipped_roots`, and in `.paths` in `build.zig.zon`.
 
@@ -44,7 +44,7 @@ Three files carry context this one deliberately does not repeat:
 - **`CONTEXT.md`** — the project's vocabulary, and the words it refuses to use
   (Ctx not "Context", Str not "string", keep not "dupe", Refusal not "negative
   test"). Match it in code, comments, docs and commit messages.
-- **`docs/adr/`** — 46 binding decisions, each naming the alternative it
+- **`docs/adr/`** — 48 binding decisions, each naming the alternative it
   rejected. Check here before proposing a design change; "why not X?" usually
   already has an answer on file. **ADR 0041 decides which module new work goes
   in and ADR 0042 decides what that module may import**, and they are the two
@@ -61,6 +61,7 @@ zig build test-all     # the above, plus the same suite in ReleaseSafe — what 
 zig build test-core    # only Core, both modes — no Engine, no module graph
 zig build test-id      # only nilo_id, the same way
 zig build test-config  # only nilo_config, the same way, plus its refusals
+zig build test-pw      # only nilo_pw, the same way, plus its refusals
 zig build layering     # check that no module imports upward or sideways
 zig build refusals     # only the compile-error checks
 zig build examples     # build all seven examples
@@ -98,9 +99,11 @@ module graph, so `zig build test` is the only way to run it.
 zig test core/core.zig                  # the vocabulary, no build.zig
 zig test id/id.zig                      # nilo_id, likewise
 zig test config/config.zig              # nilo_config, likewise
+zig test pw/pw.zig                      # nilo_pw, likewise
 zig build test-core                     # the same, both optimize modes
 zig build test-id
 zig build test-config
+zig build test-pw
 ```
 
 A module that needs no event loop is a module whose tests need no module graph,
@@ -116,7 +119,7 @@ Bottom to top. Each layer knows nothing about the one above it.
 | Layer | Files | What it is |
 |---|---|---|
 | **Core** | `core/` | `Str` and the Scope. The vocabulary every layer agrees about, and no IO at all — a separate module (`nilo_core`) that names no Engine, so `zig test core/core.zig` runs the whole of it (ADR 0041). |
-| **Tools** | `id/` | one job each, no event loop, and `nilo_core` is the most they may import. `nilo_id` is the first and imports nothing at all (ADR 0042). |
+| **Tools** | `id/`, `config/`, `pw/` | one job each, no event loop, and `nilo_core` is the most they may import. All three import nothing at all (ADR 0042, ADR 0043, ADR 0048). |
 | **Engine** | `http/engine/zio.zig` | accept, read, write. **The only file in the repo allowed to name zio** (ADR 0002). |
 | **Bulkhead** | `http/bulkhead.zig` | the entire contract nilo asks of an Engine, listed in that file's header. `Options` is declared here rather than by the Engine, so swapping engines cannot change what a user writes. |
 | **HTTP + App** | `http/http1.zig`, `http/router.zig`, `http/app.zig` | parse, match, dispatch. `App.handleRequest` takes only a `*std.Io.Reader`/`*std.Io.Writer`, which is why almost every HTTP behaviour is tested against in-memory buffers with no server. |
@@ -132,7 +135,7 @@ plus the Debug-only use-after-request trap), `fail` (fail functions, message
 stored in a box bound to the fiber — ADR 0007), `resolve` (resolved values,
 worked out once per request), `service` (type-keyed registry, checked at
 `listen()`), `middleware` (the onion), `form`/`bound`/`convert`/`patch`/`percent`
-(request data into structs of the caller's own), `session`/`cookie`,
+(request data into structs of the caller's own), `session`/`cookie`, `password` (the Gate and the salt in front of `nilo_pw` — ADR 0048),
 `static`/`sendfile`/`filebody`/`range` (files, in memory or opened per request),
 `stream`/`body`/`websocket` (requests that outlive one read), `openapi`,
 `watchdog` (times a handler that holds its thread), `logger`, `cors`.
