@@ -16,7 +16,23 @@ it has to say what it is for.
 
 In order.
 
-1. **Reloading without a restart — static files, then the server.** A
+1. **`sql` — a query is a struct, checked while compiling.** A second module
+   beside `zfast` rather than inside it, designed in
+   [ADR 0039](./adr/0039-the-shape-of-a-query-is-settled-while-compiling.md):
+   a Row is a struct of your own, the SQL is a constant built before the binary
+   exists, and a column that does not exist is a Refusal. Not an ORM, and the
+   word is refused along with the mechanisms — no change tracking, no lazy
+   relations, no identity map, all three of which cost an allocation per row or
+   a query nobody wrote.
+
+   The comptime half is built, tested with no database in the room, and its
+   seventeen Refusals are held: the Row marker and its checks, the Dialect,
+   the where walker, `SELECT` and `DELETE` as constants, and the schema
+   comparison. What is left is everything that touches a socket — the pg.zig
+   Wire behind the seam, filling a Row from bytes, `Borrowed(Row)` and
+   `stream`, `INSERT`/`UPDATE`, `Tx` and its Debug-only trap, and running the
+   schema comparison on the first connection that succeeds.
+2. **Reloading without a restart — static files, then the server.** A
    development annoyance rather than a design hole: a deploy restarts anyway.
    The static half is a watch option on `staticWith`, re-reading a directory
    that has changed. The other half is the whole process, and it cannot live
@@ -30,7 +46,7 @@ In order.
    to disk: a spilled file's length and ETag are recorded at load while its bytes
    are read per request, so a file edited under a running server can now be
    served inconsistently rather than merely staying stale (known gaps, below).
-2. **`permessage-deflate`.** Negotiated in the handshake, and a compressor per
+3. **`permessage-deflate`.** Negotiated in the handshake, and a compressor per
    connection is memory that has not been budgeted.
 
 ## Known gaps

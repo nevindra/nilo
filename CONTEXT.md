@@ -153,3 +153,25 @@ _Avoid_: negative test, compile-fail case, error test, fixture
 **Test client**:
 A stand-in for the other end of a connection, for testing a handler that writes its answer rather than returning one. Runs one request through the App with no server and no socket.
 _Avoid_: mock, fixture, test server, harness
+
+### SQL
+
+**Row**:
+A struct of the caller's own, one field per column, carrying the marker that names its table. A narrower one names another Row instead of a table, and is checked against it while compiling.
+_Avoid_: ORM, model, entity, record, schema, DTO
+
+**Borrowed row**:
+One Row read on its own rather than with the rest, its text pointing into a buffer the handler passed in and valid only until the next one is pulled. That text is a plain slice and not a Str, which is what keeps the Str guarantee free of exceptions.
+_Avoid_: view, ref, unowned, cursor row
+
+**Dialect**:
+The half that writes the SQL, worked out entirely while compiling. It says how a parameter is spelled and how a condition is phrased, and it may refuse a condition its database cannot express rather than emit one that means something else.
+_Avoid_: backend, flavor, adapter, driver
+
+**Wire**:
+The half that speaks to the database: run this query with these values, hand back rows, begin and end a transaction. Everything a database can do that this module does not is reached directly, not through here.
+_Avoid_: driver, client, connection layer, bulkhead
+
+**Tx**:
+One transaction in flight, holding a connection until it ends. It ends however the handler leaves — committed, rolled back, or abandoned — because the connection has to go back fit for whoever takes it next.
+_Avoid_: transaction, unit of work, session, scope

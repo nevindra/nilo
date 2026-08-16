@@ -9,10 +9,14 @@
             .hash = "zio-0.17.0-xHbVVI_jJQC3YbgU7JydwAV7MuASkOTd73YqBaKlFFUz",
         },
     },
+    // Two modules ship, so two directories do. `sql` sits beside `src`
+    // rather than inside it (ADR 0039), which means this list is the one
+    // place that has to remember it exists — held by a test in `build.zig`.
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
+        "sql",
         "LICENSE",
         "README.md",
     },

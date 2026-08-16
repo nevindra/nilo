@@ -1,5 +1,27 @@
 const std = @import("std");
 
+/// The directories a module is rooted in. Two modules ship, so two
+/// directories do, and `.paths` in `build.zig.zon` is the one place that has
+/// to remember — a dependent whose `.paths` is missing one gets a package
+/// without that module and finds out at their own build (ADR 0039).
+///
+/// Checked here rather than in a test, because a check that runs on every
+/// `zig build` cannot be the thing somebody forgot to run.
+const shipped_roots = [_][]const u8{ "src", "sql" };
+
+comptime {
+    const manifest = @embedFile("build.zig.zon");
+    @setEvalBranchQuota(8 * manifest.len + 1_000);
+    for (shipped_roots) |root| {
+        const quoted = "\"" ++ root ++ "\"";
+        if (std.mem.indexOf(u8, manifest, quoted) == null) @compileError(
+            "zfast: a module is rooted in `" ++ root ++
+                "/` and build.zig.zon's `.paths` does not list it.\n" ++
+                "  A dependent would fetch a package with that module missing.",
+        );
+    }
+}
+
 const examples = [_]Example{
     .{ .name = "hello", .about = "The smallest thing that serves" },
     .{ .name = "rest", .about = "Typed handlers, a service, fail functions, middleware" },
@@ -11,6 +33,80 @@ const examples = [_]Example{
 };
 
 const Example = struct { name: []const u8, about: []const u8 };
+
+/// The same, for `sql/refusals/`. A separate list because they hang off
+/// `test-sql` rather than `test` — the framework's loop does not pay for a
+/// module it does not import (ADR 0039).
+const sql_refusals = [_]Refusal{
+    .{
+        .name = "any_empty",
+        .says = "`.any` is empty.",
+    },
+    .{
+        .name = "any_not_a_list",
+        .says = "`.any` holds a list of conditions and this one is a single condition.",
+    },
+    .{
+        .name = "borrowed_column_not_in_base",
+        .says = "borrowed_column_not_in_base.UserCard reads `emial`, which borrowed_column_not_in_base.User does not have.",
+    },
+    .{
+        .name = "borrowed_column_wrong_type",
+        .says = "borrowed_column_wrong_type.UserCard reads `age` as []const u8, and borrowed_column_wrong_type.User reads it as i32.",
+    },
+    .{
+        .name = "borrowed_from_a_non_row",
+        .says = "borrowed_from_a_non_row.UserCard's zfast_table names borrowed_from_a_non_row.Settings, which is not a Row.",
+    },
+    .{
+        .name = "compared_with_null",
+        .says = "`gt` was given null on column `deleted_at`.",
+    },
+    .{
+        .name = "condition_on_unknown_column",
+        .says = "condition_on_unknown_column.User has no column `agee`, asked for in a condition.",
+    },
+    .{
+        .name = "delete_without_condition",
+        .says = "a delete on delete_without_condition.User with no condition.",
+    },
+    .{
+        .name = "key_not_a_column",
+        .says = "key_not_a_column.User's key names the column `user_id`, which is not one of its columns.",
+    },
+    .{
+        .name = "negative_limit",
+        .says = "`.limit` is -1.",
+    },
+    .{
+        .name = "no_id_and_no_key",
+        .says = "no_id_and_no_key.Membership has no column `id`, so its zfast_table has to say which column identifies a row.",
+    },
+    .{
+        .name = "not_a_row",
+        .says = "not_a_row.User is not a Row — it has no `zfast_table`.",
+    },
+    .{
+        .name = "order_on_unknown_column",
+        .says = "order_on_unknown_column.User has no column `creted_at`, asked for in `.order`.",
+    },
+    .{
+        .name = "reserved_column_any",
+        .says = "reserved_column_any.Answer has a column named `any`, which is the word a condition uses for OR.",
+    },
+    .{
+        .name = "table_unknown_option",
+        .says = "table_unknown_option.User's zfast_table sets `.primary`, which is not part of it.",
+    },
+    .{
+        .name = "table_without_name",
+        .says = "table_without_name.User's zfast_table does not say `.name`.",
+    },
+    .{
+        .name = "unknown_select_option",
+        .says = "a select on unknown_select_option.User was given `.limti`, which is not one of its options.",
+    },
+};
 
 /// One entry per file in `refusals/`: a program written wrong on purpose, and
 /// the first line of the error it has to stop with. `says` leaves out the
@@ -312,6 +408,21 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // The SQL module: a second module beside the library rather than inside
+    // it (ADR 0039). The dependency runs one way — `sql` on `zfast`, never
+    // back — which is what makes this feature cost a project that does not
+    // import it exactly zero bytes. It lives in `sql/` rather than under
+    // `src/` so that the convention about adding an `_ = @import(…)` line to
+    // `src/zfast.zig` cannot pull it into every build by being followed.
+    const zfast_sql = b.addModule("zfast_sql", .{
+        .root_source_file = b.path("sql/sql.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zfast", .module = zfast },
+        },
+    });
+
     // The benchmark target: a routed GET with a path param returning ~1KB
     // of JSON, which is the primary metric in docs/history.md.
     const bench = b.createModule(.{
@@ -370,6 +481,48 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the tests in Debug — the fast loop");
     const test_all_step = b.step("test-all", "Run the tests in Debug and ReleaseSafe — what CI runs");
     test_all_step.dependOn(test_step);
+
+    // The SQL module keeps its own step, and `test` does not depend on it
+    // (ADR 0039). Not for speed: it has a tier that cannot run without a
+    // database at all, and mixing a step that needs Postgres into the one
+    // run every thirty seconds is the wrong place for it. What is here is
+    // the half that needs nothing — generated SQL and the schema comparison
+    // are both pure functions, the same reason `App.handleRequest` is tested
+    // against in-memory buffers.
+    const test_sql_step = b.step("test-sql", "Run the SQL module's tests — no database needed");
+    test_all_step.dependOn(test_sql_step);
+
+    // The SQL module's Refusals, held the same way the framework's are (ADR
+    // 0027) and hung off `test-sql` rather than `test`. Every comptime check
+    // in `sql/` answers a question a database would otherwise answer at run
+    // time, so the wording of these is the whole point of doing it early.
+    const refusals_sql_step = b.step(
+        "refusals-sql",
+        "Check that each SQL mistake stops in zfast's own words",
+    );
+    for (sql_refusals) |refusal| {
+        const module = b.createModule(.{
+            .root_source_file = b.path(b.fmt("sql/refusals/{s}.zig", .{refusal.name})),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{.{ .name = "zfast_sql", .module = zfast_sql }},
+        });
+        const refused = b.addObject(.{ .name = refusal.name, .root_module = module });
+        refused.expect_errors = .{ .contains = b.fmt("error: zfast: {s}", .{refusal.says}) };
+        refusals_sql_step.dependOn(&refused.step);
+    }
+    test_sql_step.dependOn(refusals_sql_step);
+
+    for (test_modes) |mode| {
+        const sql_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("sql/sql.zig"),
+                .target = target,
+                .optimize = mode,
+            }),
+        });
+        test_sql_step.dependOn(&b.addRunArtifact(sql_tests).step);
+    }
 
     for (test_modes) |mode| {
         const step = if (mode == loop_mode) test_step else test_all_step;
