@@ -2,7 +2,7 @@
 //! failure the design has: the cookie is dropped with no error and no
 //! warning, so it looks like a session that simply never works.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 const Signed = struct {
     user: u32,

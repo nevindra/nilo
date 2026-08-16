@@ -11,7 +11,7 @@
 //! ```
 
 const std = @import("std");
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 pub const std_options = nilo.std_options;
 pub const std_options_debug_io = nilo.debug_io;

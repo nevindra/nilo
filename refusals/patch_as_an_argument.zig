@@ -1,6 +1,6 @@
 //! A `Patch` asked for as an argument. It is a field of a body, not a body.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 fn edit(id: u32, name: nilo.Patch(nilo.Str)) u32 {
     _ = name;

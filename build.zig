@@ -1,13 +1,17 @@
 const std = @import("std");
 
-/// The directories a module is rooted in. Two modules ship, so two
-/// directories do, and `.paths` in `build.zig.zon` is the one place that has
-/// to remember — a dependent whose `.paths` is missing one gets a package
-/// without that module and finds out at their own build (ADR 0039).
+/// The directories a module is rooted in. One per shipped module (ADR 0041),
+/// and `.paths` in `build.zig.zon` is the one place that has to remember — a
+/// dependent whose `.paths` is missing one gets a package without that module
+/// and finds out at their own build (ADR 0039).
 ///
 /// Checked here rather than in a test, because a check that runs on every
 /// `zig build` cannot be the thing somebody forgot to run.
-const shipped_roots = [_][]const u8{ "src", "sql" };
+///
+/// **Adding a module means adding a row here as well as to `.paths`.** Core
+/// shipped for a whole session with neither, and nothing noticed, because a
+/// list that does not name a directory cannot check it.
+const shipped_roots = [_][]const u8{ "core", "http", "sql" };
 
 comptime {
     const manifest = @embedFile("build.zig.zon");
@@ -113,6 +117,10 @@ const sql_refusals = [_]Refusal{
     .{
         .name = "not_a_row",
         .says = "not_a_row.User is not a Row — it has no `nilo_table`.",
+    },
+    .{
+        .name = "not_a_scope",
+        .says = "db.select needs a Scope and *mem.Allocator is not one.",
     },
     .{
         .name = "order_on_unknown_column",
@@ -414,6 +422,24 @@ fn stripMeasured(strip: ?bool, optimize: std.builtin.OptimizeMode) ?bool {
     return if (optimize == .ReleaseFast) true else null;
 }
 
+/// A copy of Core for one optimize mode (ADR 0041).
+///
+/// A module carries the mode it was created with, so every root that reaches
+/// Core needs one of its own — the same reason zio is fetched once per mode
+/// below. `createModule` and not `addModule`: only the top-level `nilo_core`
+/// is a name somebody else's project may import.
+fn coreFor(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    mode: std.builtin.OptimizeMode,
+) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("core/core.zig"),
+        .target = target,
+        .optimize = mode,
+    });
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -424,30 +450,58 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // The library itself, under the name it is imported by. Everything
-    // else here — the benchmark server, every example — depends on this
-    // exactly the way somebody else's project would.
-    const nilo = b.addModule("nilo", .{
-        .root_source_file = b.path("src/nilo.zig"),
+    // The bottom layer: what every other one agrees about, and nothing else
+    // (ADR 0041). It names no Engine and does no IO, which is why it is the
+    // one module here that needs no import of its own — and why
+    // `zig test core/core.zig` runs the whole of it without this file.
+    const nilo_core = b.addModule("nilo_core", .{
+        .root_source_file = b.path("core/core.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // The server, under the name it is imported by. Everything else here —
+    // the benchmark server, every example — depends on this exactly the way
+    // somebody else's project would.
+    //
+    // **No module is called `nilo`, and that is the decision rather than an
+    // oversight** (ADR 0041). The word names the project: the `nilo: ` prefix
+    // every Refusal carries, and the `nilo_table` / `nilo_resolve` /
+    // `nilo_start` markers that sit in a reader's own structs. A module
+    // holding the bare name would make it mean two things, which is the one
+    // thing `CONTEXT.md` exists to prevent. An umbrella module re-exporting
+    // the others would bring the name back and cost every project the bytes
+    // of every module, which is the property ADR 0040 bought.
+    const nilo_http = b.addModule("nilo_http", .{
+        .root_source_file = b.path("http/http.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "zio", .module = zio.module("zio") },
+            .{ .name = "nilo_core", .module = nilo_core },
         },
     });
 
     // The SQL module: a second module beside the library rather than inside
-    // it (ADR 0039). The dependency runs one way — `sql` on `nilo`, never
-    // back — which is what makes this feature cost a project that does not
-    // import it exactly zero bytes. It lives in `sql/` rather than under
-    // `src/` so that the convention about adding an `_ = @import(…)` line to
-    // `src/nilo.zig` cannot pull it into every build by being followed.
+    // it (ADR 0039). It lives in `sql/` rather than under `src/` so that the
+    // convention about adding an `_ = @import(…)` line to `src/nilo.zig`
+    // cannot pull it into every build by being followed.
+    //
+    // What it imports is `nilo_core` and **not** `nilo`: a Service sits
+    // beside the App rather than on top of it (ADR 0041), and everything
+    // this module ever wanted from a `Ctx` was `arena()` and `str()`, which
+    // is what a Scope is. The tests at the bottom of `sql/db.zig` and
+    // `sql/live.zig` do drive a whole request through a real App, and they
+    // still say `@import("nilo_http")` — an import named only from a `test` block
+    // is not analysed in a build that is not a test build, so the module
+    // published here links no server. `under_test` below is where that name
+    // is supplied.
     const nilo_sql = b.addModule("nilo_sql", .{
         .root_source_file = b.path("sql/sql.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "nilo", .module = nilo },
+            .{ .name = "nilo_core", .module = nilo_core },
         },
     });
 
@@ -464,11 +518,11 @@ pub fn build(b: *std.Build) void {
     // The benchmark target: a routed GET with a path param returning ~1KB
     // of JSON, which is the primary metric in docs/history.md.
     const bench = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("bench/main.zig"),
         .target = target,
         .optimize = optimize,
         .strip = stripMeasured(strip, optimize),
-        .imports = &.{.{ .name = "nilo", .module = nilo }},
+        .imports = &.{.{ .name = "nilo_http", .module = nilo_http }},
     });
 
     const exe = b.addExecutable(.{ .name = "nilo-hello", .root_module = bench });
@@ -480,11 +534,14 @@ pub fn build(b: *std.Build) void {
     const profile = b.addExecutable(.{
         .name = "nilo-profile",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/profile.zig"),
+            .root_source_file = b.path("http/profile.zig"),
             .target = target,
             .optimize = .ReleaseFast,
             .strip = stripMeasured(strip, .ReleaseFast),
-            .imports = &.{.{ .name = "zio", .module = zio.module("zio") }},
+            .imports = &.{
+                .{ .name = "zio", .module = zio.module("zio") },
+                .{ .name = "nilo_core", .module = coreFor(b, target, .ReleaseFast) },
+            },
         }),
     });
     b.step("profile", "Time the pieces of one request").dependOn(&b.addRunArtifact(profile).step);
@@ -501,10 +558,13 @@ pub fn build(b: *std.Build) void {
     const fuzzer = b.addExecutable(.{
         .name = "nilo-fuzz",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/fuzz_main.zig"),
+            .root_source_file = b.path("http/fuzz_main.zig"),
             .target = target,
             .optimize = .ReleaseSafe,
-            .imports = &.{.{ .name = "zio", .module = zio.module("zio") }},
+            .imports = &.{
+                .{ .name = "zio", .module = zio.module("zio") },
+                .{ .name = "nilo_core", .module = coreFor(b, target, .ReleaseSafe) },
+            },
         }),
     });
     const run_fuzzer = b.addRunArtifact(fuzzer);
@@ -519,6 +579,21 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the tests in Debug — the fast loop");
     const test_all_step = b.step("test-all", "Run the tests in Debug and ReleaseSafe — what CI runs");
     test_all_step.dependOn(test_step);
+
+    // Core, on its own, in both modes (ADR 0041). It hangs off `test` rather
+    // than beside it because it is the fastest thing in this file — no
+    // Engine to build, no module graph to walk — and because the claim it
+    // holds is one a change to the layering would break silently otherwise:
+    // that the bottom layer compiles and passes with nothing above it.
+    //
+    // `zig test core/core.zig` is the same run without this file at all, and
+    // that it works is the property, not a convenience.
+    const test_core_step = b.step("test-core", "Run Core's tests — no Engine, no module graph");
+    for (test_modes) |mode| {
+        const tests = b.addTest(.{ .root_module = coreFor(b, target, mode) });
+        test_core_step.dependOn(&b.addRunArtifact(tests).step);
+    }
+    test_step.dependOn(test_core_step);
 
     // The SQL module keeps its own step, and `test` does not depend on it
     // (ADR 0039). Not for speed: it has a tier that cannot run without a
@@ -572,17 +647,38 @@ pub fn build(b: *std.Build) void {
     // module's tests drive a whole request through `nilo.testing.Client`.
     for (test_modes) |mode| {
         const engine = b.dependency("zio", .{ .target = target, .optimize = mode });
+
+        // **One Core per mode, shared by both modules below**, and it has to
+        // be shared rather than merely identical. Two modules built from the
+        // same root file are two different modules to Zig, so a second copy
+        // would make `nilo_core.Str` and `nilo.Str` two distinct types — and
+        // `db.zig` decides what to copy out of the read buffer by asking
+        // `F == core.Str`, which would then quietly answer false for every
+        // Row a test declares. Nothing would fail to compile; the text would
+        // just stop being kept.
+        const core_mod = coreFor(b, target, mode);
+
         const framework = b.createModule(.{
-            .root_source_file = b.path("src/nilo.zig"),
+            .root_source_file = b.path("http/http.zig"),
             .target = target,
             .optimize = mode,
-            .imports = &.{.{ .name = "zio", .module = engine.module("zio") }},
+            .imports = &.{
+                .{ .name = "zio", .module = engine.module("zio") },
+                .{ .name = "nilo_core", .module = core_mod },
+            },
         });
+
+        // The test build is the one place this module names an App, and it
+        // gets both: `nilo_core` for the module itself, `nilo` for the tests
+        // at the bottom of `db.zig` and `live.zig` (ADR 0041).
         const under_test = b.createModule(.{
             .root_source_file = b.path("sql/sql.zig"),
             .target = target,
             .optimize = mode,
-            .imports = &.{.{ .name = "nilo", .module = framework }},
+            .imports = &.{
+                .{ .name = "nilo_core", .module = core_mod },
+                .{ .name = "nilo_http", .module = framework },
+            },
         });
         if (b.lazyDependency("pg", .{ .target = target, .optimize = mode })) |pg| {
             under_test.addImport("pg", pg.module("pg"));
@@ -604,25 +700,35 @@ pub fn build(b: *std.Build) void {
         // reaches stderr, and the build runner answers stderr from a test
         // process with a red `failed command` block above a summary saying
         // every step passed — see `src/test_root.zig`.
+        // One Core per mode here too, for the reason spelled out above the
+        // SQL module's copy: a second one would be a second set of types.
+        const core_mod = coreFor(b, target, mode);
+
         const lib_tests = b.createModule(.{
-            .root_source_file = b.path("src/test_root.zig"),
+            .root_source_file = b.path("http/test_root.zig"),
             .target = target,
             .optimize = mode,
-            .imports = &.{.{ .name = "zio", .module = engine.module("zio") }},
+            .imports = &.{
+                .{ .name = "zio", .module = engine.module("zio") },
+                .{ .name = "nilo_core", .module = core_mod },
+            },
         });
 
         const library = b.createModule(.{
-            .root_source_file = b.path("src/nilo.zig"),
+            .root_source_file = b.path("http/http.zig"),
             .target = target,
             .optimize = mode,
-            .imports = &.{.{ .name = "zio", .module = engine.module("zio") }},
+            .imports = &.{
+                .{ .name = "zio", .module = engine.module("zio") },
+                .{ .name = "nilo_core", .module = core_mod },
+            },
         });
 
         const bench_tests = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = b.path("bench/main.zig"),
             .target = target,
             .optimize = mode,
-            .imports = &.{.{ .name = "nilo", .module = library }},
+            .imports = &.{.{ .name = "nilo_http", .module = library }},
         });
 
         for ([_]*std.Build.Module{ lib_tests, bench_tests }) |module| {
@@ -637,7 +743,7 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path(b.fmt("examples/{s}/main.zig", .{example.name})),
                 .target = target,
                 .optimize = mode,
-                .imports = &.{.{ .name = "nilo", .module = library }},
+                .imports = &.{.{ .name = "nilo_http", .module = library }},
             });
             const tests = b.addTest(.{ .root_module = module });
             step.dependOn(&b.addRunArtifact(tests).step);
@@ -673,7 +779,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path(b.fmt("refusals/{s}.zig", .{refusal.name})),
             .target = target,
             .optimize = .Debug,
-            .imports = &.{.{ .name = "nilo", .module = nilo }},
+            .imports = &.{.{ .name = "nilo_http", .module = nilo_http }},
         });
         const refused = b.addObject(.{ .name = refusal.name, .root_module = module });
         refused.expect_errors = .{ .contains = b.fmt("error: nilo: {s}", .{refusal.says}) };
@@ -693,7 +799,7 @@ pub fn build(b: *std.Build) void {
             // Deliberately not `stripMeasured`: an example is run by a person,
             // and the first thing they need from a crash is where it was.
             .strip = strip,
-            .imports = &.{.{ .name = "nilo", .module = nilo }},
+            .imports = &.{.{ .name = "nilo_http", .module = nilo_http }},
         });
         const built = b.addExecutable(.{
             .name = b.fmt("example-{s}", .{example.name}),

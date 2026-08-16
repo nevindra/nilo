@@ -1,7 +1,7 @@
 //! A service registered by value. The App keeps the pointer and copies
 //! nothing, so a copy would be a service nobody else can see.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 const Db = struct { open: bool = false };
 

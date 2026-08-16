@@ -1,7 +1,7 @@
 //! A binding wrapped in a binding. There is one way for a field to fail and
 //! one place the failures go, so the second wrapper has nothing to add.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 const SignUp = struct { email: nilo.Str };
 

@@ -1,7 +1,7 @@
 //! A resolver that hands back something other than the type it belongs to —
 //! usually a copy-and-paste from the resolver next to it.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 const Caller = struct {
     name: nilo.Str,

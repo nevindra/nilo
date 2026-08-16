@@ -18,7 +18,7 @@ saying what the person was trying to do:
 //! `*Store` — and by value it is a struct, so nilo reads it as a second
 //! request body.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 const Store = struct { rows: u32 };
 const NewOrder = struct { sku: nilo.Str };

@@ -1,6 +1,6 @@
 //! `Query` given the type of a single param rather than a struct of them.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 fn list(page: nilo.Query(u32)) u32 {
     return page.value;

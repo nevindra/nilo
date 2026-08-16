@@ -1,6 +1,6 @@
 //! A form field of a type no form value can become.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 const SignUp = struct { tags: []const u8 = "" };
 

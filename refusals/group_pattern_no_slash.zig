@@ -1,6 +1,6 @@
 //! A pattern inside a group written as if it were joined by the group.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 fn index() []const u8 {
     return "";

@@ -52,7 +52,15 @@
 //! the column check and nothing else.
 
 const std = @import("std");
-const nilo = @import("nilo");
+const core = @import("nilo_core");
+
+/// **Reached only by the tests at the bottom of this file** — a Service does
+/// not import an App (ADR 0041). It is here rather than unreachable because
+/// the test worth having is the one that drives a whole request through a
+/// real App, and Zig makes that free: an import named only from a `test`
+/// block is never analysed in a build that is not a test build, so the
+/// published `nilo_sql` declares `nilo_core` alone and links no server.
+const nilo = @import("nilo_http");
 
 const dialect = @import("dialect.zig");
 const postgres = @import("postgres.zig");
@@ -241,7 +249,8 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         ///
         /// The statement itself was settled while compiling: `options` only
         /// carries the values (ADR 0039).
-        pub fn select(self: *Self, comptime Row: type, c: *nilo.Ctx, options: anytype) ![]Row {
+        pub fn select(self: *Self, comptime Row: type, c: anytype, options: anytype) ![]Row {
+            comptime core.checkScope(@TypeOf(c), "db.select");
             const stmt = comptime statement.select(D, Row, @TypeOf(options));
             return fill(Row, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, options));
         }
@@ -250,7 +259,8 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         ///
         /// `?Row` is already a 404 in the typed layer (ADR 0024), so a
         /// handler that returns this and nothing else is a whole endpoint.
-        pub fn one(self: *Self, comptime Row: type, c: *nilo.Ctx, options: anytype) !?Row {
+        pub fn one(self: *Self, comptime Row: type, c: anytype, options: anytype) !?Row {
+            comptime core.checkScope(@TypeOf(c), "db.one");
             const found = try self.select(Row, c, options);
             return if (found.len == 0) null else found[0];
         }
@@ -270,9 +280,10 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         pub fn stream(
             self: *Self,
             comptime Row: type,
-            c: *nilo.Ctx,
+            c: anytype,
             options: anytype,
         ) !Streamed(Row) {
+            comptime core.checkScope(@TypeOf(c), "db.stream");
             const stmt = comptime statement.select(D, Row, @TypeOf(options));
             const w = try self.wireOf();
             const rows = try w.run(c.arena(), stmt.sql, valuesOf(stmt, Row, options));
@@ -293,10 +304,11 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         pub fn raw(
             self: *Self,
             comptime Row: type,
-            c: *nilo.Ctx,
+            c: anytype,
             sql: []const u8,
             values: anytype,
         ) ![]Row {
+            comptime core.checkScope(@TypeOf(c), "db.raw");
             return fill(Row, try self.wireOf(), null, c, sql, values);
         }
 
@@ -308,7 +320,8 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         /// `values` names a subset of the columns, because the ones the
         /// database fills in are exactly the ones a caller has nothing to
         /// say about. A name that is not a column is a Refusal.
-        pub fn insert(self: *Self, comptime Row: type, c: *nilo.Ctx, values: anytype) !Row {
+        pub fn insert(self: *Self, comptime Row: type, c: anytype, values: anytype) !Row {
+            comptime core.checkScope(@TypeOf(c), "db.insert");
             const stmt = comptime statement.insert(D, Row, @TypeOf(values));
             const back = try fill(Row, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, values));
             // `RETURNING` on a successful insert answers with exactly one
@@ -324,14 +337,16 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         /// Both halves are required: an update with no `.set` changes
         /// nothing, and one with no `.where` rewrites the table. Each is a
         /// Refusal rather than a statement nobody meant to send.
-        pub fn update(self: *Self, comptime Row: type, c: *nilo.Ctx, options: anytype) !usize {
+        pub fn update(self: *Self, comptime Row: type, c: anytype, options: anytype) !usize {
+            comptime core.checkScope(@TypeOf(c), "db.update");
             const stmt = comptime statement.update(D, Row, @TypeOf(options));
             const w = try self.wireOf();
             return w.exec(c.arena(), stmt.sql, valuesOf(stmt, Row, options));
         }
 
         /// Delete every row matching `options`, and say how many there were.
-        pub fn delete(self: *Self, comptime Row: type, c: *nilo.Ctx, options: anytype) !usize {
+        pub fn delete(self: *Self, comptime Row: type, c: anytype, options: anytype) !usize {
+            comptime core.checkScope(@TypeOf(c), "db.delete");
             const stmt = comptime statement.delete(D, Row, @TypeOf(options));
             const w = try self.wireOf();
             return w.exec(c.arena(), stmt.sql, valuesOf(stmt, Row, options));
@@ -354,7 +369,8 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         /// closures, so it means a struct holding a function and every
         /// capture passed by hand, and `Stream`, `Socket` and `Body` are all
         /// *hold the thing, `defer` the cleanup* (ADR 0039).
-        pub fn begin(self: *Self, c: *nilo.Ctx) !Tx {
+        pub fn begin(self: *Self, c: anytype) !Tx {
+            comptime core.checkScope(@TypeOf(c), "db.begin");
             const w = try self.wireOf();
             const inner = try w.begin(c.arena());
             if (traps_enabled) self.hold(&self.open_transactions, .Add);
@@ -396,29 +412,34 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
                 if (traps_enabled) self.db.hold(&self.db.open_transactions, .Sub);
             }
 
-            pub fn select(self: *Tx, comptime Row: type, c: *nilo.Ctx, options: anytype) ![]Row {
+            pub fn select(self: *Tx, comptime Row: type, c: anytype, options: anytype) ![]Row {
+                comptime core.checkScope(@TypeOf(c), "tx.select");
                 const stmt = comptime statement.select(D, Row, @TypeOf(options));
                 return fill(Row, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, options));
             }
 
-            pub fn one(self: *Tx, comptime Row: type, c: *nilo.Ctx, options: anytype) !?Row {
+            pub fn one(self: *Tx, comptime Row: type, c: anytype, options: anytype) !?Row {
+                comptime core.checkScope(@TypeOf(c), "tx.one");
                 const found = try self.select(Row, c, options);
                 return if (found.len == 0) null else found[0];
             }
 
-            pub fn insert(self: *Tx, comptime Row: type, c: *nilo.Ctx, values: anytype) !Row {
+            pub fn insert(self: *Tx, comptime Row: type, c: anytype, values: anytype) !Row {
+                comptime core.checkScope(@TypeOf(c), "tx.insert");
                 const stmt = comptime statement.insert(D, Row, @TypeOf(values));
                 const back = try fill(Row, self.w, &self.inner, c, stmt.sql, valuesOf(stmt, Row, values));
                 if (back.len == 0) return error.QueryFailed;
                 return back[0];
             }
 
-            pub fn update(self: *Tx, comptime Row: type, c: *nilo.Ctx, options: anytype) !usize {
+            pub fn update(self: *Tx, comptime Row: type, c: anytype, options: anytype) !usize {
+                comptime core.checkScope(@TypeOf(c), "tx.update");
                 const stmt = comptime statement.update(D, Row, @TypeOf(options));
                 return self.inner.exec(c.arena(), stmt.sql, valuesOf(stmt, Row, options));
             }
 
-            pub fn delete(self: *Tx, comptime Row: type, c: *nilo.Ctx, options: anytype) !usize {
+            pub fn delete(self: *Tx, comptime Row: type, c: anytype, options: anytype) !usize {
+                comptime core.checkScope(@TypeOf(c), "tx.delete");
                 const stmt = comptime statement.delete(D, Row, @TypeOf(options));
                 return self.inner.exec(c.arena(), stmt.sql, valuesOf(stmt, Row, options));
             }
@@ -426,10 +447,11 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             pub fn raw(
                 self: *Tx,
                 comptime Row: type,
-                c: *nilo.Ctx,
+                c: anytype,
                 sql: []const u8,
                 values: anytype,
             ) ![]Row {
+                comptime core.checkScope(@TypeOf(c), "tx.raw");
                 return fill(Row, self.w, &self.inner, c, sql, values);
             }
         };
@@ -519,7 +541,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             comptime Row: type,
             w: *W,
             tx: ?*W.Tx,
-            c: *nilo.Ctx,
+            c: anytype,
             sql: []const u8,
             values: anytype,
         ) ![]Row {
@@ -556,7 +578,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             rows: *const W.Rows,
             comptime F: type,
             comptime col: usize,
-            c: *nilo.Ctx,
+            c: anytype,
         ) !F {
             if (@typeInfo(F) == .optional) {
                 const Inner = @typeInfo(F).optional.child;
@@ -571,8 +593,8 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         /// driver's read buffer is copied into the request arena here, so
         /// what a handler holds lives exactly as long as the response it is
         /// going into.
-        fn kept(comptime F: type, value: WireRead(F), c: *nilo.Ctx) !F {
-            if (F == nilo.Str) return c.str(try c.arena().dupe(u8, value));
+        fn kept(comptime F: type, value: WireRead(F), c: anytype) !F {
+            if (F == core.Str) return c.str(try c.arena().dupe(u8, value));
             if (F == []const u8) return try c.arena().dupe(u8, value);
             if (F == types.Timestamp) return .{ .micros = value };
             if (F == types.Uuid) return uuidOf(value);
@@ -702,7 +724,7 @@ fn Values(comptime Row: type, comptime O: type, comptime stmt: statement.Stateme
 ///   with its version byte already off, so what arrives is text to parse.
 fn WireRead(comptime F: type) type {
     comptime {
-        if (F == nilo.Str) return []const u8;
+        if (F == core.Str) return []const u8;
         if (F == types.Timestamp) return i64;
         if (F == types.Uuid) return []const u8;
         if (types.jsonPayload(F) != null) return []const u8;
@@ -767,8 +789,8 @@ fn assertStreamable(comptime Row: type) void {
 /// and writes the `T` inside rather than the wrapper.
 fn WireWrite(comptime F: type) type {
     comptime {
-        if (F == nilo.Str) return []const u8;
-        if (F == ?nilo.Str) return ?[]const u8;
+        if (F == core.Str) return []const u8;
+        if (F == ?core.Str) return ?[]const u8;
         if (F == types.Timestamp) return i64;
         if (F == ?types.Timestamp) return ?i64;
         if (F == types.Uuid) return [types.Uuid.byte_len]u8;
@@ -1147,4 +1169,40 @@ test "a committed transaction is not rolled back on the way out" {
     try testing.expectEqual(@as(usize, 1), db.wire.?.committed);
     try testing.expectEqual(@as(usize, 0), db.wire.?.rolled_back);
     if (traps_enabled) try testing.expectEqual(@as(usize, 0), db.open_transactions);
+}
+
+test "Core is one module, so a Row's Str is the App's Str" {
+    // Two modules built from the same root file are two different types to
+    // Zig (ADR 0041). If `build.zig` ever hands this module a Core of its
+    // own rather than the one the App was given, this is what notices —
+    // before `kept` quietly stops recognising a `Str` column and leaves the
+    // text pointing into a read buffer that is about to be reused.
+    try testing.expect(core.Str == nilo.Str);
+}
+
+test "a Run is a Scope, so a query needs no request around it" {
+    // The half of ADR 0041 that is not tidying: everything this module ever
+    // wanted from a `Ctx` was `arena()` and `str()`, so a program with no
+    // server in it can hand over a `Run` instead and the same calls compile.
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = 2 };
+
+    // No App, no request, no socket — and the rows come back filled, the
+    // `Str` column included. That last part is the one worth asserting: it
+    // is `kept` recognising the column and copying it into the Run's arena,
+    // which is the same call it makes for a request.
+    const found = try db.select(Person, &run, .{ .where = .{ .age = .{ .gt = 18 } } });
+    try testing.expectEqual(@as(usize, 2), found.len);
+    try testing.expectEqualStrings("fake", found[0].email.view());
+
+    // And it dies with the tick, exactly as it would with the request.
+    if (core.trap_enabled) {
+        const held = found[0].email;
+        run.reset();
+        try testing.expect(!held.alive());
+    }
 }

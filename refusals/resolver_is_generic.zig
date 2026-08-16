@@ -1,7 +1,7 @@
 //! A resolver still holding an `anytype`, so nothing about it is settled —
 //! not its arguments and not what it hands back.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 const Caller = struct {
     name: nilo.Str,

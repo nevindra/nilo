@@ -29,10 +29,23 @@ const exe = b.addExecutable(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "nilo", .module = nilo.module("nilo") }},
+        .imports = &.{
+            .{ .name = "nilo_http", .module = nilo.module("nilo_http") },
+        },
     }),
 });
 b.installArtifact(exe);
+```
+
+The package is `nilo`; the module is `nilo_http`. **The bare name is the
+project's, not any one module's** — `nilo_sql` and `nilo_core` sit beside the
+server, and you add a line here for each one you import and nothing for the ones
+you do not
+([ADR 0041](../adr/0041-a-module-sits-where-the-loop-puts-it.md)). In your own
+code the alias goes back:
+
+```zig
+const nilo = @import("nilo_http");
 ```
 
 Pass the same `.optimize` through to the dependency. Building nilo in `Debug`
@@ -42,7 +55,7 @@ under a `ReleaseFast` program is legal and slow, and nothing warns about it.
 
 ```zig
 const std = @import("std");
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 pub const std_options = nilo.std_options;
 pub const std_options_debug_io = nilo.debug_io;

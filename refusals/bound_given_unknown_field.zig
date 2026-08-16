@@ -2,7 +2,7 @@
 //! putting itself back on the page reads every box by name, and a typo there
 //! would otherwise be an empty box nobody notices.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 const SignUp = struct { email: nilo.Str, age: u32 };
 

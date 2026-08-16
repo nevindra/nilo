@@ -46,7 +46,7 @@ const names = @import("names.zig");
 const ctx_mod = @import("ctx.zig");
 const service_mod = @import("service.zig");
 const fail = @import("fail.zig");
-const str_mod = @import("str.zig");
+const str_mod = @import("nilo_core");
 const http1 = @import("http1.zig");
 const bulkhead = @import("bulkhead.zig");
 

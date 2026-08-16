@@ -3,7 +3,7 @@
 //! `Bound(Form(…))` the handler actually wrote rather than the `Form(…)`
 //! inside it.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 const SignUp = struct { tags: []const u8 = "" };
 

@@ -1,7 +1,7 @@
 //! A resolver asking for a path param. It belongs to the request rather
 //! than to a route, so there is no `:id` to hand it.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 const Caller = struct {
     name: nilo.Str,

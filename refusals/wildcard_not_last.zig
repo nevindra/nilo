@@ -1,6 +1,6 @@
 //! A catch-all with a segment after it, which nothing could ever match.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 fn raw(c: *nilo.Ctx) !void {
     _ = c;

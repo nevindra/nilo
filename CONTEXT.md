@@ -6,6 +6,14 @@ An HTTP framework for Zig that puts the comfort of writing code first, with perf
 
 ### Layers
 
+**Layer**:
+Where a module sits, decided by one question — does it need the event loop? Core needs none, an App owns one, a Service needs one and does not own it. A module imports downward only and never a sibling, which is what makes two modules two separate pieces of work.
+_Avoid_: tier, level, ring, package, workspace
+
+**Core**:
+The bottom module: the vocabulary every other layer agrees about, and no IO at all. A file earns its place here by being needed by two layers, not by having nowhere else to live. It names no Engine, so it runs under a plain `zig test` and links into a program with no server in it.
+_Avoid_: utils, common, shared, base, prelude
+
 **Engine**:
 The bottom layer, the one that deals with the operating system: accepting connections, reading and writing bytes. Knows nothing about HTTP.
 _Avoid_: runtime, backend, driver, event loop
@@ -17,6 +25,14 @@ _Avoid_: adapter, abstraction layer, interface
 **Ctx**:
 The object standing for one request in flight, and all the control over it. This is nilo's real API — every layer above it turns into calls to this while compiling.
 _Avoid_: Context, Request context, c
+
+**Scope**:
+One lifetime and the memory that belongs to it, asked for as exactly two calls: `arena()` and `str()`. A Ctx is the Scope a request has, and the only one the framework itself ever hands out. It is a shape checked while compiling rather than an interface with a function table, so a module that takes one generates the same code it would have generated naming Ctx.
+_Avoid_: context, allocator, session, unit of work, lifetime
+
+**Run**:
+The Scope for work that is not a request — a CLI run, the tick of a scheduled task, a test that wants one with no App around it. It owns its arena and its lifetime, so text it stamps goes stale at the end of a tick exactly as a request's does, and the debug trap watches it on the same terms.
+_Avoid_: job, task, batch, context, worker
 
 **Typed handler**:
 An ordinary function that takes only what it needs and returns data. nilo matches its arguments while compiling. This is nilo's face to its users.
@@ -178,4 +194,4 @@ _Avoid_: driver, client, connection layer, bulkhead
 
 **Tx**:
 One transaction in flight, holding a connection until it ends. It ends however the handler leaves — committed, rolled back, or abandoned — because the connection has to go back fit for whoever takes it next.
-_Avoid_: transaction, unit of work, session, scope
+_Avoid_: transaction, unit of work, session, scope — and "scope" stays on this list now that a Scope is a thing here, because it is the wrong word for this one specifically: a Scope ends one way and a Tx ends three.

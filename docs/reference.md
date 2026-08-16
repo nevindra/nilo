@@ -3,6 +3,31 @@
 The whole surface, as a list. For what any of it is *for*, see
 [the guide](./guide/).
 
+## The modules
+
+Three ship, and a project links only what it imports
+([ADR 0041](./adr/0041-a-module-sits-where-the-loop-puts-it.md)).
+
+| | | |
+|---|---|---|
+| `nilo_http` | the server — everything on this page unless it says otherwise | [below](#app) |
+| `nilo_sql` | Postgres | [below](#nilo_sql) |
+| `nilo_core` | `Str` and the [Scope](#scope), shared by the other two | [below](#run) |
+
+```zig
+const nilo = @import("nilo_http");    // the alias everybody writes
+const sql = @import("nilo_sql");      // only if you talk to Postgres
+```
+
+**There is no module called `nilo`.** The word names the project — the `nilo: `
+prefix on every Refusal, and the `nilo_table` / `nilo_resolve` / `nilo_start`
+markers that go in your own structs. Nothing re-exports the others, because an
+umbrella module would cost every project the bytes of every module.
+
+`nilo_http` re-exports what it needs from `nilo_core`, so `nilo.Str` and
+`nilo.Run` are the same declarations `nilo_core` holds. A program with no server
+in it imports `nilo_core` directly and links no router and no event loop.
+
 ## Root wiring
 
 ```zig
@@ -274,6 +299,38 @@ One file out of a multipart form, as a `Form(T)` field type.
 | `s.len()` | |
 | `s.keep(gpa)` | a copy that outlives the request; the caller frees it |
 | `Str.static(bytes)` | text that already outlives any request — what a test uses |
+
+## `Run`
+
+A [Scope](#scope) for work that is not a request: a CLI run, the tick of a
+scheduled task, a test. Handed to anything that would otherwise take a `*Ctx`.
+
+```zig
+var run = nilo.Run.init(gpa);
+defer run.deinit();
+
+const rows = try db.select(User, &run, .{ .where = .{ .age = .{ .gt = 18 } } });
+```
+
+| | |
+|---|---|
+| `nilo.Run.init(gpa)` | |
+| `run.deinit()` | |
+| `run.arena()` | `std.mem.Allocator` — memory that lasts as long as this tick |
+| `run.str(bytes)` | `Str` — text you allocated from `run.arena()`, stamped with this tick |
+| `run.reset()` | end the tick: the memory goes back, the pages stay, and every `Str` from it goes stale |
+
+## Scope
+
+Not a type — the two calls above, `arena()` and `str()`. A `Ctx` has them and a
+`Run` has them, and anything asking for a Scope takes either
+([ADR 0041](./adr/0041-a-module-sits-where-the-loop-puts-it.md)). It is checked
+while compiling, so passing something else is a Refusal naming the call rather
+than an error from inside the module.
+
+`nilo_core` is the module both live in. A project importing `nilo` never has to
+name it — `nilo.Str` and `nilo.Run` are the same declarations — but a program
+with no server in it can depend on `nilo_core` alone.
 
 ## `Dir`
 
@@ -561,8 +618,13 @@ database switched off, and the first request that needs it gets
 
 ### Queries
 
-Every one takes the Row, the `Ctx` (for the request arena) and a struct
-written where it is used. All of them compile their SQL to a constant.
+Every one takes the Row, a [Scope](#scope) — the `*Ctx` inside a handler, a
+`*nilo.Run` anywhere else — and a struct written where it is used. All of them
+compile their SQL to a constant.
+
+The Scope is why this module names no App: `arena()` and `str()` were the only
+things it ever asked a `Ctx` for, so a query runs the same in a CLI as in a
+request ([ADR 0041](./adr/0041-a-module-sits-where-the-loop-puts-it.md)).
 
 | | |
 |---|---|

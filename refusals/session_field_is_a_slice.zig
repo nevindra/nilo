@@ -2,7 +2,7 @@
 //! into, and nothing bounds how long it gets — so the cookie's size would
 //! depend on the data, and a browser drops an oversized cookie in silence.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 const Signed = struct {
     user: u32,

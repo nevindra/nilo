@@ -1,7 +1,7 @@
 //! Two resolved values, each worked out from the other. Left alone this is
 //! a compiler that expands for ever rather than a message.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 const Caller = struct {
     name: nilo.Str,

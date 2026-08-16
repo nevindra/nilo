@@ -2,7 +2,7 @@
 //! this is asking for the form twice — and the message says so, rather than
 //! treating the binding as some other kind of argument.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 const SignUp = struct { email: nilo.Str };
 const Extra = struct { referrer: nilo.Str };

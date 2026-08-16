@@ -45,9 +45,10 @@
 
 const std = @import("std");
 /// Named here only so that `Borrowed` knows which field type means *text
-/// that lives as long as the request*. Nothing else in this file asks the
-/// framework anything.
-const nilo = @import("nilo");
+/// that lives as long as the work does*. Nothing else in this file asks any
+/// other layer anything — and what it asks is Core, not the framework
+/// (ADR 0041).
+const core = @import("nilo_core");
 
 /// The declaration a Row carries. Named the way `nilo_resolve`,
 /// `nilo_query` and `nilo_response` are, so the markers the compile-time
@@ -151,8 +152,8 @@ pub fn Borrowed(comptime Row: type) type {
 /// an `i64` is a value and has nothing to outlive.
 fn borrowedType(comptime T: type) type {
     comptime {
-        if (T == nilo.Str) return []const u8;
-        if (T == ?nilo.Str) return ?[]const u8;
+        if (T == core.Str) return []const u8;
+        if (T == ?core.Str) return ?[]const u8;
         return T;
     }
 }

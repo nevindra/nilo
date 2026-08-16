@@ -37,7 +37,7 @@
 //! the point of it taking a `std.Io` rather than a runtime.
 
 const std = @import("std");
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 const live_config = @import("live_config");
 
 const db_mod = @import("db.zig");

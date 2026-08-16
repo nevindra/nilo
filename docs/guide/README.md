@@ -3,6 +3,26 @@
 One page per thing you might want to do. Read them in order the first time —
 each one assumes the ones above it — and jump straight in afterwards.
 
+## Which module a page is about
+
+nilo is three modules rather than one library, and which one a page belongs to
+is decided by a single question — does it need the event loop?
+([ADR 0041](../adr/0041-a-module-sits-where-the-loop-puts-it.md))
+
+| Module | What it is | Pages |
+|---|---|---|
+| **`nilo_http`** | the server: routing, handlers, middleware, files, sockets | everything below except the two named on the right |
+| **`nilo_sql`** | Postgres: your struct is the table | [Talking to Postgres](./sql.md) |
+| **`nilo_core`** | `Str`, and the Scope the other two share | [the reference](../reference.md#scope) |
+
+There is **no module called `nilo`** — the word names the project, and the
+server is `nilo_http`. Every example here writes the alias back, which is all it
+costs:
+
+```zig
+const nilo = @import("nilo_http");
+```
+
 ## Start here
 
 1. [Getting started](./getting-started.md) — install, the two lines of root
@@ -38,8 +58,10 @@ each one assumes the ones above it — and jump straight in afterwards.
     and range requests, and a file too big to hold opened per request.
 14. [Errors](./errors.md) — failing a request from anywhere, what a client is
     told, and request ids for tying a failure to its log line.
-15. [Talking to Postgres](./sql.md) — the second module: your struct is the
-    table, the query is a constant, and a misspelled column is a build error.
+15. [Talking to Postgres](./sql.md) — `nilo_sql`: your struct is the table, the
+    query is a constant, and a misspelled column is a build error. It takes a
+    Scope rather than a `Ctx`, so the same query runs with no server in the
+    process.
 
 ## Shipping it
 

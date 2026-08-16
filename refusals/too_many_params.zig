@@ -1,6 +1,6 @@
 //! More captures on one route than nilo holds per request.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 fn deep(c: *nilo.Ctx) !void {
     _ = c;

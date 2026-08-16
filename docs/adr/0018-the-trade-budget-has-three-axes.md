@@ -48,6 +48,7 @@ Measured stripped, `ReleaseFast`, on the examples in this repository.
 | JSON failure bodies, `Status`, `?T` → 404, nested body messages, `components`, `Patch` ([ADRs 0024](./0024-a-failure-mode-belongs-in-the-return-type.md)–[0026](./0026-a-patch-needs-three-answers-and-an-optional-has-two.md)) | +6 KB | +14 KB |
 | Names for generic shapes, an honest answer for a handler that writes its own, and the enum wording | +3.3 KB | +3.2 KB |
 | Holding the rule about error messages ([ADR 0027](./0027-the-rule-about-error-messages-is-held-by-a-build-step.md)) | +0 | +0 |
+| Core as a module of its own, and a Scope in place of a `Ctx` ([ADR 0041](./0041-a-module-sits-where-the-loop-puts-it.md)) | +0 | +0 |
 
 The second row is one measurement of six changes because they landed together, which is a worse record than the first row and is noted as such. The split it does show is the useful part: `hello` has one route returning text and pays +6 KB, which is the failure-body writer and nothing else — that part is unconditional. The remaining +8 KB on `rest` is the body describer and the schema walker, and those are generated per body type, so they are paid by applications that have bodies.
 

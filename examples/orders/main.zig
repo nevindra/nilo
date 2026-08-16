@@ -47,7 +47,7 @@
 //! ```
 
 const std = @import("std");
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 const fail = nilo.fail;
 const Str = nilo.Str;
 const Allocator = std.mem.Allocator;

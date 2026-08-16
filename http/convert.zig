@@ -21,7 +21,7 @@
 const std = @import("std");
 const fail = @import("fail.zig");
 const naming = @import("names.zig");
-const str_mod = @import("str.zig");
+const str_mod = @import("nilo_core");
 
 const Str = str_mod.Str;
 

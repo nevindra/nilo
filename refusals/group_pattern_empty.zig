@@ -1,6 +1,6 @@
 //! An empty pattern inside a group, meaning to register the group itself.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 fn index() []const u8 {
     return "";

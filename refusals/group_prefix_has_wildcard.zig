@@ -3,7 +3,7 @@
 //! in a prefix is allowed — middleware scoping matches whole segments, and a
 //! `:name` segment matches whatever is opposite it.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 export fn refusal() void {
     var app: nilo.App = undefined;

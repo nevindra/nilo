@@ -29,7 +29,7 @@
 
 const std = @import("std");
 const http1 = @import("http1.zig");
-const str_mod = @import("str.zig");
+const str_mod = @import("nilo_core");
 const patch_mod = @import("patch.zig");
 
 const Str = str_mod.Str;

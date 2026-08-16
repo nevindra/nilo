@@ -41,7 +41,7 @@ Thirty-nine checks were covered. Writing the cases and watching them fail found 
 
 **The message for two request bodies blamed the wrong argument.** A handler taking a service by value — `fn placeOrder(store: Store, incoming: NewOrder)` — was told argument 2, `NewOrder`, was the surplus body, and advised to make `NewOrder` a pointer. `NewOrder` was the one thing in that signature that was already right. nilo cannot know which of two structs was meant to be the body, so the message now names both and states the rule that tells them apart.
 
-**Messages spelled nilo's types with nilo's file names.** A resolver returning the wrong type was told it returned `str.Str`; a slice of headers was called `[]http1.Header`. Both true, both about a source tree the reader does not have and a `str` they never imported. `src/names.zig` rewrites the names nilo's own compile errors print into the ones the import line gives them — `nilo.Str`, `[]nilo.Header` — and leaves a type of the reader's own exactly where they wrote it.
+**Messages spelled nilo's types with nilo's file names.** A resolver returning the wrong type was told it returned `str.Str`; a slice of headers was called `[]http1.Header`. Both true, both about a source tree the reader does not have and a `str` they never imported. `http/names.zig` rewrites the names nilo's own compile errors print into the ones the import line gives them — `nilo.Str`, `[]nilo.Header` — and leaves a type of the reader's own exactly where they wrote it.
 
 ## The half of the rule this does not hold, and what was done about it
 
@@ -51,8 +51,8 @@ Zig reports a `@compileError` at the `@compileError`, which is always inside nil
 
 ```
 referenced by:
-    route__anon_702: src/app.zig:284:22
-    post__anon_685: src/app.zig:244:23
+    route__anon_702: http/app.zig:284:22
+    post__anon_685: http/app.zig:244:23
     6 reference(s) hidden; use '-freference-trace=8' to see all references
 ```
 

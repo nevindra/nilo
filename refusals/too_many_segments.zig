@@ -1,6 +1,6 @@
 //! A path deeper than nilo matches. The answer is a `*` catch-all.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 fn deep(c: *nilo.Ctx) !void {
     _ = c;

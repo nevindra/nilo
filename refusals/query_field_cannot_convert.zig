@@ -1,6 +1,6 @@
 //! A query field of a type no query value can become.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 const Search = struct { tags: []const u8 = "" };
 

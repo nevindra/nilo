@@ -9,6 +9,14 @@ compile-time engine reads its argument list and produces routing, typed input, a
 400 for anything that does not fit, and an OpenAPI document. Nothing is
 annotated.
 
+**The repository is modules, not one library** (ADR 0041). Which one a file
+belongs in is decided by a single question — does it need the event loop?
+`core/` needs none and is the vocabulary everything else shares; `http/` owns
+the loop and is the HTTP framework; `sql/` needs the loop without owning it.
+**A module imports downward only, and never a sibling**, which is what lets two
+of them be worked on at once. Nothing under `http/` may be imported by `sql/`,
+and the way a Service reaches request-lifetime memory is a Scope, not a `Ctx`.
+
 **The framework's one dependency is [zio](https://github.com/lalinsky/zio)**,
 pinned in `build.zig.zon`. The SQL module adds
 [pg.zig](https://github.com/lalinsky/pg.zig), which brings four of its own
@@ -21,9 +29,10 @@ Three files carry context this one deliberately does not repeat:
 - **`CONTEXT.md`** — the project's vocabulary, and the words it refuses to use
   (Ctx not "Context", Str not "string", keep not "dupe", Refusal not "negative
   test"). Match it in code, comments, docs and commit messages.
-- **`docs/adr/`** — 37 binding decisions, each naming the alternative it
+- **`docs/adr/`** — 41 binding decisions, each naming the alternative it
   rejected. Check here before proposing a design change; "why not X?" usually
-  already has an answer on file.
+  already has an answer on file. **ADR 0041 decides which module new work goes
+  in**, and it is the one to read before adding a file anywhere but `http/`.
 - **`docs/reference.md`** — the whole public API on one page.
 
 ## Commands
@@ -31,10 +40,11 @@ Three files carry context this one deliberately does not repeat:
 ```
 zig build test         # the loop: the suite in Debug, plus the refusals
 zig build test-all     # the above, plus the same suite in ReleaseSafe — what CI runs
+zig build test-core    # only Core, both modes — no Engine, no module graph
 zig build refusals     # only the compile-error checks
 zig build examples     # build all seven examples
 zig build fuzz -- --iterations 1000000 --seed 0x…   # generated requests at the parser
-zig build run          # the benchmark server (src/main.zig): GET /users/:id, ~1 KB JSON
+zig build run          # the benchmark server (bench/main.zig): GET /users/:id, ~1 KB JSON
 zig build profile      # where the time inside one request goes
 zig build run-{hello,rest,orders,forms,spa,stream,chat}   # run one example
 ./bench/bench.sh       # wrk/oha against an already-running ReleaseFast server
@@ -53,12 +63,23 @@ No `-Dtest-filter` is wired into `build.zig`, so the build steps are all-or-
 nothing. Modules that do not reach the Bulkhead run standalone with a filter:
 
 ```
-zig test src/range.zig --test-filter "a suffix range"
+zig test http/range.zig --test-filter "a suffix range"
 ```
 
-That works for `str`, `cookie`, `percent`, `patch`, `names`, `json` and `range`.
-Everything else imports the Engine transitively and needs the module graph, so
-`zig build test` is the only way to run it.
+That works for `cookie`, `percent`, `patch`, `names`, `json` and `range`.
+Everything else under `http/` imports the Engine transitively and needs the
+module graph, so `zig build test` is the only way to run it.
+
+**Core is the exception, and by design rather than by luck** (ADR 0041):
+
+```
+zig test core/core.zig                  # the whole bottom layer, no build.zig
+zig build test-core                     # the same, both optimize modes
+```
+
+A module that needs no event loop is a module whose tests need no module graph,
+which is the property the layering exists to buy. If a change to `core/` ever
+stops that command working, the layering has been broken rather than the test.
 
 ## Architecture
 
@@ -66,11 +87,12 @@ Bottom to top. Each layer knows nothing about the one above it.
 
 | Layer | Files | What it is |
 |---|---|---|
-| **Engine** | `src/engine/zio.zig` | accept, read, write. **The only file in the repo allowed to name zio** (ADR 0002). |
-| **Bulkhead** | `src/bulkhead.zig` | the entire contract nilo asks of an Engine, listed in that file's header. `Options` is declared here rather than by the Engine, so swapping engines cannot change what a user writes. |
-| **HTTP + App** | `src/http1.zig`, `src/router.zig`, `src/app.zig` | parse, match, dispatch. `App.handleRequest` takes only a `*std.Io.Reader`/`*std.Io.Writer`, which is why almost every HTTP behaviour is tested against in-memory buffers with no server. |
-| **Ctx** | `src/ctx.zig` | one request in flight, and nilo's real API. |
-| **Typed** | `src/typed.zig` | the compile-time engine. Reads the argument list and turns a typed handler into an ordinary Ctx handler. |
+| **Core** | `core/` | `Str` and the Scope. The vocabulary every layer agrees about, and no IO at all — a separate module (`nilo_core`) that names no Engine, so `zig test core/core.zig` runs the whole of it (ADR 0041). |
+| **Engine** | `http/engine/zio.zig` | accept, read, write. **The only file in the repo allowed to name zio** (ADR 0002). |
+| **Bulkhead** | `http/bulkhead.zig` | the entire contract nilo asks of an Engine, listed in that file's header. `Options` is declared here rather than by the Engine, so swapping engines cannot change what a user writes. |
+| **HTTP + App** | `http/http1.zig`, `http/router.zig`, `http/app.zig` | parse, match, dispatch. `App.handleRequest` takes only a `*std.Io.Reader`/`*std.Io.Writer`, which is why almost every HTTP behaviour is tested against in-memory buffers with no server. |
+| **Ctx** | `http/ctx.zig` | one request in flight, and nilo's real API. |
+| **Typed** | `http/typed.zig` | the compile-time engine. Reads the argument list and turns a typed handler into an ordinary Ctx handler. |
 
 The rule the typed layer enforces is one sentence: **a pointer is a service, a
 value is request data.** Path params are matched *by position*, because Zig does
@@ -98,7 +120,7 @@ ADR 0018 splits "performance" into axes that do not recover the same way. Two of
 them are hard:
 
 - **Allocations per request.** Held by `test "the request path stays inside its
-  allocation budget"` in `src/app.zig`. A DX feature may not add one to a path
+  allocation budget"` in `http/app.zig`. A DX feature may not add one to a path
   that did not ask for it.
 - **Memory per idle connection.** 8,767 bytes, flat. Every feature that costs
   per-connection memory states the number in its own ADR.
@@ -128,7 +150,7 @@ failure inside the standard library impossible to record as passing. See
 **Tests sit at the bottom of the file they test**, and are named as sentences
 describing the behaviour, not the function: `test "a path param that is not a
 number becomes a 400 with a clear message"`. New src files get an `_ =
-@import(...)` line in the `test { … }` block at the end of `src/nilo.zig`, or
+@import(...)` line in the `test { … }` block at the end of `http/http.zig`, or
 they never run. The examples carry tests too, and run in the same suite.
 
 **Both optimize modes matter.** Debug is the loop; ReleaseSafe is the gate,

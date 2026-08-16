@@ -4,7 +4,7 @@
 never imports it links none of it — not the driver, not TLS, nothing.
 
 ```zig
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 const sql = @import("nilo_sql");
 ```
 
@@ -137,6 +137,22 @@ because they read the same struct you wrote.
 Every call takes the `Ctx`. Not to read the request: for the request arena,
 which is where the rows go. They live exactly as long as the response that
 carries them, and nothing is freed by hand.
+
+What it actually asks the `Ctx` for is two calls — `arena()` and `str()` — so
+what it takes is a **Scope**, and a `*Ctx` is one
+([ADR 0041](../adr/0041-a-module-sits-where-the-loop-puts-it.md)). Where there
+is no request there is `nilo.Run`, which owns an arena and a lifetime of its
+own:
+
+```zig
+var run = nilo.Run.init(gpa);
+defer run.deinit();
+
+const adults = try db.select(User, &run, .{ .where = .{ .age = .{ .gt = 18 } } });
+```
+
+Same query, same rows, no server in the process. That is the whole of what a
+migration script or a nightly job needs from this module.
 
 ## Writing
 

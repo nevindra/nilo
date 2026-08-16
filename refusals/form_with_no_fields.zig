@@ -1,6 +1,6 @@
 //! A form with nothing in it, which would read nothing whatever was sent.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 const Empty = struct {};
 

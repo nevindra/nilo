@@ -1,7 +1,7 @@
 //! The marker set to a value instead of the function that works the value
 //! out from a request.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 const Caller = struct {
     name: nilo.Str,

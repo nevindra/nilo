@@ -14,7 +14,7 @@ That is not a rare bug, it is a data leak between users, and it only shows up un
 
 So the Failure is bound to the **fiber**, through `zio.TaskLocal`: the value sticks to its fiber, travels with it if the fiber moves threads, and is invisible to other fibers. What `fail()` can reach is always the Failure of the request it is genuinely serving.
 
-Because only `src/engine/` may name zio (ADR 0002), this joins the Bulkhead contract as one pointer bound to the unit of work currently running — `bindSlot`/`unbindSlot`/`slot`. An Engine built on ordinary threads rather than fibers satisfies the same contract with a `threadlocal`.
+Because only `http/engine/` may name zio (ADR 0002), this joins the Bulkhead contract as one pointer bound to the unit of work currently running — `bindSlot`/`unbindSlot`/`slot`. An Engine built on ordinary threads rather than fibers satisfies the same contract with a `threadlocal`.
 
 Outside the Engine there are no fibers at all — unit tests call `App` directly with in-memory buffers. For that the Bulkhead keeps a threadlocal fallback, used only when the fiber slot is empty. On a real server the fiber slot always exists and always wins, so the fallback is never read.
 

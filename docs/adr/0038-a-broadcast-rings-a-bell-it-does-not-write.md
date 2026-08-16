@@ -171,7 +171,7 @@ allocation for as long as the slowest seat holds it.
 **Throughput and p99: unmoved.** `wrk -t4 -c64`, two 15-second runs each:
 1.110M/1.105M req/s before, 1.108M/1.102M after, with p99 varying more between
 repeats of the same build than between builds. The allocations-per-request test
-in `src/app.zig` passes unchanged — an ordinary request never touches any of
+in `http/app.zig` passes unchanged — an ordinary request never touches any of
 this.
 
 ## What was rejected

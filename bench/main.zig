@@ -5,7 +5,7 @@
 //! measured. The examples worth reading are in `examples/`.
 
 const std = @import("std");
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 const fail = nilo.fail;
 
 pub const std_options = nilo.std_options;

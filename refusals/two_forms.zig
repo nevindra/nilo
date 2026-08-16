@@ -1,6 +1,6 @@
 //! A handler asking for the form twice. A request has one body.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 const Account = struct { email: nilo.Str };
 const Details = struct { name: nilo.Str };

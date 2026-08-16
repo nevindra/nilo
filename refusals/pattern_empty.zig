@@ -1,6 +1,6 @@
 //! A route registered with no pattern at all.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 fn index() []const u8 {
     return "";

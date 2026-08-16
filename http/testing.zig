@@ -29,7 +29,7 @@ const std = @import("std");
 const App = @import("app.zig").App;
 const bulkhead = @import("bulkhead.zig");
 const fail = @import("fail.zig");
-const str_mod = @import("str.zig");
+const str_mod = @import("nilo_core");
 
 pub const Options = struct {
     /// The response buffer. A request whose answer does not fit gets a

@@ -14,18 +14,29 @@ Install it pinned — `zig fetch --save git+https://github.com/nevindra/nilo?ref
 
 ### Breaking: the rename
 
-Everything spelled `zfast` is spelled `nilo`. Three things reach code you
-wrote, and a search and replace covers all of them:
+Everything spelled `zfast` is spelled `nilo`, and **the server's module is
+`nilo_http` rather than `nilo`** — the bare name belongs to the project, which
+now has three modules rather than one
+([ADR 0041](./docs/adr/0041-a-module-sits-where-the-loop-puts-it.md)). A search
+and replace covers all of it:
 
 | Was | Is |
 |---|---|
-| `@import("zfast")` | `@import("nilo")` |
+| `@import("zfast")` | `@import("nilo_http")` |
 | `zfast_table`, `zfast_resolve`, `zfast_query`, `zfast_response` | `nilo_table`, `nilo_resolve`, … |
 | `.zfast` in `build.zig.zon`, `zfast_sql` | `.nilo`, `nilo_sql` |
+| `nilo.module("nilo")` in your `build.zig` | `nilo.module("nilo_http")` |
 
 The markers are the ones worth knowing about, because they sit in **your**
-structs rather than behind the import line. Nothing else about the API
-changed in this release.
+structs rather than behind the import line — and they are the ones that
+**do not** move again, because they are named after the project rather than
+after a module. Alias the import back and the rest of your code is unchanged:
+
+```zig
+const nilo = @import("nilo_http");
+```
+
+Nothing else about the API changed in this release.
 
 ### `nilo_sql` runs
 
@@ -76,6 +87,28 @@ still not an ORM and still refuses joins, aggregates and migrations
   first connection is accepted, which is the only reason a connection pool
   can exist at all ([ADR 0040](./docs/adr/0040-a-service-that-needs-the-loop-is-finished-when-the-loop-exists.md)).
 
+### A third module, below the other two
+
+nilo is now a toolkit whose largest module is a server, rather than a server
+with things beside it
+([ADR 0041](./docs/adr/0041-a-module-sits-where-the-loop-puts-it.md)). Which
+module a file belongs in is decided by one question — does it need the event
+loop? — and **a module imports downward only, never a sibling.**
+
+Nothing you wrote changes. `nilo.Str` is the same declaration it always was.
+
+- **`nilo_core`** holds `Str` and the Scope, needs no event loop, and can be
+  imported on its own by a program that serves nothing.
+- **A Scope is `arena()` and `str()`**, and nothing else. That pair was all
+  `nilo_sql` ever wanted from a `Ctx`, so a query now takes either — the
+  `*Ctx` a handler was given, or a **`nilo.Run`** where there is no request.
+  `db.select(User, &run, .{ … })` runs in a CLI, in a scheduled tick, or in a
+  test with no App in it. Handing over something that is neither is a Refusal
+  naming the call.
+- **`zig build test-core`** runs the bottom layer in both modes, and
+  `zig test core/core.zig` runs it with no `build.zig` at all. That this works
+  is the property the layering exists for, not a convenience.
+
 ### What it costs
 
 A project that does not import `nilo_sql` links none of it — not the driver,
@@ -83,6 +116,9 @@ not TLS — and pays **560 bytes** for the startup hook. One that uses the
 whole module pays **733 KB**, of which the entire write half is 53 KB and the
 rest is pg.zig's TLS dependency. Allocations per request, memory per idle
 connection and p99 are unchanged.
+
+Splitting Core out cost **zero bytes**, measured on three binaries rather than
+assumed.
 
 ## 0.1.0
 

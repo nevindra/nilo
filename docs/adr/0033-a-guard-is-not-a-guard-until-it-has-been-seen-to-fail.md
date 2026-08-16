@@ -10,7 +10,7 @@ one-off and together they are a pattern.
 **The suite whose green runs were not evidence.** `zig build test` printed a
 red block that read exactly like a failure and exited 0, often enough to be
 written off as flakiness under load. Two mistakes, each hiding the other. The
-first: `src/test_root.zig` set a `std_options` with a log function that threw
+first: `http/test_root.zig` set a `std_options` with a log function that threw
 every line away, and `build.zig` carried a comment explaining why that was
 necessary. It had never run once — in a test build the root module is the
 compiler's own test runner, which declares `std_options` itself. The second is

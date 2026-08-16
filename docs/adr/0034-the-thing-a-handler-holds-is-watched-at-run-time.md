@@ -34,7 +34,7 @@ A debug aid in the shape of the `Str` staleness trap (ADR 0004) — a rule the
 type system cannot hold, held instead by something that watches at run time
 and says so in words.
 
-`src/watchdog.zig` measures **elapsed time minus time the fiber spent
+`http/watchdog.zig` measures **elapsed time minus time the fiber spent
 parked**, per request, and warns when what is left crosses
 `block_warning_ms` (default 250):
 

@@ -1,6 +1,6 @@
 //! Two query structs, one per group of fields. The query string is one thing.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 const Paging = struct { page: u32 = 1 };
 const Sorting = struct { sort: nilo.Str = .static("id") };

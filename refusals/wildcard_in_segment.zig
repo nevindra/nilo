@@ -1,6 +1,6 @@
 //! A `*` used as a glob inside a segment. It is a whole segment or nothing.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 fn raw(c: *nilo.Ctx) !void {
     _ = c;

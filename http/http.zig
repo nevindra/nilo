@@ -9,7 +9,13 @@ pub const App = @import("app.zig").App;
 pub const Group = @import("app.zig").Group;
 
 pub const Ctx = @import("ctx.zig").Ctx;
-pub const Str = @import("str.zig").Str;
+pub const Str = @import("nilo_core").Str;
+
+/// A Scope for work that is not a request — a CLI run, the tick of a
+/// scheduled task, a test (ADR 0041). A `Ctx` is the Scope a handler has;
+/// this is the one a program with no request in it hands to a module that
+/// wants one, `nilo_sql` included.
+pub const Run = @import("nilo_core").Run;
 pub const Method = @import("http1.zig").Method;
 pub const Options = @import("bulkhead.zig").Options;
 
@@ -479,7 +485,10 @@ test "a fail function inside blocking reaches the request that made the call" {
 }
 
 test {
-    _ = @import("str.zig");
+    // Core is not listed here. It is a module of its own now, with a step of
+    // its own (ADR 0041) — running it from inside the framework's suite would
+    // hide the property that step exists to hold: that it passes with nothing
+    // above it.
     _ = @import("names.zig");
     _ = @import("patch.zig");
     _ = @import("percent.zig");

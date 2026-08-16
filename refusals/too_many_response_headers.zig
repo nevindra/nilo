@@ -1,7 +1,7 @@
 //! More headers written into a Response than it carries. The rest go on
 //! with `c.setHeader`, which has no limit.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 fn index() nilo.Response([]const u8) {
     return .{

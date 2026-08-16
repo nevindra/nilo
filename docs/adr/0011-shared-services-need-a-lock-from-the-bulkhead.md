@@ -12,7 +12,7 @@ That last sentence was not true when this ADR was first written, and finding out
 
 Worse, the obvious answer is wrong. `std.Thread.Mutex` blocks the OS thread. Under a fiber runtime the thread is running many other connections, so blocking it stalls all of them. If the fiber holding the lock is parked waiting on I/O and can only be resumed by that same thread, nothing gets unstuck. A framework whose documented Service pattern deadlocks under load is not one to ship.
 
-Meanwhile a user cannot simply reach for `zio.Mutex`: ADR 0002 exists so that nothing above `src/engine/` names zio, and that promise is worth nothing if user code has to break it to write a correct handler.
+Meanwhile a user cannot simply reach for `zio.Mutex`: ADR 0002 exists so that nothing above `http/engine/` names zio, and that promise is worth nothing if user code has to break it to write a correct handler.
 
 ## What was decided
 

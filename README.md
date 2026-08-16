@@ -110,10 +110,10 @@ The throughput number (1.4M req/s) is the *least* interesting one and
 the table is five servers making identical syscalls. The two that are actually
 properties of the design are the 8,767 and the 1.
 
-## 79 programs written wrong on purpose
+## 81 programs written wrong on purpose
 
 Everyone tests that their code works. This repo also tests **that its error
-messages still say the right thing**, with 79 programs that are *supposed* to
+messages still say the right thing**, with 81 programs that are *supposed* to
 fail to compile and a build step that checks the wording of every failure.
 
 Because an error message is only a feature until someone refactors it into
@@ -135,11 +135,21 @@ without a search engine. So can your coding agent, and
 
 | | | |
 |---|---|---|
+| **`nilo_core`** | `Str` and the Scope — the vocabulary the others share. No event loop, no HTTP | **shipped** |
 | **`nilo`** | HTTP: routing, typed handlers, middleware, cookies and sessions, static files, streaming, WebSocket, OpenAPI | **shipped** |
 | **`nilo_sql`** | Postgres: your struct is the table | **shipped**: reads, writes, transactions, streaming |
 
-Two modules today. Config, CLI arguments and an HTTP client are the obvious next
-ones, because Zig makes you hand-roll all three.
+Three modules today, and the shape is deliberate: **a toolkit whose largest
+module is a server**, rather than a server with things bolted beside it. Which
+module a file belongs in is settled by one question — does it need the event
+loop? — and a module imports downward only, never a sibling
+([ADR 0041](./docs/adr/0041-a-module-sits-where-the-loop-puts-it.md)). That's
+what lets two of them be worked on at once, and it's why `nilo_sql` takes a
+Scope rather than a `Ctx`: the same query runs in a handler, in a CLI, or in a
+test with no server in the process.
+
+Config, CLI arguments and an HTTP client are the obvious next ones, because Zig
+makes you hand-roll all three.
 
 But this isn't going to become a junk drawer, because there's a bar to clear:
 
@@ -163,7 +173,7 @@ says where every byte of it goes.
 
 ```zig
 const std = @import("std");
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 // Two lines of wiring, once, in your root file. `listen()` names whichever
 // one is missing.
@@ -257,9 +267,20 @@ const exe = b.addExecutable(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "nilo", .module = nilo.module("nilo") }},
+        .imports = &.{
+            .{ .name = "nilo_http", .module = nilo.module("nilo_http") },
+        },
     }),
 });
+```
+
+The package is `nilo` and the module is `nilo_http`, because **the name belongs
+to the project rather than to any one module** — `nilo_sql` and `nilo_core` are
+its siblings, and you add a line above for each one you actually import. In your
+own code, alias it back:
+
+```zig
+const nilo = @import("nilo_http");
 ```
 
 `zig build run`, and the code above is a working server.
@@ -314,7 +335,7 @@ you would meet them.
 
 *While compiling:* an argument nilo can't make sense of, a pattern that can't
 work, two request bodies, a `Form` and a JSON body in the same handler, a column
-that isn't on your struct. [The one up top](#73-programs-written-wrong-on-purpose)
+that isn't on your struct. [The one up top](#81-programs-written-wrong-on-purpose)
 is a fair sample of the register.
 
 *At startup, before a single request is served:* a route registered twice, a
@@ -352,8 +373,8 @@ and fixes it in a single pass; so does an agent, at build or boot time rather
 than by shipping a 500 and reading the logs afterwards.
 
 Those messages don't drift, because
-[`refusals/`](./refusals/) and [`sql/refusals/`](./sql/refusals/) hold **73
-programs written wrong on purpose** (56 for HTTP, 17 for SQL) and the build
+[`refusals/`](./refusals/) and [`sql/refusals/`](./sql/refusals/) hold **81
+programs written wrong on purpose** (56 for HTTP, 25 for SQL) and the build
 checks the wording of every one
 ([ADR 0027](./docs/adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)).
 It's also how a module earns its way in: by bringing its own refusals, not by
@@ -399,7 +420,7 @@ When you want *why* rather than *how*:
 | | |
 |---|---|
 | [`docs/reference.md`](./docs/reference.md) | the entire API surface on one page |
-| [`docs/adr/`](./docs/adr/) | 39 decisions, each naming the alternative it rejected |
+| [`docs/adr/`](./docs/adr/) | 41 decisions, each naming the alternative it rejected |
 | [`CONTEXT.md`](./CONTEXT.md) | the vocabulary, and the words this project refuses |
 | [`docs/roadmap.md`](./docs/roadmap.md) | what's next, what's refused, what's undecided |
 | [`docs/history.md`](./docs/history.md) | what was measured, and what was got wrong |

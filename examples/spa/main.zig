@@ -10,7 +10,7 @@
 //! and no body.
 
 const std = @import("std");
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 // The two lines every nilo root file wants. `listen()` says so at startup
 // if either is missing.

@@ -196,7 +196,7 @@ fn microsSince(started: u64) u64 {
 // ---- tests ----
 
 const testing = std.testing;
-const str_mod = @import("str.zig");
+const str_mod = @import("nilo_core");
 
 /// A Ctx with only what a log line reads filled in. Enough because the line
 /// touches four things and nothing else; anything more would be arranging a

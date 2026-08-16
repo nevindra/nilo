@@ -39,7 +39,7 @@ const ctx_mod = @import("ctx.zig");
 const fail_mod = @import("fail.zig");
 const form_mod = @import("form.zig");
 const naming = @import("names.zig");
-const str_mod = @import("str.zig");
+const str_mod = @import("nilo_core");
 
 const Str = str_mod.Str;
 const Upload = form_mod.Upload;

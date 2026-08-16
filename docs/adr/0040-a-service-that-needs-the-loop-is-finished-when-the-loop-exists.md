@@ -39,7 +39,7 @@ pub fn nilo_start(self: *Db, io: std.Io) !void { … }
 ```
 
 It joins `nilo_resolve`, `nilo_table`, `nilo_query` and `nilo_response` —
-`src/resolve.zig` asks that the markers read alike, and this one does.
+`http/resolve.zig` asks that the markers read alike, and this one does.
 
 **The order is: bind, then start, then say "listening".** A port already in
 use is the commonest way a server fails to start, so it is still reported
@@ -104,7 +104,7 @@ struct rather than the column name it started as.
 
 **`error.AlreadyExists` reaches 409 through `fail.zig`, and that costs no
 dependency.** ADR 0039 promised the row and nothing implemented it. A Zig
-error is a member of one global set, so `src/fail.zig` can match on the name
+error is a member of one global set, so `http/fail.zig` can match on the name
 without importing the module that raises it: the arrow still runs one way.
 It is the only one of the SQL module's four errors given a default, because
 a unique violation means the same thing whatever the request around it was.

@@ -20,13 +20,15 @@
             .lazy = true,
         },
     },
-    // Two modules ship, so two directories do. `sql` sits beside `src`
-    // rather than inside it (ADR 0039), which means this list is the one
-    // place that has to remember it exists — held by a test in `build.zig`.
+    // One directory per module that ships (ADR 0041), and this list is the
+    // one place that has to remember they exist — held by a comptime check
+    // in `build.zig`, because a dependent whose package is missing a
+    // directory finds out at their own build rather than ours.
     .paths = .{
         "build.zig",
         "build.zig.zon",
-        "src",
+        "core",
+        "http",
         "sql",
         "LICENSE",
         "README.md",

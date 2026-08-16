@@ -1,6 +1,6 @@
 //! A path param made optional, as if the route could match without it.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 fn show(id: ?u32) u32 {
     return id orelse 0;

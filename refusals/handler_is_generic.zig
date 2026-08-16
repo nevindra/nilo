@@ -1,6 +1,6 @@
 //! A handler still holding an `anytype`, so it has no argument types to match.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 fn show(id: anytype) u32 {
     return id;

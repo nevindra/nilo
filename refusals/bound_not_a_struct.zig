@@ -1,7 +1,7 @@
 //! A binding of something that is not a struct. A binding records an outcome
 //! per field, and a `u32` has no fields to record anything against.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 fn signUp(incoming: nilo.Bound(u32)) u32 {
     _ = incoming;

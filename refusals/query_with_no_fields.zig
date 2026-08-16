@@ -1,6 +1,6 @@
 //! An empty query struct, which would read nothing.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 const Search = struct {};
 

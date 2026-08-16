@@ -1,7 +1,7 @@
 //! A `Redirect` on a status that carries no `Location`, which no client
 //! would follow.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 fn old() nilo.Redirect(200) {
     return .to("/new");

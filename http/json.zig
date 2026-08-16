@@ -26,7 +26,7 @@
 //! chooses between `12.5` and `1.25e1` is not worth copying.
 
 const std = @import("std");
-const Str = @import("str.zig").Str;
+const Str = @import("nilo_core").Str;
 
 /// Serialise `value` as JSON. Uses the generated writer when the type is one
 /// it covers, and `std.json` when it is not — decided while compiling, so
@@ -245,7 +245,7 @@ test "an escape lands on every offset of a block boundary" {
 }
 
 test "a Str goes out as a plain JSON string" {
-    var lifetime = @import("str.zig").Lifetime{};
+    var lifetime = @import("nilo_core").Lifetime{};
     try expectSame(Str.fromRequest("wati sari", &lifetime));
     try expectSame(Str.fromRequest("with a \" in it", &lifetime));
     try expectSame(struct { name: Str, id: u32 }{

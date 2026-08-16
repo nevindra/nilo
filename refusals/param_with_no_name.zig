@@ -1,6 +1,6 @@
 //! A colon with nothing after it, so nothing can look the param up.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 fn show(id: u32) u32 {
     return id;

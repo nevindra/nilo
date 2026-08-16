@@ -1,7 +1,7 @@
 //! A list of services registered as if it were one — `list.items` handed
 //! straight to provide().
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 const Db = struct { open: bool = false };
 

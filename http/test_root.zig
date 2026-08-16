@@ -20,5 +20,5 @@
 //! every step passed.
 
 test {
-    _ = @import("nilo.zig");
+    _ = @import("http.zig");
 }

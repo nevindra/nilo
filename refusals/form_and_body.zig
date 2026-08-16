@@ -1,7 +1,7 @@
 //! A handler asking for a JSON body and a form at once. They are the same
 //! bytes read two ways, so a request has one or the other and never both.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 const Profile = struct { bio: nilo.Str };
 const SignUp = struct { email: nilo.Str };

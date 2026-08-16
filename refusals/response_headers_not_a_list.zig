@@ -2,7 +2,7 @@
 //! they are set, because a slice would not say how many there are until the
 //! program runs and the response has to hold them itself (ADR 0019).
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 var built: [2]nilo.Header = undefined;
 var how_many: usize = 2;

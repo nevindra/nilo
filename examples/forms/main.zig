@@ -38,7 +38,7 @@
 //!   on the way back out is the part with no framework behind it.
 
 const std = @import("std");
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 const fail = nilo.fail;
 const Str = nilo.Str;
 

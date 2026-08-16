@@ -1,6 +1,6 @@
 //! Text from a request asked for as a bare slice instead of a `Str`.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 fn greet(name: []const u8) []const u8 {
     return name;

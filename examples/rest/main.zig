@@ -25,7 +25,7 @@
 //! ```
 
 const std = @import("std");
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 const fail = nilo.fail;
 
 // The two lines every nilo root file wants. `listen()` says so at startup

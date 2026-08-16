@@ -68,7 +68,7 @@ The primary metric, as `bench/bench.sh` has stated it since stage 1 and as the
 first row of [ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md)'s budget
 puts it: a routed `GET` with a path param returning ~1 KB of JSON, keep-alive,
 no pipelining. The target is `GET /users/:id` in
-[`src/main.zig`](../src/main.zig), 982 bytes of body, CORS installed, no logger.
+[`bench/main.zig`](../bench/main.zig), 982 bytes of body, CORS installed, no logger.
 
 Three runs of 30 seconds, `wrk -t4 -c64`, after a discarded 10-second warm-up:
 

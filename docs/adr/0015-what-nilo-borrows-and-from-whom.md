@@ -4,7 +4,7 @@
 
 Fiber was chosen for a good reason: the audience is people coming from Go and Node, and Fiber is what "comfortable" looks like to them. What it is not is a design nilo can keep following, because v1 already overtook it in the two places that decide the shape of everything above `Ctx`:
 
-- **Fiber has no typed handlers.** Every handler is `func(c *fiber.Ctx) error`. The compile-time argument matching in `src/typed.zig` is a different kind of framework, and there is nothing left in Fiber to copy for it.
+- **Fiber has no typed handlers.** Every handler is `func(c *fiber.Ctx) error`. The compile-time argument matching in `http/typed.zig` is a different kind of framework, and there is nothing left in Fiber to copy for it.
 - **Fiber's best-known footgun is the one v1 closed.** `c.Params()` returns text pointing into a buffer that the next request reuses, and the rule saying so lives in the documentation. `Str` and `keep` (ADR 0004) put that rule in the type system. Fiber gave up where nilo did the work.
 
 So Fiber stays as the **tone** — familiar, unceremonious, running in ten minutes — and stops being the architecture. What follows is where the architecture comes from instead.

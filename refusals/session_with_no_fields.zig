@@ -1,7 +1,7 @@
 //! A session with nothing in it. It would compile, seal five bytes and
 //! remember nothing, which is a cookie's worth of work for no answer.
 
-const nilo = @import("nilo");
+const nilo = @import("nilo_http");
 
 const Empty = struct {};
 
