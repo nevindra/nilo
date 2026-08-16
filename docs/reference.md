@@ -798,7 +798,7 @@ const User = struct {
 
 | | |
 |---|---|
-| `.name` | the table, **written out**. Never guessed from the type name |
+| `.name` | the table, **written out**. Never guessed from the type name. `"app.users"` is a schema and a table; a bare name is whatever `search_path` resolves to |
 | `.key` | the column that identifies a row. Defaults to `id` when there is a field of that name |
 | `pub const nilo_table = Other` | a narrower Row: the same table as `Other`, fewer columns, checked against it while compiling |
 

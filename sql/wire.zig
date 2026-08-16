@@ -332,10 +332,12 @@ pub const Fake = struct {
         self: *Fake,
         arena: std.mem.Allocator,
         query: []const u8,
+        schema: ?[]const u8,
         table: []const u8,
     ) Error![]const Column {
         _ = arena;
         _ = query;
+        _ = schema;
         _ = table;
         return self.columns;
     }

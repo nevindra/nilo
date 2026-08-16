@@ -74,6 +74,17 @@ pub const Postgres = struct {
         };
     }
 
+    /// A relation, quoted, with its schema in front when it has one.
+    ///
+    /// Two identifiers rather than one, which is the whole of the bug this
+    /// replaces: `quote("app.users")` produced `"app.users"`, a single
+    /// identifier with a dot in its name, and Postgres then looked for a table
+    /// nobody had created. A dialect with no schemas answers by ignoring the
+    /// first half, which is why this is the Dialect's call and not the Row's.
+    pub fn qualify(comptime schema: ?[]const u8, comptime table: []const u8) []const u8 {
+        return comptime if (schema) |s| quote(s) ++ "." ++ quote(table) else quote(table);
+    }
+
     pub const list_form: ListForm = .any_array;
 
     /// `LIMIT`/`OFFSET`, which most dialects agree on and one day one will not.
@@ -175,10 +186,16 @@ pub const Postgres = struct {
     /// succeeds. `udt_name` rather than `data_type` because it answers `int4`
     /// and `timestamptz` — the names anyone writing a migration typed — where
     /// `data_type` answers `integer` and `timestamp with time zone`.
+    ///
+    /// Two parameters: the schema, which is null for a Row that named none and
+    /// then means whatever `search_path` resolves to, and the table.
+    /// `information_schema.columns` covers views and materialized-view-backed
+    /// relations as well as tables, so a Row over a view is introspected by
+    /// the same query with nothing added.
     pub const introspect =
         \\SELECT column_name, udt_name, is_nullable
         \\FROM information_schema.columns
-        \\WHERE table_schema = current_schema() AND table_name = $1
+        \\WHERE table_schema = COALESCE($1, current_schema()) AND table_name = $2
         \\ORDER BY ordinal_position
     ;
 
@@ -307,9 +324,9 @@ pub const Postgres = struct {
 pub fn assertDialect(comptime D: type) void {
     comptime {
         const owed = [_][]const u8{
-            "name",   "placeholder", "quote",   "list_form",
-            "limit",  "offset",      "accepts", "introspect",
-            "readAs", "bindAs",      "arrayOf",
+            "name",    "placeholder", "quote",   "list_form",
+            "limit",   "offset",      "accepts", "introspect",
+            "readAs",  "bindAs",      "arrayOf", "qualify",
         };
         for (owed) |decl| {
             if (!@hasDecl(D, decl)) @compileError(
@@ -384,6 +401,14 @@ test "a type that names its own column is taken at its word" {
 test "an enum is not judged, because its type name lives in the database" {
     const Role = enum { admin, user };
     try testing.expectEqual(@as(Accepts, null), Postgres.accepts(Role));
+}
+
+test "a qualified relation is two identifiers, not one with a dot in it" {
+    try testing.expectEqualStrings("\"app\".\"users\"", Postgres.qualify("app", "users"));
+    try testing.expectEqualStrings("\"users\"", Postgres.qualify(null, "users"));
+    // The bug this replaces: one identifier named `app.users`, which is a
+    // relation nobody created.
+    try testing.expectEqualStrings("\"app.users\"", Postgres.quote("app.users"));
 }
 
 test "postgres takes a list as one value, so a statement stays a constant" {

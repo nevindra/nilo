@@ -402,9 +402,6 @@ of it — measured at 0 bytes.
 
 ### Known gaps
 
-- **A table can only be named, never qualified.** `.name = "app.users"` is
-  quoted as one identifier, and the introspection query only looks in
-  `current_schema()`. Anything with a `search_path` is out.
 - **An enum column that has not named its type is not checked at startup.**
   An enum carrying `pub const nilo_column = "user_role"` is judged like any
   other column; one that does not is not, because a Postgres enum's type name
@@ -517,7 +514,6 @@ Two whole areas come off before the list starts.
       `checking` cannot notice a missing index and nothing could generate one.
 - [ ] Sequences, identity columns, generated columns
 - [ ] Views and materialized views
-- [ ] Schema qualification → known gaps, above
 - [ ] A column type declared by a project rather than by this module. The
       schema half is already open — a struct or an enum with `pub const
       nilo_column` is judged by `dialect.accepts` — and the wire half is

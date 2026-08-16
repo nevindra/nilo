@@ -266,6 +266,12 @@ Nothing about the API changed to get any of it. What *did* change:
   ReleaseFast. A Row that reads an array cannot be streamed, for the reason a
   `Json` column cannot: a streamed row holds only what the read buffer already
   holds.
+- **A table can be qualified.** `.name = "app.users"` is a schema and a
+  table now, quoted as two identifiers and introspected in that schema.
+  Before, it was quoted as *one* identifier — `"app.users"`, a relation
+  nobody created — and the error arrived at run time. A bare name still
+  means whatever `search_path` resolves to. More than one dot is a compile
+  error rather than a run-time surprise.
 - **`.distinct_from` and `.not_distinct_from`** — SQL's null-safe comparison,
   and **the one operator a condition takes an optional for**:
 

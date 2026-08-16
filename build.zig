@@ -149,6 +149,10 @@ const sql_refusals = [_]Refusal{
         .says = "streamed_json.Account reads `settings` as a Json column, and a streamed row cannot hold one.",
     },
     .{
+        .name = "table_name_with_two_dots",
+        .says = "table_name_with_two_dots.User names the table `db.app.users`, which is not a schema and a table.",
+    },
+    .{
         .name = "streamed_list",
         .says = "streamed_list.Ticket reads `tags` as a list column, and a streamed row cannot hold one.",
     },

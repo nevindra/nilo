@@ -90,6 +90,13 @@ const role_type = "nilo_live_role_" ++ mode_suffix;
 /// them. A wrong row is not something to hide in a table other tests read.
 const list_table = "nilo_live_tickets_" ++ mode_suffix;
 
+/// A schema of its own, so that a qualified name is tested against a table
+/// that **only** exists there. A table in `public` with the same name would
+/// let a broken `qualify` pass by finding the wrong relation, which is the
+/// failure a test for this has to rule out rather than reproduce.
+const other_schema = "nilo_live_other_" ++ mode_suffix;
+const scoped_table = other_schema ++ ".widgets";
+
 /// Created and dropped by `Live.open`, so a run leaves nothing behind and
 /// does not care what else is in the database.
 ///
@@ -147,7 +154,14 @@ const setup =
     "  (1, ARRAY['urgent','billing'], ARRAY[10,20,30])," ++
     "  (2, ARRAY[]::text[], NULL)," ++
     "  (3, ARRAY['solo',NULL], NULL)," ++
-    "  (4, ARRAY['deep'], ARRAY[[1,2],[3,4]]);";
+    "  (4, ARRAY['deep'], ARRAY[[1,2],[3,4]]);" ++
+    "DROP SCHEMA IF EXISTS " ++ other_schema ++ " CASCADE;" ++
+    "CREATE SCHEMA " ++ other_schema ++ ";" ++
+    "CREATE TABLE " ++ scoped_table ++ " (" ++
+    "  id bigint PRIMARY KEY," ++
+    "  label text NOT NULL" ++
+    ");" ++
+    "INSERT INTO " ++ scoped_table ++ " (id, label) VALUES (1, 'in another schema');";
 
 const Person = struct {
     pub const nilo_table = .{ .name = table, .key = .id };
@@ -253,7 +267,7 @@ test "the schema comparison agrees with the table it was written against" {
     defer live.close(gpa);
 
     const arena = live.arena.allocator();
-    const actual = try live.wire.columnsOf(arena, dialect.Postgres.introspect, table);
+    const actual = try live.wire.columnsOf(arena, dialect.Postgres.introspect, null, table);
 
     var problems: std.ArrayList(schema.Problem) = .empty;
     const found = try schema.compare(dialect.Postgres, Person, actual, &problems, arena);
@@ -287,7 +301,7 @@ test "a table that is not there is one sentence rather than one per column" {
     };
 
     const arena = live.arena.allocator();
-    const actual = try live.wire.columnsOf(arena, dialect.Postgres.introspect, "nilo_no_such_table");
+    const actual = try live.wire.columnsOf(arena, dialect.Postgres.introspect, null, "nilo_no_such_table");
     try testing.expectEqual(@as(usize, 0), actual.len);
 
     var problems: std.ArrayList(schema.Problem) = .empty;
@@ -313,7 +327,7 @@ test "a Row that disagrees with the table is caught, which is the point of the c
     };
 
     const arena = live.arena.allocator();
-    const actual = try live.wire.columnsOf(arena, dialect.Postgres.introspect, table);
+    const actual = try live.wire.columnsOf(arena, dialect.Postgres.introspect, null, table);
 
     var problems: std.ArrayList(schema.Problem) = .empty;
     const found = try schema.compare(dialect.Postgres, Wrong, actual, &problems, arena);
@@ -1614,12 +1628,61 @@ test "the schema comparison judges an array by the array it holds" {
     // job is to log what it found and a logged `err` is a failed test run
     // (`http/test_root.zig`). What is under test is the comparison.
     const arena = live.arena.allocator();
-    const actual = try live.wire.columnsOf(arena, dialect.Postgres.introspect, list_table);
+    const actual = try live.wire.columnsOf(arena, dialect.Postgres.introspect, null, list_table);
 
     var problems: std.ArrayList(schema.Problem) = .empty;
     const found = try schema.compare(dialect.Postgres, Wide, actual, &problems, arena);
     try testing.expectEqual(@as(usize, 1), found);
     try testing.expectEqual(schema.Mismatch.wrong_type, problems.items[0].kind);
+}
+
+// -- a table in a schema of its own ---------------------------------------
+
+/// The table this Row names is in `nilo_live_other_<mode>` and nowhere else,
+/// so every assertion below fails if the name is quoted as one identifier.
+const Widget = struct {
+    pub const nilo_table = .{ .name = scoped_table, .key = .id };
+
+    id: i64,
+    label: []const u8,
+};
+
+test "a qualified table is found, read and written like any other" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const found = (try stack.db.find(Widget, &run, @as(i64, 1))).?;
+    try testing.expectEqualStrings("in another schema", found.label);
+
+    const made = try stack.db.insert(Widget, &run, .{
+        .id = @as(i64, 2),
+        .label = "written there too",
+    });
+    try testing.expectEqual(@as(i64, 2), made.id);
+    try testing.expectEqual(@as(usize, 2), try stack.db.count(Widget, &run, .{}));
+
+    // Quoted as one identifier every statement above named
+    // `"nilo_live_other_<mode>.widgets"` — a relation nobody created — and
+    // said so only when it reached Postgres. Reaching Postgres is the whole
+    // reason this test is here rather than beside the string assertions.
+}
+
+test "the schema check looks in the schema the Row named" {
+    const gpa = testing.allocator;
+    var live = (try Live.open(gpa)) orelse return error.SkipZigTest;
+    defer live.close(gpa);
+
+    var db = db_mod.Db.init(gpa, "already open", .{});
+    db.wire = live.wire;
+
+    // `current_schema()` is `public` and `widgets` is not there, so a check
+    // that ignored the schema half would report `no_such_table` for a table
+    // that exists.
+    try testing.expectEqual(@as(usize, 0), try db.checkSchema(&.{Widget}));
 }
 
 // -- the null-safe comparison ---------------------------------------------

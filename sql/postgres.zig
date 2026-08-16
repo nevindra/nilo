@@ -413,9 +413,10 @@ pub const Wire = struct {
         self: *Wire,
         arena: std.mem.Allocator,
         query: []const u8,
+        schema: ?[]const u8,
         table: []const u8,
     ) wire.Error![]const wire.Column {
-        var rows = try self.run(arena, query, .{table});
+        var rows = try self.run(arena, query, .{ schema, table });
         defer rows.close();
 
         var found: std.ArrayList(wire.Column) = .empty;

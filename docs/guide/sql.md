@@ -28,6 +28,12 @@ The table name is written out, never guessed. `User` → `users` looks clever
 until `Category`, and every framework that guesses ends up shipping a list of
 irregular nouns.
 
+`.name = "app.users"` is a schema and a table, quoted as two identifiers and
+introspected in that schema. A bare name is whatever `search_path` resolves
+to, which is what it has always meant. One dot, with something on either side
+— anything else is a compile error, because `a.b.c` names a relation nobody
+created and Postgres would only say so at run time.
+
 `.key` names the column that identifies a row, and defaults to `id` when
 there is a field called that.
 

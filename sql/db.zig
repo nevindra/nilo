@@ -1041,7 +1041,8 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
 
             var problems: std.ArrayList(schema.Problem) = .empty;
             inline for (Rows) |Row| {
-                const actual = try w.columnsOf(arena, D.introspect, comptime row_mod.tableOf(Row));
+                const q = comptime row_mod.qualifiedOf(Row);
+                const actual = try w.columnsOf(arena, D.introspect, q.schema, q.table);
                 _ = try schema.compare(D, Row, actual, &problems, arena);
             }
 

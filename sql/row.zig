@@ -78,6 +78,43 @@ pub fn tableOf(comptime Row: type) []const u8 {
     return comptime specOf(Row).name;
 }
 
+/// A table name taken apart. `.name = "app.users"` is two identifiers and one
+/// of them decides which schema the introspection query looks in, so the split
+/// happens once, here, rather than in each of the seven places that write a
+/// `FROM`.
+pub const Qualified = struct {
+    /// Null means *whatever `search_path` resolves to*, which is what a bare
+    /// name has always meant and stays the default.
+    schema: ?[]const u8,
+    table: []const u8,
+};
+
+/// The table `Row` reads, split on the dot.
+///
+/// **One dot, and both halves have to be there.** `"app.users"` is a schema
+/// and a table; `"users"` is a table; anything else — `"a.b.c"`, `".users"`,
+/// `"app."` — is a mistake with a plausible cause and no plausible meaning, so
+/// it stops here rather than reaching Postgres as a relation nobody named.
+pub fn qualifiedOf(comptime Row: type) Qualified {
+    return comptime blk: {
+        const written = tableOf(Row);
+        const dot = std.mem.indexOfScalar(u8, written, '.') orelse
+            break :blk .{ .schema = null, .table = written };
+
+        const schema = written[0..dot];
+        const table = written[dot + 1 ..];
+        if (schema.len == 0 or table.len == 0 or
+            std.mem.indexOfScalar(u8, table, '.') != null) @compileError(
+            "nilo: " ++ @typeName(Row) ++ " names the table `" ++ written ++
+                "`, which is not a schema and a table.\n" ++
+                "  A qualified name is `schema.table` — one dot, and something on " ++
+                "either side of it. A table whose name really contains a dot is out " ++
+                "of reach here and is `db.raw`.",
+        );
+        break :blk .{ .schema = schema, .table = table };
+    };
+}
+
 /// The column that identifies a row, as written text. `.key` defaults to `id`
 /// when the Row has a field of that name and is required when it does not —
 /// there is nothing to infer from a Row whose identity column is `user_id`.
@@ -439,6 +476,25 @@ test "a near miss is named, and something unrelated is not guessed at" {
 
 test "the column list reads as a sentence when there is nothing to suggest" {
     try testing.expectEqualStrings("`id`, `email`, `age`", columnList(User));
+}
+
+test "a table name splits on the dot into a schema and a table" {
+    const Qualified_ = struct {
+        pub const nilo_table = .{ .name = "app.users", .key = .id };
+        id: i64,
+    };
+    const q = qualifiedOf(Qualified_);
+    try testing.expectEqualStrings("app", q.schema.?);
+    try testing.expectEqualStrings("users", q.table);
+}
+
+test "a bare name has no schema, which means whatever the search_path says" {
+    const q = qualifiedOf(User);
+    try testing.expectEqual(@as(?[]const u8, null), q.schema);
+    try testing.expectEqualStrings("users", q.table);
+    // `tableOf` still answers what was written, because that is what a
+    // message about the Row should say.
+    try testing.expectEqualStrings("users", tableOf(User));
 }
 
 test "a struct that is not a Row is not mistaken for one" {

@@ -49,6 +49,16 @@ const types_mod = @import("types.zig");
 /// is shape, and a sort direction chosen at runtime is two statements.
 pub const Direction = enum { asc, desc };
 
+/// The Row's table, quoted, with its schema in front when the Row named one.
+/// One function rather than seven call sites, because a `FROM` and an
+/// `INSERT INTO` have to spell the same relation the same way.
+fn relation(comptime D: type, comptime Row: type) []const u8 {
+    return comptime blk: {
+        const q = row_mod.qualifiedOf(Row);
+        break :blk D.qualify(q.schema, q.table);
+    };
+}
+
 /// What a statement compiles to: the text, and where to read each value from
 /// inside the options struct it came from.
 pub const Statement = struct {
@@ -127,7 +137,7 @@ fn rowsOf(
         );
 
         var sql: []const u8 = "SELECT " ++ columnList(D, Row) ++
-            " FROM " ++ D.quote(row_mod.tableOf(Row));
+            " FROM " ++ relation(D, Row);
 
         var paths: []const where_mod.Path = &.{};
         var params: []const where_mod.Param = &.{};
@@ -216,7 +226,7 @@ fn tally(
         dialect_mod.assertDialect(D);
         assertOptions(Row, O, &known_tally, "an aggregate");
 
-        var sql: []const u8 = opening ++ D.quote(row_mod.tableOf(Row));
+        var sql: []const u8 = opening ++ relation(D, Row);
         var paths: []const where_mod.Path = &.{};
         var params: []const where_mod.Param = &.{};
 
@@ -251,7 +261,7 @@ pub fn find(comptime D: type, comptime Row: type, comptime K: type) Statement {
 
         break :blk .{
             .sql = "SELECT " ++ columnList(D, Row) ++
-                " FROM " ++ D.quote(row_mod.tableOf(Row)) ++
+                " FROM " ++ relation(D, Row) ++
                 " WHERE " ++ D.quote(key) ++ " = " ++
                 D.bindAs(D.placeholder(1), row_mod.ColumnType(Row, key), false) ++
                 D.limit("1"),
@@ -314,7 +324,7 @@ fn deleting(
         dialect_mod.assertDialect(D);
         assertOptions(Row, O, &[_][]const u8{"where"}, "a delete");
 
-        var sql: []const u8 = "DELETE FROM " ++ D.quote(row_mod.tableOf(Row));
+        var sql: []const u8 = "DELETE FROM " ++ relation(D, Row);
         var paths: []const where_mod.Path = &.{};
         var params: []const where_mod.Param = &.{};
 
@@ -400,7 +410,7 @@ pub fn insert(comptime D: type, comptime Row: type, comptime V: type) Statement 
         }
 
         break :blk .{
-            .sql = "INSERT INTO " ++ D.quote(row_mod.tableOf(Row)) ++
+            .sql = "INSERT INTO " ++ relation(D, Row) ++
                 " (" ++ names ++ ") VALUES (" ++ places ++ ")" ++
                 " RETURNING " ++ columnList(D, Row),
             .paths = paths,
@@ -475,7 +485,7 @@ pub fn insertMany(comptime D: type, comptime Row: type, comptime V: type) Statem
         }
 
         break :blk .{
-            .sql = "INSERT INTO " ++ D.quote(row_mod.tableOf(Row)) ++
+            .sql = "INSERT INTO " ++ relation(D, Row) ++
                 " (" ++ names ++ ") SELECT * FROM unnest(" ++ arrays ++ ")" ++
                 " RETURNING " ++ columnList(D, Row),
             .paths = paths,
@@ -731,7 +741,7 @@ fn updating(
                 "  An update that changes no column is not a statement worth sending.",
         );
 
-        var sql: []const u8 = "UPDATE " ++ D.quote(row_mod.tableOf(Row)) ++ " SET ";
+        var sql: []const u8 = "UPDATE " ++ relation(D, Row) ++ " SET ";
         var paths: []const where_mod.Path = &.{};
         var params: []const where_mod.Param = &.{};
         var next: usize = 1;
@@ -1076,6 +1086,36 @@ test "the value a find binds is the one handed in, reached by an empty path" {
 }
 
 // -- writes ---------------------------------------------------------------
+
+test "a qualified table is two identifiers everywhere a relation is written" {
+    const Scoped = struct {
+        pub const nilo_table = .{ .name = "app.users", .key = .id };
+
+        id: i64,
+        email: []const u8,
+    };
+
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"email\" FROM \"app\".\"users\"",
+        comptime select(Pg, Scoped, @TypeOf(.{})).sql,
+    );
+    try testing.expectEqualStrings(
+        "INSERT INTO \"app\".\"users\" (\"email\") VALUES ($1)" ++
+            " RETURNING \"id\", \"email\"",
+        comptime insert(Pg, Scoped, @TypeOf(.{ .email = "a@b.c" })).sql,
+    );
+    try testing.expectEqualStrings(
+        "DELETE FROM \"app\".\"users\" WHERE \"id\" = $1",
+        comptime delete(Pg, Scoped, @TypeOf(.{ .where = .{ .id = 1 } })).sql,
+    );
+    try testing.expectEqualStrings(
+        "UPDATE \"app\".\"users\" SET \"email\" = $1 WHERE \"id\" = $2",
+        comptime update(Pg, Scoped, @TypeOf(.{
+            .set = .{ .email = "a@b.c" },
+            .where = .{ .id = 1 },
+        })).sql,
+    );
+}
 
 test "an insert names the columns it was given and returns the whole row" {
     const found = comptime insert(Pg, User, @TypeOf(.{ .email = "a@b.c", .age = 30 }));
