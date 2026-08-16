@@ -16,20 +16,58 @@ it has to say what it is for.
 
 In order.
 
-1. **`sql`, past one table.** The module reads and writes a single table and
+1. **`sql`, the calls a service writes every day.** The module reads and
+   writes one row at a time, and the shapes below are the ones a handler
+   reaches for and does not find. Each is a statement this module could
+   settle while compiling, so none of them moves
+   [ADR 0039](./adr/0039-the-shape-of-a-query-is-settled-while-compiling.md)'s
+   line; what they cost is surface, and each wants its axis numbers before it
+   is written.
+   - `db.count` / `db.exists`. Pagination needs a total, and the way to get
+     one today is `db.raw` with a Row carrying a `nilo_table` that matches no
+     table (`Tally` in `sql/live.zig` is that, and reads as the wart it is).
+   - `db.find(Row, c, key)`. `row.keyOf` already works out the answer and has
+     no caller — `.key` is a comptime check with nothing reading it.
+   - Insert many. One round trip per row is the only shape there is.
+   - Upsert. `ON CONFLICT` has no spelling, so idempotent writes are a caught
+     `AlreadyExists` and a second statement, which is also a race.
+   - `RETURNING` on `update` and `delete`. Both answer with a count, so a
+     handler that wants the row it just changed pays for a second query.
+   - `not in`, `not like`, and negation generally. `.ne` exists; its list and
+     pattern halves do not.
+   - `SELECT … FOR UPDATE`, savepoints, and an isolation level on `begin`.
+     A `Tx` today is one connection and three verbs, which is not enough to
+     write anything that actually contends.
+2. **Prepared statements, measured first.** Every statement this module sends
+   is already a comptime constant, which is the property that makes a cache
+   cheap here and impossible in a framework that assembles its SQL per
+   request — the key can be the statement's own identity. What is unknown is
+   the number: `conn.queryOpts` re-parses and re-plans on every call, and
+   nobody has measured what that is worth. `zig build profile` is the
+   harness; [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md)'s
+   10% is the bar, and `sql/postgres.zig` already says out loud that this is
+   the measurement nobody has taken.
+3. **The column types Postgres has and this module cannot read.** `numeric`
+   is the one that matters — money in an `f64` is wrong, and a service that
+   bills anybody needs it before it needs anything else on this list. Arrays
+   (`text[]`, `int[]`) are the other half: pg.zig encodes them and
+   `dialect.accepts` declines to judge them, so a Row that reads one fails to
+   compile inside the driver rather than stopping here. `interval` and `inet`
+   are the same shape of question and are worth less.
+4. **`sql`, past one table.** The module reads and writes a single table and
    refuses everything past *one table, conditions that filter rows*
    ([ADR 0039](./adr/0039-the-shape-of-a-query-is-settled-while-compiling.md)),
    with `db.raw` as the way out. What nobody has designed is whether the line
    moves: a join is where dialects disagree most, and a builder's surface
    grows with the builder. Migrations are the other half of the same
    question and are equally undecided.
-2. **A second Dialect.** The seam is fitted and only Postgres is filled in,
+5. **A second Dialect.** The seam is fitted and only Postgres is filled in,
    so nothing is known about whether it holds. SQLite is the useful test,
    because it disagrees about the two things the seam abstracts: placeholders
    and list form (`sql/dialect.zig` already refuses a dialect with no
    `ANY(array)` rather than expanding a list into placeholders, which is the
    decision SQLite would challenge).
-3. **Reloading without a restart — static files, then the server.** A
+6. **Reloading without a restart — static files, then the server.** A
    development annoyance rather than a design hole: a deploy restarts anyway.
    The static half is a watch option on `staticWith`, re-reading a directory
    that has changed. The other half is the whole process, and it cannot live
@@ -43,13 +81,50 @@ In order.
    to disk: a spilled file's length and ETag are recorded at load while its bytes
    are read per request, so a file edited under a running server can now be
    served inconsistently rather than merely staying stale (known gaps, below).
-4. **`permessage-deflate`.** Negotiated in the handshake, and a compressor per
+7. **`permessage-deflate`.** Negotiated in the handshake, and a compressor per
    connection is memory that has not been budgeted.
 
 ## Known gaps
 
 Things that are wrong or missing today, with what fixing them would take.
 
+- **`db.one` reads the whole result set and keeps the first row.** It calls
+  `select` and indexes it, so a lookup on a column that is not unique pulls
+  every match out of Postgres and copies all of its text into the arena
+  before throwing it away. The fix is a `LIMIT 1` compiled into `one`'s own
+  statement, and a Refusal when the caller also wrote `.limit`.
+- **`select`'s allocation count is stated and not held, and the stated number
+  is wrong.** [ADR 0039](./adr/0039-the-shape-of-a-query-is-settled-while-compiling.md)
+  claims *exactly two when `.limit` is written out, since the row count is
+  then known before the first row arrives* — and `fill` never reads the
+  limit. Measured against `budget.Counting` over a 32-byte Row: 2 allocations
+  at 10 rows, 4 at 100, 6 at 1,000, 10 at 100,000, and 1.68× the bytes the
+  result actually needs, none of which an arena gives back. The fix is one
+  `ensureTotalCapacityPrecise` from the comptime limit — which makes the ADR's
+  sentence true — plus the test the HTTP path already has and this one does
+  not, and the number corrected in the ADR in place.
+- **A table that is not there is reported as every column being missing.** The
+  introspection query answers nothing, so each column reports
+  `no_such_column` — ten lines for one mistake, and not the one that was
+  made. Forgetting to migrate is the most common way to see this, so it
+  wants its own sentence: `schema.compare` checking `actual.len == 0` first.
+- **A table can only be named, never qualified.** `.name = "app.users"` is
+  quoted as one identifier, and the introspection query only looks in
+  `current_schema()`. Anything with a `search_path` is out.
+- **An enum column holding a value the Zig enum does not have panics.** It is
+  `std.meta.stringToEnum(T, str).?` inside the driver, and
+  `dialect.accepts` declines to judge enums, so this is the one column type
+  that is unchecked at startup *and* fatal at run time. Reading it as
+  `[]const u8` is the workaround; the fix is a decode that errors.
+- **`translate` reads `conn.err` before it reads the error it was given.**
+  pg.zig clears that field on `release`, so the pooled path is clean — but a
+  `Tx` holds its connection across statements, and a non-server failure after
+  a server one is reported with the older code. Narrow, and wrong when it
+  happens.
+- **A query has no deadline of its own.** `timeout_ms` bounds the wait for a
+  free connection and nothing bounds the statement,
+  which [ADR 0023](./adr/0023-a-deadline-belongs-to-an-operation-not-to-a-request.md)
+  says an operation should have.
 - **There are no counters.** Correlation is covered — request ids and JSON log
   lines ([Errors and logging](./guide/errors.md)) — but metrics are not: how many
   requests, at what statuses, how long. That is a much larger surface than a log
