@@ -6,7 +6,7 @@ Until now a struct argument meant one thing: the request body, parsed as JSON. T
 
 The tempting version is to leave the signature alone and let a plain struct argument read whichever encoding turned up. It reads beautifully and it is wrong twice.
 
-It makes the **API description lie**: the document would have to promise `application/json` or guess, and a generated client posting the wrong one gets a 400 from a server that could have said so up front. And it makes the endpoint's contract depend on what the caller happened to send, which is the opposite of every other thing zfast reads off a signature (ADR 0017).
+It makes the **API description lie**: the document would have to promise `application/json` or guess, and a generated client posting the wrong one gets a 400 from a server that could have said so up front. And it makes the endpoint's contract depend on what the caller happened to send, which is the opposite of every other thing nilo reads off a signature (ADR 0017).
 
 So it is explicit, and it is spelled the way its neighbour is: `Query(T)` is the query string as a struct of yours, and `Form(T)` is the body as a struct of yours. Same rules in both — a field's type says what its text has to become, a default is what "not sent" means, `?T` may be absent — and the same conversions, which is why `convert.zig` now exists as one module instead of as two copies that could drift. `"age" has to be a whole number, not "soon"` is the same sentence a bad `?age=` has always produced.
 
@@ -42,13 +42,13 @@ The number of parts is bounded (`max_parts`, 256). The arrays are sized from a c
 
 `filename`, `content_type`, `bytes`. All three are `Str`, so they die with the request and `keep` is what takes one out (ADR 0004) — including `bytes`, where `Str` is doing lifetime duty rather than claiming the contents are text.
 
-The filename is **what the client said, and a client can say anything.** `../../etc/passwd` is a filename a browser will send if asked to. It is documented at the type, in the guide and in `zfast.zig` as a label to show back and never a path to write to, because that is the one mistake this feature makes easy.
+The filename is **what the client said, and a client can say anything.** `../../etc/passwd` is a filename a browser will send if asked to. It is documented at the type, in the guide and in `nilo.zig` as a label to show back and never a path to write to, because that is the one mistake this feature makes easy.
 
 `Content-Type` on a part is likewise unverified and says so.
 
 ## Consequences
 
-- `zfast.Form`, `zfast.Upload`, and `c.form(T)` for a handler holding a `*Ctx`. `Query`'s field checks and `Form`'s are now the same function.
+- `nilo.Form`, `nilo.Upload`, and `c.form(T)` for a handler holding a `*Ctx`. `Query`'s field checks and `Form`'s are now the same function.
 - The document names the encoding: `application/x-www-form-urlencoded` for a form of text, `multipart/form-data` for one with a file, and the file itself as `{"type":"string","format":"binary"}` rather than as the three-field struct that carries it.
 - `RFC 6266`'s `filename*=UTF-8''…` is not read. It is the fallback a browser uses for a name that is not Latin-1, and the plain `filename` is always sent alongside it — reading half of that convention would be worse than reading none.
 - Five refusals: a field of a type no form value can become, a `Form` of a non-struct, a `Form` with no fields, a form and a body together, and two forms. Plus one for an `Upload` asked for as an argument of its own, which is the mistake somebody makes on the way to writing the right thing.

@@ -1,12 +1,12 @@
-//! More captures on one route than zfast holds per request.
+//! More captures on one route than nilo holds per request.
 
-const zfast = @import("zfast");
+const nilo = @import("nilo");
 
-fn deep(c: *zfast.Ctx) !void {
+fn deep(c: *nilo.Ctx) !void {
     _ = c;
 }
 
 export fn refusal() void {
-    var app: zfast.App = undefined;
+    var app: nilo.App = undefined;
     app.get("/:a/:b/:c/:d/:e/:f/:g/:h/:i", deep) catch {};
 }

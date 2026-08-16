@@ -1,5 +1,5 @@
 
-===== zfast =====
+===== nilo =====
   payload verified: 982 bytes body, 1110 bytes on the wire
   processes=1 threads=8
      1,401,412 req/s   p50  36.00us  p90  46.00us  p99  69.00us

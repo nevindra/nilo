@@ -1,6 +1,6 @@
 # Typed handlers are a thin layer over Ctx, not a replacement for it
 
-zfast has two API layers, and that is deliberate. `Ctx` is the real API. A typed handler is only a compile-time layer that, while compiling, turns into exactly the same `Ctx` calls — free at runtime.
+nilo has two API layers, and that is deliberate. `Ctx` is the real API. A typed handler is only a compile-time layer that, while compiling, turns into exactly the same `Ctx` calls — free at runtime.
 
 ```zig
 fn getUser(db: *Db, id: u32) !User { ... }        // 90% of cases

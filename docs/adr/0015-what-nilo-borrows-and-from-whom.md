@@ -1,11 +1,11 @@
-# What zfast borrows, and from whom
+# What nilo borrows, and from whom
 
 `docs/history.md` records that, since stage 1, **the model is GoFiber**. That was the right call for v1 and it is the wrong one for v2, so this ADR replaces it.
 
-Fiber was chosen for a good reason: the audience is people coming from Go and Node, and Fiber is what "comfortable" looks like to them. What it is not is a design zfast can keep following, because v1 already overtook it in the two places that decide the shape of everything above `Ctx`:
+Fiber was chosen for a good reason: the audience is people coming from Go and Node, and Fiber is what "comfortable" looks like to them. What it is not is a design nilo can keep following, because v1 already overtook it in the two places that decide the shape of everything above `Ctx`:
 
 - **Fiber has no typed handlers.** Every handler is `func(c *fiber.Ctx) error`. The compile-time argument matching in `src/typed.zig` is a different kind of framework, and there is nothing left in Fiber to copy for it.
-- **Fiber's best-known footgun is the one v1 closed.** `c.Params()` returns text pointing into a buffer that the next request reuses, and the rule saying so lives in the documentation. `Str` and `keep` (ADR 0004) put that rule in the type system. Fiber gave up where zfast did the work.
+- **Fiber's best-known footgun is the one v1 closed.** `c.Params()` returns text pointing into a buffer that the next request reuses, and the rule saying so lives in the documentation. `Str` and `keep` (ADR 0004) put that rule in the type system. Fiber gave up where nilo did the work.
 
 So Fiber stays as the **tone** — familiar, unceremonious, running in ten minutes — and stops being the architecture. What follows is where the architecture comes from instead.
 
@@ -13,13 +13,13 @@ So Fiber stays as the **tone** — familiar, unceremonious, running in ten minut
 
 FastAPI's contribution is not that it made Python fast. It is that **you write the function signature once and everything else is derived from it** — validation, the error messages, the OpenAPI document, and a page you can click through.
 
-zfast already has the hard half. `fn getUser(db: *Db, id: u32) !User` is a contract the compile-time engine reads, and it already produces the argument matching and the 400s. What it did not produce was a description of the API, and that gap has an unusually good price in Zig: the whole thing is comptime type information, so a generated OpenAPI document costs **nothing on the request path**. It is the largest DX gain available that ADR 0001 does not even get a vote on.
+nilo already has the hard half. `fn getUser(db: *Db, id: u32) !User` is a contract the compile-time engine reads, and it already produces the argument matching and the 400s. What it did not produce was a description of the API, and that gap has an unusually good price in Zig: the whole thing is comptime type information, so a generated OpenAPI document costs **nothing on the request path**. It is the largest DX gain available that ADR 0001 does not even get a vote on.
 
 Landed as `app.docs(…)` — see ADR 0017.
 
 ## Elysia: values are resolved, and plugins carry their own routes
 
-Elysia is the closest philosophical neighbour zfast has, despite sharing no language. It compiles each route ahead of time into a specialised function that prepares only what that handler actually touches — the same move as `typed.wrap`, done at startup with codegen instead of at compile time.
+Elysia is the closest philosophical neighbour nilo has, despite sharing no language. It compiles each route ahead of time into a specialised function that prepares only what that handler actually touches — the same move as `typed.wrap`, done at startup with codegen instead of at compile time.
 
 Two of its mechanisms answer questions v1 deliberately left open.
 

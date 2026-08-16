@@ -149,7 +149,7 @@ fn writeBody(c: *Ctx, contents: Contents, status: u16, from: u64, len: u64) !voi
     c._sent = true;
     c._status = status;
 
-    // Putting the answer on the wire is zfast waiting on the client, not the
+    // Putting the answer on the wire is nilo waiting on the client, not the
     // handler running — `Ctx.send`'s reason, and a two-gigabyte file taken
     // slowly is the case it was written for. Without this, a client on a
     // hotel connection would be reported as a handler holding its thread
@@ -237,7 +237,7 @@ fn headerValue(c: *const Ctx, name: []const u8) ?[]const u8 {
 const testing = std.testing;
 
 const App = @import("app.zig").App;
-const zfast_testing = @import("testing.zig");
+const nilo_testing = @import("testing.zig");
 
 /// A directory with one file in it, written for one test and removed
 /// afterwards. The `Dir` is what a static Set or a Service would hold open.
@@ -320,7 +320,7 @@ test "the whole file goes out, with the headers every file answer carries" {
     defer app.deinit();
     try appWithFile(&app);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.get(&app, "/file");
@@ -344,7 +344,7 @@ test "a size the caller already knows is used rather than asked for again" {
     defer app.deinit();
     try appWithFile(&app);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.get(&app, "/known");
@@ -363,7 +363,7 @@ test "a range is answered from the middle of the file without reading the rest" 
     defer app.deinit();
     try appWithFile(&app);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.send(&app, "GET /file HTTP/1.1\r\nRange: bytes=3-5\r\n\r\n");
@@ -383,7 +383,7 @@ test "a suffix range counts back from the end" {
     defer app.deinit();
     try appWithFile(&app);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.send(&app, "GET /file HTTP/1.1\r\nRange: bytes=-4\r\n\r\n");
@@ -402,7 +402,7 @@ test "a range past the end says how big the file actually is" {
     defer app.deinit();
     try appWithFile(&app);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.send(&app, "GET /file HTTP/1.1\r\nRange: bytes=99-\r\n\r\n");
@@ -425,7 +425,7 @@ test "a matching If-None-Match costs a head and nothing else" {
     defer app.deinit();
     try appWithFile(&app);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.send(&app, "GET /file HTTP/1.1\r\nIf-None-Match: \"abc\"\r\n\r\n");
@@ -448,7 +448,7 @@ test "If-Range matching keeps the range, and not matching sends the whole file" 
     defer app.deinit();
     try appWithFile(&app);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const resumed = try client.send(
@@ -479,7 +479,7 @@ test "a HEAD gets the length a GET would have sent, and no bytes" {
     defer app.deinit();
     try appWithFile(&app);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const whole = try client.send(&app, "HEAD /file HTTP/1.1\r\n\r\n");
@@ -505,7 +505,7 @@ test "an empty file is a 200 with nothing in it" {
     defer app.deinit();
     try appWithFile(&app);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.get(&app, "/file");
@@ -528,7 +528,7 @@ test "a file the list promised and the disk does not have opens with FileNotFoun
     defer app.deinit();
     try appWithFile(&app);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.get(&app, "/missing");
@@ -547,7 +547,7 @@ test "a file with no ETag answers without one, and ignores a conditional" {
     defer app.deinit();
     try appWithFile(&app);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.send(&app, "GET /file HTTP/1.1\r\nIf-None-Match: *\r\n\r\n");
@@ -590,7 +590,7 @@ test "the descriptor is given back however the answer ends" {
     defer app.deinit();
     try appWithFile(&app);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const requests = [_][]const u8{

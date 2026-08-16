@@ -4,7 +4,7 @@ The same idea as [`refusals/`](../../refusals/README.md), for the SQL module.
 Read that one for how to add a file and what a failure means; the only
 differences are here.
 
-**They import `zfast_sql`, not `zfast`.** Each one is a query written wrong on
+**They import `nilo_sql`, not `nilo`.** Each one is a query written wrong on
 purpose against a Row declared in the same file, so a reader can see the
 mistake and the thing it contradicts without opening anything else.
 

@@ -5,15 +5,15 @@
 //! measured. The examples worth reading are in `examples/`.
 
 const std = @import("std");
-const zfast = @import("zfast");
-const fail = zfast.fail;
+const nilo = @import("nilo");
+const fail = nilo.fail;
 
-pub const std_options = zfast.std_options;
-pub const std_options_debug_io = zfast.debug_io;
+pub const std_options = nilo.std_options;
+pub const std_options_debug_io = nilo.debug_io;
 
 /// A panic still takes the process down — Zig cannot recover (ADR 0008) —
 /// but this makes it say which request was being served when it happened.
-pub const panic = zfast.panic;
+pub const panic = nilo.panic;
 
 const User = struct {
     id: u32,
@@ -52,7 +52,7 @@ fn health() []const u8 {
 pub fn main() !void {
     var db = Db{ .max_id = 1_000_000 };
 
-    var app = zfast.App.init(std.heap.smp_allocator);
+    var app = nilo.App.init(std.heap.smp_allocator);
     defer app.deinit();
 
     try app.provide(&db);
@@ -63,7 +63,7 @@ pub fn main() !void {
     // `logger.standard` is deliberately absent: this same binary is the
     // benchmark target, and a log line per request would measure the
     // logger rather than the framework. Add it in a real app.
-    try app.use(zfast.cors.permissive);
+    try app.use(nilo.cors.permissive);
 
     try app.get("/users/:id", getUser);
     try app.get("/health", health);

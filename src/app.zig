@@ -215,7 +215,7 @@ pub const App = struct {
     /// A directory that cannot be loaded says why in one line and stops the
     /// process, for the reason `listen()` and `route()` do: the sentence
     /// naming the missing directory is the whole answer, and letting the
-    /// error travel back to `main` prints a stack trace through zfast's own
+    /// error travel back to `main` prints a stack trace through nilo's own
     /// files on top of it (ADR 0002). `tryStatic` is the same call with the
     /// error as a value.
     pub fn static(self: *App, url_prefix: []const u8, dir_path: []const u8) !void {
@@ -309,7 +309,7 @@ pub const App = struct {
     /// A route that collides with one already registered says so in one
     /// line and stops the process, for the same reason `listen()` does:
     /// letting the error travel back to `main` prints a stack trace through
-    /// zfast's own files on top of the answer, and which file inside the
+    /// nilo's own files on top of the answer, and which file inside the
     /// framework noticed the collision is not the user's problem (ADR
     /// 0002). `tryRoute` is the same call with the error as a value.
     pub fn route(
@@ -544,7 +544,7 @@ pub const App = struct {
     /// A server that cannot start says why in one line and stops the
     /// process there. That is the whole point of those messages: letting
     /// the error travel back to `main` instead would print a stack trace
-    /// through zfast's own files on top of the answer (ADR 0002). Use
+    /// through nilo's own files on top of the answer (ADR 0002). Use
     /// `tryListen` to get the error as a value and no message.
     pub fn listen(self: *App, options_: bulkhead.Options) !void {
         self.tryListen(options_) catch |err| {
@@ -585,7 +585,18 @@ pub const App = struct {
                 return error.SessionSecretWrongLength;
             };
         }
-        try bulkhead.serve(self.gpa, options_, &self.stop, self, handleConnection);
+        try bulkhead.serve(self.gpa, options_, &self.stop, self, startServices, handleConnection);
+    }
+
+    /// Finish building the services that could not be finished before the
+    /// event loop existed.
+    ///
+    /// Called by the Engine from inside `listen()`, after the port is taken
+    /// and before anything is accepted (ADR 0040). Nothing is kept: a
+    /// service that needs the loop after startup took a copy of it here,
+    /// and the App has no use for one.
+    fn startServices(self: *App, io: std.Io) anyerror!void {
+        try self.services.start(io);
     }
 
     /// Say how many routes the document cannot describe, at the one moment
@@ -1107,18 +1118,18 @@ fn checkPrefix(comptime prefix: []const u8) void {
         if (prefix.len == 0) return;
 
         if (prefix[0] != '/') @compileError(
-            "zfast: the group prefix \"" ++ prefix ++ "\" does not start with a slash.\n" ++
+            "nilo: the group prefix \"" ++ prefix ++ "\" does not start with a slash.\n" ++
                 "  Write `app.group(\"/" ++ prefix ++ "\")` — a prefix is the front of a path, " ++
                 "and a path always begins with one.",
         );
         if (prefix[prefix.len - 1] == '/') @compileError(
-            "zfast: the group prefix \"" ++ prefix ++ "\" ends with a slash.\n" ++
+            "nilo: the group prefix \"" ++ prefix ++ "\" ends with a slash.\n" ++
                 "  Drop it: `app.group(\"" ++ prefix[0 .. prefix.len - 1] ++ "\")`. The patterns " ++
                 "registered inside bring their own leading slash, and two would make " ++
                 "\"" ++ prefix ++ "/users\".",
         );
         if (std.mem.indexOfScalar(u8, prefix, '*') != null) @compileError(
-            "zfast: the group prefix \"" ++ prefix ++ "\" has a `*` in it, and a catch-all " ++
+            "nilo: the group prefix \"" ++ prefix ++ "\" has a `*` in it, and a catch-all " ++
                 "cannot be a prefix.\n" ++
                 "  A `*` matches the whole rest of the path, so there would be nothing left for " ++
                 "the routes inside the group to match — every one of them would be unreachable.\n" ++
@@ -1135,11 +1146,11 @@ fn checkPrefix(comptime prefix: []const u8) void {
 fn joined(comptime prefix: []const u8, comptime pattern: []const u8) []const u8 {
     comptime {
         if (pattern.len == 0) @compileError(
-            "zfast: a route pattern inside the group \"" ++ prefix ++ "\" cannot be empty.\n" ++
+            "nilo: a route pattern inside the group \"" ++ prefix ++ "\" cannot be empty.\n" ++
                 "  Use \"/\" for the group's own path.",
         );
         if (pattern[0] != '/') @compileError(
-            "zfast: the route pattern \"" ++ pattern ++ "\" inside the group \"" ++ prefix ++
+            "nilo: the route pattern \"" ++ pattern ++ "\" inside the group \"" ++ prefix ++
                 "\" does not start with a slash.\n" ++
                 "  Patterns inside a group are written the same way as outside one, relative to " ++
                 "the prefix: `\"/" ++ pattern ++ "\"` registers " ++
@@ -1158,7 +1169,7 @@ fn joined(comptime prefix: []const u8, comptime pattern: []const u8) []const u8 
 /// over — a chunked one whose sizes do not add up — leaves the stream at
 /// an unknown byte, so the connection has to go; the response, though, is
 /// still owed and still sent.
-/// Two lines belong in a zfast root source file, and forgetting either one
+/// Two lines belong in a nilo root source file, and forgetting either one
 /// fails quietly — the sort of quiet that costs an afternoon. Without
 /// `std_options_debug_io`, `std.log` writes to stderr the blocking way and
 /// parks the whole event loop behind it; without `std_options`, the
@@ -1167,12 +1178,12 @@ fn joined(comptime prefix: []const u8, comptime pattern: []const u8) []const u8 
 fn checkRootWiring() void {
     if (comptime !@hasDecl(@import("root"), "std_options_debug_io")) std.log.warn(
         "std.log will block the event loop. Add to your root source file: " ++
-            "pub const std_options_debug_io = zfast.debug_io;",
+            "pub const std_options_debug_io = nilo.debug_io;",
         .{},
     );
     if (comptime std.log.logEnabled(.debug, .zio)) std.log.warn(
         "the Engine's debug lines are switched on and will drown out your own. Add to your " ++
-            "root source file: pub const std_options = zfast.std_options;",
+            "root source file: pub const std_options = nilo.std_options;",
         .{},
     );
 }
@@ -1472,7 +1483,7 @@ fn sendDirect(c: *Ctx, status: u16, content_type: []const u8, body: []const u8) 
     c._sent = true;
     c._status = status;
     // `Ctx.send`'s reason, and the other half of the same accounting: this
-    // is zfast waiting on the client, not a handler running (ADR 0034).
+    // is nilo waiting on the client, not a handler running (ADR 0034).
     const w = watchdog.waiting(c._watch);
     defer watchdog.waited(c._watch, w);
     const keep_alive = c.keepAlive();
@@ -1534,7 +1545,7 @@ const Str = str_mod.Str;
 // Reached for only by the tests below, which is why they are here rather
 // than at the top: `testing.zig` imports this file, and the tests are the
 // one place that wants to go back the other way.
-const zfast_testing = @import("testing.zig");
+const nilo_testing = @import("testing.zig");
 const form_mod = @import("form.zig");
 const bound_mod = @import("bound.zig");
 const redirect_mod = @import("redirect.zig");
@@ -2352,7 +2363,7 @@ fn createWithLocation() typed.Response(UserOut) {
         .status = 201,
         .headers = .of(&.{
             .{ .name = "Location", .value = "/users/7" },
-            .{ .name = "X-Made-By", .value = "zfast" },
+            .{ .name = "X-Made-By", .value = "nilo" },
         }),
         .value = .{ .id = 7, .name = "wati" },
     };
@@ -2369,7 +2380,7 @@ test "Response(T) carries headers of its own, without reaching for a Ctx" {
 
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 201 Created\r\n"));
     try testing.expect(std.mem.indexOf(u8, result.response, "Location: /users/7\r\n") != null);
-    try testing.expect(std.mem.indexOf(u8, result.response, "X-Made-By: zfast\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, result.response, "X-Made-By: nilo\r\n") != null);
     try testing.expect(std.mem.indexOf(u8, result.response, "{\"id\":7,\"name\":\"wati\"}") != null);
 }
 
@@ -2454,7 +2465,7 @@ test "a handler returning ?T answers 404 when there is none, and never sends nul
 fn headersBuiltInAFrameThatDies(arena: std.mem.Allocator, id: u32) !typed.Headers {
     return .of(&.{
         .{ .name = "Location", .value = try std.fmt.allocPrint(arena, "/users/{d}", .{id}) },
-        .{ .name = "X-Made-By", .value = "zfast" },
+        .{ .name = "X-Made-By", .value = "nilo" },
     });
 }
 
@@ -2480,7 +2491,7 @@ test "a Response's headers are copied out of the frame that wrote them" {
     try testing.expectEqual(@as(usize, 2), headers.view().len);
     try testing.expectEqualStrings("Location", headers.view()[0].name);
     try testing.expectEqualStrings("/users/42", headers.view()[0].value);
-    try testing.expectEqualStrings("zfast", headers.view()[1].value);
+    try testing.expectEqualStrings("nilo", headers.view()[1].value);
 
     // And a Response that says nothing about headers carries none.
     const quiet: typed.Response(u8) = .{ .value = 1 };
@@ -4381,7 +4392,7 @@ const Sessions = struct {
 };
 
 const SignedIn = struct {
-    pub const zfast_resolve = authenticateRequest;
+    pub const nilo_resolve = authenticateRequest;
 
     id: u32,
 };
@@ -4990,7 +5001,7 @@ test "a range past the end of a file says how big it really is" {
     try testing.expect(std.mem.startsWith(u8, nonsense.response, "HTTP/1.1 200 OK\r\n"));
     try testing.expect(std.mem.endsWith(u8, nonsense.response, "abcdefghijklmnopqrstuvwxyz"));
 
-    // More than one range wants a multipart body zfast does not assemble.
+    // More than one range wants a multipart body nilo does not assemble.
     const several = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\nRange: bytes=0-2,10-12\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, several.response, "HTTP/1.1 200 OK\r\n"));
 }
@@ -5696,7 +5707,7 @@ test "two cookies are two Set-Cookie lines, not one replacing the other" {
     defer app.deinit();
     try app.get("/sign-in", setsTwoCookies);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.get(&app, "/sign-in");
@@ -5718,7 +5729,7 @@ test "clearing a cookie sends one that has already expired" {
     defer app.deinit();
     try app.post("/sign-out", signsOut);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.post(&app, "/sign-out", "");
@@ -5773,7 +5784,7 @@ test "a urlencoded form reaches a typed handler, and its redirect carries the co
     defer app.deinit();
     try app.post("/sign-in", signIn);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.postWith(
@@ -5959,7 +5970,7 @@ test "a binding that bound answers exactly as the plain form would have" {
     defer app.deinit();
     try app.post("/register", register);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.postWith(
@@ -5977,7 +5988,7 @@ test "a handler can answer its own way, and read back what was typed" {
     defer app.deinit();
     try app.post("/register", registerShowingTheForm);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.postWith(
@@ -6100,7 +6111,7 @@ test "a multipart upload reaches a typed handler with its bytes intact" {
     defer app.deinit();
     try app.post("/avatars", uploadAvatar);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const body = "--X\r\nContent-Disposition: form-data; name=\"caption\"\r\n\r\nme, squinting\r\n" ++
@@ -6141,7 +6152,7 @@ test "a *Ctx handler can redirect, and a redirect carries no body" {
     defer app.deinit();
     try app.get("/old", redirectsItself);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.get(&app, "/old");
@@ -6248,7 +6259,7 @@ test "a handler that blocks is caught, on the first request and with nobody else
     try testing.expectEqual(before + 1, watchdog.caught.load(.monotonic));
 }
 
-test "the same wait through zfast.blocking is not" {
+test "the same wait through nilo.blocking is not" {
     // The half that decides whether anybody keeps the detector switched on.
     // A guard that fires on correct code is a guard that gets turned off,
     // and then it is not a guard.
@@ -6357,7 +6368,7 @@ fn locksAndAnswers(c: *Ctx) anyerror!void {
     try c.sendEmpty(200);
 }
 
-test "a zfast.Mutex still locks after being wrapped for the detector" {
+test "a nilo.Mutex still locks after being wrapped for the detector" {
     var app = App.init(testing.allocator);
     defer app.deinit();
     try app.get("/guarded", locksAndAnswers);

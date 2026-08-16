@@ -1,49 +1,49 @@
 //! The name of a type as the person reading the message knows it.
 //!
-//! `@typeName` spells a type with the file it was declared in, and zfast's
-//! files are not files anybody using zfast has opened. A resolver that handed
+//! `@typeName` spells a type with the file it was declared in, and nilo's
+//! files are not files anybody using nilo has opened. A resolver that handed
 //! back the wrong type was told it returned `str.Str` — a true sentence about
 //! a source tree the reader does not have, and one that sends them looking
-//! for a `str` they never imported. Their import line says `zfast`, so that
+//! for a `str` they never imported. Their import line says `nilo`, so that
 //! is the name the message uses.
 //!
-//! Only zfast's own types are rewritten. A type of the reader's own already
+//! Only nilo's own types are rewritten. A type of the reader's own already
 //! carries the name of the file they wrote it in, which is exactly where they
 //! want to be sent.
 
 const std = @import("std");
 
-/// Every zfast type a message can print, under the name `zfast.zig` exports
+/// Every nilo type a message can print, under the name `nilo.zig` exports
 /// it by. A generic is listed without its parentheses so that
-/// `typed.Response([]const u8)` comes out as `zfast.Response([]const u8)`.
+/// `typed.Response([]const u8)` comes out as `nilo.Response([]const u8)`.
 ///
 /// A type missing from here is not a bug that hides: it prints its file name,
 /// which is wrong in the same visible way `str.Str` was. `refusals/` is where
 /// that gets noticed.
 const ours = [_][2][]const u8{
-    .{ "str.Str", "zfast.Str" },
-    .{ "ctx.Ctx", "zfast.Ctx" },
-    .{ "app.App", "zfast.App" },
-    .{ "app.Group", "zfast.Group" },
-    .{ "typed.Response", "zfast.Response" },
-    .{ "typed.Status", "zfast.Status" },
-    .{ "typed.Query", "zfast.Query" },
-    .{ "form.Form", "zfast.Form" },
-    .{ "form.Upload", "zfast.Upload" },
-    .{ "redirect.Redirect", "zfast.Redirect" },
-    .{ "cookie.Cookie", "zfast.Cookie" },
-    .{ "typed.Headers", "zfast.Headers" },
-    .{ "typed.Header", "zfast.Header" },
-    .{ "http1.Header", "zfast.Header" },
-    .{ "http1.Method", "zfast.Method" },
-    .{ "patch.Patch", "zfast.Patch" },
-    .{ "middleware.Middleware", "zfast.Middleware" },
-    .{ "middleware.Next", "zfast.Next" },
-    .{ "bulkhead.Mutex", "zfast.Mutex" },
-    .{ "fail.Failure", "zfast.Failure" },
+    .{ "str.Str", "nilo.Str" },
+    .{ "ctx.Ctx", "nilo.Ctx" },
+    .{ "app.App", "nilo.App" },
+    .{ "app.Group", "nilo.Group" },
+    .{ "typed.Response", "nilo.Response" },
+    .{ "typed.Status", "nilo.Status" },
+    .{ "typed.Query", "nilo.Query" },
+    .{ "form.Form", "nilo.Form" },
+    .{ "form.Upload", "nilo.Upload" },
+    .{ "redirect.Redirect", "nilo.Redirect" },
+    .{ "cookie.Cookie", "nilo.Cookie" },
+    .{ "typed.Headers", "nilo.Headers" },
+    .{ "typed.Header", "nilo.Header" },
+    .{ "http1.Header", "nilo.Header" },
+    .{ "http1.Method", "nilo.Method" },
+    .{ "patch.Patch", "nilo.Patch" },
+    .{ "middleware.Middleware", "nilo.Middleware" },
+    .{ "middleware.Next", "nilo.Next" },
+    .{ "bulkhead.Mutex", "nilo.Mutex" },
+    .{ "fail.Failure", "nilo.Failure" },
 };
 
-/// What to call `T` in a message. Every type name zfast's own compile errors
+/// What to call `T` in a message. Every type name nilo's own compile errors
 /// print goes through here.
 pub fn of(comptime T: type) []const u8 {
     return textOf(@typeName(T));
@@ -79,19 +79,19 @@ fn replaced(comptime in: []const u8, comptime from: []const u8, comptime to: []c
 
 const testing = std.testing;
 
-test "a zfast type is named the way the import line names it" {
-    try testing.expectEqualStrings("zfast.Str", comptime textOf("str.Str"));
-    try testing.expectEqualStrings("zfast.Ctx", comptime textOf("ctx.Ctx"));
+test "a nilo type is named the way the import line names it" {
+    try testing.expectEqualStrings("nilo.Str", comptime textOf("str.Str"));
+    try testing.expectEqualStrings("nilo.Ctx", comptime textOf("ctx.Ctx"));
 }
 
 test "a name is rewritten wherever it appears, not only at the front" {
-    try testing.expectEqualStrings("[]zfast.Header", comptime textOf("[]http1.Header"));
+    try testing.expectEqualStrings("[]nilo.Header", comptime textOf("[]http1.Header"));
     try testing.expectEqualStrings(
-        "zfast.Response([]const u8)",
+        "nilo.Response([]const u8)",
         comptime textOf("typed.Response([]const u8)"),
     );
     try testing.expectEqualStrings(
-        "zfast.Patch(zfast.Str)",
+        "nilo.Patch(nilo.Str)",
         comptime textOf("patch.Patch(str.Str)"),
     );
 }
@@ -101,14 +101,14 @@ test "a type of the reader's own is left where they wrote it" {
     try testing.expectEqualStrings("u32", comptime textOf("u32"));
     // The file is theirs even when the type inside it is not.
     try testing.expectEqualStrings(
-        "main.Page(zfast.Str)",
+        "main.Page(nilo.Str)",
         comptime textOf("main.Page(str.Str)"),
     );
 }
 
 test "the same name twice is rewritten twice" {
     try testing.expectEqualStrings(
-        "main.Pair(zfast.Str,zfast.Str)",
+        "main.Pair(nilo.Str,nilo.Str)",
         comptime textOf("main.Pair(str.Str,str.Str)"),
     );
 }

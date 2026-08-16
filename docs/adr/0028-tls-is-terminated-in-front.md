@@ -1,6 +1,6 @@
 # TLS is terminated in front, and that is the answer rather than the plan
 
-`docs/roadmap.md` carried TLS under "Not decided" with the note that it *may stay out on purpose*. This decides it. **zfast does not speak TLS, and is not going to.** It listens on plaintext HTTP and expects a proxy in front of it wherever the internet is involved.
+`docs/roadmap.md` carried TLS under "Not decided" with the note that it *may stay out on purpose*. This decides it. **nilo does not speak TLS, and is not going to.** It listens on plaintext HTTP and expects a proxy in front of it wherever the internet is involved.
 
 The question that settled it was not "how hard is TLS" but "what does every other server in the comparison actually do".
 
@@ -15,7 +15,7 @@ The question that settled it was not "how hard is TLS" but "what does every othe
 | Bun | yes | the BoringSSL it ships with |
 | http.zig | no | — |
 
-Not one of them implemented TLS. Every yes in that table is a server plugged into a TLS implementation somebody else wrote, funded and had audited — and axum, the one most like zfast in ambition, does not have it at all. Its users bolt on rustls, which is a separately funded project with its own audits.
+Not one of them implemented TLS. Every yes in that table is a server plugged into a TLS implementation somebody else wrote, funded and had audited — and axum, the one most like nilo in ambition, does not have it at all. Its users bolt on rustls, which is a separately funded project with its own audits.
 
 Zig has no such thing to plug into. `std/crypto/tls/` in 0.16 contains exactly one file, `Client.zig`. The standard library can *make* a TLS connection — that is how `zig fetch` reaches an HTTPS URL — and cannot *accept* one.
 
@@ -33,11 +33,11 @@ Zig has no such thing to plug into. `std/crypto/tls/` in 0.16 contains exactly o
 
 TLS takes both. A connection needs record buffers in each direction, 16 KB each at the maximum record size, so the per-connection figure goes from 8,767 bytes to something like five times that. The handshake allocates. The number that `comparison.md` puts third out of nine, and the flatness from 1,000 connections to 10,000 that makes it safe to multiply, are properties of a design with no TLS in it.
 
-That is not a reason to refuse TLS on its own — plenty of servers pay it and are right to. It is a reason to notice that adding TLS would mean deleting the two claims that currently distinguish zfast from anything else in that table.
+That is not a reason to refuse TLS on its own — plenty of servers pay it and are right to. It is a reason to notice that adding TLS would mean deleting the two claims that currently distinguish nilo from anything else in that table.
 
 ## And most deployments have already terminated it
 
-The audience for this decision is somebody putting a Zig HTTP server into production. In practice that is Fly.io, Railway, Render, Cloud Run, a Kubernetes ingress, an ALB, or Cloudflare — and every one of those terminates TLS before the request reaches the process. For those deployments zfast speaking TLS would be a feature that is switched off.
+The audience for this decision is somebody putting a Zig HTTP server into production. In practice that is Fly.io, Railway, Render, Cloud Run, a Kubernetes ingress, an ALB, or Cloudflare — and every one of those terminates TLS before the request reaches the process. For those deployments nilo speaking TLS would be a feature that is switched off.
 
 What is left is a bare VPS wanting to answer `:443` directly, and the answer there is five lines of Caddy and a certificate that renews itself.
 

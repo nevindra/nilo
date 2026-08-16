@@ -6,12 +6,12 @@ An HTML form is not JSON. A browser posts
 
 ```zig
 const SignIn = struct {
-    email: zfast.Str,
-    password: zfast.Str,
-    remember: zfast.Str = .static(""),   // an unticked checkbox is not sent at all
+    email: nilo.Str,
+    password: nilo.Str,
+    remember: nilo.Str = .static(""),   // an unticked checkbox is not sent at all
 };
 
-fn signIn(incoming: zfast.Form(SignIn)) !zfast.Redirect(303) {
+fn signIn(incoming: nilo.Form(SignIn)) !nilo.Redirect(303) {
     ... incoming.value.email ...
     return .to("/welcome");
 }
@@ -50,15 +50,15 @@ as "application/json"
 
 ## Files
 
-A field typed `zfast.Upload` is a file. Three pieces, all `Str`:
+A field typed `nilo.Upload` is a file. Three pieces, all `Str`:
 
 ```zig
 const NewAvatar = struct {
-    caption: zfast.Str,
-    image: zfast.Upload,
+    caption: nilo.Str,
+    image: nilo.Upload,
 };
 
-fn upload(incoming: zfast.Form(NewAvatar)) !zfast.Status(201, Avatar) {
+fn upload(incoming: nilo.Form(NewAvatar)) !nilo.Status(201, Avatar) {
     const image = incoming.value.image;
     image.filename.view()      // "me.png"
     image.content_type.view()  // "image/png"
@@ -108,7 +108,7 @@ is not — somebody mistypes their age and loses everything else they typed.
 `Bound(Form(T))` hands the failures to the handler instead:
 
 ```zig
-fn signUp(b: zfast.Bound(zfast.Form(SignUp))) !zfast.Redirect(303) {
+fn signUp(b: nilo.Bound(nilo.Form(SignUp))) !nilo.Redirect(303) {
     const form = b.value() orelse return b.fail();
     ...
 }
@@ -132,7 +132,7 @@ typed**. You put `soon` back in the age box, not `0`. That is `given`, and it
 works for every field whether or not it bound:
 
 ```zig
-fn signUp(arena: std.mem.Allocator, b: zfast.Bound(zfast.Form(SignUp))) !Page {
+fn signUp(arena: std.mem.Allocator, b: nilo.Bound(nilo.Form(SignUp))) !Page {
     if (b.value()) |form| return welcome(form);
 
     var wrong: std.ArrayList(Problem) = .empty;
@@ -142,7 +142,7 @@ fn signUp(arena: std.mem.Allocator, b: zfast.Bound(zfast.Form(SignUp))) !Page {
         f.reason     // .not_a_number
         f.given      // Str "soon" — what arrived
         f.expected   // "a whole number"
-        try f.say(w) // zfast's own sentence, so yours cannot drift from it
+        try f.say(w) // nilo's own sentence, so yours cannot drift from it
     }
 
     return signUpPage(.{
@@ -158,7 +158,7 @@ otherwise be an empty box nobody notices.
 
 ### What it does not do
 
-The reasons are exactly the conversions zfast already performs: `.missing`,
+The reasons are exactly the conversions nilo already performs: `.missing`,
 `.not_a_number`, `.not_true_or_false`, `.not_a_choice`, `.wrong_kind`. **This
 is not a validator.** Whether the age is plausible, whether the email has an
 `@`, whether the two passwords match — all yours.
@@ -176,10 +176,10 @@ The same wrapper works on the other two slots: `Bound(T)` for a JSON body and
 They are the same bytes read two ways, so asking for both stops compilation:
 
 ```zig
-// zfast: the handler for route "/sign-up" asks for both a request body
+// nilo: the handler for route "/sign-up" asks for both a request body
 // (argument 1, a main.Profile) and a form (argument 2) — and a request only
 // has one body.
-fn signUp(profile: Profile, incoming: zfast.Form(SignIn)) !void { … }
+fn signUp(profile: Profile, incoming: nilo.Form(SignIn)) !void { … }
 ```
 
 ## From a `Ctx`
@@ -188,7 +188,7 @@ fn signUp(profile: Profile, incoming: zfast.Form(SignIn)) !void { … }
 `c.json(T)` is for a JSON body:
 
 ```zig
-fn signIn(c: *zfast.Ctx) !void {
+fn signIn(c: *nilo.Ctx) !void {
     const incoming = try c.form(SignIn);
     ...
 }

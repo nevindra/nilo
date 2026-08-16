@@ -6,7 +6,7 @@ request:
 
 ```zig
 fn getUser(db: *Db, id: u32) !User {
-    return db.find(id) orelse zfast.fail.notFound("no user {d}", .{id});
+    return db.find(id) orelse nilo.fail.notFound("no user {d}", .{id});
 }
 
 test "getUser" {
@@ -21,14 +21,14 @@ test "getUser" {
 Arguments are matched while compiling, by one rule: **a pointer is a service, a
 value is request data.**
 
-| Argument | What zfast passes in |
+| Argument | What nilo passes in |
 |---|---|
 | `*Ctx` | the raw request — the way out when you need full control |
 | `*Db`, `*const Config` | a [service](./services.md), matched by its type |
 | `u32`, `f64`, `Str`, `bool`, an enum | a path param, in the order they appear in the pattern |
 | `Query(T)` | the [query string](./requests.md#query-params), read into a struct of yours |
 | `std.mem.Allocator` | the request arena, freed when the request ends |
-| a type with `zfast_resolve` | a [resolved value](./middleware.md#resolved-values) — the signed-in user, usually |
+| a type with `nilo_resolve` | a [resolved value](./middleware.md#resolved-values) — the signed-in user, usually |
 | any other struct | the [request body](./requests.md#json-bodies), parsed from JSON |
 
 Order is free, except among path params: those are positional, so the first
@@ -125,7 +125,7 @@ value in, since it lives exactly as long as the response needs it to and is
 thrown away afterwards. Nothing to free.
 
 `.of(…)` is not decoration. A list written inside a handler belongs to that
-handler's stack frame, and zfast reads the headers after the handler has
+handler's stack frame, and nilo reads the headers after the handler has
 returned; `of` copies them into the response while the list is still there. Up to
 eight per response — a ninth is a compile error pointing at `c.setHeader`, which
 has no limit.
@@ -139,7 +139,7 @@ you want to look at before parsing, an answer written in pieces — the handler
 asks for a `*Ctx`:
 
 ```zig
-fn download(c: *zfast.Ctx, files: *Files) !void {
+fn download(c: *nilo.Ctx, files: *Files) !void {
     const wanted = c.header("X-File") orelse return fail.badRequest("no X-File", .{});
     try c.send(200, "application/octet-stream", files.get(wanted.view()));
 }
@@ -160,7 +160,7 @@ typed layer is a thin one.
 ## `Str`, and text that belongs to the request
 
 Text arriving from a request — a param, a header, a query value — is a
-`zfast.Str`, not a `[]const u8`. It is valid while the request runs and not
+`nilo.Str`, not a `[]const u8`. It is valid while the request runs and not
 afterwards, and the type says so:
 
 | | |
@@ -188,7 +188,7 @@ pattern a service wants.
 
 What the trap cannot promise is *everything*: Zig has no ownership system, so
 this is a debug-build check and not a guarantee. A `Str` reached through a
-pointer zfast never walked — inside a const slice, inside an untagged union —
+pointer nilo never walked — inside a const slice, inside an untagged union —
 carries no marker and is not watched. Release builds drop the whole mechanism,
 at no cost.
 

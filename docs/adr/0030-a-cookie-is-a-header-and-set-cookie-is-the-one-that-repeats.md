@@ -1,6 +1,6 @@
 # A cookie is a header, and `Set-Cookie` is the one header that repeats
 
-zfast had no cookies at all until 0.1.0 was nearly done. Nothing was decided about them; they were simply missing, and `docs/guide/middleware.md` had been quietly writing "behind a cookie" in an example for weeks. Somebody coming from Express or Gin reaches for `c.cookie("session")` inside the first ten minutes, finds `c.header("Cookie")`, and has to split `a=1; b=2` themselves.
+nilo had no cookies at all until 0.1.0 was nearly done. Nothing was decided about them; they were simply missing, and `docs/guide/middleware.md` had been quietly writing "behind a cookie" in an example for weeks. Somebody coming from Express or Gin reaches for `c.cookie("session")` inside the first ten minutes, finds `c.header("Cookie")`, and has to split `a=1; b=2` themselves.
 
 So the question was never whether, only what shape. Three things had to be settled.
 
@@ -38,8 +38,8 @@ There is nothing to encode it as, so it is refused: `check` runs before anything
 
 ## Consequences
 
-- `Ctx.cookie`, `Ctx.setCookie`, `Ctx.clearCookie`; `zfast.Cookie` and `zfast.SameSite` are the surface. Nothing new on `App`.
+- `Ctx.cookie`, `Ctx.setCookie`, `Ctx.clearCookie`; `nilo.Cookie` and `nilo.SameSite` are the surface. Nothing new on `App`.
 - **One arena allocation per cookie set**, sized from `cookie.lengthOf` before it is written, and a test holds the length and the writer together — a length that disagreed with what is written is either a buffer overrun or a truncated cookie.
 - `clearCookie` takes a `Clearing` and not a name, because a browser matches a deletion on name, path *and* domain. A cookie set under `/admin` is not cleared by a deletion at `/`, and nothing anywhere reports that it was not — so the two other fields are in the signature where they can be seen.
 - **Sessions are still not here.** A cookie is the mechanism; what goes in it, where it is stored and how it is signed is policy, and that is the same line ADR 0016 draws around authentication. `examples/forms` shows the whole shape in about forty lines, with the session store as an ordinary Service.
-- Reading a cookie is not a handler argument. A type carrying `zfast_resolve` already reads what it likes from the request and appears in an argument list by name (ADR 0016), and that is the mechanism a signed-in user should go through. A second way in would have been a second thing to keep in step.
+- Reading a cookie is not a handler argument. A type carrying `nilo_resolve` already reads what it likes from the request and appears in an argument list by name (ADR 0016), and that is the mechanism a signed-in user should go through. A second way in would have been a second thing to keep in step.

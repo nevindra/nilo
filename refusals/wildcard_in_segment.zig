@@ -1,12 +1,12 @@
 //! A `*` used as a glob inside a segment. It is a whole segment or nothing.
 
-const zfast = @import("zfast");
+const nilo = @import("nilo");
 
-fn raw(c: *zfast.Ctx) !void {
+fn raw(c: *nilo.Ctx) !void {
     _ = c;
 }
 
 export fn refusal() void {
-    var app: zfast.App = undefined;
+    var app: nilo.App = undefined;
     app.get("/files/img*", raw) catch {};
 }

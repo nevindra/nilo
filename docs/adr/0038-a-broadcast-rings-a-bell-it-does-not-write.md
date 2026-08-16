@@ -1,7 +1,7 @@
 # A broadcast rings a bell; it does not write
 
 Sending to a WebSocket a handler does not hold was the last thing on the
-roadmap and the one thing zfast recorded as not-here twice. ADR 0022 called it
+roadmap and the one thing nilo recorded as not-here twice. ADR 0022 called it
 "a project rather than a function". ADR 0029 measured it, priced it at 8,673
 bytes per connection, and left it unbuilt with the reason written down: the
 shape that would cost nothing needed a wait that ends on either the socket
@@ -12,7 +12,7 @@ That last sentence was wrong, and finding out cost two spikes.
 
 ## What changed
 
-**`zio.CompletionQueue` is public in the v0.17.0 zfast already pins.**
+**`zio.CompletionQueue` is public in the v0.17.0 nilo already pins.**
 `spike/completion_queue/` parked a fiber on a `NetPoll(.recv)` and an `Async`
 at once, woke it from a plain OS thread, and cancelled it mid-park: clean 30
 runs in 30 in Debug, ReleaseSafe and ReleaseFast alike. The worry that it would
@@ -54,7 +54,7 @@ scheduled once. A spike that only ran that would have shipped the lossy one.
 to all of them.**
 
 ```zig
-fn chat(c: *zfast.Ctx, room: *zfast.Room) !void {
+fn chat(c: *nilo.Ctx, room: *nilo.Room) !void {
     var socket = try c.upgrade();
     try room.join(&socket);
     defer room.leave(&socket);
@@ -110,10 +110,10 @@ shouting, and a message can be as big as the receiving buffer.
 outright:
 
 > A queue with a policy — drop oldest, drop newest, disconnect — is what a
-> pub/sub layer wants, and zfast is not one.
+> pub/sub layer wants, and nilo is not one.
 
 A `Room` is one, so the refusal is amended rather than quietly ignored. What
-survives of it is the part that was actually right: **zfast does not have a
+survives of it is the part that was actually right: **nilo does not have a
 queue with a policy; a Room does.** The policy is `Full.drop_oldest` (the
 default, and what a chat wants — a client that fell behind wants to catch up at
 the front) or `Full.drop_newest`. What it is not is a hidden default in the
@@ -185,7 +185,7 @@ this.
   buys nothing, because contention was never the problem.
 - **`zio.BroadcastChannel`.** Better delivery and a much smaller send path, and
   it aborts (or in `ReleaseFast` deadlocks) when a fiber parked in `receive` is
-  cancelled, which every zfast connection is at shutdown. Reported as zio#667
+  cancelled, which every nilo connection is at shutdown. Reported as zio#667
   and fixed upstream in `ab6873eb`; still not in a release, and a shared ring
   has no per-consumer close, which is what forces the cancel in the first place.
 - **Waiting for zio#673 to land.** The fix belongs upstream and is in flight.
@@ -204,7 +204,7 @@ this.
 - **`receive` parks differently.** It only waits when its read buffer is empty:
   a reader holding a buffered frame is readable whatever the socket thinks.
 - **ADR 0020's refusal is amended**, ADR 0022's "the thing this does not do" no
-  longer describes zfast, and ADR 0029's "blocked on one upstream line" is
+  longer describes nilo, and ADR 0029's "blocked on one upstream line" is
   resolved. All three carry a note pointing here.
 - **`permessage-deflate` is still not here**, and neither is any deadline on a
   quiet WebSocket. Both are ADR 0022's, both unchanged.

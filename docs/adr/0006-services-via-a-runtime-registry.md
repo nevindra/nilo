@@ -5,7 +5,7 @@ Typed handlers ask for services by the type of their arguments (ADR 0003). The q
 The most Zig-like answer is to make `App` generic over the set of service types, so that a service you forgot to register stops compilation:
 
 ```zig
-var app = zfast.App(.{ *Db, *Config }).init(gpa, .{ &db, &cfg });
+var app = nilo.App(.{ *Db, *Config }).init(gpa, .{ &db, &cfg });
 ```
 
 That was rejected. The audience is Go and Node people, who over there just write `app := fiber.New()`. Making them name every service type twice — once in `App`'s parameter, once when filling it in — and turning `App` into a different type depending on its contents is a large DX price for one fairly rare class of mistake. The documentation ends up forking too.
@@ -13,7 +13,7 @@ That was rejected. The audience is Go and Node people, who over there just write
 So the registry is a **runtime** one, keyed by type name from `@typeName`:
 
 ```zig
-var app = zfast.App.init(gpa);
+var app = nilo.App.init(gpa);
 try app.provide(&db);
 try app.get("/users/:id", getUser);   // getUser asks for *Db
 ```

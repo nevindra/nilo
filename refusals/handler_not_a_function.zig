@@ -1,9 +1,9 @@
 //! The handler called instead of named — the mistake `app.get("/", index())`
 //! makes, here in its plainest form.
 
-const zfast = @import("zfast");
+const nilo = @import("nilo");
 
 export fn refusal() void {
-    var app: zfast.App = undefined;
+    var app: nilo.App = undefined;
     app.get("/", 42) catch {};
 }

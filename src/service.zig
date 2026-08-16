@@ -43,7 +43,29 @@ pub const Registry = struct {
         type_name: []const u8,
         ptr: *anyopaque,
         is_const: bool,
+        /// Set only for a service that declared `nilo_start`. Null is the
+        /// ordinary case and costs one branch at startup, never per
+        /// request.
+        start: ?*const fn (*anyopaque, std.Io) anyerror!void = null,
     };
+
+    /// The `nilo_start` hook, with the type erased so the registry can hold
+    /// it beside every other service.
+    ///
+    /// A service that needs the event loop cannot be built before
+    /// `listen()`, because the loop does not exist until then — and a
+    /// connection pool dialled without one blocks the thread every request
+    /// on it shares (ADR 0014). Declaring `nilo_start` says "finish
+    /// building me once there is a loop", and `listen()` calls it before
+    /// accepting anything (ADR 0040).
+    fn startHook(comptime T: type) ?*const fn (*anyopaque, std.Io) anyerror!void {
+        if (!@hasDecl(T, "nilo_start")) return null;
+        return &struct {
+            fn call(erased: *anyopaque, io: std.Io) anyerror!void {
+                return T.nilo_start(@ptrCast(@alignCast(erased)), io);
+            }
+        }.call;
+    }
 
     pub fn init(gpa: std.mem.Allocator) Registry {
         return .{ .gpa = gpa };
@@ -64,13 +86,20 @@ pub const Registry = struct {
         const info = switch (@typeInfo(P)) {
             .pointer => |p| p,
             else => @compileError(
-                "zfast: app.provide() wants a pointer to a service, not " ++ names.of(P) ++
+                "nilo: app.provide() wants a pointer to a service, not " ++ names.of(P) ++
                     ".\n  Services outlive the App, so what gets registered is a pointer to one: " ++
                     "`app.provide(&db)`.",
             ),
         };
         if (info.size != .one) @compileError(
-            "zfast: app.provide() wants a pointer to a single value, not " ++ names.of(P) ++ ".",
+            "nilo: app.provide() wants a pointer to a single value, not " ++ names.of(P) ++ ".",
+        );
+
+        if (info.is_const and @hasDecl(info.child, "nilo_start")) @compileError(
+            "nilo: " ++ names.of(info.child) ++ " has a `nilo_start`, so it finishes building " ++
+                "itself when the server starts — and it was provided as `*const`, which " ++
+                "leaves it nothing to build into.\n  Provide it as `app.provide(&thing)` " ++
+                "with a `var`.",
         );
 
         const type_name = @typeName(info.child);
@@ -81,7 +110,21 @@ pub const Registry = struct {
             .type_name = type_name,
             .ptr = @ptrCast(@constCast(ptr)),
             .is_const = info.is_const,
+            .start = startHook(info.child),
         });
+    }
+
+    /// Finish building every service that asked to be finished, in the
+    /// order they were provided. Run once, from inside `listen()`, before
+    /// the first connection is accepted (ADR 0040).
+    ///
+    /// The first failure stops the rest: a server whose database is
+    /// unreachable should not go on to open anything else and then answer
+    /// requests it cannot serve.
+    pub fn start(self: *const Registry, io: std.Io) !void {
+        for (self.entries.items) |e| {
+            if (e.start) |hook| try hook(e.ptr, io);
+        }
     }
 
     /// Fetch the service of type `P` (a pointer type), or null if it was

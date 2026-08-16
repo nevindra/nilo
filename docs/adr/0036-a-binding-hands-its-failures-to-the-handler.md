@@ -2,14 +2,14 @@
 
 `Form(T)` and a JSON body were all-or-nothing. One field that would not convert was a 400 out of a fail function and the request was over, with nothing saying *which* field — one sentence about the first mistake found, and no way to ask about the rest.
 
-For a framework whose claim is that the signature is the whole contract ([ADR 0015](./0015-what-zfast-borrows-and-from-whom.md)), not being able to name the field that broke the contract is the gap that contradicts the most. A 422 listing the fields is what a REST client expects, and showing a form again with one box marked needs the same thing from the other direction.
+For a framework whose claim is that the signature is the whole contract ([ADR 0015](./0015-what-nilo-borrows-and-from-whom.md)), not being able to name the field that broke the contract is the gap that contradicts the most. A 422 listing the fields is what a REST client expects, and showing a form again with one box marked needs the same thing from the other direction.
 
 jetzig has the thin version — `expectParams(T)` returns null when anything is missing, which says *something* was wrong and not *what*. Naming the fields is the part worth building.
 
 ## `Bound(W)` wraps the slot rather than replacing it
 
 ```zig
-fn signUp(b: zfast.Bound(zfast.Form(SignUp))) !zfast.Redirect(303) {
+fn signUp(b: nilo.Bound(nilo.Form(SignUp))) !nilo.Redirect(303) {
     const form = b.value() orelse return b.fail();
     …
 }
@@ -31,7 +31,7 @@ What that appears to cost is the form case: re-showing a page needs the fields t
 
 `.missing`, `.not_a_number`, `.not_true_or_false`, `.not_a_choice`, `.wrong_kind`. That is the whole vocabulary and it is meant to stay that way.
 
-zfast's job stops at "this did not convert to a `u32`". Whether the age is plausible, whether the email has an `@`, whether the two passwords match — all of that is the application's, and a reason set that grew to answer any of it would be a validation language wearing a smaller name. That is the line [ADR 0018](./0018-the-trade-budget-has-three-axes.md)'s scope argument draws, and it is easier to hold now than after the first `.too_long`.
+nilo's job stops at "this did not convert to a `u32`". Whether the age is plausible, whether the email has an `@`, whether the two passwords match — all of that is the application's, and a reason set that grew to answer any of it would be a validation language wearing a smaller name. That is the line [ADR 0018](./0018-the-trade-budget-has-three-axes.md)'s scope argument draws, and it is easier to hold now than after the first `.too_long`.
 
 ## Three things stay a hard 400
 
@@ -51,7 +51,7 @@ This matters more than it looks. A binding's 422 and the endpoint next door's 40
 
 ## The document promises less, which is the correct amount
 
-`typed.zig` already carried a flag for this — `can_reject`, "whether zfast can refuse this request before the handler runs". A binding sets it false.
+`typed.zig` already carried a flag for this — `can_reject`, "whether nilo can refuse this request before the handler runs". A binding sets it false.
 
 So the generated document stops promising a 400 for that endpoint, and **nothing replaces it**. What the handler answers instead is a line in a function body, and [ADR 0024](./0024-a-failure-mode-belongs-in-the-return-type.md) is explicit that the document promises what the signature settles and nothing else. A 422 that appeared because `Bound` was in the argument list would be a guess: the handler may answer 200 with the form again, and often should.
 
@@ -67,7 +67,7 @@ A body that parses pays for none of it: one parse, no second pass, every outcome
 
 ## Consequences
 
-- `zfast.Bound`, plus `c.formCollecting`, `c.jsonCollecting` for a handler holding a `*Ctx`.
+- `nilo.Bound`, plus `c.formCollecting`, `c.jsonCollecting` for a handler holding a `*Ctx`.
 - A JSON body says `"quantity" has to be a whole number, not text` where a form says `not "soon"`, and that difference is kept rather than smoothed. In JSON a quoted value **is** text, so sending text where a number belongs is a mistake about the kind — which is the sentence the body parser has always given, and collecting several of them does not earn the right to reword it.
 - The struct behind a failed binding has undefined fields in it and is deliberately never stamped with the request lifetime: `stamp` walks the struct writing markers, and following an undefined slice is the crash the marker exists to prevent. Safe because `value()` withholds the struct; the text that *is* reachable is stamped one field at a time.
 - Five refusals: a binding of a binding, a binding of a non-struct, a bound form beside a plain one, a bound form whose field no form value can become, and `given("…")` for a field the struct does not have.

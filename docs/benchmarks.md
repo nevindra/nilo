@@ -58,7 +58,7 @@ cores**:
 | server `0-7`, client `8-15` | 8 cores, all shared with the client | 1,143,293 |
 | server `0-3,8-11`, client `4-7,12-15` | 4 cores, none shared | **1,314,275** |
 
-That is the first finding and it is about measuring, not about zfast: on an SMT
+That is the first finding and it is about measuring, not about nilo: on an SMT
 machine, `taskset -c 0-7` is not eight cores. Everything below uses the second
 split, so **the server is on four physical cores.**
 
@@ -83,7 +83,7 @@ Spread is about 3%. No socket errors, no non-2xx, in any run.
 "Server CPU" is `utime+stime` from `/proc/<pid>/stat` over the run, against a
 ceiling of 800% — eight hardware threads on four physical cores. At ~600% the
 server is **not saturated**, which means 1.31M is where the load generator ran
-out, not where zfast did.
+out, not where nilo did.
 
 ### Where it actually saturates
 
@@ -98,7 +98,7 @@ Pushing until the server stops going faster, 20 seconds each:
 **Roughly 1.96M requests per second on four physical cores**, about 489k per
 core, at 95% of the server's hardware-thread budget.
 
-The p99 column in the bottom two rows is **not zfast's latency and should not be
+The p99 column in the bottom two rows is **not nilo's latency and should not be
 quoted as such.** The giveaway is p50: it stays at 30µs while p99 goes to
 1.78ms. A server whose tail had grown would have dragged its median with it.
 What grew is the queue inside a load generator that has been given eight threads
@@ -117,7 +117,7 @@ So there are two defensible readings, and they answer different questions:
 
 `zig build profile` measures the pieces without a socket or a load generator in
 the way, and it is the number that survives a change of machine best. On this
-box, one request is **181ns of zfast's own work**:
+box, one request is **181ns of nilo's own work**:
 
 | | | |
 |---|---|---|
@@ -140,15 +140,15 @@ routes. Only the absolute numbers were ever machine-bound.
 
 ### The number that reframes the budget
 
-Put the two measurements beside each other. A request costs 181ns of zfast's own
+Put the two measurements beside each other. A request costs 181ns of nilo's own
 work and **3,902–4,542ns of CPU** once it is actually being served over a
-socket. zfast's own code is therefore about **4% of what a request costs.** The
+socket. nilo's own code is therefore about **4% of what a request costs.** The
 other ~96% is the kernel: `epoll`, `recv`, `send`, and the TCP/IP path — on
 loopback, where it is at its cheapest.
 
 That is worth stating plainly next to
 [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md), because it
-makes the 10% rule more generous than it sounds. Ten percent of zfast's own work
+makes the 10% rule more generous than it sounds. Ten percent of nilo's own work
 is 18ns, which is **0.4% of the request**. The DX budget was never the thing
 standing between this framework and a throughput number.
 
@@ -269,7 +269,7 @@ zig build -Doptimize=ReleaseFast
 
 # server on four whole physical cores — check your own topology first,
 # `cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list`
-taskset -c 0-3,8-11 ./zig-out/bin/zfast-hello
+taskset -c 0-3,8-11 ./zig-out/bin/nilo-hello
 
 # client on the other four
 taskset -c 4-7,12-15 wrk -t4 -c64 -d30s --latency http://127.0.0.1:8787/users/42
@@ -296,7 +296,7 @@ commands are the ones that measure something.
   ceiling that real hardware will not reach.
 - ~~**Anything to compare against.**~~ *Done* —
   [`comparison.md`](./comparison.md) runs eight other servers through this same
-  harness on this same machine. zfast is first on throughput, first-equal on
+  harness on this same machine. nilo is first on throughput, first-equal on
   tail latency, third of nine on memory per connection, and last on release
   build time at 7.4s — though its edit loop is 0.4s, which is 0.2s behind Go and
   not the crisis a release-mode number alone makes it look. Both of the numbers

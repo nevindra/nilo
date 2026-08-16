@@ -314,7 +314,7 @@ pub const LoadError = error{
 
 /// Which of these failures `load` has already put into words, so `App` can
 /// stop the process on them instead of letting the error reach `main` and
-/// print a stack trace through zfast's own files on top of the answer
+/// print a stack trace through nilo's own files on top of the answer
 /// (ADR 0002). The same rule `bulkhead.explained` states for `listen()`.
 ///
 /// `OutOfMemory` is not on the list: nothing explained it, and there is
@@ -377,7 +377,7 @@ pub fn fromMemory(gpa: std.mem.Allocator, entries: []const Entry) !Set {
 
     // The same rule a loaded directory follows, with the same defaults.
     // The API description is JSON and is the largest thing that comes
-    // through here, so leaving it out would have meant the one file zfast
+    // through here, so leaving it out would have meant the one file nilo
     // generates itself being the one file it does not compress.
     const defaults = Options{};
 
@@ -423,7 +423,7 @@ pub fn load(
 
     var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch |err| {
         std.log.err(
-            "zfast: static directory \"{s}\" could not be opened ({s}) — " ++
+            "nilo: static directory \"{s}\" could not be opened ({s}) — " ++
                 "the path is relative to the working directory the server runs in",
             .{ dir_path, @errorName(err) },
         );
@@ -441,7 +441,7 @@ pub fn load(
     // branch to go with it.
     const serving = bulkhead.Dir.open(dir_path) catch |err| {
         std.log.err(
-            "zfast: static directory \"{s}\" could not be held open ({s}) — " ++
+            "nilo: static directory \"{s}\" could not be held open ({s}) — " ++
                 "the path is relative to the working directory the server runs in",
             .{ dir_path, @errorName(err) },
         );
@@ -479,7 +479,7 @@ pub fn load(
 
     while (walker.next(io) catch |err| {
         std.log.err(
-            "zfast: static directory \"{s}\" could not be walked ({s})",
+            "nilo: static directory \"{s}\" could not be walked ({s})",
             .{ dir_path, @errorName(err) },
         );
         return error.StaticReadFailed;
@@ -492,7 +492,7 @@ pub fn load(
 
         var url_buf: [max_url]u8 = undefined;
         const url = join(&url_buf, url_prefix, entry.path) orelse {
-            std.log.err("zfast: static file \"{s}\" has a path longer than {d} bytes", .{ entry.path, max_url });
+            std.log.err("nilo: static file \"{s}\" has a path longer than {d} bytes", .{ entry.path, max_url });
             return error.StaticUrlTooLong;
         };
         toForwardSlashes(url);
@@ -503,7 +503,7 @@ pub fn load(
         // over the line must not be read even once, or startup on a
         // directory of videos costs a pass over every one of them.
         const stat = entry.dir.statFile(io, entry.basename, .{}) catch |err| {
-            std.log.err("zfast: static file \"{s}\" could not be read ({s})", .{ entry.path, @errorName(err) });
+            std.log.err("nilo: static file \"{s}\" could not be read ({s})", .{ entry.path, @errorName(err) });
             return error.StaticReadFailed;
         };
 
@@ -539,7 +539,7 @@ pub fn load(
         // refused.
         const bytes = entry.dir.readFileAlloc(io, entry.basename, gpa, .limited64(options.max_file_bytes +| 1)) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
-            std.log.err("zfast: static file \"{s}\" could not be read ({s})", .{ entry.path, @errorName(err) });
+            std.log.err("nilo: static file \"{s}\" could not be read ({s})", .{ entry.path, @errorName(err) });
             return error.StaticReadFailed;
         };
         errdefer gpa.free(bytes);
@@ -547,7 +547,7 @@ pub fn load(
         held_total += bytes.len;
         if (held_total > options.max_total_bytes) {
             std.log.err(
-                "zfast: static directory \"{s}\" is over the {d} byte total limit",
+                "nilo: static directory \"{s}\" is over the {d} byte total limit",
                 .{ dir_path, options.max_total_bytes },
             );
             return error.StaticSetTooLarge;
@@ -565,7 +565,7 @@ pub fn load(
                 held_total += p.len;
                 if (held_total > options.max_total_bytes) {
                     std.log.err(
-                        "zfast: static directory \"{s}\" is over the {d} byte total limit " ++
+                        "nilo: static directory \"{s}\" is over the {d} byte total limit " ++
                             "once the gzipped copies are counted — raise .max_total_bytes, " ++
                             "or pass .compress = false",
                         .{ dir_path, options.max_total_bytes },
@@ -597,14 +597,14 @@ pub fn load(
         var buf: [max_url]u8 = undefined;
         const url = join(&buf, url_prefix, options.spa_fallback) orelse {
             std.log.err(
-                "zfast: the SPA fallback URL \"{s}\" + \"{s}\" is longer than {d} bytes",
+                "nilo: the SPA fallback URL \"{s}\" + \"{s}\" is longer than {d} bytes",
                 .{ url_prefix, options.spa_fallback, max_url },
             );
             return error.StaticUrlTooLong;
         };
         set.fallback = set.lookup(url) orelse {
             std.log.err(
-                "zfast: the SPA fallback \"{s}\" is not in \"{s}\" — " ++
+                "nilo: the SPA fallback \"{s}\" is not in \"{s}\" — " ++
                     "the name is relative to the directory, e.g. \"index.html\"",
                 .{ options.spa_fallback, dir_path },
             );
@@ -621,7 +621,7 @@ pub fn load(
     // memory budget and the second one is not in that budget at all — it is
     // one descriptor each, and only while a response is being written.
     std.log.info(
-        "zfast: loaded {d} static file(s) ({d} bytes held{f}) from \"{s}\" onto \"{s}\"{f}{s}",
+        "nilo: loaded {d} static file(s) ({d} bytes held{f}) from \"{s}\" onto \"{s}\"{f}{s}",
         .{
             set.files.len,
             held_total,
@@ -1168,7 +1168,7 @@ test "a file with no compressed copy asks for the plain one whatever the client 
 // ---- a file too big to hold (ADR 0037) ----
 
 const App = @import("app.zig").App;
-const zfast_testing = @import("testing.zig");
+const nilo_testing = @import("testing.zig");
 
 /// A directory of real files, written for one test and removed after it.
 /// The path is relative to the working directory, which is what `load` and
@@ -1312,7 +1312,7 @@ test "a spilled file answers whole, in parts, and with a 304" {
         .cache_control = "public, max-age=60",
     });
 
-    var client = try zfast_testing.Client.init(gpa, .{});
+    var client = try nilo_testing.Client.init(gpa, .{});
     defer client.deinit();
 
     // The whole thing, with everything a held file's answer carries.
@@ -1386,7 +1386,7 @@ test "a held file and a spilled one answer a conditional range the same way" {
         defer app.deinit();
         try app.tryStaticWith("/", tree.path, .{ .max_file_bytes = max_file_bytes });
 
-        var client = try zfast_testing.Client.init(gpa, .{});
+        var client = try nilo_testing.Client.init(gpa, .{});
         defer client.deinit();
 
         const whole = try client.get(&app, "/a.bin");

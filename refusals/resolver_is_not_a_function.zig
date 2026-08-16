@@ -1,18 +1,18 @@
 //! The marker set to a value instead of the function that works the value
 //! out from a request.
 
-const zfast = @import("zfast");
+const nilo = @import("nilo");
 
 const Caller = struct {
-    name: zfast.Str,
-    pub const zfast_resolve = 42;
+    name: nilo.Str,
+    pub const nilo_resolve = 42;
 };
 
-fn whoami(caller: Caller) zfast.Str {
+fn whoami(caller: Caller) nilo.Str {
     return caller.name;
 }
 
 export fn refusal() void {
-    var app: zfast.App = undefined;
+    var app: nilo.App = undefined;
     app.get("/me", whoami) catch {};
 }

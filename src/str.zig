@@ -68,7 +68,7 @@ pub const Str = struct {
 
     const Marker = if (trap_enabled) ?struct { gen_ptr: *const u64, gen: u64 } else void;
 
-    /// A Str tied to a request's lifetime. Used internally by zfast.
+    /// A Str tied to a request's lifetime. Used internally by nilo.
     pub fn fromRequest(bytes: []const u8, lifetime: *const Lifetime) Str {
         return .{
             ._bytes = bytes,
@@ -111,7 +111,7 @@ pub const Str = struct {
     /// Str is a struct — so it is `{f}` here and `{s}` with `.view()`. Worth
     /// the four lines anyway: logging the path is the first thing anybody
     /// writes, and without this the answer was a compile error from inside
-    /// `std.Io.Writer` naming neither zfast nor the fix.
+    /// `std.Io.Writer` naming neither nilo nor the fix.
     pub fn format(self: Str, w: *std.Io.Writer) std.Io.Writer.Error!void {
         return w.writeAll(self.view());
     }

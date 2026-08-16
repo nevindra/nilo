@@ -1,4 +1,4 @@
-// Go Fiber — fasthttp underneath. The framework zfast took its tone from in
+// Go Fiber — fasthttp underneath. The framework nilo took its tone from in
 // v1 (see docs/history.md).
 package main
 
@@ -35,7 +35,7 @@ func main() {
 			return c.Status(fiber.StatusNotFound).SendString("no user " + raw)
 		}
 
-		// c.JSON serialises per request, like zfast.
+		// c.JSON serialises per request, like nilo.
 		return c.JSON(User{uint32(id), "Routed Tester", "tester@example.dev", bio})
 	})
 

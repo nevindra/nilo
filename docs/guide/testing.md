@@ -8,7 +8,7 @@ fake HTTP request.
 
 ```zig
 fn getUser(db: *Db, id: u32) !User {
-    return db.find(id) orelse zfast.fail.notFound("no user {d}", .{id});
+    return db.find(id) orelse nilo.fail.notFound("no user {d}", .{id});
 }
 
 test "getUser" {
@@ -38,7 +38,7 @@ const profile = try me(.{ .id = 7, .name = .static("wati") });
 const created = try createUser(&db, .{ .name = .static("wati"), .age = 30 });
 ```
 
-`zfast.blocking` and `zfast.Mutex` both work with no server under them, so a
+`nilo.blocking` and `nilo.Mutex` both work with no server under them, so a
 handler that uses either is still callable from a test.
 
 `Str.static("wati")` is how a test makes one: text that already outlives any
@@ -51,11 +51,11 @@ answer — a stream, an event stream, anything sending from a `*Ctx` — needs
 somewhere to write to. So there is a client for that:
 
 ```zig
-var app = zfast.App.init(testing.allocator);
+var app = nilo.App.init(testing.allocator);
 defer app.deinit();
 try app.get("/report.csv", report);
 
-var client = try zfast.testing.Client.init(testing.allocator, .{});
+var client = try nilo.testing.Client.init(testing.allocator, .{});
 defer client.deinit();
 
 const answer = try client.get(&app, "/report.csv");
@@ -116,7 +116,7 @@ zig build test        # Debug — 0.8s, the one to keep hitting
 zig build test-all    # Debug and ReleaseSafe — 7.8s, before you push
 ```
 
-zfast's own suite runs **in both `Debug` and `ReleaseSafe`**, and `-Doptimize=`
+nilo's own suite runs **in both `Debug` and `ReleaseSafe`**, and `-Doptimize=`
 cannot change that. That is not decoration: the bug that made
 [ADR 0019](../adr/0019-a-response-owns-its-headers.md) necessary passed 175
 tests in `Debug` and segfaulted in release, because a stack temporary still holds

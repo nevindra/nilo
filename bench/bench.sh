@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# zfast's benchmark script — in the repo since stage 1 (see docs/plan.md)
+# nilo's benchmark script — in the repo since stage 1 (see docs/plan.md)
 # so that when a measuring machine turns up it is one command away instead
 # of a new project.
 #
@@ -10,7 +10,7 @@
 #
 # The target is the example route in src/main.zig: GET /users/:id returning
 # ~1KB of JSON. Start the server first with
-# `zig build -Doptimize=ReleaseFast` then `./zig-out/bin/zfast-hello`.
+# `zig build -Doptimize=ReleaseFast` then `./zig-out/bin/nilo-hello`.
 #
 # The load test for fail-function message leakage lives separately in
 # bench/mixed.lua (see ADR 0007) — that one tests correctness, not speed.

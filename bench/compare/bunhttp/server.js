@@ -22,7 +22,7 @@ Bun.serve({
           },
         });
       }
-      // Serialised per request, like zfast.
+      // Serialised per request, like nilo.
       const body = JSON.stringify({
         id,
         name: 'Routed Tester',

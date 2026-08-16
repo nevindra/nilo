@@ -1,19 +1,19 @@
-//! zfast's SQL module — a query is a struct of your own, checked while
+//! nilo's SQL module — a query is a struct of your own, checked while
 //! compiling (ADR 0039).
 //!
 //! ```zig
-//! const sql = @import("zfast_sql");
+//! const sql = @import("nilo_sql");
 //!
 //! const User = struct {
-//!     pub const zfast_table = .{ .name = "users", .key = .id };
+//!     pub const nilo_table = .{ .name = "users", .key = .id };
 //!
 //!     id: i64,
-//!     email: zfast.Str,
+//!     email: nilo.Str,
 //!     age: i32,
 //!     created_at: sql.Timestamp,
 //! };
 //!
-//! fn listAdults(db: *sql.Db, c: *zfast.Ctx) ![]User {
+//! fn listAdults(db: *sql.Db, c: *nilo.Ctx) ![]User {
 //!     return db.select(User, c, .{ .where = .{ .age = .{ .gt = 18 } } });
 //! }
 //! ```
@@ -60,11 +60,14 @@
 //! |---|---|---|
 //! | **Row** | `row.zig` | the marker, the borrow chain, the column list |
 //! | **Dialect** | `dialect.zig` | comptime, writes the SQL, may refuse |
-//! | **Wire** | `wire.zig` | runtime, speaks to the database |
 //! | **where** | `where.zig` | a condition into a fragment and a value list |
-//! | **statements** | `select.zig` | the whole `SELECT`, as a constant |
-//! | **schema** | `schema.zig` | Row against table, on the first connection |
+//! | **statements** | `statement.zig` | all four, each as a constant |
 //! | **types** | `types.zig` | Timestamp, Uuid, Json — value, not arithmetic |
+//! | **schema** | `schema.zig` | Row against table, while the server starts |
+//! | **Wire** | `wire.zig` | the contract a driver meets |
+//! | **the driver** | `postgres.zig` | pg.zig, and the only file that names it |
+//! | **Db** | `db.zig` | what a handler holds, and where `Str` stops |
+//! | **live tests** | `live.zig` | the half that needs a real Postgres |
 //!
 //! Two seams rather than one, because two different things get replaced
 //! independently: swapping the driver changes how bytes reach the socket,
@@ -72,9 +75,16 @@
 //! Postgres is filled in — the point is that `$1` is not hardcoded, not that
 //! a second dialect exists.
 //!
-//! Nothing here imports `zfast`, and `zfast` does not know this module
-//! exists. That one-way dependency is what makes this feature cost exactly
-//! zero bytes to a project that does not import it.
+//! **The dependency runs one way: this module imports `nilo`, and `nilo`
+//! does not know this module exists.** That is what makes the feature cost
+//! exactly zero to a project that does not import it — measured, not
+//! assumed: the HTTP-only binary contains no pg or TLS content, and pg.zig
+//! is `.lazy = true`, so it is not even downloaded (ADR 0040).
+//!
+//! What it costs the projects that *do* import it is 733 KB, of which the
+//! whole write half is 53 KB and the rest is pg.zig's TLS dependency. ADR
+//! 0040 has the numbers and the argument for why being a TLS client is not
+//! the thing ADR 0028 refused.
 
 const std = @import("std");
 
@@ -82,9 +92,16 @@ pub const row = @import("row.zig");
 pub const dialect = @import("dialect.zig");
 pub const wire = @import("wire.zig");
 pub const where = @import("where.zig");
-pub const statement = @import("select.zig");
+pub const statement = @import("statement.zig");
 pub const schema = @import("schema.zig");
 pub const types = @import("types.zig");
+pub const postgres = @import("postgres.zig");
+pub const db = @import("db.zig");
+
+/// What a handler holds. `*sql.Db` in a signature is a service like any
+/// other, so `listen()` checks it is registered before the first request
+/// rather than after (ADR 0006).
+pub const Db = db.Db;
 
 /// The Dialect used unless something says otherwise. One exists; the seam is
 /// there so that the second one is an addition rather than a rewrite.
@@ -114,11 +131,27 @@ pub fn deleteFor(comptime Row: type, comptime Options: type) statement.Statement
     return comptime statement.delete(Postgres, Row, Options);
 }
 
+/// The `INSERT`, with the Row's column list as its `RETURNING`.
+pub fn insertFor(comptime Row: type, comptime Values: type) statement.Statement {
+    return comptime statement.insert(Postgres, Row, Values);
+}
+
+/// The `UPDATE`. Both `.set` and `.where` are required, and the numbering
+/// runs through them in that order.
+pub fn updateFor(comptime Row: type, comptime Options: type) statement.Statement {
+    return comptime statement.update(Postgres, Row, Options);
+}
+
+/// A Row with every `Str` replaced by `[]const u8` — what `db.stream` hands
+/// back, and a type that says its text dies at the next row rather than
+/// leaving that to a comment (ADR 0039).
+pub const Borrowed = row.Borrowed;
+
 test {
     // Every file in this module, or its tests never run — the same rule
-    // `src/zfast.zig` states for the framework. This module is deliberately
+    // `src/nilo.zig` states for the framework. This module is deliberately
     // not reachable from there: a `_ = @import` line pointing the other way
-    // would compile the whole of it into every zfast build.
+    // would compile the whole of it into every nilo build.
     _ = row;
     _ = dialect;
     _ = wire;
@@ -126,6 +159,12 @@ test {
     _ = statement;
     _ = schema;
     _ = types;
+    _ = postgres;
+    _ = db;
+    // The tests that need a database. Every one of them skips when
+    // `DATABASE_URL` is unset, so this line costs nothing to somebody who
+    // has not started one (`sql/live.zig`).
+    _ = @import("live.zig");
 }
 
 // -- tests ---------------------------------------------------------------
@@ -133,7 +172,7 @@ test {
 const testing = std.testing;
 
 const User = struct {
-    pub const zfast_table = .{ .name = "users", .key = .id };
+    pub const nilo_table = .{ .name = "users", .key = .id };
 
     id: i64,
     email: []const u8,

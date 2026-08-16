@@ -1,7 +1,7 @@
 # refusals
 
 Programs written wrong on purpose. Each one has to fail to compile with a
-message that zfast wrote, and `zig build test` checks that it does
+message that nilo wrote, and `zig build test` checks that it does
 ([ADR 0027](../docs/adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)).
 
 Nothing here is ever run, and nothing here compiles.
@@ -15,13 +15,13 @@ saying what the person was trying to do:
 
 ```zig
 //! A service asked for by value. `Store` is a service — it is meant to be
-//! `*Store` — and by value it is a struct, so zfast reads it as a second
+//! `*Store` — and by value it is a struct, so nilo reads it as a second
 //! request body.
 
-const zfast = @import("zfast");
+const nilo = @import("nilo");
 
 const Store = struct { rows: u32 };
-const NewOrder = struct { sku: zfast.Str };
+const NewOrder = struct { sku: nilo.Str };
 
 fn placeOrder(store: Store, incoming: NewOrder) u32 {
     _ = incoming;
@@ -29,13 +29,13 @@ fn placeOrder(store: Store, incoming: NewOrder) u32 {
 }
 
 export fn refusal() void {
-    var app: zfast.App = undefined;
+    var app: nilo.App = undefined;
     app.post("/orders", placeOrder) catch {};
 }
 ```
 
 `export` is what gets the function analysed without a `main`, and
-`var app: zfast.App = undefined` is fine because none of this runs — the
+`var app: nilo.App = undefined` is fine because none of this runs — the
 compiler stops at the route registration.
 
 **A row in `build.zig`**, holding the first line of the message:
@@ -47,7 +47,7 @@ compiler stops at the route registration.
 },
 ```
 
-Leave the `zfast: ` off. The build step puts it there, which is how a message
+Leave the `nilo: ` off. The build step puts it there, which is how a message
 that does not start with it becomes impossible to write down as passing.
 
 To find out what to put in `.says`, guess, run `zig build refusals`, and read

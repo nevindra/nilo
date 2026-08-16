@@ -60,7 +60,7 @@ Every measured cost is exactly the next power of two at or above `@sizeOf`.
 
 **What is being paid is the allocator's size class, not the struct.** The spike
 gives each connection its own allocation, which is the obvious way to write it
-and the wrong way to ship it. Folded into the connection state zfast already
+and the wrong way to ship it. Folded into the connection state nilo already
 allocates, there is no second allocation and no rounding, and the cost is the
 struct:
 
@@ -89,9 +89,9 @@ size for a number that goes in an ADR.
 
 ## What this does not measure
 
-- **zfast's connection, rather than a zio server's.** The delta is the
+- **nilo's connection, rather than a zio server's.** The delta is the
   machinery's marginal cost, and that is what transfers; the per-connection
-  total for a real zfast server has to be re-measured on the real server when
+  total for a real nilo server has to be re-measured on the real server when
   the feature lands, the way ADR 0029 measured the fiber.
 - **A mailbox with anything in it.** The ring is written so its pages are
   resident, but the posts it would point at are somebody else's memory, and

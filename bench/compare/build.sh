@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build every candidate, including zfast itself.
+# Build every candidate, including nilo itself.
 #
 # Node and Bun have no build step. Anything whose toolchain is missing is
 # skipped with a note rather than failing the run — drive.py will report it as
@@ -8,7 +8,7 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-ZFAST="$(cd "$HERE/../.." && pwd)"
+NILO="$(cd "$HERE/../.." && pwd)"
 export GOCACHE="$HERE/.gocache"
 
 ok=0; skipped=0
@@ -30,7 +30,7 @@ step() {  # step <label> <tool> <dir> <command...>
     fi
 }
 
-step "zfast"     zig   "$ZFAST"          zig build -Doptimize=ReleaseFast
+step "nilo"     zig   "$NILO"          zig build -Doptimize=ReleaseFast
 step "http.zig"  zig   "$HERE/httpzig"   zig build -Doptimize=ReleaseFast
 step "Go net/http" go  "$HERE/gonet"     go build -o gonet-bench .
 step "Go Fiber"  go    "$HERE/gofiber"   go build -o gofiber-bench .

@@ -47,14 +47,14 @@
 //! ```
 
 const std = @import("std");
-const zfast = @import("zfast");
-const fail = zfast.fail;
-const Str = zfast.Str;
+const nilo = @import("nilo");
+const fail = nilo.fail;
+const Str = nilo.Str;
 const Allocator = std.mem.Allocator;
 
-pub const std_options = zfast.std_options;
-pub const std_options_debug_io = zfast.debug_io;
-pub const panic = zfast.panic;
+pub const std_options = nilo.std_options;
+pub const std_options_debug_io = nilo.debug_io;
+pub const panic = nilo.panic;
 
 // ---- what the API talks about ----
 
@@ -171,7 +171,7 @@ const Catalog = struct {
 /// `allocator()` leaves that handle pointing at where the arena used to be.
 const Orders = struct {
     gpa: Allocator,
-    lock: zfast.Mutex = .init,
+    lock: nilo.Mutex = .init,
     rows: std.ArrayList(*Row) = .empty,
     people: std.ArrayList(*Person) = .empty,
     next_id: u32 = 1,
@@ -219,7 +219,7 @@ const Orders = struct {
     // ---- copying out ----
     //
     // Every read hands back a copy in the request arena rather than a view
-    // into the store. That is not caution: a handler returns to zfast, which
+    // into the store. That is not caution: a handler returns to nilo, which
     // then writes the response — and between those two moments another
     // request on another thread can delete this order and free the arena the
     // text lived in. The copy is thrown away with the request, and costs one
@@ -357,7 +357,7 @@ const Orders = struct {
 
     /// `error.Conflict` rather than `fail.conflict`: a store knows an
     /// illegal transition when it sees one and knows nothing about HTTP.
-    /// zfast maps the error to a 409 on its own, and the handler above puts
+    /// nilo maps the error to a 409 on its own, and the handler above puts
     /// a sentence on it — so the store stays a store and the client still
     /// gets told what happened.
     fn advance(self: *Orders, into: Allocator, id: u32, to: Stage) !?Order {
@@ -518,7 +518,7 @@ fn mayGo(from: Stage, to: Stage) bool {
 /// first. Two locks held one after the other rather than one around both,
 /// which is the whole reason it is a separate service.
 const Audit = struct {
-    lock: zfast.Mutex = .init,
+    lock: nilo.Mutex = .init,
     entries: [64]Entry = undefined,
     written: usize = 0,
 
@@ -560,13 +560,13 @@ const Keys = struct {
 };
 
 const Caller = struct {
-    pub const zfast_resolve = identify;
+    pub const nilo_resolve = identify;
 
     name: []const u8,
     scope: Scope,
 };
 
-fn identify(c: *zfast.Ctx, keys: *const Keys) !Caller {
+fn identify(c: *nilo.Ctx, keys: *const Keys) !Caller {
     const header = c.header("Authorization") orelse
         return fail.unauthorized("this endpoint wants an Authorization header", .{});
     const bearer = "Bearer ";
@@ -584,9 +584,9 @@ fn identify(c: *zfast.Ctx, keys: *const Keys) !Caller {
 /// returned value is a plain function pointer — there is nothing to allocate
 /// and nothing to free, because `wanted` is comptime and lives in the
 /// generated function rather than in a closure.
-fn needs(comptime wanted: Scope) zfast.Middleware {
+fn needs(comptime wanted: Scope) nilo.Middleware {
     return struct {
-        fn check(c: *zfast.Ctx, next: zfast.Next) !void {
+        fn check(c: *nilo.Ctx, next: nilo.Next) !void {
             const caller = try c.resolve(Caller);
             if (@intFromEnum(caller.scope) < @intFromEnum(wanted)) {
                 return fail.forbidden(
@@ -623,9 +623,9 @@ const NewOrder = struct {
 /// `Patch(NewAddress)` is the same three answers as `Patch(Str)`: not
 /// mentioned, sent as null, sent as an address.
 const EditOrder = struct {
-    priority: zfast.Patch(Priority) = .absent,
-    note: zfast.Patch(Str) = .absent,
-    ship_to: zfast.Patch(NewAddress) = .absent,
+    priority: nilo.Patch(Priority) = .absent,
+    note: nilo.Patch(Str) = .absent,
+    ship_to: nilo.Patch(NewAddress) = .absent,
 };
 
 const Move = struct { to: Stage };
@@ -671,19 +671,19 @@ const Summary = struct {
 
 // ---- handlers ----
 
-fn listOrders(orders: *Orders, arena: Allocator, filter: zfast.Query(Filter)) !Page(Order) {
+fn listOrders(orders: *Orders, arena: Allocator, filter: nilo.Query(Filter)) !Page(Order) {
     return orders.list(arena, filter.value, null);
 }
 
 /// Two services, the request arena and a body, in one argument list. The
-/// order they are written in is the order they read best in — zfast matches
+/// order they are written in is the order they read best in — nilo matches
 /// them by type, not by position.
 fn placeOrder(
     orders: *Orders,
     catalog: *const Catalog,
     arena: Allocator,
     incoming: NewOrder,
-) !zfast.Status(201, Order) {
+) !nilo.Status(201, Order) {
     if (incoming.lines.len == 0) return fail.unprocessable("an order needs at least one line", .{});
 
     const placed = try orders.place(arena, catalog, incoming);
@@ -712,7 +712,7 @@ fn addLine(
     arena: Allocator,
     id: u32,
     asked: NewLine,
-) !zfast.Status(201, Order) {
+) !nilo.Status(201, Order) {
     const grown = orders.addLine(arena, catalog, id, asked) catch |err| switch (err) {
         error.Conflict => return fail.conflict("order {d} has been placed, so its lines are settled", .{id}),
         else => |other| return other,
@@ -725,7 +725,7 @@ fn addLine(
 /// Get the order wrong and nothing warns you, which is the honest cost of
 /// positional matching — the alternative is naming them, and naming them is
 /// what `Query(T)` is for.
-fn dropLine(orders: *Orders, id: u32, no: u16) !zfast.Status(204, void) {
+fn dropLine(orders: *Orders, id: u32, no: u16) !nilo.Status(204, void) {
     const dropped = orders.dropLine(id, no) catch |err| switch (err) {
         error.Conflict => return fail.conflict("order {d} has been placed, so its lines are settled", .{id}),
         else => |other| return other,
@@ -772,7 +772,7 @@ fn putCustomer(
     arena: Allocator,
     code: Str,
     incoming: NewCustomer,
-) !zfast.Response(Customer) {
+) !nilo.Response(Customer) {
     if (code.len() == 0) return fail.badRequest("a customer code cannot be empty", .{});
 
     const done = try orders.putCustomer(arena, code.view(), incoming);
@@ -787,7 +787,7 @@ fn customerOrders(
     orders: *Orders,
     arena: Allocator,
     code: Str,
-    filter: zfast.Query(Filter),
+    filter: nilo.Query(Filter),
 ) !Page(Order) {
     return orders.list(arena, filter.value, code.view());
 }
@@ -799,7 +799,7 @@ fn customerOrders(
 ///
 /// [ADR 0014]: ../../docs/adr/0014-blocking-calls-go-to-a-thread-pool.md
 fn daily(orders: *Orders) !Summary {
-    return zfast.blocking(Orders.summarise, .{orders});
+    return nilo.blocking(Orders.summarise, .{orders});
 }
 
 fn auditTrail(audit: *Audit, arena: Allocator) ![]const Audit.Entry {
@@ -811,7 +811,7 @@ fn auditTrail(audit: *Audit, arena: Allocator) ![]const Audit.Entry {
 /// body, in pieces" — and taking one has a price this example is the right
 /// place to name: **a route that drops to `*Ctx` drops out of the generated
 /// document.** Nothing at startup says so.
-fn attachInvoice(c: *zfast.Ctx, orders: *Orders, arena: Allocator, id: u32) !void {
+fn attachInvoice(c: *nilo.Ctx, orders: *Orders, arena: Allocator, id: u32) !void {
     if (try orders.get(arena, id) == null) return fail.notFound("no order {d}", .{id});
 
     var body = try c.bodyStreamWith(.{ .max_bytes = 8 * 1024 * 1024 });
@@ -829,7 +829,7 @@ fn attachInvoice(c: *zfast.Ctx, orders: *Orders, arena: Allocator, id: u32) !voi
 // ---- mounting ----
 
 /// A plugin: everything about orders, registered against whatever it is
-/// handed. `anytype` rather than `zfast.Group("/v1")` is what makes it
+/// handed. `anytype` rather than `nilo.Group("/v1")` is what makes it
 /// mountable anywhere — the prefix is part of a group's type, so spelling
 /// the type spells the prefix.
 fn mountOrders(group: anytype) !void {
@@ -865,7 +865,7 @@ pub fn main() !void {
     defer orders.deinit();
     var audit = Audit{};
 
-    var app = zfast.App.init(gpa);
+    var app = nilo.App.init(gpa);
     defer app.deinit();
 
     // Three services of three shapes: one written to under a lock, one
@@ -882,7 +882,7 @@ pub fn main() !void {
         .description = "Nested resources, nested bodies, and a state machine.",
     });
 
-    try app.use(zfast.logger.standard);
+    try app.use(nilo.logger.standard);
 
     const v1 = app.group("/v1");
     // Everything under /v1 needs a token; the resolver decides who, and this
@@ -1136,7 +1136,7 @@ test "the document names every shape that has a name, and the paths that have pa
     var orders = Orders{ .gpa = testing.allocator };
     defer orders.deinit();
 
-    var app = zfast.App.init(testing.allocator);
+    var app = nilo.App.init(testing.allocator);
     defer app.deinit();
 
     try app.provide(&orders);
@@ -1144,7 +1144,7 @@ test "the document names every shape that has a name, and the paths that have pa
     app.docs(.{ .title = "Orders", .version = "1.0.0" });
     try mountOrders(app.group("/v1"));
 
-    var client = try zfast.testing.Client.init(testing.allocator, .{ .response_bytes = 256 * 1024 });
+    var client = try nilo.testing.Client.init(testing.allocator, .{ .response_bytes = 256 * 1024 });
     defer client.deinit();
 
     const answer = try client.get(&app, "/openapi.json");

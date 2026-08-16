@@ -1,5 +1,5 @@
 // Pinned to exactly what ../../build.zig.zon pins, so this spike measures the
-// version zfast actually ships against rather than whatever is newest. That
+// version nilo actually ships against rather than whatever is newest. That
 // matters more here than usual: the number this produces is meant to go into
 // an ADR, and an ADR's number has to be reproducible from the pin.
 .{

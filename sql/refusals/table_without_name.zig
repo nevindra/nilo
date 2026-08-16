@@ -1,10 +1,10 @@
 //! The marker is there and does not name a table. `.key` alone says which
 //! column identifies a row without saying which rows.
 
-const sql = @import("zfast_sql");
+const sql = @import("nilo_sql");
 
 const User = struct {
-    pub const zfast_table = .{ .key = .id };
+    pub const nilo_table = .{ .key = .id };
 
     id: i64,
     email: []const u8,

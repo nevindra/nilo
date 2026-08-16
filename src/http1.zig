@@ -95,7 +95,7 @@ pub fn discardBody(in: *std.Io.Reader, r: *const Request, limit: u64) !void {
 //
 // `5\r\nhello\r\n0\r\n\r\n` — a size in hex, that many bytes, repeat, and a
 // zero-sized chunk ends it. What comes after the last chunk is trailers:
-// headers held back until the body was finished. zfast reads them only far
+// headers held back until the body was finished. nilo reads them only far
 // enough to get past them, because a trailer arrives after the handler has
 // already been given the body, so there is nothing left to do with it.
 
@@ -176,7 +176,7 @@ pub const Header = struct { name: []const u8, value: []const u8 };
 /// classic request-smuggling bug — so `Ctx.setHeader` refuses them.
 ///
 /// `Transfer-Encoding` is on the list for the same reason and is worse: a
-/// response that announces chunked framing zfast is not applying is read by
+/// response that announces chunked framing nilo is not applying is read by
 /// the client as a chunk size, and everything after that is somebody's
 /// guess. It is written only by `writeStreamHead`.
 pub fn isReservedHeader(name: []const u8) bool {
@@ -352,7 +352,7 @@ pub fn parseHead(head: []const u8, r: *Request) ParseError!void {
                 // should be, or one past the end of the line. A field name
                 // is one or more characters (RFC 9110 §5.1), so `: value`
                 // is malformed and gets the same 400 as a line with no
-                // colon at all — found by `fuzz.zig`, which had zfast
+                // colon at all — found by `fuzz.zig`, which had nilo
                 // ignoring it and every reference parser refusing it.
                 if (colon <= line_start or colon >= end) return error.BadHeader;
                 // Two of the three headers that matter begin with `c` and one
@@ -1010,7 +1010,7 @@ test "a 304 keeps its Content-Type but drops the Content-Length" {
 }
 
 test "a body handed to a bodyless status is dropped rather than framed wrong" {
-    // Nothing in zfast does this, but a handler reaching for `c.send(204, …)`
+    // Nothing in nilo does this, but a handler reaching for `c.send(204, …)`
     // with contents would otherwise leave bytes on the connection that the
     // next request would be read out of.
     var buf: [256]u8 = undefined;

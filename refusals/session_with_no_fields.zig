@@ -1,16 +1,16 @@
 //! A session with nothing in it. It would compile, seal five bytes and
 //! remember nothing, which is a cookie's worth of work for no answer.
 
-const zfast = @import("zfast");
+const nilo = @import("nilo");
 
 const Empty = struct {};
 
-fn me(s: zfast.Session(Empty)) u32 {
+fn me(s: nilo.Session(Empty)) u32 {
     _ = s;
     return 0;
 }
 
 export fn refusal() void {
-    var app: zfast.App = undefined;
+    var app: nilo.App = undefined;
     app.get("/me", me) catch {};
 }

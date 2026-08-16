@@ -3,7 +3,7 @@
 A redirect was always possible — `Status(302, void)` with a `Location` header on it — and always three lines for a one-line idea:
 
 ```zig
-fn old(arena: std.mem.Allocator) !zfast.Status(302, void) {
+fn old(arena: std.mem.Allocator) !nilo.Status(302, void) {
     return .{ .headers = .of(&.{.{ .name = "Location", .value = "/new" }}) };
 }
 ```
@@ -17,7 +17,7 @@ ADR 0024 already settled the shape of this trade for statuses generally: `Respon
 A redirect's status is a constant in the source essentially always — a form POST answers 303, an old address answers 301 — so it belongs in the type:
 
 ```zig
-fn signUp(incoming: zfast.Form(SignUp)) !zfast.Redirect(303) {
+fn signUp(incoming: nilo.Form(SignUp)) !nilo.Redirect(303) {
     return .to("/welcome");
 }
 ```
@@ -50,7 +50,7 @@ A redirect answers with a `Location` and `Content-Length: 0`. Browsers follow th
 
 ## Consequences
 
-- `zfast.Redirect(status)` with `.to(location)` and `.with(location, headers)`, plus `Ctx.redirect(status, location)`.
+- `nilo.Redirect(status)` with `.to(location)` and `.with(location, headers)`, plus `Ctx.redirect(status, location)`.
 - 303, 307 and 308 join the statuses whose first line is assembled at compile time; 301 and 302 already had phrases and no way to reach them.
 - `c.redirect` refuses an empty location and a status outside 3xx with a 500 rather than sending a `Location` nobody can follow. The typed version cannot reach the second of those — the type refused it while compiling.
 - `location` is copied on the way out like any header value, so building one in the request arena or on the stack is safe.

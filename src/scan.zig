@@ -1,6 +1,6 @@
 //! Finding delimiters in a run of bytes, a block at a time.
 //!
-//! Three places in zfast walk text looking for a handful of particular bytes:
+//! Three places in nilo walk text looking for a handful of particular bytes:
 //! the request head (newlines and colons), the query string (`&` and `=`), and
 //! a JSON string (the characters that have to be escaped). All three used to do
 //! it with `std.mem.indexOfScalar` per delimiter per line or per pair, which is

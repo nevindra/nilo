@@ -1,9 +1,9 @@
-# zfast
+# nilo
 
 Zig hands you a compiler and gets out of the way. Everything above it (routing,
 parsing a request, talking to Postgres) you write yourself, or you don't ship.
 
-**zfast is that layer, and it has exactly one idea: your types are the contract,
+**nilo is that layer, and it has exactly one idea: your types are the contract,
 and the compiler is the check.**
 
 Here is what that buys. This is a route:
@@ -14,7 +14,7 @@ fn getUser(db: *Db, id: u32) !?User {
 }
 ```
 
-Not a handler you hang a decorator on. The route. zfast reads that signature
+Not a handler you hang a decorator on. The route. nilo reads that signature
 while compiling and hands back URL matching, an `id` already parsed into a
 `u32`, a **400** with a real sentence when it isn't a number, a **404** when
 `null` comes back, and an OpenAPI document that says all three.
@@ -29,8 +29,9 @@ One rule covers the whole argument list:
 That's it. That's the API. No decorators, no macros, no codegen step, no
 `schema.yaml`.
 
-> **0.1.0**, the first release · needs **Zig 0.16** · `zfast` is a working name
-> and will probably change before 1.0.
+> **0.2.0** · needs **Zig 0.16** · renamed from `zfast`, which is the one
+> breaking change in this release. Three lines of search and replace
+> ([CHANGELOG](./CHANGELOG.md)).
 
 ## Then we did it again, to SQL
 
@@ -39,10 +40,10 @@ table.
 
 ```zig
 const User = struct {
-    pub const zfast_table = .{ .name = "users", .key = .id };
+    pub const nilo_table = .{ .name = "users", .key = .id };
 
     id: i64,
-    email: zfast.Str,
+    email: nilo.Str,
     age: i32,
     created_at: sql.Timestamp,
 };
@@ -72,14 +73,14 @@ Which means this is a **build error**, not a 500 at 3am:
 
 ```
 $ zig build
-error: zfast: User has no column `agee`, asked for in a condition.
+error: nilo: User has no column `agee`, asked for in a condition.
        Did you mean `age`?
 ```
 
-> **Where it actually is.** The compile-time half is built and tested: Rows, the
-> Postgres dialect, conditions, `SELECT`/`DELETE`, the schema check, 17
-> refusals, 70 tests in two optimize modes. Nothing reaches a socket yet, so you
-> **can't query a database with this today**. Design and reasoning:
+> **Where it actually is.** It runs. `select`, `one`, `insert`, `update`,
+> `delete`, `raw`, transactions and streaming, over pg.zig, checked against a
+> real Postgres on every push. One table at a time, on purpose. Design and
+> reasoning:
 > [ADR 0039](./docs/adr/0039-the-shape-of-a-query-is-settled-while-compiling.md).
 
 One more thing falls out for free. `db.one(...)` returns `?User`, so a handler
@@ -109,10 +110,10 @@ The throughput number (1.4M req/s) is the *least* interesting one and
 the table is five servers making identical syscalls. The two that are actually
 properties of the design are the 8,767 and the 1.
 
-## 73 programs written wrong on purpose
+## 79 programs written wrong on purpose
 
 Everyone tests that their code works. This repo also tests **that its error
-messages still say the right thing**, with 73 programs that are *supposed* to
+messages still say the right thing**, with 79 programs that are *supposed* to
 fail to compile and a build step that checks the wording of every failure.
 
 Because an error message is only a feature until someone refactors it into
@@ -120,9 +121,9 @@ mush.
 
 ```
 $ zig build
-error: zfast: route "/users/:user/pets/:pet" has 2 path params (:user, :pet), but its handler only takes 1.
+error: nilo: route "/users/:user/pets/:pet" has 2 path params (:user, :pet), but its handler only takes 1.
        Path params are matched by position, so the ones at the end would never be read.
-       Add the arguments (`id: u32`, `name: zfast.Str`, …), drop the unused `:` from the
+       Add the arguments (`id: u32`, `name: nilo.Str`, …), drop the unused `:` from the
        pattern, or ask for a `*Ctx` if you would rather fetch them yourself with `c.param("…")`.
 ```
 
@@ -134,8 +135,8 @@ without a search engine. So can your coding agent, and
 
 | | | |
 |---|---|---|
-| **`zfast`** | HTTP: routing, typed handlers, middleware, cookies and sessions, static files, streaming, WebSocket, OpenAPI | **shipped** |
-| **`zfast_sql`** | Postgres: your struct is the table | **half-built**: compiles queries, can't run them |
+| **`nilo`** | HTTP: routing, typed handlers, middleware, cookies and sessions, static files, streaming, WebSocket, OpenAPI | **shipped** |
+| **`nilo_sql`** | Postgres: your struct is the table | **shipped**: reads, writes, transactions, streaming |
 
 Two modules today. Config, CLI arguments and an HTTP client are the obvious next
 ones, because Zig makes you hand-roll all three.
@@ -151,34 +152,38 @@ Templates are the first thing that bar turns away
 ([here's why](#what-it-wont-do)).
 
 Modules stay separate, and it's not tidiness: Zig doesn't compile what nothing
-imports, so an HTTP-only project pays **zero bytes** for `zfast_sql` and never
-fetches a Postgres driver.
+imports, so an HTTP-only project pays **zero bytes** for `nilo_sql` and never
+fetches a Postgres driver. That's measured, not hoped for. The HTTP-only binary
+contains no driver and no TLS at all; a server that does run queries costs
+733 KB more, and
+[ADR 0040](./docs/adr/0040-a-service-that-needs-the-loop-is-finished-when-the-loop-exists.md)
+says where every byte of it goes.
 
 ## A whole server
 
 ```zig
 const std = @import("std");
-const zfast = @import("zfast");
+const nilo = @import("nilo");
 
 // Two lines of wiring, once, in your root file. `listen()` names whichever
 // one is missing.
-pub const std_options = zfast.std_options;       // engine chatter out of your logs
-pub const std_options_debug_io = zfast.debug_io; // `std.log` off the event loop
+pub const std_options = nilo.std_options;       // engine chatter out of your logs
+pub const std_options_debug_io = nilo.debug_io; // `std.log` off the event loop
 
 fn getUser(db: *Db, id: u32) !?User {
     return db.find(id);
 }
 
-fn createUser(db: *Db, incoming: NewUser) !zfast.Status(201, User) {
+fn createUser(db: *Db, incoming: NewUser) !nilo.Status(201, User) {
     return .{ .value = try db.add(incoming) };
 }
 
 pub fn main() !void {
-    var app = zfast.App.init(std.heap.smp_allocator);
+    var app = nilo.App.init(std.heap.smp_allocator);
     defer app.deinit();
 
     try app.provide(&db);
-    try app.use(zfast.logger.standard);
+    try app.use(nilo.logger.standard);
     try app.get("/users/:id", getUser);
     try app.post("/users", createUser);
     try app.static("/", "public");
@@ -201,7 +206,7 @@ Answering with a file is the same shape, a return type rather than a side
 effect, so the generated document can still see it:
 
 ```zig
-fn invoice(files: *Files, id: u32) !?zfast.FileBody {
+fn invoice(files: *Files, id: u32) !?nilo.FileBody {
     const name = files.nameOf(id) orelse return null;
     return .{ .dir = files.dir, .name = name, .content_type = "application/pdf" };
 }
@@ -234,7 +239,7 @@ Zig 0.16 and nothing else. No C library, no system package.
 
 ```
 zig init                                                          # only if you have no build.zig.zon yet
-zig fetch --save git+https://github.com/nevindra/zfast?ref=v0.1.0
+zig fetch --save git+https://github.com/nevindra/nilo?ref=v0.2.0
 ```
 
 **Keep the `?ref=`.** Without it `zig fetch` takes whatever `main` happens to be
@@ -244,7 +249,7 @@ neither of them asked for a version.
 Then hand the module to whatever imports it, in `build.zig`:
 
 ```zig
-const zfast = b.dependency("zfast", .{ .target = target, .optimize = optimize });
+const nilo = b.dependency("nilo", .{ .target = target, .optimize = optimize });
 
 const exe = b.addExecutable(.{
     .name = "my-app",
@@ -252,7 +257,7 @@ const exe = b.addExecutable(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "zfast", .module = zfast.module("zfast") }},
+        .imports = &.{.{ .name = "nilo", .module = nilo.module("nilo") }},
     }),
 });
 ```
@@ -307,7 +312,7 @@ both a person in a hurry and an agent actually edit a file.
 **A mistake is refused rather than tolerated**, in three places, in the order
 you would meet them.
 
-*While compiling:* an argument zfast can't make sense of, a pattern that can't
+*While compiling:* an argument nilo can't make sense of, a pattern that can't
 work, two request bodies, a `Form` and a JSON body in the same handler, a column
 that isn't on your struct. [The one up top](#73-programs-written-wrong-on-purpose)
 is a fair sample of the register.
@@ -339,7 +344,7 @@ named in the log, in any build:
 ```
 warning: handler GET /report held its thread for 412ms. Every other request being served
          on that thread waited the whole time. Hand the call that waits to
-         zfast.blocking (ADR 0014).
+         nilo.blocking (ADR 0014).
 ```
 
 Every one of those names what you did and what to do instead. A person reads one
@@ -376,7 +381,7 @@ document says `default` rather than guessing
 Your app serves it at `/openapi.json`, so a generated client or an agent can
 read the contract back out of the running server.
 
-> **Pointing an agent at zfast:** [`docs/reference.md`](./docs/reference.md) is
+> **Pointing an agent at nilo:** [`docs/reference.md`](./docs/reference.md) is
 > the whole API surface on one page, [`CONTEXT.md`](./CONTEXT.md) is the
 > project's vocabulary. About 26 KB together, small enough to hand over whole.
 > And every [ADR](./docs/adr/) names the alternative it rejected, so "why not
@@ -443,7 +448,7 @@ against all four before it's written**, not after.
 Borrowed from FastAPI (the signature), Elysia (resolved values, plugins), nginx
 and TigerBeetle (memory discipline), Elm (error messages), Drizzle (the query
 shape). Credit and reasoning:
-[ADR 0015](./docs/adr/0015-what-zfast-borrows-and-from-whom.md).
+[ADR 0015](./docs/adr/0015-what-nilo-borrows-and-from-whom.md).
 
 ## License
 

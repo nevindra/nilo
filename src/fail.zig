@@ -59,7 +59,7 @@ pub const Failure = struct {
     }
 };
 
-/// Everything zfast tracks about the request this fiber is serving. It is
+/// Everything nilo tracks about the request this fiber is serving. It is
 /// what the Bulkhead slot points at, so anything reachable from anywhere —
 /// a fail function, the panic handler (ADR 0008) — finds it here.
 pub const InFlight = struct {
@@ -71,7 +71,7 @@ pub const InFlight = struct {
     path: []const u8 = "",
 
     /// Whether this request is holding its thread (ADR 0034). Here for the
-    /// same reason everything else is: `zfast.blocking` has to find it from
+    /// same reason everything else is: `nilo.blocking` has to find it from
     /// inside a call that knows nothing about the request it is part of.
     watch: watchdog.Watch = .{},
 
@@ -173,7 +173,17 @@ pub fn statusFor(err: anyerror) u16 {
 
         error.Unauthorized => 401,
         error.Forbidden => 403,
-        error.Conflict => 409,
+        // `AlreadyExists` is `nilo_sql`'s, and it is the only one of that
+        // module's four errors given a row here. A unique violation means
+        // the client asked for something that is already there, and that is
+        // true whatever the request around it was; a foreign key or check
+        // violation usually means the code is wrong, so those stay 500 and
+        // the handler decides (ADR 0039).
+        //
+        // Naming it costs no dependency. A Zig error is a member of one
+        // global set, so this file can match on the name without importing
+        // the module that raises it — the arrow still runs one way.
+        error.Conflict, error.AlreadyExists => 409,
         error.BodyTooLarge => 413,
         error.Timeout, error.Canceled => 503,
 

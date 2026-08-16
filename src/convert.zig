@@ -28,7 +28,7 @@ const Str = str_mod.Str;
 /// Why one piece of request text could not become the type that was asked
 /// for.
 ///
-/// This is the whole vocabulary, and it stays that way on purpose. zfast's
+/// This is the whole vocabulary, and it stays that way on purpose. nilo's
 /// job stops at "this did not convert to a `u32`"; whether the age is
 /// plausible is the application's question, and a reason set that grew to
 /// answer it would be a validation language wearing a smaller name.
@@ -142,10 +142,10 @@ pub fn sayWhy(comptime P: type, arrived: Str, comptime label: []const u8, w: *st
             .{ comptime enumChoices(P), text },
         ),
         // A `Str` is the one type that cannot fail to convert, so there is
-        // no sentence here for it and asking for one is a bug in zfast
+        // no sentence here for it and asking for one is a bug in nilo
         // rather than in anybody's application.
         else => @compileError(
-            "zfast: " ++ naming.of(P) ++ " has no conversion failure to describe.",
+            "nilo: " ++ naming.of(P) ++ " has no conversion failure to describe.",
         ),
     }
 }

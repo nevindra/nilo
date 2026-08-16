@@ -8,7 +8,7 @@ This is that concept. A type says how it is worked out from a request, and a han
 
 ```zig
 const CurrentUser = struct {
-    pub const zfast_resolve = authenticate;
+    pub const nilo_resolve = authenticate;
 
     id: u32,
     name: Str,
@@ -75,4 +75,4 @@ The two compose through `c.resolve`, which is why that method exists at all.
 - A service used by nothing but a resolver is still checked by `listen()`. `typed.requirements` walks into resolver chains, so forgetting `provide(&sessions)` for a `*Sessions` that appears in no handler signature still stops the server before the socket opens.
 - A handler taking a resolved value is still an ordinary function: `me(.{ .id = 7 })` in a test, no server, no fake request. That is the property ADR 0003 exists to protect, and this does not spend any of it.
 - A resolver is *not* a middleware and cannot wrap the handler — no "after" half, no short-circuit that answers. Refusing is the only control it has, which is all authentication needs. Anything that wants to see the response is middleware.
-- Three markers now exist for the compile-time engine to read — `zfast_query`, `zfast_response`, `zfast_resolve` — and the order they are tested in matters: a resolved value is a struct, and a plain struct argument is the request body, so the marker check has to come first.
+- Three markers now exist for the compile-time engine to read — `nilo_query`, `nilo_response`, `nilo_resolve` — and the order they are tested in matters: a resolved value is a struct, and a plain struct argument is the request body, so the marker check has to come first.

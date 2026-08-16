@@ -1,6 +1,6 @@
 //! An Engine built on zio (https://github.com/lalinsky/zio).
 //!
-//! The only file in zfast allowed to name zio. See ADR 0002.
+//! The only file in nilo allowed to name zio. See ADR 0002.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -186,7 +186,7 @@ pub const Stop = struct {
 /// `.monotonic` is the whole ordering requirement.
 pub const Capacity = struct {
     live: std.atomic.Value(u32) = .init(0),
-    /// 0 means no limit, which is what zfast did before this existed.
+    /// 0 means no limit, which is what nilo did before this existed.
     max: u32 = 0,
     /// Connections closed because the server was full, since it started.
     /// Read only for the log line.
@@ -239,7 +239,7 @@ const drain_poll_ms = 20;
 ///
 /// `App.listen()` stops the process on these instead of returning them: the
 /// message is the whole answer, and letting the error travel up to `main`
-/// would print a stack trace through zfast on top of it (ADR 0002 — the
+/// would print a stack trace through nilo on top of it (ADR 0002 — the
 /// Engine is not the user's business, in a crash log least of all).
 pub fn explained(err: anyerror) bool {
     return switch (err) {
@@ -337,7 +337,7 @@ fn classifyListenFailure(name: []const u8) StartupFailure {
 /// zio keeps a timeout on the reader and on the writer and applies it to
 /// every operation, so putting a limit on the next read is a field store
 /// rather than a timer, a watchdog fiber, or anything else with a cost.
-/// The names are plain on purpose: the Bulkhead is what turns zfast's
+/// The names are plain on purpose: the Bulkhead is what turns nilo's
 /// policy into calls on these, and this file is not allowed to know what
 /// that policy is (ADR 0002).
 pub const Clocks = struct {
@@ -377,7 +377,7 @@ pub const Clocks = struct {
     /// because that is all a `std.Io` interface can say; the reason is kept
     /// on the side, here. zio does not clear it, so this only means
     /// anything asked directly after the operation that failed — which is
-    /// the only place zfast asks, and then the connection is closed.
+    /// the only place nilo asks, and then the connection is closed.
     pub fn timedOut(self: *const Clocks) bool {
         if (self.reader.err) |err| if (err == error.Timeout) return true;
         if (self.writer.err) |err| if (err == error.Timeout) return true;
@@ -403,7 +403,7 @@ pub const Woken = enum {
 /// A connection's second way to be woken: not by the client at the other end
 /// of its socket, but by another fiber with something to say to it.
 ///
-/// Everything else in zfast is woken by the client. That is what makes the
+/// Everything else in nilo is woken by the client. That is what makes the
 /// per-connection numbers in ADR 0018 as small as they are, and it is exactly
 /// what a broadcast cannot live with — a connection sitting in a read cannot
 /// be told anything until whoever is on the other end happens to speak.
@@ -509,6 +509,13 @@ pub const Wake = struct {
 /// there is a socket behind them. `handler` must be
 /// `fn (@TypeOf(state), *std.Io.Reader, *std.Io.Writer, *Clocks, *Wake, Peer) void`.
 ///
+/// `ready(state, io)` runs once, after the loop exists and the port is
+/// taken, before the first connection is accepted. It is how something
+/// that needs the event loop to exist gets built at all — a connection pool
+/// is the case it was added for, and the loop is not there to hand out
+/// until this function has started it (ADR 0040). `ready` must be
+/// `fn (@TypeOf(state), std.Io) anyerror!void`.
+///
 /// Returns when `stop` is set — by a signal, or by somebody calling
 /// `App.shutdown()` — once the connections still being served have
 /// finished or the grace period has run out.
@@ -517,6 +524,7 @@ pub fn serve(
     options: anytype,
     stop: *Stop,
     state: anytype,
+    comptime ready: anytype,
     comptime handler: anytype,
 ) !void {
     const State = @TypeOf(state);
@@ -534,7 +542,7 @@ pub fn serve(
     // Engine. What the person running it needs is the port number and what
     // to do next — so the reason travels back as a value, and the error is
     // made fresh below. Going through a value is what resets the error
-    // return trace: the one that gets printed then starts in zfast, not in
+    // return trace: the one that gets printed then starts in nilo, not in
     // zio's completion queue (ADR 0002 — the Engine is not the user's
     // business, in a crash log least of all).
     var why: StartupFailure = .other;
@@ -542,7 +550,7 @@ pub fn serve(
     const maybe_addr: ?zio.net.IpAddress =
         zio.net.IpAddress.parseIp(options.address, options.port) catch |err| bad: {
             std.log.err(
-                "\"{s}\" is not an address zfast can listen on ({s}). It wants an IP address, " ++
+                "\"{s}\" is not an address nilo can listen on ({s}). It wants an IP address, " ++
                     "not a host name: \"127.0.0.1\" or \"::1\" for this machine only, " ++
                     "\"0.0.0.0\" or \"::\" for every interface.",
                 .{ options.address, @errorName(err) },
@@ -582,7 +590,16 @@ pub fn serve(
     const server = maybe_server orelse return why.toError();
     defer server.close();
 
-    std.log.info("zfast listening on {f} across {d} thread(s)", .{ server.socket.address, threads });
+    // After the port is taken, before anything is accepted, and before the
+    // line below says the server is up — because until this returns it is
+    // not. A pool that cannot reach its database explains itself and comes
+    // back as an error here rather than as a surprise inside the first
+    // request that needed it (ADR 0040). This runs on the thread that
+    // called `serve`, which is already inside the loop: `accept` below is
+    // waited on the same way, so anything `ready` does can wait too.
+    try ready(state, rt.io());
+
+    std.log.info("nilo listening on {f} across {d} thread(s)", .{ server.socket.address, threads });
 
     // A buffer that starts on a page boundary and ends on one, so every page
     // of it belongs to this connection alone and can be given back.
@@ -686,7 +703,7 @@ pub fn serve(
             if (warned_at_ns == 0 or now - warned_at_ns >= capacity_warn_gap_ns) {
                 warned_at_ns = now;
                 std.log.warn(
-                    "zfast is holding its limit of {d} connections, so new ones are being closed " ++
+                    "nilo is holding its limit of {d} connections, so new ones are being closed " ++
                         "unanswered ({d} so far). Raise `.max_connections` in listen() if the " ++
                         "machine has the memory — each connection costs about 9 KB — or put " ++
                         "fewer of them on this process.",
@@ -716,19 +733,19 @@ fn drain(stop: *const Stop, grace_ms: u32) void {
     while (true) {
         const busy = stop.in_flight.load(.acquire);
         if (busy == 0) {
-            std.log.info("zfast stopped", .{});
+            std.log.info("nilo stopped", .{});
             return;
         }
         if (waited >= grace_ms) {
             std.log.warn(
-                "zfast stopped with {d} request(s) still unanswered after {d}ms — they were cut " ++
+                "nilo stopped with {d} request(s) still unanswered after {d}ms — they were cut " ++
                     "off. Pass `.shutdown_grace_ms = …` to listen() if handlers need longer.",
                 .{ busy, grace_ms },
             );
             return;
         }
         if (waited == 0) std.log.info(
-            "zfast stopping: {d} request(s) still being answered, waiting up to {d}ms",
+            "nilo stopping: {d} request(s) still being answered, waiting up to {d}ms",
             .{ busy, grace_ms },
         );
 
@@ -860,7 +877,7 @@ pub const File = struct {
 //
 // One server per process, therefore. A second `serve` would take the
 // pointer from the first, and its `spawn`ed work would be counted by the
-// wrong shutdown. Nothing in zfast does that today and `listen` is the
+// wrong shutdown. Nothing in nilo does that today and `listen` is the
 // only caller; if that changes, this is the line that has to move into
 // the state `serve` already carries.
 var background: std.atomic.Value(?*zio.Group) = .init(null);
@@ -981,7 +998,7 @@ test "a full server refuses, and takes the next connection once one closes" {
 }
 
 test "no cap is a server that takes whatever arrives" {
-    // What zfast did before `max_connections` existed, and what setting it
+    // What nilo did before `max_connections` existed, and what setting it
     // to zero asks for back.
     var capacity: Capacity = .{ .max = 0 };
     for (0..1000) |_| try testing.expect(capacity.take());

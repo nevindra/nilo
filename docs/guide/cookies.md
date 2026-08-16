@@ -1,11 +1,11 @@
 # Cookies
 
 ```zig
-fn signIn(c: *zfast.Ctx, sessions: *Sessions) !void {
+fn signIn(c: *nilo.Ctx, sessions: *Sessions) !void {
     try c.setCookie(.{ .name = "session", .value = try sessions.open() });
 }
 
-fn me(c: *zfast.Ctx) !?User {
+fn me(c: *nilo.Ctx) !?User {
     const token = c.cookie("session") orelse return null;
     ...
 }
@@ -18,7 +18,7 @@ is looked through in full.
 
 ## The value comes back as it was sent
 
-zfast does not decode a cookie value. RFC 6265 makes it opaque bytes, and every
+nilo does not decode a cookie value. RFC 6265 makes it opaque bytes, and every
 framework layers its own encoding on top — percent, base64, signed-then-base64
 — so guessing would corrupt the ones that guessed otherwise.
 
@@ -102,11 +102,11 @@ in an argument list by name:
 
 ```zig
 const SignedIn = struct {
-    pub const zfast_resolve = authenticate;
+    pub const nilo_resolve = authenticate;
     email: []const u8,
 };
 
-fn authenticate(c: *zfast.Ctx, sessions: *Sessions, arena: std.mem.Allocator) !SignedIn {
+fn authenticate(c: *nilo.Ctx, sessions: *Sessions, arena: std.mem.Allocator) !SignedIn {
     const token = c.cookie("session") orelse
         return fail.unauthorized("you are not signed in", .{});
     ...
@@ -117,7 +117,7 @@ fn me(user: SignedIn) !Profile { … }   // and that is the whole wiring
 
 ## Sessions are yours
 
-zfast gives you the cookie. What goes in it, where it is stored and how it is
+nilo gives you the cookie. What goes in it, where it is stored and how it is
 signed is your application's — the same line it draws around authentication.
 [`examples/forms`](../../examples/forms/main.zig) shows the whole shape in
 about forty lines, with the session store as an ordinary

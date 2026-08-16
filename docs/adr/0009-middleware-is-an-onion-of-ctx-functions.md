@@ -15,7 +15,7 @@ try app.use("/api", requireToken);
 
 ## The shape: onion, not before/after hooks
 
-The obvious alternative is two hooks, `before(c)` and `after(c)`. It was rejected because it has nowhere to put the thing that connects them. The timing middleware above needs a start time visible to both halves; with separate hooks that has to go into per-request storage, which zfast deliberately does not have (see the limitation below). With an onion it is an ordinary local variable, and the borrow checker of the human reading it is `try next.run(c)` sitting in the middle.
+The obvious alternative is two hooks, `before(c)` and `after(c)`. It was rejected because it has nowhere to put the thing that connects them. The timing middleware above needs a start time visible to both halves; with separate hooks that has to go into per-request storage, which nilo deliberately does not have (see the limitation below). With an onion it is an ordinary local variable, and the borrow checker of the human reading it is `try next.run(c)` sitting in the middle.
 
 The onion also makes short-circuiting fall out for free: a middleware that answers and simply does not call `next` ends the chain. Nothing extra has to be invented for auth rejection.
 
@@ -41,7 +41,7 @@ pub const Next = struct {
 
 Fusing the whole chain at compile time into a single function would remove the indirect call per layer. It was rejected for the same reason ADR 0006 rejected a generic `App`: it would require every route's middleware set to be known at the point the route is registered, which forces registration order on the user to buy back a few nanoseconds across two to four layers. Well under the ADR 0001 threshold.
 
-Resolving at `listen()` — rather than when each route is registered — kills Fiber's most reported gotcha, where `app.Use` after a route silently does not apply to it. In zfast, order between `use` and `get` does not matter. Order *among* `use` calls does, and that is the only ordering rule there is: **middleware run in the order they were registered; one registered with a prefix only runs on routes under that prefix.**
+Resolving at `listen()` — rather than when each route is registered — kills Fiber's most reported gotcha, where `app.Use` after a route silently does not apply to it. In nilo, order between `use` and `get` does not matter. Order *among* `use` calls does, and that is the only ordering rule there is: **middleware run in the order they were registered; one registered with a prefix only runs on routes under that prefix.**
 
 ## The chain runs even when no route matches
 

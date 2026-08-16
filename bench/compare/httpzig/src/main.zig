@@ -1,11 +1,11 @@
-// http.zig — the direct in-language competitor, named in zfast's history.md.
+// http.zig — the direct in-language competitor, named in nilo's history.md.
 const std = @import("std");
 const httpz = @import("httpz");
 
 const PORT = 8806;
 const MAX_ID: u32 = 1_000_000;
 
-// Same payload as zfast's src/main.zig, byte for byte.
+// Same payload as nilo's src/main.zig, byte for byte.
 const bio = "A systems nerd who writes Zig before breakfast. " ** 19;
 
 const User = struct {
@@ -36,7 +36,7 @@ fn getUser(req: *httpz.Request, res: *httpz.Response) !void {
     const id = std.fmt.parseInt(u32, raw, 10) catch return notFound(res, raw);
     if (id == 0 or id > MAX_ID) return notFound(res, raw);
 
-    // Serialised per request, like zfast.
+    // Serialised per request, like nilo.
     try res.json(User{
         .id = id,
         .name = "Routed Tester",

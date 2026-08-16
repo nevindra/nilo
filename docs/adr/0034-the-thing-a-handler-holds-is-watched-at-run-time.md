@@ -25,7 +25,7 @@ returns the right answer at the right speed. It is correct in every way a
 person can check by looking at it. The bug only exists in the presence of a
 second request, which arrives for the first time in production.
 
-Everything else zfast gets wrong announces itself: a bad route 404s, a bad
+Everything else nilo gets wrong announces itself: a bad route 404s, a bad
 header parse fails a test. This one waits.
 
 ## The decision
@@ -41,7 +41,7 @@ parked**, per request, and warns when what is left crosses
 ```
 handler GET /users/7 held its thread for 2003ms. Every other request being
 served on that thread waited the whole time. Hand the call that waits to
-zfast.blocking (ADR 0014).
+nilo.blocking (ADR 0014).
 ```
 
 Parked time is not guessed at. It is reported by the small set of things a
@@ -49,16 +49,16 @@ request waits on that are not the handler's own code:
 
 | what waits | where it says so |
 |---|---|
-| `zfast.blocking` | `bulkhead.blocking` |
-| `zfast.sleep` | `bulkhead.sleep` |
-| `zfast.Mutex.lock` | `bulkhead.Mutex` |
+| `nilo.blocking` | `bulkhead.blocking` |
+| `nilo.sleep` | `bulkhead.sleep` |
+| `nilo.Mutex.lock` | `bulkhead.Mutex` |
 | asking the OS for entropy | `bulkhead.randomSecure` |
 | reading the request body | `Ctx.body` |
 | writing the response | `Ctx.send`, `App.sendDirect` |
 
 Whatever is left over is the handler running. A handler that ran for a
 quarter of a second without yielding once is either blocking or doing CPU work
-it should have handed to `zfast.blocking` — and since that is the same advice
+it should have handed to `nilo.blocking` — and since that is the same advice
 either way, both are worth saying.
 
 Three of those six turned `Mutex`, `sleep` and `randomSecure` from re-exports
@@ -67,13 +67,13 @@ into wrappers. That is the entire structural cost.
 ## What it looks like against a real server
 
 Two handlers, both waiting 600ms, on a server with two executor threads. One
-holds the thread; the other hands the wait to `zfast.blocking`. Everything
+holds the thread; the other hands the wait to `nilo.blocking`. Everything
 else about them is identical, including what the client sees:
 
 ```
 $ curl -w '%{time_total}\n' localhost:8799/slow      # holds the thread
 0.600718
-$ curl -w '%{time_total}\n' localhost:8799/proper    # zfast.blocking
+$ curl -w '%{time_total}\n' localhost:8799/proper    # nilo.blocking
 0.603396
 ```
 
@@ -95,7 +95,7 @@ And the log, of its own accord, from the single-`curl` run above:
 ```
 warning: handler GET /slow held its thread for 600ms. Every other request being
 served on that thread waited the whole time. Hand the call that waits to
-zfast.blocking (ADR 0014).
+nilo.blocking (ADR 0014).
 ```
 
 Nothing was said about `/proper`, on any run.
@@ -130,7 +130,7 @@ of resolution is not a compromise at all. `bulkhead.coarseNanos` is that
 clock, falling back to `monotonicNanos` where the platform has no such thing.
 
 There is a trap inside the trap, worth writing down: reached through
-`std.os.linux.clock_gettime` it costs **571ns**, not 5ns, because zfast links
+`std.os.linux.clock_gettime` it costs **571ns**, not 5ns, because nilo links
 libc and that path skips the vDSO. Through `std.posix.system` it is 5ns. The
 first version of this was a hundred times slower than the thing it replaced,
 and it looked identical on the page.
@@ -138,7 +138,7 @@ and it looked identical on the page.
 **Holding the pointer instead of looking it up.** The remaining cost was not
 the clock at all — it was `fail.inFlight()`, which finds the request through
 the fiber slot, called twice on the response-write path. `Ctx` now carries
-`_watch` directly. Code with no `Ctx` to hand — `zfast.blocking` and friends —
+`_watch` directly. Code with no `Ctx` to hand — `nilo.blocking` and friends —
 still pays the lookup, and does not care, because a request reaching one of
 those is about to park anyway.
 
@@ -180,7 +180,7 @@ of which are throughput problems that look nothing like this.
 
 ## Consequences
 
-- `zfast.Mutex` is now zfast's own struct rather than the Engine's, with three
+- `nilo.Mutex` is now nilo's own struct rather than the Engine's, with three
   methods forwarded. `.init` and `.{}` both still work, so nothing a user
   wrote changes.
 - `bulkhead.coarseNanos` exists and is the clock to reach for when the

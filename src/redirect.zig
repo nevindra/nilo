@@ -2,11 +2,11 @@
 //! (ADR 0032).
 //!
 //! ```zig
-//! fn shortLink(db: *Db, code: Str) !zfast.Redirect(302) {
+//! fn shortLink(db: *Db, code: Str) !nilo.Redirect(302) {
 //!     return .to(try db.target(code.view()));
 //! }
 //!
-//! fn signUp(incoming: zfast.Form(SignUp)) !zfast.Redirect(303) {
+//! fn signUp(incoming: nilo.Form(SignUp)) !nilo.Redirect(303) {
 //!     try store.add(incoming.value);
 //!     return .to("/welcome");
 //! }
@@ -27,7 +27,7 @@ const typed = @import("typed.zig");
 
 /// The declaration a `Redirect` carries, so the compile-time engine can tell
 /// one from an ordinary return value. Its value is the status.
-pub const marker = "zfast_redirect";
+pub const marker = "nilo_redirect";
 
 /// A response that sends the client somewhere else.
 pub fn Redirect(comptime status: u16) type {
@@ -36,10 +36,10 @@ pub fn Redirect(comptime status: u16) type {
     return struct {
         const Self = @This();
 
-        pub const zfast_redirect = status;
+        pub const nilo_redirect = status;
 
         /// Where the client is being sent. A path (`/welcome`) or a whole
-        /// URL; zfast passes it through untouched, because what counts as a
+        /// URL; nilo passes it through untouched, because what counts as a
         /// sensible destination is the application's business.
         location: []const u8,
 
@@ -51,7 +51,7 @@ pub fn Redirect(comptime status: u16) type {
         /// the status stays in the signature where the document can read it:
         ///
         /// ```zig
-        /// fn old() zfast.Redirect(301) {
+        /// fn old() nilo.Redirect(301) {
         ///     return .to("/new");
         /// }
         /// ```
@@ -79,7 +79,7 @@ fn checkStatus(comptime status: u16) void {
         switch (status) {
             301, 302, 303, 307, 308 => return,
             else => @compileError(
-                "zfast: `Redirect(" ++ std.fmt.comptimePrint("{d}", .{status}) ++
+                "nilo: `Redirect(" ++ std.fmt.comptimePrint("{d}", .{status}) ++
                     ")` is not a redirect.\n" ++
                     "  The statuses that carry a Location are 301 (moved for good), 302 (found), " ++
                     "303 (see other — what a form POST answers with, so the reload does not " ++
@@ -102,7 +102,7 @@ const testing = std.testing;
 
 test "a redirect carries its status in the type and its location in the value" {
     const Moved = Redirect(301);
-    try testing.expectEqual(@as(u16, 301), Moved.zfast_redirect);
+    try testing.expectEqual(@as(u16, 301), Moved.nilo_redirect);
 
     const answer: Moved = .to("/new");
     try testing.expectEqualStrings("/new", answer.location);
@@ -120,7 +120,7 @@ test "a redirect can carry headers of its own" {
 
 test "every redirect status the type accepts" {
     inline for (.{ 301, 302, 303, 307, 308 }) |status| {
-        try testing.expectEqual(@as(u16, status), Redirect(status).zfast_redirect);
+        try testing.expectEqual(@as(u16, status), Redirect(status).nilo_redirect);
         try testing.expect(isRedirect(Redirect(status)));
     }
     try testing.expect(!isRedirect(u32));

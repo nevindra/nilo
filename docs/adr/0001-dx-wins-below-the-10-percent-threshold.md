@@ -1,6 +1,6 @@
 # DX beats performance, with a 10% threshold
 
-zfast is sold as a fast HTTP framework, so anyone reading the code later will reasonably assume every decision was won by a benchmark number. What was actually decided is the opposite: **the comfort of writing code wins, unless it costs more than 10%.** Performance numbers are what get attention; comfort is what keeps people.
+nilo is sold as a fast HTTP framework, so anyone reading the code later will reasonably assume every decision was won by a benchmark number. What was actually decided is the opposite: **the comfort of writing code wins, unless it costs more than 10%.** Performance numbers are what get attention; comfort is what keeps people.
 
 The reason is in the audience. People coming from Go or Node live at 30–80k requests per second today; the existing Zig frameworks hand them 140k. A 40% difference in the HTTP layer is not something they will feel — it disappears into the first database query. What they will feel is whether they can get running in ten minutes, whether the error messages are readable, and whether they have to think about allocators.
 

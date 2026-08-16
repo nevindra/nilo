@@ -1,4 +1,4 @@
-# zfast
+# nilo
 
 An HTTP framework for Zig that puts the comfort of writing code first, with performance as a consequence — not the other way round. It is aimed at people who are used to Go or Node and are giving Zig a try.
 
@@ -11,19 +11,19 @@ The bottom layer, the one that deals with the operating system: accepting connec
 _Avoid_: runtime, backend, driver, event loop
 
 **Bulkhead**:
-The internal boundary between zfast and the Engine. Everything zfast needs from the Engine goes through here, so the Engine can be swapped without touching user code.
+The internal boundary between nilo and the Engine. Everything nilo needs from the Engine goes through here, so the Engine can be swapped without touching user code.
 _Avoid_: adapter, abstraction layer, interface
 
 **Ctx**:
-The object standing for one request in flight, and all the control over it. This is zfast's real API — every layer above it turns into calls to this while compiling.
+The object standing for one request in flight, and all the control over it. This is nilo's real API — every layer above it turns into calls to this while compiling.
 _Avoid_: Context, Request context, c
 
 **Typed handler**:
-An ordinary function that takes only what it needs and returns data. zfast matches its arguments while compiling. This is zfast's face to its users.
+An ordinary function that takes only what it needs and returns data. nilo matches its arguments while compiling. This is nilo's face to its users.
 _Avoid_: magic handler, extractor, auto handler
 
 **Resolved value**:
-Something zfast works out from the request before the handler runs — the signed-in user, usually. The type itself says how, by carrying the function that does it, and a handler asks for one by writing it in its argument list. Worked out once per request and shared by everyone who asks.
+Something nilo works out from the request before the handler runs — the signed-in user, usually. The type itself says how, by carrying the function that does it, and a handler asks for one by writing it in its argument list. Worked out once per request and shared by everyone who asks.
 _Avoid_: extension, request-scoped state, locals, context value, extractor
 
 ### Data
@@ -77,7 +77,7 @@ A response written in pieces because its length is not known when the head goes 
 _Avoid_: chunked response, writer, body writer
 
 **Body reader**:
-A request body taken in pieces rather than held whole, for the ones too big for the request arena. Bounded by the buffer the handler passes in, and allocates nothing. A body left half-read is finished off by zfast, so the connection stays usable.
+A request body taken in pieces rather than held whole, for the ones too big for the request arena. Bounded by the buffer the handler passes in, and allocates nothing. A body left half-read is finished off by nilo, so the connection stays usable.
 _Avoid_: upload stream, multipart, file handle
 
 **Event stream**:
@@ -91,7 +91,7 @@ One self-contained HTTP application: a set of routes, middleware, and services. 
 _Avoid_: Server, Router, Engine
 
 **Service**:
-A long-lived thing registered once when the App is built — a database connection, config, a logger — then asked for by handlers according to its type. Shared across every request being served at once, so one that gets written to needs a `zfast.Mutex`.
+A long-lived thing registered once when the App is built — a database connection, config, a logger — then asked for by handlers according to its type. Shared across every request being served at once, so one that gets written to needs a `nilo.Mutex`.
 _Avoid_: dependency, state, context value, DI container
 
 **Middleware**:
@@ -107,11 +107,11 @@ An ordinary function that takes a Group and registers into it. There is no plugi
 _Avoid_: extension, module, add-on, middleware bundle
 
 **API description**:
-The OpenAPI document zfast writes from the handler signatures. Not maintained alongside the code — read off the same argument list the compile-time engine reads, and built once when the server starts. It promises what the signature settles and nothing else.
+The OpenAPI document nilo writes from the handler signatures. Not maintained alongside the code — read off the same argument list the compile-time engine reads, and built once when the server starts. It promises what the signature settles and nothing else.
 _Avoid_: schema, spec file, swagger, annotations
 
 **Blocking**:
-Waiting on the operating system from inside a handler — a database driver, a file, a call out to another service. Many requests share one OS thread, so doing it directly stops all of them; `zfast.blocking` hands the call to a pool of real threads instead, and only the one request waits.
+Waiting on the operating system from inside a handler — a database driver, a file, a call out to another service. Many requests share one OS thread, so doing it directly stops all of them; `nilo.blocking` hands the call to a pool of real threads instead, and only the one request waits.
 _Avoid_: offload, thread pool, async, await
 
 **Held thread**:
@@ -139,7 +139,7 @@ An answer that is a file on disk rather than a value, returned by the handler th
 _Avoid_: file response, download, attachment, send file
 
 **Socket**:
-A WebSocket connection, held by an ordinary handler that does not return until it ends. zfast does the handshake, the framing and the housekeeping frames; the loop is the handler's. The buffer it reads into is the message ceiling.
+A WebSocket connection, held by an ordinary handler that does not return until it ends. nilo does the handshake, the framing and the housekeeping frames; the loop is the handler's. The buffer it reads into is the message ceiling.
 _Avoid_: websocket connection, channel, ws, peer
 
 **Range**:
@@ -147,7 +147,7 @@ A request for part of a file rather than all of it — a video being scrubbed, a
 _Avoid_: partial content, byte range, seek, chunk
 
 **Refusal**:
-A program written wrong on purpose, kept so that the message it stops with stays the one zfast wrote. Never run and never compiles; the build checks the wording of the error, and a mistake that stops somewhere inside the standard library instead cannot be recorded as acceptable.
+A program written wrong on purpose, kept so that the message it stops with stays the one nilo wrote. Never run and never compiles; the build checks the wording of the error, and a mistake that stops somewhere inside the standard library instead cannot be recorded as acceptable.
 _Avoid_: negative test, compile-fail case, error test, fixture
 
 **Test client**:
@@ -161,8 +161,12 @@ A struct of the caller's own, one field per column, carrying the marker that nam
 _Avoid_: ORM, model, entity, record, schema, DTO
 
 **Borrowed row**:
-One Row read on its own rather than with the rest, its text pointing into a buffer the handler passed in and valid only until the next one is pulled. That text is a plain slice and not a Str, which is what keeps the Str guarantee free of exceptions.
+One Row read on its own rather than with the rest, its text pointing into the buffer the rows arrive in and valid only until the next one is pulled. That text is a plain slice and not a Str, which is what keeps the Str guarantee free of exceptions.
 _Avoid_: view, ref, unowned, cursor row
+
+**Statement**:
+A whole piece of SQL and the list of places its values are read from, both worked out while compiling. Which table, which columns, which operators and how many parameters are all settled; only the values are not.
+_Avoid_: query builder, prepared statement, expression tree
 
 **Dialect**:
 The half that writes the SQL, worked out entirely while compiling. It says how a parameter is spelled and how a condition is phrased, and it may refuse a condition its database cannot express rather than emit one that means something else.

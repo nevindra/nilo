@@ -38,13 +38,13 @@
 //!   on the way back out is the part with no framework behind it.
 
 const std = @import("std");
-const zfast = @import("zfast");
-const fail = zfast.fail;
-const Str = zfast.Str;
+const nilo = @import("nilo");
+const fail = nilo.fail;
+const Str = nilo.Str;
 
-pub const std_options = zfast.std_options;
-pub const std_options_debug_io = zfast.debug_io;
-pub const panic = zfast.panic;
+pub const std_options = nilo.std_options;
+pub const std_options_debug_io = nilo.debug_io;
+pub const panic = nilo.panic;
 
 /// The name the session cookie goes by, in one place: it is written by
 /// `signIn`, read by `authenticate` and deleted by `signOut`, and three
@@ -60,7 +60,7 @@ const session_cookie = "session";
 /// what happens either side of it.
 const Sessions = struct {
     gpa: std.mem.Allocator,
-    lock: zfast.Mutex = .init,
+    lock: nilo.Mutex = .init,
     open: std.ArrayList(Session) = .empty,
     next: u32 = 1,
 
@@ -124,12 +124,12 @@ const Sessions = struct {
 /// `SignedIn` in an argument list is the whole of the wiring — no
 /// middleware, no header parsing in the handler.
 const SignedIn = struct {
-    pub const zfast_resolve = authenticate;
+    pub const nilo_resolve = authenticate;
 
     email: []const u8,
 };
 
-fn authenticate(c: *zfast.Ctx, sessions: *Sessions, arena: std.mem.Allocator) !SignedIn {
+fn authenticate(c: *nilo.Ctx, sessions: *Sessions, arena: std.mem.Allocator) !SignedIn {
     const token = c.cookie(session_cookie) orelse
         return fail.unauthorized("you are not signed in", .{});
     const email = try sessions.emailFor(token.view(), arena) orelse
@@ -159,8 +159,8 @@ const SignIn = struct {
 fn signIn(
     sessions: *Sessions,
     arena: std.mem.Allocator,
-    incoming: zfast.Form(SignIn),
-) !zfast.Redirect(303) {
+    incoming: nilo.Form(SignIn),
+) !nilo.Redirect(303) {
     const email = incoming.value.email.view();
     // The example's entire authentication policy. Yours goes here.
     if (!std.mem.eql(u8, incoming.value.password.view(), "hunter2")) {
@@ -185,7 +185,7 @@ fn signIn(
 /// The other half. `c.clearCookie` is the same call as `setCookie` with an
 /// age that has already run out — and it has to name the same path the
 /// cookie was set with, or the browser keeps it.
-fn signOut(c: *zfast.Ctx, sessions: *Sessions) !zfast.Redirect(303) {
+fn signOut(c: *nilo.Ctx, sessions: *Sessions) !nilo.Redirect(303) {
     if (c.cookie(session_cookie)) |token| try sessions.end(token.view());
     try c.clearCookie(.{ .name = session_cookie });
     return .to("/");
@@ -199,11 +199,11 @@ fn me(user: SignedIn) !struct { email: []const u8 } {
 
 // ---- a file ----
 
-/// A form with an `Upload` in it can only arrive as multipart, and zfast
+/// A form with an `Upload` in it can only arrive as multipart, and nilo
 /// says so rather than reporting the field as missing.
 const NewAvatar = struct {
     caption: Str,
-    image: zfast.Upload,
+    image: nilo.Upload,
 };
 
 const Avatar = struct {
@@ -213,7 +213,7 @@ const Avatar = struct {
     bytes: usize,
 };
 
-fn uploadAvatar(user: SignedIn, incoming: zfast.Form(NewAvatar)) !zfast.Status(201, Avatar) {
+fn uploadAvatar(user: SignedIn, incoming: nilo.Form(NewAvatar)) !nilo.Status(201, Avatar) {
     _ = user; // signing in is what earns you an upload
     const image = incoming.value.image;
     if (image.len() == 0) return fail.badRequest("no file was chosen", .{});
@@ -243,9 +243,9 @@ const Registration = struct {
 };
 
 fn register(
-    c: *zfast.Ctx,
+    c: *nilo.Ctx,
     arena: std.mem.Allocator,
-    incoming: zfast.Bound(zfast.Form(Registration)),
+    incoming: nilo.Bound(nilo.Form(Registration)),
 ) !void {
     var buf: [4096]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
@@ -257,7 +257,7 @@ fn register(
         return c.send(200, "text/html; charset=utf-8", try arena.dupe(u8, buf[0..w.end]));
     }
 
-    // Everything that did not bind, in zfast's own words. Writing the
+    // Everything that did not bind, in nilo's own words. Writing the
     // sentence yourself would be a second wording of the same mistake.
     try w.writeAll(page_head ++ "<h1>Register</h1><ul class=\"problems\">");
     var it = incoming.failures();
@@ -294,7 +294,7 @@ fn writeField(w: *std.Io.Writer, comptime name: []const u8, value: []const u8) !
 ///
 /// Twelve lines rather than a dependency, and **not optional**: `age` goes
 /// back to the page as whatever was typed, and what was typed may be
-/// `<script>`. zfast has no template layer to do this for you and is not
+/// `<script>`. nilo has no template layer to do this for you and is not
 /// getting one ([the roadmap](../../docs/roadmap.md#not-coming) says why), so
 /// it is yours to remember — and this is what remembering it looks like.
 fn writeEscaped(w: *std.Io.Writer, text: []const u8) !void {
@@ -310,10 +310,10 @@ fn writeEscaped(w: *std.Io.Writer, text: []const u8) !void {
 
 // ---- the page ----
 
-const page_head = "<!doctype html><meta charset=\"utf-8\"><title>zfast forms</title>";
+const page_head = "<!doctype html><meta charset=\"utf-8\"><title>nilo forms</title>";
 
 const page =
-    \\<!doctype html><meta charset="utf-8"><title>zfast forms</title>
+    \\<!doctype html><meta charset="utf-8"><title>nilo forms</title>
     \\<h1>Sign in</h1>
     \\<form method="post" action="/sign-in">
     \\  <input name="email" value="wati@example.dev">
@@ -336,13 +336,13 @@ const page =
 
 /// A `*Ctx` handler, because the content type is `text/html` and a handler
 /// returning text gets `text/plain`.
-fn home(c: *zfast.Ctx) !void {
+fn home(c: *nilo.Ctx) !void {
     try c.send(200, "text/html; charset=utf-8", page);
 }
 
 /// A permanent move. 301 and 308 are the permanent pair, 302 and 307 the
 /// temporary one; the two ending in 7 and 8 keep the request's method.
-fn oldHome() zfast.Redirect(301) {
+fn oldHome() nilo.Redirect(301) {
     return .to("/");
 }
 
@@ -354,11 +354,11 @@ pub fn main() !void {
     var sessions = Sessions{ .gpa = gpa };
     defer sessions.deinit();
 
-    var app = zfast.App.init(gpa);
+    var app = nilo.App.init(gpa);
     defer app.deinit();
 
     try app.provide(&sessions);
-    try app.use(zfast.logger.standard);
+    try app.use(nilo.logger.standard);
 
     try app.get("/", home);
     try app.get("/home", oldHome);
@@ -447,12 +447,12 @@ test "a form posted the way a browser posts it signs in and redirects" {
     var sessions = Sessions{ .gpa = testing.allocator };
     defer sessions.deinit();
 
-    var app = zfast.App.init(testing.allocator);
+    var app = nilo.App.init(testing.allocator);
     defer app.deinit();
     try app.provide(&sessions);
     try app.post("/sign-in", signIn);
 
-    var client = try zfast.testing.Client.init(testing.allocator, .{});
+    var client = try nilo.testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.postWith(
@@ -471,12 +471,12 @@ test "signing out clears the cookie the browser is holding" {
     defer sessions.deinit();
     const token = try sessions.start("wati@example.dev");
 
-    var app = zfast.App.init(testing.allocator);
+    var app = nilo.App.init(testing.allocator);
     defer app.deinit();
     try app.provide(&sessions);
     try app.post("/sign-out", signOut);
 
-    var client = try zfast.testing.Client.init(testing.allocator, .{});
+    var client = try nilo.testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     var request: [256]u8 = undefined;
@@ -499,12 +499,12 @@ test "an upload arrives with its bytes, and an endpoint behind the sign-in refus
     defer sessions.deinit();
     const token = try sessions.start("wati@example.dev");
 
-    var app = zfast.App.init(testing.allocator);
+    var app = nilo.App.init(testing.allocator);
     defer app.deinit();
     try app.provide(&sessions);
     try app.post("/avatars", uploadAvatar);
 
-    var client = try zfast.testing.Client.init(testing.allocator, .{});
+    var client = try nilo.testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const body = "--B\r\nContent-Disposition: form-data; name=\"caption\"\r\n\r\nme, squinting\r\n" ++
@@ -539,12 +539,12 @@ test "the same endpoint sent a form that cannot carry a file says which to send"
     defer sessions.deinit();
     const token = try sessions.start("wati@example.dev");
 
-    var app = zfast.App.init(testing.allocator);
+    var app = nilo.App.init(testing.allocator);
     defer app.deinit();
     try app.provide(&sessions);
     try app.post("/avatars", uploadAvatar);
 
-    var client = try zfast.testing.Client.init(testing.allocator, .{});
+    var client = try nilo.testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     var request: [256]u8 = undefined;
@@ -559,11 +559,11 @@ test "the same endpoint sent a form that cannot carry a file says which to send"
 }
 
 test "a registration with two bad fields comes back with both, and with what was typed" {
-    var app = zfast.App.init(testing.allocator);
+    var app = nilo.App.init(testing.allocator);
     defer app.deinit();
     try app.post("/register", register);
 
-    var client = try zfast.testing.Client.init(testing.allocator, .{});
+    var client = try nilo.testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.postWith(
@@ -587,11 +587,11 @@ test "a registration with two bad fields comes back with both, and with what was
 test "what was typed comes back escaped, not as markup" {
     // The failure this example exists to not demonstrate. `age` is echoed
     // into the page, so an age of `<script>` has to arrive as text.
-    var app = zfast.App.init(testing.allocator);
+    var app = nilo.App.init(testing.allocator);
     defer app.deinit();
     try app.post("/register", register);
 
-    var client = try zfast.testing.Client.init(testing.allocator, .{});
+    var client = try nilo.testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.postWith(
@@ -606,11 +606,11 @@ test "what was typed comes back escaped, not as markup" {
 }
 
 test "a registration that binds is an ordinary answer" {
-    var app = zfast.App.init(testing.allocator);
+    var app = nilo.App.init(testing.allocator);
     defer app.deinit();
     try app.post("/register", register);
 
-    var client = try zfast.testing.Client.init(testing.allocator, .{});
+    var client = try nilo.testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.postWith(
@@ -625,5 +625,5 @@ test "a registration that binds is an ordinary answer" {
 
 test "the old address is a permanent redirect to the new one" {
     try testing.expectEqualStrings("/", oldHome().location);
-    try testing.expectEqual(@as(u16, 301), @TypeOf(oldHome()).zfast_redirect);
+    try testing.expectEqual(@as(u16, 301), @TypeOf(oldHome()).nilo_redirect);
 }

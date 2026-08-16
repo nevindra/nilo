@@ -20,5 +20,5 @@
 //! every step passed.
 
 test {
-    _ = @import("zfast.zig");
+    _ = @import("nilo.zig");
 }

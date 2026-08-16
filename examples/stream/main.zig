@@ -11,10 +11,10 @@
 //! ```
 
 const std = @import("std");
-const zfast = @import("zfast");
+const nilo = @import("nilo");
 
-pub const std_options = zfast.std_options;
-pub const std_options_debug_io = zfast.debug_io;
+pub const std_options = nilo.std_options;
+pub const std_options_debug_io = nilo.debug_io;
 
 /// A report nobody wants to build in memory first. The rows go out as they
 /// are produced, and the client can start reading before the last one exists.
@@ -22,7 +22,7 @@ pub const std_options_debug_io = zfast.debug_io;
 /// A streaming handler asks for a `*Ctx` because the response is written
 /// rather than returned. Everything else about it is an ordinary handler —
 /// it can take services and typed arguments alongside.
-fn report(c: *zfast.Ctx, meter: *Meter) !void {
+fn report(c: *nilo.Ctx, meter: *Meter) !void {
     var body = try c.stream(200, "text/csv");
     try body.writeAll("reading,celsius\n");
 
@@ -32,7 +32,7 @@ fn report(c: *zfast.Ctx, meter: *Meter) !void {
     }
 
     // Required: it writes the marker saying where the body ends. Forget it
-    // and zfast writes one for you, and says so in the log.
+    // and nilo writes one for you, and says so in the log.
     try body.finish();
 }
 
@@ -41,7 +41,7 @@ fn report(c: *zfast.Ctx, meter: *Meter) !void {
 ///
 /// `live()` is what makes this deployable. Without it a `Ctrl-C` would wait
 /// for every open stream to run out on its own.
-fn tokens(c: *zfast.Ctx, pace: *Pace) !void {
+fn tokens(c: *nilo.Ctx, pace: *Pace) !void {
     var events = try c.events();
 
     // How long the browser waits before reconnecting, if this drops.
@@ -52,13 +52,13 @@ fn tokens(c: *zfast.Ctx, pace: *Pace) !void {
         if (!events.live()) break;
         sent += 1;
         try events.send(.{ .name = "token", .data = word });
-        // Standing in for whatever is actually slow. `zfast.sleep` takes
+        // Standing in for whatever is actually slow. `nilo.sleep` takes
         // milliseconds and parks this fiber; `std.Thread.sleep` would stop
         // every other request sharing its thread (ADR 0014).
         //
         // Zero under a test, where there is no Engine to park in and no
         // reason to wait — `pace` is a service so the test can say so.
-        if (pace.millis > 0) try zfast.sleep(pace.millis);
+        if (pace.millis > 0) try nilo.sleep(pace.millis);
     }
 
     // A last event with the shape of a result, so a client can tell
@@ -82,9 +82,9 @@ const poem = [_][]const u8{
 /// past a megabyte, which is right for JSON and wrong for a file. This
 /// allocates nothing at all — the 64 KB below is the only memory involved,
 /// and it is on this function's own stack.
-fn upload(c: *zfast.Ctx) !Receipt {
+fn upload(c: *nilo.Ctx) !Receipt {
     var incoming = c.bodyStreamWith(.{ .max_bytes = 8 * 1024 * 1024 }) catch
-        return zfast.fail.tooLarge("this endpoint takes up to 8 MB", .{});
+        return nilo.fail.tooLarge("this endpoint takes up to 8 MB", .{});
 
     var digest = std.hash.Crc32.init();
     var buf: [64 * 1024]u8 = undefined;
@@ -111,7 +111,7 @@ const Pace = struct { millis: u64 };
 fn page() []const u8 {
     return
         \\<!doctype html>
-        \\<title>zfast streaming</title>
+        \\<title>nilo streaming</title>
         \\<pre id="out" style="font: 16px/1.6 ui-monospace, monospace; padding: 2rem"></pre>
         \\<script>
         \\  const out = document.getElementById("out");
@@ -127,7 +127,7 @@ fn page() []const u8 {
 }
 
 pub fn main() !void {
-    var app = zfast.App.init(std.heap.smp_allocator);
+    var app = nilo.App.init(std.heap.smp_allocator);
     defer app.deinit();
 
     var meter = Meter{};
@@ -135,7 +135,7 @@ pub fn main() !void {
     var pace = Pace{ .millis = 120 };
     try app.provide(&pace);
 
-    try app.use(zfast.logger.standard);
+    try app.use(nilo.logger.standard);
 
     try app.get("/", page);
     try app.get("/report.csv", report);
@@ -148,18 +148,18 @@ pub fn main() !void {
 // ---- tests ----
 //
 // A streaming handler needs a request to write into, so these go through
-// App the way every other zfast test does rather than calling the handler.
+// App the way every other nilo test does rather than calling the handler.
 
 const testing = std.testing;
 
 test "the report streams its rows, and every row arrives" {
-    var app = zfast.App.init(testing.allocator);
+    var app = nilo.App.init(testing.allocator);
     defer app.deinit();
     var meter = Meter{};
     try app.provide(&meter);
     try app.get("/report.csv", report);
 
-    var client = try zfast.testing.Client.init(testing.allocator, .{ .response_bytes = 2 << 20 });
+    var client = try nilo.testing.Client.init(testing.allocator, .{ .response_bytes = 2 << 20 });
     defer client.deinit();
 
     const answer = try client.get(&app, "/report.csv");
@@ -176,13 +176,13 @@ test "the report streams its rows, and every row arrives" {
 }
 
 test "the token stream is an event stream, and says when it is done" {
-    var app = zfast.App.init(testing.allocator);
+    var app = nilo.App.init(testing.allocator);
     defer app.deinit();
     var pace = Pace{ .millis = 0 };
     try app.provide(&pace);
     try app.get("/tokens", tokens);
 
-    var client = try zfast.testing.Client.init(testing.allocator, .{});
+    var client = try nilo.testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.get(&app, "/tokens");
@@ -197,11 +197,11 @@ test "the token stream is an event stream, and says when it is done" {
 }
 
 test "an upload is read in pieces, and the whole of it is seen" {
-    var app = zfast.App.init(testing.allocator);
+    var app = nilo.App.init(testing.allocator);
     defer app.deinit();
     try app.post("/upload", upload);
 
-    var client = try zfast.testing.Client.init(testing.allocator, .{});
+    var client = try nilo.testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     // Bigger than the 64 KB buffer the handler reads through, so this really

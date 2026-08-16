@@ -1,6 +1,6 @@
 # A deadline belongs to an operation, not to a request
 
-zfast 0.1.0 had no deadlines of any kind. `nc host 8080`, then say nothing, and a fiber is parked until TCP gives up on it — which on Linux is minutes. Repeat from one laptop and the server is full. No tool, no bandwidth, no cleverness: this was the largest hole in the project and [ADR 0020](./0020-a-request-that-lasts-is-still-one-request.md) named it and declined to fix it, on the grounds that read, header and write timeouts want one decision rather than a knob bolted onto each feature.
+nilo 0.1.0 had no deadlines of any kind. `nc host 8080`, then say nothing, and a fiber is parked until TCP gives up on it — which on Linux is minutes. Repeat from one laptop and the server is full. No tool, no bandwidth, no cleverness: this was the largest hole in the project and [ADR 0020](./0020-a-request-that-lasts-is-still-one-request.md) named it and declined to fix it, on the grounds that read, header and write timeouts want one decision rather than a knob bolted onto each feature.
 
 This is that decision.
 
@@ -11,14 +11,14 @@ Not "where do the timeouts go". It is: **what is a deadline attached to?**
 The obvious answer is the request. Give a request 30 seconds; if it is not done, cut it. Every framework with a `request_timeout` works that way, and it is wrong here for reasons that are not about performance:
 
 - **It is wrong about streams.** A server-sent event stream that runs for an hour is a request. So is a WebSocket. So is a 4 GB upload on a domestic line. Under a request deadline, each of those is either killed for working correctly or the deadline is set so high that it stops protecting anything.
-- **It cannot be implemented without cancellation.** Cutting a request that is halfway through a handler means unwinding a fiber that is not asking to be unwound. Zig has no way to make that safe — the same fact that makes a `recover` middleware impossible ([ADR 0008](./0008-no-recover-middleware.md)) — so the honest version of a request deadline in zfast is "stop waiting on the socket", which is not a request deadline at all.
+- **It cannot be implemented without cancellation.** Cutting a request that is halfway through a handler means unwinding a fiber that is not asking to be unwound. Zig has no way to make that safe — the same fact that makes a `recover` middleware impossible ([ADR 0008](./0008-no-recover-middleware.md)) — so the honest version of a request deadline in nilo is "stop waiting on the socket", which is not a request deadline at all.
 - **It answers the wrong question.** A handler taking 30 seconds is a slow handler, and slow handlers are the author's business. A *client* taking 30 seconds to send a header is nobody's business but the server's, because it is the server's fiber being held.
 
 So:
 
 > **A deadline is a limit on one wait for the network, not on a request.** Four limits, each on a different wait, and none of them can interrupt a handler that is doing work.
 
-Nothing in zfast can be cut off mid-computation, which means nothing had to be made interruptible, which means this ADR adds no new way for a handler to fail. Every failure it introduces is a read or a write that returns an error — a shape every one of these call sites already handles, because a client can always disconnect.
+Nothing in nilo can be cut off mid-computation, which means nothing had to be made interruptible, which means this ADR adds no new way for a handler to fail. Every failure it introduces is a read or a write that returns an error — a shape every one of these call sites already handles, because a client can always disconnect.
 
 ## The four limits
 

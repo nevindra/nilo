@@ -1,6 +1,6 @@
 # A failure mode belongs in the return type
 
-[ADR 0017](./0017-the-api-description-comes-from-the-signatures.md) says the API description is read off the signatures, and [ADR 0015](./0015-what-zfast-borrows-and-from-whom.md) puts the ambition plainly: *the signature is the whole contract*. Building a CRUD app end to end is where that turns out not to be true yet.
+[ADR 0017](./0017-the-api-description-comes-from-the-signatures.md) says the API description is read off the signatures, and [ADR 0015](./0015-what-nilo-borrows-and-from-whom.md) puts the ambition plainly: *the signature is the whole contract*. Building a CRUD app end to end is where that turns out not to be true yet.
 
 A CRUD contract is three things: what goes in, what comes out, and how it fails. The signature carries the first two well. The third lived entirely in the function body:
 

@@ -1,6 +1,6 @@
 # The rule about error messages is held by a build step
 
-[ADR 0015](./0015-what-zfast-borrows-and-from-whom.md) borrowed Elm's standard and wrote it as a rule with teeth:
+[ADR 0015](./0015-what-nilo-borrows-and-from-whom.md) borrowed Elm's standard and wrote it as a rule with teeth:
 
 > Every new comptime check in v2 fires at the first place a human named the thing, says what is wrong in words, and says the fix — **or it does not ship**.
 
@@ -24,10 +24,10 @@ const refusals = [_]Refusal{
 
 ```zig
 const refused = b.addObject(.{ .name = refusal.name, .root_module = module });
-refused.expect_errors = .{ .contains = b.fmt("error: zfast: {s}", .{refusal.says}) };
+refused.expect_errors = .{ .contains = b.fmt("error: nilo: {s}", .{refusal.says}) };
 ```
 
-**The `zfast: ` prefix is supplied by the build script, not written in the table.** That is the load-bearing detail. Writing an expectation is how a check gets recorded as acceptable, and there is no way to record one whose message does not start with `zfast:` — a check that stopped somewhere else in the standard library cannot be written down as passing, only deleted or fixed. The general rule is structural rather than a string somebody remembers to compare.
+**The `nilo: ` prefix is supplied by the build script, not written in the table.** That is the load-bearing detail. Writing an expectation is how a check gets recorded as acceptable, and there is no way to record one whose message does not start with `nilo:` — a check that stopped somewhere else in the standard library cannot be written down as passing, only deleted or fixed. The general rule is structural rather than a string somebody remembers to compare.
 
 The rest is a plain expectation of the message's first line. It locks the wording, which means changing a message is a build failure that shows the old text beside the new — a diff to approve rather than a change that lands unread.
 
@@ -35,19 +35,19 @@ The rest is a plain expectation of the message's first line. It locks the wordin
 
 Thirty-nine checks were covered. Writing the cases and watching them fail found four defects that had been shipped, in a codebase where the message quality had been argued about repeatedly:
 
-**Two messages had no `zfast:` prefix at all.** The two on `Response.headers` — the exact thing the prefix rule exists to catch, sitting in the file that documents the rule.
+**Two messages had no `nilo:` prefix at all.** The two on `Response.headers` — the exact thing the prefix rule exists to catch, sitting in the file that documents the rule.
 
-**A slice passed to `Headers.of` never reached its message.** `of` accepted `anytype` and dereferenced any pointer, and a slice is a pointer, so `.of(built[0..n])` stopped with `index syntax required for slice type '[]http1.Header'` — an error from inside zfast about zfast, which is precisely axum's failure mode named in ADR 0015. The message it was supposed to produce was three lines below and unreachable.
+**A slice passed to `Headers.of` never reached its message.** `of` accepted `anytype` and dereferenced any pointer, and a slice is a pointer, so `.of(built[0..n])` stopped with `index syntax required for slice type '[]http1.Header'` — an error from inside nilo about nilo, which is precisely axum's failure mode named in ADR 0015. The message it was supposed to produce was three lines below and unreachable.
 
-**The message for two request bodies blamed the wrong argument.** A handler taking a service by value — `fn placeOrder(store: Store, incoming: NewOrder)` — was told argument 2, `NewOrder`, was the surplus body, and advised to make `NewOrder` a pointer. `NewOrder` was the one thing in that signature that was already right. zfast cannot know which of two structs was meant to be the body, so the message now names both and states the rule that tells them apart.
+**The message for two request bodies blamed the wrong argument.** A handler taking a service by value — `fn placeOrder(store: Store, incoming: NewOrder)` — was told argument 2, `NewOrder`, was the surplus body, and advised to make `NewOrder` a pointer. `NewOrder` was the one thing in that signature that was already right. nilo cannot know which of two structs was meant to be the body, so the message now names both and states the rule that tells them apart.
 
-**Messages spelled zfast's types with zfast's file names.** A resolver returning the wrong type was told it returned `str.Str`; a slice of headers was called `[]http1.Header`. Both true, both about a source tree the reader does not have and a `str` they never imported. `src/names.zig` rewrites the names zfast's own compile errors print into the ones the import line gives them — `zfast.Str`, `[]zfast.Header` — and leaves a type of the reader's own exactly where they wrote it.
+**Messages spelled nilo's types with nilo's file names.** A resolver returning the wrong type was told it returned `str.Str`; a slice of headers was called `[]http1.Header`. Both true, both about a source tree the reader does not have and a `str` they never imported. `src/names.zig` rewrites the names nilo's own compile errors print into the ones the import line gives them — `nilo.Str`, `[]nilo.Header` — and leaves a type of the reader's own exactly where they wrote it.
 
 ## The half of the rule this does not hold, and what was done about it
 
 The rule has two halves. The harness holds *says what is wrong in words*. It says nothing about *fires at the first place a human named the thing*, and writing it exposed how badly that half was doing.
 
-Zig reports a `@compileError` at the `@compileError`, which is always inside zfast. What points back at the reader is the reference trace underneath, and Zig prints two frames of it by default. The chain was:
+Zig reports a `@compileError` at the `@compileError`, which is always inside nilo. What points back at the reader is the reference trace underneath, and Zig prints two frames of it by default. The chain was:
 
 ```
 referenced by:
@@ -56,7 +56,7 @@ referenced by:
     6 reference(s) hidden; use '-freference-trace=8' to see all references
 ```
 
-The reader's own line was the third entry — hidden by exactly one slot, behind a flag they would have to know to pass. Every one of the two frames they did get was zfast's.
+The reader's own line was the third entry — hidden by exactly one slot, behind a flag they would have to know to pass. Every one of the two frames they did get was nilo's.
 
 The fix is that each registration method checks for itself, rather than letting the error surface from wherever the work happens to be done:
 

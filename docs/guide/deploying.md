@@ -12,16 +12,16 @@ Stop it, or pass `.port = …` to listen() with a free one.
 error: service *main.Db was never registered, but 4 routes need it
 ("/users", "/users/:id", "/admin/stats", …) — call app.provide() before app.listen()
 
-error: zfast: static directory "public" could not be opened (FileNotFound) —
+error: nilo: static directory "public" could not be opened (FileNotFound) —
 the path is relative to the working directory the server runs in
 
 warning: std.log will block the event loop. Add to your root source file:
-pub const std_options_debug_io = zfast.debug_io;
+pub const std_options_debug_io = nilo.debug_io;
 ```
 
 That line is the whole answer, so it is also the last thing on the screen:
 `listen()` stops the process there rather than returning an error, which would
-print a stack trace through zfast's own files on top of it. Which file inside the
+print a stack trace through nilo's own files on top of it. Which file inside the
 engine noticed the port was taken is not your problem.
 
 If you would rather handle it — a test, or a program that falls back to another
@@ -64,7 +64,7 @@ responses. Measured on a 2-core Linux box across 1,000 held-open connections:
 **~21 KB per idle connection** with the defaults, **~17 KB** at 2 KB each.
 
 `threads = 1` makes handlers stop running at the same time, which removes the
-reason for `zfast.Mutex` — and also removes the reason to have a machine with
+reason for `nilo.Mutex` — and also removes the reason to have a machine with
 more than one core. See [Services](./services.md).
 
 On the request path, a routed GET returning JSON with CORS installed makes
@@ -124,7 +124,7 @@ a reset, since the request it sent was never read. That is on purpose:
 The log says so once a minute for as long as it lasts, with a running total:
 
 ```
-warning: zfast is holding its limit of 10000 connections, so new ones are being
+warning: nilo is holding its limit of 10000 connections, so new ones are being
 closed unanswered (417 so far). Raise `.max_connections` in listen() if the
 machine has the memory — each connection costs about 9 KB — or put fewer of them
 on this process.
@@ -133,7 +133,7 @@ on this process.
 It counts connections, not requests. One connection makes many requests in a
 row, and a WebSocket is one connection for as long as the tab is open — a chat
 server holding open tabs wants this raised, and multiplied by 9 KB first.
-`.max_connections = 0` turns it off, which is what zfast did before this
+`.max_connections = 0` turns it off, which is what nilo did before this
 existed.
 
 It is also what bounds file descriptors. A response that sends a file — a static
@@ -155,7 +155,7 @@ bounded by the buffer the handler passes in ([Requests](./requests.md)). An
 endpoint taking files wants that one, not a bigger `max_body`.
 
 This is the knob a reverse proxy in front cannot stand in for. A proxy can bring
-the limit **down** — most already do — but nothing in front of zfast can raise a
+the limit **down** — most already do — but nothing in front of nilo can raise a
 limit inside it. An app taking uploads has to say so here.
 
 ## Who the client is
@@ -191,7 +191,7 @@ configured, so `clientIp()` falls back to `peer()` rather than reading the
 closest thing to hand, which would be the forgery.
 
 Requests-per-second figures now exist, on one quiet box:
-[`../benchmarks.md`](../benchmarks.md) for zfast alone and
+[`../benchmarks.md`](../benchmarks.md) for nilo alone and
 [`../comparison.md`](../comparison.md) against eight other servers. Read the
 caveats in both — loopback, no TLS, no database, and a handler that touches
 Postgres makes every row in them the same.
@@ -201,7 +201,7 @@ Postgres makes every row in them the same.
 **`ReleaseSafe`.** In `ReleaseFast` an integer overflow is undefined behaviour
 instead of a loud crash, and a web server takes input from strangers — that is
 exactly the code where the check earns its keep. `Debug` is for development;
-zfast's own `Str` staleness trap only exists there.
+nilo's own `Str` staleness trap only exists there.
 
 ## Debug info, and what a build costs
 
@@ -209,7 +209,7 @@ Half of a Zig release build is debug info. Measured on this repo, warm: 14.7s
 with it and 7.4s without, and the binary goes from 6.0 MB to 0.8 MB. At runtime
 it costs nothing measurable. What it costs is the file and the line on every
 frame of a panic — so **keep it for anything you deploy**, which is also why the
-mode recommended above is not the one where zfast turns it off. The full
+mode recommended above is not the one where nilo turns it off. The full
 decomposition is in [`../comparison.md`](../comparison.md).
 
 `zig build -Doptimize=ReleaseFast` in this repo builds the benchmark binary,
@@ -230,7 +230,7 @@ Handler *errors* are a different thing and are already handled — see
 add
 
 ```zig
-pub const panic = zfast.panic;
+pub const panic = nilo.panic;
 ```
 
 to your root file so the crash says which request caused it:
@@ -272,18 +272,18 @@ endpoint that stops the server is an ordinary handler. The App is a service like
 any other, so hand it to itself first:
 
 ```zig
-fn quit(app: *zfast.App) []const u8 {
+fn quit(app: *nilo.App) []const u8 {
     app.shutdown();
     return "going down\n";
 }
 
-try app.provide(&app);          // …or `*zfast.App was never registered` at startup
+try app.provide(&app);          // …or `*nilo.App was never registered` at startup
 try app.post("/admin/quit", quit);
 ```
 
 ## TLS, and the proxy in front
 
-**zfast does not speak TLS, and is not going to**
+**nilo does not speak TLS, and is not going to**
 ([ADR 0028](../adr/0028-tls-is-terminated-in-front.md)). Zig's standard library
 can be a TLS client and not a TLS server; the alternatives were a one-person
 crypto dependency or a C toolchain in the install story, and both cost the
@@ -323,13 +323,13 @@ server {
 }
 ```
 
-Either way, bind zfast to `127.0.0.1` so nothing reaches it except through the
+Either way, bind nilo to `127.0.0.1` so nothing reaches it except through the
 proxy, and say `.trusted_hops = 1` so `clientIp()` reads the address the proxy
 saw.
 
 Two things go with this decision and are worth knowing before you need them:
 **HTTP/2 is not available** — browsers only speak it over TLS, negotiated during
-the handshake — and therefore **zfast cannot be a gRPC server**, since gRPC is
+the handshake — and therefore **nilo cannot be a gRPC server**, since gRPC is
 HTTP/2. Neither follows from "no TLS" on its own, which is why both are here.
 
 ## What isn't here yet
@@ -337,7 +337,7 @@ HTTP/2. Neither follows from "no TLS" on its own, which is why both are here.
 `permessage-deflate`, and compression of a handler's response (files are
 compressed — see [Static files](./static-files.md#compression)).
 
-Templates are a refusal rather than a backlog item: zfast is for building APIs
+Templates are a refusal rather than a backlog item: nilo is for building APIs
 and services, and rendering pages is not what it is for. The reasoning is in
 [the roadmap](../roadmap.md#not-coming).
 

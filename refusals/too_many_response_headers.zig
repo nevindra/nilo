@@ -1,9 +1,9 @@
 //! More headers written into a Response than it carries. The rest go on
 //! with `c.setHeader`, which has no limit.
 
-const zfast = @import("zfast");
+const nilo = @import("nilo");
 
-fn index() zfast.Response([]const u8) {
+fn index() nilo.Response([]const u8) {
     return .{
         .value = "",
         .headers = .of(&.{
@@ -21,6 +21,6 @@ fn index() zfast.Response([]const u8) {
 }
 
 export fn refusal() void {
-    var app: zfast.App = undefined;
+    var app: nilo.App = undefined;
     app.get("/", index) catch {};
 }

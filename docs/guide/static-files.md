@@ -72,7 +72,7 @@ original for the life of the process, and is charged against `max_total_bytes`
 like everything else. The startup line says how much it came to:
 
 ```
-zfast: loaded 34 static file(s) (2411903 bytes held, 383204 of them gzipped
+nilo: loaded 34 static file(s) (2411903 bytes held, 383204 of them gzipped
        copies) from "dist" onto "/assets"
 ```
 
@@ -129,7 +129,7 @@ gzipped copy has different offsets — so answering one from the other would han
 back the wrong bytes without saying so.
 
 A request for several ranges at once is legal and wants a `multipart/byteranges`
-body zfast doesn't assemble — so it gets the whole file too. Nothing sends them.
+body nilo doesn't assemble — so it gets the whole file too. Nothing sends them.
 
 ## Files too big to hold
 
@@ -168,7 +168,7 @@ The startup line counts the spilled files separately from the bytes, because
 they are not in that number:
 
 ```
-zfast: loaded 12 static file(s) (48211 bytes held, 9022 of them gzipped copies)
+nilo: loaded 12 static file(s) (48211 bytes held, 9022 of them gzipped copies)
        from "public" onto "/", 2 of them over 8388608 bytes and opened per
        request rather than held
 ```

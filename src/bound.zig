@@ -1,7 +1,7 @@
 //! A binding that hands its failures back, instead of ending the request.
 //!
 //! ```zig
-//! fn signUp(b: zfast.Bound(zfast.Form(SignUp))) !Redirect(303) {
+//! fn signUp(b: nilo.Bound(nilo.Form(SignUp))) !Redirect(303) {
 //!     const form = b.value() orelse return b.fail();
 //!     return db.create(form.email, form.age);
 //! }
@@ -23,7 +23,7 @@
 //! allocation budget cannot see it (ADR 0018).
 //!
 //! **It is not a validation language.** The reasons are exactly the ones
-//! `convert.zig` can already produce. zfast's job stops at "this did not
+//! `convert.zig` can already produce. nilo's job stops at "this did not
 //! convert to a `u32`"; whether the age is plausible stays the
 //! application's, and a reason set that grew to answer that would be a
 //! validator wearing a smaller name.
@@ -48,7 +48,7 @@ pub const Reason = convert.Reason;
 
 /// The declaration a `Bound(W)` carries, so the compile-time engine can tell
 /// it from the thing it wraps.
-pub const marker = "zfast_bound";
+pub const marker = "nilo_bound";
 
 /// Which of the three places a binding was read from.
 ///
@@ -81,7 +81,7 @@ pub const Failure = struct {
 
     _say: *const fn (Failure, *std.Io.Writer) anyerror!void,
 
-    /// Write zfast's own sentence for this failure.
+    /// Write nilo's own sentence for this failure.
     ///
     /// Here so that a handler assembling a body of its own does not have to
     /// reproduce the wording — and so that it cannot drift from the wording
@@ -103,8 +103,8 @@ pub fn Bound(comptime W: type) type {
     return struct {
         const Self = @This();
 
-        pub const zfast_bound = W;
-        pub const zfast_bound_slot = slot;
+        pub const nilo_bound = W;
+        pub const nilo_bound_slot = slot;
         /// The struct the handler actually asked for.
         pub const Value = T;
         /// What the engine fills in and hands to `from`.
@@ -243,7 +243,7 @@ pub fn Bound(comptime W: type) type {
                     if (std.mem.eql(u8, f.name, name)) return i;
                 }
                 @compileError(
-                    "zfast: `" ++ naming.of(T) ++ "` has no field `" ++ name ++ "`.\n" ++
+                    "nilo: `" ++ naming.of(T) ++ "` has no field `" ++ name ++ "`.\n" ++
                         "  A binding only knows the fields of the struct it was read into: " ++
                         fieldList(T) ++ ".",
                 );
@@ -257,24 +257,24 @@ pub fn Bound(comptime W: type) type {
 fn slotOf(comptime W: type) Slot {
     comptime {
         if (@typeInfo(W) != .@"struct") @compileError(
-            "zfast: `Bound(" ++ naming.of(W) ++ ")` — a binding is read into a struct.\n" ++
+            "nilo: `Bound(" ++ naming.of(W) ++ ")` — a binding is read into a struct.\n" ++
                 "  Write `Bound(Form(T))`, `Bound(Query(T))`, or `Bound(T)` for a JSON body, " ++
                 "where `T` is a struct of your own with one field per field of the request.",
         );
         if (@hasDecl(W, marker)) @compileError(
-            "zfast: `Bound(Bound(…))` — a binding is already a binding.\n" ++
-                "  Drop the outer one: `Bound(" ++ naming.of(W.zfast_bound) ++ ")`.",
+            "nilo: `Bound(Bound(…))` — a binding is already a binding.\n" ++
+                "  Drop the outer one: `Bound(" ++ naming.of(W.nilo_bound) ++ ")`.",
         );
         if (@hasDecl(W, form_mod.marker)) return .form;
-        if (@hasDecl(W, "zfast_query")) return .query;
+        if (@hasDecl(W, "nilo_query")) return .query;
         return .body;
     }
 }
 
 fn valueOf(comptime W: type, comptime slot: Slot) type {
     return switch (slot) {
-        .form => W.zfast_form,
-        .query => W.zfast_query,
+        .form => W.nilo_form,
+        .query => W.nilo_query,
         .body => W,
     };
 }
@@ -464,7 +464,7 @@ fn saidBy(f: Failure) []const u8 {
     return buf.bytes[0..w.end];
 }
 
-test "a failure writes zfast's own sentence, in the words of its slot" {
+test "a failure writes nilo's own sentence, in the words of its slot" {
     const b = twoWrong();
     var it = b.failures();
 
@@ -481,7 +481,7 @@ test "a failure writes zfast's own sentence, in the words of its slot" {
 test "the same field says a different thing out of a query string" {
     const Page = struct { page: u32 };
     const b = Bound(struct {
-        pub const zfast_query = Page;
+        pub const nilo_query = Page;
         value: Page,
     }).from(.{ .page = 0 }, .{.{ .reason = .not_a_number, .given = Str.static("soon") }});
 
@@ -554,9 +554,9 @@ test "the text that arrived is readable whether or not it converted" {
 
 test "a binding of a form is still a binding of the struct inside it" {
     const Wrapped = Bound(form_mod.Form(SignUp));
-    try testing.expectEqual(Slot.form, Wrapped.zfast_bound_slot);
+    try testing.expectEqual(Slot.form, Wrapped.nilo_bound_slot);
     try testing.expectEqual(SignUp, Wrapped.Value);
 
     // And a plain struct is the JSON body.
-    try testing.expectEqual(Slot.body, Bound(SignUp).zfast_bound_slot);
+    try testing.expectEqual(Slot.body, Bound(SignUp).nilo_bound_slot);
 }

@@ -2,7 +2,7 @@
 
 ADR 0005 decided that a fail function stores its message in "the request currently running". It did not say how it knows which request that is. That turns out to be the easiest part to get wrong.
 
-The reflex answer is `threadlocal`. In zfast that answer is **wrong**, and wrong in a dangerous way. The Engine runs every connection in a fiber, and many fibers share one OS thread. This sequence can happen at any moment:
+The reflex answer is `threadlocal`. In nilo that answer is **wrong**, and wrong in a dangerous way. The Engine runs every connection in a fiber, and many fibers share one OS thread. This sequence can happen at any moment:
 
 1. Fiber A enters a handler. The thread slot points at A's Failure.
 2. A's handler waits on a database query, so A goes to sleep.

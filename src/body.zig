@@ -1,7 +1,7 @@
 //! Reading a request body in pieces, for the ones too big to hold (ADR 0020).
 //!
 //! ```zig
-//! fn upload(c: *zfast.Ctx, store: *Store) !Receipt {
+//! fn upload(c: *nilo.Ctx, store: *Store) !Receipt {
 //!     var incoming = try c.bodyStream();
 //!     var buf: [64 * 1024]u8 = undefined;
 //!     while (try incoming.read(&buf)) |part| try store.append(part);
@@ -170,7 +170,7 @@ pub const Body = struct {
         };
     }
 
-    /// zfast's own: `Ctx.bodyStream` builds one of these.
+    /// nilo's own: `Ctx.bodyStream` builds one of these.
     pub fn init(in: *std.Io.Reader, progress: *Progress) Body {
         return .{
             .reader = .{

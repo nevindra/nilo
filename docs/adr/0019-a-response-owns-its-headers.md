@@ -56,6 +56,6 @@ This bug was reachable from the front page of the README, and the suite was gree
 ## Consequences
 
 - **`Response.headers` is a breaking change** for anybody who wrote one: `&.{…}` becomes `.of(&.{…})`, and reading them back is `.view()`. There is no deprecation path, because the old spelling still compiles and still crashes.
-- `zfast.Headers` is exported, so the type can be named when a helper builds one.
+- `nilo.Headers` is exported, so the type can be named when a helper builds one.
 - A `Response(T)` is 264 bytes larger than its payload. If that ever shows up in a measurement, the cap is the knob, and ADR 0018's allocation and per-connection invariants are both untouched — nothing here allocates.
 - ADR 0018's fourth axis (binary size) is unaffected: the array replaces a slice, and `of` inlines to a handful of stores.

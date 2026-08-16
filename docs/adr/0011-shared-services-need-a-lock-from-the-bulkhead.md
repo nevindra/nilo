@@ -8,7 +8,7 @@ The example has a `Store` service holding an `ArrayList` of users and a `POST /u
 
 Handlers run on several OS threads at once, so two of them can be inside the same Service at the same moment.
 
-That last sentence was not true when this ADR was first written, and finding out why is part of the decision. zio's own default is **one** executor — the right default for a library that might be embedded in somebody else's thread, and the wrong one for a server process, which would otherwise leave every core but one idle. zfast now asks for one executor per core (`Options.threads`), which makes the concurrency real and this ADR necessary rather than merely prudent. Nothing in zfast serialises them — the request arena is per request, the fail slot is per fiber, and a Service is by definition shared. That is correct and deliberate, but it means **a Service with mutable state needs a lock, and until now zfast gave users no way to say so.**
+That last sentence was not true when this ADR was first written, and finding out why is part of the decision. zio's own default is **one** executor — the right default for a library that might be embedded in somebody else's thread, and the wrong one for a server process, which would otherwise leave every core but one idle. nilo now asks for one executor per core (`Options.threads`), which makes the concurrency real and this ADR necessary rather than merely prudent. Nothing in nilo serialises them — the request arena is per request, the fail slot is per fiber, and a Service is by definition shared. That is correct and deliberate, but it means **a Service with mutable state needs a lock, and until now nilo gave users no way to say so.**
 
 Worse, the obvious answer is wrong. `std.Thread.Mutex` blocks the OS thread. Under a fiber runtime the thread is running many other connections, so blocking it stalls all of them. If the fiber holding the lock is parked waiting on I/O and can only be resumed by that same thread, nothing gets unstuck. A framework whose documented Service pattern deadlocks under load is not one to ship.
 
@@ -16,11 +16,11 @@ Meanwhile a user cannot simply reach for `zio.Mutex`: ADR 0002 exists so that no
 
 ## What was decided
 
-The Bulkhead gains one item: **`Mutex`** — a lock that parks the unit of work rather than the OS thread under it. Exposed as `zfast.Mutex`.
+The Bulkhead gains one item: **`Mutex`** — a lock that parks the unit of work rather than the OS thread under it. Exposed as `nilo.Mutex`.
 
 ```zig
 const Store = struct {
-    lock: zfast.Mutex = .init,
+    lock: nilo.Mutex = .init,
     users: std.ArrayList(User) = .empty,
 };
 
@@ -35,7 +35,7 @@ Two properties made this an easy call rather than a reluctant one:
 
 ## Why the Bulkhead rather than anywhere else
 
-Because the correct implementation depends entirely on the Engine. A threaded Engine wants `std.Thread.Mutex`; a fiber Engine wants its own. Anything zfast wrote itself would be right for one of them and a deadlock for the other. This is precisely what the Bulkhead is for, and it is the second time the answer has been "the Engine already has one" — the first was the monotonic clock.
+Because the correct implementation depends entirely on the Engine. A threaded Engine wants `std.Thread.Mutex`; a fiber Engine wants its own. Anything nilo wrote itself would be right for one of them and a deadlock for the other. This is precisely what the Bulkhead is for, and it is the second time the answer has been "the Engine already has one" — the first was the monotonic clock.
 
 ## Consequences
 
@@ -44,4 +44,4 @@ Because the correct implementation depends entirely on the Engine. A threaded En
 - Nothing forces the lock. A Service with mutable state and no lock still compiles and still races. Catching that would need ownership tracking Zig does not have; the honest answer is to say so in the docs and put the lock in the example everyone copies.
 - Running on every core makes the per-fiber failure slot (ADR 0007) load-bearing in a way it was not before: fibers now really do move between threads. Re-verified under load once the threads were real — **0 crossed responses out of 1,008,130**, where a thread-local would have leaked one request's message into another's response.
 - `Options.threads` exists so a single-threaded run is still one line away, for anyone who wants the old behaviour while they audit their Services.
-- `zfast.RwLock`, condition variables and channels are all sitting there in zio unexposed. They stay unexposed until something needs them — the Bulkhead grows one item at a time, for a reason each time.
+- `nilo.RwLock`, condition variables and channels are all sitting there in zio unexposed. They stay unexposed until something needs them — the Bulkhead grows one item at a time, for a reason each time.

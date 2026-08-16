@@ -15,7 +15,7 @@ const std = @import("std");
 /// What to do about the `Range` header on a request.
 pub const Answer = union(enum) {
     /// Send the whole file, 200. No `Range`, or one there is no sense to be
-    /// made of, or one asking for more pieces than zfast will assemble.
+    /// made of, or one asking for more pieces than nilo will assemble.
     whole,
     /// Send `part`, 206, with a `Content-Range`.
     part: Part,
@@ -50,7 +50,7 @@ pub fn parse(header: ?[]const u8, total: u64, if_range_matches: bool) Answer {
     const raw = header orelse return .whole;
     if (!if_range_matches) return .whole;
 
-    // `bytes` is the only unit anybody implements, and a unit zfast does not
+    // `bytes` is the only unit anybody implements, and a unit nilo does not
     // know is a request to ignore the header rather than to fail.
     const eq = std.mem.indexOfScalar(u8, raw, '=') orelse return .whole;
     if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, raw[0..eq], " \t"), "bytes")) return .whole;
@@ -192,7 +192,7 @@ test "anything that cannot be understood is ignored, and the whole file goes out
     }
 }
 
-test "more than one range is ignored, because zfast does not assemble multipart" {
+test "more than one range is ignored, because nilo does not assemble multipart" {
     try testing.expectEqual(Answer.whole, wants("bytes=0-99,200-299", 1000));
 }
 

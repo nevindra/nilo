@@ -36,7 +36,7 @@ decides what to pass in:
 | `!Status(201, T)` | a `"201"` response, named |
 | `!Response(T)` | `default` — the status is picked at runtime |
 | a `*Ctx` and no return value | `default` — the handler writes its own answer |
-| anything zfast can refuse first | a 400 |
+| anything nilo can refuse first | a 400 |
 
 ## Named shapes
 

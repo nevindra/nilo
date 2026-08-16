@@ -2,10 +2,10 @@
 //! condition that quietly matches no rows — the worst kind, because the query
 //! runs and answers.
 
-const sql = @import("zfast_sql");
+const sql = @import("nilo_sql");
 
 const User = struct {
-    pub const zfast_table = .{ .name = "users", .key = .id };
+    pub const nilo_table = .{ .name = "users", .key = .id };
 
     id: i64,
     deleted_at: ?i64,

@@ -1,0 +1,39 @@
+# A Postgres for `sql/live.zig`, and nothing else.
+#
+# The tests skip when DATABASE_URL is unset, so this is only needed by
+# somebody working on the SQL module:
+#
+#   docker compose -f sql/docker-compose.yml up -d
+#   DATABASE_URL=postgres://nilo:nilo@localhost:5433/nilo zig build test-sql
+#
+# Port 5433 rather than 5432 on purpose: a machine doing this work often has
+# a real Postgres already, and a test suite that quietly connects to it
+# would create and drop a table there.
+#
+# TimescaleDB rather than plain `postgres` because that is what this project
+# is developed against. Nothing in `sql/` uses a Timescale feature — it is a
+# Postgres 18 with extensions loaded — so the tests pass against either, and
+# testing on the heavier of the two is the right way round.
+services:
+  postgres:
+    image: timescale/timescaledb-ha:pg18
+    environment:
+      POSTGRES_USER: nilo
+      POSTGRES_PASSWORD: nilo
+      POSTGRES_DB: nilo
+    ports:
+      - "5433:5432"
+    # This image puts its data under $PGROOT rather than in the usual place,
+    # and runs as `postgres` rather than root — so the volume is named and
+    # removed by `down -v` instead of being a tmpfs that would come up owned
+    # by the wrong user.
+    volumes:
+      - pgdata:/home/postgres/pgdata
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nilo -d nilo"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  pgdata:

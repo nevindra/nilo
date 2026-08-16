@@ -14,7 +14,7 @@
 //! pg.zig's pool takes `connect_on_init_count`: left at its default it dials
 //! during `init`, so the check happens at boot; set to `0` the pool comes up
 //! without touching Postgres and the check happens whenever the first query
-//! does. zfast therefore adds **no option of its own**. A `check_schema =
+//! does. nilo therefore adds **no option of its own**. A `check_schema =
 //! false` was drafted and dropped — a switch that turns off a correctness
 //! check is a place to hide from a failure, and it is unnecessary when what
 //! the user actually wants to control is when to connect.
@@ -57,15 +57,15 @@ pub const Problem = struct {
     pub fn write(self: Problem, w: *std.Io.Writer) !void {
         switch (self.kind) {
             .no_such_column => try w.print(
-                "zfast: {s}.{s} has no column in table \"{s}\"",
+                "nilo: {s}.{s} has no column in table \"{s}\"",
                 .{ self.row, self.column, self.table },
             ),
             .wrong_type => try w.print(
-                "zfast: {s}.{s} expects {s}, but {s}.{s} is {s}",
+                "nilo: {s}.{s} expects {s}, but {s}.{s} is {s}",
                 .{ self.row, self.column, self.expected, self.table, self.column, self.found },
             ),
             .unexpected_null => try w.print(
-                "zfast: {s}.{s} is not optional, but {s}.{s} may be null",
+                "nilo: {s}.{s} is not optional, but {s}.{s} may be null",
                 .{ self.row, self.column, self.table, self.column },
             ),
         }
@@ -200,7 +200,7 @@ const Pg = @import("dialect.zig").Postgres;
 const types = @import("types.zig");
 
 const User = struct {
-    pub const zfast_table = .{ .name = "users", .key = .id };
+    pub const nilo_table = .{ .name = "users", .key = .id };
 
     id: i64,
     email: []const u8,
@@ -247,7 +247,7 @@ test "a column the table does not have is named, with the table" {
 
     var buf: [128]u8 = undefined;
     try testing.expectEqualStrings(
-        "zfast: schema.User.email has no column in table \"users\"",
+        "nilo: schema.User.email has no column in table \"users\"",
         try textOf(problems.items[0], &buf),
     );
 }
@@ -262,7 +262,7 @@ test "a column holding something else says both types" {
     try testing.expectEqual(@as(usize, 1), problems.items.len);
     var buf: [128]u8 = undefined;
     try testing.expectEqualStrings(
-        "zfast: schema.User.age expects int4 or int8, but users.age is text",
+        "nilo: schema.User.age expects int4 or int8, but users.age is text",
         try textOf(problems.items[0], &buf),
     );
 }
@@ -277,7 +277,7 @@ test "a nullable column read into a plain field is caught before a null arrives"
     try testing.expectEqual(@as(usize, 1), problems.items.len);
     var buf: [128]u8 = undefined;
     try testing.expectEqualStrings(
-        "zfast: schema.User.email is not optional, but users.email may be null",
+        "nilo: schema.User.email is not optional, but users.email may be null",
         try textOf(problems.items[0], &buf),
     );
 }
@@ -314,7 +314,7 @@ test "every mismatch is reported, not just the first" {
 test "a type the Dialect declines to judge passes whatever the column holds" {
     const Role = enum { admin, user };
     const Member = struct {
-        pub const zfast_table = .{ .name = "members", .key = .id };
+        pub const nilo_table = .{ .name = "members", .key = .id };
         id: i64,
         role: Role,
     };
@@ -329,7 +329,7 @@ test "a type the Dialect declines to judge passes whatever the column holds" {
 
 test "the columns are read out of the table a narrower Row borrows" {
     const UserCard = struct {
-        pub const zfast_table = User;
+        pub const nilo_table = User;
         id: i64,
         email: []const u8,
     };

@@ -47,7 +47,7 @@ For the fields where "leave it" and "clear it" really are the same thing, `orNul
 
 ## What it touches
 
-Being a union rather than an optional means the parts of zfast that walk a type had to learn about it, and in each case the general fix was the better one:
+Being a union rather than an optional means the parts of nilo that walk a type had to learn about it, and in each case the general fix was the better one:
 
 - **The staleness trap.** `str.stamp` skipped unions entirely, so a `Str` inside a `Patch` would have had no lifetime marker on it. It now walks the active arm of any tagged union, which is right for a user's own union too.
 - **The message that says what is wrong.** `"due" has to be text or null` — the third state is not a value, so it is not something to describe here.
@@ -56,6 +56,6 @@ Being a union rather than an optional means the parts of zfast that walk a type 
 
 ## Consequences
 
-- New in the vocabulary and in `zfast.zig`. Nothing else changed shape, and nobody has to use it: `?T` in a body still means exactly what it meant.
+- New in the vocabulary and in `nilo.zig`. Nothing else changed shape, and nobody has to use it: `?T` in a body still means exactly what it meant.
 - Writing `Patch(T)` as a handler argument is a compile error that says it belongs in a body struct and shows the two lines that put it there.
 - A `Patch(T)` in a *response* goes out as its value, or as null for both of the empty cases. That is the honest limit of the type in that direction — JSON has no way to leave a field out of a value that has it — and it is why this is documented as a type for reading a PATCH body rather than for describing a resource.

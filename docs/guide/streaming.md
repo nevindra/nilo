@@ -7,7 +7,7 @@ instead of returning it.
 ## A response in pieces
 
 ```zig
-fn report(c: *zfast.Ctx, db: *Db) !void {
+fn report(c: *nilo.Ctx, db: *Db) !void {
     var body = try c.stream(200, "text/csv");
     for (db.rows()) |row| try body.print("{d},{s}\n", .{ row.id, row.name });
     try body.finish();
@@ -35,7 +35,7 @@ writes 1 piece or 200
 ([ADR 0020](../adr/0020-a-request-that-lasts-is-still-one-request.md)).
 
 `finish()` is required: it writes the marker saying where the body ends. Forget
-it and zfast writes one so the connection stays usable, and logs that it had to.
+it and nilo writes one so the connection stays usable, and logs that it had to.
 
 `c.streamWith(.{ .buffer = 16 * 1024 })` for a different buffer size; the default
 is 4 KB.
@@ -43,7 +43,7 @@ is 4 KB.
 ## Server-sent events
 
 ```zig
-fn tokens(c: *zfast.Ctx, llm: *Llm) !void {
+fn tokens(c: *nilo.Ctx, llm: *Llm) !void {
     var events = try c.events();
     while (events.live()) {
         const token = llm.next() orelse break;

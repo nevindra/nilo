@@ -3,10 +3,10 @@
 //! something down — so it is refused here and has to be said out loud with
 //! `db.raw` if it is meant.
 
-const sql = @import("zfast_sql");
+const sql = @import("nilo_sql");
 
 const User = struct {
-    pub const zfast_table = .{ .name = "users", .key = .id };
+    pub const nilo_table = .{ .name = "users", .key = .id };
 
     id: i64,
     email: []const u8,

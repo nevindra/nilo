@@ -3,13 +3,13 @@
 //! ```zig
 //! const Signed = struct { user: u32, admin: bool = false };
 //!
-//! fn signIn(s: zfast.Session(Signed), form: zfast.Form(Login)) !zfast.Redirect(303) {
+//! fn signIn(s: nilo.Session(Signed), form: nilo.Form(Login)) !nilo.Redirect(303) {
 //!     const id = try accounts.check(form) orelse return .to("/login?wrong");
 //!     try s.set(.{ .user = id });
 //!     return .to("/");
 //! }
 //!
-//! fn me(s: zfast.Session(Signed)) !?Profile {
+//! fn me(s: nilo.Session(Signed)) !?Profile {
 //!     const signed = s.get() orelse return null;   // null → 404
 //!     return profiles.find(signed.user);
 //! }
@@ -26,7 +26,7 @@
 //! The cipher comes from `std.crypto`, so this costs no dependency and does
 //! not reopen [ADR 0028](../docs/adr/0028-tls-is-terminated-in-front.md)'s
 //! refusal of one-person crypto. The shape is jetzig's; it is the one design
-//! in that framework zfast had no answer to.
+//! in that framework nilo had no answer to.
 //!
 //! **What a session may hold is deliberately narrow**: a fixed-size struct of
 //! numbers, bools, enums and `[N]u8` arrays. No slices, no pointers. Two
@@ -51,7 +51,7 @@ const names = @import("names.zig");
 const Ctx = ctx_mod.Ctx;
 const Cipher = std.crypto.aead.chacha_poly.XChaCha20Poly1305;
 
-/// How long the secret has to be. Not a number zfast picked — it is the
+/// How long the secret has to be. Not a number nilo picked — it is the
 /// cipher's key length, and saying so here means it moves if the cipher ever
 /// does.
 pub const key_len = Cipher.key_length;
@@ -67,7 +67,7 @@ comptime {
     // needs `Ctx` and a field type cannot be imported from inside a function
     // body. This is what stops the two drifting apart in silence.
     if (key_len != 32) @compileError(
-        "zfast: the session key is no longer 32 bytes; `Ctx._session_key` has to be changed to match.",
+        "nilo: the session key is no longer 32 bytes; `Ctx._session_key` has to be changed to match.",
     );
 }
 
@@ -149,7 +149,7 @@ fn sizeOf(comptime T: type) usize {
 
 fn unsupported(comptime T: type, comptime why: []const u8) noreturn {
     @compileError(
-        "zfast: `" ++ names.of(T) ++ "` cannot be part of a session, because it is " ++ why ++ ".\n" ++
+        "nilo: `" ++ names.of(T) ++ "` cannot be part of a session, because it is " ++ why ++ ".\n" ++
             "  A session travels in a cookie and there is no row on the server to point at, so it " ++
             "has to be self-contained and of a size known while compiling.\n" ++
             "  What it can hold: integers, floats, bools, enums, `[N]u8` arrays, optionals of " ++
@@ -399,17 +399,17 @@ pub fn Session(comptime T: type) type {
     // the person wrote rather than a field eight frames down.
     comptime {
         if (@typeInfo(T) != .@"struct") @compileError(
-            "zfast: the `Session(" ++ names.of(T) ++ ")` is not a struct.\n" ++
+            "nilo: the `Session(" ++ names.of(T) ++ ")` is not a struct.\n" ++
                 "  A session is a struct of your own, one field per thing you want to remember:\n" ++
                 "      const Signed = struct { user: u32, admin: bool = false };",
         );
         if (@typeInfo(T).@"struct".fields.len == 0) @compileError(
-            "zfast: the `Session(" ++ names.of(T) ++ ")` has no fields, so it would remember " ++
+            "nilo: the `Session(" ++ names.of(T) ++ ")` has no fields, so it would remember " ++
                 "nothing.",
         );
         _ = sizeOf(T);
         if (cookieSize(T) > max_cookie_bytes) @compileError(std.fmt.comptimePrint(
-            "zfast: a `Session(" ++ names.of(T) ++ ")` would be {d} bytes in the cookie, and the " ++
+            "nilo: a `Session(" ++ names.of(T) ++ ")` would be {d} bytes in the cookie, and the " ++
                 "most that fits is {d}.\n" ++
                 "  A browser drops a cookie this big without saying so, which would look like a " ++
                 "session that never works rather than one that is too large.\n" ++
@@ -421,7 +421,7 @@ pub fn Session(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        pub const zfast_resolve = read;
+        pub const nilo_resolve = read;
 
         /// What arrived, if anything readable did.
         value: ?T,
@@ -451,7 +451,7 @@ pub fn Session(comptime T: type) type {
             return .{ .value = open(T, text.view(), key.*), ._c = c };
         }
 
-        /// What the client sent, or null if it sent nothing zfast could read.
+        /// What the client sent, or null if it sent nothing nilo could read.
         pub fn get(self: Self) ?T {
             return self.value;
         }
@@ -468,7 +468,7 @@ pub fn Session(comptime T: type) type {
             const c = self._c orelse return fail.internal(
                 "a Session was set outside a request, so there is no response to put the cookie " ++
                     "on. A test that means to check what was written drives the App with " ++
-                    "zfast.testing.Client.",
+                    "nilo.testing.Client.",
                 .{},
             );
             const key = c._session_key orelse return fail.internal(
@@ -709,7 +709,7 @@ test "two seals of the same value differ, because the nonce does" {
 // that proves the resolver, the Ctx field and the cookie writer agree.
 
 const App = @import("app.zig").App;
-const zfast_testing = @import("testing.zig");
+const nilo_testing = @import("testing.zig");
 
 const Signed2 = struct { user: u32, admin: bool = false };
 
@@ -740,7 +740,7 @@ test "a handler sets a session and it leaves as a Set-Cookie" {
     defer app.deinit();
     try app.post("/sign-in", signInHandler);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.post(&app, "/sign-in", "");
@@ -759,7 +759,7 @@ test "the cookie a browser sends back arrives as the value that was put in it" {
     try app.post("/sign-in", signInHandler);
     try app.get("/who", whoHandler);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     // Take the cookie off the first response the way a browser would: the
@@ -786,7 +786,7 @@ test "no cookie is no session, and a handler says so with a 404" {
     defer app.deinit();
     try app.get("/who", whoHandler);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     try testing.expectEqual(@as(u16, 404), (try client.get(&app, "/who")).status);
@@ -800,7 +800,7 @@ test "a cookie sealed under another secret is no session rather than an error" {
     var buf: Sealed(Signed2) = undefined;
     const forged = try seal(Signed2, .{ .user = 1, .admin = true }, key_b, &buf);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     var request: [4096]u8 = undefined;
@@ -818,7 +818,7 @@ test "clearing sends a deletion the browser will act on" {
     defer app.deinit();
     try app.post("/sign-out", signOutHandler);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const header = (try client.post(&app, "/sign-out", "")).setCookie(cookie_name).?;
@@ -832,7 +832,7 @@ test "asking for a session with no secret set fails with a message, not a wrong 
     defer app.deinit();
     try app.get("/who", whoHandler);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     try testing.expectEqual(@as(u16, 500), (try client.get(&app, "/who")).status);
@@ -870,7 +870,7 @@ test "a session does not turn up in the API description as a request body" {
     try app.get("/who", whoHandler);
     app.docs(.{ .title = "test" });
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{ .response_bytes = 64 * 1024 });
+    var client = try nilo_testing.Client.init(testing.allocator, .{ .response_bytes = 64 * 1024 });
     defer client.deinit();
 
     const answer = try client.get(&app, "/openapi.json");

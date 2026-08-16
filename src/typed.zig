@@ -17,7 +17,7 @@
 //! | `Query(T)`            | the query string, read into a struct of yours |
 //! | `Form(T)`             | the body as an HTML form, into a struct of yours (ADR 0031) |
 //! | `std.mem.Allocator`   | the request arena, freed when the request ends |
-//! | a type carrying `zfast_resolve` | a resolved value, worked out from the request (ADR 0016) |
+//! | a type carrying `nilo_resolve` | a resolved value, worked out from the request (ADR 0016) |
 //! | any other struct      | the request body, parsed from JSON         |
 //!
 //! A `Form(T)` and a plain struct are the same slot — a form *is* the body —
@@ -77,14 +77,14 @@ pub fn Response(comptime T: type) type {
     // `value: T = undefined`, which would have compiled for every T and let
     // a forgotten `.value` go out as whatever was on the stack.
     if (T == void) return struct {
-        pub const zfast_response = void;
+        pub const nilo_response = void;
 
         status: u16 = 200,
         headers: Headers = .{},
         value: void = {},
     };
     return struct {
-        pub const zfast_response = T;
+        pub const nilo_response = T;
 
         status: u16 = 200,
         headers: Headers = .{},
@@ -117,15 +117,15 @@ pub fn Response(comptime T: type) type {
 /// 201 from the same upsert — and for this one the rest of the time.
 pub fn Status(comptime code: u16, comptime T: type) type {
     if (T == void) return struct {
-        pub const zfast_response = void;
-        pub const zfast_status = code;
+        pub const nilo_response = void;
+        pub const nilo_status = code;
 
         headers: Headers = .{},
         value: void = {},
     };
     return struct {
-        pub const zfast_response = T;
-        pub const zfast_status = code;
+        pub const nilo_response = T;
+        pub const nilo_status = code;
 
         headers: Headers = .{},
         value: T,
@@ -139,7 +139,7 @@ pub const Header = http1.Header;
 ///
 /// That is the whole reason this type exists. `headers: []const Header` read
 /// beautifully and was a use-after-return: a list written in the handler
-/// lives in the handler's own stack frame, and zfast reads it after the
+/// lives in the handler's own stack frame, and nilo reads it after the
 /// handler has returned. With every value a literal the compiler puts the
 /// list in static memory and it happens to work; with a computed one — and a
 /// `Location` never is a literal — `Debug` gets away with it and release
@@ -202,7 +202,7 @@ pub const Headers = struct {
                 else => notAList(Items),
             };
             if (count > room) @compileError(std.fmt.comptimePrint(
-                "zfast: a Response can carry {d} headers and this one was given {d}.\n" ++
+                "nilo: a Response can carry {d} headers and this one was given {d}.\n" ++
                     "  Set the rest with `c.setHeader`, which has no limit.",
                 .{ room, count },
             ));
@@ -212,7 +212,7 @@ pub const Headers = struct {
 
     fn notAList(comptime Items: type) noreturn {
         @compileError(
-            "zfast: Response headers have to be written out where they are set — " ++
+            "nilo: Response headers have to be written out where they are set — " ++
                 ".of(&.{.{ .name = \"Location\", .value = where }}) — and this is a " ++
                 naming.of(Items) ++ ".\n" ++
                 "  A slice would not say how many there are until the program runs, and the " ++
@@ -242,7 +242,7 @@ pub const Headers = struct {
 /// this wrapper is what tells the two apart at a glance.
 pub fn Query(comptime T: type) type {
     return struct {
-        pub const zfast_query = T;
+        pub const nilo_query = T;
 
         value: T,
     };
@@ -263,7 +263,7 @@ const Role = union(enum) {
     /// The request arena, for a handler that has to build something that
     /// outlives its own stack frame — a `Location` header, usually.
     arena,
-    /// A value zfast works out from the request before the handler runs —
+    /// A value nilo works out from the request before the handler runs —
     /// the signed-in user, usually (ADR 0016).
     resolved,
     /// The same three slots again, read as a binding that hands its failures
@@ -300,8 +300,8 @@ pub fn wrap(comptime pattern: []const u8, comptime f: anytype) router.CtxHandler
                         ),
                     .param => |nth| args[i] = try paramValue(P, c, param_names[nth]),
                     .body => args[i] = try c.json(P),
-                    .query => args[i] = .{ .value = try queryValue(P.zfast_query, c) },
-                    .form => args[i] = .{ .value = try c.form(P.zfast_form) },
+                    .query => args[i] = .{ .value = try queryValue(P.nilo_query, c) },
+                    .form => args[i] = .{ .value = try c.form(P.nilo_form) },
                     .arena => args[i] = c._arena,
                     .resolved => args[i] = try resolve.value(P, c),
                     // The outcomes live here, on the stack of the fiber that
@@ -386,7 +386,7 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
         var query: []const openapi.Field = &.{};
         var body: ?*const openapi.Schema = null;
         var body_kind: openapi.BodyKind = .json;
-        // Whether zfast can refuse this request before the handler runs.
+        // Whether nilo can refuse this request before the handler runs.
         // Not a guess — it is exactly the routes with something to convert.
         var can_reject = false;
 
@@ -400,7 +400,7 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
             .ctx => wants_ctx = true,
             .param => can_reject = can_reject or p.type.? != Str,
             .query => {
-                query = queryFields(p.type.?.zfast_query);
+                query = queryFields(p.type.?.nilo_query);
                 can_reject = true;
             },
             .body => {
@@ -413,14 +413,14 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
             // be multipart, and saying otherwise would send somebody's
             // generated client to a 400.
             .form => {
-                const Fields = p.type.?.zfast_form;
+                const Fields = p.type.?.nilo_form;
                 body = openapi.schemaOf(Fields);
                 body_kind = if (form_mod.holdsAFile(Fields)) .multipart else .urlencoded;
                 can_reject = true;
             },
             // Described exactly as the slot it binds — the request looks the
             // same on the wire either way — but `can_reject` stays false, and
-            // that is the whole difference. zfast no longer refuses this
+            // that is the whole difference. nilo no longer refuses this
             // request before the handler runs; what the handler answers
             // instead is a line in a function body, and the document promises
             // what the signature settles and nothing else (ADR 0024).
@@ -496,21 +496,21 @@ fn answerOf(comptime Fn: type) openapi.Answer {
         // A redirect has no body to describe and a status that is part of
         // the type, so it is the most completely described thing a
         // signature can produce (ADR 0032).
-        if (hasNamedDecl(V, "zfast_redirect")) return .{
-            .status = V.zfast_redirect,
+        if (hasNamedDecl(V, "nilo_redirect")) return .{
+            .status = V.nilo_redirect,
             .content_type = "",
             .schema = null,
             .redirect = true,
         };
 
-        if (hasNamedDecl(V, "zfast_response")) {
+        if (hasNamedDecl(V, "nilo_response")) {
             // The status of a `Response(T)` is a field the handler fills in,
             // so it is not knowable here. Saying "default" is the truth;
             // claiming 200 for a route that answers 201 would not be. A
             // `Status(code, T)` puts the code in the type instead, which is
             // the whole reason that type exists (ADR 0024).
-            const status: ?u16 = if (hasNamedDecl(V, "zfast_status")) V.zfast_status else null;
-            const Inner = V.zfast_response;
+            const status: ?u16 = if (hasNamedDecl(V, "nilo_status")) V.nilo_status else null;
+            const Inner = V.nilo_response;
             if (Inner == void) return .{ .status = status, .content_type = "", .schema = null };
             return answerWith(status, Inner);
         }
@@ -576,19 +576,19 @@ fn fnTypeOf(comptime pattern: []const u8, comptime F: type) type {
         else => notAFunction(pattern, F),
     };
     if (@typeInfo(Fn).@"fn".is_generic) @compileError(
-        "zfast: the handler for route \"" ++ pattern ++ "\" is still generic (it has an " ++
+        "nilo: the handler for route \"" ++ pattern ++ "\" is still generic (it has an " ++
             "`anytype` or `comptime` argument).\n" ++
-            "  zfast has to know the type of every argument to match it. Write the types out.",
+            "  nilo has to know the type of every argument to match it. Write the types out.",
     );
     if (@typeInfo(Fn).@"fn".is_var_args) @compileError(
-        "zfast: the handler for route \"" ++ pattern ++ "\" uses C varargs, which cannot be matched.",
+        "nilo: the handler for route \"" ++ pattern ++ "\" uses C varargs, which cannot be matched.",
     );
     return Fn;
 }
 
 fn notAFunction(comptime pattern: []const u8, comptime F: type) noreturn {
     @compileError(
-        "zfast: the handler for route \"" ++ pattern ++ "\" has to be a function, not " ++
+        "nilo: the handler for route \"" ++ pattern ++ "\" has to be a function, not " ++
             naming.of(F) ++ ".\n" ++
             "  Write `app.get(\"" ++ pattern ++ "\", getUser)` — the function's name, not a call to it.",
     );
@@ -609,7 +609,7 @@ fn rolesOf(
 
         for (params, 0..) |p, i| {
             const P = p.type orelse @compileError(
-                "zfast: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
+                "nilo: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
                     "\" has no type.",
             );
             roles[i] = roleOf(pattern, P, i);
@@ -620,13 +620,13 @@ fn rolesOf(
                     roles[i] = .{ .param = used };
                     used += 1;
                 },
-                // Both arguments are named, and on purpose. zfast cannot know
+                // Both arguments are named, and on purpose. nilo cannot know
                 // which of the two was meant to be the body, so a message
                 // that blamed only the second would send people to fix the
                 // one argument that was probably already right.
                 .body, .bound_body => {
                     if (body_at) |first| @compileError(
-                        "zfast: the handler for route \"" ++ pattern ++ "\" takes two structs by " ++
+                        "nilo: the handler for route \"" ++ pattern ++ "\" takes two structs by " ++
                             "value — argument " ++ num(first + 1) ++ " is a " ++
                             naming.of(params[first].type.?) ++ " and argument " ++ num(i + 1) ++
                             " is a " ++ naming.of(P) ++ " — and a request only has one body.\n" ++
@@ -643,7 +643,7 @@ fn rolesOf(
                 // of the two has to go.
                 .form, .bound_form => {
                     if (form_at) |first| @compileError(
-                        "zfast: the handler for route \"" ++ pattern ++ "\" asks for the form " ++
+                        "nilo: the handler for route \"" ++ pattern ++ "\" asks for the form " ++
                             "twice — argument " ++ num(first + 1) ++ " and argument " ++
                             num(i + 1) ++ ".\n" ++
                             "  A request has one body. Put every field in a single struct and " ++
@@ -659,7 +659,7 @@ fn rolesOf(
                 },
                 .query, .bound_query => {
                     if (query_at) |first| @compileError(
-                        "zfast: the handler for route \"" ++ pattern ++ "\" asks for the query " ++
+                        "nilo: the handler for route \"" ++ pattern ++ "\" asks for the query " ++
                             "string twice — argument " ++ num(first + 1) ++ " and argument " ++
                             num(i + 1) ++ ".\n" ++
                             "  A request has one query string. Put every field in a single struct " ++
@@ -679,7 +679,7 @@ fn rolesOf(
         }
 
         if (body_at != null and form_at != null) @compileError(
-            "zfast: the handler for route \"" ++ pattern ++ "\" asks for both a request body " ++
+            "nilo: the handler for route \"" ++ pattern ++ "\" asks for both a request body " ++
                 "(argument " ++ num(body_at.? + 1) ++ ", a " ++ naming.of(params[body_at.?].type.?) ++
                 ") and a form (argument " ++ num(form_at.? + 1) ++ ") — and a request only has " ++
                 "one body.\n" ++
@@ -692,10 +692,10 @@ fn rolesOf(
         // way in, so an unused param there is almost certainly a forgotten
         // argument.
         if (!wants_ctx and used < param_names.len) @compileError(
-            "zfast: route \"" ++ pattern ++ "\" has " ++ num(param_names.len) ++ " path params (:" ++
+            "nilo: route \"" ++ pattern ++ "\" has " ++ num(param_names.len) ++ " path params (:" ++
                 join(param_names, ", :") ++ "), but its handler only takes " ++ num(used) ++ ".\n" ++
                 "  Path params are matched by position, so the ones at the end would never be read.\n" ++
-                "  Add the arguments (`id: u32`, `name: zfast.Str`, …), drop the unused `:` from the " ++
+                "  Add the arguments (`id: u32`, `name: nilo.Str`, …), drop the unused `:` from the " ++
                 "pattern, or ask for a `*Ctx` if you would rather fetch them yourself with " ++
                 "`c.param(\"…\")`.",
         );
@@ -710,8 +710,8 @@ fn rolesOf(
 fn readInto(comptime role: Role, comptime P: type) type {
     return switch (role) {
         .body => P,
-        .form => P.zfast_form,
-        .query => P.zfast_query,
+        .form => P.nilo_form,
+        .query => P.nilo_query,
         .bound_body, .bound_form, .bound_query => P.Value,
         else => comptime unreachable,
     };
@@ -723,39 +723,39 @@ fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Rol
     if (P == std.mem.Allocator) return .arena;
     // Before the two below it: a binding wraps one of them, and it is the
     // outer type that says how failures are answered.
-    if (comptime hasNamedDecl(P, bound_mod.marker)) return switch (P.zfast_bound_slot) {
+    if (comptime hasNamedDecl(P, bound_mod.marker)) return switch (P.nilo_bound_slot) {
         .body => .bound_body,
         .form => .bound_form,
         .query => .bound_query,
     };
-    if (comptime hasNamedDecl(P, "zfast_query")) return .query;
+    if (comptime hasNamedDecl(P, "nilo_query")) return .query;
     if (comptime hasNamedDecl(P, form_mod.marker)) return .form;
     // Before `.@"struct" => .body`, and with a message of its own: an
     // `Upload` in the argument list is somebody reaching for a file the way
     // they would reach for a path param, and reading it as the request body
     // would land them in a JSON parse error about a type they never sent.
     if (P == form_mod.Upload) @compileError(
-        "zfast: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
-            "\" is a `zfast.Upload`, which is a field of a form rather than an argument of " ++
+        "nilo: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
+            "\" is a `nilo.Upload`, which is a field of a form rather than an argument of " ++
             "its own.\n" ++
             "  A file arrives as one field among several, so it is asked for inside the " ++
             "struct the form is read into:\n" ++
-            "    const NewAvatar = struct { caption: zfast.Str, image: zfast.Upload };\n" ++
-            "    fn upload(incoming: zfast.Form(NewAvatar)) !zfast.Status(201, Avatar) { … }",
+            "    const NewAvatar = struct { caption: nilo.Str, image: nilo.Upload };\n" ++
+            "    fn upload(incoming: nilo.Form(NewAvatar)) !nilo.Status(201, Avatar) { … }",
     );
     // The other half of that mistake, and worth its own message for the same
     // reason: the two types are both "a file" and point in opposite
     // directions. Read as the request body — which is what a struct by value
     // is — this would land somewhere inside `std.json` being asked to parse a
-    // directory descriptor, which is a message zfast did not write (ADR 0015).
+    // directory descriptor, which is a message nilo did not write (ADR 0015).
     if (comptime filebody.isFileBody(P)) @compileError(
-        "zfast: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
-            "\" is a `zfast.FileBody`, which is what a handler answers *with* rather than " ++
+        "nilo: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
+            "\" is a `nilo.FileBody`, which is what a handler answers *with* rather than " ++
             "something it is given.\n" ++
-            "  A file arriving from the client is a `zfast.Upload`, one field of a form:\n" ++
-            "    fn upload(incoming: zfast.Form(NewAvatar)) !zfast.Status(201, Avatar) { … }\n" ++
+            "  A file arriving from the client is a `nilo.Upload`, one field of a form:\n" ++
+            "    fn upload(incoming: nilo.Form(NewAvatar)) !nilo.Status(201, Avatar) { … }\n" ++
             "  A file going to the client is the return type:\n" ++
-            "    fn invoice(files: *Files, id: u32) !?zfast.FileBody { … }",
+            "    fn invoice(files: *Files, id: u32) !?nilo.FileBody { … }",
     );
     // Before the `.@"struct" => .body` below, which would otherwise swallow
     // it: a resolved value is a struct too, and the marker is what tells the
@@ -768,14 +768,14 @@ fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Rol
         .pointer => |p| switch (p.size) {
             .one => .service,
             .slice => @compileError(
-                "zfast: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
+                "nilo: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
                     "\" is a " ++ naming.of(P) ++ ".\n" ++
-                    "  Text from a request is asked for as a `zfast.Str`, not a bare slice: Str is " ++
+                    "  Text from a request is asked for as a `nilo.Str`, not a bare slice: Str is " ++
                     "what stops the contents from outliving the request (ADR 0004).\n" ++
                     "  Inside the handler, `.view()` reads it and `.keep()` holds on to it.",
             ),
             else => @compileError(
-                "zfast: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
+                "nilo: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
                     "\" is a " ++ naming.of(P) ++ ", which cannot be matched.\n" ++
                     "  A service is asked for as a pointer to a single value (`*Db`).",
             ),
@@ -784,27 +784,27 @@ fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Rol
         .@"struct" => .body,
 
         .optional => @compileError(
-            "zfast: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
+            "nilo: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
                 "\" is a " ++ naming.of(P) ++ ".\n" ++
                 "  A path param on a route that matched is always present, so an optional means " ++
                 "nothing here.\n" ++
                 "  A query param is the thing that may be absent, and there an optional is " ++
-                "exactly right: put the field in a struct and ask for `zfast.Query(That)`.",
+                "exactly right: put the field in a struct and ask for `nilo.Query(That)`.",
         ),
 
         else => if (comptime patch_mod.isPatch(P)) @compileError(
-            "zfast: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
+            "nilo: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
                 "\" is a `Patch(…)`, which is a field of a request body rather than an " ++
                 "argument of its own.\n" ++
                 "  A Patch says whether the body mentioned one field, so it only means " ++
                 "anything inside the struct that body is read into:\n" ++
-                "    const EditUser = struct { name: zfast.Patch(zfast.Str) = .absent };\n" ++
+                "    const EditUser = struct { name: nilo.Patch(nilo.Str) = .absent };\n" ++
                 "    fn editUser(id: u32, incoming: EditUser) !?User { … }",
         ) else @compileError(
-            "zfast: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
-                "\" is a " ++ naming.of(P) ++ ", which zfast does not recognise.\n" ++
+            "nilo: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
+                "\" is a " ++ naming.of(P) ++ ", which nilo does not recognise.\n" ++
                 "  What you can ask for: `*Ctx`, a pointer to a service (`*Db`), a path param " ++
-                "(`u32`, `zfast.Str`, `bool`, an enum), `zfast.Query(T)` for the query string, " ++
+                "(`u32`, `nilo.Str`, `bool`, an enum), `nilo.Query(T)` for the query string, " ++
                 "a `std.mem.Allocator` for the request arena, or one struct for the request body.",
         ),
     };
@@ -818,7 +818,7 @@ fn checkQueryFields(comptime pattern: []const u8, comptime T: type, comptime i: 
         const info = switch (@typeInfo(T)) {
             .@"struct" => |s| s,
             else => @compileError(
-                "zfast: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
+                "nilo: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
                     "\" is a `Query(" ++ naming.of(T) ++ ")`, but " ++ naming.of(T) ++
                     " is not a struct.\n" ++
                     "  The query string is read into a struct: one field per query param.",
@@ -826,7 +826,7 @@ fn checkQueryFields(comptime pattern: []const u8, comptime T: type, comptime i: 
         };
 
         if (info.fields.len == 0) @compileError(
-            "zfast: the `Query(" ++ naming.of(T) ++ ")` on route \"" ++ pattern ++
+            "nilo: the `Query(" ++ naming.of(T) ++ ")` on route \"" ++ pattern ++
                 "\" has no fields, so it would read nothing.\n" ++
                 "  Add one field per query param you want: `page: u32 = 1`.",
         );
@@ -834,10 +834,10 @@ fn checkQueryFields(comptime pattern: []const u8, comptime T: type, comptime i: 
         for (info.fields) |f| {
             if (converting.convertible(f.type)) continue;
             @compileError(
-                "zfast: the field `" ++ f.name ++ ": " ++ naming.of(f.type) ++ "` of the " ++
+                "nilo: the field `" ++ f.name ++ ": " ++ naming.of(f.type) ++ "` of the " ++
                     "`Query(" ++ naming.of(T) ++ ")` on route \"" ++ pattern ++
                     "\" is not something a query value can become.\n" ++
-                    "  A query param arrives as text, so a field is a `zfast.Str`, a number, " ++
+                    "  A query param arrives as text, so a field is a `nilo.Str`, a number, " ++
                     "a `bool`, or an enum — optionally wrapped in `?` when it may be absent.",
             );
         }
@@ -855,8 +855,8 @@ fn tooFewPatternParams(
     else
         "the route only has " ++ num(param_names.len) ++ " (:" ++ join(param_names, ", :") ++ ")";
 
-    return "zfast: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
-        "\" is a " ++ naming.of(P) ++ ", so zfast reads it as a path param — but " ++ has ++ ".\n" ++
+    return "nilo: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
+        "\" is a " ++ naming.of(P) ++ ", so nilo reads it as a path param — but " ++ has ++ ".\n" ++
         "  Add `:name` to the route pattern, or — if " ++ naming.of(P) ++
         " is a service — ask for it as a pointer: `*" ++ naming.of(P) ++ "`.";
 }
@@ -891,7 +891,7 @@ fn join(comptime parts: []const []const u8, comptime separator: []const u8) []co
 
 fn paramValue(comptime P: type, c: *const Ctx, comptime name: []const u8) !P {
     // The route already matched, so the param is certainly there; the
-    // `orelse` is only so a bug in zfast itself shows up as a message
+    // `orelse` is only so a bug in nilo itself shows up as a message
     // rather than a panic.
     const s = c.param(name) orelse
         return fail.internal("path param :{s} was not filled in by the router", .{name});
@@ -971,20 +971,20 @@ fn sendResult(c: *Ctx, result: anytype) !void {
     const T = @TypeOf(value);
 
     if (T == void) return;
-    // Before `zfast_response`, and carrying no body of its own: a redirect
+    // Before `nilo_response`, and carrying no body of its own: a redirect
     // is a status and a Location, and its `headers` are how a sign-in sends
     // a `Set-Cookie` on the way out (ADR 0032).
-    if (comptime hasNamedDecl(T, "zfast_redirect")) {
+    if (comptime hasNamedDecl(T, "nilo_redirect")) {
         for (value.headers.view()) |h| try c.setHeader(h.name, h.value);
-        return c.redirect(T.zfast_redirect, value.location);
+        return c.redirect(T.nilo_redirect, value.location);
     }
-    if (comptime hasNamedDecl(T, "zfast_response")) {
+    if (comptime hasNamedDecl(T, "nilo_response")) {
         // Copied rather than borrowed, the same as `Ctx.setHeader`: a
         // handler assembling a header value has the request arena to build
         // it in, and should not have to think about which of the two it is.
         for (value.headers.view()) |h| try c.setHeader(h.name, h.value);
-        const status = if (comptime hasNamedDecl(T, "zfast_status"))
-            T.zfast_status
+        const status = if (comptime hasNamedDecl(T, "nilo_status"))
+            T.nilo_status
         else
             value.status;
         return sendValue(c, status, value.value);

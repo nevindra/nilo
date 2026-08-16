@@ -3,7 +3,7 @@
 //! Two things are on show here, and the second one is the point. The first is
 //! everything a WebSocket needs — the handshake, frame headers, masking,
 //! pings, the closing handshake, a message ceiling, and shutdown that does not
-//! hang on an idle typist (ADR 0022). The second is a `zfast.Room`: saying
+//! hang on an idle typist (ADR 0022). The second is a `nilo.Room`: saying
 //! something to sockets this handler does not hold, which was the honest limit
 //! of 0.1.0 and is no longer.
 //!
@@ -15,10 +15,10 @@
 //! ```
 
 const std = @import("std");
-const zfast = @import("zfast");
+const nilo = @import("nilo");
 
-pub const std_options = zfast.std_options;
-pub const std_options_debug_io = zfast.debug_io;
+pub const std_options = nilo.std_options;
+pub const std_options_debug_io = nilo.debug_io;
 
 /// One WebSocket connection, from a handler that looks like every other
 /// handler: it takes what it needs and holds the connection until it ends.
@@ -27,7 +27,7 @@ pub const std_options_debug_io = zfast.debug_io;
 /// other connections, and nothing in it handles an incoming broadcast —
 /// `receive` writes those out on the way past, from this fiber, because a
 /// connection's bytes belong to the fiber serving it (ADR 0029).
-fn chat(c: *zfast.Ctx, room: *zfast.Room) !void {
+fn chat(c: *nilo.Ctx, room: *nilo.Room) !void {
     var socket = try c.upgrade();
 
     // `join` takes a seat, `leave` gives it back. The `defer` is not optional
@@ -54,7 +54,7 @@ fn chat(c: *zfast.Ctx, room: *zfast.Room) !void {
         try room.say(message.kind, message.data);
     }
 
-    // Reached when the other end closed, which zfast has already answered.
+    // Reached when the other end closed, which nilo has already answered.
     // Saying so again is harmless and this is where a real one would tidy up.
     try socket.close(.normal, "");
 }
@@ -62,7 +62,7 @@ fn chat(c: *zfast.Ctx, room: *zfast.Room) !void {
 fn page() []const u8 {
     return
         \\<!doctype html>
-        \\<title>zfast chat</title>
+        \\<title>nilo chat</title>
         \\<style>body{font:16px/1.6 ui-monospace,monospace;padding:2rem}
         \\input{font:inherit;width:20rem}
         \\p{color:#666;max-width:34rem}</style>
@@ -85,17 +85,17 @@ fn page() []const u8 {
 }
 
 pub fn main() !void {
-    var app = zfast.App.init(std.heap.smp_allocator);
+    var app = nilo.App.init(std.heap.smp_allocator);
     defer app.deinit();
 
     // A service with state shared across every connection, like any other —
     // `app.provide` and it arrives by type. What is different is only that
     // this one can reach connections other handlers are holding.
-    var room = try zfast.Room.init(std.heap.smp_allocator);
+    var room = try nilo.Room.init(std.heap.smp_allocator);
     defer room.deinit();
     try app.provide(&room);
 
-    try app.use(zfast.logger.standard);
+    try app.use(nilo.logger.standard);
     try app.get("/", page);
     try app.get("/ws", chat);
 
@@ -107,14 +107,14 @@ pub fn main() !void {
 const testing = std.testing;
 
 test "the handshake is answered and what arrives is broadcast" {
-    var app = zfast.App.init(testing.allocator);
+    var app = nilo.App.init(testing.allocator);
     defer app.deinit();
-    var room = try zfast.Room.initWith(testing.allocator, .{ .seats = 4, .backlog = 4 });
+    var room = try nilo.Room.initWith(testing.allocator, .{ .seats = 4, .backlog = 4 });
     defer room.deinit();
     try app.provide(&room);
     try app.get("/ws", chat);
 
-    var client = try zfast.testing.Client.init(testing.allocator, .{});
+    var client = try nilo.testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     // The handshake and one masked text frame, "Hello", in one go.
@@ -136,7 +136,7 @@ test "the handshake is answered and what arrives is broadcast" {
 }
 
 test "a connection that has left the room is not written to" {
-    var room = try zfast.Room.initWith(testing.allocator, .{ .seats = 2, .backlog = 2 });
+    var room = try nilo.Room.initWith(testing.allocator, .{ .seats = 2, .backlog = 2 });
     defer room.deinit();
 
     try testing.expectEqual(@as(usize, 0), room.count());

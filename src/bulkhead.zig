@@ -1,17 +1,25 @@
-//! Bulkhead — the internal boundary between zfast and the Engine.
+//! Bulkhead — the internal boundary between nilo and the Engine.
 //!
-//! Everything zfast needs from the Engine goes through this file. No part
-//! of zfast outside `src/engine/` may name zio. Swapping the Engine means
+//! Everything nilo needs from the Engine goes through this file. No part
+//! of nilo outside `src/engine/` may name zio. Swapping the Engine means
 //! swapping the one import below, without touching a line of user code.
 //!
 //! The contract an Engine has to meet:
 //! - reading the fields of `Options` that name a socket, a buffer or a
 //!   deadline. The struct itself is declared here, not by the Engine, so
 //!   that swapping the Engine cannot change what a user writes.
-//! - `serve(gpa, options, stop, state, handler)` — listen, accept
+//! - `serve(gpa, options, stop, state, ready, handler)` — listen, accept
 //!   connections, and run `handler(state, in, out, deadlines, waker, peer)`
 //!   for each one concurrently until that connection is done. `state` is
 //!   carried through as-is (normally `*App`). Returns when `stop` is set.
+//! - `ready(state, io)` inside that call — run once, after the port is
+//!   taken and before the first connection is accepted, and hand over the
+//!   `std.Io` the Engine runs on. This is the one thing here that exists
+//!   for a caller rather than for nilo: a connection pool cannot be built
+//!   before `listen()`, because the event loop it has to dial through does
+//!   not exist yet, and a pool built without one blocks the thread every
+//!   request shares (ADR 0040). The type is std's, not zio's, so this hands
+//!   out nothing that names the Engine.
 //! - `Peer` — who is at the other end of a connection. `accept` already
 //!   knows, so this asks the Engine for nothing it did not have.
 //! - `Deadlines.limit`/`Deadlines.timedOut` — put a time limit on the next
@@ -21,7 +29,7 @@
 //!   (ADR 0023).
 //! - `Waker.wait`/`Waker.post` — park a connection until its socket is
 //!   readable *or* another fiber has something to say to it, and wake one
-//!   from anywhere. Everything else in zfast is woken by the client at the
+//!   from anywhere. Everything else in nilo is woken by the client at the
 //!   other end, which is what makes a broadcast impossible without this. An
 //!   Engine that waits on sockets can already wait on two things — it has to,
 //!   to wait with a deadline at all — so this asks for nothing new of it
@@ -100,7 +108,7 @@ pub const Options = struct {
     ///
     /// The consequence is that handlers really do run at the same time on
     /// different threads, so a Service that gets written to needs
-    /// `zfast.Mutex` (ADR 0011). Set this to 1 and that stops being true —
+    /// `nilo.Mutex` (ADR 0011). Set this to 1 and that stops being true —
     /// but so does using the machine.
     threads: u8 = 0,
 
@@ -119,7 +127,7 @@ pub const Options = struct {
 
     // ---- deadlines (ADR 0023) ----
     //
-    // Zero turns any one of these off. All four off is what zfast did
+    // Zero turns any one of these off. All four off is what nilo did
     // before 0.1.0, and it meant a client could hold a fiber by opening a
     // connection and saying nothing.
 
@@ -239,11 +247,11 @@ pub const Options = struct {
     /// so the socket's own address is used rather than a guess.
     trusted_hops: u8 = 0,
 
-    /// How long a handler may run without yielding before zfast says so in
+    /// How long a handler may run without yielding before nilo says so in
     /// the log. 0 turns it off (ADR 0034).
     ///
     /// Many requests share one OS thread, so a handler that waits on the
-    /// operating system directly stops all of them. `zfast.blocking` is the
+    /// operating system directly stops all of them. `nilo.blocking` is the
     /// way not to, and nothing in the type system can make anybody use it —
     /// the wrong version compiles and passes its tests. This is what
     /// notices instead, and it notices on the first request rather than
@@ -251,7 +259,7 @@ pub const Options = struct {
     /// precisely because there is nobody else to be slow for.
     ///
     /// What is measured is time the handler ran, not time the request took:
-    /// waiting on `zfast.blocking`, `zfast.sleep`, a `zfast.Mutex`, the
+    /// waiting on `nilo.blocking`, `nilo.sleep`, a `nilo.Mutex`, the
     /// request body or the response write is all subtracted, because in
     /// every one of those the thread is off serving somebody else. A
     /// request that takes the connection over — a stream, a body reader, a
@@ -265,13 +273,13 @@ pub const Options = struct {
     block_warning_ms: u32 = 250,
 
     /// The secret `Session(T)` cookies are sealed with — exactly
-    /// `zfast.session.key_len` (32) bytes. Null means this application has no
+    /// `nilo.session.key_len` (32) bytes. Null means this application has no
     /// sessions, and a handler that asks for one anyway fails with a sentence
     /// naming this option.
     ///
-    /// **Where it comes from is yours**, the same line zfast draws around
+    /// **Where it comes from is yours**, the same line nilo draws around
     /// authentication: an environment variable, a mounted file, a secrets
-    /// manager. What zfast will not do is have a default, because a default
+    /// manager. What nilo will not do is have a default, because a default
     /// key is a key everybody who has read this repository already has.
     ///
     /// It has to be the *same on every instance* behind a load balancer, or a
@@ -287,13 +295,14 @@ pub const Options = struct {
 /// Listen, and run `handler(state, in, out, deadlines)` for every
 /// connection. The one call here that is a wrapper rather than a re-export,
 /// and only for this: the Engine hands over something it can put a time
-/// limit on, and this is where that becomes a `Deadlines` carrying zfast's
+/// limit on, and this is where that becomes a `Deadlines` carrying nilo's
 /// policy. Neither side has to know about the other's half of it.
 pub fn serve(
     gpa: std.mem.Allocator,
     options: Options,
     stop: *Stop,
     state: anytype,
+    comptime ready: anytype,
     comptime handler: anytype,
 ) !void {
     const State = @TypeOf(state);
@@ -317,6 +326,13 @@ pub fn serve(
             const waker: Waker = .{ .vtable = &engine_waker, .target = wake };
             handler(carried.state, in, out, deadlines, waker, peer);
         }
+
+        /// The startup hook, unwrapped from what the Engine carries. The
+        /// deadlines travelling beside `state` are a connection's business
+        /// and there is no connection yet, so only the state goes through.
+        fn start(carried: Carried, io: std.Io) anyerror!void {
+            return ready(carried.state, io);
+        }
     };
 
     return engine.serve(gpa, options, stop, Carried{
@@ -328,7 +344,7 @@ pub fn serve(
             .body_ms = options.body_timeout_ms,
             .write_ms = options.write_timeout_ms,
         },
-    }, Bridge.run);
+    }, Bridge.start, Bridge.run);
 }
 
 const engine_waker: Waker.VTable = .{
@@ -417,7 +433,7 @@ pub fn coarseNanos() u64 {
     if (builtin.os.tag == .linux) {
         // Through `std.posix.system` rather than `std.os.linux`, which is
         // the difference between the vDSO and a real syscall once libc is
-        // linked — and zfast links libc. Measured on this machine: 5ns the
+        // linked — and nilo links libc. Measured on this machine: 5ns the
         // right way, 600ns the wrong way, which is the sort of gap that
         // turns a cheap check into the most expensive thing a request does.
         var ts: std.posix.system.timespec = undefined;
@@ -617,7 +633,7 @@ pub const Side = enum { read, write };
 
 /// How long the Engine may wait for one read, or one write.
 pub const Limit = union(enum) {
-    /// As long as it takes. What every wait in zfast did before ADR 0023,
+    /// As long as it takes. What every wait in nilo did before ADR 0023,
     /// and what a connection that has stopped being HTTP goes back to.
     none,
     /// This operation gets this many milliseconds to itself. The next one
@@ -647,7 +663,7 @@ pub const Woken = enum { readable, posted, timed_out, closed };
 /// other end of it.
 ///
 /// The same shape as `Deadlines` and for the same reason: the Engine owns the
-/// machinery, zfast owns the concept, and neither has to know the other's
+/// machinery, nilo owns the concept, and neither has to know the other's
 /// half. It travels the connection chain by value the way `Deadlines` does,
 /// and it defaults to a vtable with no Engine behind it — which is what makes
 /// the whole HTTP suite runnable against in-memory buffers with no server.

@@ -1,6 +1,6 @@
 # bench/compare
 
-Eight other HTTP servers, written against zfast's benchmark route, so the
+Eight other HTTP servers, written against nilo's benchmark route, so the
 question "how does it place?" has an answer somebody can re-run rather than a
 number somebody remembers. The results are written up in
 [`docs/comparison.md`](../../docs/comparison.md); this directory is how they
@@ -25,9 +25,9 @@ server did it.
 ## Running it
 
 ```bash
-./build.sh                 # every candidate, including zfast
+./build.sh                 # every candidate, including nilo
 python3 drive.py           # all of them
-python3 drive.py zfast httpzig    # or just these
+python3 drive.py nilo httpzig    # or just these
 
 DURATION=20s WARMUP=10s python3 drive.py    # shorter than the 30s default
 ```
@@ -85,7 +85,7 @@ The reasoning, and what it cost to find out, is in
 | `results/` | the recorded run behind `docs/comparison.md` |
 
 `python3 drive.py` runs everything and starts `results/raw.json` clean. Naming
-candidates — `python3 drive.py zfast httpzig` — merges into what is already
+candidates — `python3 drive.py nilo httpzig` — merges into what is already
 there and prints which rows it kept. The rows it keeps are numbers this run did
 not take, so a file built that way is not a single session, and
 `docs/comparison.md` says which of its tables is one and which is not.

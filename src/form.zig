@@ -6,10 +6,10 @@
 //!     email: Str,
 //!     password: Str,
 //!     newsletter: bool = false,
-//!     avatar: ?zfast.Upload = null,
+//!     avatar: ?nilo.Upload = null,
 //! };
 //!
-//! fn signUp(incoming: zfast.Form(SignUp)) !zfast.Redirect(303) {
+//! fn signUp(incoming: nilo.Form(SignUp)) !nilo.Redirect(303) {
 //!     ... incoming.value.email ...
 //!     return .to("/welcome");
 //! }
@@ -44,7 +44,7 @@ const Str = str_mod.Str;
 
 /// The declaration a `Form(T)` carries, so the compile-time engine can tell
 /// it from a body and from a `Query(T)`.
-pub const marker = "zfast_form";
+pub const marker = "nilo_form";
 
 /// A form body, read into a struct of your own — one field per form field.
 ///
@@ -54,7 +54,7 @@ pub const marker = "zfast_form";
 /// a file, which only multipart can carry.
 pub fn Form(comptime T: type) type {
     return struct {
-        pub const zfast_form = T;
+        pub const nilo_form = T;
 
         value: T,
     };
@@ -352,14 +352,14 @@ pub fn checkFields(comptime T: type, comptime what: []const u8) void {
         const info = switch (@typeInfo(T)) {
             .@"struct" => |s| s,
             else => @compileError(
-                "zfast: " ++ what ++ " is not a struct.\n" ++
+                "nilo: " ++ what ++ " is not a struct.\n" ++
                     "  A form is read into a struct: one field per form field.",
             ),
         };
 
         if (info.fields.len == 0) @compileError(
-            "zfast: " ++ what ++ " has no fields, so it would read nothing.\n" ++
-                "  Add one field per form field you want: `email: zfast.Str`.",
+            "nilo: " ++ what ++ " has no fields, so it would read nothing.\n" ++
+                "  Add one field per form field you want: `email: nilo.Str`.",
         );
 
         for (info.fields) |f| {
@@ -370,10 +370,10 @@ pub fn checkFields(comptime T: type, comptime what: []const u8) void {
             if (Inner == Upload) continue;
             if (convert.convertible(f.type)) continue;
             @compileError(
-                "zfast: the field `" ++ f.name ++ ": " ++ naming.of(f.type) ++ "` of " ++ what ++
+                "nilo: the field `" ++ f.name ++ ": " ++ naming.of(f.type) ++ "` of " ++ what ++
                     " is not something a form value can become.\n" ++
-                    "  A form field arrives as text, so a field is a `zfast.Str`, a number, a " ++
-                    "`bool`, or an enum — or a `zfast.Upload` for a file — optionally wrapped in " ++
+                    "  A form field arrives as text, so a field is a `nilo.Str`, a number, a " ++
+                    "`bool`, or an enum — or a `nilo.Upload` for a file — optionally wrapped in " ++
                     "`?` when it may be absent.",
             );
         }
@@ -721,12 +721,12 @@ test "a body that is not a form at all says what it was" {
 fn multipart(comptime parts: []const []const u8) []const u8 {
     comptime {
         var out: []const u8 = "";
-        for (parts) |part| out = out ++ "--zfastBoundary\r\n" ++ part ++ "\r\n";
-        return out ++ "--zfastBoundary--\r\n";
+        for (parts) |part| out = out ++ "--niloBoundary\r\n" ++ part ++ "\r\n";
+        return out ++ "--niloBoundary--\r\n";
     }
 }
 
-const multipart_type = "multipart/form-data; boundary=zfastBoundary";
+const multipart_type = "multipart/form-data; boundary=niloBoundary";
 
 test "a multipart form fills the same struct a urlencoded one does" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -853,7 +853,7 @@ test "a part that never closes is refused rather than read to the end of the bod
         SignUp,
         arena.allocator(),
         multipart_type,
-        "--zfastBoundary\r\nContent-Disposition: form-data; name=\"email\"\r\n\r\nwati",
+        "--niloBoundary\r\nContent-Disposition: form-data; name=\"email\"\r\n\r\nwati",
         "a part of this multipart form is not closed by the boundary the Content-Type named",
     );
 }
@@ -867,9 +867,9 @@ test "a boundary string occurring inside a file does not end the part" {
     const Only = struct { f: Upload };
     const filled = try read(Only, arena.allocator(), multipart_type, comptime multipart(&.{
         "Content-Disposition: form-data; name=\"f\"; filename=\"a.txt\"\r\n\r\n" ++
-            "before --zfastBoundary after",
+            "before --niloBoundary after",
     }));
-    try testing.expectEqualStrings("before --zfastBoundary after", filled.f.bytes.view());
+    try testing.expectEqualStrings("before --niloBoundary after", filled.f.bytes.view());
 }
 
 test "a part with no name is stepped over, and the rest of the form still reads" {
@@ -906,11 +906,11 @@ test "the number of parts one form may hold is bounded" {
     for (0..max_parts * 2) |i| {
         try body.print(
             testing.allocator,
-            "--zfastBoundary\r\nContent-Disposition: form-data; name=\"f{d}\"\r\n\r\nv\r\n",
+            "--niloBoundary\r\nContent-Disposition: form-data; name=\"f{d}\"\r\n\r\nv\r\n",
             .{i},
         );
     }
-    try body.appendSlice(testing.allocator, "--zfastBoundary--\r\n");
+    try body.appendSlice(testing.allocator, "--niloBoundary--\r\n");
 
     const fields = try parse(arena.allocator(), kindOf(multipart_type), body.items);
     try testing.expectEqual(@as(usize, max_parts), fields.text.len);

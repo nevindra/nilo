@@ -1,6 +1,6 @@
 {
-  "zfast": {
-    "label": "zfast",
+  "nilo": {
+    "label": "nilo",
     "wire": 1110,
     "procs": 1,
     "rps": 1456636.43,

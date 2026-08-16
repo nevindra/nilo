@@ -8,11 +8,11 @@
 //!
 //! ```zig
 //! test "the report streams its rows" {
-//!     var app = zfast.App.init(testing.allocator);
+//!     var app = nilo.App.init(testing.allocator);
 //!     defer app.deinit();
 //!     try app.get("/report.csv", report);
 //!
-//!     var client = zfast.testing.Client.init(testing.allocator, .{});
+//!     var client = nilo.testing.Client.init(testing.allocator, .{});
 //!     defer client.deinit();
 //!
 //!     const answer = try client.get(&app, "/report.csv");

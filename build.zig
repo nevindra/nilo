@@ -15,7 +15,7 @@ comptime {
     for (shipped_roots) |root| {
         const quoted = "\"" ++ root ++ "\"";
         if (std.mem.indexOf(u8, manifest, quoted) == null) @compileError(
-            "zfast: a module is rooted in `" ++ root ++
+            "nilo: a module is rooted in `" ++ root ++
                 "/` and build.zig.zon's `.paths` does not list it.\n" ++
                 "  A dependent would fetch a package with that module missing.",
         );
@@ -43,6 +43,30 @@ const sql_refusals = [_]Refusal{
         .says = "`.any` is empty.",
     },
     .{
+        .name = "insert_nothing",
+        .says = "an insert into insert_nothing.User with no columns.",
+    },
+    .{
+        .name = "insert_unknown_column",
+        .says = "insert_unknown_column.User has no column `emial`, asked for in an insert.",
+    },
+    .{
+        .name = "set_on_unknown_column",
+        .says = "set_on_unknown_column.User has no column `aeg`, asked for in `.set`.",
+    },
+    .{
+        .name = "update_empty_set",
+        .says = "`.set` on update_empty_set.User is empty.",
+    },
+    .{
+        .name = "update_without_condition",
+        .says = "an update on update_without_condition.User with no condition.",
+    },
+    .{
+        .name = "update_without_set",
+        .says = "an update on update_without_set.User with no `.set`.",
+    },
+    .{
         .name = "any_not_a_list",
         .says = "`.any` holds a list of conditions and this one is a single condition.",
     },
@@ -56,7 +80,7 @@ const sql_refusals = [_]Refusal{
     },
     .{
         .name = "borrowed_from_a_non_row",
-        .says = "borrowed_from_a_non_row.UserCard's zfast_table names borrowed_from_a_non_row.Settings, which is not a Row.",
+        .says = "borrowed_from_a_non_row.UserCard's nilo_table names borrowed_from_a_non_row.Settings, which is not a Row.",
     },
     .{
         .name = "compared_with_null",
@@ -80,11 +104,11 @@ const sql_refusals = [_]Refusal{
     },
     .{
         .name = "no_id_and_no_key",
-        .says = "no_id_and_no_key.Membership has no column `id`, so its zfast_table has to say which column identifies a row.",
+        .says = "no_id_and_no_key.Membership has no column `id`, so its nilo_table has to say which column identifies a row.",
     },
     .{
         .name = "not_a_row",
-        .says = "not_a_row.User is not a Row — it has no `zfast_table`.",
+        .says = "not_a_row.User is not a Row — it has no `nilo_table`.",
     },
     .{
         .name = "order_on_unknown_column",
@@ -96,11 +120,11 @@ const sql_refusals = [_]Refusal{
     },
     .{
         .name = "table_unknown_option",
-        .says = "table_unknown_option.User's zfast_table sets `.primary`, which is not part of it.",
+        .says = "table_unknown_option.User's nilo_table sets `.primary`, which is not part of it.",
     },
     .{
         .name = "table_without_name",
-        .says = "table_without_name.User's zfast_table does not say `.name`.",
+        .says = "table_without_name.User's nilo_table does not say `.name`.",
     },
     .{
         .name = "unknown_select_option",
@@ -110,11 +134,11 @@ const sql_refusals = [_]Refusal{
 
 /// One entry per file in `refusals/`: a program written wrong on purpose, and
 /// the first line of the error it has to stop with. `says` leaves out the
-/// `zfast: ` prefix because the build step adds it — see the loop in `build`.
+/// `nilo: ` prefix because the build step adds it — see the loop in `build`.
 const refusals = [_]Refusal{
     .{
         .name = "argument_not_recognised",
-        .says = "argument 1 of the handler for route \"/users/:id\" is a [4]u8, which zfast does not recognise.",
+        .says = "argument 1 of the handler for route \"/users/:id\" is a [4]u8, which nilo does not recognise.",
     },
     .{
         .name = "bound_field_cannot_convert",
@@ -146,7 +170,7 @@ const refusals = [_]Refusal{
     },
     .{
         .name = "filebody_as_an_argument",
-        .says = "argument 1 of the handler for route \"/invoices\" is a `zfast.FileBody`, which is what a handler answers *with* rather than something it is given.",
+        .says = "argument 1 of the handler for route \"/invoices\" is a `nilo.FileBody`, which is what a handler answers *with* rather than something it is given.",
     },
     .{
         .name = "form_and_body",
@@ -262,7 +286,7 @@ const refusals = [_]Refusal{
     },
     .{
         .name = "resolver_is_not_a_function",
-        .says = "`resolver_is_not_a_function.Caller.zfast_resolve` is a comptime_int, not a function.",
+        .says = "`resolver_is_not_a_function.Caller.nilo_resolve` is a comptime_int, not a function.",
     },
     .{
         .name = "resolver_loop",
@@ -270,11 +294,11 @@ const refusals = [_]Refusal{
     },
     .{
         .name = "resolver_returns_wrong_type",
-        .says = "the resolver on `resolver_returns_wrong_type.Caller` returns zfast.Str, not resolver_returns_wrong_type.Caller.",
+        .says = "the resolver on `resolver_returns_wrong_type.Caller` returns nilo.Str, not resolver_returns_wrong_type.Caller.",
     },
     .{
         .name = "response_headers_not_a_list",
-        .says = "Response headers have to be written out where they are set — .of(&.{.{ .name = \"Location\", .value = where }}) — and this is a []zfast.Header.",
+        .says = "Response headers have to be written out where they are set — .of(&.{.{ .name = \"Location\", .value = where }}) — and this is a []nilo.Header.",
     },
     .{
         .name = "session_field_is_a_slice",
@@ -294,11 +318,11 @@ const refusals = [_]Refusal{
     },
     .{
         .name = "too_few_pattern_params",
-        .says = "argument 1 of the handler for route \"/users\" is a u32, so zfast reads it as a path param — but the route has no path params at all.",
+        .says = "argument 1 of the handler for route \"/users\" is a u32, so nilo reads it as a path param — but the route has no path params at all.",
     },
     .{
         .name = "too_many_params",
-        .says = "the route pattern \"/:a/:b/:c/:d/:e/:f/:g/:h/:i\" captures 9 params, and the most zfast holds is 8.",
+        .says = "the route pattern \"/:a/:b/:c/:d/:e/:f/:g/:h/:i\" captures 9 params, and the most nilo holds is 8.",
     },
     .{
         .name = "too_many_response_headers",
@@ -306,7 +330,7 @@ const refusals = [_]Refusal{
     },
     .{
         .name = "too_many_segments",
-        .says = "the route pattern \"/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q\" has 17 segments, and the most zfast matches is 16.",
+        .says = "the route pattern \"/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q\" has 17 segments, and the most nilo matches is 16.",
     },
     .{
         .name = "two_bodies",
@@ -326,7 +350,7 @@ const refusals = [_]Refusal{
     },
     .{
         .name = "upload_as_an_argument",
-        .says = "argument 1 of the handler for route \"/avatars\" is a `zfast.Upload`, which is a field of a form rather than an argument of its own.",
+        .says = "argument 1 of the handler for route \"/avatars\" is a `nilo.Upload`, which is a field of a form rather than an argument of its own.",
     },
     .{
         .name = "wildcard_in_segment",
@@ -399,8 +423,8 @@ pub fn build(b: *std.Build) void {
     // The library itself, under the name it is imported by. Everything
     // else here — the benchmark server, every example — depends on this
     // exactly the way somebody else's project would.
-    const zfast = b.addModule("zfast", .{
-        .root_source_file = b.path("src/zfast.zig"),
+    const nilo = b.addModule("nilo", .{
+        .root_source_file = b.path("src/nilo.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -409,19 +433,29 @@ pub fn build(b: *std.Build) void {
     });
 
     // The SQL module: a second module beside the library rather than inside
-    // it (ADR 0039). The dependency runs one way — `sql` on `zfast`, never
+    // it (ADR 0039). The dependency runs one way — `sql` on `nilo`, never
     // back — which is what makes this feature cost a project that does not
     // import it exactly zero bytes. It lives in `sql/` rather than under
     // `src/` so that the convention about adding an `_ = @import(…)` line to
-    // `src/zfast.zig` cannot pull it into every build by being followed.
-    const zfast_sql = b.addModule("zfast_sql", .{
+    // `src/nilo.zig` cannot pull it into every build by being followed.
+    const nilo_sql = b.addModule("nilo_sql", .{
         .root_source_file = b.path("sql/sql.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "zfast", .module = zfast },
+            .{ .name = "nilo", .module = nilo },
         },
     });
+
+    // The driver, reached lazily so that it is fetched only once something
+    // asks for this module. `lazyDependency` answers null on the pass that
+    // discovers it is missing and the build re-runs itself after the
+    // download, which is why this is an `if` rather than an `orelse`
+    // unreachable. Everything above `sql/postgres.zig` names the Wire, not
+    // pg.zig (ADR 0039).
+    if (b.lazyDependency("pg", .{ .target = target, .optimize = optimize })) |pg| {
+        nilo_sql.addImport("pg", pg.module("pg"));
+    }
 
     // The benchmark target: a routed GET with a path param returning ~1KB
     // of JSON, which is the primary metric in docs/history.md.
@@ -430,17 +464,17 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .strip = stripMeasured(strip, optimize),
-        .imports = &.{.{ .name = "zfast", .module = zfast }},
+        .imports = &.{.{ .name = "nilo", .module = nilo }},
     });
 
-    const exe = b.addExecutable(.{ .name = "zfast-hello", .root_module = bench });
+    const exe = b.addExecutable(.{ .name = "nilo-hello", .root_module = bench });
     b.installArtifact(exe);
     b.step("run", "Run the benchmark server").dependOn(&b.addRunArtifact(exe).step);
 
     // Where the time inside one request goes. Not a test: a number that
     // moves with the weather has no business failing a build.
     const profile = b.addExecutable(.{
-        .name = "zfast-profile",
+        .name = "nilo-profile",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/profile.zig"),
             .target = target,
@@ -461,7 +495,7 @@ pub fn build(b: *std.Build) void {
     // — and the speed is what makes a million inputs a coffee break rather
     // than an afternoon.
     const fuzzer = b.addExecutable(.{
-        .name = "zfast-fuzz",
+        .name = "nilo-fuzz",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/fuzz_main.zig"),
             .target = target,
@@ -498,29 +532,59 @@ pub fn build(b: *std.Build) void {
     // time, so the wording of these is the whole point of doing it early.
     const refusals_sql_step = b.step(
         "refusals-sql",
-        "Check that each SQL mistake stops in zfast's own words",
+        "Check that each SQL mistake stops in nilo's own words",
     );
     for (sql_refusals) |refusal| {
         const module = b.createModule(.{
             .root_source_file = b.path(b.fmt("sql/refusals/{s}.zig", .{refusal.name})),
             .target = target,
             .optimize = .Debug,
-            .imports = &.{.{ .name = "zfast_sql", .module = zfast_sql }},
+            .imports = &.{.{ .name = "nilo_sql", .module = nilo_sql }},
         });
         const refused = b.addObject(.{ .name = refusal.name, .root_module = module });
-        refused.expect_errors = .{ .contains = b.fmt("error: zfast: {s}", .{refusal.says}) };
+        refused.expect_errors = .{ .contains = b.fmt("error: nilo: {s}", .{refusal.says}) };
         refusals_sql_step.dependOn(&refused.step);
     }
     test_sql_step.dependOn(refusals_sql_step);
 
+    // Where the live tests connect, or null for "there is no database, skip
+    // them". A build option rather than an environment variable read inside
+    // the test, because `zig build` is the layer that already knows how to
+    // carry configuration into a compilation — and because a test binary
+    // that reads the environment behaves differently depending on who ran
+    // it, which is the opposite of what a test is for. `DATABASE_URL` is
+    // still honoured, read here where reading it is a build input.
+    const database_url = b.option(
+        []const u8,
+        "database-url",
+        "Postgres for the SQL module's live tests (default: $DATABASE_URL, else they skip)",
+    ) orelse b.graph.environ_map.get("DATABASE_URL");
+
+    const live_config = b.addOptions();
+    live_config.addOption(?[]const u8, "database_url", database_url);
+
+    // Each mode needs its own copy of everything the module imports, down to
+    // zio: a module carries the optimize mode it was created with, and this
+    // module's tests drive a whole request through `nilo.testing.Client`.
     for (test_modes) |mode| {
-        const sql_tests = b.addTest(.{
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("sql/sql.zig"),
-                .target = target,
-                .optimize = mode,
-            }),
+        const engine = b.dependency("zio", .{ .target = target, .optimize = mode });
+        const framework = b.createModule(.{
+            .root_source_file = b.path("src/nilo.zig"),
+            .target = target,
+            .optimize = mode,
+            .imports = &.{.{ .name = "zio", .module = engine.module("zio") }},
         });
+        const under_test = b.createModule(.{
+            .root_source_file = b.path("sql/sql.zig"),
+            .target = target,
+            .optimize = mode,
+            .imports = &.{.{ .name = "nilo", .module = framework }},
+        });
+        if (b.lazyDependency("pg", .{ .target = target, .optimize = mode })) |pg| {
+            under_test.addImport("pg", pg.module("pg"));
+        }
+        under_test.addOptions("live_config", live_config);
+        const sql_tests = b.addTest(.{ .root_module = under_test });
         test_sql_step.dependOn(&b.addRunArtifact(sql_tests).step);
     }
 
@@ -544,7 +608,7 @@ pub fn build(b: *std.Build) void {
         });
 
         const library = b.createModule(.{
-            .root_source_file = b.path("src/zfast.zig"),
+            .root_source_file = b.path("src/nilo.zig"),
             .target = target,
             .optimize = mode,
             .imports = &.{.{ .name = "zio", .module = engine.module("zio") }},
@@ -554,7 +618,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = mode,
-            .imports = &.{.{ .name = "zfast", .module = library }},
+            .imports = &.{.{ .name = "nilo", .module = library }},
         });
 
         for ([_]*std.Build.Module{ lib_tests, bench_tests }) |module| {
@@ -569,17 +633,17 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path(b.fmt("examples/{s}/main.zig", .{example.name})),
                 .target = target,
                 .optimize = mode,
-                .imports = &.{.{ .name = "zfast", .module = library }},
+                .imports = &.{.{ .name = "nilo", .module = library }},
             });
             const tests = b.addTest(.{ .root_module = module });
             step.dependOn(&b.addRunArtifact(tests).step);
         }
     }
 
-    // ADR 0015 says a mistake stops in zfast's own words. Nothing held that
+    // ADR 0015 says a mistake stops in nilo's own words. Nothing held that
     // rule until this step: each file in `refusals/` is a program somebody
     // wrote wrong, and each has to fail to compile with the message named
-    // above. Note what the loop does with `.says` — it supplies the `zfast: `
+    // above. Note what the loop does with `.says` — it supplies the `nilo: `
     // prefix itself, so a check that stops somewhere inside the standard
     // library cannot be written down as passing, only fixed or deleted
     // ([ADR 0027](docs/adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)).
@@ -599,16 +663,16 @@ pub fn build(b: *std.Build) void {
     // If the loop somebody sits in gets too slow to sit in, the move is to
     // take them off `test` and leave them on `test-all` — not to stop
     // checking.
-    const refusals_step = b.step("refusals", "Check that each mistake stops in zfast's own words");
+    const refusals_step = b.step("refusals", "Check that each mistake stops in nilo's own words");
     for (refusals) |refusal| {
         const module = b.createModule(.{
             .root_source_file = b.path(b.fmt("refusals/{s}.zig", .{refusal.name})),
             .target = target,
             .optimize = .Debug,
-            .imports = &.{.{ .name = "zfast", .module = zfast }},
+            .imports = &.{.{ .name = "nilo", .module = nilo }},
         });
         const refused = b.addObject(.{ .name = refusal.name, .root_module = module });
-        refused.expect_errors = .{ .contains = b.fmt("error: zfast: {s}", .{refusal.says}) };
+        refused.expect_errors = .{ .contains = b.fmt("error: nilo: {s}", .{refusal.says}) };
         refusals_step.dependOn(&refused.step);
     }
     test_step.dependOn(refusals_step);
@@ -625,7 +689,7 @@ pub fn build(b: *std.Build) void {
             // Deliberately not `stripMeasured`: an example is run by a person,
             // and the first thing they need from a crash is where it was.
             .strip = strip,
-            .imports = &.{.{ .name = "zfast", .module = zfast }},
+            .imports = &.{.{ .name = "nilo", .module = nilo }},
         });
         const built = b.addExecutable(.{
             .name = b.fmt("example-{s}", .{example.name}),

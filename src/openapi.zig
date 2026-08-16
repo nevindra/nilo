@@ -1,6 +1,6 @@
 //! The API description, worked out from the handler signatures (ADR 0017).
 //!
-//! FastAPI's one big idea, which zfast was already most of the way to
+//! FastAPI's one big idea, which nilo was already most of the way to
 //! without noticing: you write the function signature, and everything else
 //! is derived from it (ADR 0015). The typed engine has read those
 //! signatures since stage 3 to decide what to pass in. This reads the same
@@ -34,7 +34,7 @@ const patch_mod = @import("patch.zig");
 
 const Str = str_mod.Str;
 
-/// What zfast can say about the shape of a value. Deliberately smaller than
+/// What nilo can say about the shape of a value. Deliberately smaller than
 /// JSON Schema: it holds what a Zig type actually tells you, and `unknown`
 /// is the honest answer for the rest rather than a guess dressed up as a
 /// description.
@@ -156,7 +156,7 @@ pub const Operation = struct {
     body: ?*const Schema,
     body_kind: BodyKind = .json,
     answer: Answer,
-    /// Whether zfast itself can refuse this request with a 400 before the
+    /// Whether nilo itself can refuse this request with a 400 before the
     /// handler runs — true as soon as there is anything to convert or
     /// validate. Not a guess: it is exactly the set of routes with a typed
     /// param, a query struct, or a body.
@@ -206,7 +206,7 @@ fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
         // carries is "the field was not here at all", and JSON Schema says
         // that with `required`, which a default already takes care of.
         if (patch_mod.isPatch(T)) {
-            return held(.{ .nullable = schemaWithin(T.zfast_patch, depth + 1) });
+            return held(.{ .nullable = schemaWithin(T.nilo_patch, depth + 1) });
         }
 
         return switch (@typeInfo(T)) {
@@ -591,7 +591,7 @@ pub fn write(w: *std.Io.Writer, ops: []const Operation, info: Info) !void {
     try w.writeAll("}}}");
 }
 
-/// The shape of every failure zfast assembles (ADR 0025). Written out here
+/// The shape of every failure nilo assembles (ADR 0025). Written out here
 /// rather than derived from a Zig type, because the type it would be derived
 /// from is a fixed buffer and a status code, not a struct anybody returns.
 const error_schema =
@@ -659,7 +659,7 @@ fn writeOperation(w: *std.Io.Writer, components: *const Components, op: Operatio
 }
 
 /// A failure this endpoint's signature promises, carrying the shape every
-/// failure zfast assembles has (ADR 0025).
+/// failure nilo assembles has (ADR 0025).
 fn writeFailure(w: *std.Io.Writer, status: []const u8, description: []const u8) !void {
     try w.print(",\"{s}\":{{\"description\":", .{status});
     try writeString(w, description);
@@ -1016,7 +1016,7 @@ fn templateOf(pattern: []const u8) ![]const u8 {
     return out.toOwnedSlice();
 }
 
-test "a zfast pattern becomes an OpenAPI path template" {
+test "a nilo pattern becomes an OpenAPI path template" {
     const cases = [_][2][]const u8{
         .{ "/users/:id", "\"/users/{id}\"" },
         .{ "/", "\"/\"" },

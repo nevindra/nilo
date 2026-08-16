@@ -6,9 +6,9 @@ The whole surface, as a list. For what any of it is *for*, see
 ## Root wiring
 
 ```zig
-pub const std_options = zfast.std_options;         // engine chatter → warnings
-pub const std_options_debug_io = zfast.debug_io;   // std.log off the event loop
-pub const panic = zfast.panic;                     // optional: name the request in a crash
+pub const std_options = nilo.std_options;         // engine chatter → warnings
+pub const std_options_debug_io = nilo.debug_io;   // std.log off the event loop
+pub const panic = nilo.panic;                     // optional: name the request in a crash
 ```
 
 ## `App`
@@ -39,7 +39,7 @@ pub const panic = zfast.panic;                     // optional: name the request
 `get`, `post`, `put`, `delete`, `patch`, `head`, `options`, `route`, `tryRoute`,
 `static`, `staticWith`, `tryStatic`, `tryStaticWith` — the same as an App, minus
 `listen`, `docs` and `shutdown`. The prefix is compile-time text and must be
-literal; the type is `zfast.Group("/api")`.
+literal; the type is `nilo.Group("/api")`.
 
 ### `listen` options
 
@@ -83,7 +83,7 @@ read, no status sent
 | `Bound(W)` | any of the three above, with its failures instead of a 400 |
 | `Session(T)` | the session, out of its cookie |
 | `std.mem.Allocator` | the request arena |
-| a type with `zfast_resolve` | a resolved value |
+| a type with `nilo_resolve` | a resolved value |
 | any other struct | the body, parsed from JSON |
 
 A body field may be `Patch(T)`, which tells "not sent" from "sent as null":
@@ -109,7 +109,7 @@ same slot as what it wraps.
 | `b.given("name")` | `Str` — the text that arrived, bound or not. Name checked while compiling |
 
 A `Failure` carries `field`, `reason`, `given`, `kind`, `expected`, and
-`say(w)` — zfast's own sentence for it. `reason` is one of `.missing`,
+`say(w)` — nilo's own sentence for it. `reason` is one of `.missing`,
 `.not_a_number`, `.not_true_or_false`, `.not_a_choice`, `.wrong_kind`; that is
 the whole list, and it is not a validator. Nothing is allocated per failed
 field. See [Forms](./guide/forms.md#when-one-field-is-wrong-and-the-rest-are-fine)
@@ -177,6 +177,8 @@ with `format: binary` whatever the content type is at run time. See
 | `c.service(*Db)` | `?*Db` |
 | `c.resolve(V)` | `!V` — a resolved value, worked out once per request |
 | `c.keepAlive()` | whether the connection will carry another request |
+| `c.arena()` | `std.mem.Allocator` — memory that lasts exactly this request. Never freed by hand |
+| `c.str(bytes)` | `Str` — text you allocated from `c.arena()`, stamped with this request's lifetime |
 
 ### Answering
 
@@ -335,7 +337,7 @@ the 404 a file that was never there gets.
 | `s.live()` | false once the server is stopping |
 
 `c.upgradeWith(.{ .idle_ms = 30_000 })` — how long this connection may say
-nothing before zfast pings it. No answer by the end of the next stretch closes
+nothing before nilo pings it. No answer by the end of the next stretch closes
 it with 1001. Not a deadline: a quiet WebSocket is a working one, so silence
 asks a question rather than ending anything. `0` waits forever.
 
@@ -349,11 +351,11 @@ Saying something to sockets a handler does not hold
 service like any other: provide one, take it by type.
 
 ```zig
-var room = try zfast.Room.init(gpa);
+var room = try nilo.Room.init(gpa);
 defer room.deinit();
 try app.provide(&room);
 
-fn chat(c: *zfast.Ctx, room: *zfast.Room) !void {
+fn chat(c: *nilo.Ctx, room: *nilo.Room) !void {
     var socket = try c.upgrade();
     try room.join(&socket);
     defer room.leave(&socket);
@@ -367,8 +369,8 @@ fn chat(c: *zfast.Ctx, room: *zfast.Room) !void {
 
 | | |
 |---|---|
-| `zfast.Room.init(gpa)` | `!Room` — 1,024 seats, backlog of 4 |
-| `zfast.Room.initWith(gpa, .{ .seats = …, .backlog = … })` | `!Room` |
+| `nilo.Room.init(gpa)` | `!Room` — 1,024 seats, backlog of 4 |
+| `nilo.Room.initWith(gpa, .{ .seats = …, .backlog = … })` | `!Room` |
 | `room.deinit()` | |
 | `room.join(&socket)` | `!void` — `error.RoomFull` when every seat is taken |
 | `room.leave(&socket)` | safe twice, safe without joining — pair it with `defer` |
@@ -409,23 +411,23 @@ failure, whatever the endpoint returns when it works.
 
 | | |
 |---|---|
-| `zfast.Mutex` | `.init`, then `try lock()`, `unlock()`, `tryLock()` |
-| `zfast.blocking(f, args)` | run a blocking call off the event loop |
-| `zfast.sleep(ms)` | wait without parking the thread |
-| `zfast.spawn(f, args)` | run something that is not a request |
-| `zfast.monotonicNanos()` | a clock reading, for durations |
+| `nilo.Mutex` | `.init`, then `try lock()`, `unlock()`, `tryLock()` |
+| `nilo.blocking(f, args)` | run a blocking call off the event loop |
+| `nilo.sleep(ms)` | wait without parking the thread |
+| `nilo.spawn(f, args)` | run something that is not a request |
+| `nilo.monotonicNanos()` | a clock reading, for durations |
 
 `lock()` and `sleep()` fail with `error.Canceled` if the request went away, which
 maps to a 503.
 
 A handler that waits on the operating system without going through one of these
-holds the thread every other request on it is being served by. zfast notices and
+holds the thread every other request on it is being served by. nilo notices and
 says so, once a second at most:
 
 ```
 handler GET /users/7 held its thread for 2003ms. Every other request being
 served on that thread waited the whole time. Hand the call that waits to
-zfast.blocking (ADR 0014).
+nilo.blocking (ADR 0014).
 ```
 
 It fires on the first request, with nobody else waiting, which is the point —
@@ -442,7 +444,7 @@ function, which has no request to fail and so returns a bare error nobody turns
 into a response. Copy what you borrow, and log instead of failing.
 
 ```zig
-try zfast.spawn(flushMetrics, .{&exporter});
+try nilo.spawn(flushMetrics, .{&exporter});
 ```
 
 Sending to a WebSocket somebody else's connection is holding does not need
@@ -452,13 +454,13 @@ of [ADR 0038](adr/0038-a-broadcast-rings-a-bell-it-does-not-write.md).
 ## Built-in middleware
 
 ```zig
-zfast.logger.standard                                    // one info line per request
-zfast.logger.with(.{ .level = .info, .slow_micros = 0,   // slower than this → .warn
+nilo.logger.standard                                    // one info line per request
+nilo.logger.with(.{ .level = .info, .slow_micros = 0,   // slower than this → .warn
                      .format = .text,                    // or .json, one object per line
                      .request_id = false })              // X-Request-Id out, and on the line
 
-zfast.cors.permissive                                    // origin "*", no credentials
-zfast.cors.with(.{ .origin = …, .methods = …, .headers = …,
+nilo.cors.permissive                                    // origin "*", no credentials
+nilo.cors.with(.{ .origin = …, .methods = …, .headers = …,
                    .expose = …, .credentials = false, .max_age = 0 })
 ```
 
@@ -507,3 +509,136 @@ long as the response takes. `max_total_bytes` counts held bytes only. See
 | `answer.headerAt(name, n)` / `.headerCount(name)` | for the ones a response repeats |
 | `answer.setCookie(name)` | the whole `Set-Cookie` line that sets it |
 | `answer.text(&buf)` | the body with chunk framing undone |
+
+## `nilo_sql`
+
+A second module, imported separately. A project that never imports it links
+none of it ([ADR 0040](./adr/0040-a-service-that-needs-the-loop-is-finished-when-the-loop-exists.md)).
+
+```zig
+const sql = @import("nilo_sql");
+```
+
+### A Row
+
+```zig
+const User = struct {
+    pub const nilo_table = .{ .name = "users", .key = .id };
+
+    id: i64,
+    email: nilo.Str,
+    age: i32,
+    created_at: sql.Timestamp,
+};
+```
+
+| | |
+|---|---|
+| `.name` | the table, **written out**. Never guessed from the type name |
+| `.key` | the column that identifies a row. Defaults to `id` when there is a field of that name |
+| `pub const nilo_table = Other` | a narrower Row: the same table as `Other`, fewer columns, checked against it while compiling |
+
+### `Db`
+
+```zig
+var db = sql.Db.init(gpa, "postgres://…", .{});
+defer db.deinit();
+db.checking(&.{ User, Order });   // optional
+try app.provide(&db);
+```
+
+`init` opens nothing. The pool is built by `listen()`, which is the only
+moment there is an event loop to dial through — so a server starts with its
+database switched off, and the first request that needs it gets
+`error.Disconnected`.
+
+| `Opts` | |
+|---|---|
+| `size` | connections held open. Default 10 |
+| `connect_on_init` | how many to dial during `listen()`. Default 0 |
+| `timeout_ms` | how long a caller waits for a free connection. Default 10,000 |
+| `schema_mismatch_is_fatal` | whether a Row that disagrees with its table stops startup. Default true |
+
+### Queries
+
+Every one takes the Row, the `Ctx` (for the request arena) and a struct
+written where it is used. All of them compile their SQL to a constant.
+
+| | |
+|---|---|
+| `db.select(User, c, .{ … })` | `![]User` |
+| `db.one(User, c, .{ … })` | `!?User` — a handler returning this answers 404, and the document says so |
+| `db.insert(User, c, .{ .email = … })` | `!User` — the stored row, generated key included. A subset of the columns |
+| `db.update(User, c, .{ .set = …, .where = … })` | `!usize` — rows changed. Both halves required |
+| `db.delete(User, c, .{ .where = … })` | `!usize` — rows deleted. `.where` required |
+| `db.stream(User, c, .{ … })` | rows one at a time; see below |
+| `db.raw(User, c, sql, .{ … })` | `![]User` — a statement this module will not write |
+| `db.begin(c)` | `!Tx` |
+
+### Options
+
+| | |
+|---|---|
+| `.where` | a condition; see below |
+| `.order` | `.{ .created_at = .desc }`, one column per field |
+| `.limit` / `.offset` | a literal is baked into the SQL; a variable becomes a parameter |
+| `.set` | update only: columns to new values |
+
+### Conditions
+
+Different fields are ANDed. Several operators on one field are ANDed too.
+
+| | |
+|---|---|
+| `.id = 7` | `"id" = $1` |
+| `.age = .{ .gt = 18, .lt = 65 }` | `"age" > $1 AND "age" < $2` |
+| `.eq` `.ne` `.gt` `.gte` `.lt` `.lte` | |
+| `.like` / `.ilike` | |
+| `.in = &.{ 1, 2, 3 }` | `= ANY($1)` — one parameter, so the statement stays a constant |
+| `.deleted_at = null` | `IS NULL` |
+| `.deleted_at = .{ .ne = null }` | `IS NOT NULL` |
+| `.any = .{ .{ … }, .{ … } }` | OR, bracketed. Not `.or`, which is a keyword — so `any` is a reserved column name |
+
+A column that does not exist is a compile error naming the near miss.
+
+### Streaming
+
+For a result set too big to hold. Rows come back as `sql.Borrowed(User)` —
+`User` with every `Str` replaced by `[]const u8`, because the text points
+into the buffer the rows arrive in and dies at the next `next()`.
+
+```zig
+var rows = try db.stream(User, c, .{});
+defer rows.close();                       // required
+while (try rows.next()) |u| try s.print("{d},{s}\n", .{ u.id, u.email });
+```
+
+### `Tx`
+
+```zig
+var tx = try db.begin(c);
+defer tx.deinit();          // rolls back unless committed
+_ = try tx.insert(Order, c, .{ … });
+try tx.commit();
+```
+
+`tx` carries `select`, `one`, `insert`, `update`, `delete` and `raw`, all
+down the one connection it holds. Forgetting the `defer` is caught in Debug
+by a counter asserted at `db.deinit()`.
+
+### Types
+
+| | |
+|---|---|
+| `sql.Timestamp` | microseconds since the epoch, written as RFC 3339 in JSON. `timestamptz` |
+| `sql.Uuid` | 16 bytes, written as text in JSON. `uuid` |
+| `sql.Json(T)` | a `T` stored as `jsonb` |
+
+### Errors
+
+| | |
+|---|---|
+| `error.AlreadyExists` | a unique violation. **409** by default — the only one with a default |
+| `error.ConstraintViolated` | foreign key, check or not-null. 500: usually the code is wrong |
+| `error.Disconnected` | the database went away, or was never there |
+| `error.QueryFailed` | anything else. The server's text is logged, never sent |

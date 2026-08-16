@@ -1,12 +1,12 @@
-# zfast against other frameworks
+# nilo against other frameworks
 
 [`benchmarks.md`](./benchmarks.md) ended with "no other framework was built or
-run, so nothing here says how zfast places." This closes that gap. Eight other
-servers were written against the same route, verified to return zfast's response
+run, so nothing here says how nilo places." This closes that gap. Eight other
+servers were written against the same route, verified to return nilo's response
 byte for byte, and run on the same four physical cores with the same load
 generator.
 
-The short version: **zfast is first on throughput, clearly first on tail
+The short version: **nilo is first on throughput, clearly first on tail
 latency, third on memory per connection, and last on release build time though
 not on the build a developer waits for.** The places it loses are the ones worth
 reading — and the memory row only reads that way because measuring it the first
@@ -23,7 +23,7 @@ Every candidate serves `GET /users/:id`, returns the **same 982 bytes** of JSON,
 serialises that JSON per request rather than caching a rendered buffer, sets
 `Content-Type: application/json` and `Access-Control-Allow-Origin: *`, and
 answers a missing user with a 404. The driver refuses to benchmark a server
-whose body is not byte-identical to zfast's — that check caught Node returning
+whose body is not byte-identical to nilo's — that check caught Node returning
 994 bytes, because without an explicit `Content-Length` it picks chunked
 encoding and puts 12 bytes of framing on the wire nobody else was sending.
 
@@ -35,7 +35,7 @@ encoding and puts 12 bytes of framing on the wire nobody else was sending.
 | Machine | as in [`benchmarks.md`](./benchmarks.md#the-machine) — Ryzen 7 9700X, loopback |
 
 What is **not** equal, and cannot be: response header sets differ, so bytes on
-the wire run from 1,099 (http.zig) to 1,171 (Node) against zfast's 1,110. That
+the wire run from 1,099 (http.zig) to 1,171 (Node) against nilo's 1,110. That
 is a 6% spread on a ~1.1 KB response and it is part of what is being measured,
 not an error in it.
 
@@ -44,9 +44,9 @@ axum 0.8 with hyper 1.11 and tokio 1.53, http.zig at `c22672f`, Zig 0.16.0.
 
 ## Throughput and latency
 
-| framework | req/s | vs zfast | per core | p50 | p90 | p99 | CPU | ns CPU/req |
+| framework | req/s | vs nilo | per core | p50 | p90 | p99 | CPU | ns CPU/req |
 |---|---|---|---|---|---|---|---|---|
-| **zfast** | **1,401,412** | 100% | 350,353 | 36µs | 46µs | **69µs** | 641% | 4,573 |
+| **nilo** | **1,401,412** | 100% | 350,353 | 36µs | 46µs | **69µs** | 641% | 4,573 |
 | http.zig | 1,389,678 | 99% | 347,419 | 38µs | 51µs | **65µs** | 606% | 4,361 |
 | Rust axum | 1,197,545 | 85% | 299,386 | 46µs | 65µs | 226µs | 695% | 5,803 |
 | Bun.serve ×8 | 1,170,614 | 84% | 292,654 | 42µs | 104µs | 3.12ms | 732% | 6,255 |
@@ -63,37 +63,37 @@ one process per core. The gap between a runtime's default and its tuned form is
 larger here than the gap between most of the frameworks.
 
 **All nine rows above are one session**, and they are kept that way on purpose.
-zfast has since been run through the same harness again — the run that produced
+nilo has since been run through the same harness again — the run that produced
 the memory figures below — and read 1,456,636 req/s with a p99 of 57µs. That is
 4% above the row in the table, which is inside the run-to-run spread declared at
 the bottom of this page and is not an effect of anything that changed in
 between. The table keeps the session number, because a re-run that only one of
-nine candidates got is not a comparison. `results/raw.json` holds the newer zfast
+nine candidates got is not a comparison. `results/raw.json` holds the newer nilo
 figures, so the two disagree by exactly this much and for this reason.
 
 ### The field is compressed, and that was predictable
 
 [`benchmarks.md`](./benchmarks.md#the-number-that-reframes-the-budget) measured
-zfast's own code at about 4% of a request's CPU, the other 96% being `epoll`,
+nilo's own code at about 4% of a request's CPU, the other 96% being `epoll`,
 `recv`, `send` and the TCP path. A comparison at this payload therefore mostly
 measures the kernel, and the table agrees: the top five are inside 20% of each
 other, and the two clear outliers below them differ by their **concurrency
 architecture** — a goroutine pair per connection, or one thread — rather than by
 anything about routing or serialisation.
 
-So zfast finishing 0.8% ahead of http.zig is not a result. Two servers doing
+So nilo finishing 0.8% ahead of http.zig is not a result. Two servers doing
 roughly the same number of syscalls in roughly the same way landed in the same
 place, which is what should happen. The honest reading of the top of that table
-is *zfast is in the fastest group*, not *zfast is the fastest*.
+is *nilo is in the fastest group*, not *nilo is the fastest*.
 
-### The tail is where zfast actually separates
+### The tail is where nilo actually separates
 
 That said, one column is not compressed at all. At identical client load:
 
 | | p99 | relative |
 |---|---|---|
 | http.zig | 65µs | 0.9× |
-| **zfast** | **69µs** | 1× |
+| **nilo** | **69µs** | 1× |
 | Rust axum | 226µs | 3.3× |
 | Node cluster ×8 | 260µs | 3.8× |
 | Go net/http | 652µs | 9.4× |
@@ -112,20 +112,20 @@ about: the budget's first row is "throughput **and** p99", not throughput.
 
 ## Memory per idle connection
 
-This is the measurement that changed the code. As first measured, zfast was
+This is the measurement that changed the code. As first measured, nilo was
 **seventh of nine** at 16,961 bytes — http.zig held a connection in two thirds
 of that, Bun in a fiftieth. Chasing why turned up something the number was
 hiding, and the fix is described in
 [`benchmarks.md`](./benchmarks.md#giving-the-pages-back): a keep-alive
 connection was holding every page its buffers had ever touched, and now hands
-them back between requests. zfast's row below is re-measured through the same
+them back between requests. nilo's row below is re-measured through the same
 harness afterwards; nothing else moved.
 
 | framework | B per idle connection | baseline RSS |
 |---|---|---|
 | Bun.serve ×8 | 338 | 257.6 MB |
 | Bun.serve ×1 | 700 | 32.7 MB |
-| **zfast** | **8,767** | **5.4 MB** |
+| **nilo** | **8,767** | **5.4 MB** |
 | Node http ×1 | 10,543 | 48.5 MB |
 | Node cluster ×8 | 10,594 | 440.5 MB |
 | http.zig | 11,218 | 11.5 MB (caps at 8,192 connections) |
@@ -135,7 +135,7 @@ harness afterwards; nothing else moved.
 
 **Third of nine**, and the lowest of anything that is not Bun. What is left is
 two pages of fiber stack and about 574 bytes of bookkeeping, paid the moment
-`accept` returns and belonging to zio rather than to zfast.
+`accept` returns and belonging to zio rather than to nilo.
 
 The flatness is the part that has not changed and is worth as much as the level:
 marginal cost is within 20 bytes of average from 1,000 connections to 10,000.
@@ -150,10 +150,10 @@ the crossings have moved a long way:
 
 | against | |
 |---|---|
-| Rust axum | axum below 193 connections, zfast above |
-| Bun.serve ×1 | zfast below 3,532 connections |
-| Bun.serve ×8 | zfast below 31,352 connections |
-| http.zig, Go Fiber, Go net/http, both Node rows | zfast lower at every count |
+| Rust axum | axum below 193 connections, nilo above |
+| Bun.serve ×1 | nilo below 3,532 connections |
+| Bun.serve ×8 | nilo below 31,352 connections |
+| http.zig, Go Fiber, Go net/http, both Node rows | nilo lower at every count |
 
 **What this means for the README.** "Low memory" was stated without a number and
 would not have survived being given one. It survives 8,767: an idle server is
@@ -166,13 +166,13 @@ of magnitude below on the per-connection number alone.
 One more thing this measurement turned up: **http.zig stops accepting at 8,192
 connections** and does not refuse them, it just stops answering. That is
 `workers.max_conn`, whose default is 8,192 against a default of one worker.
-Configurable, and a `u16`, so 65,535 is the ceiling. zfast took 10,000 without
+Configurable, and a `u16`, so 65,535 is the ceiling. nilo took 10,000 without
 being asked to.
 
 That last sentence was written as a win and it was not one. http.zig has a
-number and zfast had none, which means http.zig's failure mode is a connection
-that waits and zfast's was the machine running out — the OOM killer takes the
-whole process, in-flight requests included. zfast now has a cap of its own,
+number and nilo had none, which means http.zig's failure mode is a connection
+that waits and nilo's was the machine running out — the OOM killer takes the
+whole process, in-flight requests included. nilo now has a cap of its own,
 `.max_connections`, defaulting to 10,000: past it a connection is closed at once
 rather than left waiting, so a client finds out immediately
 ([deploying](./guide/deploying.md#how-many-connections-at-once)). The default
@@ -201,13 +201,13 @@ project does when you do not tell it anything.
 | Go Fiber v2 | **0.2s** | 0.2s ◂ | 0.2s | 9.7 MB | 6.7 MB |
 | Rust axum | **0.2s** | 6.5s | **4.7s** ◂ | — | 1.0 MB |
 | http.zig | 0.3s | 9.2s ◂ | 3.9s | 4.2 MB | 0.4 MB |
-| **zfast** | **0.4s** | 14.7s | **7.4s** ◂ | 6.0 MB | 0.8 MB |
+| **nilo** | **0.4s** | 14.7s | **7.4s** ◂ | 6.0 MB | 0.8 MB |
 
-**In the loop that a developer actually sits in, zfast is last by 0.2 seconds**
+**In the loop that a developer actually sits in, nilo is last by 0.2 seconds**
 — 0.4s against Go's 0.2s. That is a difference nobody will feel, and it is the
 column that ADR 0001's "developer experience comes first" is about.
 
-zfast is still last in a release build, by 2.7s against axum and 3.5s against
+nilo is still last in a release build, by 2.7s against axum and 3.5s against
 http.zig. But it was 15.0s against 4.8s before this measurement was taken, and
 that reading had two different things in it: a genuine gap, and a default
 nobody had noticed.
@@ -247,15 +247,15 @@ By mode, warm:
 | `zig build -Doptimize=ReleaseSafe` | 13.9s |
 | `zig build -Doptimize=ReleaseFast -Dstrip=false` | 14.6s |
 
-### How much of it is zfast
+### How much of it is nilo
 
 Building progressively less, cold, in `ReleaseFast`:
 
 | | with debug info | without |
 |---|---|---|
-| a Zig hello world, no zfast at all | 6.9s | 1.5s |
-| zfast-hello | 14.7s | 7.3s |
-| **what zfast's own code adds** | 7.8s | **5.8s** |
+| a Zig hello world, no nilo at all | 6.9s | 1.5s |
+| nilo-hello | 14.7s | 7.3s |
+| **what nilo's own code adds** | 7.8s | **5.8s** |
 
 And the part that looks most expensive — the comptime typed layer, one
 specialised handler generated per route — costs about **59ms per route**:
@@ -292,7 +292,7 @@ code that was never generated cannot be stripped back out afterwards.
 
 ## The scorecard
 
-| | zfast's placing |
+| | nilo's placing |
 |---|---|
 | Throughput | **1st of 9** — but inside the noise of http.zig |
 | p99 under equal load | **2nd of 9**, and 3–45× ahead of everything outside the top two |
@@ -309,15 +309,15 @@ code that was never generated cannot be stripped back out afterwards.
   database, no logging. A handler that touches Postgres makes every row in the
   throughput table identical.
 - **Nothing about these frameworks in general.** Each is a ~50-line server
-  written to match zfast's route. Fiber, axum and http.zig all have knobs that
-  were left at their defaults, and so does zfast.
+  written to match nilo's route. Fiber, axum and http.zig all have knobs that
+  were left at their defaults, and so does nilo.
 - **Nothing about correctness, features, or documentation**, which is most of
   what choosing a framework is actually about.
 - **The single-threaded rows flatter themselves on CPU per request.** Bun ×1
   shows the lowest ns/req in the table partly because a server on one core has
   no cross-core cache traffic and no contention to pay for.
 - **No statistical work.** Three runs and a median, spreads of 1–4%. Enough to
-  separate 650k from 1.4M, not enough to separate zfast from http.zig — which is
+  separate 650k from 1.4M, not enough to separate nilo from http.zig — which is
   the point made above.
 - **The second build column needed a knob http.zig does not ship.** Its
   `-Dstrip` is three lines added to the harness's own `build.zig`, defaulting to

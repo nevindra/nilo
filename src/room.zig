@@ -1,7 +1,7 @@
 //! A Room — saying something to sockets this handler does not hold.
 //!
 //! ```zig
-//! fn chat(c: *zfast.Ctx, room: *zfast.Room) !void {
+//! fn chat(c: *nilo.Ctx, room: *nilo.Room) !void {
 //!     var socket = try c.upgrade();
 //!     try room.join(&socket);
 //!     defer room.leave(&socket);
@@ -71,7 +71,7 @@ pub const Options = struct {
 ///
 /// [ADR 0020](../docs/adr/0020-a-request-that-lasts-is-still-one-request.md)
 /// refused to have this at all — "a queue with a policy — drop oldest, drop
-/// newest, disconnect — is what a pub/sub layer wants, and zfast is not one".
+/// newest, disconnect — is what a pub/sub layer wants, and nilo is not one".
 /// A room is one, so the refusal is amended rather than ignored, and the
 /// amendment is that the policy is *named at the room* rather than assumed.
 pub const Full = enum {

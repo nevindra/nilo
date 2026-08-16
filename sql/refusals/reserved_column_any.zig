@@ -2,10 +2,10 @@
 //! means OR, and one word cannot be both — a condition naming this column
 //! would be read as a list of alternatives.
 
-const sql = @import("zfast_sql");
+const sql = @import("nilo_sql");
 
 const Answer = struct {
-    pub const zfast_table = .{ .name = "answers", .key = .id };
+    pub const nilo_table = .{ .name = "answers", .key = .id };
 
     id: i64,
     any: bool,

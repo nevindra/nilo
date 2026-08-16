@@ -5,7 +5,7 @@ middleware, and is registered with `app.get` like everything else — the only
 difference is that it doesn't return for a while:
 
 ```zig
-fn echo(c: *zfast.Ctx) !void {
+fn echo(c: *nilo.Ctx) !void {
     var socket = try c.upgrade();
     var buf: [16 * 1024]u8 = undefined;
     while (try socket.receive(&buf)) |message| {
@@ -16,7 +16,7 @@ fn echo(c: *zfast.Ctx) !void {
 try app.get("/ws", echo);
 ```
 
-zfast does the handshake, the frame headers, the masking, the fragment
+nilo does the handshake, the frame headers, the masking, the fragment
 reassembly and the closing handshake. Ping and pong are answered inside
 `receive`, so a handler never writes those three branches.
 
@@ -73,29 +73,29 @@ connections share is an ordinary service:
 
 ```zig
 const Transcript = struct {
-    lock: zfast.Mutex = .init,
+    lock: nilo.Mutex = .init,
     messages: std.ArrayList([]u8) = .empty,
 };
 
-fn chat(c: *zfast.Ctx, transcript: *Transcript) !void { … }
+fn chat(c: *nilo.Ctx, transcript: *Transcript) !void { … }
 ```
 
-`zfast.Mutex`, not `std.Thread.Mutex` — see [Services](./services.md).
+`nilo.Mutex`, not `std.Thread.Mutex` — see [Services](./services.md).
 
 That is for state of your own. Reaching the *other connections* is not something
 to hand-roll on top of it — see below.
 
 ## Sending to a socket you don't hold
 
-`zfast.Room` is a service like any other: provide one, take it by type, `join` on
+`nilo.Room` is a service like any other: provide one, take it by type, `join` on
 the way in and `defer leave` on the way out.
 
 ```zig
-var room = try zfast.Room.init(gpa);
+var room = try nilo.Room.init(gpa);
 defer room.deinit();
 try app.provide(&room);
 
-fn chat(c: *zfast.Ctx, room: *zfast.Room) !void {
+fn chat(c: *nilo.Ctx, room: *nilo.Room) !void {
     var socket = try c.upgrade();
     try room.join(&socket);
     defer room.leave(&socket);
@@ -135,7 +135,7 @@ how many went) rather than a disconnect
 connection was 8,673 against a budget of 8,767, which is what kept this off the
 list for two stages ([ADR 0029](../adr/0029-a-spawned-fiber-belongs-to-the-server.md)).
 
-What else came out of that work is [`zfast.spawn`](../reference.md#concurrency),
+What else came out of that work is [`nilo.spawn`](../reference.md#concurrency),
 for work that is not a request at all.
 
 ## A connection that goes quiet

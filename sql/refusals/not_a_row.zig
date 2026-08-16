@@ -2,7 +2,7 @@
 //! it says which table they came from, and a table name is written rather
 //! than guessed from the type.
 
-const sql = @import("zfast_sql");
+const sql = @import("nilo_sql");
 
 const User = struct {
     id: i64,

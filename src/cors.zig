@@ -42,7 +42,7 @@ pub fn with(comptime options: Options) mw.Middleware {
     // failure shows up as a CORS error with no mention of the real cause.
     // Better to stop it here than let someone debug it at runtime.
     if (comptime options.credentials and std.mem.eql(u8, options.origin, "*")) @compileError(
-        "zfast: cors credentials cannot be combined with origin \"*\" — browsers reject it.\n" ++
+        "nilo: cors credentials cannot be combined with origin \"*\" — browsers reject it.\n" ++
             "  Name the origin explicitly, e.g. .origin = \"https://example.com\".",
     );
 

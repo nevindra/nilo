@@ -34,7 +34,7 @@ func main() {
 			return
 		}
 
-		// Serialised per request, like zfast — not a pre-rendered buffer.
+		// Serialised per request, like nilo — not a pre-rendered buffer.
 		b, _ := json.Marshal(User{uint32(id), "Routed Tester", "tester@example.dev", bio})
 		h.Set("Content-Type", "application/json")
 		w.Write(b)

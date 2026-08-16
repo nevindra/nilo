@@ -5,9 +5,79 @@ What was measured and what was got wrong on the way is in
 [`docs/history.md`](./docs/history.md); what is coming is in
 [`docs/roadmap.md`](./docs/roadmap.md).
 
+## 0.2.0
+
+**zfast is now nilo**, and the SQL module went from compiling queries to
+running them. Needs Zig 0.16.
+
+Install it pinned — `zig fetch --save git+https://github.com/nevindra/nilo?ref=v0.2.0`.
+
+### Breaking: the rename
+
+Everything spelled `zfast` is spelled `nilo`. Three things reach code you
+wrote, and a search and replace covers all of them:
+
+| Was | Is |
+|---|---|
+| `@import("zfast")` | `@import("nilo")` |
+| `zfast_table`, `zfast_resolve`, `zfast_query`, `zfast_response` | `nilo_table`, `nilo_resolve`, … |
+| `.zfast` in `build.zig.zon`, `zfast_sql` | `.nilo`, `nilo_sql` |
+
+The markers are the ones worth knowing about, because they sit in **your**
+structs rather than behind the import line. Nothing else about the API
+changed in this release.
+
+### `nilo_sql` runs
+
+The compile-time half shipped in 0.1.0 and could not reach a socket. It can
+now, over [pg.zig](https://github.com/lalinsky/pg.zig), checked against a
+real Postgres on every push.
+
+- **Reading** — `db.select`, `db.one`, and `db.stream` for a result set too
+  big to hold. `one` returns `?Row`, so a handler returning `!?User` answers
+  404 and the OpenAPI document says so.
+- **Writing** — `db.insert` (with `RETURNING`, so the generated key comes
+  back), `db.update` and `db.delete`, both answering with the number of rows
+  they touched and both refusing to compile without a condition.
+- **Transactions** — `db.begin(c)`, held and released the way every other
+  resource in nilo is: `defer tx.deinit()` rolls back unless committed.
+- **`db.raw`** — the way past *one table, conditions that filter rows*. Still
+  fills your struct, still uses the arena; gives up the column check only.
+- **`db.checking(&.{ User, Order })`** — each Row compared against its table
+  while the server starts, instead of on whichever request got there first.
+- Rows come out of the request arena. A streamed row is `sql.Borrowed(User)`,
+  which is `User` with every `Str` replaced by `[]const u8` — because that
+  text dies at the next row, and the type says so.
+
+Six more Refusals, for an insert or an update written wrong. The module is
+still not an ORM and still refuses joins, aggregates and migrations
+([ADR 0039](./docs/adr/0039-the-shape-of-a-query-is-settled-while-compiling.md)).
+
+### Also
+
+- **`error.AlreadyExists` is a 409.** A unique violation is the one database
+  error whose meaning does not change with the request around it, so it is
+  the only one given a default answer. The rest reach your handler as errors
+  that read.
+- **`Ctx.arena()` and `Ctx.str()`** — memory that lasts exactly one request,
+  and text stamped with that request's lifetime. A module beside the
+  framework needed a supported way to allocate for a request.
+- **`listen()` finishes services that need the event loop.** A service
+  declaring `nilo_start` is handed the loop once it exists and before the
+  first connection is accepted, which is the only reason a connection pool
+  can exist at all ([ADR 0040](./docs/adr/0040-a-service-that-needs-the-loop-is-finished-when-the-loop-exists.md)).
+
+### What it costs
+
+A project that does not import `nilo_sql` links none of it — not the driver,
+not TLS — and pays **560 bytes** for the startup hook. One that uses the
+whole module pays **733 KB**, of which the entire write half is 53 KB and the
+rest is pg.zig's TLS dependency. Allocations per request, memory per idle
+connection and p99 are unchanged.
+
 ## 0.1.0
 
-The first release. Needs Zig 0.16.
+The first release, published as **zfast**. Needs Zig 0.16.
 
 Install it pinned — `zig fetch --save git+https://github.com/nevindra/zfast?ref=v0.1.0`.
 Without the `?ref=` you get whatever `main` is that day.
@@ -45,7 +115,7 @@ Without the `?ref=` you get whatever `main` is that day.
   and sent with `sendfile`, so a directory with a video in it still starts and
   the memory figure still holds
   ([ADR 0037](./docs/adr/0037-a-file-too-big-to-hold-is-opened-not-read.md)).
-- **A handler can answer with a file.** `?zfast.FileBody` serves one out of a
+- **A handler can answer with a file.** `?nilo.FileBody` serves one out of a
   directory opened on purpose, with ranges, `If-Range`, conditional requests and
   `HEAD` handled for it — and null still meaning 404. The name is checked a
   segment at a time, and the path handed to the kernel never comes from a
@@ -55,12 +125,12 @@ Without the `?ref=` you get whatever `main` is that day.
   connection that goes quiet is asked whether it is still there and closed with
   1001 if it does not answer; a quiet WebSocket is a working one, so this is a
   ping rather than a deadline (`.idle_ms`, 30 seconds, `0` waits forever).
-- **Broadcast — `zfast.Room`.** Saying something to sockets a handler does not
+- **Broadcast — `nilo.Room`.** Saying something to sockets a handler does not
   hold. Provide a `Room` like any other service, `join` on the way in,
   `defer leave` on the way out, and `say` reaches everybody in it:
 
   ```zig
-  fn chat(c: *zfast.Ctx, room: *zfast.Room) !void {
+  fn chat(c: *nilo.Ctx, room: *nilo.Room) !void {
       var socket = try c.upgrade();
       try room.join(&socket);
       defer room.leave(&socket);
@@ -80,11 +150,11 @@ Without the `?ref=` you get whatever `main` is that day.
   ([ADR 0038](./docs/adr/0038-a-broadcast-rings-a-bell-it-does-not-write.md)).
 - **A generated OpenAPI document**, written from the signatures rather than from
   annotations ([ADR 0017](./docs/adr/0017-the-api-description-comes-from-the-signatures.md)).
-- **Failure in zfast's own words.** Get a handler wrong and compilation stops
+- **Failure in nilo's own words.** Get a handler wrong and compilation stops
   with a sentence naming your route, your argument and the fix; `refusals/` is
   56 programs written wrong on purpose that keep it that way
   ([ADR 0027](./docs/adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)).
-- **`zfast.spawn`** for work that is not a request, owned by the server so
+- **`nilo.spawn`** for work that is not a request, owned by the server so
   shutdown counts it ([ADR 0029](./docs/adr/0029-a-spawned-fiber-belongs-to-the-server.md)).
 
 A full `Room` backlog drops the oldest post by default, or the newest if you say
@@ -103,7 +173,7 @@ the same harness in [`docs/comparison.md`](./docs/comparison.md).
 
 ### What is not in it
 
-- **Templates** — a refusal rather than a backlog item. zfast is for building
+- **Templates** — a refusal rather than a backlog item. nilo is for building
   APIs and services; rendering pages is not what it is for, and the reasoning is
   in [the roadmap](./docs/roadmap.md#not-coming).
 - **Counters.** Requests carry an id and lines can be JSON, but how many
@@ -117,4 +187,4 @@ the same harness in [`docs/comparison.md`](./docs/comparison.md).
   multipart. Static files under the spill threshold *are* compressed, once, at
   startup; one above it is sent as it lies on disk.
 
-`zfast` is a working name and may change before 1.0.
+`zfast` was a working name, and it changed in 0.2.0.

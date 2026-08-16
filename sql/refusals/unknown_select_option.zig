@@ -2,10 +2,10 @@
 //! be ignored, and the query would answer with every row while looking as
 //! though it had been told to stop at ten.
 
-const sql = @import("zfast_sql");
+const sql = @import("nilo_sql");
 
 const User = struct {
-    pub const zfast_table = .{ .name = "users", .key = .id };
+    pub const nilo_table = .{ .name = "users", .key = .id };
 
     id: i64,
     email: []const u8,

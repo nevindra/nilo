@@ -3,7 +3,7 @@
 //!
 //! ```zig
 //! const User = struct {
-//!     pub const zfast_table = .{ .name = "users", .key = .id };
+//!     pub const nilo_table = .{ .name = "users", .key = .id };
 //!
 //!     id: i64,
 //!     email: Str,
@@ -11,8 +11,8 @@
 //! };
 //! ```
 //!
-//! The marker is the fourth of its kind. `zfast_resolve`, `zfast_query` and
-//! `zfast_response` are the others, and `resolve.zig` asks that they all read
+//! The marker is the fourth of its kind. `nilo_resolve`, `nilo_query` and
+//! `nilo_response` are the others, and `resolve.zig` asks that they all read
 //! alike — so this is not a new mechanism, it is the one already in use.
 //!
 //! **The table name is written, never guessed.** `User` to `users` looks
@@ -26,7 +26,7 @@
 //!
 //! ```zig
 //! const UserCard = struct {
-//!     pub const zfast_table = User;
+//!     pub const nilo_table = User;
 //!
 //!     id: i64,
 //!     email: Str,
@@ -44,11 +44,15 @@
 //! of ADR 0039's rule.
 
 const std = @import("std");
+/// Named here only so that `Borrowed` knows which field type means *text
+/// that lives as long as the request*. Nothing else in this file asks the
+/// framework anything.
+const nilo = @import("nilo");
 
-/// The declaration a Row carries. Named the way `zfast_resolve`,
-/// `zfast_query` and `zfast_response` are, so the markers the compile-time
+/// The declaration a Row carries. Named the way `nilo_resolve`,
+/// `nilo_query` and `nilo_response` are, so the markers the compile-time
 /// engine looks for all read alike.
-pub const marker = "zfast_table";
+pub const marker = "nilo_table";
 
 /// How far a Row may borrow another Row's table before this gives up. Nothing
 /// legitimate nests this deep; the limit exists so that a type holding itself
@@ -80,14 +84,14 @@ pub fn keyOf(comptime Row: type) []const u8 {
         const spec = specOf(Row);
         const named = spec.key orelse {
             if (!hasColumn(Row, "id")) @compileError(
-                "zfast: " ++ @typeName(Row) ++ " has no column `id`, so its " ++
+                "nilo: " ++ @typeName(Row) ++ " has no column `id`, so its " ++
                     marker ++ " has to say which column identifies a row.\n" ++
                     "  Write `.key = .<column>` alongside `.name`.",
             );
             break :blk "id";
         };
         if (!hasColumn(Row, named)) @compileError(
-            "zfast: " ++ @typeName(Row) ++ "'s key names the column `" ++ named ++
+            "nilo: " ++ @typeName(Row) ++ "'s key names the column `" ++ named ++
                 "`, which is not one of its columns.\n" ++
                 "  The key has to be a column the Row reads, or nothing can " ++
                 "identify what was read.",
@@ -109,6 +113,50 @@ pub fn columnsOf(comptime Row: type) []const []const u8 {
     };
 }
 
+/// `Row` with every `Str` replaced by `[]const u8`.
+///
+/// This is the shape a row takes when it is read one at a time: its text
+/// belongs to the driver's read buffer and is good only until the next row
+/// is pulled. `Str` means *text that lives as long as the request*, with no
+/// asterisk — so text that does not is not called one. The type tells the
+/// truth rather than hiding the rule behind a name that promises safety
+/// (ADR 0039).
+///
+/// It is the same rule `Body.read` already followed by returning `[]u8`.
+/// Nothing here is new; it is applied one layer over.
+///
+/// The result carries no `nilo_table`, so it is not itself a Row and cannot
+/// be handed back to `select`. That is deliberate: what you may do with a
+/// borrowed row is read it before the next `next()`, and nothing else.
+pub fn Borrowed(comptime Row: type) type {
+    return comptime blk: {
+        assertRow(Row);
+        const fields = @typeInfo(Row).@"struct".fields;
+        var names: [fields.len][]const u8 = undefined;
+        var types: [fields.len]type = undefined;
+        for (fields, 0..) |f, i| {
+            names[i] = f.name;
+            types[i] = borrowedType(f.type);
+        }
+        const frozen_names = names;
+        const frozen_types = types;
+        // The field order is the Row's, which is also the `SELECT` list's,
+        // which is also the order columns are read back in. One order, kept
+        // in one place, so the three cannot drift.
+        break :blk @Struct(.auto, null, &frozen_names, &frozen_types, &@splat(.{}));
+    };
+}
+
+/// What one column's type becomes when the row is borrowed. Only `Str` moves;
+/// an `i64` is a value and has nothing to outlive.
+fn borrowedType(comptime T: type) type {
+    comptime {
+        if (T == nilo.Str) return []const u8;
+        if (T == ?nilo.Str) return ?[]const u8;
+        return T;
+    }
+}
+
 /// Whether `Row` reads a column by that name. The one question the where
 /// walker asks, and the one that turns a typo into a Refusal.
 pub fn hasColumn(comptime Row: type, comptime column: []const u8) bool {
@@ -126,7 +174,7 @@ pub fn ColumnType(comptime Row: type, comptime column: []const u8) type {
         for (@typeInfo(Row).@"struct".fields) |f| {
             if (std.mem.eql(u8, f.name, column)) return f.type;
         }
-        @compileError("zfast: " ++ @typeName(Row) ++ " has no column `" ++ column ++ "`.");
+        @compileError("nilo: " ++ @typeName(Row) ++ " has no column `" ++ column ++ "`.");
     }
 }
 
@@ -160,7 +208,7 @@ pub fn noSuchColumn(
     comptime what: []const u8,
 ) noreturn {
     comptime {
-        const head = "zfast: " ++ @typeName(Row) ++ " has no column `" ++ wrong ++
+        const head = "nilo: " ++ @typeName(Row) ++ " has no column `" ++ wrong ++
             "`, asked for in " ++ what ++ ".";
         if (nearest(Row, wrong)) |near| {
             @compileError(head ++ "\n  Did you mean `" ++ near ++ "`?");
@@ -188,7 +236,7 @@ const Spec = struct {
     key: ?[]const u8,
 };
 
-/// The table spec `Row` resolves to, following `zfast_table = OtherRow` until
+/// The table spec `Row` resolves to, following `nilo_table = OtherRow` until
 /// a spec that names a table is reached. Every borrowed Row is checked against
 /// the one it borrows from on the way past, so the check cannot be skipped by
 /// asking a question that does not need it.
@@ -201,7 +249,7 @@ fn specOf(comptime Row: type) Spec {
             const decl = @field(current, marker);
             if (@TypeOf(decl) == type) {
                 if (!isRow(decl)) @compileError(
-                    "zfast: " ++ @typeName(current) ++ "'s " ++ marker ++ " names " ++
+                    "nilo: " ++ @typeName(current) ++ "'s " ++ marker ++ " names " ++
                         @typeName(decl) ++ ", which is not a Row.\n" ++
                         "  A Row borrows a table from another Row, or names one itself " ++
                         "with `.{ .name = \"…\" }`.",
@@ -213,7 +261,7 @@ fn specOf(comptime Row: type) Spec {
             return readSpec(current, decl);
         }
         @compileError(
-            "zfast: " ++ @typeName(Row) ++ " borrows a table through more than " ++
+            "nilo: " ++ @typeName(Row) ++ " borrows a table through more than " ++
                 std.fmt.comptimePrint("{d}", .{max_borrow_depth}) ++ " Rows.\n" ++
                 "  A Row that borrows from itself, directly or in a ring, never " ++
                 "reaches a table.",
@@ -225,13 +273,13 @@ fn readSpec(comptime Row: type, comptime decl: anytype) Spec {
     comptime {
         const D = @TypeOf(decl);
         if (@typeInfo(D) != .@"struct") @compileError(
-            "zfast: " ++ @typeName(Row) ++ "'s " ++ marker ++ " is a " ++
+            "nilo: " ++ @typeName(Row) ++ "'s " ++ marker ++ " is a " ++
                 @typeName(D) ++ ".\n" ++
                 "  It is either `.{ .name = \"users\" }` or another Row to take " ++
                 "the table from.",
         );
         if (!@hasField(D, "name")) @compileError(
-            "zfast: " ++ @typeName(Row) ++ "'s " ++ marker ++ " does not say `.name`.\n" ++
+            "nilo: " ++ @typeName(Row) ++ "'s " ++ marker ++ " does not say `.name`.\n" ++
                 "  The table name is written rather than guessed from the type — " ++
                 "`User` to `users` reads well until `Category`.",
         );
@@ -239,7 +287,7 @@ fn readSpec(comptime Row: type, comptime decl: anytype) Spec {
             if (std.mem.eql(u8, f.name, "name")) continue;
             if (std.mem.eql(u8, f.name, "key")) continue;
             @compileError(
-                "zfast: " ++ @typeName(Row) ++ "'s " ++ marker ++ " sets `." ++ f.name ++
+                "nilo: " ++ @typeName(Row) ++ "'s " ++ marker ++ " sets `." ++ f.name ++
                     "`, which is not part of it.\n" ++
                     "  It takes `.name` and, when the identity column is not `id`, `.key`.",
             );
@@ -256,7 +304,7 @@ fn assertSubset(comptime Narrow: type, comptime Wide: type) void {
     comptime {
         for (@typeInfo(Narrow).@"struct".fields) |f| {
             if (!hasColumn(Wide, f.name)) {
-                const head = "zfast: " ++ @typeName(Narrow) ++ " reads `" ++ f.name ++
+                const head = "nilo: " ++ @typeName(Narrow) ++ " reads `" ++ f.name ++
                     "`, which " ++ @typeName(Wide) ++ " does not have.";
                 if (nearest(Wide, f.name)) |near| {
                     @compileError(head ++ "\n  Did you mean `" ++ near ++ "`?");
@@ -265,7 +313,7 @@ fn assertSubset(comptime Narrow: type, comptime Wide: type) void {
             }
             const theirs = ColumnType(Wide, f.name);
             if (f.type != theirs) @compileError(
-                "zfast: " ++ @typeName(Narrow) ++ " reads `" ++ f.name ++ "` as " ++
+                "nilo: " ++ @typeName(Narrow) ++ " reads `" ++ f.name ++ "` as " ++
                     @typeName(f.type) ++ ", and " ++ @typeName(Wide) ++ " reads it as " ++
                     @typeName(theirs) ++ ".\n" ++
                     "  Two Rows over one column have to agree, or one of them is " ++
@@ -275,14 +323,18 @@ fn assertSubset(comptime Narrow: type, comptime Wide: type) void {
     }
 }
 
-fn assertRow(comptime T: type) void {
+/// Stop, in this module's own words, if `T` is not a Row. Public because
+/// `db.zig` is the first thing a mistyped call reaches, and being told
+/// "`User` has no `nilo_table`" beats being told a field is missing from
+/// somewhere three functions further in.
+pub fn assertRow(comptime T: type) void {
     comptime {
         if (@typeInfo(T) != .@"struct") @compileError(
-            "zfast: " ++ @typeName(T) ++ " is not a struct, so it cannot be a Row.\n" ++
+            "nilo: " ++ @typeName(T) ++ " is not a struct, so it cannot be a Row.\n" ++
                 "  A Row is a struct of your own, one field per column.",
         );
         if (!@hasDecl(T, marker)) @compileError(
-            "zfast: " ++ @typeName(T) ++ " is not a Row — it has no `" ++ marker ++ "`.\n" ++
+            "nilo: " ++ @typeName(T) ++ " is not a Row — it has no `" ++ marker ++ "`.\n" ++
                 "  Add `pub const " ++ marker ++ " = .{ .name = \"<table>\" };` to it, " ++
                 "or `= <OtherRow>` to read the same table as another Row.",
         );
@@ -316,7 +368,7 @@ fn distance(comptime a: []const u8, comptime b: []const u8) usize {
 const testing = std.testing;
 
 const User = struct {
-    pub const zfast_table = .{ .name = "users", .key = .id };
+    pub const nilo_table = .{ .name = "users", .key = .id };
 
     id: i64,
     email: []const u8,
@@ -324,14 +376,14 @@ const User = struct {
 };
 
 const UserCard = struct {
-    pub const zfast_table = User;
+    pub const nilo_table = User;
 
     id: i64,
     email: []const u8,
 };
 
 const Membership = struct {
-    pub const zfast_table = .{ .name = "memberships", .key = .user_id };
+    pub const nilo_table = .{ .name = "memberships", .key = .user_id };
 
     user_id: i64,
     plan: []const u8,

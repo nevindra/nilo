@@ -1,6 +1,6 @@
 # A guard is not a guard until it has been seen to fail
 
-zfast has a habit of writing something down and then trusting it. The habit
+nilo has a habit of writing something down and then trusting it. The habit
 produces good documents. It has also, three separate times, produced a guard
 that was not guarding anything, and each time the discovery was an accident.
 
@@ -78,7 +78,7 @@ has nobody to check it against.
 
 ## What this is not
 
-It is not "test everything". zfast has plenty of code whose failure is obvious
+It is not "test everything". nilo has plenty of code whose failure is obvious
 the moment it happens — a router that matches the wrong route, a parser that
 reads the wrong header. Those announce themselves.
 
@@ -107,7 +107,7 @@ being careless.
 - A change adding a check adds the case that trips it. Reviewing the case is
   reviewing the check.
 - The blocking detector (ADR 0034) ships with seven tests, of which three
-  exist only to prove it stays quiet: on `zfast.blocking` used correctly, on a
+  exist only to prove it stays quiet: on `nilo.blocking` used correctly, on a
   stream, and on a server that turned it off. That balance is deliberate and
   is what this entry asks for.
 - ADR 0027's wrong number stays in that document struck through rather than

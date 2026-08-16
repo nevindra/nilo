@@ -50,6 +50,31 @@ pub const any_field = "any";
 /// to follow. Comptime, so `each` can unroll it into `@field` calls.
 pub const Path = []const []const u8;
 
+/// What one placeholder is for.
+///
+/// The path says *where the value was written*; this says *what it has to
+/// become on the way to the database*, which is a different question. A
+/// literal is written without a type and a column has one; and `.in` is
+/// written as a list where every other operator takes a single value.
+pub const Param = struct {
+    /// The column being compared or assigned, or `none` for a parameter
+    /// that belongs to no column — a `LIMIT` is a count, not a value out of
+    /// a row.
+    column: []const u8 = none,
+    /// Whether the value is a list of that column's type rather than one of
+    /// them. `.in` compiles to `= ANY($1)`: one placeholder holding many
+    /// values, which is what keeps the statement a constant however long
+    /// the list is.
+    list: bool = false,
+
+    /// The `column` of a parameter that is not a column.
+    pub const none = "";
+
+    pub fn isBound(self: Param) bool {
+        return self.column.len == 0;
+    }
+};
+
 /// What a where struct compiles to.
 pub const Plan = struct {
     /// The fragment, with no `WHERE` in front — the caller decides whether
@@ -58,6 +83,8 @@ pub const Plan = struct {
     /// Where each parameter's value lives, in the order the placeholders were
     /// numbered.
     paths: []const Path,
+    /// What each parameter is for, in that same order — see `Param`.
+    params: []const Param,
 
     pub fn isEmpty(self: Plan) bool {
         return self.sql.len == 0;
@@ -93,7 +120,8 @@ pub fn planAt(
         var state = State{ .next = first };
         const sql = walk(D, Row, W, prefix, &state);
         const frozen = state.paths[0..state.count].*;
-        break :blk .{ .sql = sql, .paths = &frozen };
+        const frozen_params = state.params[0..state.count].*;
+        break :blk .{ .sql = sql, .paths = &frozen, .params = &frozen_params };
     };
 }
 
@@ -129,7 +157,10 @@ pub fn valueAt(where: anytype, comptime path: Path) ValueAt(@TypeOf(where), path
     return valueAt(@field(where, path[0]), path[1..]);
 }
 
-fn ValueAt(comptime W: type, comptime path: Path) type {
+/// The type at the end of a path. Public because the parameter tuple a
+/// statement is run with is built out of these, one per placeholder, and
+/// that tuple's type has to exist before any of it is read (`db.zig`).
+pub fn ValueAt(comptime W: type, comptime path: Path) type {
     comptime {
         if (path.len == 0) return W;
         return ValueAt(@FieldType(W, path[0]), path[1..]);
@@ -146,16 +177,19 @@ const max_params = 64;
 const State = struct {
     next: usize,
     paths: [max_params]Path = undefined,
+    /// What each placeholder is for, in the same order — see `Param`.
+    params: [max_params]Param = undefined,
     count: usize = 0,
 
-    fn take(self: *State, comptime path: Path) usize {
+    fn take(self: *State, comptime path: Path, comptime param: Param) usize {
         if (self.count == max_params) @compileError(
-            "zfast: a condition with more than " ++
+            "nilo: a condition with more than " ++
                 std.fmt.comptimePrint("{d}", .{max_params}) ++ " values.\n" ++
                 "  That is past anything a hand-written condition reaches; " ++
                 "`db.raw` is the way to send a statement this size.",
         );
         self.paths[self.count] = path;
+        self.params[self.count] = param;
         self.count += 1;
         const n = self.next;
         self.next += 1;
@@ -174,7 +208,7 @@ fn walk(
         const info = switch (@typeInfo(W)) {
             .@"struct" => |s| s,
             else => @compileError(
-                "zfast: a condition has to be a struct, and this one is a " ++
+                "nilo: a condition has to be a struct, and this one is a " ++
                     @typeName(W) ++ ".\n" ++
                     "  Write it out where it is used: `.where = .{ .id = 7 }`.",
             ),
@@ -211,7 +245,7 @@ fn anyOf(
         const info = switch (@typeInfo(T)) {
             .@"struct" => |s| s,
             else => @compileError(
-                "zfast: `.any` holds a list of conditions and this one is a " ++
+                "nilo: `.any` holds a list of conditions and this one is a " ++
                     @typeName(T) ++ ".\n" ++
                     "  Write `.any = .{ .{ … }, .{ … } }` — a condition per entry.",
             ),
@@ -220,12 +254,12 @@ fn anyOf(
         // so asking about tuple-ness first would answer an emptiness mistake
         // with a message about shape.
         if (info.fields.len == 0) @compileError(
-            "zfast: `.any` is empty.\n" ++
+            "nilo: `.any` is empty.\n" ++
                 "  An empty list of alternatives matches nothing, which is almost " ++
                 "never what was meant; leave it out instead.",
         );
         if (!info.is_tuple) @compileError(
-            "zfast: `.any` holds a list of conditions and this one is a single " ++
+            "nilo: `.any` holds a list of conditions and this one is a single " ++
                 "condition.\n  Write `.any = .{ .{ … }, .{ … } }`, with the outer " ++
                 "braces holding one entry per alternative.",
         );
@@ -235,7 +269,7 @@ fn anyOf(
             if (i > 0) out = out ++ " OR ";
             const sub = walk(D, Row, f.type, path ++ &[_][]const u8{f.name}, state);
             if (sub.len == 0) @compileError(
-                "zfast: one of `.any`'s alternatives is empty.\n" ++
+                "nilo: one of `.any`'s alternatives is empty.\n" ++
                     "  An empty condition matches every row, which makes the whole " ++
                     "`.any` mean nothing.",
             );
@@ -271,7 +305,7 @@ fn condition(
             return out;
         }
 
-        return quoted ++ " = " ++ D.placeholder(state.take(path));
+        return quoted ++ " = " ++ D.placeholder(state.take(path, .{ .column = column }));
     }
 }
 
@@ -328,7 +362,8 @@ fn operator(
 
         if (std.mem.eql(u8, op.name, "in")) {
             return switch (D.list_form) {
-                .any_array => quoted ++ " = ANY(" ++ D.placeholder(state.take(path)) ++ ")",
+                .any_array => quoted ++ " = ANY(" ++
+                    D.placeholder(state.take(path, .{ .column = column, .list = true })) ++ ")",
                 // Expanding the list into one placeholder each would make the
                 // statement depend on a length only known at runtime, which is
                 // the half of ADR 0039's rule this module exists to keep.
@@ -343,14 +378,14 @@ fn operator(
         if (@typeInfo(op.T) == .null) {
             if (std.mem.eql(u8, op.name, "ne")) return quoted ++ " IS NOT NULL";
             @compileError(
-                "zfast: `" ++ op.name ++ "` was given null on column `" ++ column ++ "`.\n" ++
+                "nilo: `" ++ op.name ++ "` was given null on column `" ++ column ++ "`.\n" ++
                     "  Comparing with null is never true in SQL. `.col = null` asks " ++
                     "for IS NULL and `.col = .{ .ne = null }` for IS NOT NULL; nothing " ++
                     "else has a meaning.",
             );
         }
 
-        return quoted ++ " " ++ spelled ++ " " ++ D.placeholder(state.take(path));
+        return quoted ++ " " ++ spelled ++ " " ++ D.placeholder(state.take(path, .{ .column = column }));
     }
 }
 
@@ -359,7 +394,7 @@ fn operator(
 fn assertNoReservedColumn(comptime Row: type) void {
     comptime {
         if (row_mod.hasColumn(Row, any_field)) @compileError(
-            "zfast: " ++ @typeName(Row) ++ " has a column named `" ++ any_field ++
+            "nilo: " ++ @typeName(Row) ++ " has a column named `" ++ any_field ++
                 "`, which is the word a condition uses for OR.\n" ++
                 "  Read it under another name in the Row and reach the column " ++
                 "itself with `db.raw`.",
@@ -373,7 +408,7 @@ const testing = std.testing;
 const Pg = dialect_mod.Postgres;
 
 const User = struct {
-    pub const zfast_table = .{ .name = "users", .key = .id };
+    pub const nilo_table = .{ .name = "users", .key = .id };
 
     id: i64,
     email: []const u8,

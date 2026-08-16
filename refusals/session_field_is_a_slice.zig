@@ -2,19 +2,19 @@
 //! into, and nothing bounds how long it gets — so the cookie's size would
 //! depend on the data, and a browser drops an oversized cookie in silence.
 
-const zfast = @import("zfast");
+const nilo = @import("nilo");
 
 const Signed = struct {
     user: u32,
     name: []const u8,
 };
 
-fn me(s: zfast.Session(Signed)) u32 {
+fn me(s: nilo.Session(Signed)) u32 {
     _ = s;
     return 0;
 }
 
 export fn refusal() void {
-    var app: zfast.App = undefined;
+    var app: nilo.App = undefined;
     app.get("/me", me) catch {};
 }

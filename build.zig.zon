@@ -1,12 +1,23 @@
 .{
-    .name = .zfast,
-    .version = "0.1.0",
+    .name = .nilo,
+    .version = "0.2.0",
     .minimum_zig_version = "0.16.0",
-    .fingerprint = 0x716299ab012b312e,
+    .fingerprint = 0xa9fef7e1c22a71e4,
     .dependencies = .{
         .zio = .{
             .url = "git+https://github.com/lalinsky/zio?ref=v0.17.0#9711d68104946a457f151776000210d8adca3f3e",
             .hash = "zio-0.17.0-xHbVVI_jJQC3YbgU7JydwAV7MuASkOTd73YqBaKlFFUz",
+        },
+        // The driver behind `nilo_sql`, and lazy on purpose: it brings four
+        // transitive dependencies of its own (buffer, metrics, xsync, tls),
+        // and a project that serves HTTP and never imports the SQL module
+        // should not fetch, build or link any of them. `build.zig` reaches
+        // for this through `b.lazyDependency`, so it is downloaded the first
+        // time something actually asks for the module (ADR 0039).
+        .pg = .{
+            .url = "git+https://github.com/lalinsky/pg.zig#a2c98876a7d8a36b1771679ce912bfead46ee8f6",
+            .hash = "pg-0.0.0-Wp_7gUqUBgDARGCn8B7brldZRA9lmDQGn262ySg2tg3W",
+            .lazy = true,
         },
     },
     // Two modules ship, so two directories do. `sql` sits beside `src`

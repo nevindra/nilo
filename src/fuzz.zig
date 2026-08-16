@@ -2,7 +2,7 @@
 //!
 //! Every other test in this repo checks an input somebody thought of. This
 //! file checks properties instead, against inputs nobody thought of: the
-//! request head is the one piece of zfast that is fed directly by whoever
+//! request head is the one piece of nilo that is fed directly by whoever
 //! opens a connection, so it is the piece where "we never tried that" is
 //! not a defence.
 //!

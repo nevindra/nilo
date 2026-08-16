@@ -7,7 +7,7 @@ else. Once something is built its entry leaves this file: what shipped is in
 [`adr/`](./adr/).
 
 What this document is measured against is
-[ADR 0015](./adr/0015-what-zfast-borrows-and-from-whom.md): **the signature is
+[ADR 0015](./adr/0015-what-nilo-borrows-and-from-whom.md): **the signature is
 the whole contract**, on a server whose memory you can put a number on. A
 feature that does not serve one of those two is not automatically refused, but
 it has to say what it is for.
@@ -16,23 +16,20 @@ it has to say what it is for.
 
 In order.
 
-1. **`sql` — a query is a struct, checked while compiling.** A second module
-   beside `zfast` rather than inside it, designed in
-   [ADR 0039](./adr/0039-the-shape-of-a-query-is-settled-while-compiling.md):
-   a Row is a struct of your own, the SQL is a constant built before the binary
-   exists, and a column that does not exist is a Refusal. Not an ORM, and the
-   word is refused along with the mechanisms — no change tracking, no lazy
-   relations, no identity map, all three of which cost an allocation per row or
-   a query nobody wrote.
-
-   The comptime half is built, tested with no database in the room, and its
-   seventeen Refusals are held: the Row marker and its checks, the Dialect,
-   the where walker, `SELECT` and `DELETE` as constants, and the schema
-   comparison. What is left is everything that touches a socket — the pg.zig
-   Wire behind the seam, filling a Row from bytes, `Borrowed(Row)` and
-   `stream`, `INSERT`/`UPDATE`, `Tx` and its Debug-only trap, and running the
-   schema comparison on the first connection that succeeds.
-2. **Reloading without a restart — static files, then the server.** A
+1. **`sql`, past one table.** The module reads and writes a single table and
+   refuses everything past *one table, conditions that filter rows*
+   ([ADR 0039](./adr/0039-the-shape-of-a-query-is-settled-while-compiling.md)),
+   with `db.raw` as the way out. What nobody has designed is whether the line
+   moves: a join is where dialects disagree most, and a builder's surface
+   grows with the builder. Migrations are the other half of the same
+   question and are equally undecided.
+2. **A second Dialect.** The seam is fitted and only Postgres is filled in,
+   so nothing is known about whether it holds. SQLite is the useful test,
+   because it disagrees about the two things the seam abstracts: placeholders
+   and list form (`sql/dialect.zig` already refuses a dialect with no
+   `ANY(array)` rather than expanding a list into placeholders, which is the
+   decision SQLite would challenge).
+3. **Reloading without a restart — static files, then the server.** A
    development annoyance rather than a design hole: a deploy restarts anyway.
    The static half is a watch option on `staticWith`, re-reading a directory
    that has changed. The other half is the whole process, and it cannot live
@@ -46,7 +43,7 @@ In order.
    to disk: a spilled file's length and ETag are recorded at load while its bytes
    are read per request, so a file edited under a running server can now be
    served inconsistently rather than merely staying stale (known gaps, below).
-3. **`permessage-deflate`.** Negotiated in the handshake, and a compressor per
+4. **`permessage-deflate`.** Negotiated in the handshake, and a compressor per
    connection is memory that has not been budgeted.
 
 ## Known gaps
@@ -134,13 +131,13 @@ Things that are wrong or missing today, with what fixing them would take.
 
 Not "later" — decided against, with the reasoning written down.
 
-- **Templates.** zfast is for building APIs and services, and rendering a page
+- **Templates.** nilo is for building APIs and services, and rendering a page
   is the thing it is not for. The mechanism argument and the scope argument
   point the same way. Rendering means producing a string per request, which is
   an allocation per request, which is the one axis
   [ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md) treats as a hard
   invariant rather than a budget — the 8,767 bytes and the single allocation are
-  what zfast has to sell, and a template layer spends both. And the two shapes
+  what nilo has to sell, and a template layer spends both. And the two shapes
   Zig actually offers are far apart with nothing argued for in between:
   comptime-checked templates, which are a compiler of their own, and runtime
   string interpolation, which is a worse `std.fmt`. [jetzig](https://www.jetzig.dev/)
@@ -181,7 +178,7 @@ Not "later" — decided against, with the reasoning written down.
   valid until it expires, so revocation is not in the mechanism. The answer
   today is a version number in the session checked against the row the handler
   was fetching anyway ([guide](./guide/sessions.md#what-it-cannot-do)), and it
-  is not obvious zfast should have more of an opinion than that — anything
+  is not obvious nilo should have more of an opinion than that — anything
   further is a store, which is the design
   [ADR 0035](./adr/0035-a-session-is-sealed-into-the-cookie.md) declined.
 - **Multipart, streamed.** `Form(T)` reads a multipart body whole, bounded by
@@ -196,10 +193,6 @@ Not "later" — decided against, with the reasoning written down.
   that has to hold its place across reads. Until somebody designs it the answer
   is `c.bodyStream()`, which holds nothing and makes the framing the handler's
   problem.
-- **The name.** `zfast` is a working name. The `z-` prefix is crowded in the Zig
-  ecosystem already (`zap`, `zzz`, `zon`, a dozen `zig-*`), so it is easy to
-  confuse. The module name has to stay easy to change without touching user
-  code, which is why nothing above the import line spells it.
 
 ## Zig versions
 
@@ -209,7 +202,7 @@ hunting for the right branch. The consequence is that every new Zig release
 brings a few awkward weeks, made worse by zio following a branch-per-version
 pattern too.
 
-0.1.0 needs **Zig 0.16**.
+0.2.0 needs **Zig 0.16**.
 
 ## The standing risks
 
@@ -217,7 +210,7 @@ pattern too.
 |---|---|
 | zio is a one-person project; it could stop when Zig 0.17 lands | The Bulkhead, fitted from the first stage rather than patched on later ([ADR 0002](./adr/0002-zio-as-the-engine-behind-the-bulkhead.md)) |
 | The `Str` guarantee cannot be complete | The debug-build staleness trap, on from day one ([ADR 0004](./adr/0004-request-arena-and-the-str-type.md)). It missed the case anybody would actually test it with — two separate `curl` calls, where the next connection started counting from the same number the stashed `Str` held — until every connection was given a generation span of its own. What it still cannot watch is a `Str` reached through something nothing walks: a const slice, an untagged union |
-| A Service is shared across threads and nothing makes a user notice | `zfast.Mutex`, in the guide and in the example everyone copies. Nothing forces it — Zig has no ownership tracking to force it with ([ADR 0011](./adr/0011-shared-services-need-a-lock-from-the-bulkhead.md)) |
+| A Service is shared across threads and nothing makes a user notice | `nilo.Mutex`, in the guide and in the example everyone copies. Nothing forces it — Zig has no ownership tracking to force it with ([ADR 0011](./adr/0011-shared-services-need-a-lock-from-the-bulkhead.md)) |
 | A panic in any handler takes the whole process down, and Go people will assume otherwise | Cannot be fixed in Zig. Said plainly in the docs, `ReleaseSafe` and a supervisor recommended, and the in-flight request named in the crash ([ADR 0008](./adr/0008-no-recover-middleware.md)) |
 | A response could differ from what `std.json` would have written, now that something else usually writes it | `covers()` decides while compiling which types the generated writer may touch, and it errs narrow: a tuple, a `[N]u8`, a type with its own `jsonStringify`, anything unrecognised, all fall back. Floats are handed to `std.json` field by field rather than reimplemented |
 | Deadlines are on by default, so a client on a genuinely bad link could be cut off where it used to be served | The numbers are generous and each bounds one wait rather than a whole request, so nothing legitimate and slow — a big upload, an hour-long stream — is hurried by any of them ([ADR 0023](./adr/0023-a-deadline-belongs-to-an-operation-not-to-a-request.md)) |
@@ -229,4 +222,4 @@ pattern too.
 | A file response's bytes leave by a route the tests never take | **Not handled.** Every test runs through `testing.Client`, whose writer is `std.Io.Writer.fixed` and carries no `sendFile` in its vtable, so the suite takes std's read/drain fallback — the right bytes, by the route a platform without `sendfile` uses. The splice chain the feature exists for needs a real socket and nothing in the suite opens one. The fix is a build step that listens on port 0 and pulls a file over it; it is not written |
 | A file response holds a descriptor for as long as the send takes | One per request in flight, so `.max_connections` bounds it — the same number an operator already multiplies for memory. It is closed on every exit from `sendfile.send` including the error ones, and a test counts `/proc/self/fd` across a request so it stays that way ([ADR 0037](./adr/0037-a-file-too-big-to-hold-is-opened-not-read.md)) |
 | A spilled file's ETag is its mtime and size, so two different contents could share one | Accepted, and argued rather than assumed: the alternative is hashing gigabytes at startup, and a weak validator would make `If-Range` unusable for exactly the large downloads that need resuming. It is the tag nginx has served by default for twenty years. A held file is unaffected — it keeps its content hash |
-| `zio.BroadcastChannel` aborts, or in `ReleaseFast` deadlocks, when a fiber parked in `receive` is cancelled | Not used, reported upstream with a standalone reproduction, and **fixed upstream** — a fresh `Waiter` per receive attempt, in zio `ab6873eb`. Not in a release yet: v0.17.0 predates it and is what `build.zig.zon` pins, so the fix arrives whenever zfast next moves the pin. Nothing here depends on it. A waiter node was pushed onto a queue it was already linked into (`simple_queue.zig:43`, from `broadcast_channel.zig:72`). Debug aborted 10 runs in 10, ReleaseSafe 3 in 3, and `ReleaseFast` — which has no such assertion — **hung 17 runs in 20** where a clean run takes 200ms. Cancellation was what reached it: the same program closing the channel and waiting was clean 5 in 5. A shared ring forces the cancel, having no per-consumer close ([ADR 0029](./adr/0029-a-spawned-fiber-belongs-to-the-server.md), [zio#667](https://github.com/lalinsky/zio/issues/667)) |
+| `zio.BroadcastChannel` aborts, or in `ReleaseFast` deadlocks, when a fiber parked in `receive` is cancelled | Not used, reported upstream with a standalone reproduction, and **fixed upstream** — a fresh `Waiter` per receive attempt, in zio `ab6873eb`. Not in a release yet: v0.17.0 predates it and is what `build.zig.zon` pins, so the fix arrives whenever nilo next moves the pin. Nothing here depends on it. A waiter node was pushed onto a queue it was already linked into (`simple_queue.zig:43`, from `broadcast_channel.zig:72`). Debug aborted 10 runs in 10, ReleaseSafe 3 in 3, and `ReleaseFast` — which has no such assertion — **hung 17 runs in 20** where a clean run takes 200ms. Cancellation was what reached it: the same program closing the channel and waiting was clean 5 in 5. A shared ring forces the cancel, having no per-consumer close ([ADR 0029](./adr/0029-a-spawned-fiber-belongs-to-the-server.md), [zio#667](https://github.com/lalinsky/zio/issues/667)) |

@@ -1,6 +1,6 @@
 # Getting started
 
-zfast needs **Zig 0.16**. Nothing else — no C library, no system package.
+nilo needs **Zig 0.16**. Nothing else — no C library, no system package.
 
 ## Add it to your project
 
@@ -10,10 +10,10 @@ yet:
 
 ```
 zig init
-zig fetch --save git+https://github.com/nevindra/zfast?ref=v0.1.0
+zig fetch --save git+https://github.com/nevindra/nilo?ref=v0.2.0
 ```
 
-That writes zfast into your `build.zig.zon`, pinned to the tag you asked for.
+That writes nilo into your `build.zig.zon`, pinned to the tag you asked for.
 **Keep the `?ref=`.** Without it `zig fetch` resolves whatever `main` is at that
 moment and writes *that* commit's hash into your lockfile — so two people
 installing a week apart get two different libraries, and neither of them asked
@@ -21,7 +21,7 @@ for a version. Then hand the module to whatever
 imports it, in `build.zig`:
 
 ```zig
-const zfast = b.dependency("zfast", .{ .target = target, .optimize = optimize });
+const nilo = b.dependency("nilo", .{ .target = target, .optimize = optimize });
 
 const exe = b.addExecutable(.{
     .name = "my-app",
@@ -29,37 +29,37 @@ const exe = b.addExecutable(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "zfast", .module = zfast.module("zfast") }},
+        .imports = &.{.{ .name = "nilo", .module = nilo.module("nilo") }},
     }),
 });
 b.installArtifact(exe);
 ```
 
-Pass the same `.optimize` through to the dependency. Building zfast in `Debug`
+Pass the same `.optimize` through to the dependency. Building nilo in `Debug`
 under a `ReleaseFast` program is legal and slow, and nothing warns about it.
 
 ## A server that answers
 
 ```zig
 const std = @import("std");
-const zfast = @import("zfast");
+const nilo = @import("nilo");
 
-pub const std_options = zfast.std_options;
-pub const std_options_debug_io = zfast.debug_io;
+pub const std_options = nilo.std_options;
+pub const std_options_debug_io = nilo.debug_io;
 
 fn hello() []const u8 {
-    return "hello from zfast\n";
+    return "hello from nilo\n";
 }
 
-fn greet(name: zfast.Str) zfast.Str {
+fn greet(name: nilo.Str) nilo.Str {
     return name;
 }
 
 pub fn main() !void {
-    var app = zfast.App.init(std.heap.smp_allocator);
+    var app = nilo.App.init(std.heap.smp_allocator);
     defer app.deinit();
 
-    try app.use(zfast.logger.standard);
+    try app.use(nilo.logger.standard);
 
     try app.get("/", hello);
     try app.get("/greet/:name", greet);
@@ -71,12 +71,12 @@ pub fn main() !void {
 ```
 $ zig build run
 $ curl localhost:8787/
-hello from zfast
+hello from nilo
 $ curl localhost:8787/greet/wati
 wati
 ```
 
-`hello` takes nothing and returns text. `greet` takes a `zfast.Str`, which is
+`hello` takes nothing and returns text. `greet` takes a `nilo.Str`, which is
 the first `:param` in the pattern — text that belongs to the request and is only
 valid while it runs. Neither function knows what HTTP is, which is the point:
 both are callable from a test.
@@ -88,7 +88,7 @@ They are easy to write the wrong way round, and each fixes a different symptom.
 remember which.
 
 ```zig
-pub const std_options = zfast.std_options;
+pub const std_options = nilo.std_options;
 ```
 
 Turns the Engine's debug chatter down to warnings. Without it a debug build opens
@@ -98,12 +98,12 @@ settings of your own, start from this one:
 ```zig
 pub const std_options: std.Options = .{
     .log_level = .debug,
-    .log_scope_levels = zfast.std_options.log_scope_levels,
+    .log_scope_levels = nilo.std_options.log_scope_levels,
 };
 ```
 
 ```zig
-pub const std_options_debug_io = zfast.debug_io;
+pub const std_options_debug_io = nilo.debug_io;
 ```
 
 Keeps `std.log` from blocking the event loop. Writing to stderr is a syscall, and
@@ -114,7 +114,7 @@ request on that thread. The symptom is a server that is merely slow, which is wh
 There is an optional third line, worth having in production:
 
 ```zig
-pub const panic = zfast.panic;
+pub const panic = nilo.panic;
 ```
 
 It makes a crash say which request caused it — `panic: integer overflow (while

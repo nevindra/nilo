@@ -64,7 +64,7 @@ pub const Postgres = struct {
         return comptime blk: {
             for (ident) |ch| {
                 if (ch == '"') @compileError(
-                    "zfast: the column name `" ++ ident ++ "` contains a quote.\n" ++
+                    "nilo: the column name `" ++ ident ++ "` contains a quote.\n" ++
                         "  A column name comes from a Zig field name, and one written " ++
                         "with `@\"…\"` can hold characters SQL cannot.",
                 );
@@ -169,7 +169,7 @@ pub fn assertDialect(comptime D: type) void {
         };
         for (owed) |decl| {
             if (!@hasDecl(D, decl)) @compileError(
-                "zfast: " ++ @typeName(D) ++ " is being used as a Dialect and has no `" ++
+                "nilo: " ++ @typeName(D) ++ " is being used as a Dialect and has no `" ++
                     decl ++ "`.\n" ++
                     "  What a Dialect owes is listed at the top of `sql/dialect.zig`.",
             );
@@ -182,7 +182,7 @@ pub fn assertDialect(comptime D: type) void {
 /// same way.
 pub fn noListForm(comptime D: type, comptime column: []const u8) noreturn {
     @compileError(
-        "zfast: the " ++ D.name ++ " dialect has no `in`, asked for on column `" ++
+        "nilo: the " ++ D.name ++ " dialect has no `in`, asked for on column `" ++
             column ++ "`.\n" ++
             "  Its database cannot take a list as one value, and expanding the list " ++
             "into placeholders would make the statement depend on a length that is " ++

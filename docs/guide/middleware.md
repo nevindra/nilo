@@ -6,15 +6,15 @@ interchangeable: **middleware enforces, a resolved value provides.**
 ## Middleware
 
 ```zig
-fn timing(c: *zfast.Ctx, next: zfast.Next) !void {
-    const started = zfast.monotonicNanos();
+fn timing(c: *nilo.Ctx, next: nilo.Next) !void {
+    const started = nilo.monotonicNanos();
     try next.run(c);
-    const took_us = (zfast.monotonicNanos() - started) / std.time.ns_per_us;
+    const took_us = (nilo.monotonicNanos() - started) / std.time.ns_per_us;
     std.log.info("{f} took {d}µs", .{ c.path(), took_us });
 }
 
-try app.use(zfast.logger.standard);
-try app.use(zfast.cors.permissive);
+try app.use(nilo.logger.standard);
+try app.use(nilo.cors.permissive);
 try app.use(timing);
 try app.useOn("/api", requireToken);
 ```
@@ -24,7 +24,7 @@ on the way out. Not calling `next` at all ends the chain, which is all a
 rejecting auth middleware has to do:
 
 ```zig
-fn requireToken(c: *zfast.Ctx, next: zfast.Next) !void {
+fn requireToken(c: *nilo.Ctx, next: nilo.Next) !void {
     const token = c.header("Authorization") orelse
         return fail.unauthorized("this endpoint needs a token", .{});
     if (!valid(token.view())) return fail.unauthorized("that token is not valid", .{});
@@ -48,8 +48,8 @@ See [ADR 0009](../adr/0009-middleware-is-an-onion-of-ctx-functions.md).
 ## The built-in two
 
 ```zig
-try app.use(zfast.logger.standard);
-try app.use(zfast.cors.permissive);
+try app.use(nilo.logger.standard);
+try app.use(nilo.cors.permissive);
 ```
 
 `logger.with(.{ .level = .debug, .slow_micros = 250_000 })` logs ordinary
@@ -70,13 +70,13 @@ argument list:
 
 ```zig
 const CurrentUser = struct {
-    pub const zfast_resolve = authenticate;   // ← the whole wiring
+    pub const nilo_resolve = authenticate;   // ← the whole wiring
 
     id: u32,
     name: Str,
 };
 
-fn authenticate(c: *zfast.Ctx, db: *Db) !CurrentUser {
+fn authenticate(c: *nilo.Ctx, db: *Db) !CurrentUser {
     const token = c.header("Authorization") orelse
         return fail.unauthorized("this endpoint needs a token", .{});
     return db.userForToken(token.view()) orelse
@@ -104,7 +104,7 @@ guard a whole prefix.
 ## Which one to reach for
 
 ```zig
-fn requireAdmin(c: *zfast.Ctx, next: zfast.Next) !void {
+fn requireAdmin(c: *nilo.Ctx, next: nilo.Next) !void {
     const user = try c.resolve(CurrentUser);
     if (!user.is_admin) return fail.forbidden("admins only", .{});
     try next.run(c);
@@ -124,7 +124,7 @@ See [ADR 0016](../adr/0016-resolved-values-are-declared-by-their-type.md).
 
 ## Writing your own middleware
 
-The signature is `fn (c: *zfast.Ctx, next: zfast.Next) !void`. There is no
+The signature is `fn (c: *nilo.Ctx, next: nilo.Next) !void`. There is no
 registration type and no builder — `app.use` takes the function.
 
 Middleware is at the `Ctx` layer on purpose: it has no argument list to inject

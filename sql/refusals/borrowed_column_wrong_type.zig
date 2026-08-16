@@ -2,17 +2,17 @@
 //! wrong about the table, and which one it is cannot be worked out from here
 //! — so both are named.
 
-const sql = @import("zfast_sql");
+const sql = @import("nilo_sql");
 
 const User = struct {
-    pub const zfast_table = .{ .name = "users", .key = .id };
+    pub const nilo_table = .{ .name = "users", .key = .id };
 
     id: i64,
     age: i32,
 };
 
 const UserCard = struct {
-    pub const zfast_table = User;
+    pub const nilo_table = User;
 
     id: i64,
     age: []const u8,

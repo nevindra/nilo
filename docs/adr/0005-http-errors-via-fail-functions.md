@@ -18,5 +18,5 @@ Ordinary Zig errors coming from anywhere (a database, a parser, an allocator) ar
 
 - There is hidden per-request state. This is acceptable because the Engine already knows which request is running, so the cost is close to zero — but it is still hidden state, and the documentation has to say so plainly.
 - Called outside a request (inside a handler's unit test, for instance), a fail function just returns a plain error with no message. Handlers stay testable as ordinary functions.
-- The message goes out inside a JSON object, the same one for every failure zfast assembles ([ADR 0025](./0025-every-failure-answers-with-the-same-json-body.md)). Nothing about writing a fail function changed; what changed is what the client parses.
+- The message goes out inside a JSON object, the same one for every failure nilo assembles ([ADR 0025](./0025-every-failure-answers-with-the-same-json-body.md)). Nothing about writing a fail function changed; what changed is what the client parses.
 - A message written here is invisible to the generated API description, because it is a call in a function body. The failure a signature *can* state is `!?T`, which is a 404 ([ADR 0024](./0024-a-failure-mode-belongs-in-the-return-type.md)); writing the `orelse fail.notFound(…)` on top of one gets both the better sentence and the documented status.

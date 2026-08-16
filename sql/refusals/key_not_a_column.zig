@@ -1,10 +1,10 @@
 //! The key names a column the Row does not read. Nothing could identify what
 //! came back, because the value that would identify it was never selected.
 
-const sql = @import("zfast_sql");
+const sql = @import("nilo_sql");
 
 const User = struct {
-    pub const zfast_table = .{ .name = "users", .key = .user_id };
+    pub const nilo_table = .{ .name = "users", .key = .user_id };
 
     id: i64,
     email: []const u8,

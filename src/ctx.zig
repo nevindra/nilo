@@ -1,10 +1,10 @@
 //! Ctx — one request in flight, and all the control over it. This is
-//! zfast's real API (ADR 0003): the typed layer above it turns into calls
+//! nilo's real API (ADR 0003): the typed layer above it turns into calls
 //! to this while compiling.
 //!
 //! Every piece of text coming out of Ctx is a `Str`: it lives as long as
 //! the request, and is copied deliberately with `.keep()` if it needs to
-//! live longer (ADR 0004). Fields prefixed with `_` belong to zfast's
+//! live longer (ADR 0004). Fields prefixed with `_` belong to nilo's
 //! internals — the request arena behind them is never touched directly by
 //! users.
 
@@ -184,6 +184,37 @@ pub const Ctx = struct {
     /// Stays empty — and costs nothing — on a request that asks for none.
     _resolved: std.ArrayList(Resolved) = .empty,
 
+    /// Memory that lasts exactly as long as this request.
+    ///
+    /// Reset when the request ends, so nothing taken from here needs — or
+    /// may have — a `free`. It is what `Str` points into, and it is the
+    /// reason a `Str` never escapes its request without `.keep()`
+    /// (ADR 0004).
+    ///
+    /// Public because a module beside the framework has to be able to
+    /// allocate for the request without reaching into a field: `nilo_sql`
+    /// fills its rows out of here, and rows a handler returns then live
+    /// exactly as long as the response that carries them.
+    pub fn arena(self: *const Ctx) std.mem.Allocator {
+        return self._arena;
+    }
+
+    /// Text that belongs to this request, as a `Str`.
+    ///
+    /// `bytes` has to live at least as long as the request — memory from
+    /// `arena()` does, by construction, which is the pairing this exists
+    /// for. What it buys over passing the slice around is the Debug-only
+    /// trap: a `Str` read after its request has ended says so, instead of
+    /// quietly reading whatever is in the arena the next time round
+    /// (ADR 0004).
+    ///
+    /// The `Lifetime` itself stays private. Handing one out would let a
+    /// caller stamp any bytes at all with this request's lifetime, and the
+    /// trap only means something while the stamp is true.
+    pub fn str(self: *const Ctx, bytes: []const u8) Str {
+        return Str.fromRequest(bytes, self._lifetime);
+    }
+
     /// The service of type `P` (a pointer type), for handlers that hold a
     /// `*Ctx` and so do not go through argument matching. Null if it was
     /// never registered — in the typed layer that case is already filtered
@@ -200,9 +231,9 @@ pub const Ctx = struct {
     /// argument list to write in:
     ///
     /// ```zig
-    /// fn requireAdmin(c: *zfast.Ctx, next: zfast.Next) !void {
+    /// fn requireAdmin(c: *nilo.Ctx, next: nilo.Next) !void {
     ///     const user = try c.resolve(CurrentUser);
-    ///     if (!user.is_admin) return zfast.fail.forbidden("admins only", .{});
+    ///     if (!user.is_admin) return nilo.fail.forbidden("admins only", .{});
     ///     try next.run(c);
     /// }
     /// ```
@@ -217,7 +248,7 @@ pub const Ctx = struct {
     }
 
     /// The resolved value of type `V` if this request has already worked one
-    /// out. zfast's own; users go through `resolve`.
+    /// out. nilo's own; users go through `resolve`.
     pub fn cachedResolved(self: *const Ctx, comptime V: type) ?V {
         const wanted = @typeName(V);
         for (self._resolved.items) |entry| {
@@ -228,7 +259,7 @@ pub const Ctx = struct {
         return null;
     }
 
-    /// Remember a resolved value for the rest of this request. zfast's own.
+    /// Remember a resolved value for the rest of this request. nilo's own.
     ///
     /// The value is copied into the request arena, so it dies with the
     /// request exactly as every `Str` inside it does.
@@ -299,7 +330,7 @@ pub const Ctx = struct {
     /// own, and in a response header it splits the response. What passes is
     /// 1 to 64 bytes of letters, digits, `.`, `_` and `-`, which is what
     /// every id anybody generates already looks like. Anything else is
-    /// ignored in favour of one of zfast's own, rather than refused: a
+    /// ignored in favour of one of nilo's own, rather than refused: a
     /// request is not worth failing over the shape of a correlation id.
     pub fn requestId(self: *Ctx) Str {
         if (self._request_id) |id| return id;
@@ -675,13 +706,13 @@ pub const Ctx = struct {
     ///
     /// The defaults are the careful ones — `Secure`, `HttpOnly`,
     /// `SameSite=Lax`, `Path=/` — so turning a protection off is a visible
-    /// line rather than a forgotten one. See `zfast.Cookie` for the rest.
+    /// line rather than a forgotten one. See `nilo.Cookie` for the rest.
     ///
     /// Calling this twice sets two cookies rather than replacing the first,
     /// which is the one way `Set-Cookie` differs from every other response
     /// header. Costs **one arena allocation per cookie**, sized exactly.
     ///
-    /// A cookie zfast cannot write — a value with a `;` in it, which would
+    /// A cookie nilo cannot write — a value with a `;` in it, which would
     /// smuggle an attribute nobody wrote — is a 500 saying which character
     /// and why, because it is a mistake in the server rather than in the
     /// request.
@@ -736,7 +767,7 @@ pub const Ctx = struct {
     /// ```
     ///
     /// A handler that knows its status while it is being written returns
-    /// `zfast.Redirect(303)` instead, which is the same response and lets
+    /// `nilo.Redirect(303)` instead, which is the same response and lets
     /// the generated API description name it.
     pub fn redirect(self: *Ctx, status: u16, location: []const u8) !void {
         if (location.len == 0) return fail.internal(
@@ -759,7 +790,7 @@ pub const Ctx = struct {
         self._sent = true;
         self._status = status;
 
-        // Putting the answer on the wire is zfast waiting on the client, not
+        // Putting the answer on the wire is nilo waiting on the client, not
         // the handler running. A client too slow to take a large response
         // parks this fiber for as long as it takes, and without this that
         // would be reported as a handler holding its thread (ADR 0034).
@@ -839,7 +870,7 @@ pub const Ctx = struct {
     /// to the socket without passing through this process.
     ///
     /// A handler that knows it is answering with a file before it runs
-    /// returns `zfast.FileBody` instead, which is the same response and
+    /// returns `nilo.FileBody` instead, which is the same response and
     /// lets the generated API description say so (ADR 0032's move for
     /// redirects, applied here).
     pub fn sendFile(self: *Ctx, contents: sendfile_mod.Contents) !void {
@@ -917,7 +948,7 @@ pub const Ctx = struct {
     /// Turn this request into a WebSocket connection (ADR 0022).
     ///
     /// ```zig
-    /// fn echo(c: *zfast.Ctx) !void {
+    /// fn echo(c: *nilo.Ctx) !void {
     ///     var socket = try c.upgrade();
     ///     var buf: [4096]u8 = undefined;
     ///     while (try socket.receive(&buf)) |message| {
@@ -931,7 +962,7 @@ pub const Ctx = struct {
     /// nobody can read.
     ///
     /// After this the connection is no longer HTTP and cannot carry another
-    /// request, which zfast arranges — the handler only has to return.
+    /// request, which nilo arranges — the handler only has to return.
     pub fn upgrade(self: *Ctx) !websocket.Socket {
         return self.upgradeWith(.{});
     }
@@ -1261,7 +1292,7 @@ fn describeField(
     // An optional sent as null fits and holds nothing to look inside.
     if (given == .null) return null;
 
-    const Inner = if (comptime patch_mod.isPatch(T)) T.zfast_patch else switch (@typeInfo(T)) {
+    const Inner = if (comptime patch_mod.isPatch(T)) T.nilo_patch else switch (@typeInfo(T)) {
         .optional => |o| o.child,
         else => T,
     };
@@ -1312,7 +1343,7 @@ pub fn expectedOf(comptime T: type) []const u8 {
         if (T == Str) return "text";
         // A `Patch(T)` takes the value or null; leaving it out is the third
         // thing it can be, and that is not a value to describe.
-        if (patch_mod.isPatch(T)) return expectedOf(T.zfast_patch) ++ " or null";
+        if (patch_mod.isPatch(T)) return expectedOf(T.nilo_patch) ++ " or null";
         return switch (@typeInfo(T)) {
             .optional => |o| expectedOf(o.child) ++ " or null",
             .bool => "true or false",
@@ -1336,7 +1367,7 @@ pub fn expectedOf(comptime T: type) []const u8 {
 fn choicesOf(comptime T: type) ?[]const u8 {
     comptime {
         if (T == Str) return null;
-        if (patch_mod.isPatch(T)) return choicesOf(T.zfast_patch);
+        if (patch_mod.isPatch(T)) return choicesOf(T.nilo_patch);
         return switch (@typeInfo(T)) {
             .optional => |o| choicesOf(o.child),
             .@"enum" => |e| blk: {
@@ -1392,7 +1423,7 @@ fn nextId() u64 {
     return base +% id_next.fetchAdd(1, .monotonic);
 }
 
-/// Whether a client-supplied request id is one zfast is willing to repeat.
+/// Whether a client-supplied request id is one nilo is willing to repeat.
 ///
 /// Deliberately narrow. The id is written into log lines and into a response
 /// header, so the test is not "is this valid" but "can anything in here mean
@@ -1419,7 +1450,7 @@ fn hasField(comptime T: type, name: []const u8) bool {
 /// to find the field that explains the refusal, not to re-decide it.
 fn fits(comptime T: type, value: std.json.Value) bool {
     if (T == Str) return value == .string;
-    if (comptime patch_mod.isPatch(T)) return value == .null or fits(T.zfast_patch, value);
+    if (comptime patch_mod.isPatch(T)) return value == .null or fits(T.nilo_patch, value);
     return switch (@typeInfo(T)) {
         .optional => |o| value == .null or fits(o.child, value),
         .bool => value == .bool,

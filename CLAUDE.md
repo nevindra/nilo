@@ -4,11 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-zfast is an HTTP framework for Zig 0.16. A plain Zig function is a route: the
+nilo is an HTTP framework for Zig 0.16. A plain Zig function is a route: the
 compile-time engine reads its argument list and produces routing, typed input, a
 400 for anything that does not fit, and an OpenAPI document. Nothing is
-annotated. The one dependency is [zio](https://github.com/lalinsky/zio), pinned
-in `build.zig.zon`.
+annotated.
+
+**The framework's one dependency is [zio](https://github.com/lalinsky/zio)**,
+pinned in `build.zig.zon`. The SQL module adds
+[pg.zig](https://github.com/lalinsky/pg.zig), which brings four of its own
+(buffer, metrics, xsync, tls) and is marked `.lazy = true` — a project that
+serves HTTP and never imports `nilo_sql` does not fetch, build or link any of
+it, and that is the property to keep (ADR 0040).
 
 Three files carry context this one deliberately does not repeat:
 
@@ -61,9 +67,9 @@ Bottom to top. Each layer knows nothing about the one above it.
 | Layer | Files | What it is |
 |---|---|---|
 | **Engine** | `src/engine/zio.zig` | accept, read, write. **The only file in the repo allowed to name zio** (ADR 0002). |
-| **Bulkhead** | `src/bulkhead.zig` | the entire contract zfast asks of an Engine, listed in that file's header. `Options` is declared here rather than by the Engine, so swapping engines cannot change what a user writes. |
+| **Bulkhead** | `src/bulkhead.zig` | the entire contract nilo asks of an Engine, listed in that file's header. `Options` is declared here rather than by the Engine, so swapping engines cannot change what a user writes. |
 | **HTTP + App** | `src/http1.zig`, `src/router.zig`, `src/app.zig` | parse, match, dispatch. `App.handleRequest` takes only a `*std.Io.Reader`/`*std.Io.Writer`, which is why almost every HTTP behaviour is tested against in-memory buffers with no server. |
-| **Ctx** | `src/ctx.zig` | one request in flight, and zfast's real API. |
+| **Ctx** | `src/ctx.zig` | one request in flight, and nilo's real API. |
 | **Typed** | `src/typed.zig` | the compile-time engine. Reads the argument list and turns a typed handler into an ordinary Ctx handler. |
 
 The rule the typed layer enforces is one sentence: **a pointer is a service, a
@@ -113,8 +119,8 @@ session as much as to a diff, and a proposal that skips it is not finished.
 
 **Error messages are a feature, and a build step holds them.** Each file in
 `refusals/` is a program written wrong on purpose; it must fail to compile with
-a message zfast wrote. Adding a comptime check means adding **both** a file in
-`refusals/` and a row in the `refusals` table in `build.zig`. Leave the `zfast: `
+a message nilo wrote. Adding a comptime check means adding **both** a file in
+`refusals/` and a row in the `refusals` table in `build.zig`. Leave the `nilo: `
 prefix off the `.says` text — the build step supplies it, which is what makes a
 failure inside the standard library impossible to record as passing. See
 `refusals/README.md` and ADR 0027.
@@ -122,7 +128,7 @@ failure inside the standard library impossible to record as passing. See
 **Tests sit at the bottom of the file they test**, and are named as sentences
 describing the behaviour, not the function: `test "a path param that is not a
 number becomes a 400 with a clear message"`. New src files get an `_ =
-@import(...)` line in the `test { … }` block at the end of `src/zfast.zig`, or
+@import(...)` line in the `test { … }` block at the end of `src/nilo.zig`, or
 they never run. The examples carry tests too, and run in the same suite.
 
 **Both optimize modes matter.** Debug is the loop; ReleaseSafe is the gate,

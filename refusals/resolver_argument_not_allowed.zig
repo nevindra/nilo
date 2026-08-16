@@ -1,23 +1,23 @@
 //! A resolver asking for a path param. It belongs to the request rather
 //! than to a route, so there is no `:id` to hand it.
 
-const zfast = @import("zfast");
+const nilo = @import("nilo");
 
 const Caller = struct {
-    name: zfast.Str,
-    pub const zfast_resolve = identify;
+    name: nilo.Str,
+    pub const nilo_resolve = identify;
     fn identify(id: u32) !Caller {
         _ = id;
         return .{ .name = .static("") };
     }
 };
 
-fn whoami(id: u32, caller: Caller) zfast.Str {
+fn whoami(id: u32, caller: Caller) nilo.Str {
     _ = id;
     return caller.name;
 }
 
 export fn refusal() void {
-    var app: zfast.App = undefined;
+    var app: nilo.App = undefined;
     app.get("/users/:id/me", whoami) catch {};
 }

@@ -12,7 +12,7 @@ try app.get("/users/:id", getUser);
 fn getUser(db: *Db, id: u32) !User { … }
 
 try app.get("/posts/:year/:slug", getPost);
-fn getPost(year: u16, slug: zfast.Str) !Post { … }
+fn getPost(year: u16, slug: nilo.Str) !Post { … }
 ```
 
 `u32`, `i64`, `f64`, `bool`, an enum, or a `Str` for the text as it arrived. A
@@ -111,7 +111,7 @@ The 400 above names one field, because the parse stops at the first thing it
 cannot do. `Bound(T)` collects them all and hands them to the handler:
 
 ```zig
-fn placeOrder(b: zfast.Bound(NewOrder)) !zfast.Status(201, Order) {
+fn placeOrder(b: nilo.Bound(NewOrder)) !nilo.Status(201, Order) {
     const order = b.value() orelse return b.fail();
     ...
 }
@@ -137,8 +137,8 @@ up. `Patch(T)` is the field type that keeps all three:
 
 ```zig
 const EditTodo = struct {
-    title: zfast.Patch(zfast.Str) = .absent,
-    due: zfast.Patch(zfast.Str) = .absent,
+    title: nilo.Patch(nilo.Str) = .absent,
+    due: nilo.Patch(nilo.Str) = .absent,
 };
 
 fn editTodo(store: *Store, id: u32, incoming: EditTodo) !?Todo {
@@ -176,9 +176,9 @@ wrong for a file.
 ## Bodies too big to hold
 
 ```zig
-fn upload(c: *zfast.Ctx, store: *Store) !Receipt {
+fn upload(c: *nilo.Ctx, store: *Store) !Receipt {
     var incoming = c.bodyStreamWith(.{ .max_bytes = 8 * 1024 * 1024 }) catch
-        return zfast.fail.tooLarge("this endpoint takes up to 8 MB", .{});
+        return nilo.fail.tooLarge("this endpoint takes up to 8 MB", .{});
 
     var buf: [64 * 1024]u8 = undefined;
     while (try incoming.read(&buf)) |part| try store.append(part);
@@ -210,7 +210,7 @@ a byte is read.
 | `incoming.size()` | what the request announced, or `null` if it was chunked |
 | `incoming.reader` | a plain `std.Io.Reader`, for handing to the standard library |
 
-A body left half-read is fine — zfast discards the rest so the connection is
+A body left half-read is fine — nilo discards the rest so the connection is
 clean for the next request.
 
 See [ADR 0020](../adr/0020-a-request-that-lasts-is-still-one-request.md).

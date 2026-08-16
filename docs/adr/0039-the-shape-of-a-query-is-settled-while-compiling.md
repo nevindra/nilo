@@ -1,14 +1,14 @@
 # The shape of a query is settled while compiling, and only its values are not
 
-zfast has said since [ADR 0001](./0001-dx-wins-below-the-10-percent-threshold.md) that a handler touching a database flattens every benchmark in the comparison. It has never had anything to say about the handler itself. `zfast.blocking` exists so that calling a database does not stop the thread ([ADR 0014](./0014-handlers-must-not-block-the-thread.md)), and that is the whole of it: the call itself is somebody else's problem, written by hand, checked by nothing.
+nilo has said since [ADR 0001](./0001-dx-wins-below-the-10-percent-threshold.md) that a handler touching a database flattens every benchmark in the comparison. It has never had anything to say about the handler itself. `nilo.blocking` exists so that calling a database does not stop the thread ([ADR 0014](./0014-handlers-must-not-block-the-thread.md)), and that is the whole of it: the call itself is somebody else's problem, written by hand, checked by nothing.
 
-This adds a second module — `sql`, alongside `zfast`, not inside it — that turns a struct into a query and a result back into that struct, with the column names checked while compiling.
+This adds a second module — `sql`, alongside `nilo`, not inside it — that turns a struct into a query and a result back into that struct, with the column names checked while compiling.
 
 ## Why this is not the refusal templates got
 
 `docs/roadmap.md` refuses templates on two arguments, and it is worth being precise about which of them applies here, because from a distance this looks like the same request.
 
-The scope argument does not apply. Templates were refused because **zfast is for building APIs and services, and rendering a page is the thing it is not for**. Querying a database is not a thing it is not for; it is the first thing every service in the audience does after routing.
+The scope argument does not apply. Templates were refused because **nilo is for building APIs and services, and rendering a page is the thing it is not for**. Querying a database is not a thing it is not for; it is the first thing every service in the audience does after routing.
 
 The mechanism argument does not apply either, and that is the load-bearing half. Rendering means producing a string per request, which is an allocation per request, which is the axis [ADR 0018](./0018-the-trade-budget-has-three-axes.md) treats as an invariant. A query does the opposite: the string is produced **once, while compiling**, and what is left at runtime is a constant and its parameters.
 
@@ -28,7 +28,7 @@ It is the same sentence `typed.zig` lives by — *a pointer is a service, a valu
 
 ```zig
 const User = struct {
-    pub const zfast_table = .{ .name = "users", .key = .id };
+    pub const nilo_table = .{ .name = "users", .key = .id };
 
     id: i64,
     email: Str,
@@ -51,7 +51,7 @@ SELECT id, email, age, created_at FROM users WHERE age > $1 ORDER BY created_at 
 
 — and one parameter. Drizzle, which this borrows its spine from, cannot do that: JavaScript has no compile step, so it reassembles that string on every request. Zig does, so the string is not built at runtime at all.
 
-`.age = .{ .agee = … }` is a compile error naming the column and the near miss. That is a Refusal, held by the build step, the same as every other comptime check zfast makes ([ADR 0027](./0027-the-rule-about-error-messages-is-held-by-a-build-step.md)).
+`.age = .{ .agee = … }` is a compile error naming the column and the near miss. That is a Refusal, held by the build step, the same as every other comptime check nilo makes ([ADR 0027](./0027-the-rule-about-error-messages-is-held-by-a-build-step.md)).
 
 ## It is not an ORM, and it does not use the word
 
@@ -71,7 +71,7 @@ Drizzle reads `db.select().from(users).where(eq(users.age, 18))`, and the tempta
 
 A chain has to carry its accumulated state in the return type: `.where()` hands back one type, `.limit()` hands back another wrapping it. When something does not fit, what the compiler prints is the tower. Diesel is the worked example — compile-checked queries whose failures are unreadable, which is the same as not being checked for anybody who has not already learned to read them.
 
-zfast has a whole build step whose only job is to keep that from happening. A flat options struct has one type, so the message can name the field and suggest the near miss.
+nilo has a whole build step whose only job is to keep that from happening. A flat options struct has one type, so the message can name the field and suggest the near miss.
 
 It is also the shape the repo already uses everywhere — `listen(.{ .max_connections = 10_000 })`, `Options` in `bulkhead.zig` — so it is not a new thing to learn.
 
@@ -86,15 +86,15 @@ The first was rejected on scope. A struct that owns the schema has to express ev
 The third was taken. The struct describes what it reads; a query against `information_schema` compares every registered Row to what is actually there:
 
 ```
-zfast: User.age expects int4, but users.age is text
-zfast: User.nickname has no column in table 'users'
+nilo: User.age expects int4, but users.age is text
+nilo: User.nickname has no column in table 'users'
 ```
 
 **The check runs once, on the first connection that succeeds** — not at `listen()`. That distinction is the whole of it. Checking at `listen()` was the first draft and it was wrong: it makes the server refuse to start when Postgres is briefly unreachable, which turns a rolling restart during a database blip into an outage, and makes a developer working on routes that touch nothing need a database running.
 
 Tying it to the connection instead means the choice is already the user's, through a knob that already exists one layer down. pg.zig's pool takes `connect_on_init_count`; left at its default it connects during `init`, so the check happens at boot. Set to `0` the pool comes up without touching Postgres, and the check happens whenever the first query does.
 
-zfast therefore adds **no option of its own** for this. A `check_schema = false` was drafted and dropped: a switch that turns off a correctness check is a place to hide from a failure, and it is unnecessary here, because what the user wants to control is when to connect, not whether to be checked.
+nilo therefore adds **no option of its own** for this. A `check_schema = false` was drafted and dropped: a switch that turns off a correctness check is a place to hide from a failure, and it is unnecessary here, because what the user wants to control is when to connect, not whether to be checked.
 
 The residue is honest and worth stating: with the pool set to connect lazily, a mismatched struct is found on the first request that touches the database rather than at boot. That is still every Row at once, once, rather than the request that happens to read the wrong column.
 
@@ -123,22 +123,30 @@ A hundred rows with three text columns must not be three hundred allocations. Th
 
 Rows read one at a time cannot work that way, and this is where the design nearly went wrong. Reusing one buffer per row makes the text valid only until the next row is pulled — and `CONTEXT.md` defines `Str` as text that lives as long as the request, with no asterisk. A `Str` whose lifetime is shorter than that is precisely the bug class this repo fears most: correct in Debug, where the bytes a dangling pointer points at happen to still be there, and a segfault in ReleaseSafe.
 
-The answer was already in the repo. `Body.read` returns `[]u8`, not a `Str`. The rule zfast actually follows is not *text from a request is a `Str`* but **text that outlives the call is a `Str`, and text that does not is not called one**. The type tells the truth.
+The answer was already in the repo. `Body.read` returns `[]u8`, not a `Str`. The rule nilo actually follows is not *text from a request is a `Str`* but **text that outlives the call is a `Str`, and text that does not is not called one**. The type tells the truth.
 
 So a streamed row is `Borrowed(User)`: `User` with every `Str` replaced by `[]const u8`, filled into a buffer the handler passes in, allocating nothing.
 
 ```zig
 fn exportUsers(db: *Db, c: *Ctx) !void {
     var s = try c.stream("text/csv");
-    var buf: [8 * 1024]u8 = undefined;
 
-    var rows = try db.stream(User, c, .{}, &buf);
+    var rows = try db.stream(User, c, .{});
+    defer rows.close();
     while (try rows.next()) |u| try s.print("{d},{s}\n", .{ u.id, u.email });
     try s.finish();
 }
 ```
 
-pg.zig documents the same rule for its own rows — *valid only until the next call to `next`, `deinit` or `drain`* — so this is not a hazard being invented here. It is a hazard one layer down being passed along without a wrapper over it. Had `select` handed back a `Str` in this path, zfast would have been **hiding** that rule behind a type whose whole meaning is that holding it is safe.
+> **Amended when it was built.** This sketch passed a caller's buffer in,
+> and the built version does not: a borrowed row points straight at the
+> driver's read buffer, so there was nothing for a second buffer to do
+> except copy bytes with the same lifetime to a different address. What
+> replaced it is `defer rows.close()`, which the sketch was missing and
+> which is not optional — a result set walked away from half-read costs a
+> connection ([ADR 0040](./0040-a-service-that-needs-the-loop-is-finished-when-the-loop-exists.md)).
+
+pg.zig documents the same rule for its own rows — *valid only until the next call to `next`, `deinit` or `drain`* — so this is not a hazard being invented here. It is a hazard one layer down being passed along without a wrapper over it. Had `select` handed back a `Str` in this path, nilo would have been **hiding** that rule behind a type whose whole meaning is that holding it is safe.
 
 Postgres sends every row without being asked, but the rows are read off the socket as they arrive, so memory stays bounded by the read buffer and TCP carries the rest. A million-row export runs flat, and no cursor is needed.
 
@@ -156,7 +164,7 @@ So the module raises errors that read — `error.AlreadyExists`, not `error.PgEr
 
 This rule appears three times in this design, and it was already in the repo twice before it did.
 
-A request body left half-read is finished off by zfast so the connection stays usable. A result set left half-read must be drained, or the rows still on the socket become the next query's answer. **A transaction left open is worse than either.**
+A request body left half-read is finished off by nilo so the connection stays usable. A result set left half-read must be drained, or the rows still on the socket become the next query's answer. **A transaction left open is worse than either.**
 
 pg.zig's own source settles how much worse. `Pool.release` reads:
 
@@ -172,14 +180,14 @@ No `ROLLBACK`, no `DISCARD ALL`. A connection that is not idle is destroyed and 
 
 That last step is an inference about what `_state` tracks rather than something the documentation states, and it is the assumption this design is built on because it is the only safe one.
 
-A `Tx` is held and released the way every other resource in zfast is held and released:
+A `Tx` is held and released the way every other resource in nilo is held and released:
 
 ```zig
 var tx = try db.begin(c);
 defer tx.deinit();          // rolls back unless committed; the connection always returns clean
 ```
 
-The closure form — `db.transaction(c, run, args)`, impossible to get wrong — was rejected for being a second dialect. Zig has no closures, so it means a struct holding a function and every capture passed by hand, and nothing else in zfast is shaped that way: `Stream`, `Socket` and `Body` are all *hold the thing, `defer` the cleanup*.
+The closure form — `db.transaction(c, run, args)`, impossible to get wrong — was rejected for being a second dialect. Zig has no closures, so it means a struct holding a function and every capture passed by hand, and nothing else in nilo is shaped that way: `Stream`, `Socket` and `Body` are all *hold the thing, `defer` the cleanup*.
 
 Forgetting the `defer` is caught the way forgetting `.keep()` is caught — a trap that only exists in Debug. Zig cannot enforce it, so the next best thing is making the mistake loud where somebody is looking.
 
@@ -193,7 +201,7 @@ Migrations are not here and are not implied. Nothing about this design foreclose
 
 ## Consequences
 
-- **A second module, `sql/`, at the repo root — not under `src/`.** The dependency runs one way, `sql` on `zfast`, never back, which is what makes the binary-size cost of this feature exactly zero for anyone who does not import it. `src/` was rejected because `CLAUDE.md` tells contributors that a new file under `src/` gets an `_ = @import(…)` line in `zfast.zig`'s test block, and following that rule for a file under `src/sql/` would compile this module into every zfast build. A convention that points the wrong way is more dangerous than a `.paths` entry that can be forgotten, and the `.paths` entry is held by a test.
+- **A second module, `sql/`, at the repo root — not under `src/`.** The dependency runs one way, `sql` on `nilo`, never back, which is what makes the binary-size cost of this feature exactly zero for anyone who does not import it. `src/` was rejected because `CLAUDE.md` tells contributors that a new file under `src/` gets an `_ = @import(…)` line in `nilo.zig`'s test block, and following that rule for a file under `src/sql/` would compile this module into every nilo build. A convention that points the wrong way is more dangerous than a `.paths` entry that can be forgotten, and the `.paths` entry is held by a test.
 - **pg.zig is a lazy dependency.** `b.lazyDependency` returns null until something asks for it, so a project using only the HTTP framework never fetches a Postgres driver.
 - **Four test steps.** `test` stays exactly as fast as it is. `test-sql` covers generated SQL, row filling and this module's Refusals with no database at all — both halves are pure functions, the same reason `App.handleRequest` is tested against in-memory buffers. `test-all` runs both and is what CI runs. `test-sql-live` needs a real Postgres, takes its address from the environment, and is deliberately outside `test-all`.
 - **Four vocabulary entries and one banned word**: Row, Borrowed row, Dialect, Wire, Tx — and `ORM` under `_Avoid_`.
@@ -203,4 +211,4 @@ Migrations are not here and are not implied. Nothing about this design foreclose
   - Throughput against hand-written pg.zig. The bar is ADR 0001's 10%.
   - Binary size for a project that does import this. Zero for one that does not is already settled by the module split.
   - pg.zig's `read_buffer`, which its own documentation says matters most for exactly the row-heavy queries this module produces.
-- **One question deferred until it is measured.** `Timestamp` and `Uuid` carry `jsonStringify` so that a Row can be returned from a handler and come out right. `covers()` sends any type with its own `jsonStringify` to `std.json` rather than the generated writer — and `created_at` is in nearly every table, so this is the common path, not a corner. Measure it with `zig build profile` first. Under ADR 0001's 10% it is settled; over it, there is an argument to have about whether this module may reach into zfast's JSON writer, and not before.
+- **One question deferred until it is measured.** `Timestamp` and `Uuid` carry `jsonStringify` so that a Row can be returned from a handler and come out right. `covers()` sends any type with its own `jsonStringify` to `std.json` rather than the generated writer — and `created_at` is in nearly every table, so this is the common path, not a corner. Measure it with `zig build profile` first. Under ADR 0001's 10% it is settled; over it, there is an argument to have about whether this module may reach into nilo's JSON writer, and not before.

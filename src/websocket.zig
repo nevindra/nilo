@@ -1,7 +1,7 @@
 //! WebSocket — the connection that stops being HTTP (ADR 0022).
 //!
 //! ```zig
-//! fn echo(c: *zfast.Ctx) !void {
+//! fn echo(c: *nilo.Ctx) !void {
 //!     var socket = try c.upgrade();
 //!     var buf: [4096]u8 = undefined;
 //!     while (try socket.receive(&buf)) |message| {
@@ -11,7 +11,7 @@
 //! ```
 //!
 //! The handler owns the loop, the same way a streaming handler owns its
-//! `Stream`: zfast does the handshake, the framing and the housekeeping
+//! `Stream`: nilo does the handshake, the framing and the housekeeping
 //! frames, and then gets out of the way.
 //!
 //! Memory is the buffer passed to `receive` and nothing else. A message
@@ -36,7 +36,7 @@ pub const Options = struct {
     protocol: []const u8 = "",
 
     /// How long this connection may say nothing before it is asked whether it
-    /// is still there. Zero waits forever, which is what zfast did before this
+    /// is still there. Zero waits forever, which is what nilo did before this
     /// existed.
     ///
     /// **Not a deadline, and the difference is the whole design.** A WebSocket
@@ -249,7 +249,7 @@ pub const Socket = struct {
         return .{ .kind = kind.?, .data = data };
     }
 
-    /// Send one message. Never fragmented: zfast has it all already, so
+    /// Send one message. Never fragmented: nilo has it all already, so
     /// there is nothing to be gained by cutting it up.
     pub fn send(self: *Socket, kind: Kind, data: []const u8) Error!void {
         return self.writeFrame(if (kind == .text) .text else .binary, data);
@@ -347,7 +347,7 @@ pub const Socket = struct {
         };
 
         // The three reserved bits are for extensions that were negotiated in
-        // the handshake. zfast negotiates none, so a frame setting one is
+        // the handshake. nilo negotiates none, so a frame setting one is
         // talking to a server that is not there.
         if (first[0] & 0x70 != 0) return self.fail(error.ProtocolError);
 

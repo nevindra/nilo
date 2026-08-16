@@ -16,26 +16,49 @@
 //!
 //! ## What a Wire owes
 //!
-//! - `run(sql, values)` — a statement and its parameters, in placeholder
-//!   order, giving back something rows can be pulled from one at a time.
-//! - `next(rows)` — the next row, or null. **The text in a row is valid only
-//!   until the next call.** That is not a rule invented here; it is pg.zig's
-//!   own, and passing it along unwrapped is deliberate. A `Str` handed out of
-//!   this path would hide it behind a type whose entire meaning is that
-//!   holding it is safe.
+//! - `open(io, gpa, url, opts)` / `close()` — build a pool that dials
+//!   through the given event loop, and take it down. The `std.Io` is the
+//!   whole reason a `Db` is built in two halves: it does not exist until
+//!   `listen()` has started the loop (ADR 0040).
+//! - `run(arena, sql, values)` — a statement and its parameters, in
+//!   placeholder order, giving back something rows can be pulled from one
+//!   at a time. The arena is the request's, and is where the driver reads
+//!   into when a row does not fit its own buffer — so a big row costs the
+//!   request arena rather than the general allocator, and is freed by the
+//!   reset that ends the request (ADR 0004).
+//! - `next(rows)` — advance to the next row, or false at the end. **The
+//!   text in a row is valid only until the next call.** That is not a rule
+//!   invented here; it is pg.zig's own, and passing it along unwrapped is
+//!   deliberate. A `Str` handed out of this path would hide it behind a
+//!   type whose entire meaning is that holding it is safe.
+//! - `read(rows, T, col)` — one column of the row `next` stopped on, by
+//!   position. By position and not by name because the caller wrote the
+//!   `SELECT` list itself and therefore already knows the order at compile
+//!   time; a name lookup would be paying at run time for something that
+//!   stopped being a question while compiling (ADR 0039).
 //! - `drain(rows)` — throw away what is left. Not optional: pg.zig's pool
 //!   checks that a connection is idle on release and, finding it is not,
 //!   destroys the connection and dials a new one. Leaving rows unread is
 //!   therefore a correctness-safe, expensive mistake, and it is this module's
 //!   job not to make it.
-//! - `begin` / `commit` / `rollback` — and `rollback` has to be reachable
-//!   from a `defer`, because that is how it will be called.
+//! - `exec(arena, sql, values)` — a statement that answers with a count
+//!   rather than with rows, giving the count back. "Did that update
+//!   anything" has no other answer, and Postgres sends the number in
+//!   `CommandComplete` rather than as a result set.
+//! - `begin(arena)` — a transaction, **holding one connection for its whole
+//!   life**. That is not a detail: every statement in a transaction has to
+//!   go down the same connection, and a Wire whose `run` takes a fresh one
+//!   each time would silently run half a transaction somewhere else. So a
+//!   transaction is its own type with its own `run`, rather than a mode the
+//!   Wire is in.
+//! - `Tx.commit` / `Tx.rollback` — and `rollback` has to be reachable from a
+//!   `defer`, because that is how it will be called.
 //!
 //! ## The rule all three of those are instances of
 //!
 //! > **Whatever the handler did, the connection goes back usable.**
 //!
-//! A request body left half-read is finished off by zfast so the connection
+//! A request body left half-read is finished off by nilo so the connection
 //! stays usable. A result set left half-read is drained. A transaction left
 //! open is rolled back. The same sentence, three times, and it was already
 //! true twice before this module existed.
@@ -83,6 +106,18 @@ pub const Error = error{
     QueryFailed,
 };
 
+/// What opening a pool takes, declared here rather than by any one driver
+/// — the same reason `bulkhead.Options` is declared by the Bulkhead and not
+/// by zio. Swapping the driver must not change what a caller writes.
+pub const OpenOpts = struct {
+    size: u16 = 10,
+    /// How many connections to dial while opening. Zero means the pool is
+    /// created without reaching the database at all, which is what lets a
+    /// server boot with Postgres switched off (ADR 0039).
+    connect_on_init: u16 = 0,
+    timeout_ms: u32 = 10 * std.time.ms_per_s,
+};
+
 /// One column as the database describes it, for the schema comparison. Read
 /// through the Dialect's `introspect` query, which is why the field names are
 /// that query's column names rather than anything invented here.
@@ -100,13 +135,13 @@ pub const Column = struct {
 pub fn assertWire(comptime W: type) void {
     comptime {
         const owed = [_][]const u8{
-            "run",   "next",   "drain",
-            "begin", "commit", "rollback",
-            "columnsOf",
+            "open",  "close", "run",       "exec",
+            "next",  "read",  "drain",     "begin",
+            "Tx",    "columnsOf",
         };
         for (owed) |decl| {
             if (!@hasDecl(W, decl)) @compileError(
-                "zfast: " ++ @typeName(W) ++ " is being used as a Wire and has no `" ++
+                "nilo: " ++ @typeName(W) ++ " is being used as a Wire and has no `" ++
                     decl ++ "`.\n" ++
                     "  What a Wire owes is listed at the top of `sql/wire.zig`.",
             );
@@ -123,6 +158,14 @@ const testing = std.testing;
 /// it — and it is what the schema tests compare against.
 pub const Fake = struct {
     columns: []const Column = &.{},
+    /// The statement the last `run` was given, so a test can assert on the
+    /// SQL that actually reached the database rather than on the constant
+    /// the comptime half produced.
+    last_sql: []const u8 = "",
+    /// How many rows the next `run` hands back. Every one of them reads the
+    /// same way — this exists to drive the filling code, not to stand in
+    /// for a database.
+    answers: usize = 0,
     began: usize = 0,
     committed: usize = 0,
     rolled_back: usize = 0,
@@ -132,18 +175,48 @@ pub const Fake = struct {
         drained: bool = false,
     };
 
-    pub fn run(self: *Fake, sql: []const u8, values: anytype) Error!Rows {
-        _ = self;
-        _ = sql;
-        _ = values;
+    pub fn open(io: std.Io, gpa: std.mem.Allocator, url: []const u8, opts: OpenOpts) !Fake {
+        _ = io;
+        _ = gpa;
+        _ = url;
+        _ = opts;
         return .{};
     }
 
-    pub fn next(self: *Fake, rows: *Rows) Error!?void {
+    pub fn close(self: *Fake) void {
         _ = self;
-        if (rows.left == 0) return null;
+    }
+
+    pub fn run(self: *Fake, arena: std.mem.Allocator, sql: []const u8, values: anytype) Error!Rows {
+        _ = arena;
+        _ = values;
+        self.last_sql = sql;
+        return .{ .left = self.answers };
+    }
+
+    pub fn next(self: *Fake, rows: *Rows) Error!bool {
+        _ = self;
+        if (rows.left == 0) return false;
         rows.left -= 1;
-        return {};
+        return true;
+    }
+
+    /// A value of the right type, and nothing more. Text points at a
+    /// literal in the binary rather than at a read buffer, which is the one
+    /// way this is not like a real Wire — the borrow it is standing in for
+    /// is exactly what `db.zig` copies away, so the copy is exercised even
+    /// though there is nothing here that would dangle without it.
+    pub fn read(self: *Fake, rows: *const Rows, comptime T: type, col: usize) Error!T {
+        _ = self;
+        _ = rows;
+        _ = col;
+        if (T == []const u8 or T == ?[]const u8) return "fake";
+        return switch (@typeInfo(T)) {
+            .int, .float => 0,
+            .bool => false,
+            .optional => null,
+            else => error.QueryFailed,
+        };
     }
 
     pub fn drain(self: *Fake, rows: *Rows) void {
@@ -152,19 +225,57 @@ pub const Fake = struct {
         rows.drained = true;
     }
 
-    pub fn begin(self: *Fake) Error!void {
+    pub fn exec(self: *Fake, arena: std.mem.Allocator, sql: []const u8, values: anytype) Error!usize {
+        _ = arena;
+        _ = values;
+        self.last_sql = sql;
+        return self.answers;
+    }
+
+    pub const Tx = struct {
+        wire: *Fake,
+
+        pub fn run(
+            self: *Tx,
+            arena: std.mem.Allocator,
+            sql: []const u8,
+            values: anytype,
+        ) Error!Rows {
+            return self.wire.run(arena, sql, values);
+        }
+
+        pub fn exec(
+            self: *Tx,
+            arena: std.mem.Allocator,
+            sql: []const u8,
+            values: anytype,
+        ) Error!usize {
+            return self.wire.exec(arena, sql, values);
+        }
+
+        pub fn commit(self: *Tx) Error!void {
+            self.wire.committed += 1;
+        }
+
+        pub fn rollback(self: *Tx) void {
+            self.wire.rolled_back += 1;
+        }
+    };
+
+    pub fn begin(self: *Fake, arena: std.mem.Allocator) Error!Tx {
+        _ = arena;
         self.began += 1;
+        return .{ .wire = self };
     }
 
-    pub fn commit(self: *Fake) Error!void {
-        self.committed += 1;
-    }
-
-    pub fn rollback(self: *Fake) void {
-        self.rolled_back += 1;
-    }
-
-    pub fn columnsOf(self: *Fake, table: []const u8) Error![]const Column {
+    pub fn columnsOf(
+        self: *Fake,
+        arena: std.mem.Allocator,
+        query: []const u8,
+        table: []const u8,
+    ) Error![]const Column {
+        _ = arena;
+        _ = query;
         _ = table;
         return self.columns;
     }
@@ -177,7 +288,7 @@ test "the fake satisfies the contract, which is what makes it a contract" {
 test "a result set left unread is drained rather than abandoned" {
     var wire = Fake{};
     var rows = Fake.Rows{ .left = 5 };
-    _ = try wire.next(&rows);
+    try testing.expect(try wire.next(&rows));
 
     wire.drain(&rows);
     try testing.expect(rows.drained);
@@ -186,8 +297,8 @@ test "a result set left unread is drained rather than abandoned" {
 
 test "a transaction that is never committed is rolled back" {
     var wire = Fake{};
-    try wire.begin();
-    wire.rollback();
+    var tx = try wire.begin(testing.allocator);
+    tx.rollback();
 
     try testing.expectEqual(@as(usize, 1), wire.began);
     try testing.expectEqual(@as(usize, 0), wire.committed);

@@ -4,11 +4,11 @@
 
 `fail.notFound(...)` and friends can be called from anywhere, with no `Ctx` in
 hand — from a handler, from a resolver, from a helper three calls deep, from
-inside `zfast.blocking`:
+inside `nilo.blocking`:
 
 ```zig
 fn getUser(db: *Db, id: u32) !User {
-    return db.find(id) orelse zfast.fail.notFound("no user {d}", .{id});
+    return db.find(id) orelse nilo.fail.notFound("no user {d}", .{id});
 }
 ```
 
@@ -74,13 +74,13 @@ Content-Type: application/json
 ```
 
 One shape for every failure, from every source: a `fail` function, an error out
-of a handler, a body zfast refused, a request head that never finished arriving.
+of a handler, a body nilo refused, a request head that never finished arriving.
 Nothing to configure and nothing to negotiate — a frontend calls `res.json()` in
 the same `catch` where it shows the user what went wrong, and it works
 ([ADR 0025](../adr/0025-every-failure-answers-with-the-same-json-body.md)).
 
 A failure with no message of its own gets the status phrase. Nothing about
-zfast's internals goes out — no stack trace, no file name, no Zig error name
+nilo's internals goes out — no stack trace, no file name, no Zig error name
 unless a `fail` function put it in the message on purpose. A 500 logs the error
 name and sends `internal server error`.
 
@@ -94,7 +94,7 @@ try expectEqualStrings("no user 99", parsed.value.object.get("error").?.string);
 
 ## Tying a failure to its log line
 
-Behind the proxy that zfast assumes in front
+Behind the proxy that nilo assumes in front
 ([ADR 0028](../adr/0028-tls-is-terminated-in-front.md)), the one thing you
 cannot reconstruct afterwards is *which* log lines belong to the request that
 went wrong. Switch on request ids and the answer is on the response:
@@ -119,13 +119,13 @@ installed.
 If the proxy already sent an `X-Request-Id`, that one is used, so the id is the
 same on both sides. **A client's id is checked, not trusted**: up to 64 bytes of
 letters, digits, `.`, `_` and `-` — which every id generator in use produces —
-and anything else is ignored in favour of one of zfast's own. Otherwise a
+and anything else is ignored in favour of one of nilo's own. Otherwise a
 newline in a header would forge a log line and split a response.
 
 Both options are off by default: the id costs a header on every response, and
 the plain-text line is what a person reads in a terminal.
 
-## Errors zfast writes for you
+## Errors nilo writes for you
 
 You don't have to write any of these; they are what the request never reaching
 your handler looks like.

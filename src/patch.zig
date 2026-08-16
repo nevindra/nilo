@@ -38,7 +38,7 @@ pub fn Patch(comptime T: type) type {
 
         /// What this is a patch of. Read by the body parser, by the message
         /// that says what a field will accept, and by the API description.
-        pub const zfast_patch = T;
+        pub const nilo_patch = T;
 
         const Self = @This();
 
@@ -94,11 +94,11 @@ pub fn Patch(comptime T: type) type {
     };
 }
 
-/// Whether `T` is a `Patch(…)`. Asked by the parts of zfast that have to
+/// Whether `T` is a `Patch(…)`. Asked by the parts of nilo that have to
 /// treat one as "the value, or null, or not there".
 pub fn isPatch(comptime T: type) bool {
     return switch (@typeInfo(T)) {
-        .@"union" => @hasDecl(T, "zfast_patch"),
+        .@"union" => @hasDecl(T, "nilo_patch"),
         else => false,
     };
 }

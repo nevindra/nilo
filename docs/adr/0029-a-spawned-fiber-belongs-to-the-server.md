@@ -1,6 +1,6 @@
 # A spawned fiber belongs to the server, and broadcast waits for a cheaper one
 
-zfast has had nowhere to put work that is not a request. Everything that
+nilo has had nowhere to put work that is not a request. Everything that
 runs, runs because a socket asked for it. That is a good default and it is
 why the per-connection numbers in ADR 0018 are as small as they are, but it
 rules out a whole family of ordinary things: a metrics exporter that batches
@@ -87,7 +87,7 @@ things only the Engine knows. That is the same argument ADR 0011 made for
 Broadcast does not ship because 8,673 is not a number to spend quietly. A
 process that broadcasts holds far fewer connections than `max_connections`
 allows, so it may well be affordable — but the person running it has to be
-the one to decide that, and today the only shape zfast could offer them is
+the one to decide that, and today the only shape nilo could offer them is
 the one that doubles the budget for every connection whether it is listening
 to a broadcast or not.
 
@@ -96,7 +96,7 @@ to a broadcast or not.
 The spike used a detached fiber, and shutdown said this:
 
 ```
-info: zfast stopping: 8 request(s) still being answered, waiting up to 10000ms
+info: nilo stopping: 8 request(s) still being answered, waiting up to 10000ms
 ```
 
 There were sixteen fibers. Nothing spawned is counted by `Stop.in_flight`
@@ -216,7 +216,7 @@ direction.
   what it would be worth: 8,673 bytes per connection, and ADR 0018's
   invariant kept instead of doubled.
 
-- The spike's `zfast.Channel` and `zfast.BroadcastChannel` are withdrawn.
+- The spike's `nilo.Channel` and `nilo.BroadcastChannel` are withdrawn.
   They were added to measure, and measuring is done. `zio.RwLock`, condition
   variables and channels go back to sitting there unexposed, which is where
   ADR 0011 left them and for the same reason.

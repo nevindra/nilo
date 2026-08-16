@@ -22,13 +22,13 @@ The reason for the split is that the three are not the same kind of number.
 
 ## What "low memory" is allowed to mean
 
-zfast can honestly say "low memory" only because of the bottom two rows. They are the claim; throughput is the headline. Getting that backwards — trading an allocation to win a benchmark — would be spending the thing that is actually true to improve the thing that is not measured yet.
+nilo can honestly say "low memory" only because of the bottom two rows. They are the claim; throughput is the headline. Getting that backwards — trading an allocation to win a benchmark — would be spending the thing that is actually true to improve the thing that is not measured yet.
 
 ## The fourth number: binary size
 
 v2 turned up an axis v1 never had to think about, and it is worth naming rather than quietly leaving out of the table.
 
-nginx's discipline, quoted approvingly in ADR 0015, is that a module is compiled in or absent. zfast is not currently able to honour that. The generated API description costs **+14 KB on the hello example whether or not `app.docs()` is called** (ADR 0017), because the switch is a runtime `null` check and the linker cannot see through it.
+nginx's discipline, quoted approvingly in ADR 0015, is that a module is compiled in or absent. nilo is not currently able to honour that. The generated API description costs **+14 KB on the hello example whether or not `app.docs()` is called** (ADR 0017), because the switch is a runtime `null` check and the linker cannot see through it.
 
 The rule adopted, which is weaker than nginx's and honest about being so:
 

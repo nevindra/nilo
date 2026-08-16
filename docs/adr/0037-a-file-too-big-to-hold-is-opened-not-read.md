@@ -8,9 +8,9 @@ Not disk. The two options it weighed were **A**, add file IO to the Bulkhead con
 
 > File IO is a different order of obligation — open, stat, read, seek, errors, cancellation — and it would be owed by every replacement Engine forever.
 
-That sentence was true when it was written. It is not true now, and the reason is not that the obligation shrank — it is that it stopped being zfast's to define.
+That sentence was true when it was written. It is not true now, and the reason is not that the obligation shrank — it is that it stopped being nilo's to define.
 
-`sendFile` is a slot in the `std.Io.Writer` vtable. `std.Io.File.Reader` is a standard type. zio 0.17 — the version zfast already pins — fills both in: `zio.fs.Dir.openFile` opens through the event loop, `zio.fs.File.stdReader` hands back the standard reader, and `Stream.Writer` carries `.sendFile`, which is an io_uring splice chain on Linux, `sendfile` on kqueue and IOCP, and a buffer-lending loop everywhere else.
+`sendFile` is a slot in the `std.Io.Writer` vtable. `std.Io.File.Reader` is a standard type. zio 0.17 — the version nilo already pins — fills both in: `zio.fs.Dir.openFile` opens through the event loop, `zio.fs.File.stdReader` hands back the standard reader, and `Stream.Writer` carries `.sendFile`, which is an io_uring splice chain on Linux, `sendfile` on kqueue and IOCP, and a buffer-lending loop everywhere else.
 
 So the Bulkhead does not grow "file IO". It grows four names — open a directory, open a file in it, its size, close it — and everything after that is the standard library's vocabulary, reached through a `*std.Io.Writer` that the HTTP layer already holds. An Engine that replaces zio owes what any Zig program owes: a `std.Io`. ADR 0010 wrote the seam's shape down in advance and it fits.
 
@@ -39,7 +39,7 @@ Hashing is not available above the threshold for the obvious reason: computing a
 
 The alternative on offer is a weak validator, and it is the wrong one. RFC 9110 says an `If-Range` carrying a weak validator must be ignored, so a weak tag would send the whole file to every client resuming a download — and resuming is what large files are *for*. 0021 already chose the safe direction when it could not compare a date; here the safe direction is available without giving anything up, because mtime and size together are a strong validator in practice and have been the default in nginx for twenty years. Two different contents sharing a size and an mtime to the nanosecond is the risk being taken, and it is the risk every static server on the internet is already taking.
 
-This is the first last-modified time zfast has ever read. 0021 noted their absence as the reason an `If-Range` carrying a date never matches. That does not change: a date in `If-Range` is still not compared, because the tag is what the client was given and the tag is what it should send back.
+This is the first last-modified time nilo has ever read. 0021 noted their absence as the reason an `If-Range` carrying a date never matches. That does not change: a date in `If-Range` is still not compared, because the tag is what the client was given and the tag is what it should send back.
 
 ## A spilled file is never gzipped
 
@@ -49,12 +49,12 @@ In practice the threshold sorts this out on its own. A file over 8 MB is a video
 
 ## The handler side, which was the larger hole
 
-The static tree was the visible half. The other half is that a handler had no way to serve a file at all — no `http.ServeFile`, no `res.sendFile`. An invoice behind an authorisation check is an ordinary endpoint in the kind of application zfast says it is for, and it was not writable.
+The static tree was the visible half. The other half is that a handler had no way to serve a file at all — no `http.ServeFile`, no `res.sendFile`. An invoice behind an authorisation check is an ordinary endpoint in the kind of application nilo says it is for, and it was not writable.
 
 That is a return type, not a `Ctx` call, for the reason [ADR 0032](./0032-a-redirect-puts-its-status-in-the-type.md) gave for redirects: the signature is the whole contract, and an answer written by a side effect is an answer the generated document cannot see. So:
 
 ```zig
-fn invoice(files: *Files, id: u32) !?zfast.FileBody {
+fn invoice(files: *Files, id: u32) !?nilo.FileBody {
     const name = try files.nameOf(id) orelse return null;
     return .{ .dir = files.dir, .name = name, .content_type = "application/pdf" };
 }

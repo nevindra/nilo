@@ -2,7 +2,7 @@
 //!
 //! Many requests share one OS thread. A handler that waits on the operating
 //! system directly — a database driver, `std.fs`, `std.http.Client` — stops
-//! every other request on that thread for as long as it waits. `zfast.blocking`
+//! every other request on that thread for as long as it waits. `nilo.blocking`
 //! is the way not to, and ADR 0014 recorded that **nothing forces it**: the
 //! wrong version compiles, passes its tests, and only misbehaves under
 //! concurrency, which is the one condition development does not have.
@@ -15,13 +15,13 @@
 //! Parked time is not guessed at — it is reported by the six things a request
 //! waits on that are not the handler's own code:
 //!
-//! - `zfast.blocking`, `zfast.sleep`, `zfast.Mutex.lock`, `randomSecure`
+//! - `nilo.blocking`, `nilo.sleep`, `nilo.Mutex.lock`, `randomSecure`
 //!   (`bulkhead.zig`)
 //! - reading the request body, and writing the response (`ctx.zig`, `app.zig`)
 //!
 //! Whatever is left is the handler running, and a handler that ran for a
 //! quarter of a second without yielding once is either blocking or doing CPU
-//! work it should have handed to `zfast.blocking` — which is the same advice
+//! work it should have handed to `nilo.blocking` — which is the same advice
 //! either way, so both are worth saying.
 //!
 //! ## What it does not see
@@ -116,7 +116,7 @@ pub fn waited(w: ?*Watch, token: u64) void {
     watch.waited_ns += bulkhead.coarseNanos() -| token;
 }
 
-/// The same pair for code with no Ctx to hand — `zfast.blocking` and
+/// The same pair for code with no Ctx to hand — `nilo.blocking` and
 /// friends, called from inside a handler that knows nothing about the
 /// request it is part of.
 ///
@@ -167,14 +167,14 @@ fn report(method: []const u8, path: []const u8, ms: u64) void {
         std.log.warn(
             "handler {s} {s} held its thread for {d}ms. Every other request being served " ++
                 "on that thread waited the whole time. Hand the call that waits to " ++
-                "zfast.blocking (ADR 0014).",
+                "nilo.blocking (ADR 0014).",
             .{ method, path, ms },
         );
     } else {
         std.log.warn(
             "handler {s} {s} held its thread for {d}ms, and {d} more did in the second " ++
                 "before it. Every other request being served on those threads waited. " ++
-                "Hand the call that waits to zfast.blocking (ADR 0014).",
+                "Hand the call that waits to nilo.blocking (ADR 0014).",
             .{ method, path, ms, others },
         );
     }
@@ -212,8 +212,8 @@ test "a handler that ran the whole time is reported" {
 
 test "a handler that spent the time parked is not" {
     // The same 50ms, all of it waiting on something that yielded. This is
-    // the case the detector exists to keep quiet about: `zfast.blocking`
-    // done right must never look like `zfast.blocking` skipped.
+    // the case the detector exists to keep quiet about: `nilo.blocking`
+    // done right must never look like `nilo.blocking` skipped.
     try testing.expectEqual(@as(u64, 0), spent(50, 50, 10));
 }
 
@@ -258,7 +258,7 @@ test "an excused request is measured and then let go" {
 
 test "a second request on the same connection does not inherit the first one's forgiveness" {
     // The Watch lives on the InFlight, which lives for the whole connection.
-    // `waited_ns` from a request that spent its life in `zfast.blocking`
+    // `waited_ns` from a request that spent its life in `nilo.blocking`
     // would otherwise excuse the next one on that connection for free.
     var w = Watch{};
     begin(&w, 10);

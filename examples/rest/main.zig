@@ -25,14 +25,14 @@
 //! ```
 
 const std = @import("std");
-const zfast = @import("zfast");
-const fail = zfast.fail;
+const nilo = @import("nilo");
+const fail = nilo.fail;
 
-// The two lines every zfast root file wants. `listen()` says so at startup
+// The two lines every nilo root file wants. `listen()` says so at startup
 // if either is missing.
-pub const std_options = zfast.std_options; // keeps the Engine's debug chatter out of your logs
-pub const std_options_debug_io = zfast.debug_io; // keeps `std.log` from blocking the event loop
-pub const panic = zfast.panic;
+pub const std_options = nilo.std_options; // keeps the Engine's debug chatter out of your logs
+pub const std_options_debug_io = nilo.debug_io; // keeps `std.log` from blocking the event loop
+pub const panic = nilo.panic;
 
 const User = struct {
     id: u32,
@@ -47,11 +47,11 @@ const User = struct {
 ///
 /// The lock is not decoration. Handlers run concurrently on several OS
 /// threads, so anything a Service can write to needs one — and it is
-/// `zfast.Mutex` rather than `std.Thread.Mutex`, because that one stops
+/// `nilo.Mutex` rather than `std.Thread.Mutex`, because that one stops
 /// the whole thread and every other request being served on it.
 const Store = struct {
     gpa: std.mem.Allocator,
-    lock: zfast.Mutex = .init,
+    lock: nilo.Mutex = .init,
     users: std.ArrayList(User) = .empty,
     next_id: u32 = 1,
 
@@ -160,7 +160,7 @@ const Listing = struct {
     limit: usize = 100,
 };
 
-fn listUsers(store: *Store, arena: std.mem.Allocator, listing: zfast.Query(Listing)) ![]const User {
+fn listUsers(store: *Store, arena: std.mem.Allocator, listing: nilo.Query(Listing)) ![]const User {
     try store.lock.lock();
     defer store.lock.unlock();
 
@@ -191,8 +191,8 @@ fn getUser(store: *Store, id: u32) !?User {
 }
 
 const NewUser = struct {
-    name: zfast.Str,
-    email: zfast.Str,
+    name: nilo.Str,
+    email: nilo.Str,
 };
 
 /// A struct argument is the request body, parsed from JSON. `Status(201, T)`
@@ -200,14 +200,14 @@ const NewUser = struct {
 /// own — the status is part of the type, so the API description names it
 /// instead of writing `default`. A `Location` on a 201 is the reason both
 /// halves are wanted, and neither costs a drop down to `*Ctx`.
-fn createUser(store: *Store, arena: std.mem.Allocator, incoming: NewUser) !zfast.Status(201, User) {
+fn createUser(store: *Store, arena: std.mem.Allocator, incoming: NewUser) !nilo.Status(201, User) {
     try checkUser(incoming);
 
     const created = try store.add(incoming.name.view(), incoming.email.view());
     return .{
         // `.of` copies the list into the response while it is still alive:
         // written out here it belongs to this function's stack frame, and
-        // zfast reads the headers after this function has returned.
+        // nilo reads the headers after this function has returned.
         .headers = .of(&.{.{
             .name = "Location",
             // A `std.mem.Allocator` argument is the request arena: it lives
@@ -241,9 +241,9 @@ fn replaceUser(store: *Store, id: u32, incoming: NewUser) !?User {
 /// identical, so "leave it alone" and "clear it" cannot be told apart.
 /// `Patch(T)` keeps all three answers.
 const EditUser = struct {
-    name: zfast.Patch(zfast.Str) = .absent,
-    email: zfast.Patch(zfast.Str) = .absent,
-    nickname: zfast.Patch(zfast.Str) = .absent,
+    name: nilo.Patch(nilo.Str) = .absent,
+    email: nilo.Patch(nilo.Str) = .absent,
+    nickname: nilo.Patch(nilo.Str) = .absent,
 };
 
 fn editUser(store: *Store, id: u32, incoming: EditUser) !?User {
@@ -270,7 +270,7 @@ fn editUser(store: *Store, id: u32, incoming: EditUser) !?User {
 
 /// `Status(204, void)` — a response with no body at all, which is what a
 /// DELETE answers. `.{}` is the whole return.
-fn deleteUser(store: *Store, id: u32) !zfast.Status(204, void) {
+fn deleteUser(store: *Store, id: u32) !nilo.Status(204, void) {
     if (!try store.remove(id)) return fail.notFound("no user {d}", .{id});
     return .{};
 }
@@ -279,17 +279,17 @@ fn deleteUser(store: *Store, id: u32) !zfast.Status(204, void) {
 
 /// A resolved value: worked out from the request before the handler runs,
 /// once per request, and shared by everyone who asks for it. The type says
-/// how it is worked out — that `zfast_resolve` line is the entire wiring,
+/// how it is worked out — that `nilo_resolve` line is the entire wiring,
 /// and there is nothing to register in `main`.
 const Caller = struct {
-    pub const zfast_resolve = identify;
+    pub const nilo_resolve = identify;
 
     name: []const u8,
     admin: bool,
 };
 
 /// Real code looks this up in a database, in which case the resolver takes
-/// a `*Store` alongside the `*Ctx` and zfast passes it in. A missing
+/// a `*Store` alongside the `*Ctx` and nilo passes it in. A missing
 /// `provide` for it would stop the server at startup, even though no
 /// handler mentions it.
 const known_tokens = [_]struct { token: []const u8, name: []const u8, admin: bool }{
@@ -297,7 +297,7 @@ const known_tokens = [_]struct { token: []const u8, name: []const u8, admin: boo
     .{ .token = "read-only", .name = "budi", .admin = false },
 };
 
-fn identify(c: *zfast.Ctx) !Caller {
+fn identify(c: *nilo.Ctx) !Caller {
     const token = c.header("X-Token") orelse
         return fail.unauthorized("this endpoint needs an X-Token header", .{});
     for (known_tokens) |known| {
@@ -326,7 +326,7 @@ fn stats(store: *Store, caller: Caller) struct { users: usize, asked_by: []const
 ///
 /// A middleware that does not call `next.run(c)` ends the chain. That is all
 /// rejecting a request takes.
-fn requireAdmin(c: *zfast.Ctx, next: zfast.Next) !void {
+fn requireAdmin(c: *nilo.Ctx, next: nilo.Next) !void {
     const caller = try c.resolve(Caller);
     if (!caller.admin) return fail.forbidden("{s} is not an admin", .{caller.name});
     return next.run(c);
@@ -340,7 +340,7 @@ pub fn main() !void {
     _ = try store.add("wati", "wati@example.dev");
     _ = try store.add("budi", "budi@example.dev");
 
-    var app = zfast.App.init(gpa);
+    var app = nilo.App.init(gpa);
     defer app.deinit();
 
     try app.provide(&store);
@@ -348,13 +348,13 @@ pub fn main() !void {
     // An OpenAPI document at /openapi.json and a page for it at /docs,
     // written from the handler signatures below. Nothing is annotated,
     // because there is nothing to annotate: the description is read off the
-    // same argument lists zfast already reads to call them.
+    // same argument lists nilo already reads to call them.
     app.docs(.{ .title = "Users", .version = "1.0.0" });
 
     // Registration order between `use` and `get` does not matter; the
     // chains are put together when `listen()` runs.
-    try app.use(zfast.logger.standard);
-    try app.use(zfast.cors.permissive);
+    try app.use(nilo.logger.standard);
+    try app.use(nilo.cors.permissive);
 
     try app.get("/users", listUsers);
     try app.get("/users/:id", getUser);
@@ -380,7 +380,7 @@ pub fn main() !void {
 
 const testing = std.testing;
 
-test "getUser answers with the user, or with null — which zfast sends as a 404" {
+test "getUser answers with the user, or with null — which nilo sends as a 404" {
     var store = Store{ .gpa = testing.allocator };
     defer store.deinit();
     const wati = try store.add("wati", "wati@example.dev");

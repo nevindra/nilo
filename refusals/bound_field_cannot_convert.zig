@@ -3,16 +3,16 @@
 //! `Bound(Form(…))` the handler actually wrote rather than the `Form(…)`
 //! inside it.
 
-const zfast = @import("zfast");
+const nilo = @import("nilo");
 
 const SignUp = struct { tags: []const u8 = "" };
 
-fn signUp(incoming: zfast.Bound(zfast.Form(SignUp))) u32 {
+fn signUp(incoming: nilo.Bound(nilo.Form(SignUp))) u32 {
     _ = incoming;
     return 0;
 }
 
 export fn refusal() void {
-    var app: zfast.App = undefined;
+    var app: nilo.App = undefined;
     app.post("/sign-up", signUp) catch {};
 }

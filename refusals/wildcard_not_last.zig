@@ -1,12 +1,12 @@
 //! A catch-all with a segment after it, which nothing could ever match.
 
-const zfast = @import("zfast");
+const nilo = @import("nilo");
 
-fn raw(c: *zfast.Ctx) !void {
+fn raw(c: *nilo.Ctx) !void {
     _ = c;
 }
 
 export fn refusal() void {
-    var app: zfast.App = undefined;
+    var app: nilo.App = undefined;
     app.get("/files/*/raw", raw) catch {};
 }

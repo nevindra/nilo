@@ -13,7 +13,7 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-ZFAST="$(cd "$HERE/../.." && pwd)"
+NILO="$(cd "$HERE/../.." && pwd)"
 export GOCACHE="$HERE/.gocache"
 
 probe() {  # probe <label> <file> <dir> <command...>
@@ -37,7 +37,7 @@ probe "Go net/http"  "$HERE/gonet/main.go"        "$HERE/gonet"    go build -o g
 probe "Go Fiber v2"  "$HERE/gofiber/main.go"      "$HERE/gofiber"  go build -o gofiber-bench .
 probe "Rust axum"    "$HERE/rustaxum/src/main.rs" "$HERE/rustaxum" env CARGO_PROFILE_RELEASE_DEBUG=true cargo build --release
 probe "http.zig"     "$HERE/httpzig/src/main.zig" "$HERE/httpzig"  zig build -Doptimize=ReleaseFast -Dstrip=false
-probe "zfast"        "$ZFAST/src/main.zig"        "$ZFAST"         zig build -Doptimize=ReleaseFast -Dstrip=false
+probe "nilo"        "$NILO/src/main.zig"        "$NILO"         zig build -Doptimize=ReleaseFast -Dstrip=false
 
 echo
 echo "======== WARM RELEASE REBUILD, WITHOUT DEBUG INFO ========"
@@ -45,12 +45,12 @@ probe "Go net/http"  "$HERE/gonet/main.go"        "$HERE/gonet"    go build "-ld
 probe "Go Fiber v2"  "$HERE/gofiber/main.go"      "$HERE/gofiber"  go build "-ldflags=-s -w" -o gofiber-bench .
 probe "Rust axum"    "$HERE/rustaxum/src/main.rs" "$HERE/rustaxum" cargo build --release
 probe "http.zig"     "$HERE/httpzig/src/main.zig" "$HERE/httpzig"  zig build -Doptimize=ReleaseFast -Dstrip=true
-probe "zfast"        "$ZFAST/src/main.zig"        "$ZFAST"         zig build -Doptimize=ReleaseFast
+probe "nilo"        "$NILO/src/main.zig"        "$NILO"         zig build -Doptimize=ReleaseFast
 
 echo
-echo "======== WHERE ZFAST'S RELEASE BUILD GOES ========"
+echo "======== WHERE NILO'S RELEASE BUILD GOES ========"
 ZIO="zig-pkg/zio-0.17.0-xHbVVI_jJQC3YbgU7JydwAV7MuASkOTd73YqBaKlFFUz/src/zio.zig"
-OPTS=$(cd "$ZFAST" && ls .zig-cache/c/*/options.zig 2>/dev/null | head -1)
+OPTS=$(cd "$NILO" && ls .zig-cache/c/*/options.zig 2>/dev/null | head -1)
 if [ -z "$OPTS" ]; then
     echo "  (run 'zig build -Doptimize=ReleaseFast' once first — needs the options file)"
     exit 0
@@ -63,11 +63,11 @@ stage() {  # stage <label> <emit-flag> <extra flags...>
     rm -rf "$cache"
     local start end
     start=$(date +%s.%N)
-    (cd "$ZFAST" && zig build-exe "$emit" "$@" \
-        --dep zfast -Mroot=src/main.zig \
-        --dep zio -Mzfast=src/zfast.zig \
+    (cd "$NILO" && zig build-exe "$emit" "$@" \
+        --dep nilo -Mroot=src/main.zig \
+        --dep zio -Mnilo=src/nilo.zig \
         --dep zio_options -Mzio="$ZIO" -Mzio_options="$OPTS" \
-        -lc --cache-dir "$cache" --name zfast-hello >/dev/null 2>&1)
+        -lc --cache-dir "$cache" --name nilo-hello >/dev/null 2>&1)
     end=$(date +%s.%N)
     rm -rf "$cache" "/tmp/dbgstage.$$.exe"
     printf "%-44s %7.2fs\n" "$label" "$(echo "$end - $start" | bc)"
@@ -79,8 +79,8 @@ stage "and the debug info: the build" -femit-bin=/tmp/dbgstage.$$.exe -OReleaseF
 echo
 echo "and to show the linker is not in it:"
 LSTART=$(date +%s.%N)
-(cd "$ZFAST" && zig build-obj -OReleaseFast \
-    --dep zfast -Mroot=src/main.zig --dep zio -Mzfast=src/zfast.zig \
+(cd "$NILO" && zig build-obj -OReleaseFast \
+    --dep nilo -Mroot=src/main.zig --dep zio -Mnilo=src/nilo.zig \
     --dep zio_options -Mzio="$ZIO" -Mzio_options="$OPTS" \
     -lc --cache-dir /tmp/dbgobj.$$ -femit-bin=/tmp/dbgobj.$$.o >/dev/null 2>&1)
 LEND=$(date +%s.%N)

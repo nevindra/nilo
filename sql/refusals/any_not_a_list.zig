@@ -2,10 +2,10 @@
 //! reads as "role is admin OR …" with nothing on the other side, and the outer
 //! braces that would have held the alternatives are missing.
 
-const sql = @import("zfast_sql");
+const sql = @import("nilo_sql");
 
 const User = struct {
-    pub const zfast_table = .{ .name = "users", .key = .id };
+    pub const nilo_table = .{ .name = "users", .key = .id };
 
     id: i64,
     role: []const u8,

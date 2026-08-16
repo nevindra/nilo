@@ -16,7 +16,7 @@ fn search(c: *Ctx) !void {
 }
 ```
 
-Ten lines of exactly the boilerplate the typed layer exists to remove — and, worse, taking a `*Ctx` gives up the typed return value and the typed path params too. Sorting and pagination are not edge cases; a listing endpoint without them is unusual. So the most ordinary thing a REST service does was the thing that pushed people out of the layer that makes zfast worth using.
+Ten lines of exactly the boilerplate the typed layer exists to remove — and, worse, taking a `*Ctx` gives up the typed return value and the typed path params too. Sorting and pagination are not edge cases; a listing endpoint without them is unusual. So the most ordinary thing a REST service does was the thing that pushed people out of the layer that makes nilo worth using.
 
 `docs/history.md` records that "Router: path params, query params" in the v1 scope since stage 1. Only half of it was built.
 
@@ -39,9 +39,9 @@ Field names are the query names, because Zig keeps field names and does not keep
 
 ## Why a wrapper rather than a marker on the struct
 
-The obvious alternative was to leave it a plain struct and mark it, `pub const zfast_query = {}`, letting handlers write `fn search(s: Search)`. That reads better at the use site — `s.page` rather than `params.value.page`.
+The obvious alternative was to leave it a plain struct and mark it, `pub const nilo_query = {}`, letting handlers write `fn search(s: Search)`. That reads better at the use site — `s.page` rather than `params.value.page`.
 
-It was rejected on two counts. A plain struct argument is already the request body, so with a marker the question "is this the body or the query?" moves out of the signature and into the struct's definition, possibly in another file. And the marker has to live in the caller's own type, which stops that type being an ordinary struct shared with code that has never heard of zfast.
+It was rejected on two counts. A plain struct argument is already the request body, so with a marker the question "is this the body or the query?" moves out of the signature and into the struct's definition, possibly in another file. And the marker has to live in the caller's own type, which stops that type being an ordinary struct shared with code that has never heard of nilo.
 
 `Query(T)` costs one `.value` at each use and buys back a signature that can be read on its own. It also matches `Response(T)`, which already works this way, so there is one shape to learn rather than two.
 

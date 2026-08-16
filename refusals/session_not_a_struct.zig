@@ -1,14 +1,14 @@
 //! A session that is not a struct, so there are no field names for the
 //! remembered values to live in.
 
-const zfast = @import("zfast");
+const nilo = @import("nilo");
 
-fn me(s: zfast.Session(u32)) u32 {
+fn me(s: nilo.Session(u32)) u32 {
     _ = s;
     return 0;
 }
 
 export fn refusal() void {
-    var app: zfast.App = undefined;
+    var app: nilo.App = undefined;
     app.get("/me", me) catch {};
 }

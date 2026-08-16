@@ -1,8 +1,8 @@
-//! A file as a return value — the handler names it, zfast opens it, and the
+//! A file as a return value — the handler names it, nilo opens it, and the
 //! bytes never enter this process (ADR 0037).
 //!
 //! ```zig
-//! fn invoice(files: *Files, id: u32) !?zfast.FileBody {
+//! fn invoice(files: *Files, id: u32) !?nilo.FileBody {
 //!     const name = try files.nameOf(id) orelse return null;
 //!     return .{ .dir = files.dir, .name = name, .content_type = "application/pdf" };
 //! }
@@ -36,16 +36,16 @@ const typed = @import("typed.zig");
 const Ctx = @import("ctx.zig").Ctx;
 
 /// The declaration a `FileBody` carries, so the compile-time engine can tell
-/// one from an ordinary return value — `Redirect`'s `zfast_redirect`, for
+/// one from an ordinary return value — `Redirect`'s `nilo_redirect`, for
 /// the same job.
-pub const marker = "zfast_file";
+pub const marker = "nilo_file";
 
 /// An answer that is a file on disk.
 pub const FileBody = struct {
     /// There is nothing for the marker to carry: unlike `Redirect(status)`
     /// or `Response(T)`, this type is not generic and has no compile-time
     /// parameter to hand on. Its presence is the whole message.
-    pub const zfast_file = {};
+    pub const nilo_file = {};
 
     /// The directory the file is opened relative to — one a Service opened
     /// at startup and holds open, never one worked out per request.
@@ -234,7 +234,7 @@ fn refuse(c: *Ctx, wrong: Wrong) fail.Error {
     std.log.warn(
         "{s} {s}: a FileBody named a file that cannot be opened in its directory — the " ++
             "name {s} — so nothing was opened and the answer is a 404. A name reaching " ++
-            "zfast comes from the application, so this is a request value that arrived " ++
+            "nilo comes from the application, so this is a request value that arrived " ++
             "somewhere unchecked.",
         .{ @tagName(c.method), c._path, wrong.why() },
     );
@@ -253,7 +253,7 @@ const testing = std.testing;
 
 const App = @import("app.zig").App;
 const openapi = @import("openapi.zig");
-const zfast_testing = @import("testing.zig");
+const nilo_testing = @import("testing.zig");
 
 test "a name is refused by segment, not by substring" {
     // The ones that have to work. `..` inside a name is not a `..` segment,
@@ -290,7 +290,7 @@ test "a name is refused by segment, not by substring" {
 }
 
 /// A directory with one file in it, written for one test and removed
-/// afterwards — what a Service holding a `zfast.Dir` looks like.
+/// afterwards — what a Service holding a `nilo.Dir` looks like.
 const Files = struct {
     tmp: std.testing.TmpDir,
     dir: bulkhead.Dir,
@@ -352,7 +352,7 @@ test "a handler returning a FileBody answers with the file" {
     defer app.deinit();
     try appServing(&app, &files);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.get(&app, "/invoices/1");
@@ -382,7 +382,7 @@ test "a range against a FileBody is answered by the shared primitive" {
     defer app.deinit();
     try appServing(&app, &files);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.send(
@@ -402,7 +402,7 @@ test "`?FileBody` returning null is a 404, the same as every other optional" {
     defer app.deinit();
     try appServing(&app, &files);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.get(&app, "/invoices/9");
@@ -417,7 +417,7 @@ test "a file the application named and the disk does not have is a 404" {
     defer app.deinit();
     try appServing(&app, &files);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.get(&app, "/invoices/2");
@@ -440,7 +440,7 @@ test "a name with a `..` segment opens nothing, and says the same 404" {
     defer app.deinit();
     try appServing(&app, &files);
 
-    var client = try zfast_testing.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
     const answer = try client.get(&app, "/invoices/3");

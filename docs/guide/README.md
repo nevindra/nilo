@@ -1,4 +1,4 @@
-# The zfast guide
+# The nilo guide
 
 One page per thing you might want to do. Read them in order the first time —
 each one assumes the ones above it — and jump straight in afterwards.
@@ -38,13 +38,15 @@ each one assumes the ones above it — and jump straight in afterwards.
     and range requests, and a file too big to hold opened per request.
 14. [Errors](./errors.md) — failing a request from anywhere, what a client is
     told, and request ids for tying a failure to its log line.
+15. [Talking to Postgres](./sql.md) — the second module: your struct is the
+    table, the query is a constant, and a misspelled column is a build error.
 
 ## Shipping it
 
-15. [Testing](./testing.md) — handlers as ordinary functions, and the test
+16. [Testing](./testing.md) — handlers as ordinary functions, and the test
     client for the ones that write their answer.
-16. [OpenAPI](./openapi.md) — an API document written from the signatures.
-17. [Deploying](./deploying.md) — startup errors, panics, graceful shutdown,
+17. [OpenAPI](./openapi.md) — an API document written from the signatures.
+18. [Deploying](./deploying.md) — startup errors, panics, graceful shutdown,
     tuning, and what isn't here yet.
 
 ## Also

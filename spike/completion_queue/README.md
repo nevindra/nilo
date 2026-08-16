@@ -9,7 +9,7 @@ per-connection budget over again.
 
 [zio#668](https://github.com/lalinsky/zio/issues/668) asked for `waitForIo` to
 be exported for this. The answer was that `zio.CompletionQueue` already does
-it — and it does: it is public in v0.17.0, which is the version zfast already
+it — and it does: it is public in v0.17.0, which is the version nilo already
 pins, along with `ev.NetPoll`, `ev.Async` and `ev.Completion`. So **the issue's
 premise was wrong and nothing upstream needs to change to make the API
 reachable.**
@@ -19,7 +19,7 @@ That left two questions, asked in two passes.
 1. **Does the cancel path hold?** [zio#667](https://github.com/lalinsky/zio/issues/667)
    is a defect where a waiter node is pushed onto a queue it is already linked
    into, hanging `ReleaseFast` 17 runs in 20. `CompletionQueue` is built on the
-   same `SimpleQueue`, and every zfast connection is cancelled at shutdown.
+   same `SimpleQueue`, and every nilo connection is cancelled at shutdown.
 2. **Can a connection re-arm forever without dropping a message?** A broadcast
    wakes the same connection over and over, so a wakeup that works once is no
    use. This is where [zio#673](https://github.com/lalinsky/zio/issues/673)
@@ -138,7 +138,7 @@ same in all three optimize modes.
 
 > **Broadcast is not waiting on zio#673.** The fix is still the right one and
 > still belongs upstream — `reset` clearing `group` corrupts anyone who links
-> a completion before arming it, silently in ReleaseFast — but zfast does not
+> a completion before arming it, silently in ReleaseFast — but nilo does not
 > have to sit still until it lands.
 
 The one thing to say out loud: assigning a whole `Completion` is a plain store

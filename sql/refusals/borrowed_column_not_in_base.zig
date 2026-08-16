@@ -2,10 +2,10 @@
 //! This is the check that makes borrowing worth the overload: written out
 //! longhand the same typo would have survived until a live Postgres saw it.
 
-const sql = @import("zfast_sql");
+const sql = @import("nilo_sql");
 
 const User = struct {
-    pub const zfast_table = .{ .name = "users", .key = .id };
+    pub const nilo_table = .{ .name = "users", .key = .id };
 
     id: i64,
     email: []const u8,
@@ -13,7 +13,7 @@ const User = struct {
 };
 
 const UserCard = struct {
-    pub const zfast_table = User;
+    pub const nilo_table = User;
 
     id: i64,
     emial: []const u8,

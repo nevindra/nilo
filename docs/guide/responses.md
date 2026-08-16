@@ -7,7 +7,7 @@ underneath: what a `*Ctx` can send, and the rules that apply to both.
 ## Sending from a `Ctx`
 
 ```zig
-fn handler(c: *zfast.Ctx) !void { … }
+fn handler(c: *nilo.Ctx) !void { … }
 ```
 
 | | |
@@ -56,7 +56,7 @@ Eight per response there, and a ninth is a compile error pointing you at
 names it and says the answer carries a `Location`:
 
 ```zig
-fn shortLink(db: *Db, code: zfast.Str) !zfast.Redirect(302) {
+fn shortLink(db: *Db, code: nilo.Str) !nilo.Redirect(302) {
     return .to(try db.target(code.view()));
 }
 ```
@@ -88,12 +88,12 @@ There is no body. Browsers follow the header and never look
 
 ## Files
 
-`FileBody` is a file as a return value: the handler names it, zfast opens it,
+`FileBody` is a file as a return value: the handler names it, nilo opens it,
 and the bytes go from the disk to the socket without passing through your
 process ([ADR 0037](../adr/0037-a-file-too-big-to-hold-is-opened-not-read.md)).
 
 ```zig
-fn invoice(files: *Files, id: u32) !?zfast.FileBody {
+fn invoice(files: *Files, id: u32) !?nilo.FileBody {
     const name = try files.nameOf(id) orelse return null;
     return .{ .dir = files.dir, .name = name, .content_type = "application/pdf" };
 }
@@ -105,7 +105,7 @@ bytes — and the `?` says it answers 404, exactly as it does for a `?User`.
 
 | | |
 |---|---|
-| `dir` | the directory to open the file in — a `zfast.Dir` |
+| `dir` | the directory to open the file in — a `nilo.Dir` |
 | `name` | the name inside it |
 | `content_type` | default `"application/octet-stream"` |
 | `cache_control` | empty leaves the header off |
@@ -115,7 +115,7 @@ The `dir` is not decoration. It is opened once, at startup, and held as a
 service:
 
 ```zig
-var files: Files = .{ .dir = try zfast.Dir.open("uploads") };
+var files: Files = .{ .dir = try nilo.Dir.open("uploads") };
 defer files.dir.close();
 try app.provide(&files);
 ```
@@ -174,7 +174,7 @@ warning: handler GET /report failed after answering: WriteFailed
 
 ## Keep-alive
 
-zfast decides. HTTP/1.1 keeps the connection open unless the client says
+nilo decides. HTTP/1.1 keeps the connection open unless the client says
 `Connection: close`; HTTP/1.0 closes unless it asks otherwise; a failed stream or
 an unreadable body closes. `c.keepAlive()` reports what will happen. Nothing a
 handler does has to think about it — a 404 is a normal thing to answer, not a
@@ -189,7 +189,7 @@ reason to hang up.
 | `FileBody` | its `content_type`, `application/octet-stream` by default |
 | anything else | `application/json` |
 
-A failure — from a `fail.*` function, from an error, from zfast refusing a
+A failure — from a `fail.*` function, from an error, from nilo refusing a
 request — is always `application/json`. See [Errors](./errors.md).
 
 For anything else, `c.send(status, content_type, bytes)`, or `c.stream(status,

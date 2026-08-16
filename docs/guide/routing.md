@@ -102,7 +102,7 @@ try metrics(app.group("/internal"));
 Because it's handed the group rather than the App, the same function mounts at
 any prefix, or at two. `anytype` is the usual signature — a group's type carries
 its prefix, so every prefix is a different type. To spell one out, the type is
-`zfast.Group("/internal")`.
+`nilo.Group("/internal")`.
 
 Passing the App itself works too, since it has the same methods: a plugin mounted
 at the root is `try metrics(&app)`.

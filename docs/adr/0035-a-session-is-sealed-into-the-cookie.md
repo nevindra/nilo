@@ -1,20 +1,20 @@
 # A session is sealed into the cookie
 
-ADR 0030 gave zfast cookies and stopped there, on purpose: `c.setCookie` and `c.cookie` are the mechanism, and what goes in the cookie is policy. The roadmap then sat on sessions for a release with the note that *"it is not obvious there is a shape zfast should have an opinion about rather than an example of."*
+ADR 0030 gave nilo cookies and stopped there, on purpose: `c.setCookie` and `c.cookie` are the mechanism, and what goes in the cookie is policy. The roadmap then sat on sessions for a release with the note that *"it is not obvious there is a shape nilo should have an opinion about rather than an example of."*
 
-That was wrong, and what settled it was reading how somebody else answered it. jetzig keeps the whole session **in the cookie**, encrypted and signed, with no server-side store at all. That is a shape zfast can have an opinion about, because the reason to prefer it is [ADR 0018](0018-the-trade-budget-has-three-axes.md)'s second and third rows rather than taste.
+That was wrong, and what settled it was reading how somebody else answered it. jetzig keeps the whole session **in the cookie**, encrypted and signed, with no server-side store at all. That is a shape nilo can have an opinion about, because the reason to prefer it is [ADR 0018](0018-the-trade-budget-has-three-axes.md)'s second and third rows rather than taste.
 
 ## The alternative, and why it loses
 
 The obvious design is the one every framework with a database reaches for: the cookie carries an opaque id, and the server keeps a table of id → session.
 
-Costed against ADR 0018 it is expensive in exactly the places zfast has said it will not spend:
+Costed against ADR 0018 it is expensive in exactly the places nilo has said it will not spend:
 
 - **Memory per connection is the wrong metric here, but memory per *signed-in user* is a new one**, and it is unbounded. A million idle sessions is a million rows nobody is reading, plus whatever it takes to find one.
 - **An allocation per request**, at least: the id has to be looked up, and a lookup that touches a hash map under a lock is not free.
 - **A lock.** The table is shared across every thread serving requests, so it needs one, and it is on the path of every authenticated request rather than of the ones that write.
 - **An expiry sweep** — a background fiber, or a check on every read, and a decision about which.
-- **And it does not survive a restart**, so the honest version of it is not a table at all, it is Redis. That is a dependency zfast would be pushing onto every application that wants a login.
+- **And it does not survive a restart**, so the honest version of it is not a table at all, it is Redis. That is a dependency nilo would be pushing onto every application that wants a login.
 
 The sealed cookie has none of those. Nothing is stored, so there is nothing to sweep, nothing to lock, nothing to lose on restart, and **nothing added to the 8,767 bytes an idle connection holds**. A request that does not ask for a session runs the code it ran before.
 
@@ -22,7 +22,7 @@ The sealed cookie has none of those. Nothing is stored, so there is nothing to s
 
 Three things, and they are stated here rather than left to be discovered.
 
-**A session cannot be revoked.** A sealed cookie is valid until it expires, so "sign out everywhere" is not a thing the mechanism can do. The application's answer is a number in the session that it checks — a token version bumped on password change — and that check is a lookup the application already does. zfast does not pretend otherwise.
+**A session cannot be revoked.** A sealed cookie is valid until it expires, so "sign out everywhere" is not a thing the mechanism can do. The application's answer is a number in the session that it checks — a token version bumped on password change — and that check is a lookup the application already does. nilo does not pretend otherwise.
 
 **It is about 4 KB, and the ceiling is real.** A browser drops an oversized cookie *silently*: no error, no warning, and a session that simply never appears. That is why what a session may hold is a fixed-size struct — numbers, bools, enums, `[N]u8`, optionals and nested structs of those — and why `Session(T)` refuses a slice at compile time. A size that depends on the data is a size nobody checked.
 
@@ -52,16 +52,16 @@ Where the secret comes from — an environment variable, a mounted file, a secre
 
 **There is no default.** A default key is a key everybody who has read this repository already has, and the failure mode of shipping with it is not a crash, it is a forgeable session. So `Session(T)` with no secret set is a 500 with a sentence naming the option, and never a cookie sealed under zeroes.
 
-What zfast does own is telling you when it is wrong. `listen(.{ .session_secret = … })` checks the length there and stops the server with a message, because a secret of the wrong length is a deployment mistake and startup is the moment somebody is watching. It also has to be the *same on every instance* and survive a restart, and the option's documentation says so — the symptom otherwise is users being randomly signed out, which is a long way from its cause.
+What nilo does own is telling you when it is wrong. `listen(.{ .session_secret = … })` checks the length there and stops the server with a message, because a secret of the wrong length is a deployment mistake and startup is the moment somebody is watching. It also has to be the *same on every instance* and survive a restart, and the option's documentation says so — the symptom otherwise is users being randomly signed out, which is a long way from its cause.
 
 ## `Session(T)` is a resolved value, and reading is not writing
 
-It carries `zfast_resolve` like any other resolved value ([ADR 0016](0016-resolved-values-are-declared-by-their-type.md)), so a handler asks for it by writing it in its argument list, and the cookie is decrypted once per request however many things ask — a middleware guarding a prefix and the handler behind it do not pay twice.
+It carries `nilo_resolve` like any other resolved value ([ADR 0016](0016-resolved-values-are-declared-by-their-type.md)), so a handler asks for it by writing it in its argument list, and the cookie is decrypted once per request however many things ask — a middleware guarding a prefix and the handler behind it do not pay twice.
 
 Reading and writing are separate calls, and that is not an oversight:
 
 ```zig
-fn signIn(s: zfast.Session(Signed)) !zfast.Redirect(303) {
+fn signIn(s: nilo.Session(Signed)) !nilo.Redirect(303) {
     try s.set(.{ .user = id });     // and not: s.value.user = id
     return .to("/");
 }

@@ -2,7 +2,7 @@
 //! head goes out (ADR 0020).
 //!
 //! ```zig
-//! fn report(c: *zfast.Ctx, db: *Db) !void {
+//! fn report(c: *nilo.Ctx, db: *Db) !void {
 //!     var body = try c.stream(200, "text/csv");
 //!     for (db.rows()) |row| try body.print("{s},{d}\n", .{ row.name, row.total });
 //!     try body.finish();
@@ -154,7 +154,7 @@ pub const Stream = struct {
         // report, so it says so once.
         const open = self._open.* orelse {
             if (total > 0) std.log.warn(
-                "zfast: {d} bytes were written to a stream after finish() — " ++
+                "nilo: {d} bytes were written to a stream after finish() — " ++
                     "the body had already ended, so they were dropped",
                 .{total},
             );
@@ -180,7 +180,7 @@ pub const Stream = struct {
         return from_data;
     }
 
-    /// zfast's own: `Ctx.stream` builds one of these once the head is out.
+    /// nilo's own: `Ctx.stream` builds one of these once the head is out.
     pub fn init(
         buffer: []u8,
         out: *std.Io.Writer,
@@ -217,7 +217,7 @@ pub const Event = struct {
 /// A stream of server-sent events.
 ///
 /// ```zig
-/// fn tokens(c: *zfast.Ctx, llm: *Llm) !void {
+/// fn tokens(c: *nilo.Ctx, llm: *Llm) !void {
 ///     var events = try c.events();
 ///     while (events.live()) {
 ///         const token = llm.next() orelse break;

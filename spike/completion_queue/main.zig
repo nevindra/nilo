@@ -10,7 +10,7 @@
 //!
 //! zio#668 asked for `waitForIo` to be exported for this. The answer was that
 //! `zio.CompletionQueue` already does it, and it does: it is public in
-//! v0.17.0, which is the version zfast already pins. So the question is no
+//! v0.17.0, which is the version nilo already pins. So the question is no
 //! longer "is there an API" but "does it hold up where the last one did not".
 //!
 //! **What this is really testing is the cancel path.** zio#667 is a live
@@ -19,7 +19,7 @@
 //! catch it — hangs `ReleaseFast` 17 runs in 20. `CompletionQueue` is built on
 //! the same `SimpleQueue`. Reading it, the discipline looks right (the owner
 //! callback removes from `pending` before pushing to `completed`), but reading
-//! is not the same as running, and every zfast connection is cancelled at
+//! is not the same as running, and every nilo connection is cancelled at
 //! shutdown.
 //!
 //! One scenario per process, so a hang is a process that has to be killed

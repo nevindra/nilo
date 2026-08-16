@@ -1,12 +1,12 @@
 //! A colon with nothing after it, so nothing can look the param up.
 
-const zfast = @import("zfast");
+const nilo = @import("nilo");
 
 fn show(id: u32) u32 {
     return id;
 }
 
 export fn refusal() void {
-    var app: zfast.App = undefined;
+    var app: nilo.App = undefined;
     app.get("/users/:", show) catch {};
 }

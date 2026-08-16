@@ -169,7 +169,7 @@ pub const Router = struct {
         var buf: [max_segments][]const u8 = undefined;
         const parts = split(trimSlashes(pattern), &buf) orelse {
             std.debug.panic(
-                "zfast: the route \"{s}\" has more than {d} segments",
+                "nilo: the route \"{s}\" has more than {d} segments",
                 .{ pattern, max_segments },
             );
         };
@@ -420,12 +420,12 @@ pub const Router = struct {
 pub fn validatePattern(comptime pattern: []const u8) void {
     comptime {
         if (pattern.len == 0) @compileError(
-            "zfast: a route pattern cannot be empty.\n" ++
+            "nilo: a route pattern cannot be empty.\n" ++
                 "  The path a browser asks for always starts with a slash, so the pattern does " ++
                 "too: \"/\" for the root.",
         );
         if (pattern[0] != '/') @compileError(
-            "zfast: the route pattern \"" ++ pattern ++ "\" does not start with a slash.\n" ++
+            "nilo: the route pattern \"" ++ pattern ++ "\" does not start with a slash.\n" ++
                 "  Write \"/" ++ pattern ++ "\" — patterns are matched against the path as it " ++
                 "arrives, and that always begins with one.",
         );
@@ -438,7 +438,7 @@ pub fn validatePattern(comptime pattern: []const u8) void {
         var it = std.mem.splitScalar(u8, trimSlashes(pattern), '/');
         while (it.next()) |seg| : (n_segments += 1) {
             if (wildcard_at != null) @compileError(
-                "zfast: the route pattern \"" ++ pattern ++ "\" has a `*` that is not the last " ++
+                "nilo: the route pattern \"" ++ pattern ++ "\" has a `*` that is not the last " ++
                     "segment.\n" ++
                     "  A `*` swallows the whole rest of the path, so nothing after it could ever " ++
                     "match. Move it to the end, or use `:name` for a single segment.",
@@ -451,7 +451,7 @@ pub fn validatePattern(comptime pattern: []const u8) void {
                 continue;
             }
             if (std.mem.indexOfScalar(u8, seg, '*') != null) @compileError(
-                "zfast: the segment \"" ++ seg ++ "\" of route \"" ++ pattern ++ "\" mixes `*` " ++
+                "nilo: the segment \"" ++ seg ++ "\" of route \"" ++ pattern ++ "\" mixes `*` " ++
                     "with other text.\n" ++
                     "  A catch-all is a segment of its own: \"/files/*\", not \"/files/" ++ seg ++
                     "\".",
@@ -459,14 +459,14 @@ pub fn validatePattern(comptime pattern: []const u8) void {
 
             if (seg.len > 0 and seg[0] == ':') {
                 if (seg.len == 1) @compileError(
-                    "zfast: the route pattern \"" ++ pattern ++ "\" has a `:` with no name after " ++
+                    "nilo: the route pattern \"" ++ pattern ++ "\" has a `:` with no name after " ++
                         "it.\n" ++
                         "  A path param is written `:name` — the name is what `c.param(\"name\")` " ++
                         "looks up.",
                 );
                 for (names) |taken| {
                     if (std.mem.eql(u8, taken, seg[1..])) @compileError(
-                        "zfast: the route pattern \"" ++ pattern ++ "\" uses the param name `:" ++
+                        "nilo: the route pattern \"" ++ pattern ++ "\" uses the param name `:" ++
                             seg[1..] ++ "` twice.\n" ++
                             "  `c.param(\"" ++ seg[1..] ++ "\")` could only ever return the first " ++
                             "one. Give them different names.",
@@ -478,7 +478,7 @@ pub fn validatePattern(comptime pattern: []const u8) void {
             }
 
             if (std.mem.indexOfScalar(u8, seg, ':') != null) @compileError(
-                "zfast: the segment \"" ++ seg ++ "\" of route \"" ++ pattern ++ "\" has a `:` " ++
+                "nilo: the segment \"" ++ seg ++ "\" of route \"" ++ pattern ++ "\" has a `:` " ++
                     "in the middle of it, so it is matched as literal text.\n" ++
                     "  A path param takes the whole segment: \"/users/:id\", not \"/users/id:" ++
                     "\". If the colon really is part of the path, this is already correct — " ++
@@ -487,14 +487,14 @@ pub fn validatePattern(comptime pattern: []const u8) void {
         }
 
         if (n_segments > max_segments) @compileError(
-            "zfast: the route pattern \"" ++ pattern ++ "\" has " ++ num(n_segments) ++
-                " segments, and the most zfast matches is " ++ num(max_segments) ++ ".\n" ++
+            "nilo: the route pattern \"" ++ pattern ++ "\" has " ++ num(n_segments) ++
+                " segments, and the most nilo matches is " ++ num(max_segments) ++ ".\n" ++
                 "  A path this deep is usually a `*` catch-all waiting to happen: " ++
                 "\"/files/*\" hands the rest to the handler as `c.param(\"*\")`.",
         );
         if (n_params > max_params) @compileError(
-            "zfast: the route pattern \"" ++ pattern ++ "\" captures " ++ num(n_params) ++
-                " params, and the most zfast holds is " ++ num(max_params) ++ ".\n" ++
+            "nilo: the route pattern \"" ++ pattern ++ "\" captures " ++ num(n_params) ++
+                " params, and the most nilo holds is " ++ num(max_params) ++ ".\n" ++
                 "  Fold the extra ones into the request body or the query string.",
         );
     }

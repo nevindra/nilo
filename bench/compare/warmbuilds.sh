@@ -8,7 +8,7 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-ZFAST="$(cd "$HERE/../.." && pwd)"
+NILO="$(cd "$HERE/../.." && pwd)"
 export GOCACHE="$HERE/.gocache"
 
 probe() {  # probe <label> <file> <dir> <command...>
@@ -29,13 +29,13 @@ probe() {  # probe <label> <file> <dir> <command...>
 }
 
 echo "======== WARM REBUILDS (one source file's content changed) ========"
-probe "zfast"        "$ZFAST/src/main.zig"          "$ZFAST"          zig build -Doptimize=ReleaseFast
+probe "nilo"        "$NILO/src/main.zig"          "$NILO"          zig build -Doptimize=ReleaseFast
 probe "http.zig"     "$HERE/httpzig/src/main.zig"   "$HERE/httpzig"   zig build -Doptimize=ReleaseFast
 probe "Go net/http"  "$HERE/gonet/main.go"          "$HERE/gonet"     go build -o gonet-bench .
 probe "Go Fiber v2"  "$HERE/gofiber/main.go"        "$HERE/gofiber"   go build -o gofiber-bench .
 probe "Rust axum"    "$HERE/rustaxum/src/main.rs"   "$HERE/rustaxum"  cargo build --release
 
 echo
-echo "restoring zfast's working tree:"
-(cd "$ZFAST" && git status --short src/main.zig && git checkout -- src/main.zig 2>/dev/null; git status --short src/main.zig)
+echo "restoring nilo's working tree:"
+(cd "$NILO" && git status --short src/main.zig && git checkout -- src/main.zig 2>/dev/null; git status --short src/main.zig)
 echo "  (empty above means src/main.zig is back to its committed state)"

@@ -2,11 +2,11 @@
 //! the `Set-Cookie` headers a response leaves with (ADR 0030).
 //!
 //! ```zig
-//! fn signIn(c: *zfast.Ctx, sessions: *Sessions) !void {
+//! fn signIn(c: *nilo.Ctx, sessions: *Sessions) !void {
 //!     try c.setCookie(.{ .name = "session", .value = try sessions.open() });
 //! }
 //!
-//! fn whoAmI(c: *zfast.Ctx) !?User {
+//! fn whoAmI(c: *nilo.Ctx) !?User {
 //!     const token = c.cookie("session") orelse return null;
 //!     ...
 //! }

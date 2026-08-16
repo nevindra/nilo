@@ -4,7 +4,7 @@ Every request gets a request arena: one bag of memory thrown away all at once wh
 
 The dangerous consequence: all request data dies when the handler returns. Users coming from Go or Node have never debugged a use-after-free — in both those languages, holding on to a string from a request is impossible to get wrong. In Zig nothing stops you, and the crash shows up at random, hours later, in production.
 
-This is exactly GoFiber's most famous flaw, inherited from fasthttp: the rule "do not keep anything from `c` after the handler returns". Fixing it is one of the reasons zfast deserves to exist.
+This is exactly GoFiber's most famous flaw, inherited from fasthttp: the rule "do not keep anything from `c` after the handler returns". Fixing it is one of the reasons nilo deserves to exist.
 
 So request data is not a bare `[]const u8` but a **Str**:
 
@@ -29,6 +29,6 @@ Every `Lifetime` now takes a span of its own from a process-wide counter, so no 
 
 - The guarantee **cannot** be complete. Zig has no ownership system; there is no way to build a type the compiler refuses to let you store. What is being built is an API shape that makes the mistake visible, plus a trap that goes off on your laptop instead of in production.
 - Which is why the debug-build trap is not a nice-to-have — it is the only thing that actually catches anything, and it has to exist from day one.
-- A `Str` reached through something zfast does not walk carries no marker and is not watched: a const slice, an untagged union. The walk covers structs, optionals, arrays, mutable slices, and the active arm of a tagged union — which is how a `Str` inside a [`Patch`](./0026-a-patch-needs-three-answers-and-an-optional-has-two.md) is covered.
+- A `Str` reached through something nilo does not walk carries no marker and is not watched: a const slice, an untagged union. The walk covers structs, optionals, arrays, mutable slices, and the active arm of a tagged union — which is how a `Str` inside a [`Patch`](./0026-a-patch-needs-three-answers-and-an-optional-has-two.md) is covered.
 - The marker is 16 bytes rather than 12 in a debug build, which is the cost of a 64-bit generation. Release builds still carry none of it.
 - Memory use grows with the number of requests in flight, not the number of connections. That is acceptable because the metrics being chased are throughput and p99, not connection density.

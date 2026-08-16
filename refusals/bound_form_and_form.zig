@@ -2,18 +2,18 @@
 //! this is asking for the form twice — and the message says so, rather than
 //! treating the binding as some other kind of argument.
 
-const zfast = @import("zfast");
+const nilo = @import("nilo");
 
-const SignUp = struct { email: zfast.Str };
-const Extra = struct { referrer: zfast.Str };
+const SignUp = struct { email: nilo.Str };
+const Extra = struct { referrer: nilo.Str };
 
-fn signUp(incoming: zfast.Bound(zfast.Form(SignUp)), also: zfast.Form(Extra)) u32 {
+fn signUp(incoming: nilo.Bound(nilo.Form(SignUp)), also: nilo.Form(Extra)) u32 {
     _ = incoming;
     _ = also;
     return 0;
 }
 
 export fn refusal() void {
-    var app: zfast.App = undefined;
+    var app: nilo.App = undefined;
     app.post("/sign-up", signUp) catch {};
 }

@@ -1,7 +1,7 @@
 """Run every candidate through an identical benchmark.
 
 Same route, same 982-byte payload, same core split, same wrk invocation.
-Each candidate is verified byte-for-byte against zfast's response before it is
+Each candidate is verified byte-for-byte against nilo's response before it is
 allowed to produce a number.
 """
 import json
@@ -33,10 +33,10 @@ WRK = ["wrk", "-t4", "-c64", "--latency"]
 DURATION = os.environ.get("DURATION", "30s")
 WARMUP = os.environ.get("WARMUP", "10s")
 
-ZFAST = os.path.join(REPO, "zig-out", "bin", "zfast-hello")
+NILO = os.path.join(REPO, "zig-out", "bin", "nilo-hello")
 
 CANDIDATES = [
-    dict(key="zfast", label="zfast", port=8787, cmd=[ZFAST]),
+    dict(key="nilo", label="nilo", port=8787, cmd=[NILO]),
     dict(key="gonet", label="Go net/http", port=8801,
          cmd=[f"{HERE}/gonet/gonet-bench"]),
     dict(key="gofiber", label="Go Fiber v2", port=8802,
@@ -187,7 +187,7 @@ def http_get(port, path):
 
 
 def verify(cand):
-    """Every candidate must return exactly the bytes zfast returns."""
+    """Every candidate must return exactly the bytes nilo returns."""
     head, body = http_get(cand["port"], "/users/42")
     status = head.split("\r\n")[0]
     problems = []
@@ -322,7 +322,7 @@ def save(results):
 
 def load():
     """What is already recorded, so re-running one candidate updates the file
-    instead of replacing it. Without this, `drive.py zfast` wrote a raw.json
+    instead of replacing it. Without this, `drive.py nilo` wrote a raw.json
     holding one row and the other eight were gone — which is how the file came
     to disagree with docs/comparison.md."""
     try:

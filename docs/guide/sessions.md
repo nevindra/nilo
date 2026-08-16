@@ -3,19 +3,19 @@
 ```zig
 const Signed = struct { user: u32, admin: bool = false };
 
-fn signIn(s: zfast.Session(Signed), form: zfast.Form(Login)) !zfast.Redirect(303) {
+fn signIn(s: nilo.Session(Signed), form: nilo.Form(Login)) !nilo.Redirect(303) {
     const id = try accounts.check(form.email, form.password) orelse
         return .to("/login?wrong");
     try s.set(.{ .user = id });
     return .to("/");
 }
 
-fn me(s: zfast.Session(Signed)) !?Profile {
+fn me(s: nilo.Session(Signed)) !?Profile {
     const signed = s.get() orelse return null;   // null → 404
     return profiles.find(signed.user);
 }
 
-fn signOut(s: zfast.Session(Signed)) !zfast.Redirect(303) {
+fn signOut(s: nilo.Session(Signed)) !nilo.Redirect(303) {
     try s.clear();
     return .to("/");
 }
@@ -36,7 +36,7 @@ try app.listen(.{ .session_secret = secret });   // exactly 32 bytes
 ```
 
 Where it comes from is yours — an environment variable, a mounted file, a
-secrets manager. zfast has **no default**, because a default key is a key
+secrets manager. nilo has **no default**, because a default key is a key
 everybody who has read this repository already has.
 
 Three things have to be true of it, and getting any of them wrong is quiet:
@@ -96,10 +96,10 @@ Being a resolved value is also what makes it cheap: the cookie is decrypted
 `/admin` and the handler behind it do not both pay.
 
 ```zig
-fn requireAdmin(c: *zfast.Ctx, next: zfast.Next) !void {
-    const s = try c.resolve(zfast.Session(Signed));
-    const signed = s.get() orelse return zfast.fail.unauthorized("sign in first", .{});
-    if (signed.role != .admin) return zfast.fail.forbidden("admins only", .{});
+fn requireAdmin(c: *nilo.Ctx, next: nilo.Next) !void {
+    const s = try c.resolve(nilo.Session(Signed));
+    const signed = s.get() orelse return nilo.fail.unauthorized("sign in first", .{});
+    if (signed.role != .admin) return nilo.fail.forbidden("admins only", .{});
     try next.run(c);
 }
 ```
@@ -128,7 +128,7 @@ If you need revocation, put a number in the session and check it:
 ```zig
 const Signed = struct { user: u32, token_version: u16 };
 
-fn me(s: zfast.Session(Signed), db: *Db) !?Profile {
+fn me(s: nilo.Session(Signed), db: *Db) !?Profile {
     const signed = s.get() orelse return null;
     const account = db.find(signed.user) orelse return null;
     if (account.token_version != signed.token_version) return null;   // signed out everywhere
@@ -158,7 +158,7 @@ swapping places, which no size check would catch.
 
 It is where a user's id lives once something else has established it. What
 checks the password, what talks to the identity provider, what a role means —
-all yours. zfast provides the mechanism and no policy, the same line it draws
+all yours. nilo provides the mechanism and no policy, the same line it draws
 around [middleware and resolved values](./middleware.md).
 
 ## Testing
@@ -183,7 +183,7 @@ drive the App with the [test client](./testing.md), setting the key directly
 rather than listening:
 
 ```zig
-var app = zfast.App.init(testing.allocator);
+var app = nilo.App.init(testing.allocator);
 defer app.deinit();
 app.session_key = @splat(0xA5);          // what `.session_secret` becomes
 try app.post("/sign-in", signIn);

@@ -330,7 +330,7 @@ fn longLived(gpa: std.mem.Allocator) !void {
     defer gpa.free(away);
 
     // A whole message read, unmasked and echoed back, against in-memory
-    // buffers — so what is left is zfast's work, with no kernel in it.
+    // buffers — so what is left is nilo's work, with no kernel in it.
     var t = clock();
     for (0..ws_rounds) |_| {
         var in = std.Io.Reader.fixed(wire[0..frame_len]);

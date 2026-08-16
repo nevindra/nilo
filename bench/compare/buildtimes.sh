@@ -12,7 +12,7 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-ZFAST="$(cd "$HERE/../.." && pwd)"
+NILO="$(cd "$HERE/../.." && pwd)"
 # A scratch cache, so the machine's own Go build cache is left alone.
 export GOCACHE="$HERE/.gocache"
 
@@ -42,8 +42,8 @@ size() {  # size <label> <path>
 
 echo "======== COLD BUILDS (deps already fetched, build cache empty) ========"
 
-rm -rf "$ZFAST/.zig-cache" "$ZFAST/zig-out"
-t "zfast" env -C "$ZFAST" zig build -Doptimize=ReleaseFast
+rm -rf "$NILO/.zig-cache" "$NILO/zig-out"
+t "nilo" env -C "$NILO" zig build -Doptimize=ReleaseFast
 
 rm -rf "$HERE/httpzig/.zig-cache" "$HERE/httpzig/zig-out"
 t "http.zig" env -C "$HERE/httpzig" zig build -Doptimize=ReleaseFast
@@ -60,8 +60,8 @@ t "Rust axum (lto, cgu=1)" env -C "$HERE/rustaxum" cargo build --release
 echo
 echo "======== WARM REBUILDS (one source file touched) ========"
 
-touch "$ZFAST/src/main.zig"
-t "zfast" env -C "$ZFAST" zig build -Doptimize=ReleaseFast
+touch "$NILO/src/main.zig"
+t "nilo" env -C "$NILO" zig build -Doptimize=ReleaseFast
 
 touch "$HERE/httpzig/src/main.zig"
 t "http.zig" env -C "$HERE/httpzig" zig build -Doptimize=ReleaseFast
@@ -77,7 +77,7 @@ t "Rust axum (lto, cgu=1)" env -C "$HERE/rustaxum" cargo build --release
 
 echo
 echo "======== BINARY SIZE ========"
-size "zfast"        "$ZFAST/zig-out/bin/zfast-hello"
+size "nilo"        "$NILO/zig-out/bin/nilo-hello"
 size "http.zig"     "$HERE/httpzig/zig-out/bin/httpzig-bench"
 size "Go net/http"  "$HERE/gonet/gonet-bench"
 size "Go Fiber v2"  "$HERE/gofiber/gofiber-bench"

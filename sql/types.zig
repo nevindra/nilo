@@ -23,7 +23,7 @@
 //!
 //! `Timestamp` is therefore deliberately open: it is an `i64` whose unit is
 //! stated, and anyone who wants arithmetic can build it on top in a package of
-//! their own without asking zfast's permission. This is the floor for that
+//! their own without asking nilo's permission. This is the floor for that
 //! work, not a refusal of it.
 
 const std = @import("std");
@@ -40,7 +40,7 @@ pub const Timestamp = struct {
     /// line has to know that.
     micros: i64,
 
-    pub const zfast_column = "timestamptz";
+    pub const nilo_column = "timestamptz";
 
     pub fn fromSeconds(secs: i64) Timestamp {
         return .{ .micros = secs * std.time.us_per_s };
@@ -90,7 +90,7 @@ pub const Timestamp = struct {
 pub const Uuid = struct {
     bytes: [16]u8,
 
-    pub const zfast_column = "uuid";
+    pub const nilo_column = "uuid";
 
     /// The hyphenated form, lowercase. 8-4-4-4-12, which is the only spelling
     /// anything on the other side of an API expects.
@@ -143,8 +143,8 @@ pub fn Json(comptime T: type) type {
 
         value: T,
 
-        pub const zfast_column = "jsonb";
-        pub const zfast_json_of = T;
+        pub const nilo_column = "jsonb";
+        pub const nilo_json_of = T;
 
         pub fn jsonStringify(self: Self, jw: anytype) !void {
             try jw.write(self.value);
@@ -156,17 +156,17 @@ pub fn Json(comptime T: type) type {
 /// bytes to turn into a field.
 pub fn jsonPayload(comptime T: type) ?type {
     return switch (@typeInfo(T)) {
-        .@"struct" => if (@hasDecl(T, "zfast_json_of")) T.zfast_json_of else null,
+        .@"struct" => if (@hasDecl(T, "nilo_json_of")) T.nilo_json_of else null,
         else => null,
     };
 }
 
-/// The column type a zfast-provided type expects, when it has an opinion.
+/// The column type a nilo-provided type expects, when it has an opinion.
 /// The Dialect asks; a plain Zig type answers `null` and is mapped by the
 /// Dialect's own table instead.
 pub fn declaredColumn(comptime T: type) ?[]const u8 {
     return switch (@typeInfo(T)) {
-        .@"struct" => if (@hasDecl(T, "zfast_column")) T.zfast_column else null,
+        .@"struct" => if (@hasDecl(T, "nilo_column")) T.nilo_column else null,
         else => null,
     };
 }

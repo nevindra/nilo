@@ -1,13 +1,13 @@
 # A WebSocket is a handler that does not return yet
 
-Everything else in zfast answers a request. A WebSocket stops being a request: after the 101 the connection carries frames in both directions until somebody closes it, and none of HTTP applies any more.
+Everything else in nilo answers a request. A WebSocket stops being a request: after the 101 the connection carries frames in both directions until somebody closes it, and none of HTTP applies any more.
 
 The temptation is a shape of its own — a registration API, a set of callbacks, an object with `onMessage` and `onClose`. That is what most frameworks do, and it means a WebSocket handler is not a handler, cannot take a service, cannot take a resolved value, and cannot be read next to the routes around it.
 
 So it is a handler:
 
 ```zig
-fn chat(c: *zfast.Ctx, room: *Room) !void {
+fn chat(c: *nilo.Ctx, room: *Room) !void {
     var socket = try c.upgrade();
     var buf: [16 * 1024]u8 = undefined;
     while (try socket.receive(&buf)) |message| {
@@ -62,17 +62,17 @@ Sending to *other* connections needs a registry of live sockets and a way to wri
 
 It is recorded here rather than half-built, because a broadcast that works in a test and interleaves under load is worse than one that does not exist.
 
-> **This is no longer true, and [ADR 0038](./0038-a-broadcast-rings-a-bell-it-does-not-write.md) is how it stopped being.** A `zfast.Room` says things to sockets a handler does not hold, and the loop above is unchanged — `receive` writes out anything posted to this connection on its way past, so a handler still never sees a broadcast and never writes a branch for one. The registry is the Room's seats; the way to write to a socket from a different fiber is not to, which was the whole finding.
+> **This is no longer true, and [ADR 0038](./0038-a-broadcast-rings-a-bell-it-does-not-write.md) is how it stopped being.** A `nilo.Room` says things to sockets a handler does not hold, and the loop above is unchanged — `receive` writes out anything posted to this connection on its way past, so a handler still never sees a broadcast and never writes a branch for one. The registry is the Room's seats; the way to write to a socket from a different fiber is not to, which was the whole finding.
 >
-> **Both of the guesses below were wrong, and ADR 0029 has the measurements.** The interleaving is real and a lock per socket does fix it — and fixes nothing else, because the writing is done by the *speaker's* fiber, which then blocks on the first connection that has stopped reading. That is not a locking problem and no lock granularity touches it. The second guess, a mailbox the owning fiber drains, is the right shape and is not reachable: it needs a wait that ends on either the socket becoming readable or a post arriving, and zio exports no way to park a fiber on a completion. What did come out of that work is `zfast.spawn`.
+> **Both of the guesses below were wrong, and ADR 0029 has the measurements.** The interleaving is real and a lock per socket does fix it — and fixes nothing else, because the writing is done by the *speaker's* fiber, which then blocks on the first connection that has stopped reading. That is not a locking problem and no lock granularity touches it. The second guess, a mailbox the owning fiber drains, is the right shape and is not reachable: it needs a wait that ends on either the socket becoming readable or a post arriving, and zio exports no way to park a fiber on a completion. What did come out of that work is `nilo.spawn`.
 
-Also not here: `permessage-deflate` (negotiated in the handshake, and a compressor per connection is memory zfast has not budgeted), and any deadline at all — a client that opens a socket and never speaks holds a fiber until TCP gives up. That last one is the same hole ADR 0020 recorded, and WebSocket makes it cheaper to exploit.
+Also not here: `permessage-deflate` (negotiated in the handshake, and a compressor per connection is memory nilo has not budgeted), and any deadline at all — a client that opens a socket and never speaks holds a fiber until TCP gives up. That last one is the same hole ADR 0020 recorded, and WebSocket makes it cheaper to exploit.
 
 > **The hole is closed, by the answer this ADR already named.** `Options.idle_ms`, 30 seconds by default: silence sends a ping, and silence after an unanswered ping closes with 1001. Still not a deadline, for the reason given above — a quiet WebSocket is a working one, so the framework asks rather than assumes. What made it buildable was [ADR 0038](./0038-a-broadcast-rings-a-bell-it-does-not-write.md), which gave the connection a wait that can carry a limit; before that there was no way to time a WebSocket read without also breaking the quiet-is-fine promise. Set it to `0` for the old behaviour.
 
 ## Consequences
 
-- The connection cannot carry another HTTP request, which zfast arranges: `upgrade()` sets the same flag an unframed HTTP/1.0 stream sets, and `keepAlive()` is false from then on. A handler only has to return.
+- The connection cannot carry another HTTP request, which nilo arranges: `upgrade()` sets the same flag an unframed HTTP/1.0 stream sets, and `keepAlive()` is false from then on. A handler only has to return.
 - A handshake that is missing something is a 400 naming the missing part — `Upgrade`, `Connection`, `Sec-WebSocket-Version`, `Sec-WebSocket-Key` — rather than framing nobody can read. Getting this wrong by hand is the normal way to meet WebSocket for the first time.
 - **The logger was reporting a status nobody sent.** A handler failing after its 101 was logged as `500`, because the logger asked the error what status it mapped to without asking whether an answer had already gone out. It now uses the sent status when there is one, which fixes the same wrongness for a stream that fails mid-body.
-- 5 of the 8 statuses `Close` names are ones zfast sends itself. The enum is left open (`_`) because a handler is entitled to send a code of its own.
+- 5 of the 8 statuses `Close` names are ones nilo sends itself. The enum is left open (`_`) because a handler is entitled to send a code of its own.

@@ -3,7 +3,7 @@
 //! `std.json` is what this falls back to, and for a while it was all there
 //! was. What it costs is not obvious from reading it: it writes a JSON string
 //! a byte at a time, through the writer, checking each one for something that
-//! needs escaping. On the ~1KB payload that is zfast's primary metric that
+//! needs escaping. On the ~1KB payload that is nilo's primary metric that
 //! came to 1038ns — more than everything else the request does put together.
 //!
 //! So the shapes a handler actually returns get a writer of their own,
@@ -39,7 +39,7 @@ pub fn write(w: *std.Io.Writer, value: anytype) std.Io.Writer.Error!void {
 
 /// Whether the generated writer handles `T`. Deliberately narrow: a type
 /// this does not recognise is `std.json`'s to write, and the cost of being
-/// wrong here is a response that differs from what zfast used to send.
+/// wrong here is a response that differs from what nilo used to send.
 ///
 /// Answerable only while compiling — it reads the types of a struct's fields —
 /// so call it as `comptime covers(T)`.

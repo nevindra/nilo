@@ -2,12 +2,12 @@
 //! marker takes either a table of its own or another Row, and `Settings` is
 //! neither.
 
-const sql = @import("zfast_sql");
+const sql = @import("nilo_sql");
 
 const Settings = struct { theme: []const u8 };
 
 const UserCard = struct {
-    pub const zfast_table = Settings;
+    pub const nilo_table = Settings;
 
     id: i64,
     email: []const u8,

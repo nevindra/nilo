@@ -53,7 +53,7 @@ const slots = @import("config").slots;
 const Post = []const u8;
 
 /// Everything a broadcast-capable connection holds that an ordinary one does
-/// not. One allocation per connection, because in zfast this would live in
+/// not. One allocation per connection, because in nilo this would live in
 /// the connection's own state rather than on a handler's stack — and because
 /// a struct on a fiber stack that is already mapped would measure as free
 /// when it is not.

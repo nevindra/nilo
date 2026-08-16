@@ -1,4 +1,10 @@
-//! A whole `SELECT`, built while compiling (ADR 0039).
+//! A whole statement, built while compiling (ADR 0039).
+//!
+//! Four of them — `SELECT`, `INSERT`, `UPDATE`, `DELETE` — in one file
+//! because they share more than they differ: the same column list, the same
+//! table name, the same condition walker, the same Refusal when a column is
+//! misspelled. A reader who knows how a `select` narrows knows how a
+//! `delete` does, because it is the same code.
 //!
 //! This is where the claim gets paid. Given a Row and a struct of options,
 //! what comes out is a `[]const u8` that exists before the program does:
@@ -40,6 +46,10 @@ pub const Direction = enum { asc, desc };
 pub const Statement = struct {
     sql: []const u8,
     paths: []const where_mod.Path,
+    /// What each parameter is for, in placeholder order. What reads this is
+    /// the parameter tuple in `db.zig`, which needs a definite type for a
+    /// literal that was written without one.
+    params: []const where_mod.Param,
 
     pub fn paramCount(self: Statement) usize {
         return self.paths.len;
@@ -60,6 +70,7 @@ pub fn select(comptime D: type, comptime Row: type, comptime O: type) Statement 
             " FROM " ++ D.quote(row_mod.tableOf(Row));
 
         var paths: []const where_mod.Path = &.{};
+        var params: []const where_mod.Param = &.{};
         var next: usize = 1;
 
         if (@hasField(O, "where")) {
@@ -67,6 +78,7 @@ pub fn select(comptime D: type, comptime Row: type, comptime O: type) Statement 
             if (!p.isEmpty()) {
                 sql = sql ++ " WHERE " ++ p.sql;
                 paths = paths ++ p.paths;
+                params = params ++ p.params;
                 next += p.paths.len;
             }
         }
@@ -80,6 +92,7 @@ pub fn select(comptime D: type, comptime Row: type, comptime O: type) Statement 
             sql = sql ++ D.limit(bound.text);
             if (bound.path) |path| {
                 paths = paths ++ &[_]where_mod.Path{path};
+                params = params ++ &[_]where_mod.Param{.{}};
                 next += 1;
             }
         }
@@ -89,11 +102,12 @@ pub fn select(comptime D: type, comptime Row: type, comptime O: type) Statement 
             sql = sql ++ D.offset(bound.text);
             if (bound.path) |path| {
                 paths = paths ++ &[_]where_mod.Path{path};
+                params = params ++ &[_]where_mod.Param{.{}};
                 next += 1;
             }
         }
 
-        break :blk .{ .sql = sql, .paths = paths };
+        break :blk .{ .sql = sql, .paths = paths, .params = params };
     };
 }
 
@@ -107,12 +121,14 @@ pub fn delete(comptime D: type, comptime Row: type, comptime O: type) Statement 
 
         var sql: []const u8 = "DELETE FROM " ++ D.quote(row_mod.tableOf(Row));
         var paths: []const where_mod.Path = &.{};
+        var params: []const where_mod.Param = &.{};
 
         if (@hasField(O, "where")) {
             const p = where_mod.planAt(D, Row, @FieldType(O, "where"), 1, &.{"where"});
             if (!p.isEmpty()) {
                 sql = sql ++ " WHERE " ++ p.sql;
                 paths = p.paths;
+                params = p.params;
             }
         }
 
@@ -122,12 +138,148 @@ pub fn delete(comptime D: type, comptime Row: type, comptime O: type) Statement 
         // as leaving it off: an empty condition matches every row, and the
         // braces make it look like a decision was made.
         if (paths.len == 0) @compileError(
-            "zfast: a delete on " ++ @typeName(Row) ++ " with no condition.\n" ++
+            "nilo: a delete on " ++ @typeName(Row) ++ " with no condition.\n" ++
                 "  That empties the table. If it is meant, `db.raw` says so where " ++
                 "somebody reading the code can see it.",
         );
 
-        break :blk .{ .sql = sql, .paths = paths };
+        break :blk .{ .sql = sql, .paths = paths, .params = params };
+    };
+}
+
+/// `INSERT`, with the Row's own column list as the `RETURNING` clause.
+///
+/// `V` is the type of a struct naming the columns being written, and it is
+/// deliberately a *subset* of the Row's: the columns a database fills in
+/// — a generated key, a `DEFAULT now()` — are exactly the ones a caller has
+/// nothing to say about. A name that is not a column is the same Refusal a
+/// condition gets, which is what makes the subset safe rather than sloppy.
+///
+/// `RETURNING` is not optional, and that is a decision. The generated key is
+/// almost always the next thing the caller needs, and a second `SELECT` to
+/// fetch what the database just had in its hand is a round trip nobody meant
+/// to pay for. It costs nothing here: the column list is the one `select`
+/// already writes.
+pub fn insert(comptime D: type, comptime Row: type, comptime V: type) Statement {
+    return comptime blk: {
+        dialect_mod.assertDialect(D);
+        row_mod.assertRow(Row);
+
+        const info = switch (@typeInfo(V)) {
+            .@"struct" => |s| s,
+            else => @compileError(
+                "nilo: an insert into " ++ @typeName(Row) ++ " takes a struct of columns " ++
+                    "and was given a " ++ @typeName(V) ++ ".\n" ++
+                    "  Write it out where it is used: `.{ .email = \"…\", .age = 30 }`.",
+            ),
+        };
+        if (info.fields.len == 0) @compileError(
+            "nilo: an insert into " ++ @typeName(Row) ++ " with no columns.\n" ++
+                "  A row of nothing but defaults is `db.raw` with `DEFAULT VALUES`; " ++
+                "written this way it is much more likely that the values were left out " ++
+                "by accident.",
+        );
+
+        var names: []const u8 = "";
+        var places: []const u8 = "";
+        var paths: []const where_mod.Path = &.{};
+        var params: []const where_mod.Param = &.{};
+
+        for (info.fields, 0..) |f, i| {
+            if (!row_mod.hasColumn(Row, f.name)) {
+                row_mod.noSuchColumn(Row, f.name, "an insert");
+            }
+            if (i > 0) {
+                names = names ++ ", ";
+                places = places ++ ", ";
+            }
+            names = names ++ D.quote(f.name);
+            places = places ++ D.placeholder(i + 1);
+            paths = paths ++ &[_]where_mod.Path{&[_][]const u8{f.name}};
+            params = params ++ &[_]where_mod.Param{.{ .column = f.name }};
+        }
+
+        break :blk .{
+            .sql = "INSERT INTO " ++ D.quote(row_mod.tableOf(Row)) ++
+                " (" ++ names ++ ") VALUES (" ++ places ++ ")" ++
+                " RETURNING " ++ columnList(D, Row),
+            .paths = paths,
+            .params = params,
+        };
+    };
+}
+
+/// The option names an `UPDATE` takes.
+const update_known = [_][]const u8{ "set", "where" };
+
+/// `UPDATE … SET … WHERE …`, with both halves required.
+///
+/// `.set` shares nothing with `.where` except the column check, because they
+/// are different questions: `.set` is columns to new values, `.where` is the
+/// same condition language `select` and `delete` use. Numbering runs through
+/// both, `SET` first, which is why the where walker takes a starting number
+/// rather than always beginning at one.
+pub fn update(comptime D: type, comptime Row: type, comptime O: type) Statement {
+    return comptime blk: {
+        dialect_mod.assertDialect(D);
+        assertOptions(Row, O, &update_known, "an update");
+
+        if (!@hasField(O, "set")) @compileError(
+            "nilo: an update on " ++ @typeName(Row) ++ " with no `.set`.\n" ++
+                "  An update that changes no column is not a statement worth sending; " ++
+                "write `.set = .{ .column = value }`.",
+        );
+
+        const S = @FieldType(O, "set");
+        const set_info = switch (@typeInfo(S)) {
+            .@"struct" => |s| s,
+            else => @compileError(
+                "nilo: `.set` has to be a struct and this one is a " ++ @typeName(S) ++ ".\n" ++
+                    "  Write `.set = .{ .age = 31 }`, one column per field.",
+            ),
+        };
+        if (set_info.fields.len == 0) @compileError(
+            "nilo: `.set` on " ++ @typeName(Row) ++ " is empty.\n" ++
+                "  An update that changes no column is not a statement worth sending.",
+        );
+
+        var sql: []const u8 = "UPDATE " ++ D.quote(row_mod.tableOf(Row)) ++ " SET ";
+        var paths: []const where_mod.Path = &.{};
+        var params: []const where_mod.Param = &.{};
+        var next: usize = 1;
+
+        for (set_info.fields, 0..) |f, i| {
+            if (!row_mod.hasColumn(Row, f.name)) {
+                row_mod.noSuchColumn(Row, f.name, "`.set`");
+            }
+            if (i > 0) sql = sql ++ ", ";
+            sql = sql ++ D.quote(f.name) ++ " = " ++ D.placeholder(next);
+            paths = paths ++ &[_]where_mod.Path{&[_][]const u8{ "set", f.name }};
+            params = params ++ &[_]where_mod.Param{.{ .column = f.name }};
+            next += 1;
+        }
+
+        const before_where = paths.len;
+        if (@hasField(O, "where")) {
+            const p = where_mod.planAt(D, Row, @FieldType(O, "where"), next, &.{"where"});
+            if (!p.isEmpty()) {
+                sql = sql ++ " WHERE " ++ p.sql;
+                paths = paths ++ p.paths;
+                params = params ++ p.params;
+            }
+        }
+
+        // The same rule `delete` follows, for the same reason: an update
+        // with no condition rewrites every row in the table, and it is
+        // reached by leaving something out rather than by writing something
+        // down. `.where = .{}` counts as leaving it out.
+        if (paths.len == before_where) @compileError(
+            "nilo: an update on " ++ @typeName(Row) ++ " with no condition.\n" ++
+                "  That rewrites every row in the table. If it is meant, `db.raw` says " ++
+                "so where somebody reading the code can see it.",
+        );
+
+        break :blk .{ .sql = sql, .paths = paths, .params = params };
     };
 }
 
@@ -148,7 +300,7 @@ fn orderBy(comptime D: type, comptime Row: type, comptime T: type) []const u8 {
         const info = switch (@typeInfo(T)) {
             .@"struct" => |s| s,
             else => @compileError(
-                "zfast: `.order` has to be a struct and this one is a " ++
+                "nilo: `.order` has to be a struct and this one is a " ++
                     @typeName(T) ++ ".\n" ++
                     "  Write `.order = .{ .created_at = .desc }`, one column per field.",
             ),
@@ -161,7 +313,7 @@ fn orderBy(comptime D: type, comptime Row: type, comptime T: type) []const u8 {
                 row_mod.noSuchColumn(Row, f.name, "`.order`");
             }
             if (f.type != Direction and f.type != @TypeOf(.enum_literal)) @compileError(
-                "zfast: `.order` on column `" ++ f.name ++ "` was given a " ++
+                "nilo: `.order` on column `" ++ f.name ++ "` was given a " ++
                     @typeName(f.type) ++ ".\n" ++
                     "  A direction is `.asc` or `.desc`, and it is settled while " ++
                     "compiling — a sort chosen at run time is two statements.",
@@ -187,7 +339,7 @@ fn writtenValue(comptime T: type, comptime field: []const u8, comptime As: type)
         for (@typeInfo(T).@"struct".fields) |f| {
             if (!std.mem.eql(u8, f.name, field)) continue;
             const written = f.default_value_ptr orelse @compileError(
-                "zfast: `." ++ field ++ "` has no value written out where it is used.\n" ++
+                "nilo: `." ++ field ++ "` has no value written out where it is used.\n" ++
                     "  It is settled while compiling, so it has to be a literal " ++
                     "rather than something worked out at run time.",
             );
@@ -215,14 +367,14 @@ fn boundary(
         if (T == comptime_int) {
             const value = writtenValue(O, field, comptime_int);
             if (value < 0) @compileError(
-                "zfast: `." ++ field ++ "` is " ++
+                "nilo: `." ++ field ++ "` is " ++
                     std.fmt.comptimePrint("{d}", .{value}) ++ ".\n" ++
                     "  It counts rows, so it cannot be negative.",
             );
             return .{ .text = std.fmt.comptimePrint("{d}", .{value}), .path = null };
         }
         if (@typeInfo(T) != .int) @compileError(
-            "zfast: `." ++ field ++ "` was given a " ++ @typeName(T) ++ ".\n" ++
+            "nilo: `." ++ field ++ "` was given a " ++ @typeName(T) ++ ".\n" ++
                 "  It counts rows, so it is a whole number — written out, or held " ++
                 "in an integer.",
         );
@@ -241,7 +393,7 @@ fn assertOptions(
 ) void {
     comptime {
         if (@typeInfo(O) != .@"struct") @compileError(
-            "zfast: " ++ what ++ " takes a struct of options and was given a " ++
+            "nilo: " ++ what ++ " takes a struct of options and was given a " ++
                 @typeName(O) ++ ".\n" ++
                 "  Write it out where it is used: `.{ .where = .{ … } }`.",
         );
@@ -254,7 +406,7 @@ fn assertOptions(
                 list = list ++ (if (i == 0) "" else ", ") ++ "`." ++ name ++ "`";
             }
             @compileError(
-                "zfast: " ++ what ++ " on " ++ @typeName(Row) ++ " was given `." ++
+                "nilo: " ++ what ++ " on " ++ @typeName(Row) ++ " was given `." ++
                     f.name ++ "`, which is not one of its options.\n" ++
                     "  It takes " ++ list ++ ".",
             );
@@ -268,7 +420,7 @@ const testing = std.testing;
 const Pg = dialect_mod.Postgres;
 
 const User = struct {
-    pub const zfast_table = .{ .name = "users", .key = .id };
+    pub const nilo_table = .{ .name = "users", .key = .id };
 
     id: i64,
     email: []const u8,
@@ -277,7 +429,7 @@ const User = struct {
 };
 
 const UserCard = struct {
-    pub const zfast_table = User;
+    pub const nilo_table = User;
 
     id: i64,
     email: []const u8,
@@ -382,4 +534,61 @@ test "a delete carries its condition and nothing else" {
     const s = comptime delete(Pg, User, @TypeOf(o));
     try testing.expectEqualStrings("DELETE FROM \"users\" WHERE \"id\" = $1", s.sql);
     try testing.expectEqual(@as(usize, 1), s.paramCount());
+}
+
+// -- writes ---------------------------------------------------------------
+
+test "an insert names the columns it was given and returns the whole row" {
+    const found = comptime insert(Pg, User, @TypeOf(.{ .email = "a@b.c", .age = 30 }));
+    try testing.expectEqualStrings(
+        "INSERT INTO \"users\" (\"email\", \"age\") VALUES ($1, $2)" ++
+            " RETURNING \"id\", \"email\", \"age\", \"created_at\"",
+        found.sql,
+    );
+    try testing.expectEqual(@as(usize, 2), found.paramCount());
+    try testing.expectEqualStrings("email", found.params[0].column);
+    try testing.expectEqualStrings("age", found.params[1].column);
+}
+
+test "an insert writes a subset, because the database fills the rest in" {
+    // No `id` and no `created_at`: a generated key and a DEFAULT are exactly
+    // the columns a caller has nothing to say about.
+    const found = comptime insert(Pg, User, @TypeOf(.{ .email = "a@b.c" }));
+    try testing.expectEqualStrings(
+        "INSERT INTO \"users\" (\"email\") VALUES ($1)" ++
+            " RETURNING \"id\", \"email\", \"age\", \"created_at\"",
+        found.sql,
+    );
+}
+
+test "an update numbers its set columns before its condition" {
+    const found = comptime update(Pg, User, @TypeOf(.{
+        .set = .{ .email = "new@b.c", .age = 31 },
+        .where = .{ .id = 7 },
+    }));
+    try testing.expectEqualStrings(
+        "UPDATE \"users\" SET \"email\" = $1, \"age\" = $2 WHERE \"id\" = $3",
+        found.sql,
+    );
+    try testing.expectEqual(@as(usize, 3), found.paramCount());
+    try testing.expectEqualStrings("id", found.params[2].column);
+}
+
+test "an update's condition is the same language a select's is" {
+    const found = comptime update(Pg, User, @TypeOf(.{
+        .set = .{ .age = 0 },
+        .where = .{ .age = .{ .lt = 18 }, .email = .{ .like = "%@spam.example" } },
+    }));
+    try testing.expectEqualStrings(
+        "UPDATE \"users\" SET \"age\" = $1 WHERE \"age\" < $2 AND \"email\" LIKE $3",
+        found.sql,
+    );
+}
+
+test "a write on a narrower Row goes to the table it borrows" {
+    const found = comptime insert(Pg, UserCard, @TypeOf(.{ .email = "a@b.c" }));
+    try testing.expectEqualStrings(
+        "INSERT INTO \"users\" (\"email\") VALUES ($1) RETURNING \"id\", \"email\"",
+        found.sql,
+    );
 }

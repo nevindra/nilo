@@ -33,12 +33,12 @@ See [ADR 0006](../adr/0006-services-via-a-runtime-registry.md).
 
 Handlers run concurrently on several OS threads. A service you only read from is
 fine as-is. One that gets written to needs a lock — and it needs
-**`zfast.Mutex`**, not `std.Thread.Mutex`, because that one blocks the whole
+**`nilo.Mutex`**, not `std.Thread.Mutex`, because that one blocks the whole
 thread and every other request being served on it:
 
 ```zig
 const Store = struct {
-    lock: zfast.Mutex = .init,
+    lock: nilo.Mutex = .init,
     users: std.ArrayList(User) = .empty,
 };
 
@@ -72,13 +72,13 @@ fn addTodo(store: *Store, incoming: NewTodo) !Todo {
 }
 ```
 
-In a debug build zfast panics on the read instead, and names the request that
+In a debug build nilo panics on the read instead, and names the request that
 did it. That is the trap doing its job — but the fix is the point:
 
 ```zig
 const Store = struct {
     gpa: std.mem.Allocator,
-    lock: zfast.Mutex = .init,
+    lock: nilo.Mutex = .init,
     todos: std.ArrayList(Todo) = .empty,
 
     /// Everything a Todo owns, freed in one place. Worth having even for one
@@ -119,7 +119,7 @@ Two habits make the rest of it fall out:
   old one, so a failed allocation leaves the row as it was rather than holding a
   pointer to freed memory.
 
-None of this is zfast's — it is what owning memory costs in Zig, and it is a real
+None of this is nilo's — it is what owning memory costs in Zig, and it is a real
 part of what a CRUD app in this language weighs. The framework's part is that
 getting it wrong stops on your laptop instead of in production.
 
@@ -154,7 +154,7 @@ the arena used to be.
 
 ### Returning text a service owns
 
-A handler returns to zfast, and zfast writes the response *after* it returns. In
+A handler returns to nilo, and nilo writes the response *after* it returns. In
 between, another request on another thread can delete that row and free the text
 the response is about to be written from.
 
@@ -180,7 +180,7 @@ domain with lines, an address and a customer in it.
 
 ## Handlers must not block
 
-`zfast.Mutex` is one case of a rule that runs through everything: **many requests
+`nilo.Mutex` is one case of a rule that runs through everything: **many requests
 share one OS thread, so a handler that waits stops all of them.** Not just the
 request doing the waiting — every other request that happens to be on that
 thread, including ones that had no work left to do.
@@ -194,12 +194,12 @@ $ curl -w '%{time_total}\n' localhost:8787/
 1.701                               # ...paid by a request that had nothing to wait for
 ```
 
-The way out is `zfast.blocking`, which hands the call to a pool of real threads
+The way out is `nilo.blocking`, which hands the call to a pool of real threads
 and parks only this request:
 
 ```zig
 fn getUser(db: *Db, id: u32) !User {
-    return zfast.blocking(Db.query, .{ db, id });   // instead of db.query(id)
+    return nilo.blocking(Db.query, .{ db, id });   // instead of db.query(id)
 }
 ```
 
@@ -211,20 +211,20 @@ ordinary function a test can call.
 
 | | |
 |---|---|
-| a database driver — `libpq`, SQLite, a socket you opened yourself | `zfast.blocking` |
-| `std.fs` — reading or writing a file | `zfast.blocking` |
-| `std.http.Client`, or any call out to another service | `zfast.blocking` |
-| a `std.Thread.Mutex`, semaphore, or channel from `std` | `zfast.Mutex` |
-| sleeping, backing off, waiting out a rate limit | `try zfast.sleep(ms)` |
+| a database driver — `libpq`, SQLite, a socket you opened yourself | `nilo.blocking` |
+| `std.fs` — reading or writing a file | `nilo.blocking` |
+| `std.http.Client`, or any call out to another service | `nilo.blocking` |
+| a `std.Thread.Mutex`, semaphore, or channel from `std` | `nilo.Mutex` |
+| sleeping, backing off, waiting out a rate limit | `try nilo.sleep(ms)` |
 
 Pure computation does not need it — parsing, JSON, a hash, a loop over a slice.
 Those are *using* the thread, not waiting on it. A long computation is a
-different problem, and `zfast.blocking` handles that one too.
+different problem, and `nilo.blocking` handles that one too.
 
-`zfast.sleep` takes milliseconds and fails with `error.Canceled` if the request
+`nilo.sleep` takes milliseconds and fails with `error.Canceled` if the request
 went away while waiting, the same way `Mutex.lock` does.
 
-### zfast says so when you forget
+### nilo says so when you forget
 
 Nothing *forces* any of this — Zig has no way to mark a function as blocking, so
 a handler that calls the driver directly still compiles and still passes its
@@ -234,7 +234,7 @@ whatever it spent legitimately waiting, and says so:
 ```
 handler GET /users/7 held its thread for 2003ms. Every other request being
 served on that thread waited the whole time. Hand the call that waits to
-zfast.blocking (ADR 0014).
+nilo.blocking (ADR 0014).
 ```
 
 The useful part is *when*: on the first request, with nobody else on the server.

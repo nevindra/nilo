@@ -10,18 +10,18 @@
 //! and no body.
 
 const std = @import("std");
-const zfast = @import("zfast");
+const nilo = @import("nilo");
 
-// The two lines every zfast root file wants. `listen()` says so at startup
+// The two lines every nilo root file wants. `listen()` says so at startup
 // if either is missing.
-pub const std_options = zfast.std_options; // keeps the Engine's debug chatter out of your logs
-pub const std_options_debug_io = zfast.debug_io; // keeps `std.log` from blocking the event loop
-pub const panic = zfast.panic;
+pub const std_options = nilo.std_options; // keeps the Engine's debug chatter out of your logs
+pub const std_options_debug_io = nilo.debug_io; // keeps `std.log` from blocking the event loop
+pub const panic = nilo.panic;
 
 const Task = struct { id: u32, title: []const u8, done: bool };
 
 const tasks = [_]Task{
-    .{ .id = 1, .title = "Read the zfast README", .done = true },
+    .{ .id = 1, .title = "Read the nilo README", .done = true },
     .{ .id = 2, .title = "Write a handler that is just a function", .done = true },
     .{ .id = 3, .title = "Find out where the ETag came from", .done = false },
 };
@@ -31,10 +31,10 @@ fn listTasks() []const Task {
 }
 
 pub fn main() !void {
-    var app = zfast.App.init(std.heap.smp_allocator);
+    var app = nilo.App.init(std.heap.smp_allocator);
     defer app.deinit();
 
-    try app.use(zfast.logger.standard);
+    try app.use(nilo.logger.standard);
 
     // Routes come first when a path could be either, so the API is never
     // shadowed by a file that happens to share its name.

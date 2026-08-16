@@ -38,7 +38,7 @@ async fn get_user(Path(raw): Path<String>) -> Response {
         }
     };
 
-    // Serialised per request, like zfast.
+    // Serialised per request, like nilo.
     let body = serde_json::to_string(&User {
         id,
         name: "Routed Tester",

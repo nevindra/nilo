@@ -1,4 +1,4 @@
-//! zfast — an HTTP framework for Zig that puts writing code first. Its
+//! nilo — an HTTP framework for Zig that puts writing code first. Its
 //! vocabulary is in CONTEXT.md, its design decisions in docs/adr/.
 
 pub const App = @import("app.zig").App;
@@ -17,7 +17,7 @@ pub const Options = @import("bulkhead.zig").Options;
 /// blocking the event loop:
 ///
 /// ```zig
-/// pub const std_options_debug_io = zfast.debug_io;
+/// pub const std_options_debug_io = nilo.debug_io;
 /// ```
 ///
 /// Note which is which — `debug_io` goes into `std_options_debug_io`, and
@@ -28,7 +28,7 @@ pub const Options = @import("bulkhead.zig").Options;
 /// otherwise is a server that is merely slow.
 pub const debug_io = @import("bulkhead.zig").debug_io;
 
-/// The other half of the wiring: `pub const std_options = zfast.std_options;`
+/// The other half of the wiring: `pub const std_options = nilo.std_options;`
 ///
 /// All it does is turn the Engine's debug chatter down to warnings. Without
 /// it a debug build opens with `debug(zio): Spawning worker thread 1` and
@@ -40,7 +40,7 @@ pub const debug_io = @import("bulkhead.zig").debug_io;
 /// ```zig
 /// pub const std_options: std.Options = .{
 ///     .log_level = .debug,
-///     .log_scope_levels = zfast.std_options.log_scope_levels,
+///     .log_scope_levels = nilo.std_options.log_scope_levels,
 /// };
 /// ```
 pub const std_options: std.Options = .{
@@ -54,7 +54,7 @@ pub const std_options: std.Options = .{
 ///
 /// ```zig
 /// const Store = struct {
-///     lock: zfast.Mutex = .init,
+///     lock: nilo.Mutex = .init,
 ///     users: std.ArrayList(User) = .empty,
 /// };
 ///
@@ -67,7 +67,7 @@ pub const Mutex = @import("bulkhead.zig").Mutex;
 /// by the server rather than by whatever started it (ADR 0029).
 ///
 /// ```zig
-/// try zfast.spawn(flushMetrics, .{&exporter});
+/// try nilo.spawn(flushMetrics, .{&exporter});
 /// ```
 ///
 /// The server counts it while it runs and cuts it off when the shutdown
@@ -94,7 +94,7 @@ pub const spawn = @import("bulkhead.zig").spawn;
 ///
 /// ```zig
 /// fn getUser(db: *Db, id: u32) !User {
-///     return zfast.blocking(Db.query, .{ db, id });
+///     return nilo.blocking(Db.query, .{ db, id });
 /// }
 /// ```
 ///
@@ -129,7 +129,7 @@ pub const Response = @import("typed.zig").Response;
 /// can name it: `Status(201, User)`, `Status(204, void)` (ADR 0024).
 ///
 /// ```zig
-/// fn createUser(incoming: NewUser) !zfast.Status(201, User) {
+/// fn createUser(incoming: NewUser) !nilo.Status(201, User) {
 ///     return .{ .value = made };
 /// }
 /// ```
@@ -180,7 +180,7 @@ pub const testing = @import("testing.zig");
 ///
 /// ```zig
 /// const Search = struct { q: Str, page: u32 = 1, tag: ?Str = null };
-/// fn search(params: zfast.Query(Search)) ![]const Item { … }
+/// fn search(params: nilo.Query(Search)) ![]const Item { … }
 /// ```
 pub const Query = @import("typed.zig").Query;
 
@@ -188,8 +188,8 @@ pub const Query = @import("typed.zig").Query;
 /// `Query(T)`, on the body instead of the query string (ADR 0031).
 ///
 /// ```zig
-/// const SignUp = struct { email: Str, password: Str, avatar: ?zfast.Upload = null };
-/// fn signUp(incoming: zfast.Form(SignUp)) !zfast.Redirect(303) { … }
+/// const SignUp = struct { email: Str, password: Str, avatar: ?nilo.Upload = null };
+/// fn signUp(incoming: nilo.Form(SignUp)) !nilo.Redirect(303) { … }
 /// ```
 ///
 /// `application/x-www-form-urlencoded` and `multipart/form-data` are both
@@ -209,7 +209,7 @@ pub const Upload = @import("form.zig").Upload;
 /// A binding that hands its failures back, instead of ending the request.
 ///
 /// ```zig
-/// fn signUp(b: zfast.Bound(zfast.Form(SignUp))) !zfast.Redirect(303) {
+/// fn signUp(b: nilo.Bound(nilo.Form(SignUp))) !nilo.Redirect(303) {
 ///     const form = b.value() orelse return b.fail();
 ///     …
 /// }
@@ -228,7 +228,7 @@ pub const Upload = @import("form.zig").Upload;
 /// person actually typed.
 ///
 /// Nothing is allocated per failed field, and this is not a validation
-/// layer — zfast's job stops at "this did not convert to a `u32`", and
+/// layer — nilo's job stops at "this did not convert to a `u32`", and
 /// whether the age is plausible stays yours.
 pub const Bound = @import("bound.zig").Bound;
 
@@ -236,7 +236,7 @@ pub const Bound = @import("bound.zig").Bound;
 /// type so the API description can name it (ADR 0032).
 ///
 /// ```zig
-/// fn signUp(incoming: zfast.Form(SignUp)) !zfast.Redirect(303) {
+/// fn signUp(incoming: nilo.Form(SignUp)) !nilo.Redirect(303) {
 ///     return .to("/welcome");
 /// }
 /// ```
@@ -250,7 +250,7 @@ pub const Redirect = @import("redirect.zig").Redirect;
 /// memory (ADR 0037).
 ///
 /// ```zig
-/// fn invoice(files: *Files, id: u32) !?zfast.FileBody {
+/// fn invoice(files: *Files, id: u32) !?nilo.FileBody {
 ///     const name = files.nameOf(id) orelse return null;
 ///     return .{ .dir = files.dir, .name = name, .content_type = "application/pdf" };
 /// }
@@ -273,9 +273,9 @@ pub const FileBody = @import("filebody.zig").FileBody;
 /// `FileBody` (ADR 0037).
 ///
 /// ```zig
-/// const Files = struct { dir: zfast.Dir };
+/// const Files = struct { dir: nilo.Dir };
 ///
-/// var files: Files = .{ .dir = try zfast.Dir.open("uploads") };
+/// var files: Files = .{ .dir = try nilo.Dir.open("uploads") };
 /// defer files.dir.close();
 /// try app.provide(&files);
 /// ```
@@ -299,12 +299,12 @@ pub const SameSite = @import("cookie.zig").SameSite;
 /// ```zig
 /// const Signed = struct { user: u32, admin: bool = false };
 ///
-/// fn signIn(s: zfast.Session(Signed)) !zfast.Redirect(303) {
+/// fn signIn(s: nilo.Session(Signed)) !nilo.Redirect(303) {
 ///     try s.set(.{ .user = 7 });
 ///     return .to("/");
 /// }
 ///
-/// fn me(s: zfast.Session(Signed)) !?Profile {
+/// fn me(s: nilo.Session(Signed)) !?Profile {
 ///     const signed = s.get() orelse return null;
 ///     return profiles.find(signed.user);
 /// }
@@ -329,7 +329,7 @@ pub const session = @import("session.zig");
 /// needs and `?T` cannot say (ADR 0026).
 ///
 /// ```zig
-/// const EditTodo = struct { title: zfast.Patch(zfast.Str) = .absent };
+/// const EditTodo = struct { title: nilo.Patch(nilo.Str) = .absent };
 ///
 /// switch (incoming.title) {
 ///     .absent => {},                  // not mentioned: leave it alone
@@ -350,10 +350,10 @@ pub const Next = @import("middleware.zig").Next;
 /// like this rather than like a syscall of your own:
 ///
 /// ```zig
-/// fn timing(c: *zfast.Ctx, next: zfast.Next) !void {
-///     const started = zfast.monotonicNanos();
+/// fn timing(c: *nilo.Ctx, next: nilo.Next) !void {
+///     const started = nilo.monotonicNanos();
 ///     try next.run(c);
-///     const took_us = (zfast.monotonicNanos() - started) / std.time.ns_per_us;
+///     const took_us = (nilo.monotonicNanos() - started) / std.time.ns_per_us;
 ///     std.log.info("{f} took {d}µs", .{ c.path(), took_us });
 /// }
 /// ```
@@ -379,7 +379,7 @@ pub const openapi = @import("openapi.zig");
 /// by putting this in your root source file:
 ///
 /// ```zig
-/// pub const panic = zfast.panic;
+/// pub const panic = nilo.panic;
 /// ```
 ///
 /// Zig cannot recover from a panic — the process is going down either way

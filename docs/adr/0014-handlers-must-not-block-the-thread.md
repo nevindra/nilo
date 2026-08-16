@@ -2,11 +2,11 @@
 
 Found by using the framework the way its intended audience would: writing a handler that waits for something.
 
-[ADR 0011](./0011-shared-services-need-a-lock-from-the-bulkhead.md) answered one instance of this — a Service with mutable state needs `zfast.Mutex`, not `std.Thread.Mutex`, because the latter stops the whole thread. That ADR got the reasoning right and the scope wrong. A lock is not a special case. It is the *first* case.
+[ADR 0011](./0011-shared-services-need-a-lock-from-the-bulkhead.md) answered one instance of this — a Service with mutable state needs `nilo.Mutex`, not `std.Thread.Mutex`, because the latter stops the whole thread. That ADR got the reasoning right and the scope wrong. A lock is not a special case. It is the *first* case.
 
 ## What was wrong
 
-zfast runs each connection in a fiber and many fibers on one OS thread. Anything a handler does that waits on the operating system stops every other request sharing that thread — not just the one waiting.
+nilo runs each connection in a fiber and many fibers on one OS thread. Anything a handler does that waits on the operating system stops every other request sharing that thread — not just the one waiting.
 
 Measured, on a two-executor server, with one handler sitting in `nanosleep` for two seconds:
 
@@ -19,18 +19,18 @@ The second number is the shape of the problem. Four requests that each spend the
 
 Two things made this worse than a documentation gap:
 
-- **zfast exposed nothing to fix it with.** The Bulkhead carried `Mutex` and a clock. It did not carry a way to wait, or a way to hand a blocking call somewhere it could block harmlessly. `zio` has both, and ADR 0002 says user code may not name zio — so a correct handler could not be written at all without breaking that promise.
-- **The audience makes it the default mistake, not an edge case.** zfast is aimed at people coming from Go and Node. In Go every blocking call is safe because the runtime moves the goroutine; in Node the driver is async because there is no other option. Both groups arrive with "call the database from the handler" as a habit that has always worked. Here it compiles, passes every test, works perfectly under curl, and only shows up as a latency tail under load — the worst possible failure schedule.
+- **nilo exposed nothing to fix it with.** The Bulkhead carried `Mutex` and a clock. It did not carry a way to wait, or a way to hand a blocking call somewhere it could block harmlessly. `zio` has both, and ADR 0002 says user code may not name zio — so a correct handler could not be written at all without breaking that promise.
+- **The audience makes it the default mistake, not an edge case.** nilo is aimed at people coming from Go and Node. In Go every blocking call is safe because the runtime moves the goroutine; in Node the driver is async because there is no other option. Both groups arrive with "call the database from the handler" as a habit that has always worked. Here it compiles, passes every test, works perfectly under curl, and only shows up as a latency tail under load — the worst possible failure schedule.
 
 The one sentence in the README that touched this said `std.Thread.Mutex` blocks the thread. Read as written, that is a fact about mutexes.
 
 ## What was decided
 
-The Bulkhead gains two items, exposed as `zfast.blocking` and `zfast.sleep`.
+The Bulkhead gains two items, exposed as `nilo.blocking` and `nilo.sleep`.
 
 ```zig
 fn getUser(db: *Db, id: u32) !User {
-    return zfast.blocking(Db.query, .{ db, id });
+    return nilo.blocking(Db.query, .{ db, id });
 }
 ```
 
@@ -49,12 +49,12 @@ And the README gains a section stating the general rule, with the table of what 
 - **Wrap handlers automatically**, running every one on the blocking pool. This makes the slow path safe by making the fast path slow: every request would pay a thread hand-off, including the overwhelming majority that only touch memory. It also throws away the reason for choosing a fiber Engine.
 - **Detect blocking calls at compile time.** Zig has no effect system and no way to mark a function as blocking. Nothing to detect with. *This is still true and it turned out to be the less interesting question — see [ADR 0034](./0034-the-thing-a-handler-holds-is-watched-at-run-time.md), which does not ask whether the compiler can prove a function blocks but whether the server can notice that one just did.*
 - **Provide async drivers.** The real fix, and far outside v1 — it means an async Postgres client, an async file API, an async HTTP client. `blocking` is what makes the ecosystem that exists today usable in the meantime, and it is what Go's own `syscall` boundary does underneath.
-- **Say nothing and let people find out.** This was the status quo, and it is the option this ADR exists to reject. The symptom is a p99 nobody can explain, on a metric zfast has declared primary since stage 1.
+- **Say nothing and let people find out.** This was the status quo, and it is the option this ADR exists to reject. The symptom is a p99 nobody can explain, on a metric nilo has declared primary since stage 1.
 
 ## Consequences
 
 - The Bulkhead contract grows by two items. Every future Engine has to supply a way to offload a blocking call and a way to wait. A threaded Engine satisfies both trivially — `blocking` calls the function, `sleep` sleeps the thread — so this is a cheap obligation, unlike file IO ([ADR 0010](./0010-static-files-are-held-in-memory.md)).
 - ~~**Nothing forces it.** A handler calling the driver directly still compiles and still passes its tests.~~ Still true of the compiler, no longer true of the running server: [ADR 0034](./0034-the-thing-a-handler-holds-is-watched-at-run-time.md) added a stopwatch that says so in the log, on the first request, with nobody else waiting. The docs half of the answer stands — say it plainly, and put it where people copy from.
 - The blocking pool is finite, so `blocking` converts "the thread stalls" into "the pool is the queue" rather than into unlimited concurrency. That is the correct trade for a database, which has a connection limit of its own, and it is worth saying out loud before someone expects otherwise.
-- `zfast.monotonicNanos` was exported in the same pass. It is not part of this decision, but it came from the same cause: the README's timing middleware used `std.time.milliTimestamp`, which Zig 0.16 does not have, and the Engine's clock was sitting in the Bulkhead unexposed. A user could not write a timing middleware at all.
-- Long computation is covered by the same tool and is not mentioned separately in the README's table. `zfast.blocking` around a CPU-bound call moves it off the executor thread just as well as it moves a syscall.
+- `nilo.monotonicNanos` was exported in the same pass. It is not part of this decision, but it came from the same cause: the README's timing middleware used `std.time.milliTimestamp`, which Zig 0.16 does not have, and the Engine's clock was sitting in the Bulkhead unexposed. A user could not write a timing middleware at all.
+- Long computation is covered by the same tool and is not mentioned separately in the README's table. `nilo.blocking` around a CPU-bound call moves it off the executor thread just as well as it moves a syscall.

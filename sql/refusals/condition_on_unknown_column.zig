@@ -2,10 +2,10 @@
 //! the Row is right there in the same file — so this is settled while
 //! compiling rather than by a database saying no at three in the morning.
 
-const sql = @import("zfast_sql");
+const sql = @import("nilo_sql");
 
 const User = struct {
-    pub const zfast_table = .{ .name = "users", .key = .id };
+    pub const nilo_table = .{ .name = "users", .key = .id };
 
     id: i64,
     email: []const u8,

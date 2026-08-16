@@ -1,5 +1,5 @@
 // The zio dependency is pinned to exactly what ../../build.zig.zon pins, so
-// this spike answers a question about the version zfast actually ships
+// this spike answers a question about the version nilo actually ships
 // against rather than about whatever is newest.
 .{
     .name = .completion_queue_spike,

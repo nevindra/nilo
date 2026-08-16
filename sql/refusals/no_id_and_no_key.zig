@@ -2,10 +2,10 @@
 //! marker allows, because it involves no guessing; a table keyed on anything
 //! else has to say so.
 
-const sql = @import("zfast_sql");
+const sql = @import("nilo_sql");
 
 const Membership = struct {
-    pub const zfast_table = .{ .name = "memberships" };
+    pub const nilo_table = .{ .name = "memberships" };
 
     user_id: i64,
     plan: []const u8,

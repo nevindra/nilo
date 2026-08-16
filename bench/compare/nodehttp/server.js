@@ -28,7 +28,7 @@ const server = http.createServer((req, res) => {
       res.end(`no user ${m[1]}`);
       return;
     }
-    // Serialised per request, like zfast.
+    // Serialised per request, like nilo.
     const body = JSON.stringify({
       id,
       name: 'Routed Tester',

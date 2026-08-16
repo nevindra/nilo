@@ -1,15 +1,15 @@
 //! An empty query struct, which would read nothing.
 
-const zfast = @import("zfast");
+const nilo = @import("nilo");
 
 const Search = struct {};
 
-fn list(search: zfast.Query(Search)) u32 {
+fn list(search: nilo.Query(Search)) u32 {
     _ = search;
     return 0;
 }
 
 export fn refusal() void {
-    var app: zfast.App = undefined;
+    var app: nilo.App = undefined;
     app.get("/users", list) catch {};
 }
