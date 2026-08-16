@@ -18,9 +18,11 @@ The one case worth a 416 is different in kind: `bytes=1000-` on a 26-byte file i
 
 **More than one range in a header.** It is legal, and it wants a `multipart/byteranges` body: a boundary string, a nested head per part, and a body format that exists nowhere else in zfast. A browser scrubbing a video sends one range. A download resuming sends one range. `curl -r` sends one range. So a request for several is ignored and the whole file goes out — correct, and it costs no code.
 
-**`sendfile`, and files too big to hold.** Still not here, and still a contradiction of ADR 0010 rather than an extension of it. Serving a range from memory is what makes this feature four lines; serving one from disk is a different design and wants its own argument.
+**`sendfile`, and files too big to hold.** ~~Still not here, and still a contradiction of ADR 0010 rather than an extension of it.~~ Both shipped in 0.1.0 — [ADR 0037](./0037-a-file-too-big-to-hold-is-opened-not-read.md) is the argument this paragraph said was owed. The claim that serving a range from memory is what makes the feature four lines held up: what a file on disk changed is where the bytes come from, not what a `Range` means. `range.parse` is still the only place that decides that, and both kinds of file pass through it.
 
-**Dates in `If-Range`.** The header may carry an ETag or a last-modified date. zfast has no last-modified date to compare against — files are hashed at load, not stamped — so a date never matches, and a client sending one gets the whole file. That is the safe direction: the failure mode of *not* honouring a range is a bigger download, and the failure mode of honouring one wrongly is a corrupt file.
+**Dates in `If-Range`.** The header may carry an ETag or a last-modified date, and zfast compares only the tag. A date never matches, so a client sending one gets the whole file. That is the safe direction: the failure mode of *not* honouring a range is a bigger download, and the failure mode of honouring one wrongly is a corrupt file.
+
+When this was written the reason was that there was no last-modified date to compare against — every file was hashed at load rather than stamped. That is no longer true of a file too big to hold, whose tag is built out of its modification time precisely because hashing it is not affordable (ADR 0037). The behaviour is unchanged all the same, and now by choice rather than by absence: the tag is what the client was handed, so the tag is what it should send back, and accepting a date as well would be a second way to answer the same question.
 
 ## `If-Range` is the one that matters for correctness
 

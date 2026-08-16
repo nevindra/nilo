@@ -40,14 +40,22 @@ Without the `?ref=` you get whatever `main` is that day.
   per line and puts an `X-Request-Id` on every response, adopting the proxy's id
   when it sent a usable one. `c.requestId()` reaches the same id from a handler.
 - **Static files** held in memory, gzipped once at startup, with ETags and range
-  requests.
+  requests. A file over `max_file_bytes` is not refused but opened per request
+  and sent with `sendfile`, so a directory with a video in it still starts and
+  the memory figure still holds
+  ([ADR 0037](./docs/adr/0037-a-file-too-big-to-hold-is-opened-not-read.md)).
+- **A handler can answer with a file.** `?zfast.FileBody` serves one out of a
+  directory opened on purpose, with ranges, `If-Range`, conditional requests and
+  `HEAD` handled for it — and null still meaning 404. The name is checked a
+  segment at a time, and the path handed to the kernel never comes from a
+  request.
 - **Streamed responses and server-sent events.**
 - **WebSocket** — handshake, framing, masking, pings, closing handshake.
 - **A generated OpenAPI document**, written from the signatures rather than from
   annotations ([ADR 0017](./docs/adr/0017-the-api-description-comes-from-the-signatures.md)).
 - **Failure in zfast's own words.** Get a handler wrong and compilation stops
   with a sentence naming your route, your argument and the fix; `refusals/` is
-  54 programs written wrong on purpose that keep it that way
+  56 programs written wrong on purpose that keep it that way
   ([ADR 0027](./docs/adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)).
 - **`zfast.spawn`** for work that is not a request, owned by the server so
   shutdown counts it ([ADR 0029](./docs/adr/0029-a-spawned-fiber-belongs-to-the-server.md)).
@@ -75,7 +83,8 @@ the same harness in [`docs/comparison.md`](./docs/comparison.md).
   ([ADR 0028](./docs/adr/0028-tls-is-terminated-in-front.md)).
 - **A `recover` middleware.** Zig cannot recover from a panic, so there is
   nothing to build ([ADR 0008](./docs/adr/0008-no-recover-middleware.md)).
-- **Compressing a handler's response**, `sendfile`, `permessage-deflate`, and
-  streamed multipart. Static files *are* compressed, once, at startup.
+- **Compressing a handler's response**, `permessage-deflate`, and streamed
+  multipart. Static files under the spill threshold *are* compressed, once, at
+  startup; one above it is sent as it lies on disk.
 
 `zfast` is a working name and may change before 1.0.

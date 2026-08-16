@@ -38,6 +38,15 @@
 //!   that calls anything blocking stops every other request sharing its
 //!   thread, and the Engine is the only layer that knows how to wait
 //!   without doing that (ADR 0014).
+//! - `Dir`/`File` — open a directory, open a file inside it by name, ask
+//!   how big it is, close either. Four calls, and deliberately no fifth: no
+//!   seek, no write, and nothing that walks a directory while a request is
+//!   waiting on it. The list is that short because everything past it is
+//!   already standard — the reader is a `std.Io.File.Reader` and the bytes
+//!   leave through `sendFile`, which is a slot in the `std.Io.Writer`
+//!   vtable the Engine fills in anyway — so an Engine that has a `std.Io`
+//!   has these already and owes nothing it was not going to write
+//!   (ADR 0037).
 //!
 //! The Reader/Writer handed to the handler are plain std types
 //! (`*std.Io.Reader`, `*std.Io.Writer`), so the HTTP layer has no idea
@@ -430,6 +439,93 @@ pub fn sleep(ms: u64) error{Canceled}!void {
 /// Somewhere to put work that is not a request, owned by the server that
 /// is running rather than by the fiber that started it (ADR 0029).
 pub const spawn = engine.spawn;
+
+// ---- files (ADR 0037) ----
+//
+// A file too big to hold is opened rather than read, and this is the whole
+// of what that costs the Bulkhead. Both types are wrappers rather than
+// re-exports for the reason `Mutex` and `randomSecure` are: every call
+// below parks the fiber on the Engine, so the thread is off serving
+// somebody else and the blocking detector has to be told, or opening a file
+// would be reported as a handler holding its thread (ADR 0034). Wrapped
+// here rather than at each call site so that nobody has to remember.
+
+/// A directory, opened once and held open.
+///
+/// The long way round to a file's bytes, on purpose. A name is opened
+/// relative to a descriptor that was chosen before the socket was, so
+/// nothing carried by a request is ever resolved as a path — which is the
+/// property ADR 0010 bought by refusing disk IO outright, kept here by the
+/// shape of the type rather than by a normalisation step somebody has to
+/// get right.
+pub const Dir = struct {
+    _inner: engine.Dir,
+
+    /// Open `path`, relative to the working directory the server runs in.
+    ///
+    /// Held for as long as whatever opened it — the static tree for the life
+    /// of the App, a Service for the life of the process — so this is
+    /// startup work, and the request path only ever calls `openFile`.
+    pub fn open(path: []const u8) !Dir {
+        const w = watchdog.waitingAnywhere();
+        defer watchdog.waitedAnywhere(w);
+        return .{ ._inner = try engine.Dir.open(path) };
+    }
+
+    pub fn close(self: Dir) void {
+        const w = watchdog.waitingAnywhere();
+        defer watchdog.waitedAnywhere(w);
+        self._inner.close();
+    }
+
+    /// Open `name` inside this directory.
+    ///
+    /// `name` is a name, not a path to work out: it is resolved by the
+    /// kernel against this directory's descriptor. A symlink inside the
+    /// directory is followed, because refusing them breaks ordinary
+    /// deployments and no static server on the internet refuses them by
+    /// default (ADR 0037).
+    ///
+    /// `error.FileNotFound` is the one failure with an answer better than a
+    /// 500 — from the client's side, a file the list promised and the disk
+    /// no longer has is indistinguishable from one that never existed.
+    pub fn openFile(self: Dir, name: []const u8) !File {
+        const w = watchdog.waitingAnywhere();
+        defer watchdog.waitedAnywhere(w);
+        return .{ ._inner = try self._inner.openFile(name) };
+    }
+};
+
+/// One open file, on its way to a client.
+pub const File = struct {
+    _inner: engine.File,
+
+    /// How many bytes there are, asked of the operating system rather than
+    /// remembered. What the `Content-Length` of a file response is made of.
+    pub fn size(self: File) !u64 {
+        const w = watchdog.waitingAnywhere();
+        defer watchdog.waitedAnywhere(w);
+        return self._inner.size();
+    }
+
+    pub fn close(self: File) void {
+        const w = watchdog.waitingAnywhere();
+        defer watchdog.waitedAnywhere(w);
+        self._inner.close();
+    }
+
+    /// A reader over this file, using `buffer` for whatever it has to hold.
+    ///
+    /// The type that comes back is the standard library's own, and that is
+    /// the point rather than an implementation detail: `sendFileAll` takes
+    /// exactly this, so the bytes reach the socket through a vtable slot the
+    /// Engine already fills in, and the HTTP layer sends a file without ever
+    /// naming the Engine (ADR 0037). Nothing here does any IO — it is a
+    /// struct being built — so there is no wait to forgive.
+    pub fn reader(self: File, buffer: []u8) std.Io.File.Reader {
+        return self._inner.reader(buffer);
+    }
+};
 
 // ---- idle connections give their pages back ----
 

@@ -126,6 +126,7 @@ and [ADR 0036](./adr/0036-a-binding-hands-its-failures-to-the-handler.md).
 | `Status(code, T)` | that status — and the API description names it |
 | `Response(T)` | a status chosen at runtime; the description says `default` |
 | `Redirect(code)` | that status and a `Location`, no body |
+| `FileBody` | a file on disk, opened and sent without being held in memory |
 
 ```zig
 Status(201, User){ .headers = .of(&.{…}), .value = user }
@@ -133,10 +134,21 @@ Status(204, void){}                                        // an empty response
 Response(User){ .status = if (made) 201 else 200, .value = user }
 Redirect(303).to("/welcome")                               // written `return .to(…)`
 Redirect(303).with("/welcome", .of(&.{…}))                 // …with headers of its own
+FileBody{ .dir = files.dir, .name = name }                 // `?FileBody` — null is a 404
 ```
 
 `Redirect` takes 301, 302, 303, 307 or 308; anything else is a compile error.
 303 is the one a form POST wants.
+
+`FileBody` fields: `dir` (a [`Dir`](#dir)), `name`, `content_type`
+(`"application/octet-stream"`), `cache_control` (`""`) and `headers` — a
+`Content-Disposition` goes in the last of those, and there is no `download_as`.
+The name is checked before it is opened: a `..` segment, an absolute path, a NUL
+— and on Windows a backslash or a drive letter — answer the same 404 a missing
+file does. `Range`, `If-Range`, `If-None-Match` and `HEAD` work as they do for a
+static file; the API description says the body is `application/octet-stream`
+with `format: binary` whatever the content type is at run time. See
+[Responses](./guide/responses.md#files).
 
 `Headers` holds up to 8 by value; a ninth is a compile error.
 
@@ -179,6 +191,7 @@ Redirect(303).with("/welcome", .of(&.{…}))                 // …with headers 
 | `c.sendText(status, text)` | `text/plain` |
 | `c.sendJson(status, value)` | `application/json` |
 | `c.sendEmpty(status)` | no body and no `Content-Type` — a 204, usually |
+| `c.sendFile(.{ .file = f, .content_type = … })` | an open file. **Closed here**, on every way out |
 | `c.stream(status, content_type)` | `!Stream` |
 | `c.streamWith(status, content_type, .{ .buffer = … })` | the same, buffer of your own. Default 4 KB |
 | `c.events()` | `!Events` |
@@ -189,6 +202,11 @@ Redirect(303).with("/welcome", .of(&.{…}))                 // …with headers 
 refused by `setHeader`. Set headers before sending. Setting the same header
 twice replaces it — except `Set-Cookie`, which a response may carry more than
 one of.
+
+`sendFile` also takes `size` (null asks the file), `etag` and `cache_control`,
+and answers a `Range`, an `If-Range`, an `If-None-Match` and a `HEAD` from them.
+A handler that knows it is answering with a file before it runs returns
+[`FileBody`](#handler-returns) instead, which the API description can see.
 
 ## `Cookie`
 
@@ -254,6 +272,22 @@ One file out of a multipart form, as a `Form(T)` field type.
 | `s.len()` | |
 | `s.keep(gpa)` | a copy that outlives the request; the caller frees it |
 | `Str.static(bytes)` | text that already outlives any request — what a test uses |
+
+## `Dir`
+
+A directory, opened once and held open — what a service hands a `FileBody`.
+
+| | |
+|---|---|
+| `Dir.open(path)` | `!Dir` — relative to the working directory the server runs in. Startup work |
+| `d.close()` | |
+| `d.openFile(name)` | `!File` — a name inside it, resolved by the kernel against the descriptor |
+
+Nothing here resolves a path, which is why a name is a name: `openFile` hands it
+to the kernel with the directory, so there is no normalisation step to get
+wrong. A symlink inside the directory is followed. `error.FileNotFound` is the
+one open failure with a better answer than a 500, and a `FileBody` turns it into
+the 404 a file that was never there gets.
 
 ## `Stream`
 
@@ -391,6 +425,12 @@ zfast.cors.with(.{ .origin = …, .methods = …, .headers = …,
 | `max_file_bytes` | `8 * 1024 * 1024` |
 | `max_total_bytes` | `64 * 1024 * 1024` |
 | `dotfiles` | `false` |
+
+`max_file_bytes` is a threshold, not a ceiling: a file over it is listed but not
+read, and each request opens it and sends it from the disk — no gzipped copy, an
+ETag made of the modification time and the size, and one file descriptor for as
+long as the response takes. `max_total_bytes` counts held bytes only. See
+[Static files](./guide/static-files.md#files-too-big-to-hold).
 
 ## OpenAPI options
 

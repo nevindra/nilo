@@ -49,6 +49,7 @@ const resolve = @import("resolve.zig");
 const openapi = @import("openapi.zig");
 const patch_mod = @import("patch.zig");
 const bound_mod = @import("bound.zig");
+const filebody = @import("filebody.zig");
 
 const Ctx = ctx_mod.Ctx;
 const Str = str_mod.Str;
@@ -527,6 +528,18 @@ fn answerWith(comptime status: ?u16, comptime V: type) openapi.Answer {
             .optional => |o| o.child,
             else => V,
         };
+        // Read after the unwrap, in the same place and for the same reason
+        // `sendValue` dispatches after it: `?FileBody` has two things to say
+        // — a file, and a 404 — and reading it before would lose one of them.
+        // The body is described as bytes rather than as the struct's fields,
+        // which are a descriptor and a name and belong to the server.
+        if (filebody.isFileBody(Present)) return .{
+            .status = status,
+            .content_type = "",
+            .schema = null,
+            .not_found = Present != V,
+            .binary = true,
+        };
         return .{
             .status = status,
             .content_type = contentTypeFor(Present),
@@ -729,6 +742,20 @@ fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Rol
             "struct the form is read into:\n" ++
             "    const NewAvatar = struct { caption: zfast.Str, image: zfast.Upload };\n" ++
             "    fn upload(incoming: zfast.Form(NewAvatar)) !zfast.Status(201, Avatar) { … }",
+    );
+    // The other half of that mistake, and worth its own message for the same
+    // reason: the two types are both "a file" and point in opposite
+    // directions. Read as the request body — which is what a struct by value
+    // is — this would land somewhere inside `std.json` being asked to parse a
+    // directory descriptor, which is a message zfast did not write (ADR 0015).
+    if (comptime filebody.isFileBody(P)) @compileError(
+        "zfast: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
+            "\" is a `zfast.FileBody`, which is what a handler answers *with* rather than " ++
+            "something it is given.\n" ++
+            "  A file arriving from the client is a `zfast.Upload`, one field of a form:\n" ++
+            "    fn upload(incoming: zfast.Form(NewAvatar)) !zfast.Status(201, Avatar) { … }\n" ++
+            "  A file going to the client is the return type:\n" ++
+            "    fn invoice(files: *Files, id: u32) !?zfast.FileBody { … }",
     );
     // Before the `.@"struct" => .body` below, which would otherwise swallow
     // it: a resolved value is a struct too, and the marker is what tells the
@@ -978,6 +1005,20 @@ fn sendValue(c: *Ctx, status: u16, value: anytype) !void {
         const present = value orelse return fail.notFound("there is no {s}", .{c._path});
         return sendValue(c, status, present);
     }
+    // Here, and not up in `sendResult` beside `Redirect`, because of where
+    // the optional is unwrapped. `?Redirect` is not an idiom — a redirect is
+    // an answer the handler decided on, so there is nothing for the `?` to
+    // mean — while `?FileBody` is the *main* idiom: a file that may not be
+    // there is what "the invoice for this id" almost always is, and ADR 0037
+    // leans on `?` meaning a 404 exactly as it does everywhere else
+    // (ADR 0024). Recognised after the unwrap, one line of dispatch serves
+    // both `FileBody` and `?FileBody`.
+    //
+    // `status` is not passed on, and that is not an oversight: what a file
+    // answers with is decided by the conditional and range machinery in
+    // `sendfile.send` — a 200, a 206, a 304 or a 416 — and no field on a
+    // `Response(FileBody)` could be right about which.
+    if (comptime filebody.isFileBody(T)) return filebody.send(c, value);
     if (T == Str) return c.sendText(status, value.view());
     if (T == []const u8 or T == []u8) return c.sendText(status, value);
     return c.sendJson(status, value);

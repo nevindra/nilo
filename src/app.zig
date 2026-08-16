@@ -1290,12 +1290,80 @@ fn allowList(arena: std.mem.Allocator, allowed: router_mod.MethodSet) ![]const u
     return out.written();
 }
 
-/// Answer with a file loaded at startup. Also a normal handler, so a
-/// static response goes through the same middleware as everything else —
+/// Answer with a file the App listed at startup. Also a normal handler, so
+/// a static response goes through the same middleware as everything else —
 /// CORS included, which is what an asset served to another origin needs.
+///
+/// The one branch is here, at the top, and it is the only place either arm
+/// knows the other exists (ADR 0037).
 fn serveStaticFile(c: *Ctx) anyerror!void {
     const file = c._static_file.?;
+    switch (file.contents) {
+        .held => return serveHeldFile(c, file),
+        .spilled => |on_disk| return serveSpilledFile(c, file, on_disk),
+    }
+}
 
+/// A file that was too big to read at load. It was never read and is not
+/// being read now: the descriptor goes to `sendfile.send`, which writes the
+/// head and hands the bytes to the socket without them passing through this
+/// process.
+fn serveSpilledFile(
+    c: *Ctx,
+    file: *const static_mod.File,
+    on_disk: static_mod.File.Spilled,
+) anyerror!void {
+    // The name was written down by the directory walk before the socket
+    // opened, and the descriptor it is resolved against was too. Nothing a
+    // request carried is being turned into a path (ADR 0037).
+    const open = on_disk.dir.openFile(on_disk.path) catch |err| switch (err) {
+        // The list said the file was there and the disk disagrees, which
+        // from the client's side is indistinguishable from asking for
+        // something that never existed. Every other way of failing to open
+        // one is this server's problem and says so with a 500.
+        error.FileNotFound => return fail.notFound("there is no {s}", .{c._path}),
+        else => return err,
+    };
+
+    // No `Vary`, because there is nothing to vary on: a spilled file has one
+    // representation and no gzipped copy to negotiate against (ADR 0018 —
+    // nothing compresses per request). No `defer open.close()` either: the
+    // file belongs to `sendFile` from here, on every path out of it.
+    //
+    // The size is the one the walk recorded rather than a fresh `stat`,
+    // because the ETag is made of that number.
+    return c.sendFile(.{
+        .file = open,
+        .size = on_disk.size,
+        .content_type = file.content_type,
+        .etag = file.etag,
+        .cache_control = file.cache_control,
+    });
+}
+
+/// A file read at load and answered from memory — everything at or below
+/// `max_file_bytes`, which is nearly every file a web tree has.
+///
+/// **What this shares with the spilled arm, and what it does not.** Shared,
+/// and it is the part ADR 0021 exists to protect: `range_mod.parse` is the
+/// only thing anywhere that decides what a `Range` means, including the rule
+/// that turns a 206 back into a 200 when `If-Range` does not match — both
+/// arms hand it that decision as a flag and neither implements it.
+/// `contentRange` and `unsatisfiableRange` write the header, and
+/// `static_mod.etagMatches` compares the tags. There is exactly one copy of
+/// each, and a corrupt resumed download would have to be a bug in one of
+/// them rather than a disagreement between two.
+///
+/// Not shared, and it cannot be: every line below is measured against a
+/// *representation* rather than against the file. A held file may have two —
+/// the plain bytes and a gzipped copy, with a different ETag each — so which
+/// one the client gets decides the ETag the conditionals compare, the length
+/// the range is taken from, and the bytes that go out. A spilled file has
+/// exactly one representation and always will (a file that is not held
+/// cannot be compressed once), so `sendfile.send` has nothing to choose
+/// between and answers from the file's own tag and size. Sharing these lines
+/// would mean handing it a choice it can never have.
+fn serveHeldFile(c: *Ctx, file: *const static_mod.File) anyerror!void {
     // A `Range` is an offset into a representation, and the gzipped copy is
     // a different representation with different offsets. Rather than work
     // out which one a client meant, a request that asks for part of a file
@@ -1317,7 +1385,7 @@ fn serveStaticFile(c: *Ctx) anyerror!void {
     // when the gzipped one is the one going out. A shared cache that stored
     // the plain answer without this would go on handing it to clients that
     // could have had the small one, and, worse, the other way round.
-    if (file.gzip != null) try c.setStaticHeader("Vary", "Accept-Encoding");
+    if (file.contents.held.gzip != null) try c.setStaticHeader("Vary", "Accept-Encoding");
     if (sending.gzipped) try c.setStaticHeader("Content-Encoding", "gzip");
 
     // The ETag was computed when the file was read, so a repeat visitor
@@ -3694,7 +3762,9 @@ fn docsFor(app: *App) ![]const u8 {
     try app.resolveChains();
     const set = app.docs_set.?;
     for (set.files) |f| {
-        if (std.mem.eql(u8, f.url, "/openapi.json")) return f.bytes;
+        // Held, necessarily: the document was generated into memory and
+        // there is no directory for it to have spilled to.
+        if (std.mem.eql(u8, f.url, "/openapi.json")) return f.contents.held.bytes;
     }
     return error.NoDocument;
 }

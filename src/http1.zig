@@ -592,12 +592,34 @@ pub fn writeResponseHeadOnly(
     status: u16,
     phrase: []const u8,
     content_type: []const u8,
-    body_len: usize,
+    body_len: u64,
     keep_alive: bool,
     extra: []const Header,
 ) !void {
     try writeHead(out, status, phrase, content_type, body_len, keep_alive, extra);
     try out.flush();
+}
+
+/// The head of a response whose body is about to be sent straight from a
+/// file — and, unlike every other head here, **not flushed** (ADR 0037).
+///
+/// That is the whole reason it exists. `sendFile` takes whatever the writer
+/// already has buffered as the first thing to put on the wire, so leaving
+/// the head there is what makes the head and the first bytes of the file
+/// leave in one operation instead of two. Flushing first would cost a
+/// syscall and, on a small file, a packet.
+///
+/// The caller flushes, once the body is done.
+pub fn writeFileHead(
+    out: *std.Io.Writer,
+    status: u16,
+    phrase: []const u8,
+    content_type: []const u8,
+    body_len: u64,
+    keep_alive: bool,
+    extra: []const Header,
+) !void {
+    return writeHead(out, status, phrase, content_type, body_len, keep_alive, extra);
 }
 
 /// The whole first line, assembled at compile time for every status the
@@ -618,12 +640,16 @@ fn writeStatusLine(out: *std.Io.Writer, status: u16, phrase: []const u8) !void {
     }
 }
 
+/// `body_len` is a `u64` rather than a `usize` because a response body no
+/// longer has to be something this process could hold: a file being sent
+/// from disk is longer than memory on purpose (ADR 0037), and on a 32-bit
+/// build a `usize` would silently be the wrong number.
 fn writeHead(
     out: *std.Io.Writer,
     status: u16,
     phrase: []const u8,
     content_type: []const u8,
-    body_len: usize,
+    body_len: u64,
     keep_alive: bool,
     extra: []const Header,
 ) !void {

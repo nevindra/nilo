@@ -18,12 +18,21 @@
 //! gets a 304 with no body and no work.
 //!
 //! Range requests come along nearly free once the bytes are in memory — a
-//! range is a slice and two headers (ADR 0021). What this cannot do is
-//! serve a file that does not fit in RAM: `sendfile` and reading from disk
-//! per request contradict holding the tree in memory rather than extending
-//! it, and are on the roadmap with that argument still to have.
+//! range is a slice and two headers (ADR 0021).
+//!
+//! A file over `max_file_bytes` is the one exception, and it is a spill
+//! rather than a refusal: it stays in the list with its size and the path
+//! the walk produced, and a request opens it and sends it from the disk
+//! (ADR 0037). Both of the properties above survive that. The name handed
+//! to `openat` is the one the walk wrote down and never one a request
+//! carried, so there is still nothing to traverse; the memory is still a
+//! number, because a spilled file holds no bytes at all; and the read that
+//! does happen goes through the Engine, so the fiber parks rather than
+//! stopping the thread every other connection on it is being served by.
 
 const std = @import("std");
+
+const bulkhead = @import("bulkhead.zig");
 
 pub const Options = struct {
     /// Served for a path ending in `/`. Empty turns that off.
@@ -36,10 +45,28 @@ pub const Options = struct {
     ///
     /// The name is relative to the directory, e.g. `"index.html"`.
     spa_fallback: []const u8 = "",
-    /// Files bigger than this are refused at load, with their name in the
-    /// error. The whole tree is going into RAM, so the ceiling is a real
-    /// one and it is better hit at startup than at 3am.
+    /// The line between a file held in memory and one left where it is.
+    ///
+    /// At or below it nothing has changed: the file is read at load,
+    /// hashed, gzipped if it is worth it, and answered from a slice. Above
+    /// it the file is not read at all — it stays in the list with its size,
+    /// its modification time and the path the walk produced, and a request
+    /// opens it and sends it from the disk (ADR 0037).
+    ///
+    /// So this is a threshold and not a ceiling. What crossing it costs is
+    /// named rather than hidden: no gzipped copy, an ETag made of the
+    /// modification time and the size rather than of the contents, and one
+    /// file descriptor for as long as the response takes — bounded, like
+    /// everything else in flight, by `max_connections`.
+    ///
+    /// Eight megabytes is about where a file stops being part of a page and
+    /// starts being a video, an archive or an installer. All three are
+    /// compressed already, which is most of what a spilled file gives up.
     max_file_bytes: usize = 8 * 1024 * 1024,
+    /// The ceiling on what one directory may hold in memory, gzipped copies
+    /// included. Spilled files count nothing towards it, because they hold
+    /// nothing: this number is what an operator multiplies against a memory
+    /// budget, and a file that is opened per request is not in that budget.
     max_total_bytes: usize = 64 * 1024 * 1024,
     /// Whether to load names starting with `.`. Off by default: a `.env`
     /// or a `.git` that found its way into the directory being published
@@ -77,23 +104,81 @@ pub const Options = struct {
 pub const File = struct {
     /// The URL this answers to, prefix included: `/assets/app.css`.
     url: []const u8,
-    bytes: []const u8,
     content_type: []const u8,
-    /// A strong ETag, quotes included, computed from the contents at load.
+    /// A strong ETag, quotes included, worked out once at load. Which two
+    /// numbers it is made of depends on where the bytes are — see
+    /// `Contents`.
     etag: []const u8,
     /// Borrowed from the Set's options.
     cache_control: []const u8,
+    /// Where the bytes are, and everything that follows from that.
+    contents: Contents,
 
-    /// The same file, gzipped at load. Null when it was not worth it — too
-    /// small, a type that is already compressed, or it came out no smaller.
-    gzip: ?[]const u8 = null,
-    /// The ETag of the gzipped bytes, which is a different one.
+    /// A file is either held or spilled, and past the head they answer with
+    /// the two have nothing in common.
     ///
-    /// An ETag names a representation, not a file. Handing the same ETag to
-    /// both would let anything caching in front of this — a CDN, a browser,
-    /// a proxy — answer a client that cannot read gzip with the gzipped
-    /// copy, on the grounds that the tag matched. Empty when `gzip` is null.
-    gzip_etag: []const u8 = &.{},
+    /// A union rather than a `bytes` that is empty for a spilled file: an
+    /// empty slice is a perfectly good file, so "check whether it is empty"
+    /// is a rule somebody eventually forgets, and the failure it leads to is
+    /// a response promising bytes it never sends. This way asking a spilled
+    /// file for bytes it never read is a bug where it is written rather than
+    /// on the wire (ADR 0037).
+    pub const Contents = union(enum) {
+        held: Held,
+        spilled: Spilled,
+    };
+
+    /// Read at load and answered from memory — everything at or below
+    /// `max_file_bytes`, which is nearly everything a web tree contains.
+    pub const Held = struct {
+        bytes: []const u8,
+        /// The same file, gzipped at load. Null when it was not worth it —
+        /// too small, a type that is already compressed, or it came out no
+        /// smaller.
+        gzip: ?[]const u8 = null,
+        /// The ETag of the gzipped bytes, which is a different one.
+        ///
+        /// An ETag names a representation, not a file. Handing the same
+        /// ETag to both would let anything caching in front of this — a
+        /// CDN, a browser, a proxy — answer a client that cannot read gzip
+        /// with the gzipped copy, on the grounds that the tag matched.
+        /// Empty when `gzip` is null.
+        gzip_etag: []const u8 = &.{},
+    };
+
+    /// Left on the disk and opened per request (ADR 0037).
+    ///
+    /// There is no gzipped copy and there never will be: compression here
+    /// happens once, while the App is being built (ADR 0018), and a file
+    /// that is not being held cannot be compressed once. Compressing it per
+    /// request is the trade that was already refused for handler responses.
+    pub const Spilled = struct {
+        /// The directory `path` is opened against, which is the Set's.
+        ///
+        /// A copy of the handle rather than a pointer to the Set: a
+        /// descriptor is a number, and the Set itself is a value that gets
+        /// moved into the App's list of them, so a pointer would be the one
+        /// thing here that could go stale. The Set owns it and closes it
+        /// once; this is borrowed for as long as the App lives.
+        dir: bulkhead.Dir,
+        /// The path the directory walk produced, relative to `dir`.
+        ///
+        /// Not derived from the URL, and that is the whole traversal
+        /// argument: the string handed to `openat` was written down before
+        /// the socket opened, so `../../etc/passwd` is still not a path
+        /// that gets resolved — it is a name that is not in the list.
+        path: []const u8,
+        /// What the walk's `stat` said. Handed to `sendfile.send` rather
+        /// than re-statting per request, because the ETag is made of this
+        /// number: a fresh `stat` could hand a client a length and a tag
+        /// that describe two different files.
+        size: u64,
+        /// The other half of that ETag. Kept as the number it came from
+        /// rather than only as the hex inside the tag, so that anything
+        /// comparing files later compares two integers instead of parsing a
+        /// string back.
+        mtime_ns: i96,
+    };
 
     /// Which bytes and which ETag to answer with. Kept together so the two
     /// cannot come apart: picking one representation and then tagging it
@@ -105,18 +190,43 @@ pub const File = struct {
         gzipped: bool,
     };
 
+    /// The bytes and the ETag of a held file.
+    ///
+    /// Asking a spilled file is not a case to handle but a bug to hear
+    /// about: it has no bytes, and its answer is written from a descriptor
+    /// by `sendfile.send`. Callers branch on `contents` first — `App`'s
+    /// `serveStaticFile` does it once, at the top.
     pub fn identity(self: *const File) Representation {
-        return .{ .bytes = self.bytes, .etag = self.etag, .gzipped = false };
+        return .{ .bytes = self.contents.held.bytes, .etag = self.etag, .gzipped = false };
     }
 
     /// The gzipped form if there is one and the client said it can read
     /// one, and the plain form otherwise.
     pub fn representation(self: *const File, wants_gzip: bool) Representation {
         if (!wants_gzip) return self.identity();
-        const packed_bytes = self.gzip orelse return self.identity();
-        return .{ .bytes = packed_bytes, .etag = self.gzip_etag, .gzipped = true };
+        const held = self.contents.held;
+        const packed_bytes = held.gzip orelse return self.identity();
+        return .{ .bytes = packed_bytes, .etag = held.gzip_etag, .gzipped = true };
     }
 };
+
+/// Everything one file allocated, in one place. `load` frees a half-built
+/// list with this and `Set.deinit` frees a finished one, so a file that
+/// grows an allocation cannot be freed on one path and leaked on the other.
+fn freeFile(gpa: std.mem.Allocator, f: File) void {
+    gpa.free(f.url);
+    gpa.free(f.etag);
+    switch (f.contents) {
+        .held => |held| {
+            gpa.free(held.bytes);
+            if (held.gzip) |p| gpa.free(p);
+            if (held.gzip_etag.len > 0) gpa.free(held.gzip_etag);
+        },
+        // The descriptor belongs to the Set, not to the file that borrowed
+        // it, so there is nothing here but the name.
+        .spilled => |on_disk| gpa.free(on_disk.path),
+    }
+}
 
 /// One directory, loaded. Owns every byte in it.
 pub const Set = struct {
@@ -126,19 +236,23 @@ pub const Set = struct {
     files: []File,
     fallback: ?*const File,
     index: []const u8,
+    /// The directory itself, held open for as long as the App is, because a
+    /// spilled file is opened relative to it on every request that asks for
+    /// one. Opened by `load` before the socket is, which is what makes the
+    /// name a request never chose the only name that ever reaches `openat`.
+    ///
+    /// Null for a Set that has no directory — `fromMemory`, which is bytes
+    /// that were already here (ADR 0017) and can spill nothing.
+    dir: ?bulkhead.Dir = null,
 
     pub fn deinit(self: *Set) void {
-        for (self.files) |f| {
-            self.gpa.free(f.url);
-            self.gpa.free(f.bytes);
-            self.gpa.free(f.etag);
-            if (f.gzip) |p| self.gpa.free(p);
-            if (f.gzip_etag.len > 0) self.gpa.free(f.gzip_etag);
-        }
+        for (self.files) |f| freeFile(self.gpa, f);
         self.gpa.free(self.files);
         self.gpa.free(self.prefix);
+        if (self.dir) |d| d.close();
         self.files = &.{};
         self.fallback = null;
+        self.dir = null;
     }
 
     /// The file `path` names, or null if this set does not answer for it.
@@ -192,7 +306,6 @@ pub const max_url = 512;
 
 pub const LoadError = error{
     StaticDirNotFound,
-    StaticFileTooLarge,
     StaticSetTooLarge,
     StaticUrlTooLong,
     OutOfMemory,
@@ -209,7 +322,6 @@ pub const LoadError = error{
 pub fn explained(err: anyerror) bool {
     return switch (err) {
         error.StaticDirNotFound,
-        error.StaticFileTooLarge,
         error.StaticSetTooLarge,
         error.StaticUrlTooLong,
         error.StaticReadFailed,
@@ -255,10 +367,12 @@ pub fn fromMemory(gpa: std.mem.Allocator, entries: []const Entry) !Set {
     // empty slice is nothing to free.
     for (set.files) |*file| file.* = .{
         .url = &.{},
-        .bytes = &.{},
         .etag = &.{},
         .content_type = "",
         .cache_control = "",
+        // Held, and empty. Nothing here can spill: there is no directory to
+        // spill to, and these bytes are already in memory by definition.
+        .contents = .{ .held = .{ .bytes = &.{} } },
     };
 
     // The same rule a loaded directory follows, with the same defaults.
@@ -269,14 +383,15 @@ pub fn fromMemory(gpa: std.mem.Allocator, entries: []const Entry) !Set {
 
     for (entries, set.files) |entry, *file| {
         file.url = try gpa.dupe(u8, entry.url);
-        file.bytes = try gpa.dupe(u8, entry.bytes);
         file.etag = try etagFor(gpa, entry.bytes);
         file.content_type = entry.content_type;
         file.cache_control = entry.cache_control;
 
+        const held = &file.contents.held;
+        held.bytes = try gpa.dupe(u8, entry.bytes);
         if (entry.bytes.len >= defaults.compress_min_bytes and compressible(entry.content_type)) {
-            file.gzip = try gzipped(gpa, entry.bytes);
-            if (file.gzip) |p| file.gzip_etag = try etagFor(gpa, p);
+            held.gzip = try gzipped(gpa, entry.bytes);
+            if (held.gzip) |p| held.gzip_etag = try etagFor(gpa, p);
         }
     }
 
@@ -287,6 +402,10 @@ pub fn fromMemory(gpa: std.mem.Allocator, entries: []const Entry) !Set {
 /// Read `dir_path` into memory, mapping every file in it to a URL under
 /// `url_prefix`. Called before `listen()`, so the blocking reads here
 /// happen while nothing is being served.
+///
+/// A file over `options.max_file_bytes` is listed rather than read: it keeps
+/// its place in the set with the path the walk produced, and the request
+/// that asks for it opens it (ADR 0037).
 pub fn load(
     gpa: std.mem.Allocator,
     url_prefix: []const u8,
@@ -312,20 +431,47 @@ pub fn load(
     };
     defer dir.close(io);
 
+    // The same directory a second time, through the Bulkhead, and this one
+    // is kept: a spilled file is opened relative to it by every request that
+    // asks for one. Opened here rather than at the first request, which is
+    // what makes the descriptor older than the socket and the name from the
+    // walk the only name that ever reaches `openat` (ADR 0037). One
+    // descriptor per set, whether or not anything spilled today — the
+    // alternative is a lazily opened directory on the request path and a
+    // branch to go with it.
+    const serving = bulkhead.Dir.open(dir_path) catch |err| {
+        std.log.err(
+            "zfast: static directory \"{s}\" could not be held open ({s}) — " ++
+                "the path is relative to the working directory the server runs in",
+            .{ dir_path, @errorName(err) },
+        );
+        return error.StaticDirNotFound;
+    };
+
+    // Built empty and up front so that one `errdefer` owns everything from
+    // here: the files, the prefix and the descriptor above. The list below
+    // is filled first and handed over at the end, which is the only window
+    // where two things are being tidied up rather than one.
+    var set = Set{
+        .gpa = gpa,
+        .prefix = &.{},
+        .files = &.{},
+        .fallback = null,
+        .index = options.index,
+        .dir = serving,
+    };
+    errdefer set.deinit();
+    set.prefix = try gpa.dupe(u8, url_prefix);
+
     var files: std.ArrayList(File) = .empty;
     errdefer {
-        for (files.items) |f| {
-            gpa.free(f.url);
-            gpa.free(f.bytes);
-            gpa.free(f.etag);
-            if (f.gzip) |p| gpa.free(p);
-            if (f.gzip_etag.len > 0) gpa.free(f.gzip_etag);
-        }
+        for (files.items) |f| freeFile(gpa, f);
         files.deinit(gpa);
     }
 
-    var total: usize = 0;
+    var held_total: usize = 0;
     var packed_total: usize = 0;
+    var spilled_files: usize = 0;
     var skipped_dotfiles: usize = 0;
 
     var walker = try dir.walk(gpa);
@@ -351,23 +497,55 @@ pub fn load(
         };
         toForwardSlashes(url);
 
-        const bytes = entry.dir.readFileAlloc(io, entry.basename, gpa, .limited64(options.max_file_bytes)) catch |err| {
+        const content_type = contentTypeFor(url);
+
+        // Asked before anything is read, which is the whole point: a file
+        // over the line must not be read even once, or startup on a
+        // directory of videos costs a pass over every one of them.
+        const stat = entry.dir.statFile(io, entry.basename, .{}) catch |err| {
+            std.log.err("zfast: static file \"{s}\" could not be read ({s})", .{ entry.path, @errorName(err) });
+            return error.StaticReadFailed;
+        };
+
+        if (stat.size > options.max_file_bytes) {
+            // Over the line, so what goes in the list is where to find it
+            // rather than what is in it (ADR 0037). Nothing is added to
+            // `held_total`: this file holds no memory to be counted.
+            const relative = try gpa.dupe(u8, entry.path);
+            errdefer gpa.free(relative);
+
+            try files.append(gpa, .{
+                .url = try gpa.dupe(u8, url),
+                .content_type = content_type,
+                .etag = try etagForSpilled(gpa, stat.mtime.nanoseconds, stat.size),
+                .cache_control = options.cache_control,
+                .contents = .{ .spilled = .{
+                    .dir = serving,
+                    .path = relative,
+                    .size = stat.size,
+                    .mtime_ns = stat.mtime.nanoseconds,
+                } },
+            });
+            spilled_files += 1;
+            continue;
+        }
+
+        // One byte past the threshold, not the threshold itself:
+        // `readFileAlloc` gives up as soon as it has taken the whole limit,
+        // so a file of exactly `max_file_bytes` would come back as
+        // `error.StreamTooLong` — and at or below the line is held. Reaching
+        // it at all now means the file grew between the `stat` above and
+        // this read, which is a read that failed rather than a size that was
+        // refused.
+        const bytes = entry.dir.readFileAlloc(io, entry.basename, gpa, .limited64(options.max_file_bytes +| 1)) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
-            if (err == error.StreamTooLong) {
-                std.log.err(
-                    "zfast: static file \"{s}\" is over the {d} byte limit — " ++
-                        "everything is held in memory, so raise .max_file_bytes only if you mean it",
-                    .{ entry.path, options.max_file_bytes },
-                );
-                return error.StaticFileTooLarge;
-            }
             std.log.err("zfast: static file \"{s}\" could not be read ({s})", .{ entry.path, @errorName(err) });
             return error.StaticReadFailed;
         };
         errdefer gpa.free(bytes);
 
-        total += bytes.len;
-        if (total > options.max_total_bytes) {
+        held_total += bytes.len;
+        if (held_total > options.max_total_bytes) {
             std.log.err(
                 "zfast: static directory \"{s}\" is over the {d} byte total limit",
                 .{ dir_path, options.max_total_bytes },
@@ -375,7 +553,6 @@ pub fn load(
             return error.StaticSetTooLarge;
         }
 
-        const content_type = contentTypeFor(url);
         var packed_bytes: ?[]const u8 = null;
         errdefer if (packed_bytes) |p| gpa.free(p);
         if (options.compress and
@@ -385,8 +562,8 @@ pub fn load(
             packed_bytes = try gzipped(gpa, bytes);
             if (packed_bytes) |p| {
                 packed_total += p.len;
-                total += p.len;
-                if (total > options.max_total_bytes) {
+                held_total += p.len;
+                if (held_total > options.max_total_bytes) {
                     std.log.err(
                         "zfast: static directory \"{s}\" is over the {d} byte total limit " ++
                             "once the gzipped copies are counted — raise .max_total_bytes, " ++
@@ -400,26 +577,21 @@ pub fn load(
 
         try files.append(gpa, .{
             .url = try gpa.dupe(u8, url),
-            .bytes = bytes,
             .content_type = content_type,
             .etag = try etagFor(gpa, bytes),
             .cache_control = options.cache_control,
-            .gzip = packed_bytes,
-            .gzip_etag = if (packed_bytes) |p| try etagFor(gpa, p) else &.{},
+            .contents = .{ .held = .{
+                .bytes = bytes,
+                .gzip = packed_bytes,
+                .gzip_etag = if (packed_bytes) |p| try etagFor(gpa, p) else &.{},
+            } },
         });
     }
 
-    const owned = try files.toOwnedSlice(gpa);
-    errdefer gpa.free(owned);
-    sortByUrl(owned);
-
-    var set = Set{
-        .gpa = gpa,
-        .prefix = try gpa.dupe(u8, url_prefix),
-        .files = owned,
-        .fallback = null,
-        .index = options.index,
-    };
+    // Handed over, so the list is empty and its `errdefer` above has nothing
+    // left to free — from here the Set's own one covers all of it.
+    set.files = try files.toOwnedSlice(gpa);
+    sortByUrl(set.files);
 
     if (options.spa_fallback.len > 0) {
         var buf: [max_url]u8 = undefined;
@@ -436,19 +608,27 @@ pub fn load(
                     "the name is relative to the directory, e.g. \"index.html\"",
                 .{ options.spa_fallback, dir_path },
             );
-            set.deinit();
+            // Nothing freed by hand: the `errdefer` on the Set above is what
+            // gives back the files, the prefix and the descriptor, and doing
+            // it twice was a double free waiting for somebody to configure a
+            // fallback that is not there.
             return error.StaticDirNotFound;
         };
     }
 
+    // Held bytes and spilled files are two different numbers and are said as
+    // two, because the first one is what an operator multiplies against a
+    // memory budget and the second one is not in that budget at all — it is
+    // one descriptor each, and only while a response is being written.
     std.log.info(
-        "zfast: loaded {d} static file(s) ({d} bytes{f}) from \"{s}\" onto \"{s}\"{s}",
+        "zfast: loaded {d} static file(s) ({d} bytes held{f}) from \"{s}\" onto \"{s}\"{f}{s}",
         .{
             set.files.len,
-            total,
+            held_total,
             GzipNote{ .bytes = packed_total },
             dir_path,
             url_prefix,
+            SpillNote{ .files = spilled_files, .over = options.max_file_bytes },
             if (skipped_dotfiles > 0) " (dotfiles skipped)" else "",
         },
     );
@@ -464,6 +644,25 @@ const GzipNote = struct {
     pub fn format(self: GzipNote, w: *std.Io.Writer) std.Io.Writer.Error!void {
         if (self.bytes == 0) return;
         try w.print(", {d} of them gzipped copies", .{self.bytes});
+    }
+};
+
+/// The spilled half, on the same terms as `GzipNote`: a tree where every
+/// file fit is a tree that should not have to read about the threshold.
+///
+/// Outside the byte total on purpose. What is in the brackets is memory, and
+/// this is a count of files that are not in it — putting the two together
+/// would invite exactly the reading the split exists to prevent.
+const SpillNote = struct {
+    files: usize,
+    over: usize,
+
+    pub fn format(self: SpillNote, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        if (self.files == 0) return;
+        try w.print(
+            ", {d} of them over {d} bytes and opened per request rather than held",
+            .{ self.files, self.over },
+        );
     }
 };
 
@@ -640,6 +839,25 @@ fn etagFor(gpa: std.mem.Allocator, bytes: []const u8) ![]const u8 {
     return std.fmt.allocPrint(gpa, "\"{x}-{x}\"", .{ bytes.len, hash });
 }
 
+/// The ETag of a file nobody read: its modification time and its size.
+///
+/// Also strong, and deliberately so. The tempting alternative is a weak
+/// validator, and RFC 9110 says an `If-Range` carrying one must be ignored —
+/// which would send the whole file to every client resuming a download, and
+/// resuming is what large files are *for*. Hashing is not on offer up here:
+/// a strong tag for a four-gigabyte file means reading four gigabytes, at
+/// startup or per request, and both are worse than what is being risked.
+/// What is being risked is two different contents sharing a size and a
+/// modification time to the nanosecond, which is the risk nginx has been
+/// taking by default for twenty years (ADR 0037).
+///
+/// The time goes through `@bitCast` rather than a cast that could fail: a
+/// clock is allowed to say anything, including a negative number, and a
+/// panic while loading a directory is not the way to find that out.
+fn etagForSpilled(gpa: std.mem.Allocator, mtime_ns: i96, size: u64) ![]const u8 {
+    return std.fmt.allocPrint(gpa, "\"{x}-{x}\"", .{ @as(u96, @bitCast(mtime_ns)), size });
+}
+
 /// Whether an `If-None-Match` header matches `etag`. Handles the `*`
 /// wildcard, a comma-separated list, and the `W/` weak marker — all three
 /// turn up in the wild and none of them is worth a 200 with a full body.
@@ -764,10 +982,10 @@ fn fakeSet(gpa: std.mem.Allocator, prefix: []const u8, urls: []const []const u8)
     for (files, urls) |*f, url| {
         f.* = .{
             .url = try gpa.dupe(u8, url),
-            .bytes = try gpa.dupe(u8, "x"),
             .content_type = contentTypeFor(url),
             .etag = try etagFor(gpa, "x"),
             .cache_control = "",
+            .contents = .{ .held = .{ .bytes = try gpa.dupe(u8, "x") } },
         };
     }
     sortByUrl(files);
@@ -914,11 +1132,12 @@ test "the two representations of one file never share an ETag" {
     defer set.deinit();
 
     const file = set.find("/index.html").?;
-    try testing.expect(file.gzip != null);
+    const held = file.contents.held;
+    try testing.expect(held.gzip != null);
     // Different bytes, so a different tag. Sharing one would let a cache in
     // front answer a client that cannot read gzip with the gzipped copy,
     // because the tag it was holding matched.
-    try testing.expect(!std.mem.eql(u8, file.etag, file.gzip_etag));
+    try testing.expect(!std.mem.eql(u8, file.etag, held.gzip_etag));
 
     const plain = file.representation(false);
     try testing.expect(!plain.gzipped);
@@ -928,7 +1147,7 @@ test "the two representations of one file never share an ETag" {
     const squeezed = file.representation(true);
     try testing.expect(squeezed.gzipped);
     try testing.expect(squeezed.bytes.len < html.len);
-    try testing.expectEqualStrings(file.gzip_etag, squeezed.etag);
+    try testing.expectEqualStrings(held.gzip_etag, squeezed.etag);
 }
 
 test "a file with no compressed copy asks for the plain one whatever the client says" {
@@ -941,7 +1160,288 @@ test "a file with no compressed copy asks for the plain one whatever the client 
     defer set.deinit();
 
     const file = set.find("/tiny.txt").?;
-    try testing.expect(file.gzip == null);
+    try testing.expect(file.contents.held.gzip == null);
     try testing.expect(!file.representation(true).gzipped);
     try testing.expectEqualStrings("no", file.representation(true).bytes);
+}
+
+// ---- a file too big to hold (ADR 0037) ----
+
+const App = @import("app.zig").App;
+const zfast_testing = @import("testing.zig");
+
+/// A directory of real files, written for one test and removed after it.
+/// The path is relative to the working directory, which is what `load` and
+/// `app.static` both take.
+const TmpTree = struct {
+    tmp: std.testing.TmpDir,
+    path: []u8,
+
+    fn init(gpa: std.mem.Allocator, files: []const [2][]const u8) !TmpTree {
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        errdefer tmp.cleanup();
+        for (files) |entry| {
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = entry[0], .data = entry[1] });
+        }
+        return .{
+            .tmp = tmp,
+            .path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path}),
+        };
+    }
+
+    fn deinit(self: *TmpTree, gpa: std.mem.Allocator) void {
+        gpa.free(self.path);
+        self.tmp.cleanup();
+    }
+};
+
+test "a file over the threshold is listed rather than refused, and holds no bytes" {
+    const gpa = testing.allocator;
+    // Text, and repetitive, so this is a file gzip would certainly have been
+    // worth had it been held. That is what makes "no compressed copy" a
+    // decision here rather than an accident of the contents.
+    const big = "the quick brown fox jumps over the lazy dog. " ** 8;
+    var tree = try TmpTree.init(gpa, &.{
+        .{ "small.txt", "small" },
+        .{ "big.txt", big },
+    });
+    defer tree.deinit(gpa);
+
+    // A total limit far below the big file's size, on purpose: a spilled
+    // file holds nothing, so it is charged nothing, and a set that would
+    // once have been refused twice over loads.
+    var set = try load(gpa, "/", tree.path, .{
+        .max_file_bytes = 64,
+        .max_total_bytes = 128,
+        .compress_min_bytes = 16,
+    });
+    defer set.deinit();
+
+    try testing.expectEqual(@as(usize, 2), set.files.len);
+
+    // Below the line, nothing changed.
+    const held = set.find("/small.txt").?;
+    try testing.expectEqualStrings("small", held.contents.held.bytes);
+
+    // Above it, the file is where to find it rather than what is in it.
+    // There is no gzipped copy to ask about — a spilled file has nowhere to
+    // put one, which is the union's doing rather than a rule to remember.
+    const spilled = set.find("/big.txt").?;
+    const on_disk = switch (spilled.contents) {
+        .held => return error.TestExpectedSpill,
+        .spilled => |s| s,
+    };
+    try testing.expectEqualStrings("big.txt", on_disk.path);
+    try testing.expectEqual(@as(u64, big.len), on_disk.size);
+    try testing.expectEqualStrings("text/plain; charset=utf-8", spilled.content_type);
+
+    // The size and the time are the file's own, not something derived from
+    // the URL or guessed at.
+    const stat = try tree.tmp.dir.statFile(std.testing.io, "big.txt", .{});
+    try testing.expectEqual(stat.size, on_disk.size);
+    try testing.expectEqual(stat.mtime.nanoseconds, on_disk.mtime_ns);
+
+    // The tag is made of those two numbers, and is not a hash of the
+    // contents — which is the point, because nothing read the contents.
+    const from_contents = try etagFor(gpa, big);
+    defer gpa.free(from_contents);
+    try testing.expect(!std.mem.eql(u8, from_contents, spilled.etag));
+
+    const expected = try etagForSpilled(gpa, on_disk.mtime_ns, on_disk.size);
+    defer gpa.free(expected);
+    try testing.expectEqualStrings(expected, spilled.etag);
+
+    // `"<mtime>-<size>"`, hex, quotes included: nginx's shape, and strong,
+    // so an `If-Range` resuming a large download is honoured rather than
+    // ignored.
+    try testing.expect(spilled.etag[0] == '"');
+    try testing.expect(spilled.etag[spilled.etag.len - 1] == '"');
+    const inner = spilled.etag[1 .. spilled.etag.len - 1];
+    const dash = std.mem.indexOfScalar(u8, inner, '-').?;
+    try testing.expect(dash > 0);
+    for (inner[0..dash]) |ch| try testing.expect(std.ascii.isHex(ch));
+    var size_hex: [32]u8 = undefined;
+    try testing.expectEqualStrings(
+        try std.fmt.bufPrint(&size_hex, "{x}", .{on_disk.size}),
+        inner[dash + 1 ..],
+    );
+
+    // The same directory again with the threshold moved above it: the very
+    // same file is now held, hashed and gzipped. So everything asserted
+    // above is the spill's doing and not something about this file.
+    var all_held = try load(gpa, "/", tree.path, .{ .compress_min_bytes = 16 });
+    defer all_held.deinit();
+    const now_held = all_held.find("/big.txt").?.contents.held;
+    try testing.expectEqualStrings(big, now_held.bytes);
+    try testing.expect(now_held.gzip != null);
+    try testing.expectEqualStrings(from_contents, all_held.find("/big.txt").?.etag);
+}
+
+test "a whole set can spill, and the ETag moves when the file does" {
+    const gpa = testing.allocator;
+    var tree = try TmpTree.init(gpa, &.{.{ "video.mp4", "0123456789" }});
+    defer tree.deinit(gpa);
+
+    var first = try load(gpa, "/", tree.path, .{ .max_file_bytes = 4 });
+    // Freed before the second load, so the two ETags are compared as copies
+    // rather than as pointers into a Set that has been thrown away.
+    var etag_buf: [64]u8 = undefined;
+    const before = etag_buf[0..first.find("/video.mp4").?.etag.len];
+    @memcpy(before, first.find("/video.mp4").?.etag);
+    first.deinit();
+
+    // Rewritten: different contents, a different length, and a modification
+    // time the filesystem moved.
+    try tree.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "video.mp4", .data = "abcdefghijkl" });
+
+    var second = try load(gpa, "/", tree.path, .{ .max_file_bytes = 4 });
+    defer second.deinit();
+    try testing.expect(!std.mem.eql(u8, before, second.find("/video.mp4").?.etag));
+}
+
+test "a spilled file answers whole, in parts, and with a 304" {
+    const gpa = testing.allocator;
+    const alphabet = "abcdefghijklmnopqrstuvwxyz";
+    var tree = try TmpTree.init(gpa, &.{.{ "alphabet.txt", alphabet }});
+    defer tree.deinit(gpa);
+
+    var app = App.init(gpa);
+    defer app.deinit();
+    try app.tryStaticWith("/", tree.path, .{
+        .max_file_bytes = 8,
+        .cache_control = "public, max-age=60",
+    });
+
+    var client = try zfast_testing.Client.init(gpa, .{});
+    defer client.deinit();
+
+    // The whole thing, with everything a held file's answer carries.
+    const whole = try client.get(&app, "/alphabet.txt");
+    try testing.expectEqual(@as(u16, 200), whole.status);
+    try testing.expectEqualStrings(alphabet, whole.body);
+    try testing.expectEqualStrings("26", whole.header("Content-Length").?);
+    try testing.expectEqualStrings("bytes", whole.header("Accept-Ranges").?);
+    try testing.expectEqualStrings("public, max-age=60", whole.header("Cache-Control").?);
+    try testing.expectEqualStrings("text/plain; charset=utf-8", whole.header("Content-Type").?);
+
+    // Copied out: the next request writes over the buffer this points into.
+    var etag_buf: [64]u8 = undefined;
+    const etag = etag_buf[0..whole.header("ETag").?.len];
+    @memcpy(etag, whole.header("ETag").?);
+
+    // Text, and a client that would take a gzipped copy — but a file nobody
+    // is holding has none to give, and nothing here compresses per request
+    // (ADR 0018). No `Vary` either: there is only one representation.
+    const asked = try client.send(
+        &app,
+        "GET /alphabet.txt HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n",
+    );
+    try testing.expectEqual(@as(u16, 200), asked.status);
+    try testing.expect(asked.header("Content-Encoding") == null);
+    try testing.expect(asked.header("Vary") == null);
+    try testing.expectEqualStrings(alphabet, asked.body);
+
+    // Part of it, from the middle, without the rest being read.
+    const part = try client.send(&app, "GET /alphabet.txt HTTP/1.1\r\nRange: bytes=3-5\r\n\r\n");
+    try testing.expectEqual(@as(u16, 206), part.status);
+    try testing.expectEqualStrings("bytes 3-5/26", part.header("Content-Range").?);
+    try testing.expectEqualStrings("def", part.body);
+
+    // A resumed download, held to the file it started with by the tag it was
+    // given — which is why that tag has to be strong (ADR 0037).
+    var request_buf: [256]u8 = undefined;
+    const resumed = try client.send(&app, try std.fmt.bufPrint(
+        &request_buf,
+        "GET /alphabet.txt HTTP/1.1\r\nRange: bytes=20-\r\nIf-Range: {s}\r\n\r\n",
+        .{etag},
+    ));
+    try testing.expectEqual(@as(u16, 206), resumed.status);
+    try testing.expectEqualStrings("uvwxyz", resumed.body);
+
+    // And a repeat visitor: a comparison and a head, no body and no disk.
+    const conditional = try client.send(&app, try std.fmt.bufPrint(
+        &request_buf,
+        "GET /alphabet.txt HTTP/1.1\r\nIf-None-Match: {s}\r\n\r\n",
+        .{etag},
+    ));
+    try testing.expectEqual(@as(u16, 304), conditional.status);
+    try testing.expectEqualStrings("", conditional.body);
+    try testing.expectEqualStrings(etag, conditional.header("ETag").?);
+}
+
+test "a held file and a spilled one answer a conditional range the same way" {
+    // The two arms of `serveStaticFile` are written out separately, because
+    // one picks between representations and the other has only one (see the
+    // comment there). This is what stops them drifting: the same four
+    // requests, the same four answers, whichever side of the threshold the
+    // file is on.
+    const gpa = testing.allocator;
+    const alphabet = "abcdefghijklmnopqrstuvwxyz";
+
+    for ([_]usize{ 8, 1024 }) |max_file_bytes| {
+        var tree = try TmpTree.init(gpa, &.{.{ "a.bin", alphabet }});
+        defer tree.deinit(gpa);
+
+        var app = App.init(gpa);
+        defer app.deinit();
+        try app.tryStaticWith("/", tree.path, .{ .max_file_bytes = max_file_bytes });
+
+        var client = try zfast_testing.Client.init(gpa, .{});
+        defer client.deinit();
+
+        const whole = try client.get(&app, "/a.bin");
+        try testing.expectEqual(@as(u16, 200), whole.status);
+        try testing.expectEqualStrings(alphabet, whole.body);
+        var etag_buf: [64]u8 = undefined;
+        const etag = etag_buf[0..whole.header("ETag").?.len];
+        @memcpy(etag, whole.header("ETag").?);
+
+        var request_buf: [256]u8 = undefined;
+        const resumed = try client.send(&app, try std.fmt.bufPrint(
+            &request_buf,
+            "GET /a.bin HTTP/1.1\r\nRange: bytes=20-\r\nIf-Range: {s}\r\n\r\n",
+            .{etag},
+        ));
+        try testing.expectEqual(@as(u16, 206), resumed.status);
+        try testing.expectEqualStrings("bytes 20-25/26", resumed.header("Content-Range").?);
+        try testing.expectEqualStrings("uvwxyz", resumed.body);
+
+        // The file the client started with is gone, so byte 20 of this one is
+        // not the byte it wanted: all of it, and no `Content-Range` (ADR 0021).
+        const stale = try client.send(
+            &app,
+            "GET /a.bin HTTP/1.1\r\nRange: bytes=20-\r\nIf-Range: \"gone\"\r\n\r\n",
+        );
+        try testing.expectEqual(@as(u16, 200), stale.status);
+        try testing.expectEqualStrings(alphabet, stale.body);
+        try testing.expect(stale.header("Content-Range") == null);
+
+        // Past the end says how big it really is, on both sides.
+        const past = try client.send(&app, "GET /a.bin HTTP/1.1\r\nRange: bytes=99-\r\n\r\n");
+        try testing.expectEqual(@as(u16, 416), past.status);
+        try testing.expectEqualStrings("bytes */26", past.header("Content-Range").?);
+    }
+}
+
+test "a set with no directory closes cleanly, and one with a directory gives it back" {
+    // `fromMemory` is the API description (ADR 0017): no directory, nothing
+    // to spill, and a `deinit` that must not reach for a descriptor that was
+    // never opened.
+    const gpa = testing.allocator;
+    var from_memory = try fromMemory(gpa, &.{.{
+        .url = "/openapi.json",
+        .bytes = "{}",
+        .content_type = "application/json",
+    }});
+    try testing.expect(from_memory.dir == null);
+    from_memory.deinit();
+
+    var tree = try TmpTree.init(gpa, &.{.{ "a.txt", "a" }});
+    defer tree.deinit(gpa);
+    var loaded = try load(gpa, "/", tree.path, .{});
+    // Held open for the App's lifetime whether or not anything spilled, so
+    // that opening one is never something a request has to do.
+    try testing.expect(loaded.dir != null);
+    loaded.deinit();
+    try testing.expect(loaded.dir == null);
 }

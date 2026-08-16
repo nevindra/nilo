@@ -136,6 +136,13 @@ server holding open tabs wants this raised, and multiplied by 9 KB first.
 `.max_connections = 0` turns it off, which is what zfast did before this
 existed.
 
+It is also what bounds file descriptors. A response that sends a file — a static
+file over `max_file_bytes`, or a handler returning a `FileBody` — holds one open
+for as long as the send takes, and there is one of those per request in flight
+([ADR 0037](../adr/0037-a-file-too-big-to-hold-is-opened-not-read.md)). So it is
+a number that was already being multiplied rather than a second one to budget
+for.
+
 ## How big a body may be
 
 `max_body` is the most `c.body()` will read into the request arena. Past it, a
@@ -327,10 +334,9 @@ HTTP/2. Neither follows from "no TLS" on its own, which is why both are here.
 
 ## What isn't here yet
 
-`sendfile`, `permessage-deflate`, compression of a handler's response (files are
-compressed — see [Static files](./static-files.md#compression)), broadcasting to
-WebSockets a handler doesn't hold, and a request id tying your log lines
-together.
+`permessage-deflate`, compression of a handler's response (files are compressed —
+see [Static files](./static-files.md#compression)), and broadcasting to
+WebSockets a handler doesn't hold.
 
 Templates are a refusal rather than a backlog item: zfast is for building APIs
 and services, and rendering pages is not what it is for. The reasoning is in

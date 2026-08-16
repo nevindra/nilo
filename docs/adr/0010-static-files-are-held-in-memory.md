@@ -43,3 +43,13 @@ Choices inside that worth naming:
 - Assets cannot be changed without restarting. For a build-output directory that is how deployment works anyway; for local development it is a real annoyance and worth a watch-and-reload option in v2.
 - Range requests, `sendfile`, and per-request disk reads are v2, and would arrive as an addition rather than a rewrite: the same `find`, a different way of getting at the bytes.
 - The Bulkhead gains nothing. That was the point.
+
+## Amended in 0.1.0
+
+**A file too big to hold is now opened rather than refused** — [ADR 0037](./0037-a-file-too-big-to-hold-is-opened-not-read.md). This decision is not reversed, and the sentence above it turned out to be the accurate prediction: it arrived as an addition rather than a rewrite, the same `find` with a different way of getting at the bytes.
+
+What changed is the price of option A. The obligation this ADR would not put on the Bulkhead — "open, stat, read, seek, errors, cancellation, owed by every replacement Engine forever" — stopped being zfast's to define once `sendFile` was a slot in the `std.Io.Writer` vtable and zio filled it in. The Bulkhead grew four names, all of them `std.Io`-shaped, which is the seam this ADR named in advance.
+
+Two of the three things option B bought are unchanged and were never up for trade. Path traversal is still not possible, because a spilled file carries the path the directory walk produced and the string handed to `openat` still never comes from a request. The memory is still a number, because a spilled file holds no bytes. The third — ETags for free — is the one that gave: above the threshold a tag is the file's modification time and size rather than a hash of its contents, since hashing gigabytes at load is the cost this ADR was avoiding in the first place.
+
+`max_file_bytes` kept its name and changed its meaning, from the ceiling this document wanted hit at startup to the line at which a file stops being held. `error.StaticFileTooLarge` is gone with the ceiling.

@@ -35,7 +35,7 @@ each one assumes the ones above it — and jump straight in afterwards.
 12. [Services](./services.md) — shared state across threads, locks, and the rule
     about blocking calls.
 13. [Static files](./static-files.md) — a directory held in memory, with ETags
-    and range requests.
+    and range requests, and a file too big to hold opened per request.
 14. [Errors](./errors.md) — failing a request from anywhere, what a client is
     told, and request ids for tying a failure to its log line.
 

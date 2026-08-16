@@ -123,8 +123,20 @@ A function callable from anywhere to stop a request with a given status and mess
 _Avoid_: abort, throw, bail
 
 **Static set**:
-One directory read into memory when the App is built, and answered from without touching the disk again. Not a middleware: it holds state, so it is a terminal handler the middleware chain wraps like any other.
+One directory read when the App is built, and answered from a list fixed before the socket opens. Files small enough are held in memory and never touch the disk again; the rest are Spilled. Not a middleware: it holds state, so it is a terminal handler the middleware chain wraps like any other.
 _Avoid_: file server, asset middleware, public dir
+
+**Spilled file**:
+A file in a Static set too big to hold, kept in the list by its size, its modification time and the path the directory walk gave it, and opened again on every request that asks for it. It costs no memory and one descriptor while it is being sent. Its ETag is its modification time and size rather than a hash of its contents, and it is never gzipped, because there is no single moment to do either in.
+_Avoid_: streamed file, large file, disk file, external file
+
+**Dir**:
+A directory opened once and held, so that a file can be served out of it by name without any path ever being resolved. What makes traversal impossible rather than defended against: the name is checked a segment at a time and opened against this descriptor, never against the filesystem's root.
+_Avoid_: folder, root, base path, document root
+
+**FileBody**:
+An answer that is a file on disk rather than a value, returned by the handler the way a Redirect is. It names the Dir to serve out of and the name within it, and `?FileBody` means the same 404 that `?T` means anywhere else.
+_Avoid_: file response, download, attachment, send file
 
 **Socket**:
 A WebSocket connection, held by an ordinary handler that does not return until it ends. zfast does the handshake, the framing and the housekeeping frames; the loop is the handler's. The buffer it reads into is the message ceiling.

@@ -15,6 +15,7 @@ fn handler(c: *zfast.Ctx) !void { … }
 | `c.sendText(200, "hi")` | `text/plain` |
 | `c.sendJson(201, value)` | serialised and sent |
 | `c.send(200, "text/csv", bytes)` | a content type of your own |
+| `c.sendFile(.{ .file = f, … })` | an open file, closed here — see [Files](#files) |
 | `c.stream(200, "text/csv")` | a response written in pieces — [Streaming](./streaming.md) |
 | `c.events()` | a stream of server-sent events |
 | `c.upgrade()` | turn the connection into a [WebSocket](./websocket.md) |
@@ -85,6 +86,75 @@ only known while the request is running.
 There is no body. Browsers follow the header and never look
 ([ADR 0032](../adr/0032-a-redirect-puts-its-status-in-the-type.md)).
 
+## Files
+
+`FileBody` is a file as a return value: the handler names it, zfast opens it,
+and the bytes go from the disk to the socket without passing through your
+process ([ADR 0037](../adr/0037-a-file-too-big-to-hold-is-opened-not-read.md)).
+
+```zig
+fn invoice(files: *Files, id: u32) !?zfast.FileBody {
+    const name = try files.nameOf(id) orelse return null;
+    return .{ .dir = files.dir, .name = name, .content_type = "application/pdf" };
+}
+```
+
+A return type rather than a call, for the reason a redirect is one: the
+signature is the contract, so the API description says the endpoint answers with
+bytes — and the `?` says it answers 404, exactly as it does for a `?User`.
+
+| | |
+|---|---|
+| `dir` | the directory to open the file in — a `zfast.Dir` |
+| `name` | the name inside it |
+| `content_type` | default `"application/octet-stream"` |
+| `cache_control` | empty leaves the header off |
+| `headers` | up to eight, the same list a `Redirect` carries |
+
+The `dir` is not decoration. It is opened once, at startup, and held as a
+service:
+
+```zig
+var files: Files = .{ .dir = try zfast.Dir.open("uploads") };
+defer files.dir.close();
+try app.provide(&files);
+```
+
+A name is opened relative to that descriptor rather than joined onto a path, so
+nothing a request carries is ever resolved as one. What is left — a `..`
+segment, an absolute path, a NUL byte, and on Windows a backslash or a drive
+letter — is refused before anything is opened, and answers the same 404 a
+missing file does, word for word, so a probe cannot tell the two apart. The log
+line says which it was.
+
+A download's filename is a header, and goes where the other headers go:
+
+```zig
+return .{
+    .dir = files.dir,
+    .name = name,
+    .content_type = "application/pdf",
+    .headers = .of(&.{.{
+        .name = "Content-Disposition",
+        .value = "attachment; filename=\"invoice-42.pdf\"",
+    }}),
+};
+```
+
+There is deliberately no `download_as` field. Quoting a filename properly is RFC
+6266 rather than one line, and `attachment` is not the only answer — a PDF
+opening in a browser tab wants `inline` with a filename.
+
+`Range`, `If-Range`, `If-None-Match` and `HEAD` work here exactly as they do for
+a [static file](./static-files.md#range-requests). The API description says the
+body is `application/octet-stream` with `format: binary` rather than the content
+type you set, because that one is a runtime field and the document does not
+guess.
+
+`c.sendFile(.{ .file = f, .content_type = … })` is the same response from a
+`*Ctx`, for a handler that already holds an open file and has its own `etag`,
+`size` or `cache_control` to give it. It closes the file, on every way out.
+
 ## One request, one response
 
 A response is written and flushed in one go. There is no "start the response,
@@ -116,6 +186,7 @@ reason to hang up.
 |---|---|
 | `void` | no body, and no `Content-Type` either |
 | `Str`, `[]const u8` | `text/plain` |
+| `FileBody` | its `content_type`, `application/octet-stream` by default |
 | anything else | `application/json` |
 
 A failure — from a `fail.*` function, from an error, from zfast refusing a

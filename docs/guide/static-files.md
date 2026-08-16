@@ -16,6 +16,11 @@ ETag at load, so a repeat visit is a 304 with no body. Path traversal isn't
 possible, because there is no path to resolve — just a name looked up in a fixed
 list.
 
+A file over `max_file_bytes` is the one exception, and it is a spill rather than
+a refusal: it stays in the list with its size and the path the walk produced,
+and a request opens it and sends it from the disk
+([below](#files-too-big-to-hold)). Both of the properties above survive that.
+
 The path is relative to the working directory the server runs in, and a directory
 that can't be opened stops `listen()` with that sentence in the error.
 
@@ -26,8 +31,8 @@ that can't be opened stops `listen()` with that sentence in the error.
 | `index` | served for a path ending in `/`. Default `"index.html"`; empty turns it off |
 | `cache_control` | sent on every file. Default `"public, max-age=3600"` |
 | `spa_fallback` | served for any path under the prefix that names no file. Empty (the default) turns it off |
-| `max_file_bytes` | files bigger than this are refused **at load**, with their name in the error. Default 8 MB |
-| `max_total_bytes` | the same for the whole tree. Default 64 MB |
+| `max_file_bytes` | the line between a file held in memory and one opened per request. Default 8 MB |
+| `max_total_bytes` | the ceiling on what one tree may hold in memory, gzipped copies included. Default 64 MB |
 | `dotfiles` | whether to load names starting with `.`. Off by default |
 | `compress` | gzip every file worth gzipping, once, at load. On by default |
 | `compress_min_bytes` | files smaller than this are served as they are. Default 1 KB |
@@ -37,8 +42,11 @@ client-side router instead of a 404. Dotfiles are off because a `.env` or a
 `.git` that found its way into the directory being published on the first request
 is a bad way to learn it was there.
 
-The size ceilings are real ones — the whole tree is going into RAM — and it is
-better to hit them at startup than at 3am.
+`max_total_bytes` is a real ceiling — the held part of the tree is going into
+RAM — and it is better to hit it at startup than at 3am. `max_file_bytes` is not
+a ceiling but a line: a file over it is served from the disk rather than
+refused, and holds nothing to be counted against the total
+([below](#files-too-big-to-hold)).
 
 ## Compression
 
@@ -64,14 +72,15 @@ original for the life of the process, and is charged against `max_total_bytes`
 like everything else. The startup line says how much it came to:
 
 ```
-zfast: loaded 34 static file(s) (2411903 bytes, 383204 of them gzipped copies)
-       from "dist" onto "/assets"
+zfast: loaded 34 static file(s) (2411903 bytes held, 383204 of them gzipped
+       copies) from "dist" onto "/assets"
 ```
 
 A file is skipped when it is under `compress_min_bytes`, when its type is already
-compressed — a PNG, a woff2, an MP4 — or when gzip did not actually make it
-smaller. **A response body is never compressed**, only files; an endpoint
-returning JSON goes out as it is.
+compressed — a PNG, a woff2, an MP4 — when gzip did not actually make it
+smaller, or when it is over `max_file_bytes` and so was never read to be
+compressed at all. **A response body is never compressed**, only files; an
+endpoint returning JSON goes out as it is.
 
 Three details that are easy to get wrong, and are not:
 
@@ -122,13 +131,64 @@ back the wrong bytes without saying so.
 A request for several ranges at once is legal and wants a `multipart/byteranges`
 body zfast doesn't assemble — so it gets the whole file too. Nothing sends them.
 
-## The limits
+## Files too big to hold
 
-A file that doesn't fit in memory can't be served. `sendfile` is not here, and it
-contradicts holding files in memory rather than extending it.
+A file over `max_file_bytes` is left where it is. It keeps its place in the list
+with its size, its modification time and the path the directory walk produced,
+and the request that asks for it opens the file and sends it from the disk
+([ADR 0037](../adr/0037-a-file-too-big-to-hold-is-opened-not-read.md)). A
+directory with a video in it serves rather than failing to load.
+
+Below the line nothing has changed: read at load, hashed, gzipped if it is worth
+it, answered from a slice. Three things change above it.
+
+- **There is no gzipped copy, and there never will be.** Compression happens
+  once, while the App is being built, and a file that is never read has no
+  "once" to be compressed in. A file that size is a video, an archive or an
+  installer, and all three are compressed already.
+- **The ETag is the modification time and the size**, `"<mtime>-<size>"` in hex,
+  rather than a hash of the contents. It is strong, and it is what nginx has
+  served by default for twenty years. Hashing would mean reading the whole file
+  at startup, and the weak tag that is the other alternative would make
+  `If-Range` unusable for exactly the large downloads that get resumed.
+- **One file descriptor is held for as long as the response takes.** One per
+  request in flight, which `max_connections` already bounds — the number an
+  operator was already multiplying.
+
+Two things do not change, and they are the pair that holding everything in
+memory bought. Path traversal is still not possible: the name handed to the
+kernel is the one the walk wrote down before the socket opened, never one a
+request carried. And the memory is still a number — a file over the line holds
+no bytes at all, so `max_total_bytes` counts what is held and nothing else.
+
+Ranges, `If-Range`, `If-None-Match` and `HEAD` are answered exactly as they are
+for a file in memory, by the same code rather than by a second copy of it.
+
+The startup line counts the spilled files separately from the bytes, because
+they are not in that number:
+
+```
+zfast: loaded 12 static file(s) (48211 bytes held, 9022 of them gzipped copies)
+       from "public" onto "/", 2 of them over 8388608 bytes and opened per
+       request rather than held
+```
+
+A handler can answer with a file the same way — see
+[Responses](./responses.md#files).
+
+## The limits
 
 The set is loaded once, at startup. There is no reload — changing a file means
 restarting the process, which is what a deploy does anyway.
+
+For a file over the line, that is a stronger instruction than it used to be. Its
+length and its ETag were recorded at load and its bytes are read per request, so
+editing one underneath a running server splits what used to be one consistent
+copy. Shrinking it is caught: fewer bytes arrive than the head promised, so the
+connection is closed rather than letting the client read the next response as
+the rest of this body. Growing it is not — the first recorded-length bytes go
+out under the old ETag, which is a complete, correct-looking response carrying a
+prefix of a file that has moved on.
 
 Static files are not middleware: the set holds state, so it is a terminal handler
 that the middleware chain wraps like any other. Your logger sees them, and CORS

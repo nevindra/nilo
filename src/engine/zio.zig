@@ -661,6 +661,61 @@ pub fn sleep(ms: u64) error{Canceled}!void {
     return zio.sleep(.fromMilliseconds(ms));
 }
 
+// ---- files (see ADR 0037) ----
+//
+// The four calls the Bulkhead asks for, and nothing else. zio drives all of
+// them through the event loop, so a request opening a file parks its fiber
+// instead of stopping the thread — and outside a running server they fall
+// through to the blocking path, which is what keeps a handler that answers
+// with a file testable as an ordinary function.
+//
+// Wrappers rather than `pub const Dir = zio.Dir`, because zio's Dir also
+// creates, deletes, renames and iterates. Re-exporting it would quietly
+// make all of that the contract a second Engine has to meet.
+
+/// A directory, held open. Everything is opened relative to it.
+pub const Dir = struct {
+    _dir: zio.Dir,
+
+    pub fn open(path: []const u8) !Dir {
+        return .{ ._dir = try zio.Dir.cwd().openDir(path, .{}) };
+    }
+
+    pub fn close(self: Dir) void {
+        self._dir.close();
+    }
+
+    /// `openat` against this directory's descriptor.
+    ///
+    /// `allow_directory = false` costs an `fstat` on POSIX and is worth it:
+    /// a directory opened as a file has a size that means nothing, and the
+    /// alternative to refusing it here is a response whose `Content-Length`
+    /// promises bytes that no read will produce.
+    pub fn openFile(self: Dir, name: []const u8) !File {
+        return .{ ._file = try self._dir.openFile(name, .{ .allow_directory = false }) };
+    }
+};
+
+/// One open file.
+pub const File = struct {
+    _file: zio.File,
+
+    pub fn size(self: File) !u64 {
+        return self._file.size();
+    }
+
+    pub fn close(self: File) void {
+        self._file.close();
+    }
+
+    /// std's reader over this file, bound to zio's `std.Io`. Reads through
+    /// it still go through the runtime; what is standard is the type, which
+    /// is what `std.Io.Writer.sendFileAll` insists on.
+    pub fn reader(self: File, buffer: []u8) std.Io.File.Reader {
+        return self._file.stdReader(buffer);
+    }
+};
+
 // ---- work that is not a request (see ADR 0029) ----
 //
 // The group `serve` already runs its connections in, reached from outside

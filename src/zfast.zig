@@ -238,6 +238,46 @@ pub const Bound = @import("bound.zig").Bound;
 /// temporary; the pair ending in 7 and 8 keep the method.
 pub const Redirect = @import("redirect.zig").Redirect;
 
+/// An answer that is a file on disk, named by the handler and never held in
+/// memory (ADR 0037).
+///
+/// ```zig
+/// fn invoice(files: *Files, id: u32) !?zfast.FileBody {
+///     const name = files.nameOf(id) orelse return null;
+///     return .{ .dir = files.dir, .name = name, .content_type = "application/pdf" };
+/// }
+/// ```
+///
+/// A return type rather than a call, for `Redirect`'s reason: the signature
+/// is the contract, so the generated API description says the endpoint
+/// answers with bytes — and the `?` says it answers 404 (ADR 0024).
+///
+/// The file is opened relative to `dir` and never resolved as a path, so a
+/// name is checked and then handed to the kernel rather than joined onto
+/// anything. A name with a `..` segment, an absolute one, or one with a NUL
+/// in it opens nothing and answers 404, the same as a file that is not
+/// there. The bytes go from the file to the socket without passing through
+/// this process, and `Range`, `If-Range` and `If-None-Match` are answered
+/// exactly as they are for a static file.
+pub const FileBody = @import("filebody.zig").FileBody;
+
+/// A directory, opened once and held open — what a Service hands a
+/// `FileBody` (ADR 0037).
+///
+/// ```zig
+/// const Files = struct { dir: zfast.Dir };
+///
+/// var files: Files = .{ .dir = try zfast.Dir.open("uploads") };
+/// defer files.dir.close();
+/// try app.provide(&files);
+/// ```
+///
+/// Opening it is startup work: the path is relative to the working directory
+/// the server runs in, and it stays open for as long as whatever holds it.
+/// Nothing on the request path resolves a path — a `FileBody` names a file
+/// *inside* this directory, and the kernel does the rest.
+pub const Dir = @import("bulkhead.zig").Dir;
+
 /// A cookie on the way out: `c.setCookie(.{ .name = "session", .value = t })`
 /// (ADR 0030). Its defaults are `Secure`, `HttpOnly`, `SameSite=Lax` and
 /// `Path=/`, so a plain one is already the careful one.
@@ -441,6 +481,7 @@ test {
     _ = @import("form.zig");
     _ = @import("bound.zig");
     _ = @import("redirect.zig");
+    _ = @import("filebody.zig");
     _ = @import("http1.zig");
     _ = @import("bulkhead.zig");
     _ = @import("watchdog.zig");
@@ -457,6 +498,7 @@ test {
     _ = @import("stream.zig");
     _ = @import("body.zig");
     _ = @import("range.zig");
+    _ = @import("sendfile.zig");
     _ = @import("websocket.zig");
     _ = @import("testing.zig");
     _ = @import("middleware.zig");

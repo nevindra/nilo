@@ -113,6 +113,19 @@ pub const Answer = struct {
     /// this adds is that the header is part of the promise, which is the
     /// half a client generator has to see to follow it.
     redirect: bool = false,
+    /// Whether this endpoint answers with the bytes of a file — a
+    /// `FileBody` (ADR 0037). Written as `application/octet-stream` with
+    /// `{"type":"string","format":"binary"}`, which is OpenAPI's way of
+    /// saying "bytes".
+    ///
+    /// A flag rather than a content type and a schema, because the real
+    /// content type is a field the handler fills in while the request is
+    /// running: naming `application/pdf` here would be a guess about a value
+    /// that has not been decided yet. Declining to say is the same
+    /// discipline that makes a `Response(T)` report its status as `default`
+    /// rather than claiming 200 — a document that guesses is worse than one
+    /// that only promises what the signature settles.
+    binary: bool = false,
 };
 
 /// How a request body is expected to arrive on the wire. The shape is
@@ -676,6 +689,15 @@ fn writeAnswer(w: *std.Io.Writer, components: *const Components, answer: Answer)
         try w.writeAll("\"the client is sent somewhere else\",\"headers\":{\"Location\":" ++
             "{\"description\":\"where to go instead\",\"required\":true," ++
             "\"schema\":{\"type\":\"string\"}}}}");
+        return;
+    }
+
+    // A file, described as bytes. The one content type this document writes
+    // without having read it off a Zig type — see `Answer.binary` for why the
+    // handler's own is not the one that goes here.
+    if (answer.binary) {
+        try w.writeAll("\"the file's bytes\",\"content\":{\"application/octet-stream\":" ++
+            "{\"schema\":{\"type\":\"string\",\"format\":\"binary\"}}}}");
         return;
     }
 

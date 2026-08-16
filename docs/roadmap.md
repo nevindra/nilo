@@ -63,11 +63,12 @@ In order.
    times of its source tree and rebuilds when the sum moves, which is about as
    much machinery as this deserves; the part to be careful about is that neither
    half can end up in a release binary.
-3. **`sendfile`, and serving a file too big to hold in memory.** This is the
-   part that contradicts
-   [ADR 0010](./adr/0010-static-files-are-held-in-memory.md) rather than
-   extending it, so it wants its own argument before any code.
-4. **`permessage-deflate`.** Negotiated in the handshake, and a compressor per
+
+   The static half stopped being purely a convenience when files began spilling
+   to disk: a spilled file's length and ETag are recorded at load while its bytes
+   are read per request, so a file edited under a running server can now be
+   served inconsistently rather than merely staying stale (known gaps, below).
+3. **`permessage-deflate`.** Negotiated in the handshake, and a compressor per
    connection is memory that has not been budgeted.
 
 ## Known gaps
@@ -86,13 +87,17 @@ Things that are wrong or missing today, with what fixing them would take.
   long. That is a much larger surface than a log line: where the numbers live,
   who reads them out, whether there is a registry, and whether any of it can be
   had without an allocation per request. Nobody has designed it.
-- **A response body is never compressed, only a file is.** Static files are
-  gzipped once while the App is built, which is the shape that costs nothing per
-  request ([static files](./guide/static-files.md#compression)). A handler
-  returning JSON gets no such thing, and the reason is the one that shaped the
-  static half: a deflate compressor needs a 64 KB window, so one per connection
-  would multiply the 8,767 bytes an idle connection holds and one per request
-  would break the allocation budget
+- **A response body is never compressed, and only a held file is.** Static files
+  under the spill threshold are gzipped once while the App is built, which is the
+  shape that costs nothing per request
+  ([static files](./guide/static-files.md#compression)). A file over it is opened
+  per request and so has no "once" to be compressed in
+  ([ADR 0037](./adr/0037-a-file-too-big-to-hold-is-opened-not-read.md)); in
+  practice a file that large is a video or an archive and is compressed already.
+  A handler returning JSON gets no such thing either, and the reason is the one
+  that shaped the static half: a deflate compressor needs a 64 KB window, so one
+  per connection would multiply the 8,767 bytes an idle connection holds and one
+  per request would break the allocation budget
   ([ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md)). The shape that
   fits is a pool of compressors sized to the thread count rather than the
   connection count — four cores, 256 KB, and a request borrows one for as long
@@ -100,6 +105,18 @@ Things that are wrong or missing today, with what fixing them would take.
   happens when the pool is empty, what it does to a stream, what it does to SSE,
   which is the one thing that must never be buffered), and it has not been had
   yet. A proxy in front does this today and does it well.
+- **A spilled static file that changes on disk serves a stale length.** A file
+  over the threshold has its size, mtime and ETag recorded at load and its bytes
+  opened per request, so editing one under a running server splits what used to
+  be one consistent copy. Shrinking it is caught: fewer bytes arrive than the
+  head promised, so the connection closes rather than letting the client read the
+  next response as the rest of this body, and the log says which request it was.
+  Growing it is not caught — the first recorded-length bytes go out under the old
+  ETag, which is a complete, correct-looking response carrying a prefix of a file
+  that has moved on. Both are the same instruction as before, that changing a
+  file means restarting, but a held file could not fail this way and a spilled
+  one can. The fix is the watch option in item 2 above, which is why this is not
+  a separate one.
 - **A 404 or a 405 with middleware registered costs one allocation.** Routes and
   static files have their chains resolved at `listen()`, so neither pays for the
   middleware in front of it. The set of paths that are neither is every string
@@ -238,10 +255,15 @@ Not "later" — decided against, with the reasoning written down.
   `max_body` ([ADR 0031](./adr/0031-a-form-is-the-body-read-by-another-rule.md)),
   which is right for a form with a photo in it and wrong for a 2 GB video. The
   streaming version wants a parser that resumes across reads and an `Upload`
-  that is a reader rather than bytes — a real design, and one that belongs next
-  to `sendfile` above rather than on its own. Until then the answer is
-  `c.bodyStream()`, which holds nothing and makes the framing the handler's
-  problem.
+  that is a reader rather than bytes.
+
+  This used to be filed as waiting for `sendfile`, which has since shipped
+  ([ADR 0037](./adr/0037-a-file-too-big-to-hold-is-opened-not-read.md)) — so the
+  outgoing direction is settled and this is the half that is left. It did not
+  inherit an answer from that work: sending is a length and a descriptor handed
+  to the kernel, and receiving is a parser that has to hold its place across
+  reads. Until somebody designs it the answer is `c.bodyStream()`, which holds
+  nothing and makes the framing the handler's problem.
 - **The name.** `zfast` is a working name. The `z-` prefix is crowded in the Zig
   ecosystem already (`zap`, `zzz`, `zon`, a dozen `zig-*`), so it is easy to
   confuse. The module name has to stay easy to change without touching user
@@ -272,4 +294,7 @@ pattern too.
 | Nothing bounds how many connections one process holds | `.max_connections`, 10,000 by default. Past it a connection is accepted and closed at once, so the failure mode is a client that finds out immediately rather than an OOM kill that takes every in-flight request with it |
 | Spawned work can capture a `Str`, or call a fail function, and both compile | Neither can be caught: Zig has no ownership tracking, and `spawn` takes a plain function that nothing marks as being outside a request. Documented at the function, in the reference and in [ADR 0029](./adr/0029-a-spawned-fiber-belongs-to-the-server.md), and `spawn` takes its arguments by value so the copy is at least the obvious thing to write. A `Str` that escapes this way is the debug staleness trap's problem, and it is the case that trap cannot watch |
 | A fail function in spawned work is safe only because of where a threadlocal gets written | `bulkhead.slot()` falls back to a threadlocal when a fiber has no slot, which spawned fibers never do. It is null on executor threads only because the one thing that sets it does so from inside `zio.blockInPlace`, which runs on a thread-pool worker. Both ends now carry a comment saying so; nothing enforces it, and if it broke, spawned work would write its message into an unrelated request — [ADR 0007](./adr/0007-failure-box-bound-to-the-fiber.md)'s leak by another route |
+| A file response's bytes leave by a route the tests never take | **Not handled.** Every test runs through `testing.Client`, whose writer is `std.Io.Writer.fixed` and carries no `sendFile` in its vtable, so the suite takes std's read/drain fallback — the right bytes, by the route a platform without `sendfile` uses. The splice chain the feature exists for needs a real socket and nothing in the suite opens one. The fix is a build step that listens on port 0 and pulls a file over it; it is not written |
+| A file response holds a descriptor for as long as the send takes | One per request in flight, so `.max_connections` bounds it — the same number an operator already multiplies for memory. It is closed on every exit from `sendfile.send` including the error ones, and a test counts `/proc/self/fd` across a request so it stays that way ([ADR 0037](./adr/0037-a-file-too-big-to-hold-is-opened-not-read.md)) |
+| A spilled file's ETag is its mtime and size, so two different contents could share one | Accepted, and argued rather than assumed: the alternative is hashing gigabytes at startup, and a weak validator would make `If-Range` unusable for exactly the large downloads that need resuming. It is the tag nginx has served by default for twenty years. A held file is unaffected — it keeps its content hash |
 | `zio.BroadcastChannel` aborts, or in `ReleaseFast` deadlocks, when a fiber parked in `receive` is cancelled | Not used, and now reported upstream with a standalone reproduction. A waiter node is pushed onto a queue it is already linked into (`simple_queue.zig:43`, from `broadcast_channel.zig:72`). Debug aborts 10 runs in 10, ReleaseSafe 3 in 3, and `ReleaseFast` — which has no such assertion — **hangs 17 runs in 20** where a clean run takes 200ms. Cancellation is what reaches it: the same program closing the channel and waiting is clean 5 in 5. A shared ring forces the cancel, having no per-consumer close ([ADR 0029](./adr/0029-a-spawned-fiber-belongs-to-the-server.md), [zio#667](https://github.com/lalinsky/zio/issues/667)) |

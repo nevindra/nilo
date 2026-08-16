@@ -17,6 +17,7 @@ const http1 = @import("http1.zig");
 const json_mod = @import("json.zig");
 const router = @import("router.zig");
 const scan = @import("scan.zig");
+const sendfile_mod = @import("sendfile.zig");
 const service_mod = @import("service.zig");
 const static_mod = @import("static.zig");
 const stream_mod = @import("stream.zig");
@@ -810,6 +811,34 @@ pub const Ctx = struct {
         var out: std.Io.Writer.Allocating = try .initCapacity(self._arena, json_hint);
         try json_mod.write(&out.writer, value);
         try self.send(status, "application/json", out.written());
+    }
+
+    /// Answer with an open file, without ever holding it in memory
+    /// (ADR 0037).
+    ///
+    /// ```zig
+    /// const invoice = try files.dir.openFile(name);
+    /// try c.sendFile(.{ .file = invoice, .content_type = "application/pdf" });
+    /// ```
+    ///
+    /// **The file is closed here**, on every way out: a 304, a 416, a HEAD,
+    /// a whole file, part of one, or a client that walks away mid-transfer.
+    /// The caller opens it and hands it over; after this call it is gone.
+    ///
+    /// Everything a static file's answer carries, this carries too — an
+    /// `ETag`, a `Cache-Control` and `Accept-Ranges: bytes` on every answer,
+    /// a 304 for a matching `If-None-Match`, a 206 with a `Content-Range`
+    /// for a `Range`, and `If-Range` compared against the tag so a download
+    /// resumed against a file that has changed underneath starts again
+    /// rather than arriving corrupt (ADR 0021). The bytes go from the file
+    /// to the socket without passing through this process.
+    ///
+    /// A handler that knows it is answering with a file before it runs
+    /// returns `zfast.FileBody` instead, which is the same response and
+    /// lets the generated API description say so (ADR 0032's move for
+    /// redirects, applied here).
+    pub fn sendFile(self: *Ctx, contents: sendfile_mod.Contents) !void {
+        return sendfile_mod.send(self, contents);
     }
 
     // ---- answering in pieces ----

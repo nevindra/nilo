@@ -49,6 +49,10 @@ const refusals = [_]Refusal{
         .says = "cors credentials cannot be combined with origin \"*\" — browsers reject it.",
     },
     .{
+        .name = "filebody_as_an_argument",
+        .says = "argument 1 of the handler for route \"/invoices\" is a `zfast.FileBody`, which is what a handler answers *with* rather than something it is given.",
+    },
+    .{
         .name = "form_and_body",
         .says = "the handler for route \"/sign-up\" asks for both a request body (argument 1, a form_and_body.Profile) and a form (argument 2) — and a request only has one body.",
     },
