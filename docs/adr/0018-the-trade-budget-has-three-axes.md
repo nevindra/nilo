@@ -10,7 +10,7 @@ The metrics section of `docs/history.md` already separated them; this ADR turns 
 |---|---|---|
 | **Throughput and p99** | DX wins below 10%, as ADR 0001 says | Nowhere yet — no quiet machine |
 | **Allocations per request** | Hard invariant. A DX feature may not add one to a path that did not ask for it | A test: *the request path stays inside its allocation budget* |
-| **Memory per idle connection** | Hard invariant. Every new feature states its cost or has none | Measured across 1,000 held-open connections |
+| **Memory per idle connection** | Hard invariant. Every new feature states its cost or has none. **A floor, not a total** — a handler adds every byte of stack it touches ([ADR 0063](./0063-a-handlers-stack-is-per-connection.md)) | Measured across 1,000 held-open connections; four routes in `bench/sql_server.zig` separate the framework's share from the handler's |
 
 The reason for the split is that the three are not the same kind of number.
 
@@ -62,6 +62,7 @@ Measured stripped, `ReleaseFast`, on the examples in this repository.
 | A second database as a second type ([ADR 0060](./0060-a-second-database-is-a-second-type.md)) | +0 | +0 |
 | A second Dialect, SQL half only ([ADR 0061](./0061-the-second-dialect-is-the-test-of-the-seam.md)) | +0 | +0 |
 | Parsing the database URL rather than letting a driver drop half the options ([ADR 0062](./0062-a-pool-that-dialled-itself-whatever-it-was-told.md)) | +0 | +0 |
+| Four routes in a benchmark, to find out what the memory axis actually measures ([ADR 0063](./0063-a-handlers-stack-is-per-connection.md)) | +0 | +0 |
 
 The second row is one measurement of six changes because they landed together, which is a worse record than the first row and is noted as such. The split it does show is the useful part: `hello` has one route returning text and pays +6 KB, which is the failure-body writer and nothing else — that part is unconditional. The remaining +8 KB on `rest` is the body describer and the schema walker, and those are generated per body type, so they are paid by applications that have bodies.
 

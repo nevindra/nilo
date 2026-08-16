@@ -56,7 +56,7 @@ Three files carry context this one deliberately does not repeat:
 - **`CONTEXT.md`** — the project's vocabulary, and the words it refuses to use
   (Ctx not "Context", Str not "string", keep not "dupe", Refusal not "negative
   test"). Match it in code, comments, docs and commit messages.
-- **`docs/adr/`** — 62 binding decisions, each naming the alternative it
+- **`docs/adr/`** — 63 binding decisions, each naming the alternative it
   rejected. Check here before proposing a design change; "why not X?" usually
   already has an answer on file. **ADR 0041 decides which module new work goes
   in and ADR 0042 decides what that module may import**, and they are the two
@@ -188,8 +188,13 @@ them are hard:
 - **Allocations per request.** Held by `test "the request path stays inside its
   allocation budget"` in `http/app.zig`. A DX feature may not add one to a path
   that did not ask for it.
-- **Memory per idle connection.** 8,767 bytes, flat. Every feature that costs
-  per-connection memory states the number in its own ADR.
+- **Memory per idle connection.** 8,767 bytes for the framework, flat — and
+  that is a **floor rather than a total**. A suspended fiber holds its stack at
+  its high-water mark, so a handler adds every byte of stack it ever touched,
+  one for one, for the life of the connection: an ordinary database route
+  measures 17,022 ([ADR 0063](docs/adr/0063-a-handlers-stack-is-per-connection.md)).
+  Every feature that costs per-connection memory states the number in its own
+  ADR, and **in this framework the arena is cheaper than the stack**.
 - Throughput and p99: DX wins below 10%.
 - Binary size: a feature the linker cannot drop states its measured cost, as a
   stripped `ReleaseFast` number, in the running total in ADR 0018.

@@ -175,6 +175,16 @@ reconnector, whose thread cannot park against a `Threaded` Io. Under the
 engine it is fine — a server boots with Postgres down, connects when it comes
 up and serves 135,000 requests a second at a pool of eight.
 
+**Measured, and it changes advice: memory per idle connection is a floor plus
+your handler's stack.** The published 8,767 bytes is right for a handler that
+allocates nothing and is not a total — a suspended fiber holds its stack at its
+high-water mark until the connection closes, so a handler adds every byte it
+touches, one for one. An ordinary route reading one row and answering JSON
+holds **17,022 bytes**; a handler that only touches an 8 KiB stack array holds
+**17,932**, which is more, so the database was never the cause. **In this
+framework the arena is cheaper than the stack**
+([ADR 0063](./docs/adr/0063-a-handlers-stack-is-per-connection.md)).
+
 **28 Refusals** hold the module's own error messages — a Row written wrong, a
 column misspelled, an update with no condition, a key where a condition
 belongs. Each is a program in `sql/refusals/` that must fail to compile with

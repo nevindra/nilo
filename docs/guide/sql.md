@@ -878,6 +878,30 @@ which is usually a migration that has not run.
 
 Set `.schema_mismatch_is_fatal = false` to log and carry on.
 
+### The arena is cheaper than the stack
+
+Worth knowing before you write a handler that needs a scratch buffer, because
+it is the opposite of the usual Zig advice:
+
+```zig
+fn report(db: *sql.Db, c: *nilo.Ctx) ![]const u8 {
+    var buf: [64 * 1024]u8 = undefined;               // ✗ per connection
+    const buf = try c.arena().alloc(u8, 64 * 1024);   // ✓ per request
+```
+
+A connection waiting for its next request is a **suspended fiber**, and a
+suspended fiber holds its stack at the deepest point it ever reached. So a
+64 KiB stack buffer is 64 KiB held for as long as that connection stays open —
+measured one byte per byte, from 8 KiB to 128 KiB
+([ADR 0063](../adr/0063-a-handlers-stack-is-per-connection.md)). The arena is
+reset after every request.
+
+It applies to the database path too, and that is where the number came from: a
+route that reads one row and answers JSON holds **17,022 bytes** per idle
+connection against **8,749** for one that returns a constant. Most of the
+difference is how deep the driver's protocol code goes, and none of it is
+something the query did.
+
 ### A second database
 
 The Service registry is keyed by type, so `*sql.Db` is *the* database and a

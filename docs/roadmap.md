@@ -363,6 +363,26 @@ of it — measured at 0 bytes.
 
 ---
 
+### Giving a quiet connection its stack back
+
+**Memory per idle connection is 8,767 bytes plus every byte of stack the
+handler ever touched, one for one**
+([ADR 0063](./adr/0063-a-handlers-stack-is-per-connection.md)). A suspended
+fiber holds its stack at its high-water mark until the connection closes, so a
+handler with a 64 KiB buffer on the stack costs 64 KiB per connection rather
+than per request.
+
+The fix is one line in `releaseIdlePages`, which already hands a quiet
+connection's read and write buffers back and is already gated on a short read
+coming back empty — so it costs a busy connection nothing. **What blocks it is
+that zio does not expose the running fiber's stack bounds.** Guessing a floor
+is not available: zio carves 64 stacks from one slab mapping, so an `madvise`
+one page past the limit would zero a neighbouring connection's live stack.
+
+So: ask zio for `StackInfo.limit` on the current task, then release
+`[limit, frame)` beside the two buffers. Measured before and after with
+`bench/sql_server.zig`'s `/deep/:id`, which exists for this.
+
 ## `nilo_sql` — Postgres
 
 ### Next

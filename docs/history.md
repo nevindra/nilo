@@ -372,3 +372,13 @@ The binding work ([ADR 0036](./adr/0036-a-binding-hands-its-failures-to-the-hand
 ## The pool is the knob, and it has a curve
 
 **Connections against throughput, on the loopback bench at 64 client connections: 2 → 60k req/s, 4 → 99k, 8 → 133k, 16 → 148k, 32 → 180k, 64 → 206k.** The default is 10. **p99 is best at 32 (784 µs) and worse at 64 (1.03 ms)** while throughput is still climbing — the tail turns around before the headline does, which is the usual sign that the database has more connections than it can use. A query costs the server **11.4 µs of kernel time and 3.1 µs of user time**, so it is the socket rather than the module: nothing in nilo's half is what a bigger pool is buying past.
+
+## The flat number was flat because nothing was happening
+
+**Memory per idle connection is 8,767 bytes plus every byte of stack the handler ever touched, one for one.** The published figure was measured against a handler returning a constant `[]const u8` — and it is exactly right for that: 8,749 bytes, eighteen off. An ordinary route that takes a `Ctx`, reads one row and answers JSON holds **17,022**. A handler that only `@memset`s an 8 KiB array and touches no database holds **17,932**, which is *more* — so the database was never the cause. 32 KiB of stack gives 42,491 and 128 KiB gives 140,787: linear, one byte held per byte touched, for the life of the connection.
+
+**A suspended fiber holds its stack at its high-water mark, and nothing lowers it.** Which inverts the usual advice: **in this framework the arena is cheaper than the stack**, because the arena is reset per request and a stack buffer is per *connection*. `var buf: [64 * 1024]u8` in a handler — the idiomatic Zig way to avoid an allocator — is 64 KiB × every connection that ever reached that route.
+
+**This is the same bug that was already found and fixed one layer up.** The entry above records the per-connection figure falling to 8,767 "since a keep-alive connection stopped holding every buffer page it had ever touched until close". Buffer pages were fixed; stack pages were never looked at. **A fix that names the mechanism should be checked against everything else that has that mechanism**, and this one had a second address for a year.
+
+**Two things it was not, and ruling them out was most of the work.** Not the arena: `arena_keep` swept from 0 to 64 KiB changed neither the memory nor the throughput (178k–186k req/s across the whole range), so the 16 KiB retained block is buying less than it looks like. Not a leak: 500 connections × 1 request grew 8.4 MB, and 50 connections × 100 requests — ten times the work — grew 0.88 MB. **Scaling with connections rather than with requests is what tells a retention from a leak**, and it takes two runs to ask.

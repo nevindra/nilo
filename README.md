@@ -325,7 +325,9 @@ store, you should find that job already done, in a module small enough to read
 in one sitting. Things get built here because the job is common, not because
 the job is interesting.
 
-**Quick.** One allocation per request. 8,767 bytes per idle connection, flat.
+**Quick.** One allocation per request. 8,767 bytes per idle connection for the
+framework itself, flat — plus whatever stack your handler touches, which is
+held for as long as the connection is.
 Those are measurements with tests holding them in place, not adjectives.
 
 **Cheerful.** Nothing here scolds you. When you get something wrong, you get a
@@ -406,7 +408,7 @@ Most frameworks say "fast" and "lightweight". Here are numbers instead:
 | | |
 |---|---|
 | **1 allocation** | per request. A test fails if it ever becomes 2. |
-| **8,767 bytes** | per idle connection. Flat from 1,000 connections to 10,000. |
+| **8,767 bytes** | per idle connection, for the framework. Flat from 1,000 connections to 10,000. A handler adds the stack it touches ([ADR 0063](./docs/adr/0063-a-handlers-stack-is-per-connection.md)). |
 | **57µs** | p99, 9× below Go's `net/http` and 11× below Fiber |
 | **5.4 MB** | idle server |
 

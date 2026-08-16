@@ -250,6 +250,16 @@ been used costs. Re-measured through the same harness as the table above, the
 per-connection figure is **8,767 bytes** and just as flat — 8,749 at 1,000
 connections against 8,769 at 10,000.
 
+**That is the framework's floor, and the same bug turned out to be alive one
+layer down.** Buffer pages stopped being held; *stack* pages never did. A
+suspended fiber holds its stack at its high-water mark until the connection
+closes, so a handler adds every byte it touches — measured one for one, from
+8 KiB to 128 KiB. An ordinary route reading one row and answering JSON holds
+**17,022 bytes** per idle connection rather than 8,749, and a handler with a
+64 KiB buffer on its stack holds 64 KiB per connection rather than per request.
+`bench/sql_server.zig` has the four routes that separate the causes, and
+[ADR 0063](./adr/0063-a-handlers-stack-is-per-connection.md) has the tables.
+
 The gate is the whole design. Releasing on every trip round the loop, which was
 the first attempt, took throughput from 1.31M to **626k** — a 52% loss, because
 `MADV_DONTNEED` in a process with eight threads shoots down TLB entries on all
