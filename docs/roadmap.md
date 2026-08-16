@@ -190,7 +190,7 @@ Things that are wrong or missing today, with what fixing them would take.
   staleness trap, and for the same reason: a type holding one of its own has to
   stop somewhere.
 - ~~**Nothing enforces the rule that a mistake stops in zfast's own words.**~~
-  *Done, and it was holding less than it looked.* `refusals/` is 46 programs
+  *Done, and it was holding less than it looked.* `refusals/` is 50 programs
   written wrong on purpose, each expected to fail with a named message, run by
   `zig build test`
   ([ADR 0027](./adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)).

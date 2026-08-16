@@ -57,8 +57,12 @@ into a `build.zig.zon` that has to exist already:
 
 ```
 zig init
-zig fetch --save git+https://github.com/nevindra/zfast
+zig fetch --save git+https://github.com/nevindra/zfast?ref=v0.1.0
 ```
+
+The `?ref=` is the version you get. Leave it off and `zig fetch` takes whatever
+`main` happens to be that day, which is a different library every time somebody
+installs.
 
 Then hand the module to whatever imports it, in `build.zig`:
 
@@ -149,6 +153,22 @@ response, and broadcasting to WebSockets a handler doesn't hold. Each with its
 reason in [`docs/roadmap.md`](./docs/roadmap.md); the ones decided against
 rather than queued up are in [`docs/adr/`](./docs/adr/).
 
+**0.1.0 is for building an API, not for rendering pages.** Two of those absences
+land together on anyone serving HTML, so it is worth saying plainly rather than
+leaving it to be discovered. There is no template layer — building a page means
+concatenating strings yourself. And `Form(T)` is all-or-nothing: one field that
+won't convert is a 400, so the reply to a mistyped email address is an error
+page rather than the form again with everything else still in it. Forms, file
+uploads, cookies, sessions and redirects all work; what's missing is the half
+that makes a *page* pleasant. Both are on the roadmap, neither is in this
+release.
+
+**The `chat` example is an echo server**, not a chat room. zfast does the
+handshake, framing, masking, pings and the closing handshake, and a handler
+holds its own connection — but sending to a connection some *other* handler
+holds is the roadmap item above, blocked on an upstream defect. Two browser
+tabs will not see each other yet.
+
 **Sessions are here, and nothing is stored on the server.** `Session(T)` seals
 a struct of yours into one cookie with `XChaCha20Poly1305` — so there is no
 table, no expiry sweep, no lock, and nothing added to what an idle connection
@@ -190,7 +210,7 @@ Elm for the error messages — is
 
 The Elm part is the one with a build step behind it. Get a handler wrong and
 compilation stops with a sentence naming your route, your argument and the fix;
-[`refusals/`](./refusals/) is 46 programs written wrong on purpose that keep it
+[`refusals/`](./refusals/) is 50 programs written wrong on purpose that keep it
 that way ([ADR 0027](./docs/adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)).
 
 ## Measured

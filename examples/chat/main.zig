@@ -1,7 +1,15 @@
 //! A WebSocket, from the handshake to the last frame (ADR 0022).
 //!
-//! `zig build run-chat`, then open http://localhost:8787/ in two tabs and
-//! type in both. Or from a terminal:
+//! **This echoes, it does not broadcast.** What you type comes back to you and
+//! reaches nobody else, so two tabs will not see each other. Sending to a
+//! connection that a *different* handler is holding is not in 0.1.0 — it is
+//! the next thing on the roadmap, and it is waiting on a defect in the engine
+//! underneath rather than on a design. Everything else a WebSocket needs is
+//! here: the handshake, frame headers, masking, pings, the closing handshake,
+//! a message ceiling, and shutdown that does not hang on an idle typist.
+//!
+//! `zig build run-chat`, then open http://localhost:8787/ and type. Or from a
+//! terminal:
 //!
 //! ```
 //! websocat ws://localhost:8787/ws
@@ -91,9 +99,13 @@ const Room = struct {
 fn page() []const u8 {
     return
         \\<!doctype html>
-        \\<title>zfast chat</title>
+        \\<title>zfast echo</title>
         \\<style>body{font:16px/1.6 ui-monospace,monospace;padding:2rem}
-        \\input{font:inherit;width:20rem}</style>
+        \\input{font:inherit;width:20rem}
+        \\p{color:#666;max-width:34rem}</style>
+        \\<p>This echoes back to you only — another tab will not see it.
+        \\Broadcasting to connections this handler does not hold is not in
+        \\0.1.0.</p>
         \\<pre id="log"></pre>
         \\<input id="say" placeholder="say something" autofocus>
         \\<script>

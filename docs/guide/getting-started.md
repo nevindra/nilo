@@ -10,10 +10,14 @@ yet:
 
 ```
 zig init
-zig fetch --save git+https://github.com/nevindra/zfast
+zig fetch --save git+https://github.com/nevindra/zfast?ref=v0.1.0
 ```
 
-That writes zfast into your `build.zig.zon`. Then hand the module to whatever
+That writes zfast into your `build.zig.zon`, pinned to the tag you asked for.
+**Keep the `?ref=`.** Without it `zig fetch` resolves whatever `main` is at that
+moment and writes *that* commit's hash into your lockfile — so two people
+installing a week apart get two different libraries, and neither of them asked
+for a version. Then hand the module to whatever
 imports it, in `build.zig`:
 
 ```zig
@@ -130,5 +134,5 @@ which also checks for leaks.
 
 - [Handlers](./handlers.md) — the rule that decides what each argument means.
 - [Routing](./routing.md) — patterns, precedence, and grouping.
-- The five examples in [`examples/`](../../examples/), each runnable with
+- The seven examples in [`examples/`](../../examples/), each runnable with
   `zig build run-<name>`.

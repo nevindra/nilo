@@ -117,7 +117,7 @@ it is the second most common way to make this mistake. There is a test for it.
 ## The measurement, and what it changed
 
 The first working version cost **116ns per request out of 612** — 19%, well
-past [ADR 0001](./0001-what-zfast-optimises-for.md)'s 10% budget for anything
+past [ADR 0001](./0001-dx-wins-below-the-10-percent-threshold.md)'s 10% budget for anything
 that buys DX. It read a clock four times per request, and the Bulkhead's
 `monotonicNanos` costs 27ns a read because `CLOCK_MONOTONIC` does the full
 timekeeping arithmetic every time.
