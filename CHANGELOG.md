@@ -53,12 +53,16 @@ the same harness in [`docs/comparison.md`](./docs/comparison.md).
 
 ### What is not in it
 
-- **Templates**, and **field-level form errors**. Together these are the reason
-  0.1.0 is for building an API rather than rendering pages: there is no template
-  layer, and a `Form(T)` field that will not convert fails the whole request
-  with a 400 instead of handing back the form with that one field marked.
+- **Templates** — a refusal rather than a backlog item. zfast is for building
+  APIs and services; rendering pages is not what it is for, and the reasoning is
+  in [the roadmap](./docs/roadmap.md#not-coming).
+- **A binding failure that names the field.** A `Form(T)` or body field that
+  will not convert fails the whole request with a 400, and nothing says which
+  field it was. First item on the roadmap.
 - **Broadcasting to a WebSocket a handler does not hold.** The `chat` example
   echoes; two tabs do not see each other.
+- **A request id.** One plain-text log line per request, with nothing tying it
+  to anything else.
 - **TLS**, and with it HTTP/2 and a gRPC server. This is a refusal rather than a
   gap — terminate in front
   ([ADR 0028](./docs/adr/0028-tls-is-terminated-in-front.md)).

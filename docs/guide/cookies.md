@@ -97,7 +97,7 @@ Base64 and hex — which is what a session token normally is — pass untouched.
 ## The signed-in user
 
 Reading the cookie in every handler is not the shape to reach for. A
-[resolved value](./middleware.md#the-signed-in-user) reads it once and appears
+[resolved value](./middleware.md#resolved-values) reads it once and appears
 in an argument list by name:
 
 ```zig

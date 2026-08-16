@@ -327,10 +327,14 @@ HTTP/2. Neither follows from "no TLS" on its own, which is why both are here.
 
 ## What isn't here yet
 
-Sessions, templates, `sendfile`, `permessage-deflate`, compression of a
-handler's response (files are compressed — see
-[Static files](./static-files.md#compression)), and broadcasting to WebSockets a
-handler doesn't hold.
+`sendfile`, `permessage-deflate`, compression of a handler's response (files are
+compressed — see [Static files](./static-files.md#compression)), broadcasting to
+WebSockets a handler doesn't hold, and a request id tying your log lines
+together.
+
+Templates are a refusal rather than a backlog item: zfast is for building APIs
+and services, and rendering pages is not what it is for. The reasoning is in
+[the roadmap](../roadmap.md#not-coming).
 
 Each item is listed with its reason in [`../roadmap.md`](../roadmap.md); the ones
 that are refusals rather than backlog are in [`../adr/`](../adr/).

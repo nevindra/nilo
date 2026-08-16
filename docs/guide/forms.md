@@ -17,7 +17,7 @@ fn signIn(incoming: zfast.Form(SignIn)) !zfast.Redirect(303) {
 }
 ```
 
-It is the same idea as [`Query(T)`](./requests.md#the-query-string-as-a-struct),
+It is the same idea as [`Query(T)`](./requests.md#query-params),
 moved from the query string to the body: one field per form field, a field's
 type says what its text has to become, and a default is what "not sent" means.
 
@@ -92,7 +92,7 @@ The whole body is read into the request arena, bounded by `listen()`'s
 not something you can have half of.
 
 For an upload bigger than that, turn `max_body` up, or take the body in pieces
-yourself with [`c.bodyStream()`](./requests.md#a-body-too-big-to-hold), where
+yourself with [`c.bodyStream()`](./requests.md#bodies-too-big-to-hold), where
 nothing is held in memory at all. `Form(T)` is the convenient one; the stream
 is the one with no ceiling.
 

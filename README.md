@@ -2,6 +2,14 @@
 
 An HTTP framework for Zig, aimed at people coming from Go or Node.
 
+**What it chases is that the signature is the whole contract** — a handler you
+can read, test as a plain function, and generate documentation from, on a server
+whose memory you can put a number on
+([ADR 0015](./docs/adr/0015-what-zfast-borrows-and-from-whom.md)). That makes it
+a framework for building APIs and services. Rendering HTML pages is somebody
+else's job, and [templates are refused](./docs/roadmap.md#not-coming) rather
+than queued up.
+
 > **0.1.0** — the first release. Routing, typed handlers, JSON, HTML forms and
 > file uploads, cookies, sessions, redirects, middleware, static files, resolved values,
 > groups and plugins, a generated OpenAPI document, streamed responses and
@@ -143,25 +151,22 @@ it is rather than how to use it:
   nobody has decided yet
 - [`docs/history.md`](./docs/history.md) — how 0.1.0 got built, and what has
   been measured
-- [`CHANGELOG.md`](./CHANGELOG.md) — what changed, per release. Empty until
-  there is a release to change from
+- [`CHANGELOG.md`](./CHANGELOG.md) — what changed, per release
 
 ## Not here yet
 
-Absent: templates, `sendfile`, `permessage-deflate`, compressing a handler's
-response, and broadcasting to WebSockets a handler doesn't hold. Each with its
-reason in [`docs/roadmap.md`](./docs/roadmap.md); the ones decided against
-rather than queued up are in [`docs/adr/`](./docs/adr/).
+Queued up: `sendfile`, `permessage-deflate`, compressing a handler's response,
+and broadcasting to WebSockets a handler doesn't hold. Each with its reason in
+[`docs/roadmap.md`](./docs/roadmap.md); the ones decided against rather than
+queued up are in [`docs/adr/`](./docs/adr/).
 
-**0.1.0 is for building an API, not for rendering pages.** Two of those absences
-land together on anyone serving HTML, so it is worth saying plainly rather than
-leaving it to be discovered. There is no template layer — building a page means
-concatenating strings yourself. And `Form(T)` is all-or-nothing: one field that
-won't convert is a 400, so the reply to a mistyped email address is an error
-page rather than the form again with everything else still in it. Forms, file
-uploads, cookies, sessions and redirects all work; what's missing is the half
-that makes a *page* pleasant. Both are on the roadmap, neither is in this
-release.
+**Templates are not one of them.** There is no template layer and none is
+planned, because rendering a page means allocating per request and the two
+numbers below are what zfast is for. Forms, file uploads, cookies, sessions and
+redirects all work — a `<form>` posted to a handler is an ordinary request. But
+if your application's job is to produce HTML, [jetzig](https://www.jetzig.dev/)
+is built for that and this isn't. Whether anything else from that world is worth
+having gets decided one feature at a time, on whether it earns its cost.
 
 **The `chat` example is an echo server**, not a chat room. zfast does the
 handshake, framing, masking, pings and the closing handshake, and a handler
