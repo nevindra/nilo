@@ -493,11 +493,12 @@ Two whole areas come off before the list starts.
 
 **Schema**
 
-- [ ] Indexes, unique constraints, foreign keys, check constraints. A Row names
-      its columns and its key and nothing else about the table is sayable, so
-      `checking` cannot notice a missing index and nothing could generate one.
-- [ ] Sequences, identity columns, generated columns
-- [ ] Views and materialized views
+- Indexes, unique constraints, foreign keys and check constraints: refused, on
+  the record ([ADR 0056](./adr/0056-a-view-is-a-table-that-cannot-say-what-is-not-null.md)).
+  A Row names its columns and its key and nothing else about the table is
+  sayable, so nothing here can check or generate one — and a Row that *could*
+  say it would be a migration file with Zig syntax. The work belongs to a
+  migration tool, which is undecided below.
 - Row-level security and Postgres extensions: nobody has looked.
 
 **Reading**

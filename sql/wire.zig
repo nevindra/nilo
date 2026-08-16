@@ -223,7 +223,18 @@ pub const Column = struct {
     /// `int4`, `text`, `timestamptz` — the names somebody writing a migration
     /// typed, rather than `data_type`'s `character varying`.
     udt: []const u8,
-    nullable: bool,
+    /// Whether the column may hold a NULL, or **null when the database does
+    /// not know**.
+    ///
+    /// The third answer is not hedging: Postgres tracks `NOT NULL` on a table
+    /// and does not track it through a view, so a view column reads as
+    /// nullable whatever its source column was. Answering `true` there would
+    /// make every non-optional field of a Row over a view a disagreement, and
+    /// with `schema_mismatch_is_fatal` at its default that is a server that
+    /// does not start. Answering `false` would claim something nobody checked.
+    /// So there are three answers and the check skips the third
+    /// ([ADR 0056](../docs/adr/0056-a-view-is-a-table-that-cannot-say-what-is-not-null.md)).
+    nullable: ?bool,
 };
 
 /// Whether a type carries what this module asks of a Wire. Checked where the

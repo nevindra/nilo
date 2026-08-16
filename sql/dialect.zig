@@ -232,20 +232,49 @@ pub const Postgres = struct {
     }
 
     /// What the schema comparison asks, once, on the first connection that
-    /// succeeds. `udt_name` rather than `data_type` because it answers `int4`
-    /// and `timestamptz` — the names anyone writing a migration typed — where
-    /// `data_type` answers `integer` and `timestamp with time zone`.
+    /// succeeds. `typname` rather than `data_type` because it answers `int4`,
+    /// `timestamptz` and `_int4` — the names anyone writing a migration typed
+    /// — where `data_type` answers `integer`, `timestamp with time zone` and
+    /// `ARRAY`.
     ///
     /// Two parameters: the schema, which is null for a Row that named none and
-    /// then means whatever `search_path` resolves to, and the table.
-    /// `information_schema.columns` covers views and materialized-view-backed
-    /// relations as well as tables, so a Row over a view is introspected by
-    /// the same query with nothing added.
+    /// then means whatever `search_path` resolves to, and the relation.
+    ///
+    /// **`pg_catalog` rather than `information_schema`, for three reasons that
+    /// each showed up as a wrong answer** (ADR 0056):
+    ///
+    /// - A **materialized view** is not in `information_schema.columns` at
+    ///   all. A Row over one was reported as a table that does not exist,
+    ///   which with `schema_mismatch_is_fatal` at its default is a server that
+    ///   refuses to start over a relation that is right there.
+    /// - `information_schema` shows only the columns the current role holds a
+    ///   privilege on. A role granted `SELECT` on some columns of a table gets
+    ///   *no such column* for the rest — a check failing on a correct schema,
+    ///   which is the fastest way to teach somebody to switch it off.
+    /// - `relkind` is what says whether nullability means anything. Postgres
+    ///   does not track `NOT NULL` through a view, so a view's columns are all
+    ///   nullable and saying so would flag every non-optional field of a Row
+    ///   over one. `UNKNOWN` is the third answer, and the check skips it.
+    ///
+    /// The five kinds accepted are an ordinary table, a partitioned one, a
+    /// view, a materialized view and a foreign table. An index and a sequence
+    /// are relations too and are not things a Row reads.
     pub const introspect =
-        \\SELECT column_name, udt_name, is_nullable
-        \\FROM information_schema.columns
-        \\WHERE table_schema = COALESCE($1, current_schema()) AND table_name = $2
-        \\ORDER BY ordinal_position
+        \\SELECT a.attname,
+        \\       t.typname,
+        \\       CASE WHEN c.relkind IN ('v', 'm') THEN 'UNKNOWN'
+        \\            WHEN a.attnotnull THEN 'NO'
+        \\            ELSE 'YES' END
+        \\FROM pg_catalog.pg_attribute a
+        \\JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+        \\JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        \\JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+        \\WHERE n.nspname = COALESCE($1, current_schema())
+        \\  AND c.relname = $2
+        \\  AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+        \\  AND a.attnum > 0
+        \\  AND NOT a.attisdropped
+        \\ORDER BY a.attnum
     ;
 
     /// The column types this Dialect will read `T` out of.

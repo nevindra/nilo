@@ -90,6 +90,19 @@ const role_type = "nilo_live_role_" ++ mode_suffix;
 /// them. A wrong row is not something to hide in a table other tests read.
 const list_table = "nilo_live_tickets_" ++ mode_suffix;
 
+/// A view and a materialized view over the first table, and a table whose two
+/// interesting columns are filled in by the database rather than by a caller.
+///
+/// A view earns a fixture of its own because it is the one relation where the
+/// *check* was wrong rather than the read: Postgres does not track `NOT NULL`
+/// through one, so every non-optional field of a Row over a view used to be
+/// reported as a disagreement and the server refused to start (ADR 0056). A
+/// materialized view earns one because `information_schema` cannot see it at
+/// all.
+const adults_view = "nilo_live_adults_" ++ mode_suffix;
+const totals_view = "nilo_live_totals_" ++ mode_suffix;
+const auto_table = "nilo_live_auto_" ++ mode_suffix;
+
 /// A schema of its own, so that a qualified name is tested against a table
 /// that **only** exists there. A table in `public` with the same name would
 /// let a broken `qualify` pass by finding the wrong relation, which is the
@@ -117,6 +130,10 @@ const scoped_table = other_schema ++ ".widgets";
 /// this is the one column type startup cannot check, and a table that has
 /// grown a value the code has not is the way it actually goes wrong.
 const setup =
+    // Before the table, because a view depends on it and Postgres will not
+    // drop a relation something else is built on.
+    "DROP MATERIALIZED VIEW IF EXISTS " ++ totals_view ++ ";" ++
+    "DROP VIEW IF EXISTS " ++ adults_view ++ ";" ++
     "DROP TABLE IF EXISTS " ++ table ++ ";" ++
     "DROP TYPE IF EXISTS " ++ role_type ++ ";" ++
     "CREATE TYPE " ++ role_type ++ " AS ENUM ('admin', 'member', 'moderator');" ++
@@ -147,6 +164,18 @@ const setup =
     "  (1, 'ada@example.dev', 'ada', 36, '550e8400-e29b-41d4-a716-446655440000', '{\"theme\":\"dark\"}', 'admin', '3 days 04:05:06', '192.168.0.1')," ++
     "  (2, 'grace@example.dev', NULL, 45, NULL, NULL, 'member', NULL, NULL)," ++
     "  (3, 'kid@example.dev', 'kid', 11, '550e8400-e29b-41d4-a716-446655440001', '{\"theme\":\"light\"}', 'moderator', '1 mon', '10.0.0.7/24');" ++
+    "CREATE VIEW " ++ adults_view ++ " AS SELECT id, email, age FROM " ++ table ++
+    "  WHERE age >= 18;" ++
+    // `role::text` so the matview's column is a `text` rather than the enum,
+    // which is a Row's problem and not this test's.
+    "CREATE MATERIALIZED VIEW " ++ totals_view ++ " AS SELECT role::text AS role," ++
+    "  count(*)::bigint AS people FROM " ++ table ++ " GROUP BY role;" ++
+    "DROP TABLE IF EXISTS " ++ auto_table ++ ";" ++
+    "CREATE TABLE " ++ auto_table ++ " (" ++
+    "  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY," ++
+    "  label text NOT NULL," ++
+    "  slug text GENERATED ALWAYS AS (label || '-x') STORED" ++
+    ");" ++
     "DROP TABLE IF EXISTS " ++ list_table ++ ";" ++
     "CREATE TABLE " ++ list_table ++ " (" ++
     "  id bigint PRIMARY KEY," ++
@@ -1360,6 +1389,179 @@ test "a deadline ends with its transaction, so the next one starts clean" {
         try testing.expectEqual(@as(usize, 1), slept.len);
         try tx.commit();
     }
+}
+
+// -- relations that are not tables ----------------------------------------
+
+/// A Row over a view, and **every field is non-optional on purpose.** That is
+/// the whole of what used to be wrong: Postgres reports a view's columns as
+/// nullable whatever their source columns were, so this Row was five
+/// disagreements and a server that would not start.
+const Adult = struct {
+    pub const nilo_table = .{ .name = adults_view, .key = .id };
+
+    id: i64,
+    email: []const u8,
+    age: i32,
+};
+
+/// A Row over a materialized view, which `information_schema.columns` cannot
+/// see at all — the old query answered nothing and the check called it a
+/// table that does not exist.
+const RoleTotal = struct {
+    pub const nilo_table = .{ .name = totals_view, .key = .role };
+
+    role: []const u8,
+    people: i64,
+};
+
+test "a view is a relation a Row can read and a check can judge" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const grown = try stack.db.select(Adult, &run, .{ .order = .{ .id = .asc } });
+    try testing.expectEqual(@as(usize, 2), grown.len);
+    try testing.expectEqualStrings("ada@example.dev", grown[0].email);
+    try testing.expect(grown[0].age >= 18);
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var problems: std.ArrayList(schema.Problem) = .empty;
+
+    const columns = try stack.live.wire.columnsOf(
+        arena.allocator(),
+        dialect.Postgres.introspect,
+        null,
+        adults_view,
+    );
+    try testing.expect(columns.len == 3);
+    // Nothing, and not three `unexpected_null`s: the database does not know
+    // whether a view column can be null, and a check that does not know says
+    // nothing rather than guessing (ADR 0056).
+    try testing.expectEqual(@as(usize, 0), try schema.compare(
+        dialect.Postgres,
+        Adult,
+        columns,
+        &problems,
+        arena.allocator(),
+    ));
+    for (columns) |column| try testing.expectEqual(@as(?bool, null), column.nullable);
+
+    // The type is still checked, which is the half a view does know.
+    const Wrong = struct {
+        pub const nilo_table = .{ .name = adults_view, .key = .id };
+        id: i64,
+        email: i64,
+    };
+    try testing.expect(try schema.compare(
+        dialect.Postgres,
+        Wrong,
+        columns,
+        &problems,
+        arena.allocator(),
+    ) > 0);
+}
+
+test "a materialized view is a relation the introspection can see" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const totals = try stack.db.select(RoleTotal, &run, .{ .order = .{ .role = .asc } });
+    try testing.expectEqual(@as(usize, 3), totals.len);
+    try testing.expectEqualStrings("admin", totals[0].role);
+    try testing.expectEqual(@as(i64, 1), totals[0].people);
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var problems: std.ArrayList(schema.Problem) = .empty;
+
+    const columns = try stack.live.wire.columnsOf(
+        arena.allocator(),
+        dialect.Postgres.introspect,
+        null,
+        totals_view,
+    );
+    // Two rather than none, which is what `information_schema.columns`
+    // answered and what made this read as a missing table.
+    try testing.expectEqual(@as(usize, 2), columns.len);
+    try testing.expectEqual(@as(usize, 0), try schema.compare(
+        dialect.Postgres,
+        RoleTotal,
+        columns,
+        &problems,
+        arena.allocator(),
+    ));
+}
+
+/// A Row over a table where two of the three columns are the database's to
+/// fill: `id` is `GENERATED ALWAYS AS IDENTITY` and `slug` is a generated
+/// column. Neither may be written, and neither has to be — an insert names a
+/// **subset** of the Row's columns, which is the design this is the payoff
+/// for.
+const Auto = struct {
+    pub const nilo_table = .{ .name = auto_table, .key = .id };
+
+    id: i64,
+    label: []const u8,
+    slug: ?[]const u8,
+};
+
+test "an identity key and a generated column are filled by the database" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    // One column written, three read back. `RETURNING` is not optional here
+    // and this is why: without it a caller would have to go and ask what key
+    // the database chose.
+    const first = try stack.db.insert(Auto, &run, .{ .label = "alpha" });
+    try testing.expect(first.id > 0);
+    try testing.expectEqualStrings("alpha", first.label);
+    try testing.expectEqualStrings("alpha-x", first.slug.?);
+
+    const second = try stack.db.insert(Auto, &run, .{ .label = "beta" });
+    try testing.expect(second.id > first.id);
+
+    // And a batch, where the arrays hold only the column that was written.
+    const Made = struct { label: []const u8 };
+    const many = try stack.db.insertMany(Auto, &run, &[_]Made{
+        .{ .label = "gamma" },
+        .{ .label = "delta" },
+    });
+    try testing.expectEqual(@as(usize, 2), many.len);
+    try testing.expectEqualStrings("gamma-x", many[0].slug.?);
+    try testing.expect(many[1].id > many[0].id);
+
+    // A generated column is nullable as far as Postgres is concerned — it
+    // carries no `NOT NULL` unless one was written — so the Row reads it as
+    // an optional and the check agrees.
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var problems: std.ArrayList(schema.Problem) = .empty;
+    const columns = try stack.live.wire.columnsOf(
+        arena.allocator(),
+        dialect.Postgres.introspect,
+        null,
+        auto_table,
+    );
+    try testing.expectEqual(@as(usize, 0), try schema.compare(
+        dialect.Postgres,
+        Auto,
+        columns,
+        &problems,
+        arena.allocator(),
+    ));
 }
 
 // -- a column type this module did not choose -----------------------------

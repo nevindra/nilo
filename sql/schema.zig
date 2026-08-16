@@ -192,7 +192,9 @@ fn problemFor(
         out.found = column.udt;
         return out;
     }
-    if (column.nullable and !want.optional) {
+    // `null` is the database saying it does not know, which a view is
+    // (ADR 0056). Nothing is claimed either way, so nothing is reported.
+    if ((column.nullable orelse false) and !want.optional) {
         var out = base;
         out.kind = .unexpected_null;
         out.found = column.udt;

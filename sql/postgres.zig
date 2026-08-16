@@ -489,7 +489,12 @@ pub const Wire = struct {
             found.append(arena, .{
                 .name = arena.dupe(u8, name) catch return error.QueryFailed,
                 .udt = arena.dupe(u8, udt) catch return error.QueryFailed,
-                .nullable = std.mem.eql(u8, is_nullable, "YES"),
+                .nullable = if (std.mem.eql(u8, is_nullable, "YES"))
+                    true
+                else if (std.mem.eql(u8, is_nullable, "NO"))
+                    false
+                else
+                    null,
             }) catch return error.QueryFailed;
         }
         return found.toOwnedSlice(arena) catch return error.QueryFailed;

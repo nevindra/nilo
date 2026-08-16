@@ -266,6 +266,15 @@ Nothing about the API changed to get any of it. What *did* change:
   ReleaseFast. A Row that reads an array cannot be streamed, for the reason a
   `Json` column cannot: a streamed row holds only what the read buffer already
   holds.
+- **A Row can read a view or a materialized view.** The schema check asked
+  `information_schema`, which cannot see a materialized view at all, hides
+  columns the role has no privilege on, and reports every view column as
+  nullable — so a Row over a view was one disagreement per field and, by
+  default, a server that refused to start. It asks `pg_catalog` now, and a
+  column's nullability has a third answer for the case the database does not
+  know ([ADR 0056](docs/adr/0056-a-view-is-a-table-that-cannot-say-what-is-not-null.md)).
+  A driver's `Column.nullable` is `?bool`.
+
 - **A column type can come from outside this module.** Any struct or enum with
   `nilo_column`, `nilo_read(text, arena)` and `nilo_write(arena)` is one, and
   it travels as the text Postgres prints — so an `interval`, a `money`, a

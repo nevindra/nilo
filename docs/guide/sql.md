@@ -822,9 +822,51 @@ which is usually a migration that has not run.
 
 Set `.schema_mismatch_is_fatal = false` to log and carry on.
 
+### Views, and the one thing a check cannot know
+
+A Row can name a **view** or a **materialized view** instead of a table, and
+everything works the same way — reading it, checking it, `db.raw` past it.
+
+One half of the check is skipped there, and it has to be: Postgres does not
+track `NOT NULL` through a view, so every column of one reads as nullable
+whatever its source column was. Checking that would flag every non-optional
+field of a Row over a view, so the column's **type** is compared and its
+nullability is left alone
+([ADR 0056](../adr/0056-a-view-is-a-table-that-cannot-say-what-is-not-null.md)).
+
+### Columns the database fills in
+
+An identity key, a sequence default and a generated column all work with
+nothing said about them, because an insert names a **subset** of the Row's
+columns and `RETURNING` is not optional:
+
+```zig
+const Auto = struct {
+    pub const nilo_table = .{ .name = "auto", .key = .id };
+
+    id: i64,               // GENERATED ALWAYS AS IDENTITY
+    label: nilo.Str,
+    slug: ?nilo.Str,       // GENERATED ALWAYS AS (label || '-x') STORED
+};
+
+const made = try db.insert(Auto, c, .{ .label = "alpha" });
+// made.id is the database's, made.slug is "alpha-x"
+```
+
+A batch is the same: the arrays hold only the columns that were written. Note
+that a generated column carries no `NOT NULL` unless one was written, so the
+Row reads it as an optional.
+
+**Indexes, unique constraints, foreign keys and check constraints are not
+here, and that is a decision.** A Row names its columns and its key and
+nothing else about the table, so nothing here can check or generate one — and
+a Row that could say it would be a migration file with Zig syntax. Write them
+where you write the rest of your DDL. The half that reaches a handler is
+already done: a unique violation is `error.AlreadyExists` and a 409.
+
 ## Errors
 
-The module raises five, and they read:
+The module raises six, and they read:
 
 | | |
 |---|---|

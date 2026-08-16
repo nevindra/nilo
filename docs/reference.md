@@ -823,6 +823,15 @@ database switched off, and the first request that needs it gets
 | `timeout_ms` | how long a caller waits for a free connection. Default 10,000 |
 | `schema_mismatch_is_fatal` | whether a Row that disagrees with its table stops startup. Default true |
 
+A Row may name a **view** or a **materialized view** as well as a table. The
+column types are checked there; nullability is not, because Postgres does not
+track `NOT NULL` through a view
+([ADR 0056](./adr/0056-a-view-is-a-table-that-cannot-say-what-is-not-null.md)).
+An identity key, a sequence default and a generated column need nothing said
+about them — an insert names a subset of the Row's columns and `RETURNING`
+brings the rest back. Indexes and constraints are refused on the record: a Row
+cannot say one, and one that could would be a migration file.
+
 ### Queries
 
 Every one takes the Row, a [Scope](#scope) — the `*Ctx` inside a handler, a
