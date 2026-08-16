@@ -134,6 +134,25 @@ migrations
   declaring `nilo_start` is handed the loop once it exists and before the
   first connection is accepted, which is the only reason a connection pool
   can exist at all ([ADR 0040](./docs/adr/0040-a-service-that-needs-the-loop-is-finished-when-the-loop-exists.md)).
+- **`nilo.nowMicros()` and `nilo.nowMillis()`** — what time it is, which
+  nothing in nilo could answer before. They are `nilo_core`'s, so a program
+  with no server in it has them too, and they are plain functions rather than
+  calls on a `Ctx`: reading a wall clock needs no event loop and nobody owns
+  the time ([ADR 0045](./docs/adr/0045-core-knows-what-time-it-is.md)). 15ns a
+  call. Use `nilo.monotonicNanos()` for a duration — a wall clock moves when
+  an operator moves it.
+- **`c.entropy(n)`** — `n` unguessable bytes from the operating system,
+  returned by value, with the wait paid for by the Bulkhead rather than by
+  the thread every other request is sharing
+  ([ADR 0046](./docs/adr/0046-entropy-belongs-to-the-loop.md)).
+  `nilo.randomSecure(&buf)` is the same bytes into a buffer you already hold.
+  Together with the clock this is what `nilo_id` was waiting for:
+
+  ```zig
+  const key = id.v7(try c.entropy(id.Uuid.v7_entropy), nilo.nowMillis());
+  ```
+- **`sql.Timestamp.now()`** — so `created_at` is a field a handler fills
+  rather than a database default it has to remember to set.
 
 ### A third module, below the other two
 

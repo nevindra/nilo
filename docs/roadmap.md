@@ -47,22 +47,14 @@ to live. `nilo_id` sits beside it in the same layer and below is only `std`
 
 ### Next
 
-1. **A seam for the two things a module down here cannot reach: entropy and the
-   wall clock.** Both are IO in Zig 0.16 and neither has a supported source
-   inside nilo — `Ctx` exposes no clock and no `randomSecure`, so `id.v7` takes
-   its millisecond and its randomness as arguments that a handler has nowhere
-   to get. It is the thing standing in front of the whole layer rather than in
-   front of one module: a password module needs to get *off* the loop, an S3
-   module needs to dial out, and this needs to reach the operating system at
-   all. One decision, three callers.
-
-   Half of the design is settled by precedent. ADR 0040 grew `Ctx` a pair of
-   calls for exactly this shape of problem and Core then named the pair, which
-   is what a Scope is; a second pair would be checked the same way. What is not
-   settled is what a `Run` does with it — `arena()` and `str()` are pure
-   bookkeeping that Core implements with no IO, and entropy is not, so either
-   `Run` holds an `Io` (Core doing IO, a real amendment to what Core is) or the
-   second pair belongs to something that is not a Scope.
+1. **A per-thread entropy pool, if a number ever justifies one.** `c.entropy`
+   reaches the operating system on every call, which is 56ns on a kernel that
+   serves `getrandom` from a vDSO and roughly twenty times that on one that
+   does not ([ADR 0046](./adr/0046-entropy-belongs-to-the-loop.md)). A CSPRNG
+   seeded once per thread would remove it, and costs stored state, a fork
+   hazard and a seeding moment. Nobody has a workload that needs it. This is
+   here so that whoever finds one knows the design was priced rather than
+   missed.
 
 ### Known gaps
 
@@ -71,7 +63,11 @@ to live. `nilo_id` sits beside it in the same layer and below is only `std`
   pg.zig's own zio and a Service written here would have to name zio — which
   [ADR 0002](./adr/0002-zio-as-the-engine-behind-the-bulkhead.md) permits in
   exactly one file. It is not urgent with one Service. It is the bill the
-  second one arrives with, and it is half of the item above.
+  second one arrives with, and it is its own decision — **not** the one
+  [ADR 0046](./adr/0046-entropy-belongs-to-the-loop.md) answered, which was
+  written down here as though the two were halves of one thing and is not.
+  Reaching the operating system for bytes and reaching the network for a
+  socket have a layer in common and nothing else.
 - **The layering step cannot see that an import is only reached from a test.**
   `zig build layering` refuses an import that is not in that module's row of
   the `layers` table, and `sql/db.zig` legitimately names `nilo_http` from a
@@ -104,12 +100,6 @@ to live. `nilo_id` sits beside it in the same layer and below is only `std`
 
 A `Uuid` and the two layouts anybody writes, v4 and v7. It imports nothing at
 all, which is the strongest form of what the bottom layer is for.
-
-### Next
-
-1. **`id.v4()` and `id.v7()`, with no arguments.** What the module is for, and
-   it cannot be built here — it is `nilo_core`'s first item, above. Everything
-   else on this page is smaller than that one.
 
 ### Known gaps
 
@@ -503,6 +493,32 @@ needs to hold.
       with no design left in it. Deterministic values and per-table counts are
       what `drizzle-seed` adds on top, and they are library, not mechanism.
 - A GUI over the database: not from here.
+
+---
+
+## Modules that do not exist yet
+
+A section rather than a list inside somebody else's, because what decides
+whether one of these gets built is a repository-level seam rather than anything
+in a module that is already here.
+
+- **`nilo_pw` — hashing a password.** Unblocked, and in the shape `nilo_id`
+  already has: argon2id as a pure function of a password, a salt and its
+  parameters, with the caller supplying the salt from
+  [`c.entropy`](./adr/0046-entropy-belongs-to-the-loop.md) and wrapping the call
+  in `nilo.blocking`, because hashing deliberately takes 100ms and that is a
+  held thread if it happens on the loop. What is left to decide is smaller than
+  it looks: which parameters are the default, and whether the encoded form is
+  the PHC string everyone else writes — it is, and the only reason to say so is
+  that a hash nobody else can read is a hash nobody can migrate off.
+- **`nilo_s3` — object storage.** Blocked, and not on the same thing. It needs
+  an outbound socket, and the Bulkhead covers the way in only — see `nilo_core`'s
+  known gaps. Signing a request is the half that is ready: it needs `percent`
+  one layer down, which is the second caller that file has been waiting for.
+- **A `nilo_mail`, a `nilo_redis`, anything else that dials.** All the same
+  blocker as `nilo_s3`, and none of them is a reason to answer it on its own.
+  The seam gets designed once, against two callers, or it gets fitted to
+  whichever one turned up first.
 
 ---
 

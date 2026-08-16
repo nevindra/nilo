@@ -200,6 +200,7 @@ with `format: binary` whatever the content type is at run time. See
 | `c.jsonCollecting(T, &outcomes)` | `!T` — as `json`, recording why each field failed |
 | `c.formCollecting(T, &outcomes)` | `!T` — as `form`, recording why each field failed |
 | `c.requestId()` | `Str` — this request's id, from `X-Request-Id` or generated |
+| `c.entropy(n)` | `![n]u8` — unguessable bytes from the OS, off the event loop. `n` is comptime |
 | `c.bodyStream()` | `!Body` — the body in pieces |
 | `c.bodyStreamWith(.{ .max_bytes = … })` | the same, with a ceiling. Default 64 MB |
 | `c.peer()` | the address the connection came from — the proxy's, if there is one |
@@ -347,10 +348,7 @@ straight into an insert. Nothing here allocates and nothing here does IO.
 ```zig
 const id = @import("nilo_id");
 
-var random: [id.Uuid.v7_entropy]u8 = undefined;
-try fillUnguessably(&random);
-
-const key = id.v7(random, ms_since_the_epoch);
+const key = id.v7(try c.entropy(id.Uuid.v7_entropy), nilo.nowMillis());
 _ = try db.insert(User, c, .{ .id = key, .email = form.email });
 ```
 
@@ -369,13 +367,13 @@ _ = try db.insert(User, c, .{ .id = key, .email = form.email });
 A `Uuid` in a returned struct leaves as its text rather than as sixteen
 numbers, and one in a Row is written and read as the `uuid` column.
 
-**The randomness is yours to supply, and nilo has nowhere to get it for you
-yet.** Entropy and the wall clock are both IO in Zig 0.16, `Ctx` exposes
-neither, and a module in the bottom layer has no Bulkhead to reach through —
-so `v4` and `v7` take what they need rather than fetching it. A v4 built from a
-seeded `std.Random.DefaultPrng` is fine in a test and is a session token
-anybody can predict in production. ADR 0042 has the argument and what the
-missing seam would be.
+**The randomness is an argument, and it has to be unguessable.** Entropy is IO
+and a module in the bottom layer has no Bulkhead to reach through, so `v4` and
+`v7` take what they need rather than fetching it — inside a request that is
+`c.entropy(n)`, outside one it is `std.Io.randomSecure`
+([ADR 0046](./adr/0046-entropy-belongs-to-the-loop.md)). A v4 built from a
+seeded `std.Random.DefaultPrng` is fine in a test and is a session token anybody
+can predict in production; nothing here can tell the difference.
 
 ## `nilo_config`
 
@@ -578,10 +576,27 @@ failure, whatever the endpoint returns when it works.
 | `nilo.blocking(f, args)` | run a blocking call off the event loop |
 | `nilo.sleep(ms)` | wait without parking the thread |
 | `nilo.spawn(f, args)` | run something that is not a request |
+| `nilo.randomSecure(&buf)` | fill a buffer you already hold, off the event loop |
 | `nilo.monotonicNanos()` | a clock reading, for durations |
 
 `lock()` and `sleep()` fail with `error.Canceled` if the request went away, which
 maps to a 503.
+
+## What time it is
+
+| | |
+|---|---|
+| `nilo.nowMicros()` | `i64` — microseconds since the epoch. What `sql.Timestamp` counts |
+| `nilo.nowMillis()` | `i64` — milliseconds. What a UUID v7 puts in its first six bytes |
+
+Plain functions rather than calls on a `Ctx` or a `Run`: reading the wall clock
+needs no event loop and nobody owns the time, so there is nothing for a Scope to
+be the holder of
+([ADR 0045](./adr/0045-core-knows-what-time-it-is.md)). They are `nilo_core`'s,
+so a program with no server in it has them too. 15ns a call.
+
+**Use `monotonicNanos` for a duration, never these.** A wall clock moves when an
+operator moves it, so two readings a second apart can come back in either order.
 
 A handler that waits on the operating system without going through one of these
 holds the thread every other request on it is being served by. nilo notices and
@@ -814,7 +829,7 @@ Forgetting the `defer` is caught in Debug by a counter asserted at
 
 | | |
 |---|---|
-| `sql.Timestamp` | microseconds since the epoch, written as RFC 3339 in JSON. `timestamptz` |
+| `sql.Timestamp` | microseconds since the epoch, written as RFC 3339 in JSON. `timestamptz`. `.now()`, `.fromSeconds(s)`, `.seconds()` |
 | `sql.Uuid` | `nilo_id`'s [`Uuid`](#nilo_id), re-exported — the same type either import gives you. `uuid` |
 | `sql.Json(T)` | a `T` stored as `jsonb`, parsed per row into the request arena. Not available in `db.stream`, which allocates nothing |
 

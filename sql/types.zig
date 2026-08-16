@@ -32,6 +32,7 @@
 //! 0042). What stayed is this module's opinion about which column it goes in.
 
 const std = @import("std");
+const core = @import("nilo_core");
 const id = @import("nilo_id");
 
 /// A moment, as microseconds since 1970-01-01 UTC — the same integer Postgres
@@ -47,6 +48,18 @@ pub const Timestamp = struct {
     micros: i64,
 
     pub const nilo_column = "timestamptz";
+
+    /// Now, which this could not answer until Core had a clock (ADR 0045).
+    /// A copy rather than a conversion: `nowMicros` counts in the unit this
+    /// column stores.
+    ///
+    /// It is a wall clock, so it is what a `created_at` wants and what
+    /// nothing measuring a duration should use — two rows written a second
+    /// apart can carry timestamps in either order if an operator moves the
+    /// clock between them.
+    pub fn now() Timestamp {
+        return .{ .micros = core.nowMicros() };
+    }
 
     pub fn fromSeconds(secs: i64) Timestamp {
         return .{ .micros = secs * std.time.us_per_s };
@@ -197,6 +210,15 @@ test "seconds and microseconds are the same moment" {
     const t = Timestamp.fromSeconds(1_786_951_800);
     try testing.expectEqual(@as(i64, 1_786_951_800_000_000), t.micros);
     try testing.expectEqual(@as(i64, 1_786_951_800), t.seconds());
+}
+
+test "a Timestamp can say what time it is, and says it in microseconds" {
+    const then = Timestamp.fromSeconds(1_767_225_600); // 2026-01-01
+    const now = Timestamp.now();
+    try testing.expect(now.micros > then.micros);
+    // The unit, not the instant: a reading in seconds or milliseconds would
+    // land far below a moment that has already happened.
+    try testing.expect(now.seconds() > 1_767_225_600);
 }
 
 test "a uuid column and a generated key are the same type" {

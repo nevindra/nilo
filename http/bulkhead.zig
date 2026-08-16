@@ -431,11 +431,20 @@ pub fn randomSecure(buffer: []u8) !void {
 /// is underneath, only the price of asking.
 pub fn coarseNanos() u64 {
     if (builtin.os.tag == .linux) {
-        // Through `std.posix.system` rather than `std.os.linux`, which is
-        // the difference between the vDSO and a real syscall once libc is
-        // linked — and nilo links libc. Measured on this machine: 5ns the
-        // right way, 600ns the wrong way, which is the sort of gap that
-        // turns a cheap check into the most expensive thing a request does.
+        // Through `std.posix.system`, which is `std.os.linux` in a build
+        // that does not link libc and libc's own wrapper in one that does.
+        //
+        // That distinction used to be the point of this comment: it
+        // recorded 5ns one way and 600ns the other, on the grounds that
+        // only the libc path reached the vDSO. **Re-measured on Zig 0.16
+        // and it is no longer true** — `std.os.linux` reaches the vDSO
+        // too, and `CLOCK_MONOTONIC_COARSE` is 1–2ns either way (ADR 0045).
+        // What survives is the reason the *coarse* clock is here at all:
+        // it is 2ns against 15ns for `CLOCK_MONOTONIC` read the same way,
+        // which is the sort of gap that turns a cheap check into the most
+        // expensive thing a request does. (15ns is the raw clock; the 27ns
+        // above is `monotonicNanos`, which is the Engine's call and carries
+        // its own frame.)
         var ts: std.posix.system.timespec = undefined;
         const rc = std.posix.system.clock_gettime(.MONOTONIC_COARSE, &ts);
         if (std.posix.errno(rc) == .SUCCESS) {

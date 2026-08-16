@@ -117,6 +117,25 @@ pub const blocking = @import("bulkhead.zig").blocking;
 /// which maps to a 503 the way `Mutex.lock` does.
 pub const sleep = @import("bulkhead.zig").sleep;
 
+/// Bytes from the operating system's entropy source, off the event loop —
+/// what `Ctx.entropy` is underneath, for a buffer you are already holding
+/// or for work outside a request (ADR 0046).
+///
+/// Inside a handler prefer `c.entropy(n)`, which answers by value and so
+/// fits in the expression that wants it.
+pub const randomSecure = @import("bulkhead.zig").randomSecure;
+
+/// What time it is: microseconds and milliseconds since the epoch, from
+/// `nilo_core` (ADR 0045). Reading the wall clock needs no event loop, so
+/// this is a plain function rather than a call on the `Ctx` — nobody owns
+/// the time, and there is nothing to ask permission for.
+///
+/// `nowMillis()` is the unit a UUID v7 puts in its first six bytes;
+/// `nowMicros()` is the one Postgres keeps a `timestamptz` in, which is why
+/// `sql.Timestamp.now()` is a copy rather than a conversion.
+pub const nowMicros = @import("nilo_core").nowMicros;
+pub const nowMillis = @import("nilo_core").nowMillis;
+
 /// Fail functions — `fail.notFound("no user {d}", .{id})` and friends,
 /// callable from anywhere (ADR 0005).
 pub const fail = @import("fail.zig");

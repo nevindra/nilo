@@ -358,6 +358,36 @@ pub const Ctx = struct {
         return Str.fromRequest(self._request_id_buf[0..], self._lifetime);
     }
 
+    /// `n` bytes from the operating system's entropy source, off the event
+    /// loop (ADR 0046).
+    ///
+    /// ```zig
+    /// const key = id.v7(try c.entropy(id.Uuid.v7_entropy), nilo.nowMillis());
+    /// ```
+    ///
+    /// **A method rather than a free function, and that is the design.**
+    /// Entropy comes from a syscall, and a syscall made straight from a
+    /// fiber stops every request sharing that thread (ADR 0002, ADR 0014).
+    /// This one goes through the Bulkhead, so the fiber parks on the
+    /// Engine's blocking pool and the detector is told the handler is not
+    /// the one holding it (ADR 0034). Being reachable only from a `Ctx` is
+    /// what says *this call costs a wait, and here is where the wait is
+    /// paid for* — which is why `nilo_id` takes its randomness as an
+    /// argument rather than fetching it: down there, nobody is paying.
+    ///
+    /// By value rather than into a buffer the caller declares, so it fits
+    /// in the expression that uses it. `n` is comptime, the array is on the
+    /// stack, and nothing is allocated.
+    ///
+    /// A program with no loop in it needs none of this: `std.Io.randomSecure`
+    /// is the same bytes, and there is no fiber to park.
+    pub fn entropy(self: *const Ctx, comptime n: usize) ![n]u8 {
+        _ = self;
+        var out: [n]u8 = undefined;
+        try bulkhead.randomSecure(&out);
+        return out;
+    }
+
     /// The cookie called `name`, or null if the request carries no such one
     /// (ADR 0030).
     ///

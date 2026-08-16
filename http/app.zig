@@ -5692,6 +5692,36 @@ test "reading a cookie allocates nothing" {
     try testing.expectEqual(@as(usize, 0), counting.allocs);
 }
 
+fn answersWithEntropy(c: *Ctx) anyerror!void {
+    const first = try c.entropy(16);
+    const second = try c.entropy(16);
+    const zeroes = [_]u8{0} ** 16;
+
+    if (std.mem.eql(u8, &first, &second)) return c.sendText(500, "twice the same");
+    if (std.mem.eql(u8, &first, &zeroes)) return c.sendText(500, "all zero");
+    try c.sendText(200, "unguessable");
+}
+
+test "a handler can ask for entropy, and gets different bytes every time" {
+    // Driven through a whole request rather than called directly, because
+    // what is being checked is that the Bulkhead answers at all outside a
+    // running server — a handler is an ordinary function and this suite has
+    // no Engine under it (ADR 0046). Two readings rather than one, because
+    // a source that is broken open answers zeroes and a source that is
+    // broken shut answers the same bytes twice; neither would fail a test
+    // that only looked at the length.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/token", answersWithEntropy);
+
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    const answer = try client.get(&app, "/token");
+    try testing.expectEqual(@as(u16, 200), answer.status);
+    try testing.expectEqualStrings("unguessable", answer.body);
+}
+
 fn setsTwoCookies(c: *Ctx) anyerror!void {
     try c.setCookie(.{ .name = "session", .value = "abc123" });
     try c.setCookie(.{ .name = "theme", .value = "dark", .http_only = false, .secure = false });
