@@ -182,6 +182,47 @@ pub const Wire = struct {
             _ = self.conn.exec(sql, .{}) catch |err| return translate(self.conn, err);
         }
 
+        /// `SAVEPOINT nilo_sp_3`, and the two ways back out of it.
+        ///
+        /// **The statement is built rather than a constant, for the reason
+        /// `deadline` gives**: the number is one this module counted, no
+        /// request supplies it, and there is no `SAVEPOINT $1` in Postgres —
+        /// a savepoint name is an identifier, and identifiers do not take
+        /// placeholders. So the alternative to printing it here is not a
+        /// constant, it is not having savepoints.
+        ///
+        /// `revive` before the undo, and only before the undo. Rolling back
+        /// to a savepoint is the one thing a caller does *because* the last
+        /// statement failed, so it is the path that finds the connection in
+        /// pg.zig's `.fail` — the same state `commit` and `rollback` have to
+        /// let it out of, and for the same reason.
+        pub fn savepoint(
+            self: *Tx,
+            arena: std.mem.Allocator,
+            comptime op: wire.SavepointOp,
+            id: u32,
+        ) wire.Error!void {
+            _ = arena;
+            if (self.done) return error.QueryFailed;
+            if (op == .undo) self.revive();
+            self.fresh();
+
+            const verb = switch (op) {
+                .mark => "SAVEPOINT ",
+                .undo => "ROLLBACK TO SAVEPOINT ",
+                .keep => "RELEASE SAVEPOINT ",
+            };
+            // The longest verb, the prefix, and ten digits of a u32.
+            var buf: [verb.len + name_prefix.len + 10]u8 = undefined;
+            const sql = std.fmt.bufPrint(&buf, verb ++ name_prefix ++ "{d}", .{id}) catch
+                unreachable;
+            _ = self.conn.exec(sql, .{}) catch |err| return translate(self.conn, err);
+        }
+
+        /// What a savepoint is called on the server. Prefixed so that it
+        /// cannot collide with one a `tx.raw` put down by hand.
+        const name_prefix = "nilo_sp_";
+
         pub fn commit(self: *Tx) wire.Error!void {
             if (self.done) return;
             self.done = true;
@@ -218,12 +259,33 @@ pub const Wire = struct {
     };
 
     /// Take a connection out of the pool and open a transaction on it.
-    pub fn begin(self: *Wire, arena: std.mem.Allocator) wire.Error!Tx {
+    ///
+    /// The isolation level and the read-only flag ride on the `BEGIN` rather
+    /// than arriving as a `SET TRANSACTION` behind it, which is why asking
+    /// for either costs nothing: `opts` is comptime, so what goes down the
+    /// socket is a constant this file assembled while compiling.
+    pub fn begin(self: *Wire, arena: std.mem.Allocator, comptime opts: wire.Begin) wire.Error!Tx {
         _ = arena;
         var conn = self.pool.acquire() catch return error.Disconnected;
         errdefer conn.release();
-        _ = conn.exec("BEGIN", .{}) catch |err| return translate(conn, err);
+        _ = conn.exec(comptime beginText(opts), .{}) catch |err| return translate(conn, err);
         return .{ .wire = self, .conn = conn };
+    }
+
+    /// `BEGIN`, with whatever the caller asked for spelled onto the end of
+    /// it. Postgres takes the isolation level and the access mode as part of
+    /// the statement, and they read in that order.
+    fn beginText(comptime opts: wire.Begin) []const u8 {
+        comptime {
+            var text: []const u8 = "BEGIN";
+            if (opts.isolation) |level| text = text ++ " ISOLATION LEVEL " ++ switch (level) {
+                .read_committed => "READ COMMITTED",
+                .repeatable_read => "REPEATABLE READ",
+                .serializable => "SERIALIZABLE",
+            };
+            if (opts.read_only) text = text ++ " READ ONLY";
+            return text;
+        }
     }
 
     /// Build a pool that dials through `io`.
@@ -459,6 +521,10 @@ fn translate(conn: *pg.Conn, err: anyerror) wire.Error {
         // by hand has told the handler the same thing either way: this
         // statement is not going to finish.
         if (std.mem.eql(u8, server.code, "57014")) return error.TimedOut;
+        // `55P03` is `lock_not_available`, which Postgres sends for a
+        // `NOWAIT` that found the row held. It is the answer the statement
+        // was written to get rather than a failure, so it gets a name.
+        if (std.mem.eql(u8, server.code, "55P03")) return error.Locked;
         // The text never reaches the client (ADR 0025); it goes here, where
         // whoever is reading the log is the person who can fix it.
         std.log.err("nilo_sql: {s} [{s}]", .{ server.message, server.code });
@@ -509,4 +575,23 @@ const testing = std.testing;
 
 test "the postgres wire satisfies the contract" {
     comptime wire.assertWire(Wire);
+}
+
+test "what a transaction was begun with is spelled onto the BEGIN itself" {
+    try testing.expectEqualStrings("BEGIN", comptime Wire.beginText(.{}));
+    try testing.expectEqualStrings(
+        "BEGIN ISOLATION LEVEL SERIALIZABLE",
+        comptime Wire.beginText(.{ .isolation = .serializable }),
+    );
+    try testing.expectEqualStrings(
+        "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
+        comptime Wire.beginText(.{ .isolation = .repeatable_read, .read_only = true }),
+    );
+    // Written out rather than left off, for a server whose role has a
+    // different default set on it.
+    try testing.expectEqualStrings(
+        "BEGIN ISOLATION LEVEL READ COMMITTED",
+        comptime Wire.beginText(.{ .isolation = .read_committed }),
+    );
+    try testing.expectEqualStrings("BEGIN READ ONLY", comptime Wire.beginText(.{ .read_only = true }));
 }

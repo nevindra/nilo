@@ -51,14 +51,31 @@
 //!   rather than with rows, giving the count back. "Did that update
 //!   anything" has no other answer, and Postgres sends the number in
 //!   `CommandComplete` rather than as a result set.
-//! - `begin(arena)` — a transaction, **holding one connection for its whole
-//!   life**. That is not a detail: every statement in a transaction has to
-//!   go down the same connection, and a Wire whose `run` takes a fresh one
+//! - `begin(arena, opts)` — a transaction, **holding one connection for its
+//!   whole life**. That is not a detail: every statement in a transaction has
+//!   to go down the same connection, and a Wire whose `run` takes a fresh one
 //!   each time would silently run half a transaction somewhere else. So a
 //!   transaction is its own type with its own `run`, rather than a mode the
 //!   Wire is in.
+//!
+//!   `opts` is comptime, which is what lets the whole `BEGIN` be one constant
+//!   and lets a Wire that cannot express an isolation level refuse it while
+//!   compiling rather than at the first request.
 //! - `Tx.commit` / `Tx.rollback` — and `rollback` has to be reachable from a
 //!   `defer`, because that is how it will be called.
+//! - `Tx.savepoint(arena, op, id)` — mark a point inside this transaction,
+//!   undo back to one, or drop one. Postgres calls the three `SAVEPOINT`,
+//!   `ROLLBACK TO SAVEPOINT` and `RELEASE SAVEPOINT`, and **a nested
+//!   transaction is these and not a second `BEGIN`** — Postgres has no
+//!   nested `BEGIN` and neither does this contract.
+//!
+//!   `id` is a number this module counts up, and the Wire turns it into a
+//!   name. Naming is the driver's because a savepoint name is an identifier
+//!   in its grammar, and no request ever supplies one.
+//!
+//!   The undo has to work on a transaction the server has already aborted,
+//!   which is the whole reason a savepoint is worth having: one failed
+//!   statement otherwise takes every statement around it with it.
 //! - `Tx.deadline(ms)` — bound how long the statements after it may run,
 //!   for as long as this transaction lasts. **On the Tx rather than on the
 //!   Wire, and that is the design rather than a limitation** (ADR 0047): a
@@ -114,6 +131,16 @@ pub const Error = error{
     ConstraintViolated,
     /// The connection went away, or was never there.
     Disconnected,
+    /// A row this statement asked to hold is held by somebody else, and the
+    /// caller said not to wait for it — `.lock = .update_nowait`. Separate
+    /// from `QueryFailed` for the same reason `TimedOut` is: it is the answer
+    /// the caller asked the question to get, and a handler that cannot tell
+    /// it from a broken statement has half a feature.
+    ///
+    /// No default status. A row somebody else is holding is a 409 for one
+    /// endpoint, a 503 for another, and a retry with `.update_skip_locked`
+    /// for a third.
+    Locked,
     /// A statement ran past the deadline the caller set with `tx.deadline`
     /// and the database cancelled it. Separate from `QueryFailed` because a
     /// deadline nobody can tell fired is half a feature: the handler that set
@@ -127,6 +154,53 @@ pub const Error = error{
     /// The database said no in a way this module does not translate. The text
     /// is logged; it does not reach the client (ADR 0025).
     QueryFailed,
+};
+
+/// What a transaction sees of everything else running beside it. The
+/// spelling is Postgres's and the meanings are the SQL standard's.
+///
+/// Null in `Begin` means *whatever the server is set to*, which is what a
+/// plain `BEGIN` has always meant — usually `read_committed`, and not always,
+/// because `ALTER ROLE … SET default_transaction_isolation` is a thing. That
+/// is why `.read_committed` is a value here rather than being spelled by
+/// leaving the option out: a transaction that has to be read-committed can
+/// say so.
+pub const Isolation = enum {
+    /// Every statement sees rows committed before that statement started. A
+    /// second read inside the same transaction can see something new.
+    read_committed,
+    /// Every statement sees rows committed before the *transaction* started,
+    /// so two reads of the same row agree. A write that collides answers
+    /// `error.QueryFailed` with `40001` in the log.
+    repeatable_read,
+    /// The above, and the transactions that commit are guaranteed to be
+    /// equivalent to having run one at a time. What a transaction that reads
+    /// something and then writes a decision about it needs, and it costs
+    /// retries: a serialisation failure is an ordinary outcome.
+    serializable,
+};
+
+/// What `begin` takes. Comptime, because both of these are properties of the
+/// transaction rather than data in it — folded into the `BEGIN` itself, so
+/// asking for either costs no round trip at all.
+pub const Begin = struct {
+    isolation: ?Isolation = null,
+    /// Refuse every write inside this transaction, at the server. Worth
+    /// saying for a report or an export: it lets Postgres skip work, and it
+    /// turns a write nobody meant to make into an error rather than a change.
+    read_only: bool = false,
+};
+
+/// One thing to do with a savepoint. Comptime at every call, so a driver's
+/// switch over it disappears.
+pub const SavepointOp = enum {
+    /// `SAVEPOINT` — put the mark down.
+    mark,
+    /// `ROLLBACK TO SAVEPOINT` — undo everything since it. The transaction
+    /// carries on, which is the whole point.
+    undo,
+    /// `RELEASE SAVEPOINT` — keep the work and forget the mark.
+    keep,
 };
 
 /// What opening a pool takes, declared here rather than by any one driver
@@ -199,6 +273,15 @@ pub const Fake = struct {
     rolled_back: usize = 0,
     /// The last deadline a transaction asked for, or null if none did.
     deadline_ms: ?u32 = null,
+    /// What the last `begin` was asked for. A Fake cannot show that an
+    /// isolation level did anything — that wants two connections and a real
+    /// server, which is `live.zig` — but it can show that the call carried
+    /// what the caller wrote.
+    began_with: Begin = .{},
+    /// Savepoints, counted by what was done with them.
+    marked: usize = 0,
+    undone: usize = 0,
+    kept: usize = 0,
 
     pub const Rows = struct {
         left: usize = 0,
@@ -313,6 +396,23 @@ pub const Fake = struct {
             self.wire.deadline_ms = ms;
         }
 
+        /// The same arrangement as `deadline`: the number arrived, and what
+        /// it becomes is `postgres.zig`'s business and `live.zig`'s to pin.
+        pub fn savepoint(
+            self: *Tx,
+            arena: std.mem.Allocator,
+            comptime op: SavepointOp,
+            id: u32,
+        ) Error!void {
+            _ = arena;
+            _ = id;
+            switch (op) {
+                .mark => self.wire.marked += 1,
+                .undo => self.wire.undone += 1,
+                .keep => self.wire.kept += 1,
+            }
+        }
+
         pub fn commit(self: *Tx) Error!void {
             self.wire.committed += 1;
         }
@@ -322,9 +422,10 @@ pub const Fake = struct {
         }
     };
 
-    pub fn begin(self: *Fake, arena: std.mem.Allocator) Error!Tx {
+    pub fn begin(self: *Fake, arena: std.mem.Allocator, comptime opts: Begin) Error!Tx {
         _ = arena;
         self.began += 1;
+        self.began_with = opts;
         return .{ .wire = self };
     }
 
@@ -359,10 +460,35 @@ test "a result set left unread is drained rather than abandoned" {
 
 test "a transaction that is never committed is rolled back" {
     var wire = Fake{};
-    var tx = try wire.begin(testing.allocator);
+    var tx = try wire.begin(testing.allocator, .{});
     tx.rollback();
 
     try testing.expectEqual(@as(usize, 1), wire.began);
     try testing.expectEqual(@as(usize, 0), wire.committed);
     try testing.expectEqual(@as(usize, 1), wire.rolled_back);
+}
+
+test "what a transaction was begun with reaches the wire" {
+    var wire = Fake{};
+    var tx = try wire.begin(testing.allocator, .{ .isolation = .serializable, .read_only = true });
+    defer tx.rollback();
+
+    try testing.expectEqual(Isolation.serializable, wire.began_with.isolation.?);
+    try testing.expect(wire.began_with.read_only);
+}
+
+test "a savepoint is three operations and not a second begin" {
+    var wire = Fake{};
+    var tx = try wire.begin(testing.allocator, .{});
+    defer tx.rollback();
+
+    try tx.savepoint(testing.allocator, .mark, 1);
+    try tx.savepoint(testing.allocator, .undo, 1);
+    try tx.savepoint(testing.allocator, .keep, 1);
+
+    // One `BEGIN`, whatever happened inside it.
+    try testing.expectEqual(@as(usize, 1), wire.began);
+    try testing.expectEqual(@as(usize, 1), wire.marked);
+    try testing.expectEqual(@as(usize, 1), wire.undone);
+    try testing.expectEqual(@as(usize, 1), wire.kept);
 }

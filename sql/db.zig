@@ -257,6 +257,9 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         /// carries the values (ADR 0039).
         pub fn select(self: *Self, comptime Row: type, c: anytype, options: anytype) ![]Row {
             comptime core.checkScope(@TypeOf(c), "db.select");
+            comptime assertUnlocked(Row, @TypeOf(options), "db.select",
+                "Begin one and ask there: `var tx = try db.begin(c, .{}); defer tx.deinit();` " ++
+                    "and then `tx.select(…)`.");
             const stmt = comptime statement.select(D, Row, @TypeOf(options));
             return fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, options));
         }
@@ -271,6 +274,9 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         /// A `.limit` written alongside it is a Refusal.
         pub fn one(self: *Self, comptime Row: type, c: anytype, options: anytype) !?Row {
             comptime core.checkScope(@TypeOf(c), "db.one");
+            comptime assertUnlocked(Row, @TypeOf(options), "db.one",
+                "Begin one and ask there: `var tx = try db.begin(c, .{}); defer tx.deinit();` " ++
+                    "and then `tx.one(…)`.");
             const stmt = comptime statement.one(D, Row, @TypeOf(options));
             const found = try fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, valuesOf(stmt, Row, options));
             return if (found.len == 0) null else found[0];
@@ -343,6 +349,11 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             options: anytype,
         ) !Streamed(Row) {
             comptime core.checkScope(@TypeOf(c), "db.stream");
+            comptime assertUnlocked(Row, @TypeOf(options), "db.stream",
+                "There is no `tx.stream` to move this to, either: a result set held open " ++
+                    "keeps its connection busy, so nothing else in the transaction could " ++
+                    "run until it closed. Lock the rows with `tx.select` and work through " ++
+                    "what comes back.");
             const stmt = comptime statement.select(D, Row, @TypeOf(options));
             const w = try self.wireOf();
             const rows = try w.run(c.arena(), stmt.sql, valuesOf(stmt, Row, options));
@@ -591,21 +602,28 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
         /// resource in nilo is:
         ///
         /// ```zig
-        /// var tx = try db.begin(c);
+        /// var tx = try db.begin(c, .{});
         /// defer tx.deinit();       // rolls back unless committed
         /// _ = try tx.insert(Order, c, .{ … });
         /// try tx.commit();
         /// ```
+        ///
+        /// `opts` is `.{ .isolation = …, .read_only = … }` and both ride on
+        /// the `BEGIN` itself, so asking for either costs no round trip. It
+        /// is comptime and required — required because every other call in
+        /// this module takes its options where they are used, and a second
+        /// name for the same call with one argument more would be a worse
+        /// answer than one `.{}`.
         ///
         /// The closure form — `db.transaction(c, run, args)`, impossible to
         /// get wrong — was rejected for being a second dialect: Zig has no
         /// closures, so it means a struct holding a function and every
         /// capture passed by hand, and `Stream`, `Socket` and `Body` are all
         /// *hold the thing, `defer` the cleanup* (ADR 0039).
-        pub fn begin(self: *Self, c: anytype) !Tx {
+        pub fn begin(self: *Self, c: anytype, comptime opts: wire_mod.Begin) !Tx {
             comptime core.checkScope(@TypeOf(c), "db.begin");
             const w = try self.wireOf();
-            const inner = try w.begin(c.arena());
+            const inner = try w.begin(c.arena(), opts);
             if (traps_enabled) self.hold(&self.open_transactions, .Add);
             return .{ .db = self, .w = w, .inner = inner };
         }
@@ -617,6 +635,18 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             w: *W,
             inner: W.Tx,
             finished: bool = false,
+            /// The number the next savepoint gets. Counted up and never
+            /// reused, so a savepoint taken inside a loop is a fresh mark
+            /// each time around rather than one that shadows the last.
+            sp_next: u32 = 0,
+            /// The highest savepoint this transaction will still send SQL
+            /// for. Undoing or dropping one destroys every savepoint taken
+            /// after it — that is Postgres's rule, not a choice made here —
+            /// so a handle above this line names a mark the server no longer
+            /// has, and sending its `RELEASE` would abort the transaction
+            /// with *no such savepoint*. It is a stale handle rather than a
+            /// mistake, and `deinit` on one does nothing.
+            sp_live: u32 = 0,
 
             /// Roll back unless something already committed. Written to be
             /// called from a `defer`, which is the only way it will be.
@@ -637,7 +667,7 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
             /// past it ([ADR 0047](../docs/adr/0047-a-deadline-needs-a-connection-you-hold.md)).
             ///
             /// ```zig
-            /// var tx = try db.begin(c);
+            /// var tx = try db.begin(c, .{});
             /// defer tx.deinit();
             /// try tx.deadline(2_000);
             /// const rows = try tx.select(Report, c, .{ .where = … });
@@ -666,6 +696,123 @@ pub fn DbOf(comptime W: type, comptime D: type) type {
                 self.inner.rollback();
                 self.end();
             }
+
+            /// Put a mark inside this transaction that one part of it can be
+            /// undone back to, without ending the whole thing.
+            ///
+            /// ```zig
+            /// var sp = try tx.savepoint();
+            /// defer sp.deinit();                 // undoes it, unless released
+            /// if (tx.insert(Tag, c, .{ .name = name })) |_| {
+            ///     try sp.release();
+            /// } else |err| switch (err) {
+            ///     error.AlreadyExists => sp.rollback(),   // it was there; carry on
+            ///     else => return err,
+            /// }
+            /// ```
+            ///
+            /// **This is what a nested transaction is.** Postgres has no
+            /// nested `BEGIN`, and every library that offers one is writing
+            /// savepoints underneath; nilo writes them where they can be
+            /// seen, because the two do not behave the same way — an inner
+            /// commit here is not durable, it only means the outer
+            /// transaction may still commit it.
+            ///
+            /// It earns its round trip on exactly one path, and it is the
+            /// path that matters: **a statement that fails inside a
+            /// transaction aborts all of it**, so a handler that wants to
+            /// try something and carry on has no other way to do it.
+            pub fn savepoint(self: *Tx) !Savepoint {
+                if (self.finished) return error.QueryFailed;
+                self.sp_next += 1;
+                const id = self.sp_next;
+                try self.inner.savepoint(self.arenaOf(), .mark, id);
+                self.sp_live = id;
+                return .{ .tx = self, .id = id };
+            }
+
+            /// The allocator a savepoint's statement is run with. It reads
+            /// nothing and writes nothing, so there is nothing for it to
+            /// allocate — but the Wire's shape takes one, and a Wire that
+            /// wanted memory here would get the general allocator rather
+            /// than a request arena this call does not have.
+            fn arenaOf(self: *Tx) std.mem.Allocator {
+                return self.db.gpa;
+            }
+
+            /// One mark inside a transaction, and the two ways out of it —
+            /// the same trio `Tx` has, one level in: `deinit` undoes unless
+            /// something kept it, `release` keeps, `rollback` undoes now.
+            pub const Savepoint = struct {
+                tx: *Tx,
+                id: u32,
+                finished: bool = false,
+
+                /// Undo everything since the mark, unless it was released.
+                /// Written to be called from a `defer`, which is the only
+                /// way it will be.
+                pub fn deinit(self: *Savepoint) void {
+                    self.rollback();
+                }
+
+                /// Keep the work, and drop the mark. Fallible, the way
+                /// `tx.commit` is and for the same reason: this is the path
+                /// that is meant to succeed, so a caller wants to hear when
+                /// it did not.
+                pub fn release(self: *Savepoint) !void {
+                    if (!self.live()) return error.QueryFailed;
+                    self.end();
+                    try self.tx.inner.savepoint(self.tx.arenaOf(), .keep, self.id);
+                }
+
+                /// Undo the work and carry on. Cannot fail, the way
+                /// `tx.rollback` cannot: it is called on a path that is
+                /// already handling something, and if the undo does not
+                /// reach the server the next statement on this transaction
+                /// will say so.
+                pub fn rollback(self: *Savepoint) void {
+                    if (!self.live()) return;
+                    self.end();
+                    self.tx.inner.savepoint(self.tx.arenaOf(), .undo, self.id) catch |err| {
+                        std.log.err(
+                            "nilo_sql: a savepoint could not be rolled back to ({s}). The " ++
+                                "transaction around it is the one that will fail next.",
+                            .{@errorName(err)},
+                        );
+                    };
+                }
+
+                /// Whether there is still a mark on the server this handle
+                /// names. False once this handle has been used, and false
+                /// when an outer savepoint or the transaction itself has
+                /// already taken it — see `Tx.sp_live`.
+                fn live(self: *Savepoint) bool {
+                    if (self.finished) return false;
+                    if (self.tx.finished) return false;
+                    return self.id <= self.tx.sp_live;
+                }
+
+                /// Whichever way this handle was used, it is spent, and the
+                /// server has dropped every mark taken after it. A
+                /// `ROLLBACK TO` leaves the mark itself in place — but no
+                /// handle names it any more, so nothing here will send SQL
+                /// for it again.
+                ///
+                /// **There is no leak trap on a savepoint, unlike a
+                /// transaction and a stream, and that is a decision.** Both
+                /// of those count connections that never go back to the
+                /// pool; an abandoned savepoint holds nothing at all — the
+                /// `Tx` around it owns the connection and ends it either
+                /// way. What abandoning one costs is that the work it marked
+                /// is kept rather than undone, which is a bug in the
+                /// handler's logic rather than a resource nobody can
+                /// reclaim, and a Debug-only panic is the wrong shape for
+                /// that.
+                fn end(self: *Savepoint) void {
+                    self.finished = true;
+                    self.tx.sp_live = self.id - 1;
+                }
+            };
 
             fn end(self: *Tx) void {
                 self.finished = true;
@@ -1455,6 +1602,39 @@ fn assertStreamable(comptime Row: type) void {
     }
 }
 
+/// A row lock is only a lock for as long as the transaction holding it lasts,
+/// so a `.lock` outside one is refused rather than sent.
+///
+/// **What makes this worth a Refusal is that the wrong version works.**
+/// `SELECT … FOR UPDATE` on a pooled connection with no transaction around it
+/// runs, answers, and releases the lock before the handler has read the first
+/// row — Postgres wraps a lone statement in a transaction of its own and ends
+/// it immediately. Nothing fails, nothing is logged, and the read-modify-write
+/// the lock was written to protect races anyway, under load, in production.
+/// The statement is legal SQL; it is the promise that is missing, which is
+/// exactly the kind of mistake a compiler can hold.
+///
+/// The same call inside a `Tx` is the intended one, and the message says so.
+fn assertUnlocked(
+    comptime Row: type,
+    comptime O: type,
+    comptime call: []const u8,
+    comptime instead: []const u8,
+) void {
+    comptime {
+        if (@typeInfo(O) != .@"struct") return;
+        if (!@hasField(O, "lock")) return;
+        @compileError(
+            "nilo: `" ++ call ++ "` on " ++ @typeName(Row) ++ " was given a `.lock`, and " ++
+                "there is no transaction to hold it.\n" ++
+                "  A row lock lasts until the transaction around it ends, and this call " ++
+                "has none — Postgres would take the lock, answer, and drop it before the " ++
+                "handler read a row.\n" ++
+                "  " ++ instead,
+        );
+    }
+}
+
 /// What a column's value binds as on the way *to* the database — the mirror
 /// of `WireRead`, and the same mapping read the other way round.
 ///
@@ -1726,13 +1906,13 @@ test "a borrowed row is the same row with its Strs told the truth" {
 /// A handler that opens a transaction and walks away from it. The `defer`
 /// is the whole subject of the test below.
 fn abandonTransaction(db: *FakeDb, c: *nilo.Ctx) !void {
-    var tx = try db.begin(c);
+    var tx = try db.begin(c, .{});
     defer tx.deinit();
     // and no commit
 }
 
 fn commitTransaction(db: *FakeDb, c: *nilo.Ctx) !void {
-    var tx = try db.begin(c);
+    var tx = try db.begin(c, .{});
     defer tx.deinit();
     try tx.commit();
 }
@@ -1784,7 +1964,7 @@ fn touchEverything(db: *FakeDb, c: *nilo.Ctx) !void {
     defer rows.close();
     while (try rows.next()) |_| {}
 
-    var tx = try db.begin(c);
+    var tx = try db.begin(c, .{});
     defer tx.deinit();
     _ = try tx.select(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
     _ = try tx.one(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
@@ -1799,6 +1979,20 @@ fn touchEverything(db: *FakeDb, c: *nilo.Ctx) !void {
     _ = try tx.delete(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
     _ = try tx.deleteReturning(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
     _ = try tx.raw(Person, c, "SELECT 1", .{});
+
+    // Every lock, and both ways out of a savepoint.
+    _ = try tx.select(Person, c, .{ .where = .{ .id = @as(i64, 1) }, .lock = .update });
+    _ = try tx.select(Person, c, .{ .where = .{ .id = @as(i64, 1) }, .lock = .update_nowait });
+    _ = try tx.select(Person, c, .{ .where = .{ .id = @as(i64, 1) }, .lock = .update_skip_locked });
+    _ = try tx.one(Person, c, .{ .where = .{ .id = @as(i64, 1) }, .lock = .share });
+
+    var kept = try tx.savepoint();
+    try kept.release();
+    var undone = try tx.savepoint();
+    undone.rollback();
+    var deferred = try tx.savepoint();
+    deferred.deinit();
+
     tx.rollback();
 }
 
@@ -1839,6 +2033,113 @@ test "a transaction rolls back when nobody commits it" {
     try testing.expectEqual(@as(usize, 1), db.wire.?.rolled_back);
     // The trap's counter is back to zero, which is what `deinit` asserts.
     if (traps_enabled) try testing.expectEqual(@as(usize, 0), db.open_transactions);
+}
+
+/// A handler that nests three savepoints and then unwinds to the outermost,
+/// which is the shape the bookkeeping in `Savepoint.live` exists for.
+///
+/// Undoing the outer one destroys the two inside it **on the server**, so a
+/// `defer` on either that still sent SQL would be asking Postgres to release
+/// a savepoint it no longer has — an error, inside a transaction, which
+/// aborts the whole thing. The handles go stale rather than wrong.
+fn nestSavepoints(db: *FakeDb, c: *nilo.Ctx) !void {
+    var tx = try db.begin(c, .{});
+    defer tx.deinit();
+
+    var outer = try tx.savepoint();
+    defer outer.deinit();
+    var middle = try tx.savepoint();
+    defer middle.deinit();
+    var inner = try tx.savepoint();
+    defer inner.deinit();
+
+    outer.rollback();
+}
+
+test "undoing a savepoint leaves the ones inside it stale rather than wrong" {
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{};
+
+    var app = nilo.App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    try app.get("/nest", nestSavepoints);
+
+    var client = try nilo.testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+    const answer = try client.get(&app, "/nest");
+    try testing.expectEqual(@as(u16, 200), answer.status);
+
+    // Three marks went down, and exactly one undo came back — the two
+    // `defer`s on the savepoints Postgres had already destroyed sent nothing.
+    try testing.expectEqual(@as(usize, 3), db.wire.?.marked);
+    try testing.expectEqual(@as(usize, 1), db.wire.?.undone);
+    try testing.expectEqual(@as(usize, 0), db.wire.?.kept);
+}
+
+/// A handler that keeps the work a savepoint marked, and then takes another.
+/// The second one has to be a fresh mark: reusing the number would name a
+/// savepoint the server dropped with the release.
+fn reuseSavepoint(db: *FakeDb, c: *nilo.Ctx) !void {
+    var tx = try db.begin(c, .{});
+    defer tx.deinit();
+
+    var first = try tx.savepoint();
+    try first.release();
+    // Released once, and the second call does nothing rather than sending a
+    // release for a mark that is gone.
+    try testing.expectError(error.QueryFailed, first.release());
+
+    var second = try tx.savepoint();
+    defer second.deinit();
+    try testing.expectEqual(@as(u32, 2), second.id);
+}
+
+test "a savepoint number is counted up and never reused" {
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{};
+
+    var app = nilo.App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    try app.get("/reuse", reuseSavepoint);
+
+    var client = try nilo.testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+    const answer = try client.get(&app, "/reuse");
+    try testing.expectEqual(@as(u16, 200), answer.status);
+
+    try testing.expectEqual(@as(usize, 2), db.wire.?.marked);
+    try testing.expectEqual(@as(usize, 1), db.wire.?.kept);
+    try testing.expectEqual(@as(usize, 1), db.wire.?.undone);
+}
+
+/// A handler that asks for a transaction nothing may be written in.
+fn readOnlyTransaction(db: *FakeDb, c: *nilo.Ctx) !void {
+    var tx = try db.begin(c, .{ .isolation = .serializable, .read_only = true });
+    defer tx.deinit();
+    _ = try tx.select(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
+}
+
+test "what a transaction is begun with travels down to the wire" {
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{};
+
+    var app = nilo.App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    try app.get("/report", readOnlyTransaction);
+
+    var client = try nilo.testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+    const answer = try client.get(&app, "/report");
+    try testing.expectEqual(@as(u16, 200), answer.status);
+
+    try testing.expectEqual(wire_mod.Isolation.serializable, db.wire.?.began_with.isolation.?);
+    try testing.expect(db.wire.?.began_with.read_only);
 }
 
 /// A handler that opens a result set, closes it, and closes it again. The
@@ -2124,7 +2425,7 @@ test "a deadline reaches the transaction, and only a transaction has one" {
     var run = nilo.Run.init(testing.allocator);
     defer run.deinit();
 
-    var tx = try db.begin(&run);
+    var tx = try db.begin(&run, .{});
     defer tx.deinit();
 
     try testing.expectEqual(@as(?u32, null), db.wire.?.deadline_ms);
@@ -2145,7 +2446,7 @@ test "a deadline on a finished transaction is refused rather than sent nowhere" 
     var run = nilo.Run.init(testing.allocator);
     defer run.deinit();
 
-    var tx = try db.begin(&run);
+    var tx = try db.begin(&run, .{});
     defer tx.deinit();
     try tx.commit();
 

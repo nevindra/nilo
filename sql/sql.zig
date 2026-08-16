@@ -115,6 +115,14 @@ pub const Decimal = types.Decimal;
 pub const Column = wire.Column;
 pub const Error = wire.Error;
 
+/// What a transaction is begun with, and what a read holds on to. Both are
+/// written as literals at the call — `db.begin(c, .{ .isolation = .serializable })`,
+/// `.lock = .update` — so naming either type is for a caller keeping one in a
+/// struct of their own.
+pub const Begin = wire.Begin;
+pub const Isolation = wire.Isolation;
+pub const Lock = dialect.Lock;
+
 /// The marker a Row carries, exported so that a caller writing one can name
 /// it rather than remembering the spelling.
 pub const table_marker = row.marker;

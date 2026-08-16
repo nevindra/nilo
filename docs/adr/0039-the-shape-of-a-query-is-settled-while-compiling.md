@@ -183,7 +183,7 @@ That last step is an inference about what `_state` tracks rather than something 
 A `Tx` is held and released the way every other resource in nilo is held and released:
 
 ```zig
-var tx = try db.begin(c);
+var tx = try db.begin(c, .{});
 defer tx.deinit();          // rolls back unless committed; the connection always returns clean
 ```
 

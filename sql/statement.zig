@@ -84,11 +84,11 @@ pub const Statement = struct {
 
 /// The option names a `SELECT` takes. Anything else is a Refusal, so a
 /// misspelled `.limti` stops at `zig build` rather than being ignored.
-const known = [_][]const u8{ "where", "order", "limit", "offset" };
+const known = [_][]const u8{ "where", "order", "limit", "offset", "lock" };
 
 /// The same list without `.limit`, for `one` — which compiles its own and so
 /// has none to give away.
-const known_one = [_][]const u8{ "where", "order", "offset" };
+const known_one = [_][]const u8{ "where", "order", "offset", "lock" };
 
 /// How many rows the caller is asking for. `one` is not a `select` somebody
 /// narrowed: the ceiling is the module's rather than the caller's, which is
@@ -183,6 +183,11 @@ fn rowsOf(
                 next += 1;
             }
         }
+
+        // Last, which is where the grammar puts it: a lock holds the rows
+        // that came back, so it is written after the clauses that decide
+        // which those are.
+        if (@hasField(O, "lock")) sql = sql ++ lockedBy(D, Row, O);
 
         break :blk .{ .sql = sql, .paths = paths, .params = params, .reserve = reserve };
     };
@@ -923,6 +928,26 @@ fn columnListFrom(
     }
 }
 
+/// The locking clause a `.lock` compiles to.
+///
+/// Written out where it is used, like a sort direction and for the same
+/// reason: which lock a read takes is shape, and a lock chosen at run time is
+/// two statements. The Dialect may have none, and then this is a Refusal
+/// naming it rather than a select that holds nothing.
+fn lockedBy(comptime D: type, comptime Row: type, comptime O: type) []const u8 {
+    comptime {
+        const T = @FieldType(O, "lock");
+        if (T != dialect_mod.Lock and T != @TypeOf(.enum_literal)) @compileError(
+            "nilo: `.lock` was given a " ++ @typeName(T) ++ ".\n" ++
+                "  It is `.update`, `.update_nowait`, `.update_skip_locked` or " ++
+                "`.share`, written out where it is used — which lock a read takes " ++
+                "is settled while compiling.",
+        );
+        const mode: dialect_mod.Lock = writtenValue(O, "lock", dialect_mod.Lock);
+        return D.lock(mode) orelse dialect_mod.noRowLock(D, Row);
+    }
+}
+
 fn orderBy(comptime D: type, comptime Row: type, comptime T: type) []const u8 {
     comptime {
         const info = switch (@typeInfo(T)) {
@@ -1131,6 +1156,35 @@ test "a written limit works beside a condition holding a value from elsewhere" {
     try testing.expect(std.mem.endsWith(u8, s.sql, "WHERE \"age\" > $1 LIMIT 10"));
     try testing.expectEqual(@as(usize, 1), s.paramCount());
     try testing.expectEqual(@as(i32, 18), where_mod.valueAt(o, s.paths[0]));
+}
+
+test "a lock goes on the end, after everything that decides which rows it holds" {
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"email\", \"age\", \"created_at\" FROM \"users\"" ++
+            " WHERE \"id\" = $1 FOR UPDATE",
+        sqlOf(.{ .where = .{ .id = 7 }, .lock = .update }),
+    );
+    // Past the limit and the offset, which is where the grammar puts it.
+    try testing.expect(std.mem.endsWith(
+        u8,
+        sqlOf(.{ .order = .{ .id = .asc }, .limit = 5, .offset = 2, .lock = .update_skip_locked }),
+        "ORDER BY \"id\" ASC LIMIT 5 OFFSET 2 FOR UPDATE SKIP LOCKED",
+    ));
+    try testing.expect(std.mem.endsWith(u8, sqlOf(.{ .lock = .share }), "FOR SHARE"));
+    try testing.expect(std.mem.endsWith(u8, sqlOf(.{ .lock = .update_nowait }), "FOR UPDATE NOWAIT"));
+}
+
+test "a lock carries no parameter, because which lock it is was settled while compiling" {
+    const s = comptime select(Pg, User, @TypeOf(.{ .where = .{ .id = 7 }, .lock = .update }));
+    try testing.expectEqual(@as(usize, 1), s.paramCount());
+}
+
+test "one compiles its LIMIT 1 before the lock, so the lock is still last" {
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"email\", \"age\", \"created_at\" FROM \"users\"" ++
+            " WHERE \"id\" = $1 LIMIT 1 FOR UPDATE",
+        comptime one(Pg, User, @TypeOf(.{ .where = .{ .id = 7 }, .lock = .update })).sql,
+    );
 }
 
 test "offset is numbered after limit" {

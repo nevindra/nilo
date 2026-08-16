@@ -367,17 +367,7 @@ of it — measured at 0 bytes.
 
 ### Next
 
-1. **The calls a service writes every day.** The module reads and writes one
-   row at a time, and the shapes below are the ones a handler reaches for and
-   does not find. Each is a statement this module could settle while compiling,
-   so none of them moves
-   [ADR 0039](./adr/0039-the-shape-of-a-query-is-settled-while-compiling.md)'s
-   line; what they cost is surface, and each wants its axis numbers before it
-   is written.
-   - `SELECT … FOR UPDATE`, savepoints, and an isolation level on `begin`.
-     A `Tx` today is one connection and five verbs, which is not enough to
-     write anything that actually contends.
-2. **Prepared statements, measured first.** Every statement this module sends
+1. **Prepared statements, measured first.** Every statement this module sends
    is already a comptime constant, which is the property that makes a cache
    cheap here and impossible in a framework that assembles its SQL per
    request — the key can be the statement's own identity. What is unknown is
@@ -386,9 +376,9 @@ of it — measured at 0 bytes.
    harness; [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md)'s
    10% is the bar, and `sql/postgres.zig` already says out loud that this is
    the measurement nobody has taken.
-3. **The column types after arrays.** `interval` and `inet` are the same shape
+2. **The column types after arrays.** `interval` and `inet` are the same shape
    of question `text[]` and `numeric` were, and are worth less than either was.
-4. **A second Dialect.** The seam is fitted and only Postgres is filled in,
+3. **A second Dialect.** The seam is fitted and only Postgres is filled in,
    so nothing is known about whether it holds. SQLite is the useful test,
    because it disagrees about the three things the seam abstracts:
    placeholders, list form (`sql/dialect.zig` already refuses a dialect with
@@ -505,7 +495,7 @@ Two whole areas come off before the list starts.
 
 **Schema**
 
-- [ ] `interval`, `inet` → Next 3
+- [ ] `interval`, `inet` → Next 2
 - [ ] Indexes, unique constraints, foreign keys, check constraints. A Row names
       its columns and its key and nothing else about the table is sayable, so
       `checking` cannot notice a missing index and nothing could generate one.
@@ -531,9 +521,8 @@ Two whole areas come off before the list starts.
 
 **Connection and session**
 
-- [ ] Isolation level, savepoints, nested transactions, `FOR UPDATE` → Next 1
-- [ ] Prepared statements → Next 2
-- [ ] A second driver → Next 4
+- [ ] Prepared statements → Next 1
+- [ ] A second driver → Next 3
 - [ ] Read replicas — a second pool, and a rule for which one a statement takes
 - [ ] A query cache
 

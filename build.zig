@@ -157,6 +157,10 @@ const sql_refusals = [_]Refusal{
         .says = "streamed_list.Ticket reads `tags` as a list column, and a streamed row cannot hold one.",
     },
     .{
+        .name = "row_lock_outside_a_transaction",
+        .says = "`db.select` on row_lock_outside_a_transaction.User was given a `.lock`, and there is no transaction to hold it.",
+    },
+    .{
         .name = "batch_update_without_key",
         .says = "a batch update of batch_update_without_key.User does not carry `id`.",
     },
@@ -1052,7 +1056,15 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path(b.fmt("sql/refusals/{s}.zig", .{refusal.name})),
             .target = target,
             .optimize = .Debug,
-            .imports = &.{.{ .name = "nilo_sql", .module = nilo_sql }},
+            // `nilo_http` as well as the module under test, because some of
+            // these mistakes are only reachable through a call that takes a
+            // Scope — `db.select` and friends — and a Scope is a `Ctx` or a
+            // `Run`. A refusal that had to fake one would be testing the
+            // fake.
+            .imports = &.{
+                .{ .name = "nilo_sql", .module = nilo_sql },
+                .{ .name = "nilo_http", .module = nilo_http },
+            },
         });
         const refused = b.addObject(.{ .name = refusal.name, .root_module = module });
         refused.expect_errors = .{ .contains = b.fmt("error: nilo: {s}", .{refusal.says}) };

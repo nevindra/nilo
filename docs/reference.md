@@ -851,7 +851,7 @@ request ([ADR 0041](./adr/0041-a-module-sits-where-the-loop-puts-it.md)).
 | `db.deleteReturning(User, c, .{ .where = … })` | `![]User` — the rows that were removed |
 | `db.stream(User, c, .{ … })` | rows one at a time; see below |
 | `db.raw(User, c, sql, .{ … })` | `![]User` — a statement this module will not write |
-| `db.begin(c)` | `!Tx` |
+| `db.begin(c, .{})` | `!Tx`. `.{ .isolation = …, .read_only = … }` rides on the `BEGIN`; see below |
 
 ### A batch
 
@@ -960,24 +960,26 @@ while (try rows.next()) |u| try s.print("{d},{s}\n", .{ u.id, u.email });
 ### `Tx`
 
 ```zig
-var tx = try db.begin(c);
+var tx = try db.begin(c, .{});
 defer tx.deinit();          // rolls back unless committed
 _ = try tx.insert(Order, c, .{ … });
 try tx.commit();
 ```
 
 `tx` carries every read and write call above — `select`, `one`, `find`,
-`count`, `exists`, `insert`, `update`, `updateReturning`, `delete`,
-`deleteReturning` and `raw` — all down the one connection it holds.
-Forgetting the `defer` is caught in Debug by a counter asserted at
-`db.deinit()`.
+`count`, `exists`, `insert`, `insertMany`, `update`, `updateMany`,
+`updateReturning`, `delete`, `deleteReturning` and `raw` — all down the one
+connection it holds. Forgetting the `defer` is caught in Debug by a counter
+asserted at `db.deinit()`.
 
 | | |
 |---|---|
+| `db.begin(c, .{ .isolation = …, .read_only = … })` | both ride on the `BEGIN` itself, so neither costs a round trip. `.isolation` is `.read_committed`, `.repeatable_read` or `.serializable`; left out means whatever the server is set to |
 | `tx.deadline(ms)` | bound every statement after it, for the life of this transaction. `error.TimedOut` past it |
+| `tx.savepoint()` | `!Savepoint` — a mark one part of the transaction can be undone back to; see below |
 
 ```zig
-var tx = try db.begin(c);
+var tx = try db.begin(c, .{});
 defer tx.deinit();
 try tx.deadline(2_000);                   // one round trip
 const rows = try tx.select(Report, c, .{ .where = … });
@@ -990,6 +992,66 @@ statement it bounds. `db.select` takes whichever connection is free and gives
 it straight back, so there is nothing to set one on. Postgres undoes it when
 the transaction ends, however it ends. For a floor under everything, set it on
 the role: `ALTER ROLE app SET statement_timeout = '30s'`.
+
+#### Holding the rows a read matched
+
+A read inside a transaction can hold what it matched until that transaction
+ends, which is what makes read-modify-write safe.
+
+| | |
+|---|---|
+| `.lock = .update` | hold every matching row against another writer, waiting for anyone already holding it |
+| `.lock = .update_nowait` | the same, except a row somebody else holds fails at once with `error.Locked` |
+| `.lock = .update_skip_locked` | the same, except a row somebody else holds is left out of the answer — a work queue |
+| `.lock = .share` | hold against a writer, and let other readers hold it too |
+
+```zig
+var tx = try db.begin(c, .{});
+defer tx.deinit();
+const held = try tx.select(Item, c, .{ .where = .{ .id = id }, .lock = .update });
+_ = try tx.update(Item, c, .{ .set = .{ .qty = held[0].qty - 1 }, .where = .{ .id = id } });
+try tx.commit();
+```
+
+`find` has no `.lock` — it takes a key rather than options — so a locked read
+of one row is `tx.one(Row, c, .{ .where = .{ .id = id }, .lock = .update })`.
+
+**A `.lock` outside a transaction is a compile error.** Postgres wraps a lone
+statement in a transaction of its own and ends it immediately, so the lock
+would be taken and dropped before the handler read a row: the statement works,
+and the promise it was written for is missing
+([ADR 0054](./adr/0054-contention-is-what-a-transaction-is-for.md)).
+
+#### Savepoints
+
+| | |
+|---|---|
+| `tx.savepoint()` | `!Savepoint` — put a mark down |
+| `sp.deinit()` | undo everything since the mark, unless it was released. For a `defer` |
+| `sp.release()` | `!void` — keep the work, and drop the mark |
+| `sp.rollback()` | undo the work now; the transaction carries on |
+
+```zig
+var sp = try tx.savepoint();
+defer sp.deinit();
+
+if (tx.insert(Tag, c, .{ .name = name })) |_| {
+    try sp.release();
+} else |err| switch (err) {
+    error.AlreadyExists => sp.rollback(),   // it was already there; carry on
+    else => return err,
+}
+```
+
+**This is what a nested transaction is** — Postgres has no nested `BEGIN`, and
+an inner "commit" is not durable; it only means the outer transaction may
+still commit it. It earns its round trip on one path and that path matters: a
+statement that fails inside a transaction aborts all of it, so without a mark
+there is no way to try something and carry on.
+
+Undoing or dropping a savepoint destroys every savepoint taken after it, which
+is Postgres's rule. A `defer sp.deinit()` on one of those sends nothing rather
+than asking the server to release a mark it no longer has.
 
 ### Types
 
@@ -1016,4 +1078,5 @@ than the process.
 | `error.ConstraintViolated` | foreign key, check or not-null. 500: usually the code is wrong |
 | `error.Disconnected` | the database went away, or was never there |
 | `error.TimedOut` | a statement ran past `tx.deadline`. No default status — what a deadline means is the handler's to decide |
+| `error.Locked` | a `.lock = .update_nowait` found a row somebody else is holding. No default status — a held row is a 409, a 503 or a retry depending on the endpoint |
 | `error.QueryFailed` | anything else. The server's text is logged, never sent |

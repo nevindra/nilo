@@ -554,7 +554,7 @@ test "a delete narrows the table and the next select sees it" {
 
 fn rollbackAnInsert(db: *db_mod.Db, c: *nilo.Ctx) ![]Person {
     {
-        var tx = try db.begin(c);
+        var tx = try db.begin(c, .{});
         defer tx.deinit();
         _ = try tx.insert(Person, c, .{
             .id = @as(i64, 77),
@@ -581,7 +581,7 @@ test "a transaction nobody committed leaves the table as it was" {
 
 fn commitAnInsert(db: *db_mod.Db, c: *nilo.Ctx) ![]Person {
     {
-        var tx = try db.begin(c);
+        var tx = try db.begin(c, .{});
         defer tx.deinit();
         _ = try tx.insert(Person, c, .{
             .id = @as(i64, 78),
@@ -1260,7 +1260,7 @@ test "a statement that fails inside a transaction still leaves a rollback that w
     const dirty_before = try postgres.dirtyConnections();
 
     {
-        var tx = try stack.db.begin(&run);
+        var tx = try stack.db.begin(&run, .{});
         defer tx.deinit();
         // `id` is the primary key and row 1 is already there.
         try testing.expectError(error.AlreadyExists, tx.insert(Person, &run, .{
@@ -1281,7 +1281,7 @@ test "a statement that fails inside a transaction still leaves a rollback that w
     // The pool holds two, so five rounds reuse whatever came back.
     var round: usize = 0;
     while (round < 5) : (round += 1) {
-        var tx = try stack.db.begin(&run);
+        var tx = try stack.db.begin(&run, .{});
         defer tx.deinit();
         const found = try tx.select(Person, &run, .{ .where = .{ .id = @as(i64, 1) } });
         try testing.expectEqual(@as(usize, 1), found.len);
@@ -1305,7 +1305,7 @@ test "a statement past its deadline is cancelled by the database" {
     var run = nilo.Run.init(gpa);
     defer run.deinit();
 
-    var tx = try stack.db.begin(&run);
+    var tx = try stack.db.begin(&run, .{});
     defer tx.deinit();
 
     try tx.deadline(100);
@@ -1332,7 +1332,7 @@ test "a deadline ends with its transaction, so the next one starts clean" {
     defer run.deinit();
 
     {
-        var tx = try stack.db.begin(&run);
+        var tx = try stack.db.begin(&run, .{});
         defer tx.deinit();
         try tx.deadline(100);
         try testing.expectError(
@@ -1348,12 +1348,260 @@ test "a deadline ends with its transaction, so the next one starts clean" {
     // this on whichever round reused it.
     var round: usize = 0;
     while (round < 5) : (round += 1) {
-        var tx = try stack.db.begin(&run);
+        var tx = try stack.db.begin(&run, .{});
         defer tx.deinit();
         const slept = try tx.raw(Slept, &run, "SELECT pg_sleep(0.3) IS NULL", .{});
         try testing.expectEqual(@as(usize, 1), slept.len);
         try tx.commit();
     }
+}
+
+// -- what a transaction is begun with, and what a read holds --------------
+
+/// The ids these tests own. High enough not to collide with the fixture and
+/// with the rows the tests above insert, and every one of them is deleted by
+/// the test that made it — the fixture is shared by everything in this file.
+const scratch_id: i64 = 900;
+
+/// One text column, for a `SHOW` — a statement whose answer is a setting
+/// rather than a row of anything.
+const Setting = struct {
+    pub const nilo_table = .{ .name = "unused", .key = .value };
+    value: []const u8,
+};
+
+test "a transaction begun read-only is read-only at the server" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    var tx = try stack.db.begin(&run, .{ .read_only = true });
+    defer tx.deinit();
+
+    // Asked of Postgres rather than proved by a refused insert, and the
+    // reason is the test runner rather than the design: a write here answers
+    // `25006`, `translate` logs the server's message at `err` on the way to
+    // `QueryFailed`, and a test that logs an error is a failed test. What
+    // nilo owes is that the words reached the `BEGIN`; that Postgres then
+    // refuses writes is Postgres's, documented, and not this suite's to
+    // re-prove.
+    const shown = try tx.raw(Setting, &run, "SHOW transaction_read_only", .{});
+    try testing.expectEqual(@as(usize, 1), shown.len);
+    try testing.expectEqualStrings("on", shown[0].value);
+
+    // Reading is the whole of what it may do, and it does it.
+    const found = try tx.select(Person, &run, .{ .where = .{ .id = @as(i64, 1) } });
+    try testing.expectEqual(@as(usize, 1), found.len);
+}
+
+test "a transaction begun with an isolation level says so at the server" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    var tx = try stack.db.begin(&run, .{ .isolation = .serializable });
+    defer tx.deinit();
+
+    const shown = try tx.raw(Setting, &run, "SHOW transaction_isolation", .{});
+    try testing.expectEqualStrings("serializable", shown[0].value);
+}
+
+test "a repeatable-read transaction keeps seeing the row it first read" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const id = scratch_id + 2;
+    _ = try stack.db.insert(Person, &run, .{
+        .id = id,
+        .email = "snapshot@example.dev",
+        .age = @as(i32, 30),
+    });
+    defer _ = stack.db.delete(Person, &run, .{ .where = .{ .id = id } }) catch {};
+
+    {
+        var tx = try stack.db.begin(&run, .{ .isolation = .repeatable_read });
+        defer tx.deinit();
+
+        // The snapshot is taken by the first statement rather than by the
+        // `BEGIN`, so this read is what fixes what the transaction can see.
+        const first = try tx.one(Person, &run, .{ .where = .{ .id = id } });
+        try testing.expectEqual(@as(i32, 30), first.?.age);
+
+        // Somebody else, on the pool's other connection, and committed.
+        const changed = try stack.db.update(Person, &run, .{
+            .set = .{ .age = @as(i32, 31) },
+            .where = .{ .id = id },
+        });
+        try testing.expectEqual(@as(usize, 1), changed);
+
+        // Read committed would answer 31 here. This is the difference the
+        // option buys, and the reason it is worth a word on the `BEGIN`.
+        const again = try tx.one(Person, &run, .{ .where = .{ .id = id } });
+        try testing.expectEqual(@as(i32, 30), again.?.age);
+        try tx.commit();
+    }
+
+    // And outside it, the change was always there.
+    const now = try stack.db.one(Person, &run, .{ .where = .{ .id = id } });
+    try testing.expectEqual(@as(i32, 31), now.?.age);
+}
+
+test "a row another transaction holds is refused rather than waited for" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    var holder = try stack.db.begin(&run, .{});
+    defer holder.deinit();
+    const held = try holder.select(Person, &run, .{
+        .where = .{ .id = @as(i64, 1) },
+        .lock = .update,
+    });
+    try testing.expectEqual(@as(usize, 1), held.len);
+
+    var other = try stack.db.begin(&run, .{});
+    defer other.deinit();
+
+    // `.update` here would block until the first transaction ended, which on
+    // one thread is a test that never finishes. `.update_nowait` is what a
+    // handler asks when it would rather answer than queue, and `Locked` is
+    // the answer it asked for — a plain `QueryFailed` would leave it unable
+    // to tell this from a broken statement.
+    try testing.expectError(error.Locked, other.select(Person, &run, .{
+        .where = .{ .id = @as(i64, 1) },
+        .lock = .update_nowait,
+    }));
+}
+
+test "a locked row is left out of a skipping read rather than blocking it" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    var holder = try stack.db.begin(&run, .{});
+    defer holder.deinit();
+    _ = try holder.select(Person, &run, .{ .where = .{ .id = @as(i64, 1) }, .lock = .update });
+
+    var worker = try stack.db.begin(&run, .{});
+    defer worker.deinit();
+    const taken = try worker.select(Person, &run, .{
+        .where = .{ .age = .{ .gt = @as(i32, 0) } },
+        .order = .{ .id = .asc },
+        .lock = .update_skip_locked,
+    });
+
+    // Whatever else is in the table by now, row 1 is being held and is
+    // therefore not in this answer — which is the whole of what a work queue
+    // needs: two workers running the same statement never get the same row.
+    try testing.expect(taken.len > 0);
+    for (taken) |person| try testing.expect(person.id != 1);
+}
+
+test "a savepoint undoes one failed statement and leaves the transaction alive" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const first = scratch_id + 3;
+    const second = scratch_id + 4;
+    defer _ = stack.db.delete(Person, &run, .{ .where = .{ .id = first } }) catch {};
+    defer _ = stack.db.delete(Person, &run, .{ .where = .{ .id = second } }) catch {};
+
+    {
+        var tx = try stack.db.begin(&run, .{});
+        defer tx.deinit();
+
+        _ = try tx.insert(Person, &run, .{
+            .id = first,
+            .email = "before@example.dev",
+            .age = @as(i32, 20),
+        });
+
+        var sp = try tx.savepoint();
+        defer sp.deinit();
+
+        // Row 1 is in the fixture and `id` is the primary key. Without the
+        // mark above, this is the end of the transaction: Postgres aborts it
+        // and every statement after this one answers `25P02` until somebody
+        // rolls the whole thing back.
+        try testing.expectError(error.AlreadyExists, tx.insert(Person, &run, .{
+            .id = @as(i64, 1),
+            .email = "clash@example.dev",
+            .age = @as(i32, 30),
+        }));
+        sp.rollback();
+
+        // The proof: a statement after the failure, in the same transaction.
+        _ = try tx.insert(Person, &run, .{
+            .id = second,
+            .email = "after@example.dev",
+            .age = @as(i32, 21),
+        });
+        try tx.commit();
+    }
+
+    // Both sides of the savepoint survived, because neither was what was
+    // undone — what the mark took back was one failed statement.
+    try testing.expect(try stack.db.exists(Person, &run, .{ .where = .{ .id = first } }));
+    try testing.expect(try stack.db.exists(Person, &run, .{ .where = .{ .id = second } }));
+}
+
+test "a savepoint rolled back takes its work with it, and released keeps it" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const undone = scratch_id + 5;
+    const kept = scratch_id + 6;
+    defer _ = stack.db.delete(Person, &run, .{ .where = .{ .id = kept } }) catch {};
+
+    {
+        var tx = try stack.db.begin(&run, .{});
+        defer tx.deinit();
+
+        var thrown = try tx.savepoint();
+        _ = try tx.insert(Person, &run, .{
+            .id = undone,
+            .email = "undone@example.dev",
+            .age = @as(i32, 22),
+        });
+        thrown.rollback();
+
+        var held = try tx.savepoint();
+        _ = try tx.insert(Person, &run, .{
+            .id = kept,
+            .email = "kept@example.dev",
+            .age = @as(i32, 23),
+        });
+        try held.release();
+
+        try tx.commit();
+    }
+
+    try testing.expect(!try stack.db.exists(Person, &run, .{ .where = .{ .id = undone } }));
+    try testing.expect(try stack.db.exists(Person, &run, .{ .where = .{ .id = kept } }));
 }
 
 // -- the column type nothing checks at startup ----------------------------
@@ -1845,7 +2093,7 @@ test "a batch inside a transaction is undone with the rest of it" {
 
     const before = try stack.db.count(Person, &run, .{});
     {
-        var tx = try stack.db.begin(&run);
+        var tx = try stack.db.begin(&run, .{});
         defer tx.deinit();
         const stored = try tx.insertMany(Person, &run, &[_]Newcomer{
             .{ .id = 920, .email = "tx-one@batch.dev", .age = 31 },
@@ -1927,7 +2175,7 @@ test "a batch update inside a transaction is undone with the rest of it" {
     defer run.deinit();
 
     {
-        var tx = try stack.db.begin(&run);
+        var tx = try stack.db.begin(&run, .{});
         defer tx.deinit();
         const changed = try tx.updateMany(Person, &run, &[_]Bump{.{ .id = 1, .age = 99 }});
         try testing.expectEqual(@as(usize, 1), changed.len);

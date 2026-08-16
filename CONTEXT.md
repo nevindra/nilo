@@ -223,3 +223,11 @@ _Avoid_: driver, client, connection layer, bulkhead
 **Tx**:
 One transaction in flight, holding a connection until it ends. It ends however the handler leaves — committed, rolled back, or abandoned — because the connection has to go back fit for whoever takes it next.
 _Avoid_: transaction, unit of work, session, scope — and "scope" stays on this list now that a Scope is a thing here, because it is the wrong word for this one specifically: a Scope ends one way and a Tx ends three.
+
+**Savepoint**:
+A mark inside a Tx that one part of it can be undone back to without ending the whole thing. It is what a nested transaction actually is — Postgres has no nested `BEGIN` — and calling it one would promise a durability an inner mark does not have. Ends the three ways a Tx does, one level in: released, rolled back, or abandoned.
+_Avoid_: nested transaction, subtransaction, checkpoint, partial rollback
+
+**Lock**:
+What a read inside a Tx holds its rows with, until that Tx ends. Written where the condition is, settled while compiling, and refused outside a transaction — because there the statement still runs and the promise is gone.
+_Avoid_: row lock, pessimistic locking, select for update, mutex

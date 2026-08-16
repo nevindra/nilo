@@ -14,7 +14,7 @@ connection the transaction is holding. Statements after it that run past the
 number come back `error.TimedOut`.
 
 ```zig
-var tx = try db.begin(c);
+var tx = try db.begin(c, .{});
 defer tx.deinit();
 try tx.deadline(2_000);
 const rows = try tx.select(Report, c, .{ .where = … });

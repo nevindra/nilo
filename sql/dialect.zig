@@ -46,6 +46,31 @@ pub const ListForm = enum {
 /// would fail honest schemas.
 pub const Accepts = ?[]const []const u8;
 
+/// How a read holds on to the rows it matched, until the transaction around
+/// it ends. Written as `.lock = .update` in a select's options.
+///
+/// Four rather than the eight Postgres has, and the four are the jobs: hold a
+/// row to change it, fail rather than queue, take the next one nobody is
+/// holding, and stop a row changing while it is read. `FOR NO KEY UPDATE` and
+/// `FOR KEY SHARE` are weaker forms that exist to reduce contention between
+/// foreign keys, which is a tuning answer rather than a shape — `db.raw`
+/// writes one where it is measured to matter.
+pub const Lock = enum {
+    /// Hold every matching row against another writer, and wait for anyone
+    /// already holding it. The read half of read-modify-write.
+    update,
+    /// The same, except that a row somebody else holds fails the statement
+    /// immediately with `error.Locked` rather than waiting.
+    update_nowait,
+    /// The same, except that a row somebody else holds is left out of the
+    /// answer. A work queue: several workers run the same statement and each
+    /// one gets rows none of the others has.
+    update_skip_locked,
+    /// Hold every matching row against a writer, and let other readers hold
+    /// it too. For a read whose answer must still be true at commit.
+    share,
+};
+
 /// Postgres, and for now the only one.
 pub const Postgres = struct {
     pub const name = "postgres";
@@ -94,6 +119,23 @@ pub const Postgres = struct {
 
     pub fn offset(comptime placeholder_text: []const u8) []const u8 {
         return " OFFSET " ++ placeholder_text;
+    }
+
+    /// How this Dialect spells a row lock, or `null` when it has none — a
+    /// database with one writer at a time has nothing to say here, and the
+    /// caller gets a Refusal naming it rather than a lock that silently is
+    /// not one.
+    ///
+    /// It goes on the end, after `LIMIT` and `OFFSET`, because that is where
+    /// the grammar puts it and because the rows it locks are the rows that
+    /// came back.
+    pub fn lock(comptime mode: Lock) ?[]const u8 {
+        return switch (mode) {
+            .update => " FOR UPDATE",
+            .update_nowait => " FOR UPDATE NOWAIT",
+            .update_skip_locked => " FOR UPDATE SKIP LOCKED",
+            .share => " FOR SHARE",
+        };
     }
 
     /// How a column of type `T` is asked for in a `SELECT` list, given its
@@ -324,9 +366,10 @@ pub const Postgres = struct {
 pub fn assertDialect(comptime D: type) void {
     comptime {
         const owed = [_][]const u8{
-            "name",    "placeholder", "quote",   "list_form",
-            "limit",   "offset",      "accepts", "introspect",
-            "readAs",  "bindAs",      "arrayOf", "qualify",
+            "name",   "placeholder", "quote",   "list_form",
+            "limit",  "offset",      "accepts", "introspect",
+            "readAs", "bindAs",      "arrayOf", "qualify",
+            "lock",
         };
         for (owed) |decl| {
             if (!@hasDecl(D, decl)) @compileError(
@@ -336,6 +379,18 @@ pub fn assertDialect(comptime D: type) void {
             );
         }
     }
+}
+
+/// The message a `.lock` stops with on a Dialect that has no row locks. Its
+/// database serialises writers some other way, so the honest answer is a
+/// Refusal rather than a select that quietly holds nothing.
+pub fn noRowLock(comptime D: type, comptime Row: type) noreturn {
+    @compileError(
+        "nilo: the " ++ D.name ++ " dialect has no row lock, asked for by a read of " ++
+            @typeName(Row) ++ ".\n" ++
+            "  Its database does not let one transaction hold a row against another, " ++
+            "so there is nothing to write that would mean what `.lock` means.",
+    );
 }
 
 /// The message `in` stops with on a Dialect that cannot write one. Here
@@ -409,6 +464,13 @@ test "a qualified relation is two identifiers, not one with a dot in it" {
     // The bug this replaces: one identifier named `app.users`, which is a
     // relation nobody created.
     try testing.expectEqualStrings("\"app.users\"", Postgres.quote("app.users"));
+}
+
+test "a row lock is four spellings, and each one names a different job" {
+    try testing.expectEqualStrings(" FOR UPDATE", Postgres.lock(.update).?);
+    try testing.expectEqualStrings(" FOR UPDATE NOWAIT", Postgres.lock(.update_nowait).?);
+    try testing.expectEqualStrings(" FOR UPDATE SKIP LOCKED", Postgres.lock(.update_skip_locked).?);
+    try testing.expectEqualStrings(" FOR SHARE", Postgres.lock(.share).?);
 }
 
 test "postgres takes a list as one value, so a statement stays a constant" {

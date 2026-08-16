@@ -266,6 +266,24 @@ Nothing about the API changed to get any of it. What *did* change:
   ReleaseFast. A Row that reads an array cannot be streamed, for the reason a
   `Json` column cannot: a streamed row holds only what the read buffer already
   holds.
+- **A transaction takes what it is on the `BEGIN`.** `db.begin(c, .{ .isolation
+  = .serializable, .read_only = true })` — comptime, folded into the statement,
+  so neither option costs a round trip. **`db.begin` now takes an options
+  struct**: an existing call becomes `db.begin(c, .{})`.
+- **A read inside a transaction can hold what it matched.** `.lock = .update`,
+  `.update_nowait`, `.update_skip_locked` or `.share`, written where the
+  condition is. `.update_skip_locked` is a work queue in one option;
+  `.update_nowait` answers `error.Locked`, which is new. A `.lock` on
+  `db.select`, `db.one` or `db.stream` is a compile error, because a lock with
+  no transaction around it is taken and dropped before the handler reads a row
+  ([ADR 0054](docs/adr/0054-contention-is-what-a-transaction-is-for.md)).
+- **`tx.savepoint()`** — a mark one part of a transaction can be undone back
+  to. `sp.release()` keeps the work, `sp.rollback()` undoes it, `sp.deinit()`
+  undoes unless something kept it. This is what a nested transaction is:
+  Postgres has no nested `BEGIN`, and an inner commit is not durable. It is the
+  only way to survive a failed statement inside a transaction, which otherwise
+  aborts all of it.
+
 - **`db.updateMany(Row, c, rows)`** — the batch's other half, and the same
   `unnest` joined against the table rather than selected into it. Each row
   carries the Row's key and is found by it, so there is no `.where` and a
