@@ -4,15 +4,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-nilo is an HTTP framework for Zig 0.16. A plain Zig function is a route: the
-compile-time engine reads its argument list and produces routing, typed input, a
-400 for anything that does not fit, and an OpenAPI document. Nothing is
-annotated.
+**nilo is a toolkit for Zig 0.16 — six modules, of which the largest is an HTTP
+server.** It is not a framework with parts bolted beside it, and that
+distinction decides where new work goes. What the modules share is one idea:
+**your types are the contract, and the compiler is the check.** A plain Zig
+function is a route, and its argument list produces routing, typed input, a 400
+for anything that does not fit, and an OpenAPI document. A plain struct is a
+table, and its fields produce the SQL before the program starts. Nothing is
+annotated anywhere.
+
+The project exists to put the ordinary parts within reach of somebody who picked
+Zig up for an ordinary job — an API, a form, a settings struct, a password to
+store. **A module gets built because that job is common, not because it is
+interesting**, and it gets in only if it is expressible as a type the caller
+already wrote, checked while compiling, with its cost written down (ADR 0018).
+The name is the author's cat; the README says the rest, and the three words
+there — helpful, quick, cheerful — are the order the trades are made in.
 
 **The repository is modules, not one library** (ADR 0041). Which one a file
 belongs in is decided by a single question — does it need the event loop?
 `core/` needs none and is the vocabulary everything else shares; `http/` owns
-the loop and is the HTTP framework; `sql/` needs the loop without owning it.
+the loop and is the server; `sql/` needs the loop without owning it.
 **A module imports downward only, and never a sibling**, which is what lets two
 of them be worked on at once. Nothing under `http/` may be imported by `sql/`,
 and the way a Service reaches request-lifetime memory is a Scope, not a `Ctx`.
@@ -52,6 +64,26 @@ Three files carry context this one deliberately does not repeat:
   reading of 0042 under load, and worth the five minutes before adding a sixth
   module.
 - **`docs/reference.md`** — the whole public API on one page.
+
+## Who works here
+
+The repository is written to be worked on by somebody who did not write it —
+another person, or a model — and that is a constraint on how a change is made
+rather than a hope about who turns up. **Nothing load-bearing may live only in
+the author's head, only in a commit body, or only in this session.** A decision
+goes in an ADR, a number goes in `docs/history.md`, a rule goes in a build step.
+
+Two of those rules are build steps rather than paragraphs, and they are the ones
+to lean on: `zig build layering` refuses an import that goes upward or sideways,
+and `zig build refusals` checks the wording of 91 error messages. Prefer making
+a new rule enforceable that way over writing it down here — a paragraph nobody
+runs is the thing that rots.
+
+`CONTRIBUTING.md` is the outward-facing half of this, and it lists the four
+things a change has to carry: which axis it spends and the number, its refusals,
+its tests in both optimize modes, its documentation. When proposing work,
+propose it in that shape. Anything that changes those four rules, the commands,
+or the layout has to change there and here together.
 
 ## Commands
 

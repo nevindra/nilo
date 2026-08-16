@@ -1,10 +1,14 @@
 # nilo
 
-An HTTP framework for Zig that puts the comfort of writing code first, with performance as a consequence — not the other way round. It is aimed at people who are used to Go or Node and are giving Zig a try.
+A toolkit for Zig — six modules for the ordinary jobs, of which the largest is an HTTP server. It puts the comfort of writing code first, with performance as a consequence rather than the other way round. It is aimed at people who are used to Go or Node and are giving Zig a try.
 
 ## Language
 
 ### Layers
+
+**Toolkit**:
+What the repository is: a set of modules held together by one idea — your types are the contract and the compiler is the check — rather than by an event loop. The server is the largest module and not the centre. A module earns its place by the job being common, and the ones a program does not import cost it nothing.
+_Avoid_: framework, library, suite, batteries-included, ecosystem
 
 **Layer**:
 Where a module sits, decided by one question — does it need the event loop? Core needs none, an App owns one, a Service needs one and does not own it. A module imports downward only and never a sibling, which is what makes two modules two separate pieces of work. Core is the layer that holds more than one module, and the vocabulary sits under the rest of it.
