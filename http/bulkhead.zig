@@ -12,14 +12,23 @@
 //!   connections, and run `handler(state, in, out, deadlines, waker, peer)`
 //!   for each one concurrently until that connection is done. `state` is
 //!   carried through as-is (normally `*App`). Returns when `stop` is set.
-//! - `ready(state, io)` inside that call — run once, after the port is
-//!   taken and before the first connection is accepted, and hand over the
+//! - `ready(state, io, limits)` inside that call — run once, after the port
+//!   is taken and before the first connection is accepted, and hand over the
 //!   `std.Io` the Engine runs on. This is the one thing here that exists
 //!   for a caller rather than for nilo: a connection pool cannot be built
 //!   before `listen()`, because the event loop it has to dial through does
 //!   not exist yet, and a pool built without one blocks the thread every
 //!   request shares (ADR 0040). The type is std's, not zio's, so this hands
 //!   out nothing that names the Engine.
+//! - `Limits.arm`/`release`/`fired` — put a time limit on an operation that
+//!   is *not* a read or write of a connection nilo holds, and say afterwards
+//!   whether that limit is what cancelled it. `Deadlines` below covers
+//!   inbound, where nilo owns the socket and can set a timeout on it;
+//!   outbound the socket belongs to a driver, so the only thing left to bound
+//!   is the unit of work itself. An Engine that cannot cancel an operation in
+//!   flight can no longer meet this contract (ADR 0065). The type is
+//!   `nilo_core`'s, because the caller is a Service and a Service may not
+//!   import `nilo_http`.
 //! - `Peer` — who is at the other end of a connection. `accept` already
 //!   knows, so this asks the Engine for nothing it did not have.
 //! - `Deadlines.limit`/`Deadlines.timedOut` — put a time limit on the next
@@ -72,6 +81,49 @@ const builtin = @import("builtin");
 
 const engine = @import("engine/zio.zig");
 const watchdog = @import("watchdog.zig");
+
+/// Re-exported so nothing above has to know that the type came from a layer
+/// below rather than from here. It lives in `nilo_core` because a Service
+/// holds one and a Service may not import `nilo_http` (ADR 0065).
+pub const Limits = @import("nilo_core").Limits;
+
+// The check ADR 0065 says this file owes. Core declares a fixed slot for the
+// Engine's arming state and cannot measure what goes in it, because it may
+// not name an Engine; this is the one place that can do both.
+comptime {
+    if (engine.limit_state_size > Limits.slot_size) @compileError(std.fmt.comptimePrint(
+        "nilo: this Engine needs {d} bytes to arm an operation deadline and " ++
+            "core.Limits.slot_size is {d}.\n  Raise slot_size in core/limits.zig to at least {d}.",
+        .{ engine.limit_state_size, Limits.slot_size, engine.limit_state_size },
+    ));
+    if (engine.limit_state_align > Limits.slot_align) @compileError(std.fmt.comptimePrint(
+        "nilo: this Engine arms an operation deadline at {d}-byte alignment and " ++
+            "core.Limits.slot_align is {d}.\n  Raise slot_align in core/limits.zig.",
+        .{ engine.limit_state_align, Limits.slot_align },
+    ));
+}
+
+const engine_limits: Limits.VTable = .{
+    .arm = struct {
+        fn f(_: ?*anyopaque, state: *anyopaque, ms: u32) void {
+            engine.armOperation(state, ms);
+        }
+    }.f,
+    .release = struct {
+        fn f(_: ?*anyopaque, state: *anyopaque) void {
+            engine.releaseOperation(state);
+        }
+    }.f,
+    .fired = struct {
+        fn f(_: ?*anyopaque, state: *anyopaque) bool {
+            return engine.firedOperation(state);
+        }
+    }.f,
+};
+
+/// What a Service is handed at startup. There is no `target`: the Engine arms
+/// the fiber that is running, and it already knows which one that is.
+pub const engine_limits_value: Limits = .{ .vtable = &engine_limits };
 
 pub const debug_io = engine.debug_io;
 pub const Peer = engine.Peer;
@@ -350,9 +402,11 @@ pub fn serve(
 
         /// The startup hook, unwrapped from what the Engine carries. The
         /// deadlines travelling beside `state` are a connection's business
-        /// and there is no connection yet, so only the state goes through.
+        /// and there is no connection yet, so only the state goes through —
+        /// along with the one clock that is not a connection's, which is what
+        /// a Service bounds an outbound call with (ADR 0065).
         fn start(carried: Carried, io: std.Io) anyerror!void {
-            return ready(carried.state, io);
+            return ready(carried.state, io, engine_limits_value);
         }
     };
 

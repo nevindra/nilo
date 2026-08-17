@@ -148,5 +148,5 @@ which also checks for leaks.
 
 - [Handlers](./handlers.md) — the rule that decides what each argument means.
 - [Routing](./routing.md) — patterns, precedence, and grouping.
-- The seven examples in [`examples/`](../../examples/), each runnable with
+- The eight examples in [`examples/`](../../examples/), each runnable with
   `zig build run-<name>`.

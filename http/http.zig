@@ -16,6 +16,17 @@ pub const Str = @import("nilo_core").Str;
 /// this is the one a program with no request in it hands to a module that
 /// wants one, `nilo_sql` included.
 pub const Run = @import("nilo_core").Run;
+
+/// Percent coding, both directions
+/// ([ADR 0066](../docs/adr/0066-percent-is-needed-by-two-layers.md)).
+///
+/// The framework decodes with it on the way in, and it is re-exported here
+/// because the caller who needs the *other* direction is a handler: anything
+/// putting somebody else's text into a URL it is about to fetch. That is the
+/// second layer the ADR is named for, and a handler cannot reach `nilo_core`
+/// without adding an import to its build.
+pub const percent = @import("nilo_core").percent;
+
 pub const Method = @import("http1.zig").Method;
 pub const Options = @import("bulkhead.zig").Options;
 
@@ -88,6 +99,28 @@ pub const Mutex = @import("bulkhead.zig").Mutex;
 /// nilo's own caller is password hashing, and there the Gate is already
 /// applied for you — see `Ctx.hashPassword`.
 pub const Gate = @import("bulkhead.zig").Gate;
+
+/// A deadline for an operation that is not a read or a write of a connection
+/// nilo holds — an outbound call, in practice (ADR 0065).
+///
+/// A Service asks for one by taking a third parameter on its start hook, and
+/// bounds one call with it:
+///
+/// ```zig
+/// pub fn nilo_start(self: *Mailer, io: std.Io, limits: nilo.Limits) !void {
+///     self.io = io;
+///     self.limits = limits;
+/// }
+///
+/// var bound: nilo.Limits.Bound = .idle;
+/// defer bound.release();
+/// bound.arm(self.limits, 2_000);
+/// ```
+///
+/// `bound.fired()` afterwards is how a handler tells its own deadline from a
+/// shutdown: both arrive as `error.Canceled`, and only one of them is worth
+/// reporting as a timeout.
+pub const Limits = @import("bulkhead.zig").Limits;
 
 /// Somewhere to put work that is not a request: a fiber of its own, owned
 /// by the server rather than by whatever started it (ADR 0029).
@@ -530,7 +563,6 @@ test {
     // above it.
     _ = @import("names.zig");
     _ = @import("patch.zig");
-    _ = @import("percent.zig");
     _ = @import("convert.zig");
     _ = @import("cookie.zig");
     _ = @import("session.zig");

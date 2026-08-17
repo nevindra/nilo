@@ -15,6 +15,8 @@
 const std = @import("std");
 const names = @import("names.zig");
 
+const Limits = @import("nilo_core").Limits;
+
 /// What a handler needs from the registry. Computed at compile time by the
 /// typed engine, then checked once at startup.
 pub const Requirement = struct {
@@ -46,7 +48,7 @@ pub const Registry = struct {
         /// Set only for a service that declared `nilo_start`. Null is the
         /// ordinary case and costs one branch at startup, never per
         /// request.
-        start: ?*const fn (*anyopaque, std.Io) anyerror!void = null,
+        start: ?*const fn (*anyopaque, std.Io, Limits) anyerror!void = null,
     };
 
     /// The `nilo_start` hook, with the type erased so the registry can hold
@@ -58,11 +60,34 @@ pub const Registry = struct {
     /// on it shares (ADR 0014). Declaring `nilo_start` says "finish
     /// building me once there is a loop", and `listen()` calls it before
     /// accepting anything (ADR 0040).
-    fn startHook(comptime T: type) ?*const fn (*anyopaque, std.Io) anyerror!void {
+    /// **Two arities, and the older one is not deprecated.** A Service that
+    /// only wants the loop writes `nilo_start(self, io)` and is untouched by
+    /// ADR 0065; one that also wants to bound an outbound call writes
+    /// `nilo_start(self, io, limits)`. Both erase to the same three-argument
+    /// pointer, so the registry holds one kind of thing and the branch is a
+    /// `comptime` one paid once per service type.
+    ///
+    /// Widening every hook to three parameters instead would have been one
+    /// line in `sql/db.zig` and a break for every Service written outside this
+    /// repository, for a parameter most of them will not use.
+    fn startHook(comptime T: type) ?*const fn (*anyopaque, std.Io, Limits) anyerror!void {
         if (!@hasDecl(T, "nilo_start")) return null;
+
+        const params = @typeInfo(@TypeOf(T.nilo_start)).@"fn".params;
+        if (params.len != 2 and params.len != 3) @compileError(
+            "nilo: " ++ names.of(T) ++ ".nilo_start takes " ++
+                std.fmt.comptimePrint("{d}", .{params.len}) ++
+                " parameters, and it has to take 2 or 3.\n" ++
+                "  fn nilo_start(self: *" ++ names.of(T) ++ ", io: std.Io) !void\n" ++
+                "  fn nilo_start(self: *" ++ names.of(T) ++ ", io: std.Io, limits: nilo_core.Limits) !void\n" ++
+                "  The second form is for a service that bounds an outbound call with a deadline.",
+        );
+
         return &struct {
-            fn call(erased: *anyopaque, io: std.Io) anyerror!void {
-                return T.nilo_start(@ptrCast(@alignCast(erased)), io);
+            fn call(erased: *anyopaque, io: std.Io, limits: Limits) anyerror!void {
+                const self: *T = @ptrCast(@alignCast(erased));
+                if (params.len == 2) return T.nilo_start(self, io);
+                return T.nilo_start(self, io, limits);
             }
         }.call;
     }
@@ -121,9 +146,9 @@ pub const Registry = struct {
     /// The first failure stops the rest: a server whose database is
     /// unreachable should not go on to open anything else and then answer
     /// requests it cannot serve.
-    pub fn start(self: *const Registry, io: std.Io) !void {
+    pub fn start(self: *const Registry, io: std.Io, limits: Limits) !void {
         for (self.entries.items) |e| {
-            if (e.start) |hook| try hook(e.ptr, io);
+            if (e.start) |hook| try hook(e.ptr, io, limits);
         }
     }
 

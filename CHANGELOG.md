@@ -450,6 +450,93 @@ Nothing you wrote changes. `nilo.Str` is the same declaration it always was.
 - **`zig build test-core`** runs the bottom layer in both modes, and
   `zig test core/core.zig` runs it with no `build.zig` at all. That this works
   is the property the layering exists for, not a convenience.
+- **`nilo_core.percent`** is percent coding, both directions
+  ([ADR 0066](./docs/adr/0066-percent-is-needed-by-two-layers.md)). The
+  decoding half moved down from `http/` and behaves exactly as it did; the
+  encoding half is new, and it is in Core because a Service that signs a URL
+  cannot import `nilo_http` to reach it. `percent.encodeInto(dst, raw, .path)`
+  leaves `/` alone, `.unreserved` escapes it, a space is always `%20`, and hex
+  is uppercase — none of those three is an option, because each is a failure
+  that says nothing when it happens. Nothing you wrote changes: the server
+  decoded path params and query values through this before and still does.
+
+### `nilo_fetch`, and a fourth layer
+
+**Calling somebody else's HTTP API from a handler**, as a module of its own
+([ADR 0070](./docs/adr/0070-a-fitting-borrows-the-loop.md)).
+
+```zig
+const fetch = @import("nilo_fetch");
+
+var api: fetch.Client = .init(gpa, .{});
+try app.provide(&api);
+
+fn charge(api: *fetch.Client, c: *nilo.Ctx) !Receipt {
+    const res = try api.post(c, "https://api.example.com/v1/charges", "amount=500", .{});
+    if (!res.ok()) return nilo.fail.status(502, "the payment service said no", .{});
+    return res.json(Receipt, c);
+}
+```
+
+`std.http.Client` is the client — pool, HTTP/1.1, TLS. What this adds is sixty-five
+lines of the policy a server needs and a script does not, and each line of it
+closes something real:
+
+- **A gate on calls in flight** (32 by default). std's pool bounds *idle*
+  connections and not in-use ones, so 500 concurrent handlers is 500 live
+  connections at 59,151 bytes of buffers each.
+- **A deadline per call** (30s by default), because `std.http.Client` has none
+  and an endpoint that accepts and then goes quiet otherwise holds a handler
+  until the process dies. `error.TimedOut` is this call's own deadline;
+  `error.Canceled` is a shutdown, and the two are told apart rather than
+  guessed at.
+- **A bounded drain**, so refusing a 500 MB response does not download it.
+- **A body ceiling**, enforced while reading, so a lying `content-length` buys
+  nothing.
+- **A `Str` in your Scope**, so the body lives exactly as long as the request
+  and nothing is freed by hand.
+- **The body asked for uncompressed.** `std.http.Client` advertises
+  `Accept-Encoding: gzip, deflate` and then hands back the *compressed* bytes;
+  decompressing is a separate call there, so a caller who copies the obvious
+  four lines gets unreadable bytes and no error to say so. `nilo_fetch` sends
+  `identity`. Decompressing instead would cost a 32 KiB flate window on the
+  handler's stack, which is per *connection* rather than per request
+  ([ADR 0063](./docs/adr/0063-a-handlers-stack-is-per-connection.md)).
+
+A 4xx or a 5xx is a `Response`, not an error — the call worked and the service
+said no. Retries, circuit breakers and rate limiting are deliberately absent:
+they are facts about somebody else's service.
+
+**`nilo_http` does not import it**, so a program that calls nobody links no
+HTTP client, no TLS and no certificate bundle. A program that *does* pays
+**1,688 bytes** for the module and 655,600 for `std.http.Client` and TLS; one
+call costs **one allocation** and **no measurable memory or throughput** over
+calling `std.http.Client` yourself. All four axes, each against that control,
+are in [`bench/result/fetch.md`](./bench/result/fetch.md).
+
+`examples/outbound/` is a working one — `zig build run-outbound`, then
+`curl localhost:8787/repos/ziglang/zig`. `zig build smoke-tls -Dnetwork` calls
+a real HTTPS endpoint and is deliberately not part of `zig build test`.
+
+### Services can bound an outbound call
+
+**`nilo.Limits`**, handed to a service that asks for it, bounds an operation
+that is not a read or write of a connection nilo holds
+([ADR 0065](./docs/adr/0065-the-way-out-was-open-the-clock-was-not.md)).
+
+```zig
+pub fn nilo_start(self: *Mailer, io: std.Io, limits: nilo.Limits) !void {
+    self.io = io;
+    self.limits = limits;
+}
+
+var bound: nilo.Limits.Bound = .idle;
+defer bound.release();
+bound.arm(self.limits, 2_000);
+```
+
+**Nothing you wrote changes.** `nilo_start` still takes `(self, io)`; the
+three-parameter form is for a service that wants a clock, and both compile.
 
 ### `nilo_id`, and a fourth module
 

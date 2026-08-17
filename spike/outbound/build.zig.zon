@@ -1,0 +1,11 @@
+// The empty dependency list is the measurement, not an oversight: if an
+// outbound HTTP client needs no engine to be tested, this file is where that
+// shows up first.
+.{
+    .name = .outbound_spike,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0x77df4c505505f2a9,
+    .dependencies = .{},
+    .paths = .{ "build.zig", "build.zig.zon", "main.zig" },
+}

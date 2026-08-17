@@ -16,7 +16,8 @@ Six ship, and a project links only what it imports
 | `nilo_id` | UUIDs | [below](#nilo_id) |
 | `nilo_config` | settings out of the environment | [below](#nilo_config) |
 | `nilo_pw` | password hashing | [below](#nilo_pw) |
-| `nilo_core` | `Str` and the [Scope](#scope), shared by the rest | [below](#run) |
+| `nilo_fetch` | calling somebody else's HTTP API | [below](#nilo_fetch) |
+| `nilo_core` | `Str`, the [Scope](#scope) and [percent coding](#nilo_corepercent), shared by the rest | [below](#run) |
 
 ```zig
 const nilo = @import("nilo_http");    // the alias everybody writes
@@ -343,6 +344,126 @@ than an error from inside the module.
 `nilo_core` is the module both live in. A project importing `nilo` never has to
 name it — `nilo.Str` and `nilo.Run` are the same declarations — but a program
 with no server in it can depend on `nilo_core` alone.
+
+## `nilo_core.percent`
+
+RFC 3986, both directions. The server decodes every path param and query value
+through it and you never call that half; the encoding half is for building a
+URL or signing one, and a Service can reach it because it is in Core rather
+than behind `nilo_http`
+([ADR 0066](./adr/0066-percent-is-needed-by-two-layers.md)).
+
+```zig
+const percent = @import("nilo_core").percent;
+
+var buf: [256]u8 = undefined;
+const key = percent.encodeInto(&buf, "holiday photos/bali.jpg", .path);
+// "holiday%20photos/bali.jpg"
+```
+
+A handler reaches the same thing as **`nilo.percent`** without adding an import
+— which is the other half of what ADR 0066 is about, and what
+`examples/outbound/` uses to put a path param into a URL it is about to fetch.
+
+| Call | |
+|---|---|
+| `percent.encodedLen(raw, set)` | `usize` — exact, not an estimate: every byte becomes one or three |
+| `percent.encodeInto(dst, raw, set)` | `[]u8` — the part of `dst` used. `dst` must be `encodedLen` or longer |
+| `percent.encodeWrite(w, raw, set)` | straight to a `*std.Io.Writer`, for something assembled a piece at a time |
+| `percent.decode(gpa, raw, plus_as_space)` | `![]const u8` — allocates only if there is something to decode, else hands `raw` back |
+| `percent.decodeInto(dst, raw, plus_as_space)` | `[]u8` — the part of `dst` used |
+| `percent.decodedLen(raw)` | `usize` |
+| `percent.needed(raw, plus_as_space)` | `bool` — whether decoding would change anything |
+
+`set` is `.path`, where `/` is a separator and stays, or `.unreserved`, where
+`/` is data and becomes `%2F`. Everything outside RFC 3986's unreserved set —
+`A-Z`, `a-z`, `0-9`, `-`, `.`, `_`, `~` — is escaped in both, which includes
+`!`, `*`, `'`, `(` and `)` if you are arriving from `encodeURIComponent`.
+
+Three things are not options, because each is a failure that says nothing when
+it happens: **a space is always `%20` and never `+`**, **hex is uppercase**, and
+**there is no allocating encoder** — measure with `encodedLen` or write with
+`encodeWrite`. `decode` allocates because the request path needs it to.
+
+`plus_as_space` is the decoder's only switch, and it is for query values:
+`?q=a+b` means "a b" because HTML forms have encoded it that way since 1995. It
+stays off for path params, where a `+` is a plain `+`.
+
+## `nilo_fetch`
+
+An HTTP client for calling somebody else's API from inside a request. A
+**Fitting**: it borrows the event loop and owns no destination
+([ADR 0070](./adr/0070-a-fitting-borrows-the-loop.md)).
+
+`std.http.Client` is the client — pool, HTTP/1.1, TLS. What this adds is the
+policy a server needs and a script does not, in about sixty lines.
+
+```zig
+const fetch = @import("nilo_fetch");
+
+var api: fetch.Client = .init(gpa, .{});
+try app.provide(&api);
+
+fn charge(api: *fetch.Client, c: *nilo.Ctx) !Receipt {
+    const res = try api.post(c, "https://api.example.com/v1/charges", "amount=500", .{});
+    if (!res.ok()) return nilo.fail.status(502, "the payment service said no", .{});
+    return res.json(Receipt, c);
+}
+```
+
+| Call | |
+|---|---|
+| `client.get(c, url, .{})` | `Response` |
+| `client.post(c, url, body, .{})` | `Response` |
+| `client.put(c, url, body, .{})` | `Response` |
+| `client.delete(c, url, .{})` | `Response` |
+| `client.send(c, method, url, body_or_null, .{})` | for a method the four above do not name |
+| `res.ok()` | `bool` — 2xx |
+| `res.status` | `std.http.Status` |
+| `res.body` | `Str`, in the Scope you passed. Goes when the request does |
+| `res.json(T, c)` | `T`, parsed into the same Scope |
+
+`c` is a Scope — the `*Ctx` a handler was given, or a `nilo.Run` where there is
+no request. Handing over something that is neither is a Refusal naming the call.
+
+**`Client.Settings`**, given to `init`:
+
+| Field | Default | |
+|---|---|---|
+| `max_in_flight` | 32 | calls at once, across every host. Past it a caller waits for a permit rather than opening another connection — an HTTPS one holds 59,151 bytes |
+| `timeout_ms` | 30,000 | how long one whole call may take. `0` is no limit |
+| `max_body` | 8 MiB | a longer body is `error.BodyTooLarge`, enforced while reading |
+| `max_drain` | 64 KiB | how much of an unread body is worth reading to keep a pooled connection. Past it the connection is dropped |
+
+**`Client.Call`**, given per call: `headers`, and `timeout_ms` / `max_body` to
+override the settings above for one call.
+
+**Errors worth naming.** `error.TimedOut` is this call's own deadline;
+`error.Canceled` is the server shutting down underneath it, and the two are
+told apart rather than guessed at. `error.NotStarted` is a call made before
+`listen()` — the client is finished at startup like any other service.
+
+**A 4xx or a 5xx is a `Response`, not an error.** The call worked and the
+service said no; only the caller knows which of those matters.
+
+**The body is asked for uncompressed.** `send` sends
+`Accept-Encoding: identity`, so `res.body` is the body rather than a gzip
+stream. This differs from `std.http.Client`'s default, which advertises gzip
+and then returns the compressed bytes from `Response.reader` — decompressing is
+a separate call there, and a caller who does not make it gets unreadable bytes
+and no error. Decompressing here would cost a 32 KiB flate window on the
+handler's stack, which is per *connection*
+([ADR 0063](./adr/0063-a-handlers-stack-is-per-connection.md)), so identity is
+the trade taken. A server that ignores the header and gzips anyway is an error
+rather than a `Str` full of noise.
+
+`examples/outbound/` is the whole of this against a real API, and
+[`bench/result/fetch.md`](../bench/result/fetch.md) is what it costs on each of
+ADR 0018's four axes.
+
+**What it is not**: a retry policy, a circuit breaker or a rate limiter. Those
+are decisions about somebody else's service and belong to whoever knows what
+that service promises.
 
 ## `nilo_id`
 

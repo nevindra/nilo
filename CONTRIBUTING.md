@@ -25,7 +25,7 @@ Then read these four, in this order. They're the whole background you need:
 | [`README.md`](./README.md) | what this is and what it refuses to be |
 | [`CONTEXT.md`](./CONTEXT.md) | the vocabulary, and the words this project won't use |
 | [`CLAUDE.md`](./CLAUDE.md) | the working brief: layout, commands, invariants, conventions |
-| [`docs/adr/`](./docs/adr/) | 48 decisions, each one naming the alternative it beat |
+| [`docs/adr/`](./docs/adr/) | 70 decisions, each one naming the alternative it beat |
 
 The ADRs are the important one. Before you propose a design change, check
 whether it already has a file. "Why not X?" usually has an answer on record, and
@@ -38,14 +38,15 @@ with a vibe.
 zig build test         # the loop: the suite in Debug, plus the refusals
 zig build test-all     # the above plus the same suite in ReleaseSafe. This is what CI runs
 zig build layering     # check that no module imports upward or sideways
-zig build refusals     # the framework's 56 compile-error checks — NOT the others
+zig build refusals     # the framework's 57 compile-error checks — NOT the others
 zig build refusals-sql # nilo_sql's 41; refusals-config and refusals-pw for the rest
-zig build examples     # build all seven examples
+zig build examples     # build all eight examples
 
 zig build test-core    # only nilo_core, both modes. No engine, no module graph
 zig build test-id      # only nilo_id, the same way
 zig build test-config  # only nilo_config, the same way, plus its refusals
 zig build test-pw      # only nilo_pw, the same way, plus its refusals
+zig build test-fetch   # only nilo_fetch, both modes — a real socket, no Engine
 
 zig build run          # the benchmark server
 zig build profile      # where the time inside one request goes
@@ -56,7 +57,7 @@ zig build fuzz -- --iterations 1000000 --seed 0x…
 Two things worth knowing before they surprise you:
 
 **The refusals never cache.** The compiler keeps nothing from a compilation that
-failed, so all 91 of them get re-analysed on every run. That's why they're the
+failed, so all 110 of them get re-analysed on every run. That's why they're the
 slow part of `zig build test`, and they stay there on purpose.
 
 **The bottom four modules run without the build system.** `zig test core/core.zig`,
@@ -64,6 +65,18 @@ slow part of `zig build test`, and they stay there on purpose.
 work on their own, filters and all. That's not a nicety, it's the entry
 condition for that layer. If a change ever stops one of those commands working,
 the layering broke, not the test.
+
+`nilo_fetch` is one step short of that and for a stated reason — a Fitting
+borrows the loop ([ADR 0070](./docs/adr/0070-a-fitting-borrows-the-loop.md)). It
+needs `nilo_core` in the graph and nothing else:
+
+```
+zig test --dep nilo_core -Mroot=fetch/fetch.zig -Mnilo_core=core/core.zig
+```
+
+That opens a real socket at both ends on `std.Io.Threaded`, with no engine
+anywhere. Same rule as above: if it ever needs one, the module is in the wrong
+layer.
 
 Everything under `http/` reaches the engine and needs the module graph, so
 `zig build test` is the only way to run it. A few files are pure enough to run
@@ -73,7 +86,8 @@ standalone with a filter:
 zig test http/range.zig --test-filter "a suffix range"
 ```
 
-That works for `cookie`, `percent`, `patch`, `names`, `json` and `range`.
+That works for `cookie`, `patch`, `names`, `json` and `range`. Percent coding
+moved to Core, and runs under `zig test core/core.zig` (ADR 0066).
 
 ## What a change has to carry
 

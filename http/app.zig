@@ -601,8 +601,8 @@ pub const App = struct {
     /// and before anything is accepted (ADR 0040). Nothing is kept: a
     /// service that needs the loop after startup took a copy of it here,
     /// and the App has no use for one.
-    fn startServices(self: *App, io: std.Io) anyerror!void {
-        try self.services.start(io);
+    fn startServices(self: *App, io: std.Io, limits: bulkhead.Limits) anyerror!void {
+        try self.services.start(io, limits);
     }
 
     /// Say how many routes the document cannot describe, at the one moment

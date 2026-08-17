@@ -385,6 +385,52 @@ pub const Clocks = struct {
     }
 };
 
+/// Bounding an operation that is **not** a read or a write on a connection
+/// nilo holds — an outbound call by a Service, where the socket belongs to a
+/// driver and there is nothing here to set a timeout on
+/// (ADR 0065).
+///
+/// `Clocks` above is the inbound half and works by setting a timeout on the
+/// stream. This half cannot: it cancels the *fiber* instead, which is what
+/// reaches through `std.Io.net` and `std.http.Client` alike, because every
+/// operation in both carries `Io.Cancelable`.
+///
+/// The three functions take the state as bytes because the type that holds it
+/// lives in `nilo_core`, which may not name an Engine. `bulkhead.zig` checks
+/// at `comptime` that `core.Limits`'s slot is big enough for what is written
+/// here, so the `@ptrCast` below is checked rather than hoped.
+pub const limit_state_size = @sizeOf(zio.AutoCancel);
+pub const limit_state_align = @alignOf(zio.AutoCancel);
+
+/// Give the operation running on this fiber `ms` to finish.
+///
+/// The state is initialised here rather than by the caller because only this
+/// file knows what it is. It is address sensitive from this call until
+/// `releaseOperation` — zio's `AutoCancel` hands `&self.timer` to the event
+/// loop and stores `&self` as its userdata — which is why the whole `Bound`
+/// API takes a pointer.
+pub fn armOperation(state: *anyopaque, ms: u32) void {
+    const cancel: *zio.AutoCancel = @ptrCast(@alignCast(state));
+    cancel.* = .init;
+    cancel.set(.{ .duration = .fromMilliseconds(ms) });
+}
+
+/// Take the deadline off. If the timer already fired, this parks until the
+/// callback has finished with the state rather than returning while something
+/// still points at it.
+pub fn releaseOperation(state: *anyopaque) void {
+    const cancel: *zio.AutoCancel = @ptrCast(@alignCast(state));
+    cancel.clear();
+}
+
+/// Whether this deadline is what cancelled the fiber, as opposed to a
+/// shutdown or somebody else's cancel. Consumes the answer, so it is asked
+/// once, and only after an operation came back `error.Canceled`.
+pub fn firedOperation(state: *anyopaque) bool {
+    const cancel: *zio.AutoCancel = @ptrCast(@alignCast(state));
+    return cancel.check(error.Canceled);
+}
+
 /// What ended a `Wake.wait`.
 pub const Woken = enum {
     /// The socket has something to read.

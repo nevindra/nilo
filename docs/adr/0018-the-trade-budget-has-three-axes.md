@@ -63,6 +63,16 @@ Measured stripped, `ReleaseFast`, on the examples in this repository.
 | A second Dialect, SQL half only ([ADR 0061](./0061-the-second-dialect-is-the-test-of-the-seam.md)) | +0 | +0 |
 | Parsing the database URL rather than letting a driver drop half the options ([ADR 0062](./0062-a-pool-that-dialled-itself-whatever-it-was-told.md)) | +0 | +0 |
 | Four routes in a benchmark, to find out what the memory axis actually measures ([ADR 0063](./0063-a-handlers-stack-is-per-connection.md)) | +0 | +0 |
+| An outbound HTTP client, `nilo_fetch` ([ADR 0070](./0070-a-fitting-borrows-the-loop.md)) | +0 | +0 |
+
+`nilo_fetch` is +0 on both examples because neither imports it, and that is the
+whole of the row rather than an accident: a module nothing names is never
+analysed, so the linker has nothing to drop. Measured on a program that *does*
+import it, against the same program calling `std.http.Client` itself, it is
+**+1,688 bytes** — `std.http.Client` and the TLS stack under it are the other
+655,600, and they are the price of dialling out in Zig rather than of this
+module. [`bench/result/fetch.md`](../../bench/result/fetch.md) has the three
+binaries and the rest of the axes.
 
 The second row is one measurement of six changes because they landed together, which is a worse record than the first row and is noted as such. The split it does show is the useful part: `hello` has one route returning text and pays +6 KB, which is the failure-body writer and nothing else — that part is unconditional. The remaining +8 KB on `rest` is the body describer and the schema walker, and those are generated per body type, so they are paid by applications that have bodies.
 

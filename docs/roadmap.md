@@ -26,6 +26,7 @@ can be worked at the same time, by two people or by one person on two days.
 | Core | `nilo_id` | needs none | [below](#nilo_id--identifiers) |
 | Core | `nilo_config` | needs none | [below](#nilo_config--settings) |
 | Core | `nilo_pw` | needs none | [below](#nilo_pw--hashing-a-password) |
+| Fitting | `nilo_fetch` | borrows it | [below](#nilo_fetch--calling-somebody-elses-api) |
 | App | `nilo_http` | owns it | [below](#nilo_http--the-server) |
 | Service | `nilo_sql` | needs it, does not own it | [below](#nilo_sql--postgres) |
 
@@ -59,16 +60,20 @@ to live. `nilo_id` sits beside it in the same layer and below is only `std`
 
 ### Known gaps
 
-- **A Service has no supported way to dial out.** The Bulkhead covers the way
-  in and nothing covers the way out, so `sql` reaches the network through
-  pg.zig's own zio and a Service written here would have to name zio — which
-  [ADR 0002](./adr/0002-zio-as-the-engine-behind-the-bulkhead.md) permits in
-  exactly one file. It is not urgent with one Service. It is the bill the
-  second one arrives with, and it is its own decision — **not** the one
-  [ADR 0046](./adr/0046-entropy-belongs-to-the-loop.md) answered, which was
-  written down here as though the two were halves of one thing and is not.
-  Reaching the operating system for bytes and reaching the network for a
-  socket have a layer in common and nothing else.
+- **An outbound operation cannot be bounded by time.** This entry used to say a
+  Service had no supported way to dial out at all, and it was wrong in every
+  detail it gave: pg.zig names no zio — it has none in its `build.zig.zon` and
+  reaches the network through `std.Io.net` — and `std.Io` is handed to a
+  Service by `ready(state, io)`
+  ([ADR 0040](./adr/0040-a-service-that-needs-the-loop-is-finished-when-the-loop-exists.md)).
+  `nilo_sql` dials out today, through that door, naming no Engine. **The way
+  out was already open**, and the paragraph that said otherwise was written
+  from the shape of the Bulkhead rather than from reading either dependency.
+
+  What was missing was the clock on it, and `core.Limits` is now that
+  ([ADR 0065](./adr/0065-the-way-out-was-open-the-clock-was-not.md)). What is
+  left is the second caller: `nilo_sql` still has no deadline on a `db.select`
+  outside a transaction, and the mechanism it would use exists now.
 - **The layering step cannot see that an import is only reached from a test.**
   `zig build layering` refuses an import that is not in that module's row of
   the `layers` table, and `sql/db.zig` legitimately names `nilo_http` from a
@@ -91,9 +96,15 @@ to live. `nilo_id` sits beside it in the same layer and below is only `std`
   does gives up running under a plain `zig test`, which ADR 0042 made the entry
   condition for the layer. So the question is unchanged and the shape of its
   answer is not — **the caller that moves this has to be in the App or Service
-  layer**, because one below cannot afford to reach for it. `percent.zig` is the
-  likelier candidate for the same reason it always was: signing a URL needs the
-  encoding half, and whoever signs one is not down here.
+  layer**, because one below cannot afford to reach for it.
+
+  `percent.zig` was named here as the likelier candidate, and it has now gone
+  to Core **without answering this**
+  ([ADR 0066](./adr/0066-percent-is-needed-by-two-layers.md)). What let it go
+  is the one thing `convert` has not got: neither direction of percent coding
+  can fail, so there was no failure to hand upward and nothing to decide about
+  where it goes. That was the cheap half. This is the half that is left, and it
+  is now waiting on a caller of its own rather than on somebody else's move.
 
 ---
 
@@ -216,6 +227,51 @@ of it — measured at 0 bytes.
 
 ---
 
+## `nilo_fetch` — calling somebody else's API
+
+Sixty-five lines of policy in front of `std.http.Client`: a gate on calls in
+flight, a deadline per call, a bounded drain, a body ceiling, and a body that
+comes back as a `Str` in the caller's Scope
+([ADR 0070](./adr/0070-a-fitting-borrows-the-loop.md)). The first **Fitting** —
+it borrows the loop and owns no destination.
+
+### Known gaps
+
+- **A plain call costs 16,495 bytes on every idle connection**, which is the
+  largest per-connection number in the framework and is fiber stack rather than
+  buffers — moving the two client buffers into the request arena was tried and
+  is worth −66 bytes. The lever is in `http/`: giving *stack* pages back
+  between requests, the `MADV_DONTNEED` treatment the connection buffers
+  already get and stacks never have
+  ([ADR 0063](./adr/0063-a-handlers-stack-is-per-connection.md)). It would pay
+  for every handler in the framework rather than only this one.
+  [`bench/result/fetch.md`](../bench/result/fetch.md) has the routes and the
+  two theories that died.
+- **Nothing is measured through TLS.** Every figure in `bench/result/fetch.md`
+  is `http://`, and the 59,151 bytes per HTTPS connection is still std's
+  number read out of its buffer sizes rather than one this repository has put
+  on a scale — 3.6× the plain-HTTP figure, if it holds.
+- **`smoke-tls` skips silently without `-Dnetwork`.** Tolerable only because
+  the step is outside `test` and `test-all`, so nothing that gates a change can
+  be quietly green; a machine with no route out still reports six passing
+  builds and three tests that never ran.
+- **A certificate bundle is loaded per client, not per process.** `std.http.Client`
+  rescans the system roots the first time it makes an HTTPS request. One client
+  per program is the shape the docs push, so this has not bitten — but two
+  would pay twice, and nothing says so at the call site.
+
+### Not decided
+
+- **Whether retries belong anywhere.** Refused for now, and the reason is in
+  the module header: how many times, how long between, and what counts as a
+  failure are facts about somebody else's service. A caller who knows them can
+  write three lines; a default that guesses them turns one outage into a
+  thundering herd. What would change this is a shape that takes the policy as a
+  type rather than a number — which is the same test every other feature here
+  has had to pass.
+
+---
+
 ## `nilo_http` — the server
 
 ### Next
@@ -316,8 +372,11 @@ of it — measured at 0 bytes.
   reading makes the close-code and UTF-8 rules
   ([ADR 0052](./adr/0052-a-message-is-copied-once-and-framed-once.md)) guards
   that have only ever been seen to pass. It needs a build step that listens on
-  a port and drives a Python client at it — the same harness *The standing
-  risks* already names as missing for `sendfile`, and neither exists.
+  a port and drives a client at it. **That harness now exists** —
+  `fetch/deadline.zig` and `zig build test-fetch-engine` stand a real server on
+  a real socket and assert on what comes back over it — so what is left here is
+  writing the WebSocket and `sendfile` cases into that shape rather than
+  inventing one.
 - **The router is still a linear scan.** Indexing the first segment took 44% off
   a hundred-route app and moved
   [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md)'s 10% bar out
@@ -579,14 +638,15 @@ A section rather than a list inside somebody else's, because what decides
 whether one of these gets built is a repository-level seam rather than anything
 in a module that is already here.
 
-- **`nilo_s3` — object storage.** Blocked, and not on the same thing. It needs
-  an outbound socket, and the Bulkhead covers the way in only — see `nilo_core`'s
-  known gaps. Signing a request is the half that is ready: it needs `percent`
-  one layer down, which is the second caller that file has been waiting for.
-- **A `nilo_mail`, a `nilo_redis`, anything else that dials.** All the same
-  blocker as `nilo_s3`, and none of them is a reason to answer it on its own.
-  The seam gets designed once, against two callers, or it gets fitted to
-  whichever one turned up first.
+- **`nilo_s3` — object storage.** Nothing structural is in the way any more.
+  It dials through `nilo_fetch`, bounds a call with `core.Limits`, and signs
+  with `nilo_core.percent`'s encoding half — the three things it was waiting on
+  are built. What is left is S3 itself: SigV4, the bucket, and the four calls.
+- **A `nilo_mail`, a `nilo_redis`, anything else that dials.** Also unblocked,
+  and each is now a Fitting or a Service by the same question rather than a
+  seam to design first: does it hold a connection to a named system, or is it
+  given an address per call
+  ([ADR 0070](./adr/0070-a-fitting-borrows-the-loop.md))?
 
 ---
 
@@ -678,7 +738,7 @@ pattern too.
 | Nothing bounds how many connections one process holds | `.max_connections`, 10,000 by default. Past it a connection is accepted and closed at once, so the failure mode is a client that finds out immediately rather than an OOM kill that takes every in-flight request with it |
 | Spawned work can capture a `Str`, or call a fail function, and both compile | Neither can be caught: Zig has no ownership tracking, and `spawn` takes a plain function that nothing marks as being outside a request. Documented at the function, in the reference and in [ADR 0029](./adr/0029-a-spawned-fiber-belongs-to-the-server.md), and `spawn` takes its arguments by value so the copy is at least the obvious thing to write. A `Str` that escapes this way is the debug staleness trap's problem, and it is the case that trap cannot watch |
 | A fail function in spawned work is safe only because of where a threadlocal gets written | `bulkhead.slot()` falls back to a threadlocal when a fiber has no slot, which spawned fibers never do. It is null on executor threads only because the one thing that sets it does so from inside `zio.blockInPlace`, which runs on a thread-pool worker. Both ends now carry a comment saying so; nothing enforces it, and if it broke, spawned work would write its message into an unrelated request — [ADR 0007](./adr/0007-failure-box-bound-to-the-fiber.md)'s leak by another route |
-| A file response's bytes leave by a route the tests never take | **Not handled.** Every test runs through `testing.Client`, whose writer is `std.Io.Writer.fixed` and carries no `sendFile` in its vtable, so the suite takes std's read/drain fallback — the right bytes, by the route a platform without `sendfile` uses. The splice chain the feature exists for needs a real socket and nothing in the suite opens one. The fix is a build step that listens on port 0 and pulls a file over it; it is not written |
+| A file response's bytes leave by a route the tests never take | **Not handled.** Every test runs through `testing.Client`, whose writer is `std.Io.Writer.fixed` and carries no `sendFile` in its vtable, so the suite takes std's read/drain fallback — the right bytes, by the route a platform without `sendfile` uses. The splice chain the feature exists for needs a real socket, and **the suite now opens one** — `fetch/deadline.zig` and `zig build test-fetch-engine` stand a server on a real port and assert on what comes back over it. So the fix is no longer a harness to invent, only a case to write in that shape; it is still not written |
 | A file response holds a descriptor for as long as the send takes | One per request in flight, so `.max_connections` bounds it — the same number an operator already multiplies for memory. It is closed on every exit from `sendfile.send` including the error ones, and a test counts `/proc/self/fd` across a request so it stays that way ([ADR 0037](./adr/0037-a-file-too-big-to-hold-is-opened-not-read.md)) |
 | A spilled file's ETag is its mtime and size, so two different contents could share one | Accepted, and argued rather than assumed: the alternative is hashing gigabytes at startup, and a weak validator would make `If-Range` unusable for exactly the large downloads that need resuming. It is the tag nginx has served by default for twenty years. A held file is unaffected — it keeps its content hash |
 | `zio.BroadcastChannel` aborts, or in `ReleaseFast` deadlocks, when a fiber parked in `receive` is cancelled | Not used, reported upstream with a standalone reproduction, and **fixed upstream** — a fresh `Waiter` per receive attempt, in zio `ab6873eb`. Not in a release yet: v0.17.0 predates it and is what `build.zig.zon` pins, so the fix arrives whenever nilo next moves the pin. Nothing here depends on it. A waiter node was pushed onto a queue it was already linked into (`simple_queue.zig:43`, from `broadcast_channel.zig:72`). Debug aborted 10 runs in 10, ReleaseSafe 3 in 3, and `ReleaseFast` — which has no such assertion — **hung 17 runs in 20** where a clean run takes 200ms. Cancellation was what reached it: the same program closing the channel and waiting was clean 5 in 5. A shared ring forces the cancel, having no per-consumer close ([ADR 0029](./adr/0029-a-spawned-fiber-belongs-to-the-server.md), [zio#667](https://github.com/lalinsky/zio/issues/667)) |

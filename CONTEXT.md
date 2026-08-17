@@ -1,6 +1,6 @@
 # nilo
 
-A toolkit for Zig — six modules for the ordinary jobs, of which the largest is an HTTP server. It puts the comfort of writing code first, with performance as a consequence rather than the other way round. It is aimed at people who are used to Go or Node and are giving Zig a try.
+A toolkit for Zig — seven modules for the ordinary jobs, of which the largest is an HTTP server. It puts the comfort of writing code first, with performance as a consequence rather than the other way round. It is aimed at people who are used to Go or Node and are giving Zig a try.
 
 ## Language
 
@@ -21,6 +21,10 @@ _Avoid_: utils, common, shared, base, prelude
 **Tool module**:
 A module in the bottom layer that is not the vocabulary — one job, no event loop, and nothing above it in its imports. It may name Core, which is not a sibling because a vocabulary is not a peer of anything, and it may not name another tool module. Whether it runs under a plain `zig test` is the entry condition rather than a nicety: one that cannot is in the wrong layer.
 _Avoid_: helper, utility, library, plugin, package
+
+**Fitting**:
+A module that borrows the event loop and owns no destination. It is handed `std.Io` and given an address on every call, so it holds no connection to any named system — which is what separates it from a Service. It may name Core and nothing above it, and its tests run under `std.Io.Threaded` with no engine and no module graph beyond Core: the entry condition rather than a nicety, the same way a Tool module's plain `zig test` is.
+_Avoid_: adapter, client, transport, driver, connector, integration
 
 **Engine**:
 The bottom layer, the one that deals with the operating system: accepting connections, reading and writing bytes. Knows nothing about HTTP.

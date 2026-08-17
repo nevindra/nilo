@@ -31,6 +31,7 @@
         "id",
         "config",
         "pw",
+        "fetch",
         "http",
         "sql",
         "LICENSE",
