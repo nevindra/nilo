@@ -1,0 +1,13 @@
+{
+  "name": "nilo-compare-sql-node",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@prisma/client": "^6.1.0",
+    "drizzle-orm": "^0.38.0",
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "prisma": "^6.1.0"
+  }
+}

@@ -11,17 +11,25 @@ generator. The long answer is that two of the numbers this repository had
 already published were wrong, and finding that out was worth more than the
 optimisation was.
 
-Two harnesses produce these figures and they answer different questions:
+Three harnesses produce these figures and they answer different questions:
 
 - **`zig build bench-sql`** (`bench/sql.zig`) — one connection, one statement
   at a time, 20,000 rounds a side after 2,000 warm-up. What an *operation*
   costs.
 - **`zig build bench-sql-server`** (`bench/sql_server.zig`) — a server with
   four routes, driven by wrk. What a *service* does with that saving.
+- **`bench/compare-sql/ops.py`** — ten libraries in four languages over eleven
+  operations, every ORM paired against the raw driver of its own language.
+  Whether the cost is nilo's, its driver's, or nobody's — [§8](#8-ten-clients-four-languages-eleven-operations).
 
 The second is the one that matters and the first is the one that explains it.
 A per-operation saving measured only unloaded understates what it is worth at
 a pool, by two to three times — see [§2](#2-what-that-is-worth-to-a-server).
+
+The third one carries a lesson that applies to the other two and to anything
+paired: **a confidence interval pooled across passes is over-confident**, and it
+nearly published five differences that do not survive being asked twice. §8 has
+the rule that replaced it.
 
 ## The machine
 
@@ -266,6 +274,212 @@ Two smaller figures for the same axis: a pool connection is **~7 kB** idle, and
 the prepared-statement cache is **0.9 kB a connection** — 56 kB across a pool
 of 64 with one statement in flight, paid by pg.zig rather than by nilo.
 
+## 8. Ten clients, four languages, eleven operations
+
+`bench/compare-sql/`, a second harness with a different question: not what
+`nilo_sql` costs against itself, but what it costs against everybody else.
+Ten libraries — `nilo_sql`/pg.zig, GORM/pgx, diesel-async and SQLx over
+tokio-postgres, Drizzle and Prisma over node-postgres — each doing the same
+eleven operations. **Over a unix socket, 900 samples a library, two complete
+runs of three passes each.** The report page is
+`bench/compare-sql/report.html`.
+
+Every ORM is paired against the raw driver of *its own* language. Four of them
+are literally built on that driver, so the subtraction is clean; SQLx and Prisma
+bring their own, and those rows are marked rather than read as an ORM cost.
+
+### The method correction, which is the finding that mattered most
+
+**A pooled confidence interval over three passes is over-confident, and it
+nearly published five results that do not exist.**
+
+Pooling 900 blocks narrows the interval on the assumption that the blocks are
+exchangeable. They are not: each pass is a separate session with its own
+thermal state. Split back per pass, every one of `nilo_sql`'s differences
+changed sign — `key` read +212, +178, **−147** ns — while each pooled interval
+excluded zero and would have been reported as real. Run it twice and the same
+thing happens across runs: the wide scan read **−35,008 ns in run 1 and +5,387
+in run 2**.
+
+GORM, Drizzle, Prisma and diesel-async held their sign in all six
+pass-measurements with swings of 0.4–7%. So the split does not separate a
+reliable box from an unreliable one. It separates a difference the harness can
+resolve from one it cannot.
+
+The rule now, enforced in `ops.py`, `stability.py` and `artifact_data.py`: a
+difference is real only when the interval excludes zero **and all six
+pass-measurements agree which arm was faster.** `stability.py` checks that
+inside one run, `compare_runs.py` across two — and the "before" it compares
+against is run 1's *pass 3 alone*, the only pass taken on a box as quiet as the
+re-run's. Comparing against run 1's pooled figure would have credited the re-run
+with an improvement it did not earn, which is the same mistake in a mirror.
+
+**Two things that rule does not do, both found by a peer session hitting them
+in a harness of the same shape.**
+
+- **It filters noise, not validity.** Six measurements agreeing on a direction
+  says the difference is resolvable; it does not say the difference is a *cost*.
+  Two things bounded by different resources produce a tight, repeatable,
+  meaningless number — the peer's control saturated memory bandwidth while the
+  route subtracted from it was throttled upstream, and the rule passed. Every
+  paired comparison in §8 sends the same SQL over the same connection, so the
+  differences here are costs by construction, but **it is reading the two code
+  paths that establishes that, not the rule.**
+- **The control has to do the allocation the real path does**, not merely produce
+  the same bytes — and when it does not, say which way the asymmetry cuts. On
+  every multi-row shape here `nilo_sql` builds and returns a slice of Rows while
+  the raw arm accumulates an `i64` and never allocates an array, so **the bias
+  runs against nilo**: every `nilo_sql` figure in §8 is a ceiling. Same for
+  `insertMany`'s one array per column against the control's stack arrays. Left
+  as-is and disclosed rather than fixed, because `db.select` returning a slice
+  *is* the thing being measured, and a control that built no slice would be
+  measuring a nilo nobody can call. It also makes the read finding *stronger*:
+  building that array still lands under the resolution floor.
+
+Three habits came out of it and all three are checks rather than paragraphs:
+
+- **Warm up across every shape before timing any of them.** Warming each shape
+  immediately before its own block made whichever shape ran first read 32 µs in
+  its opening blocks and 24.6 µs in its closing ones — a 23% slide that looked
+  exactly like a finding.
+- **Every arm must produce an identical checksum** over what it decoded. That is
+  what stops a library buying speed by decoding lazily.
+- **`ops.py` runs `pgrep` for every candidate binary before each run** and warns
+  if a previous one is still alive. `subprocess.run` waits on the direct child
+  and nothing else.
+
+### Reading
+
+Medians, nanoseconds per operation. `raw` marks a driver with nothing above it.
+
+| | 1 row × 4 | 1000 × 4 | 1 row × 20 | 1000 × 20 |
+|---|---|---|---|---|
+| raw pg.zig | 9,405 | **92,774** | 11,507 | **374,716** |
+| `nilo_sql` | 9,916 | 93,728 | 11,576 | 380,282 |
+| raw pgx | 7,774 | 117,180 | 9,802 | 376,328 |
+| GORM | 10,697 | 484,094 | 15,446 | 2,020,551 |
+| raw tokio-postgres | **6,204** | 134,165 | **7,759** | 484,360 |
+| diesel-async | 7,417 | 164,208 | 9,543 | 439,818 |
+| SQLx | 6,217 | 317,826 | 8,618 | 941,378 |
+| raw node-postgres | 11,014 | 697,383 | 17,497 | 2,455,166 |
+| Drizzle | 33,674 | 667,060 | 65,136 | 2,739,296 |
+| Prisma | 66,546 | 2,372,744 | 126,072 | 8,993,099 |
+
+**Two orderings, and which one applies depends on the shape.** On one row the
+round trip dominates and six of the ten land inside 6.2–11 µs. On a thousand
+rows of twenty columns the round trip is a rounding error, pure decode is what
+is left, and tokio-postgres — *fastest* at one row — falls to 1.29× while
+pg.zig leads.
+
+`nilo_sql`'s difference from pg.zig is **not measurable on any of the four**,
+by the rule above. That is the result, and it is a stronger one than the
++0.29 ns/value the pooled interval offered.
+
+Two ORMs beat the driver they sit on, both surviving all six measurements:
+**Drizzle is 60,283 ns faster than raw node-postgres** on the narrow scan and
+**diesel-async is 46,601 ns faster than raw tokio-postgres** on the wide one.
+A driver's default row representation can cost more than the struct a mapper
+fills directly — node-postgres builds a name-keyed object per row.
+
+### Writing and deleting
+
+| | insert | 100 in one statement | update | delete | tx |
+|---|---|---|---|---|---|
+| raw pg.zig | 12,252 | **134,554** | 12,133 | 11,168 | 28,872 |
+| `nilo_sql` | 15,778 | 140,428 | 11,508 | 13,584 | 31,265 |
+| raw pgx | 12,274 | 157,234 | 10,251 | 10,649 | 28,455 |
+| GORM | 56,194 | 401,920 | 52,609 | 57,867 | 67,035 |
+| raw tokio-postgres | **10,553** | 143,848 | 9,412 | **9,165** | 24,666 |
+| diesel-async | 31,564 | 273,988 | 28,436 | 14,668 | 47,753 |
+| SQLx | 13,052 | 169,629 | **9,366** | 12,690 | **24,350** |
+| raw node-postgres | 16,596 | 279,985 | 13,435 | 13,866 | 38,874 |
+| Drizzle | 39,913 | 1,016,878 | 38,318 | 33,932 | 90,911 |
+| Prisma | 77,152 | 1,395,005 | 74,535 | 74,268 | 221,707 |
+
+**These numbers only exist because `synchronous_commit` is off** for that
+throwaway database. With it on, one autocommitted INSERT is **660 µs** and every
+library reads the same, because what is being timed is an fsync of the WAL. That
+is a true number about the workload and a useless one about the comparison, and
+it is reported here rather than replaced.
+
+**Single-row writes spread 4–8× while decoding nothing.** There is no bulk work
+to hide a fixed cost behind, so what separates the field is how many layers a
+call crosses before it becomes a statement.
+
+**The batch shape measures two strategies, not two implementations.** pg.zig and
+`nilo_sql` send one array per column and `unnest` server-side, so the statement
+text is a constant whatever the batch size (ADR 0053). GORM, Diesel, Drizzle and
+Prisma build a multi-row VALUES, so the text grows with the batch and Postgres
+parses a new statement every time: 1.3 µs a row against 14 µs.
+
+**`nilo_sql`'s only two measurable costs in the whole matrix are here** —
+`insert` **+2,966 ns** and `delete` **+1,673 ns** over raw pg.zig, both holding
+across all six measurements. `update`, which does nearly the same work, is not
+measurable. All three go through prepared statements with the same comptime plan
+name and all three return one row.
+
+**The obvious explanation is an extra packet, and it is wrong.** The gap is
+almost exactly one unix-socket round trip (~2.6 µs), so `OPS_ARMS=nilo|raw` was
+added to run one arm alone — `strace` cannot tell two interleaved arms apart —
+and the count came back identical:
+
+| shape | raw pg.zig | `nilo_sql` |
+|---|---|---|
+| insert | 4.04 socket calls/op | 4.04 |
+| update | 4.00 | 4.00 |
+| delete | 4.12 | 4.12 |
+
+Marginal over 100 operations by the same subtraction `census.py` uses, and
+`readv`/`sendmsg` split evenly in both arms. **Same packets, same round trips,
+so the cost is CPU inside the process.** Why it lands on insert and delete and
+not on update is open, and **the next probe is a profile rather than a packet
+count** — which is the whole value of having killed the plausible answer first.
+
+### pg.zig: the best decoder here, and one round trip wasted
+
+The driver question this sweep was run to answer, settled from the bytes on the
+socket. For a prepared statement **already in the cache**:
+
+```
+pg.zig    sendmsg  5 B  S       -> readv     6 B  Z      <- carries no work
+          sendmsg 44 B  B E H   -> readv    40 B  2 D C
+pgx       write   88 B  B D E S -> read     40 B  2 T D C Z
+tokio-pg  sendto  32 B  B E S   -> recvfrom 40 B  2 D C Z
+```
+
+`conn.zig:243`, on the cache-hit branch, writes a standalone `Sync` and waits
+for `ReadyForQuery` before sending Bind and Execute. **Caching the statement
+saves the server's Parse and does not save the round trip.**
+
+| driver | syscalls/query | round trips | `SELECT 1` unix | `SELECT 1` bridge |
+|---|---|---|---|---|
+| pg.zig | 4.00 | **2** | 8,080 | 24,335 |
+| pgx | **2.05** | 1 | 5,364 | 15,146 |
+| tokio-postgres | 4.01 | 1 | **4,758** | 14,288 |
+| node-postgres | 4.66 | 1 | 7,208 | — |
+
+The extra trip is ~2.6 µs over a unix socket and ~9.2 µs over the Docker bridge,
+which is why pg.zig's deficit roughly triples with the transport. **This is why
+§1's single-row figures sit where they do, and it is upstream of nilo entirely.**
+
+### Peak RSS of the benchmark process
+
+| Zig | Rust | Go | Node |
+|---|---|---|---|
+| **4,116 kB** | 5,916 kB | 23,448 kB | 341,924 kB |
+
+One connection, the same eleven operations. Not memory per connection — the cost
+of the runtime existing, which is the figure that decides container density.
+
+### What is not in this section
+
+One connection, no pool, no HTTP — which is what makes the per-operation costs
+clean and what leaves the service question open. §2 is the warning: a
+per-operation saving measured only unloaded understated what it was worth at a
+pool by two to three times. **Every difference above could change size or
+direction behind a pool**, and `drive.py` is the harness that has not been
+built.
+
 ## Reproducing this
 
 ```bash
@@ -290,6 +504,30 @@ matches the invoking shell's own command line and kills the shell — it silentl
 discarded an edit and voided a whole pool sweep in this cycle. Keep the `$!`
 PID.
 
+For §8, which needs four toolchains and the fixture:
+
+```bash
+cd bench/compare-sql
+psql "$DATABASE_URL" -f fixture.sql        # five tables, deterministic timestamps
+
+cd zigsql && zig build -Doptimize=ReleaseFast && cd ..
+cd go && go build -o go-ops ops.go && cd ..
+cd rust && cargo build --release && cd ..
+cd node && npm install && npx prisma generate --schema schema.prisma && cd ..
+
+TRANSPORT=unix PASSES=3 python3 ops.py     # the sweep, round-robin
+python3 summarise.py                       # wall clock and paired, per shape
+python3 stability.py                       # do the passes agree on the sign?
+python3 compare_runs.py old.json new.json  # do two runs agree?
+python3 census.py                          # syscalls per prepared round trip
+```
+
+**Run the sweep twice and keep both files.** One run cannot tell you whether a
+difference is resolvable — that is what `compare_runs.py` is for, and it is the
+check §8 exists because of. Ask any other session on the machine to stay off the
+cores first; a peer's `cargo build --release` with LTO inside the window is worth
+30% of the wall clock and an unknown amount of the numbers.
+
 ## Is this as fast as it gets?
 
 No, and the remaining levers are worth ranking honestly, because the biggest
@@ -301,12 +539,18 @@ connection string rather than a change to nilo. This is the advice, and it is
 now in `docs/guide/sql.md`. Anybody benchmarking nilo through a published
 Docker port is measuring iptables.
 
-**2. Pipelining, unavailable.** [ADR
-0059](../../docs/adr/0059-a-round-trip-is-not-the-cost-worth-chasing.md)
-refused chasing the round trip and §5 is why that was right — the round trip is
-mostly kernel, and pipelining is the only thing that amortises it. pg.zig sends
-one message and waits; changing that is upstream work, not nilo's. If it
-arrives, the ~15.7 µs of system time per query is what it eats into.
+**2. One wasted round trip in pg.zig, ~2.6 µs, upstream but small.** This lever
+was written as "pipelining, unavailable" and §8 splits it in two. Pipelining
+proper is still unavailable and [ADR
+0059](../../docs/adr/0059-a-round-trip-is-not-the-cost-worth-chasing.md) was
+right to refuse it: the round trip is mostly kernel, and only pipelining
+amortises it. But **half of what pg.zig spends is not the round trip being
+expensive, it is pg.zig taking two where pgx and tokio-postgres take one.**
+`conn.zig:243` writes a standalone `Sync` on the prepared-statement cache-hit
+path and waits for `ReadyForQuery` before it sends Bind and Execute. Coalescing
+those is a small, local change rather than a protocol rewrite — and it is the
+whole of nilo's single-row deficit against Rust in §8. Still upstream work, but
+of a completely different size from pipelining.
 
 **3. Releasing a fiber's stack, blocked on zio.** §7 says an ordinary database
 route holds 17 kB an idle connection and most of it is stack that will never be
@@ -343,7 +587,12 @@ is the socket, and after that it is somebody else's repository.**
   either way, but nothing here says what a real schema does.
 - **A fixed-rate generator.** wrk's tail is subject to coordinated omission.
   The p99 numbers are comparable to each other and not to a service's SLO.
-- **A concurrent write workload.** Every table above reads. Row locks,
-  transactions and `insertMany` have correctness tests and no benchmark.
+- **A *concurrent* write workload.** §8 measures insert, batch, update, delete
+  and a transaction, so writes are no longer unmeasured — but on one connection.
+  Row locks and contention between writers still have correctness tests and no
+  benchmark.
+- **The comparison behind a pool.** §8 is ten libraries on one connection. §2 is
+  the warning that says those figures understate by two to three times what a
+  pool sees, and nothing has been run to find out by how much per library.
 - **A NIC.** No table here crosses a wire. A deployment where the database is a
   network hop away pays more per query than the worst row in §3.

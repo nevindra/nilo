@@ -1,0 +1,1263 @@
+<title>Ten Clients, One Postgres</title>
+
+<style>
+/* ---------------------------------------------------------------- tokens */
+/* Light is the base set; the two dark blocks below redefine only tokens, so
+   no colour is ever declared for the first time inside a media query. */
+:root {
+  --ground:     #EDF0EF;
+  --surface:    #F9FBFA;
+  --surface-2:  #E4E9E8;
+  --ink:        #16232A;
+  --ink-soft:   #55676F;
+  --ink-faint:  #81959C;
+  --rule:       #CBD5D5;
+  --rule-soft:  #DDE4E3;
+
+  /* The library under test wears Zig's amber, deepened until it sits on
+     paper. The raw drivers it is measured against wear slate — they are the
+     reference, not the finding. */
+  --accent:     #A85B14;
+  --accent-dim: #C68A4E;
+  --control:    #4A6C78;
+  --control-dim:#8AA5AE;
+
+  --good:       #2C6E52;
+  --warn:       #8A6716;
+  --bad:        #96412F;
+
+  --mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", "IBM Plex Mono",
+          Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+          Arial, sans-serif;
+
+  --col: 66ch;
+  --band: 1080px;
+}
+
+:root:not([data-theme="light"]) {
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground:     #0D1418;
+    --surface:    #141E23;
+    --surface-2:  #1B282E;
+    --ink:        #DEE7E6;
+    --ink-soft:   #96A9AE;
+    --ink-faint:  #6B7F85;
+    --rule:       #26343A;
+    --rule-soft:  #1E2A30;
+
+    --accent:     #E4A059;
+    --accent-dim: #8C6236;
+    --control:    #7FA4B1;
+    --control-dim:#4A646E;
+
+    --good:       #58AC85;
+    --warn:       #C7A257;
+    --bad:        #D57C6B;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --ground:     #0D1418;
+  --surface:    #141E23;
+  --surface-2:  #1B282E;
+  --ink:        #DEE7E6;
+  --ink-soft:   #96A9AE;
+  --ink-faint:  #6B7F85;
+  --rule:       #26343A;
+  --rule-soft:  #1E2A30;
+
+  --accent:     #E4A059;
+  --accent-dim: #8C6236;
+  --control:    #7FA4B1;
+  --control-dim:#4A646E;
+
+  --good:       #58AC85;
+  --warn:       #C7A257;
+  --bad:        #D57C6B;
+}
+
+/* ----------------------------------------------------------------- base */
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 17px;
+  line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap {
+  max-width: var(--band);
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+.col { max-width: var(--col); }
+
+p { margin: 0 0 1.1em; }
+p:last-child { margin-bottom: 0; }
+
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+strong { font-weight: 650; }
+em.q { font-style: normal; color: var(--ink-soft); }
+
+code, .mono { font-family: var(--mono); }
+
+/* ------------------------------------------------------------- masthead */
+.masthead {
+  border-bottom: 1px solid var(--rule);
+  background: var(--surface);
+  padding: 56px 0 36px;
+}
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin: 0 0 18px;
+}
+
+h1 {
+  font-family: var(--mono);
+  font-size: clamp(30px, 5.2vw, 48px);
+  line-height: 1.08;
+  letter-spacing: -0.03em;
+  font-weight: 600;
+  margin: 0 0 20px;
+  text-wrap: balance;
+  max-width: 20ch;
+}
+
+.lede {
+  font-size: 19px;
+  line-height: 1.58;
+  color: var(--ink-soft);
+  max-width: 60ch;
+}
+.lede strong { color: var(--ink); font-weight: 600; }
+
+/* the measurement stamp — what the numbers were taken through */
+.stamp {
+  margin: 32px 0 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+  gap: 1px;
+  background: var(--rule-soft);
+  border: 1px solid var(--rule-soft);
+}
+.stamp > div {
+  background: var(--surface);
+  padding: 12px 14px;
+}
+.stamp dt {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin: 0 0 3px;
+}
+.stamp dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--ink);
+  word-break: break-word;
+}
+
+/* ------------------------------------------------------------- sections */
+section { padding: 56px 0; border-bottom: 1px solid var(--rule-soft); }
+section:last-of-type { border-bottom: 0; }
+
+.kicker {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0 0 10px;
+}
+
+h2 {
+  font-family: var(--mono);
+  font-size: clamp(23px, 3.2vw, 30px);
+  line-height: 1.18;
+  letter-spacing: -0.02em;
+  font-weight: 600;
+  margin: 0 0 16px;
+  text-wrap: balance;
+}
+
+h3 {
+  font-family: var(--mono);
+  font-size: 17px;
+  letter-spacing: -0.01em;
+  font-weight: 600;
+  margin: 34px 0 10px;
+}
+
+/* ------------------------------------------------------------- readouts */
+.readout {
+  margin: 34px 0 0;
+  border: 1px solid var(--rule);
+  background: var(--surface);
+}
+
+.readout > header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 14px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--rule-soft);
+  background: var(--surface-2);
+}
+
+.readout h3 { margin: 0; font-size: 16px; }
+
+.dims {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-soft);
+  border: 1px solid var(--rule);
+  padding: 1px 7px;
+  white-space: nowrap;
+}
+
+.ask {
+  font-size: 14.5px;
+  color: var(--ink-soft);
+  flex-basis: 100%;
+  margin: 0;
+  line-height: 1.45;
+}
+
+.bars { padding: 14px 18px 18px; display: flex; flex-direction: column; gap: 5px; }
+
+.bar {
+  display: grid;
+  grid-template-columns: minmax(140px, 168px) 1fr 92px 56px;
+  align-items: center;
+  gap: 12px;
+  font-size: 14px;
+}
+
+.bar .who {
+  font-family: var(--mono);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bar .who .lang {
+  color: var(--ink-faint);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+}
+
+.track {
+  height: 15px;
+  background: var(--rule-soft);
+  position: relative;
+  min-width: 40px;
+}
+
+.fill { display: block; height: 100%; background: var(--accent-dim); }
+
+/* A raw driver is the reference, so it reads as an outline rather than a
+   filled quantity — the eye should land on the libraries built on top. */
+.bar.is-raw .fill {
+  background: transparent;
+  border: 1.5px solid var(--control);
+  box-sizing: border-box;
+}
+.bar.is-subject .fill { background: var(--accent); }
+
+.bar .num {
+  font-family: var(--mono);
+  font-size: 13px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.bar .mult {
+  font-family: var(--mono);
+  font-size: 12px;
+  text-align: right;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+.bar.is-subject .num { font-weight: 650; color: var(--accent); }
+
+/* the paired subtraction, under the bars */
+.tax {
+  border-top: 1px solid var(--rule-soft);
+  padding: 13px 18px 16px;
+  background: var(--ground);
+}
+.tax h4 {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin: 0 0 9px;
+  font-weight: 500;
+}
+.taxrow {
+  display: grid;
+  grid-template-columns: minmax(120px, 150px) 96px 1fr;
+  gap: 10px;
+  align-items: baseline;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  padding: 2px 0;
+  font-variant-numeric: tabular-nums;
+}
+.taxrow .d { text-align: right; font-weight: 600; }
+.taxrow .d.up { color: var(--bad); }
+.taxrow .d.down { color: var(--good); }
+.taxrow .d.flat { color: var(--ink-faint); }
+.taxrow .note { color: var(--ink-faint); font-size: 11.5px; }
+
+.verdict {
+  display: inline-block;
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0 5px;
+  border: 1px solid currentColor;
+  margin-right: 6px;
+  vertical-align: 1px;
+}
+.verdict.real { color: var(--ink-soft); }
+.verdict.noise { color: var(--ink-faint); }
+
+/* -------------------------------------------------------------- tables */
+.scroller { overflow-x: auto; margin: 26px 0 0; border: 1px solid var(--rule); }
+
+table { border-collapse: collapse; width: 100%; font-size: 14px; min-width: 620px; }
+th, td { text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--rule-soft); }
+thead th {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  font-weight: 500;
+  background: var(--surface-2);
+  white-space: nowrap;
+}
+tbody tr { background: var(--surface); }
+tbody tr:last-child td { border-bottom: 0; }
+td.n { font-family: var(--mono); text-align: right; font-variant-numeric: tabular-nums; }
+td .lib { font-family: var(--mono); font-weight: 600; }
+tr.subject td { background: color-mix(in srgb, var(--accent) 8%, var(--surface)); }
+
+/* ----------------------------------------------------------- code trace */
+pre {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.7;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--accent);
+  padding: 14px 16px;
+  overflow-x: auto;
+  margin: 22px 0;
+}
+pre b { color: var(--accent); font-weight: 600; }
+pre i { color: var(--ink-faint); font-style: normal; }
+
+/* --------------------------------------------------------------- notes */
+.callout {
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--control);
+  background: var(--surface);
+  padding: 16px 18px;
+  margin: 26px 0;
+  font-size: 15.5px;
+  line-height: 1.55;
+}
+.callout .tag {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--control);
+  display: block;
+  margin-bottom: 6px;
+}
+
+.rules { list-style: none; padding: 0; margin: 26px 0 0; display: grid; gap: 1px;
+         background: var(--rule-soft); border: 1px solid var(--rule-soft); }
+.rules li { background: var(--surface); padding: 15px 18px; }
+.rules b {
+  font-family: var(--mono);
+  font-size: 13px;
+  display: block;
+  margin-bottom: 4px;
+  color: var(--ink);
+}
+.rules span { font-size: 15px; color: var(--ink-soft); line-height: 1.5; }
+
+ul.plain { padding-left: 1.15em; margin: 0 0 1.1em; }
+ul.plain li { margin-bottom: 0.5em; }
+
+.finding {
+  display: grid;
+  grid-template-columns: 34px 1fr;
+  gap: 14px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--rule-soft);
+  align-items: start;
+}
+.finding:last-child { border-bottom: 0; }
+.finding .mark {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--accent);
+  border: 1px solid var(--rule);
+  text-align: center;
+  padding: 2px 0;
+  line-height: 1.3;
+}
+.finding h4 { margin: 0 0 5px; font-size: 16px; font-weight: 650; }
+.finding p { font-size: 15.5px; color: var(--ink-soft); margin: 0 0 0.7em; line-height: 1.55; }
+.finding p:last-child { margin-bottom: 0; }
+.finding p strong { color: var(--ink); }
+
+footer {
+  border-top: 1px solid var(--rule);
+  background: var(--surface);
+  padding: 30px 0 44px;
+  font-size: 14px;
+  color: var(--ink-faint);
+  font-family: var(--mono);
+}
+
+@media (max-width: 660px) {
+  .bar { grid-template-columns: 116px 1fr 78px; }
+  .bar .mult { display: none; }
+  .taxrow { grid-template-columns: 110px 88px; }
+  .taxrow .note { grid-column: 1 / -1; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .fill { transition: width .5s cubic-bezier(.22,.61,.36,1); }
+}
+</style>
+
+<header class="masthead">
+  <div class="wrap">
+    <p class="eyebrow">nilo_sql · per-operation benchmark · 17 August 2026</p>
+    <h1>Ten clients, one Postgres</h1>
+    <p class="lede">
+      Ten database libraries across four languages, doing the same eleven jobs —
+      <strong>reading, writing, deleting</strong> — against the same Postgres.
+      Every ORM is paired against the raw driver from its own language, so what
+      you see is the cost of the library itself, not the cost of the driver
+      underneath it.
+    </p>
+
+    <dl class="stamp">
+      <div><dt>Machine</dt><dd>Ryzen 7 9700X · 16 threads · 31 GB</dd></div>
+      <div><dt>Database</dt><dd>PostgreSQL 18.4 (Docker)</dd></div>
+      <div><dt>Connection</dt><dd>unix socket, single</dd></div>
+      <div><dt>Commit</dt><dd>b0b06af</dd></div>
+      <div><dt>Samples</dt><dd><span id="blockcount">900</span> per library</dd></div>
+      <div><dt>Runs</dt><dd>2 full, 3 passes each</dd></div>
+    </dl>
+  </div>
+</header>
+
+<main>
+
+<!-- ================================================== how to read ===== -->
+<section id="how-to-read">
+  <div class="wrap">
+    <p class="kicker">How to read this</p>
+    <h2>Four rules that make the numbers trustworthy</h2>
+    <div class="col">
+      <p>
+        The thing we're trying to measure is small. An ORM's overhead is often
+        less than 1% of an operation. Meanwhile this machine speeds up and slows
+        down by as much as 8% over a few minutes, just from heat and background
+        work.
+      </p>
+      <p>
+        So if you run each library one after another and compare, you're not
+        measuring the libraries. You're measuring who happened to go first.
+        Here's what we do instead.
+      </p>
+    </div>
+
+    <ul class="rules">
+      <li>
+        <b>1 · Run every library in the same process, alternating</b>
+        <span>The ORM does a batch of work, then the raw driver does the same
+        batch, then back again — hundreds of times, swapping who goes first each
+        round. We report the <b style="display:inline">middle of all those
+        head-to-head gaps</b>, not the gap between two averages. If the machine
+        slows down, it slows down for both sides at once, and the gap between
+        them stays honest.</span>
+      </li>
+      <li>
+        <b>2 · Make every library prove it did the work</b>
+        <span>Each one has to add up the same total from the data it read: all
+        the IDs, all the ages, all the email lengths, all the timestamps. Ten
+        libraries in four languages, same number every time. A library that
+        cheats by not actually decoding a field until you touch it can't produce
+        that total. This is what stops "fast" from meaning "did less".</span>
+      </li>
+      <li>
+        <b>3 · If the gap is smaller than the noise, say so</b>
+        <span>Every gap comes with an error range. If that range includes zero,
+        the answer is <b style="display:inline">"no measurable difference"</b> —
+        not a ranking. Saying "we can't tell these apart" is more useful than
+        inventing an order that won't hold next time.</span>
+      </li>
+      <li>
+        <b>4 · And the error range alone isn't enough</b>
+        <span>We learned this the hard way, and it nearly went out wrong. The
+        first run gave nilo_sql tidy-looking error ranges that all excluded
+        zero. But when we split that same data into its three passes, the
+        <em>direction</em> flipped: nilo_sql looked 212 ns slower, then 178 ns
+        slower, then 147 ns <b style="display:inline">faster</b>. GORM, Drizzle,
+        Prisma and diesel-async never did that — their gaps pointed the same way
+        every time. So the split doesn't separate a reliable machine from an
+        unreliable one. It separates gaps we can actually measure from gaps that
+        are lost in the noise. From then on, a gap only counts as real if
+        <b style="display:inline">all six measurements — three passes in each of
+        two separate runs — agree on which side is faster.</b></span>
+      </li>
+    </ul>
+
+    <div class="callout">
+      <span class="tag">Two things these rules do not cover</span>
+      <p style="margin:0 0 0.7em">
+        <strong>Rule 4 filters noise, not meaning.</strong> Six measurements
+        agreeing on a direction tells you the gap is real. It does not tell you
+        the gap is <em class="q">a cost</em> — if two things being compared are
+        limited by different resources, you can get a tight, repeatable,
+        completely meaningless number. Every paired comparison here sends the
+        same SQL over the same connection, so the gaps are costs. But the rule
+        isn't what guarantees that; reading the two code paths is.
+      </p>
+      <p style="margin:0">
+        <strong>And the raw driver isn't always doing identical work — the bias
+        runs against nilo_sql, not for it.</strong> On the multi-row tests
+        nilo_sql builds and returns an array of structs, because that's what its
+        API does; the raw driver just adds numbers up as rows arrive and never
+        allocates an array. So nilo is charged for work the reference never did.
+        We're leaving it that way, because <code>db.select</code> returning a
+        slice <em class="q">is</em> the thing being measured — but it means every
+        nilo_sql number here is a ceiling. It also makes finding 1 stronger:
+        building a thousand-element array still lands below what we can measure.
+      </p>
+    </div>
+
+    <div class="callout">
+      <span class="tag">One note about the write tests</span>
+      With Postgres set up normally, a single INSERT takes about
+      <strong>660 µs</strong> on this machine, and every library gets the same
+      number. That's because you're not timing the library — you're timing the
+      disk waiting for the write to be flushed. True about the workload, useless
+      for comparing libraries. So we turned that flush off for this throwaway
+      test database, and we report the 660 µs figure here rather than pretending
+      it doesn't exist.
+    </div>
+  </div>
+</section>
+
+<!-- ===================================================== lineup ====== -->
+<section id="lineup">
+  <div class="wrap">
+    <p class="kicker">The lineup</p>
+    <h2>Ten libraries, and who each is measured against</h2>
+    <div class="col">
+      <p>
+        Four of these ORMs are literally built on top of the raw driver they're
+        paired with. For those four, subtracting gives you a clean answer to
+        "what does this ORM cost me?"
+      </p>
+      <p>
+        Two of them — SQLx and Prisma — bring their own driver. Their gap to the
+        raw driver is part ORM, part different driver, and we've marked those
+        rows so nobody reads them as an ORM cost.
+      </p>
+    </div>
+
+    <div class="scroller">
+      <table>
+        <thead>
+          <tr>
+            <th>Library</th><th>Language</th><th>What it is</th>
+            <th>Version</th><th>Measured against</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="subject">
+            <td><span class="lib">nilo_sql</span></td><td>Zig 0.16</td>
+            <td>Data mapper — your structs are the schema</td><td>b0b06af</td>
+            <td>pg.zig, which it's built on</td>
+          </tr>
+          <tr>
+            <td><span class="lib">pg.zig</span></td><td>Zig 0.16</td>
+            <td>Raw driver</td><td>a2c9887</td><td>— the reference</td>
+          </tr>
+          <tr>
+            <td><span class="lib">GORM</span></td><td>Go 1.26</td>
+            <td>Full ORM, uses reflection</td><td>1.31.2</td>
+            <td>pgx, which it's built on</td>
+          </tr>
+          <tr>
+            <td><span class="lib">pgx</span></td><td>Go 1.26</td>
+            <td>Raw driver</td><td>5.10.0</td><td>— the reference</td>
+          </tr>
+          <tr>
+            <td><span class="lib">diesel-async</span></td><td>Rust 1.95</td>
+            <td>Query builder, checked at compile time</td><td>0.5.2 / 2.2.12</td>
+            <td>tokio-postgres, which it's built on</td>
+          </tr>
+          <tr>
+            <td><span class="lib">SQLx</span></td><td>Rust 1.95</td>
+            <td>Typed queries, own driver</td><td>0.8.6</td>
+            <td>tokio-postgres — <em class="q">different driver</em></td>
+          </tr>
+          <tr>
+            <td><span class="lib">tokio-postgres</span></td><td>Rust 1.95</td>
+            <td>Raw driver</td><td>0.7.18</td><td>— the reference</td>
+          </tr>
+          <tr>
+            <td><span class="lib">Drizzle</span></td><td>Node 24</td>
+            <td>TypeScript query builder</td><td>0.38.4</td>
+            <td>node-postgres, which it's built on</td>
+          </tr>
+          <tr>
+            <td><span class="lib">Prisma</span></td><td>Node 24</td>
+            <td>Full ORM, own query engine</td><td>6.19.3</td>
+            <td>node-postgres — <em class="q">different engine</em></td>
+          </tr>
+          <tr>
+            <td><span class="lib">node-postgres</span></td><td>Node 24</td>
+            <td>Raw driver</td><td>8.23.0</td><td>— the reference</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ====================================================== reading ==== -->
+<section id="reading">
+  <div class="wrap">
+    <p class="kicker">Part one</p>
+    <h2>Reading data</h2>
+    <div class="col">
+      <p>
+        Six tests, arranged to answer two different questions. The first few keep
+        the table at four columns and increase the number of rows. The last two
+        keep the row count and widen the table to twenty columns.
+      </p>
+      <p>
+        That split matters. A library whose cost grows with <em class="q">rows</em>
+        and one whose cost grows with <em class="q">individual values</em> look
+        identical on a narrow table, and nothing alike on a wide one — and real
+        applications have wide tables.
+      </p>
+      <p>
+        Bars are drawn to scale against the slowest library in each test. When a
+        bar is barely visible, that really is how far behind it is.
+      </p>
+    </div>
+
+    <div id="shape-empty"></div>
+    <div id="shape-key"></div>
+    <div id="shape-page"></div>
+    <div id="shape-scan"></div>
+    <div id="shape-wide"></div>
+    <div id="shape-wide_scan"></div>
+
+    <div class="col" style="margin-top:38px">
+      <h3>What the reading tests show</h3>
+      <p>
+        <strong>On a single row, almost everything ties.</strong> Six of the ten
+        land between 6.2 and 11 µs. The round trip to the database dominates, and
+        any library's own work hides behind it. This is the most realistic test —
+        it's what a normal web request does — and also the least useful for
+        telling libraries apart. The two exceptions aren't noise: Drizzle is 5.4×
+        the fastest and Prisma is 10.7×.
+      </p>
+      <p>
+        <strong>On a thousand rows of twenty columns, the order changes
+        completely.</strong> That's twenty thousand values in one answer, so the
+        round trip stops mattering and pure decoding work is all that's left.
+        pg.zig and pgx lead at 0.37 ms. tokio-postgres — which was
+        <em class="q">fastest</em> on a single row — falls behind at 0.48 ms.
+        Prisma takes 8.99 ms, which is 24× the leader.
+      </p>
+      <p>
+        <strong>Some raw drivers cost per value too.</strong> Compare
+        node-postgres on the two thousand-row tests: 697 µs for four columns,
+        2,455 µs for twenty. Same rows, five times the columns, 3.5× the time.
+        That's the driver itself, before any ORM gets involved.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ====================================================== writing ==== -->
+<section id="writing">
+  <div class="wrap">
+    <p class="kicker">Part two</p>
+    <h2>Writing data</h2>
+    <div class="col">
+      <p>
+        Every write test reads the stored row back using <code>RETURNING</code>.
+        A library that threw that row away would be doing less work than the
+        others, and its checksum wouldn't match.
+      </p>
+      <p>
+        The insert table is emptied before every single batch, for every library —
+        outside the timer. Two libraries writing the same IDs into a table only
+        one of them cleared is a crash, not a benchmark.
+      </p>
+    </div>
+
+    <div id="shape-insert"></div>
+    <div id="shape-batch"></div>
+    <div id="shape-update"></div>
+    <div id="shape-tx"></div>
+
+    <div class="col" style="margin-top:38px">
+      <h3>What the writing tests show</h3>
+      <p>
+        <strong>Writing separates libraries differently than reading does.</strong>
+        When reading, the gaps come from how many values need decoding. When
+        writing one row, there's almost nothing to decode — and yet the spread
+        between fastest and slowest is <strong>4× to 8×</strong>. That gap is
+        pure overhead: how many layers a call passes through before it becomes a
+        statement. Nothing amortises it, because there's no bulk work to hide it
+        behind.
+      </p>
+      <p>
+        <strong>Bulk inserts split the field into two strategies.</strong>
+        Inserting a hundred rows at once, pg.zig and nilo_sql send one array per
+        column and let Postgres unpack them server-side — the SQL text stays the
+        same length no matter how big the batch is. GORM, Diesel, Drizzle and
+        Prisma build a giant multi-row VALUES statement instead, so the SQL grows
+        with the batch and Postgres has to parse a brand-new statement every
+        time. The cost shows: 135 µs for a hundred rows versus 1,017 µs
+        (Drizzle) and 1,395 µs (Prisma). Per row that's 1.3 µs against 14 µs.
+      </p>
+      <p>
+        <strong>Transactions are where per-statement overhead stops
+        hiding.</strong> The <code>tx</code> test does BEGIN, a read, a write,
+        COMMIT — four statements where every other test sends one. Any fixed cost
+        a library charges per statement gets multiplied by four here, which is why
+        Prisma jumps to 9.1× while it was 8× on a single update.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ===================================================== deleting ==== -->
+<section id="deleting">
+  <div class="wrap">
+    <p class="kicker">Part three</p>
+    <h2>Deleting data</h2>
+    <div class="col">
+      <p>
+        Deleting empties a table, so we refill it before every batch — outside the
+        timer, and with exactly as many rows as that batch will remove. Seeding a
+        thousand rows to delete fifty would put a differently-sized index under
+        every measurement.
+      </p>
+    </div>
+
+    <div id="shape-delete"></div>
+
+    <div class="col" style="margin-top:38px">
+      <h3>What the delete test shows</h3>
+      <p>
+        This is the simplest operation on the whole page: one integer in, one row
+        back. Nothing to encode, almost nothing to decode. So it's the cleanest
+        look at a library's fixed overhead — how long it takes to turn one
+        function call into one statement and come back.
+      </p>
+      <p>
+        The spread is <strong>8.1×</strong>, from tokio-postgres at 9,165 ns to
+        Prisma at 74,268 ns, for identical database work.
+      </p>
+      <p>
+        There's a pattern worth noticing across all three languages: query
+        builders are cheapest on the operation with the fewest parameters.
+        diesel-async costs only +5,054 ns here, against +18,443 ns on update and
+        +20,427 ns on insert. Building the parameters, not running the query, is
+        where a query builder spends its time.
+      </p>
+      <p>
+        For nilo_sql, delete is one of only two places where its cost is actually
+        measurable: <strong>+1,673 ns</strong> over raw pg.zig, holding steady
+        across all six measurements. It is not an extra round trip — both arms
+        make 4.12 socket calls per delete, measured one arm at a time. So the
+        operation with a single integer parameter is one of nilo's more expensive
+        ones for a reason that is still open, and it is CPU rather than network.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ======================================================= memory ==== -->
+<section id="memory">
+  <div class="wrap">
+    <p class="kicker">Part four</p>
+    <h2>Memory</h2>
+    <div class="col">
+      <p>
+        Peak memory used by the benchmark process itself — the high-water mark,
+        not the size at the end, so a runtime that has already given pages back
+        doesn't look thriftier than it was. Each process holds one connection and
+        runs the same eleven tests.
+      </p>
+      <p>
+        This is not "memory per connection", and shouldn't be read that way. It's
+        the baseline cost of the runtime existing at all. For anything deployed as
+        containers, that's the number that decides how many instances fit on a
+        machine.
+      </p>
+    </div>
+    <div id="rss"></div>
+  </div>
+</section>
+
+<!-- ======================================================= pg.zig ==== -->
+<section id="pgzig">
+  <div class="wrap">
+    <p class="kicker">The main question</p>
+    <h2>Is pg.zig a good Postgres driver?</h2>
+    <div class="col">
+      <p>
+        The answer splits cleanly in two: <strong>its decoder is the best in this
+        field, and its protocol handling wastes a network round trip.</strong>
+      </p>
+      <p>
+        The good half shows up on big results. On a thousand rows — narrow or wide
+        — raw pg.zig beats raw pgx <em class="q">and</em> raw tokio-postgres.
+        If your workload is unpacking thousands of values out of a buffer, nothing
+        here touches it.
+      </p>
+      <p>
+        The bad half shows up on <code>SELECT 1</code> — a query with nothing at
+        all to decode. There, pg.zig is the <em class="q">slowest</em> of the four
+        raw drivers. When a driver loses on a query that has no content, the
+        problem isn't its decoder. It's on the wire.
+      </p>
+    </div>
+
+    <h3 class="wrap" style="max-width:var(--col)">The proof, from the bytes on the socket</h3>
+    <div class="col">
+      <p>
+        Here's what each driver actually sends for a prepared statement it has
+        <em class="q">already</em> cached — so there's no parsing to do, and no
+        reason to talk to the server twice:
+      </p>
+    </div>
+
+<pre><i>pg.zig — two round trips</i>
+  sendmsg   5 B   <b>S</b>              →  readv    6 B   <b>Z</b>      <i>← this trip carries no work at all</i>
+  sendmsg  44 B   <b>B E H</b>          →  readv   40 B   <b>2 D C</b>
+
+<i>pgx — one</i>
+  write    88 B   <b>B D E S</b>        →  read    40 B   <b>2 T D C Z</b>
+
+<i>tokio-postgres — one</i>
+  sendto   32 B   <b>B E S</b>          →  recvfrom 40 B  <b>2 D C Z</b>
+</pre>
+
+    <div class="col">
+      <p>
+        That first pg.zig round trip is a lone <code>Sync</code> message, and the
+        driver waits for the server's reply before it sends the actual query. It
+        comes from one line, at <code>conn.zig:243</code>, right on the
+        cache-hit path:
+      </p>
+    </div>
+
+<pre>if (self._prepared_statements.getPtr(n)) |describe| {
+    cached = true;
+    ...
+    <i>// Send a "SYNC" command</i>
+    try self.write(&amp;.{ <b>'S', 0, 0, 0, 4</b> });
+    stmt.buf.reset();
+    try stmt.prepareForBind(...);
+}</pre>
+
+    <div class="col">
+      <p>
+        So the irony is: <strong>caching the statement saves the server from
+        parsing it, but doesn't save the round trip.</strong> One packet out and
+        one back, carrying nothing.
+      </p>
+    </div>
+
+    <div class="scroller">
+      <table>
+        <thead>
+          <tr><th>Driver</th><th>Syscalls per query</th>
+              <th>Network round trips</th><th>SELECT 1, unix socket</th>
+              <th>SELECT 1, Docker bridge</th></tr>
+        </thead>
+        <tbody>
+          <tr class="subject">
+            <td><span class="lib">pg.zig</span></td><td class="n">4.00</td>
+            <td class="n">2</td><td class="n">8,080 ns</td>
+            <td class="n">24,335 ns</td>
+          </tr>
+          <tr><td><span class="lib">pgx</span></td><td class="n">2.05</td>
+            <td class="n">1</td><td class="n">5,364 ns</td>
+            <td class="n">15,146 ns</td></tr>
+          <tr><td><span class="lib">tokio-postgres</span></td><td class="n">4.01</td>
+            <td class="n">1</td><td class="n">4,758 ns</td>
+            <td class="n">14,288 ns</td></tr>
+          <tr><td><span class="lib">node-postgres</span></td><td class="n">4.66</td>
+            <td class="n">1</td><td class="n">7,208 ns</td><td class="n">—</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout">
+      <span class="tag">What it costs depends on the wire</span>
+      That extra round trip is about <strong>2.6 µs</strong> over a unix socket
+      and about <strong>9.2 µs</strong> over a Docker bridge. That's why pg.zig's
+      deficit roughly <em class="q">triples</em> when you change how you connect.
+      It's also why every number on this page says what it was measured through:
+      the same server over a unix socket is 133% faster than over a published
+      Docker port.
+    </div>
+  </div>
+</section>
+
+<!-- ================================================== conclusions ==== -->
+<section id="conclusions">
+  <div class="wrap">
+    <p class="kicker">What we learned</p>
+    <h2>Nine things worth keeping</h2>
+    <div class="col">
+      <p>
+        Ordered by how much each one should change a decision. Every number has a
+        run behind it.
+      </p>
+    </div>
+
+    <div class="finding">
+      <span class="mark">1</span>
+      <div>
+        <h4>On nine of eleven operations, nilo_sql's overhead can't be measured at all</h4>
+        <p>
+          From a single row up to twenty thousand values, from bulk inserts to
+          transactions, <strong>six measurements across two separate runs
+          couldn't agree on whether nilo_sql or raw pg.zig was faster</strong>.
+          On the biggest read test, the first run said nilo_sql was 35 µs
+          <em class="q">faster</em> and the second said 5 µs slower. That's not a
+          result, and saying so is more useful than picking one.
+        </p>
+        <p>
+          <strong>No other library here can say that.</strong> GORM, Drizzle,
+          Prisma and diesel-async held their direction across all six — not
+          because they're more consistent, but because their overhead is big
+          enough to see. An overhead that vanishes into the measurement noise
+          <em class="q">is</em> the finding.
+        </p>
+      </div>
+    </div>
+
+    <div class="finding">
+      <span class="mark">2</span>
+      <div>
+        <h4>nilo_sql leads the big reads, but that's the driver's win, not the ORM's</h4>
+        <p>
+          On a thousand rows of twenty columns, nilo_sql is near the top — ahead
+          of raw tokio-postgres, and 5.4× faster than GORM. But raw pg.zig sits
+          right beside it, 1.5% apart. So this is pg.zig's decoder winning, and
+          what nilo's typed layer does is <em class="q">not get in the way</em>.
+          That's still an achievement — just a different one than the ranking
+          suggests.
+        </p>
+      </div>
+    </div>
+
+    <div class="finding">
+      <span class="mark">3</span>
+      <div>
+        <h4>On single-row reads nilo_sql is behind, and it isn't nilo's fault</h4>
+        <p>
+          A single row by primary key is what most web requests do, and there
+          nilo_sql takes <strong>9,917 ns</strong> against SQLx's
+          <strong>6,217 ns</strong> — 60% behind. But raw pg.zig alone is already
+          <strong>9,405 ns</strong>, while raw tokio-postgres is
+          <strong>6,204 ns</strong>. The entire gap is in the driver, and it's
+          there before nilo touches anything. Fix pg.zig's round trip and this
+          number moves without changing a line of nilo.
+        </p>
+      </div>
+    </div>
+
+    <div class="finding">
+      <span class="mark">4</span>
+      <div>
+        <h4>pg.zig: best decoder in the field, one wasted round trip</h4>
+        <p>
+          Fastest raw driver at unpacking thousands of values, slowest at
+          <code>SELECT 1</code>. The cause is one line at
+          <code>conn.zig:243</code> — a lone <code>Sync</code> on the cache-hit
+          path that waits for a reply before sending the real query. It costs
+          about 2.6 µs over a unix socket and 9.2 µs over a Docker bridge.
+          <strong>This is the clearest and most fixable gap on the page.</strong>
+        </p>
+      </div>
+    </div>
+
+    <div class="finding">
+      <span class="mark">5</span>
+      <div>
+        <h4>Two operations where nilo_sql genuinely pays: insert and delete</h4>
+        <p>
+          These are the only two of eleven where the gap survives all six
+          measurements: insert <strong>+2,966 ns</strong> and delete
+          <strong>+1,673 ns</strong> over raw pg.zig. Compare that to update —
+          nearly the same work as insert — where the gap isn't measurable at all.
+        </p>
+        <p>
+          The obvious explanation was that nilo was sending an extra packet — the
+          gap is almost exactly one unix-socket round trip (~2.6 µs).
+          <strong>We tested it, and it's wrong.</strong> Counting socket calls one
+          library at a time under <code>strace</code>, both make
+          <em class="q">identical</em> numbers of them: 4.04 per insert, 4.00 per
+          update, 4.12 per delete, matching to two decimal places on every shape.
+          Same packets, same round trips.
+        </p>
+        <p>
+          So the cost is CPU work inside the process, not time on the wire — and
+          why it lands on insert and delete but not update is still open. All
+          three use prepared statements with the same compile-time plan names and
+          all three return one row. <strong>The next probe is a CPU profile, not
+          a packet count.</strong> Worth saying plainly: this paragraph replaces a
+          confident-sounding guess with a measurement that killed it, which is why
+          the guess was labelled a guess.
+        </p>
+      </div>
+    </div>
+
+    <div class="finding">
+      <span class="mark">6</span>
+      <div>
+        <h4>GORM is the most expensive ORM here that sits on its own driver</h4>
+        <p>
+          4.1× its own pgx on a thousand-row read, 5.4× on the wide one, and 4–5×
+          on every single-row write: insert 56,194 ns against 12,274, update
+          52,609 against 10,251, delete 57,867 against 10,649. Worth stressing —
+          <strong>pgx itself is not slow</strong>. It makes the fewest syscalls
+          per query of any driver here. The entire gap belongs to the layer above
+          it.
+        </p>
+      </div>
+    </div>
+
+    <div class="finding">
+      <span class="mark">7</span>
+      <div>
+        <h4>Prisma is in a different bracket</h4>
+        <p>
+          10.7× tokio-postgres on a single row, 24× on the wide read — 8.99 ms for
+          an answer pg.zig delivers in 0.37 ms. Some of that is fair: it runs its
+          own engine over its own connection, so the gap to node-postgres isn't
+          purely ORM cost. But the practical takeaway holds. If your workload has
+          big or frequent queries, <strong>Prisma sets your latency, not
+          Postgres</strong>.
+        </p>
+      </div>
+    </div>
+
+    <div class="finding">
+      <span class="mark">8</span>
+      <div>
+        <h4>An ORM can be faster than the driver it's built on</h4>
+        <p>
+          Two cases, both solid across all six measurements. Drizzle is
+          <strong>60,283 ns faster</strong> than raw node-postgres on a
+          thousand-row read, and diesel-async is <strong>46,601 ns faster</strong>
+          than raw tokio-postgres on the wide one. No magic: the driver's default
+          row object costs more to build than the struct the ORM fills directly.
+          node-postgres builds a name-keyed JavaScript object per row; Drizzle
+          skips it.
+        </p>
+        <p>
+          Which is why "drop the ORM if you want speed" isn't always true — and
+          why every ORM here is measured against <em class="q">its own</em>
+          driver, not against the fastest driver available.
+        </p>
+      </div>
+    </div>
+
+    <div class="finding">
+      <span class="mark">9</span>
+      <div>
+        <h4>Baseline memory differs by two orders of magnitude</h4>
+        <p>
+          Zig <strong>4,116 kB</strong>, Rust <strong>5,916 kB</strong>, Go
+          <strong>23,448 kB</strong>, Node <strong>341,924 kB</strong> — same
+          work, one connection each. Node is 83× Zig. Again, this isn't per
+          connection; it's the cost of the runtime existing. For container
+          deployments that's the number that decides density.
+        </p>
+      </div>
+    </div>
+
+    <div class="callout" style="margin-top:32px">
+      <span class="tag">What this page doesn't tell you</span>
+      Everything here is <strong>one connection, no pool, no HTTP</strong>. That's
+      what makes the per-operation costs clean, and also what leaves the real
+      service question open: throughput, tail latency, and memory per idle
+      connection under load. We already know prepared statements are worth 24%
+      with one request in flight and 67% at a busy pool — because a pooled
+      connection is a serial queue, so time not spent holding it is capacity.
+      Which means <em class="q">any</em> gap on this page could change size, or
+      even direction, once you put a pool and a web server in front of it. That's
+      the next harness.
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    bench/compare-sql · commit b0b06af · unix socket · PostgreSQL 18.4 ·
+    <span id="blockcount2">900</span> samples per library, two full runs<br>
+    Every run that changed a decision is recorded in bench/result/sql.md.
+  </div>
+</footer>
+
+<script>
+const DATA = {"shapes":{"empty":{"rows":0,"columns":0,"arms":[{"id":"tokiopg","label":"tokio-postgres","lang":"Rust","ns":4758.0,"raw":true,"onControl":false},{"id":"pgx","label":"pgx","lang":"Go","ns":5364.0,"raw":true,"onControl":false},{"id":"pg","label":"node-postgres","lang":"Node","ns":7208.5,"raw":true,"onControl":false},{"id":"pgzig","label":"pg.zig","lang":"Zig","ns":8080.0,"raw":true,"onControl":false}]},"key":{"rows":1,"columns":4,"arms":[{"id":"tokiopg","label":"tokio-postgres","lang":"Rust","ns":6203.5,"raw":true,"onControl":false},{"id":"sqlx","label":"SQLx","lang":"Rust","ns":6217.0,"raw":false,"onControl":false,"delta":42.5,"lo":26,"hi":64,"passes":[-3,92,6],"agree":false,"control":"tokio-postgres","crossRun":false,"priorPasses":3,"real":false},{"id":"diesel","label":"diesel-async","lang":"Rust","ns":7416.5,"raw":false,"onControl":true,"delta":1178.0,"lo":1157,"hi":1203,"passes":[1210,1154,1186],"agree":true,"control":"tokio-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"pgx","label":"pgx","lang":"Go","ns":7774.5,"raw":true,"onControl":false},{"id":"pgzig","label":"pg.zig","lang":"Zig","ns":9405.0,"raw":true,"onControl":false},{"id":"nilo_sql","label":"nilo_sql","lang":"Zig","ns":9916.5,"raw":false,"onControl":true,"delta":370.5,"lo":247,"hi":476,"passes":[753,786,26],"agree":true,"control":"pg.zig","crossRun":false,"priorPasses":3,"real":false},{"id":"gorm","label":"GORM","lang":"Go","ns":10697.0,"raw":false,"onControl":true,"delta":2840.5,"lo":2780,"hi":2928,"passes":[2793,2904,2836],"agree":true,"control":"pgx","crossRun":true,"priorPasses":3,"real":true},{"id":"pg","label":"node-postgres","lang":"Node","ns":11013.5,"raw":true,"onControl":false},{"id":"drizzle","label":"Drizzle","lang":"Node","ns":33674.0,"raw":false,"onControl":true,"delta":22490.0,"lo":22254,"hi":22666,"passes":[22144,22268,22801],"agree":true,"control":"node-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"prisma","label":"Prisma","lang":"Node","ns":66546.0,"raw":false,"onControl":false,"delta":55179.5,"lo":54740,"hi":55740,"passes":[53806,55777,56270],"agree":true,"control":"node-postgres","crossRun":true,"priorPasses":3,"real":true}]},"page":{"rows":20,"columns":4,"arms":[{"id":"pgzig","label":"pg.zig","lang":"Zig","ns":78768.0,"raw":true,"onControl":false},{"id":"nilo_sql","label":"nilo_sql","lang":"Zig","ns":80174.0,"raw":false,"onControl":true,"delta":1208.5,"lo":938,"hi":1479,"passes":[1082,1464,1162],"agree":true,"control":"pg.zig","crossRun":false,"priorPasses":3,"real":false},{"id":"pgx","label":"pgx","lang":"Go","ns":81597.5,"raw":true,"onControl":false},{"id":"tokiopg","label":"tokio-postgres","lang":"Rust","ns":82476.0,"raw":true,"onControl":false},{"id":"diesel","label":"diesel-async","lang":"Rust","ns":82586.5,"raw":false,"onControl":true,"delta":155.0,"lo":-72,"hi":417,"passes":[-154,949,-92],"agree":false,"control":"tokio-postgres","crossRun":false,"priorPasses":3,"real":false},{"id":"sqlx","label":"SQLx","lang":"Rust","ns":85085.0,"raw":false,"onControl":false,"delta":2754.0,"lo":2475,"hi":2935,"passes":[2414,3291,2487],"agree":true,"control":"tokio-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"gorm","label":"GORM","lang":"Go","ns":91775.5,"raw":false,"onControl":true,"delta":10132.0,"lo":9902,"hi":10352,"passes":[10120,9888,10450],"agree":true,"control":"pgx","crossRun":true,"priorPasses":3,"real":true},{"id":"pg","label":"node-postgres","lang":"Node","ns":95545.0,"raw":true,"onControl":false},{"id":"drizzle","label":"Drizzle","lang":"Node","ns":125644.0,"raw":false,"onControl":true,"delta":29239.5,"lo":28685,"hi":29671,"passes":[27888,29838,29784],"agree":true,"control":"node-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"prisma","label":"Prisma","lang":"Node","ns":216269.5,"raw":false,"onControl":false,"delta":119706.0,"lo":118364,"hi":120928,"passes":[116829,118402,124130],"agree":true,"control":"node-postgres","crossRun":true,"priorPasses":3,"real":true}]},"scan":{"rows":1000,"columns":4,"arms":[{"id":"pgzig","label":"pg.zig","lang":"Zig","ns":92774.0,"raw":true,"onControl":false},{"id":"nilo_sql","label":"nilo_sql","lang":"Zig","ns":93728.0,"raw":false,"onControl":true,"delta":932.0,"lo":96,"hi":1535,"passes":[572,3378,-263],"agree":false,"control":"pg.zig","crossRun":false,"priorPasses":3,"real":false},{"id":"pgx","label":"pgx","lang":"Go","ns":117179.5,"raw":true,"onControl":false},{"id":"tokiopg","label":"tokio-postgres","lang":"Rust","ns":134165.0,"raw":true,"onControl":false},{"id":"diesel","label":"diesel-async","lang":"Rust","ns":164208.0,"raw":false,"onControl":true,"delta":31488.5,"lo":31023,"hi":31839,"passes":[31188,31977,30977],"agree":true,"control":"tokio-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"sqlx","label":"SQLx","lang":"Rust","ns":317825.5,"raw":false,"onControl":false,"delta":183362.0,"lo":182753,"hi":184253,"passes":[188088,179526,183370],"agree":true,"control":"tokio-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"gorm","label":"GORM","lang":"Go","ns":484094.5,"raw":false,"onControl":true,"delta":362842.0,"lo":361119,"hi":365716,"passes":[362303,362074,363995],"agree":true,"control":"pgx","crossRun":true,"priorPasses":3,"real":true},{"id":"drizzle","label":"Drizzle","lang":"Node","ns":667059.5,"raw":false,"onControl":true,"delta":-60283.0,"lo":-71717,"hi":-47197,"passes":[-60364,-52313,-69676],"agree":true,"control":"node-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"pg","label":"node-postgres","lang":"Node","ns":697383.0,"raw":true,"onControl":false},{"id":"prisma","label":"Prisma","lang":"Node","ns":2372743.5,"raw":false,"onControl":false,"delta":1646703.5,"lo":1638364,"hi":1655218,"passes":[1621150,1653880,1657494],"agree":true,"control":"node-postgres","crossRun":true,"priorPasses":3,"real":true}]},"wide":{"rows":1,"columns":20,"arms":[{"id":"tokiopg","label":"tokio-postgres","lang":"Rust","ns":7759.0,"raw":true,"onControl":false},{"id":"sqlx","label":"SQLx","lang":"Rust","ns":8618.0,"raw":false,"onControl":false,"delta":895.0,"lo":869,"hi":918,"passes":[892,932,802],"agree":true,"control":"tokio-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"diesel","label":"diesel-async","lang":"Rust","ns":9542.5,"raw":false,"onControl":true,"delta":1765.5,"lo":1739,"hi":1788,"passes":[1837,1780,1645],"agree":true,"control":"tokio-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"pgx","label":"pgx","lang":"Go","ns":9802.0,"raw":true,"onControl":false},{"id":"pgzig","label":"pg.zig","lang":"Zig","ns":11507.0,"raw":true,"onControl":false},{"id":"nilo_sql","label":"nilo_sql","lang":"Zig","ns":11576.0,"raw":false,"onControl":true,"delta":194.0,"lo":28,"hi":352,"passes":[776,-287,342],"agree":false,"control":"pg.zig","crossRun":false,"priorPasses":3,"real":false},{"id":"gorm","label":"GORM","lang":"Go","ns":15445.5,"raw":false,"onControl":true,"delta":5682.5,"lo":5597,"hi":5746,"passes":[5772,5516,5720],"agree":true,"control":"pgx","crossRun":true,"priorPasses":3,"real":true},{"id":"pg","label":"node-postgres","lang":"Node","ns":17497.0,"raw":true,"onControl":false},{"id":"drizzle","label":"Drizzle","lang":"Node","ns":65135.5,"raw":false,"onControl":true,"delta":47484.5,"lo":47127,"hi":48089,"passes":[48472,46622,47758],"agree":true,"control":"node-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"prisma","label":"Prisma","lang":"Node","ns":126071.5,"raw":false,"onControl":false,"delta":108288.0,"lo":107766,"hi":109024,"passes":[110395,108258,106116],"agree":true,"control":"node-postgres","crossRun":true,"priorPasses":3,"real":true}]},"wide_scan":{"rows":1000,"columns":20,"arms":[{"id":"pgzig","label":"pg.zig","lang":"Zig","ns":374716.0,"raw":true,"onControl":false},{"id":"pgx","label":"pgx","lang":"Go","ns":376327.5,"raw":true,"onControl":false},{"id":"nilo_sql","label":"nilo_sql","lang":"Zig","ns":380282.0,"raw":false,"onControl":true,"delta":5387.0,"lo":2701,"hi":8740,"passes":[13252,6174,3232],"agree":true,"control":"pg.zig","crossRun":false,"priorPasses":3,"real":false},{"id":"diesel","label":"diesel-async","lang":"Rust","ns":439817.5,"raw":false,"onControl":true,"delta":-46601.0,"lo":-48914,"hi":-43979,"passes":[-41184,-46123,-51040],"agree":true,"control":"tokio-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"tokiopg","label":"tokio-postgres","lang":"Rust","ns":484360.0,"raw":true,"onControl":false},{"id":"sqlx","label":"SQLx","lang":"Rust","ns":941377.5,"raw":false,"onControl":false,"delta":459367.0,"lo":456467,"hi":462515,"passes":[458100,457655,467610],"agree":true,"control":"tokio-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"gorm","label":"GORM","lang":"Go","ns":2020550.5,"raw":false,"onControl":true,"delta":1635055.5,"lo":1628489,"hi":1640790,"passes":[1623588,1641224,1639776],"agree":true,"control":"pgx","crossRun":true,"priorPasses":3,"real":true},{"id":"pg","label":"node-postgres","lang":"Node","ns":2455165.5,"raw":true,"onControl":false},{"id":"drizzle","label":"Drizzle","lang":"Node","ns":2739295.5,"raw":false,"onControl":true,"delta":259917.5,"lo":221316,"hi":304651,"passes":[307221,247522,240372],"agree":true,"control":"node-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"prisma","label":"Prisma","lang":"Node","ns":8993098.5,"raw":false,"onControl":false,"delta":6550577.5,"lo":6520159,"hi":6582437,"passes":[6421083,6621506,6575656],"agree":true,"control":"node-postgres","crossRun":true,"priorPasses":3,"real":true}]},"insert":{"rows":1,"columns":4,"arms":[{"id":"tokiopg","label":"tokio-postgres","lang":"Rust","ns":10552.5,"raw":true,"onControl":false},{"id":"pgzig","label":"pg.zig","lang":"Zig","ns":12252.5,"raw":true,"onControl":false},{"id":"pgx","label":"pgx","lang":"Go","ns":12274.5,"raw":true,"onControl":false},{"id":"sqlx","label":"SQLx","lang":"Rust","ns":13051.5,"raw":false,"onControl":false,"delta":2047.0,"lo":1776,"hi":2280,"passes":[3983,1496,1824],"agree":true,"control":"tokio-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"nilo_sql","label":"nilo_sql","lang":"Zig","ns":15778.5,"raw":false,"onControl":true,"delta":2966.5,"lo":2693,"hi":3352,"passes":[4218,3674,1190],"agree":true,"control":"pg.zig","crossRun":true,"priorPasses":3,"real":true},{"id":"pg","label":"node-postgres","lang":"Node","ns":16596.0,"raw":true,"onControl":false},{"id":"diesel","label":"diesel-async","lang":"Rust","ns":31563.5,"raw":false,"onControl":true,"delta":20427.0,"lo":20037,"hi":20893,"passes":[20785,20279,20202],"agree":true,"control":"tokio-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"drizzle","label":"Drizzle","lang":"Node","ns":39912.5,"raw":false,"onControl":true,"delta":22916.5,"lo":22688,"hi":23158,"passes":[23283,22399,22886],"agree":true,"control":"node-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"gorm","label":"GORM","lang":"Go","ns":56193.5,"raw":false,"onControl":true,"delta":43404.0,"lo":42872,"hi":44112,"passes":[43576,43404,43159],"agree":true,"control":"pgx","crossRun":true,"priorPasses":3,"real":true},{"id":"prisma","label":"Prisma","lang":"Node","ns":77151.5,"raw":false,"onControl":false,"delta":59820.5,"lo":59058,"hi":60620,"passes":[60636,69638,55276],"agree":true,"control":"node-postgres","crossRun":true,"priorPasses":3,"real":true}]},"batch":{"rows":100,"columns":4,"arms":[{"id":"pgzig","label":"pg.zig","lang":"Zig","ns":134553.5,"raw":true,"onControl":false},{"id":"nilo_sql","label":"nilo_sql","lang":"Zig","ns":140427.5,"raw":false,"onControl":true,"delta":5062.0,"lo":4579,"hi":6133,"passes":[4708,5307,5178],"agree":true,"control":"pg.zig","crossRun":false,"priorPasses":3,"real":false},{"id":"tokiopg","label":"tokio-postgres","lang":"Rust","ns":143848.0,"raw":true,"onControl":false},{"id":"pgx","label":"pgx","lang":"Go","ns":157233.5,"raw":true,"onControl":false},{"id":"sqlx","label":"SQLx","lang":"Rust","ns":169628.5,"raw":false,"onControl":false,"delta":24773.5,"lo":23376,"hi":25715,"passes":[23362,24834,25945],"agree":true,"control":"tokio-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"diesel","label":"diesel-async","lang":"Rust","ns":273987.5,"raw":false,"onControl":true,"delta":128601.5,"lo":126840,"hi":130137,"passes":[129510,129765,125541],"agree":true,"control":"tokio-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"pg","label":"node-postgres","lang":"Node","ns":279985.0,"raw":true,"onControl":false},{"id":"gorm","label":"GORM","lang":"Go","ns":401919.5,"raw":false,"onControl":true,"delta":242131.5,"lo":239709,"hi":245423,"passes":[240634,244300,241615],"agree":true,"control":"pgx","crossRun":true,"priorPasses":3,"real":true},{"id":"drizzle","label":"Drizzle","lang":"Node","ns":1016877.5,"raw":false,"onControl":true,"delta":734439.0,"lo":728740,"hi":739878,"passes":[735058,740614,725207],"agree":true,"control":"node-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"prisma","label":"Prisma","lang":"Node","ns":1395005.0,"raw":false,"onControl":false,"delta":1110831.0,"lo":1104133,"hi":1118955,"passes":[1106478,1120905,1108310],"agree":true,"control":"node-postgres","crossRun":true,"priorPasses":3,"real":true}]},"update":{"rows":1,"columns":4,"arms":[{"id":"sqlx","label":"SQLx","lang":"Rust","ns":9365.5,"raw":false,"onControl":false,"delta":-34.0,"lo":-53,"hi":12,"passes":[-320,-16,26],"agree":false,"control":"tokio-postgres","crossRun":false,"priorPasses":3,"real":false},{"id":"tokiopg","label":"tokio-postgres","lang":"Rust","ns":9412.0,"raw":true,"onControl":false},{"id":"pgx","label":"pgx","lang":"Go","ns":10250.5,"raw":true,"onControl":false},{"id":"nilo_sql","label":"nilo_sql","lang":"Zig","ns":11507.5,"raw":false,"onControl":true,"delta":-373.0,"lo":-483,"hi":-256,"passes":[-427,-552,-12],"agree":true,"control":"pg.zig","crossRun":false,"priorPasses":3,"real":false},{"id":"pgzig","label":"pg.zig","lang":"Zig","ns":12133.0,"raw":true,"onControl":false},{"id":"pg","label":"node-postgres","lang":"Node","ns":13434.5,"raw":true,"onControl":false},{"id":"diesel","label":"diesel-async","lang":"Rust","ns":28435.5,"raw":false,"onControl":true,"delta":18442.5,"lo":18289,"hi":18612,"passes":[17511,22762,18616],"agree":true,"control":"tokio-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"drizzle","label":"Drizzle","lang":"Node","ns":38317.5,"raw":false,"onControl":true,"delta":24409.5,"lo":24099,"hi":24792,"passes":[23876,27910,23606],"agree":true,"control":"node-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"gorm","label":"GORM","lang":"Go","ns":52608.5,"raw":false,"onControl":true,"delta":41563.0,"lo":40786,"hi":42322,"passes":[40748,42642,40663],"agree":true,"control":"pgx","crossRun":true,"priorPasses":3,"real":true},{"id":"prisma","label":"Prisma","lang":"Node","ns":74534.5,"raw":false,"onControl":false,"delta":60317.5,"lo":59738,"hi":61117,"passes":[59552,66125,57127],"agree":true,"control":"node-postgres","crossRun":true,"priorPasses":3,"real":true}]},"delete":{"rows":1,"columns":4,"arms":[{"id":"tokiopg","label":"tokio-postgres","lang":"Rust","ns":9165.0,"raw":true,"onControl":false},{"id":"pgx","label":"pgx","lang":"Go","ns":10648.5,"raw":true,"onControl":false},{"id":"pgzig","label":"pg.zig","lang":"Zig","ns":11168.5,"raw":true,"onControl":false},{"id":"sqlx","label":"SQLx","lang":"Rust","ns":12690.0,"raw":false,"onControl":false,"delta":3083.5,"lo":2927,"hi":3330,"passes":[2938,2803,3834],"agree":true,"control":"tokio-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"nilo_sql","label":"nilo_sql","lang":"Zig","ns":13584.0,"raw":false,"onControl":true,"delta":1673.0,"lo":1539,"hi":1816,"passes":[1515,1207,3240],"agree":true,"control":"pg.zig","crossRun":true,"priorPasses":3,"real":true},{"id":"pg","label":"node-postgres","lang":"Node","ns":13865.5,"raw":true,"onControl":false},{"id":"diesel","label":"diesel-async","lang":"Rust","ns":14668.0,"raw":false,"onControl":true,"delta":5054.0,"lo":4664,"hi":5484,"passes":[4928,4611,5573],"agree":true,"control":"tokio-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"drizzle","label":"Drizzle","lang":"Node","ns":33931.5,"raw":false,"onControl":true,"delta":19634.0,"lo":19454,"hi":19863,"passes":[19737,19588,19470],"agree":true,"control":"node-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"gorm","label":"GORM","lang":"Go","ns":57866.5,"raw":false,"onControl":true,"delta":46697.0,"lo":46135,"hi":47326,"passes":[47417,46641,46154],"agree":true,"control":"pgx","crossRun":true,"priorPasses":3,"real":true},{"id":"prisma","label":"Prisma","lang":"Node","ns":74268.0,"raw":false,"onControl":false,"delta":59713.5,"lo":59267,"hi":60258,"passes":[61562,59642,57868],"agree":true,"control":"node-postgres","crossRun":true,"priorPasses":3,"real":true}]},"tx":{"rows":2,"columns":4,"arms":[{"id":"sqlx","label":"SQLx","lang":"Rust","ns":24350.0,"raw":false,"onControl":false,"delta":-350.0,"lo":-448,"hi":-246,"passes":[-428,-435,-138],"agree":true,"control":"tokio-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"tokiopg","label":"tokio-postgres","lang":"Rust","ns":24665.5,"raw":true,"onControl":false},{"id":"pgx","label":"pgx","lang":"Go","ns":28455.0,"raw":true,"onControl":false},{"id":"pgzig","label":"pg.zig","lang":"Zig","ns":28871.5,"raw":true,"onControl":false},{"id":"nilo_sql","label":"nilo_sql","lang":"Zig","ns":31264.5,"raw":false,"onControl":true,"delta":185.5,"lo":64,"hi":316,"passes":[-32,295,523],"agree":false,"control":"pg.zig","crossRun":false,"priorPasses":3,"real":false},{"id":"pg","label":"node-postgres","lang":"Node","ns":38874.0,"raw":true,"onControl":false},{"id":"diesel","label":"diesel-async","lang":"Rust","ns":47753.0,"raw":false,"onControl":true,"delta":22727.0,"lo":22617,"hi":22832,"passes":[22606,22631,23927],"agree":true,"control":"tokio-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"gorm","label":"GORM","lang":"Go","ns":67035.0,"raw":false,"onControl":true,"delta":38098.5,"lo":37529,"hi":38650,"passes":[38320,36926,38818],"agree":true,"control":"pgx","crossRun":true,"priorPasses":3,"real":true},{"id":"drizzle","label":"Drizzle","lang":"Node","ns":90911.0,"raw":false,"onControl":true,"delta":51437.5,"lo":50818,"hi":52172,"passes":[49930,51780,52692],"agree":true,"control":"node-postgres","crossRun":true,"priorPasses":3,"real":true},{"id":"prisma","label":"Prisma","lang":"Node","ns":221707.0,"raw":false,"onControl":false,"delta":180920.0,"lo":179453,"hi":183453,"passes":[180483,180000,182632],"agree":true,"control":"node-postgres","crossRun":true,"priorPasses":3,"real":true}]}},"rss":{"Zig":4116,"Go":23448,"Rust":5916,"Node":341924},"blocks":900};
+
+const ASK = {
+  empty:     ["SELECT 1", "no rows", "A round trip with nothing in it. Nothing to plan, nothing to decode — all that's left is the protocol and the socket."],
+  key:       ["One row, looked up by ID", "1 row × 4 cols", "What a typical web request does. Decoding cost is at its smallest here compared to the round trip."],
+  page:      ["Twenty rows, filtered and sorted", "20 × 4", "One page of a list."],
+  scan:      ["A thousand rows", "1000 × 4", "Where a library that decodes by reflection stops hiding behind the socket."],
+  wide:      ["One row, twenty columns", "1 × 20", "The direction real tables actually grow: wider, not just longer."],
+  wide_scan: ["A thousand rows, twenty columns", "1000 × 20", "Twenty thousand values in one answer. A library that looks columns up by name at runtime pays twenty thousand times."],
+  insert:    ["Store one row, read it back", "1 × 4", "INSERT … RETURNING. The checksum comes from what the server stored, not from the struct we sent."],
+  batch:     ["A hundred rows in one statement", "100 × 4", "One array per column and unnest, versus a giant multi-row VALUES. Two different strategies, not two versions of the same thing."],
+  update:    ["Change one row by ID, read it back", "1 × 4", "UPDATE … RETURNING."],
+  delete:    ["Remove one row by ID, read it back", "1 × 4", "DELETE … RETURNING. The simplest operation here, so the sharpest look at fixed overhead."],
+  tx:        ["BEGIN, a read, a write, COMMIT", "2 × 4", "Four statements where every other test sends one."],
+};
+
+const fmt = (n) => Math.round(n).toLocaleString('en-US');
+const sign = (n) => (n >= 0 ? '+' : '−') + fmt(Math.abs(n));
+
+function renderShape(name) {
+  const host = document.getElementById('shape-' + name);
+  const s = DATA.shapes[name];
+  if (!host || !s) return;
+  const [title, dims, ask] = ASK[name];
+  const max = Math.max(...s.arms.map(a => a.ns));
+  const best = Math.min(...s.arms.map(a => a.ns));
+
+  const bars = s.arms.map(a => {
+    const cls = a.raw ? 'is-raw' : (a.id === 'nilo_sql' ? 'is-subject' : '');
+    const w = Math.max(1.2, (a.ns / max) * 100);
+    return `<div class="bar ${cls}">
+      <span class="who">${a.label} <span class="lang">${a.lang}</span></span>
+      <span class="track"><span class="fill" style="width:${w.toFixed(1)}%"></span></span>
+      <span class="num">${fmt(a.ns)}</span>
+      <span class="mult">${(a.ns / best).toFixed(2)}×</span>
+    </div>`;
+  }).join('');
+
+  const taxed = s.arms.filter(a => 'delta' in a)
+                      .sort((x, y) => x.delta - y.delta);
+  const taxRows = taxed.map(a => {
+    const dir = a.real ? (a.delta > 0 ? 'up' : 'down') : 'flat';
+    // Three outcomes, not two. "Lost in the noise" is the case where the error
+    // range excludes zero but the six measurements disagree about direction —
+    // exactly what a single run's error range alone would have published.
+    const spans = (a.lo <= 0 && 0 <= a.hi);
+    const verdict = a.real
+      ? '<span class="verdict real">measurable</span>'
+      : spans
+        ? '<span class="verdict noise">no difference</span>'
+        : '<span class="verdict noise">lost in the noise</span>';
+    const own = a.onControl ? '' :
+      ` · <b>own driver, so not an ORM cost</b>`;
+    const per = (a.passes && a.passes.length)
+      ? ` · by pass ${a.passes.map(sign).join(' / ')}`
+      : '';
+    return `<div class="taxrow">
+      <span>${a.label}</span>
+      <span class="d ${dir}">${sign(a.delta)} ns</span>
+      <span class="note">${verdict}range [${sign(a.lo)}, ${sign(a.hi)}] vs ${a.control}${per}${own}</span>
+    </div>`;
+  }).join('');
+
+  host.innerHTML = `<div class="readout">
+    <header>
+      <h3>${title}</h3>
+      <span class="dims">${dims}</span>
+      <p class="ask">${ask}</p>
+    </header>
+    <div class="bars">${bars}</div>
+    ${taxRows ? `<div class="tax">
+       <h4>cost on top of that language's own raw driver</h4>
+       ${taxRows}</div>` : ''}
+  </div>`;
+}
+
+function renderRss() {
+  const host = document.getElementById('rss');
+  const entries = Object.entries(DATA.rss).sort((a, b) => a[1] - b[1]);
+  if (!entries.length) return;
+  const max = Math.max(...entries.map(e => e[1]));
+  const best = Math.min(...entries.map(e => e[1]));
+  host.innerHTML = `<div class="readout">
+    <header><h3>Peak memory</h3><span class="dims">whole process</span>
+    <p class="ask">One connection, the same eleven tests, each language.</p></header>
+    <div class="bars">${entries.map(([k, v]) => `
+      <div class="bar ${k === 'Zig' ? 'is-subject' : ''}">
+        <span class="who">${k}</span>
+        <span class="track"><span class="fill" style="width:${Math.max(1.2, v / max * 100).toFixed(1)}%"></span></span>
+        <span class="num">${fmt(v)} kB</span>
+        <span class="mult">${(v / best).toFixed(1)}×</span>
+      </div>`).join('')}</div>
+  </div>`;
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  Object.keys(ASK).forEach(renderShape);
+  renderRss();
+  const b = DATA.blocks || 900;
+  document.getElementById('blockcount').textContent = b;
+  document.getElementById('blockcount2').textContent = b;
+});
+</script>
