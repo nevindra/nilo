@@ -32,6 +32,16 @@ fn niloFor(
         .{ .name = "nilo_config", .module = nilo.module("nilo_config") },
         .{ .name = "nilo_id", .module = nilo.module("nilo_id") },
         .{ .name = "nilo_pw", .module = nilo.module("nilo_pw") },
+        // M3. A database that is a file, so there is nothing to run beside the
+        // process and nothing to configure — which is the whole reason this
+        // milestone goes here rather than at Postgres.
+        //
+        // The line that was supposed to be free until now was not. **Before
+        // this line existed**, a clean `zig build` of arsip already downloaded
+        // pg.zig, tls, xsync, metrics and zqlite — 11.1 MB of driver for an app
+        // whose imports were four HTTP-and-tools modules. See item 16 in
+        // `DX.md`; the binary is clean, the download is not.
+        .{ .name = "nilo_sql", .module = nilo.module("nilo_sql") },
     }) catch @panic("out of memory");
 }
 

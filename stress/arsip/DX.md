@@ -9,20 +9,25 @@ ranking is by how many users hit it and how badly, not by how hard it is to fix.
 
 Found in: **M0** scaffolding, **M1** the JSON API, **M1b** forms, uploads,
 streamed bodies, blocking work and wildcards, **M2** accounts, passwords, sealed
-sessions and settings from the environment.
+sessions and settings from the environment, **M3** the accounts in SQLite.
 
 **The number is an id, not a rank.** The table is sorted worst first, so a new
 item can land at the top without renumbering the ones below it.
 
 | # | Item | Area | Sev |
 |---|---|---|---|
+| 16 | [The lazy dependency is fetched by everybody, including an HTTP-only app](#16) | build | **critical** |
 | 14 | [A type with its own `jsonStringify` gets a schema that contradicts the wire](#14) | openapi | **critical** |
+| 18 | [`sql.Uuid` does not compile against SQLite, and the error is the driver's](#18) | sql | high |
 | 11 | [Three published examples of the password and id API do not compile](#11) | docs | high |
 | 13 | [There is no way to guard a prefix except two paths in it](#13) | middleware | high |
+| 19 | [There is no phase that is after the pool and before the server](#19) | sql, docs | high |
 | 1 | [Identical generic instantiations get two identical schemas](#1) | openapi | high |
 | 2 | [A service you forgot is a 500 in tests, not a name](#2) | services, testing | high |
 | 3 | [Past eight levels a body error says nothing at all](#3) | convert | high |
 | 15 | [A 422 has two shapes, and only one of them is nilo's](#15) | convert, docs | medium |
+| 17 | [A statement that answers with nothing still has to name a Row](#17) | sql | medium |
+| 20 | [Four small things that are wrong on the page](#20) | docs, build | low |
 | 4 | [A `union(enum)` has a derivable schema and gets `{}`](#4) | openapi | medium |
 | 5 | [`Bound(T)` cannot be built from the testing page](#5) | testing | medium |
 | 6 | [The `Str`→`Text` walk is unaddressed past two levels](#6) | docs | medium |
@@ -87,6 +92,30 @@ the fix is not new machinery, it is one call — `testing.Client.init` running i
 function nobody is told about is a function nobody calls. arsip hit this twice in
 M1 and once more in M2 (`*const Settings`, newly required) before finding out it
 existed.
+
+**M3 made it worse in a way worth spelling out**, because services are no longer
+the only thing `listen()` does that a test does not. Two more landed:
+
+- **`nilo_start` is not called**, so a `Db` in a test has no pool and every query
+  answers `error.Disconnected`. A test has to open it by hand and hold an
+  `std.Io` alive to do it — see [item 19](#19).
+- **`db.checking` is not run**, so a Row that disagrees with its table passes the
+  whole suite. arsip's `accounts` table declared `id INTEGER PRIMARY KEY
+  AUTOINCREMENT`, which SQLite reports as **nullable**; `id: i64` is not. All
+  **40 tests passed**, in both optimize modes, against that schema. The first
+  `zig build run` stopped dead with the right sentence:
+
+  ```
+  error: nilo_sql: nilo: accounts.Account.id is not optional, but accounts.id may be null
+  error: nilo found 1 disagreement(s) between a Row and its table, listed above.
+  ```
+
+  That is the check doing its job, and it is also the clearest possible statement
+  of the gap: **the suite was not testing the thing the server checks.**
+
+So the fix is worth more than it was. One `app.startForTesting(io)` — services
+started, schema checked, `checkServices` run — would close all three at once, and
+`testing.Client.init` could call it.
 
 <a name="3"></a>
 ## 3. Past eight levels a body error says nothing at all
@@ -488,3 +517,246 @@ the existing message machinery does the rest. Failing that, the honest move is a
 paragraph in `guide/forms.md` saying that rule checks do not join the collected
 422 and showing how to accumulate them by hand — because right now the guide shows
 the good half and stops.
+
+<a name="16"></a>
+## 16. The lazy dependency is fetched by everybody, including an HTTP-only app
+
+**What happens.** arsip at M2 imported `nilo_http`, `nilo_config`, `nilo_id` and
+`nilo_pw`. It did not import `nilo_sql` and named nothing in it. A clean build —
+`rm -rf zig-pkg .zig-cache && zig build` — downloaded this:
+
+| package | size | wanted by arsip? |
+|---|---|---|
+| `zio` | 2.7 MB | yes, the Engine |
+| `zqlite` | 9.8 MB | **no** — the SQLite amalgamation |
+| `pg` | 572 KB | **no** |
+| `tls` | 456 KB | **no**, pg.zig's |
+| `xsync` | 152 KB | **no**, pg.zig's |
+| `metrics` | 156 KB | **no**, pg.zig's |
+
+**11.1 MB fetched against 2.7 MB used**, and the build also *attempted* buffer.zig
+— pg.zig's fifth — and printed a fetch error when GitHub rate-limited it. An app
+with no database anywhere in it cannot build offline without a Postgres driver's
+dependency graph in the cache.
+
+**What is not wrong.** The *binary* claim holds exactly. `strings` and `nm` over
+arsip's M2 executable find no `sqlite3`, no `libpq`, no `PGconn` — zero symbols
+from any of it. So "does not **link**" is true and "does not **fetch**" is not,
+and the published sentence says all three:
+
+> a project that serves HTTP and never imports `nilo_sql` does not fetch, build
+> or link any of it
+> — `build.zig.zon`, and the same claim in `CLAUDE.md`, `README.md` and ADR 0040.
+
+**The cause is two lines**, and it is the standard Zig lazy-dependency trap:
+
+```zig
+// build.zig, in build(), unconditionally
+if (b.lazyDependency("pg",     .{ … })) |pg|     { nilo_sql.addImport("pg", …); }
+if (b.lazyDependency("zqlite", .{ … })) |zqlite| { nilo_sql.addImport("zqlite", …); }
+```
+
+`b.lazyDependency` does not mean "fetch this if somebody uses it". It means
+"**request** this": it returns null on the pass that finds the package missing,
+enqueues the download and re-runs the build. Called unconditionally at the top of
+`build()`, it runs for every dependent whatever they import — so the flag in
+`build.zig.zon` buys nothing.
+
+Not a regression from the SQLite commit either. `lazyDependency("pg", …)` was
+already there and already eager; `50171dc` doubled it and added 9.8 MB to the
+bill.
+
+**Who hits it.** Every single dependent, on `zig fetch --save` and on every clean
+CI checkout. It is the first thing anybody does with nilo and the cost is paid
+before they write a line.
+
+**What to change.** The dependency has to be reached from somewhere that only runs
+when the module is wanted, which in Zig means the *dependent's* build calling
+`b.dependency("nilo", …).module("nilo_sql")` has to be what triggers it. Two
+shapes are available and both are real work:
+
+1. **A build option.** `b.dependency("nilo", .{ .sql = true })`, and the
+   `lazyDependency` calls sit behind `if (opts.sql)`. Explicit, one line in a
+   dependent's `build.zig`, and it makes the `nilo_sql` module simply absent
+   otherwise — which is arguably better than a module that exists and cannot be
+   built.
+2. **Split the package.** `nilo_sql` as its own `build.zig.zon` entry, so a
+   dependent that does not name it never reads its manifest. That is the shape the
+   layering already describes (ADR 0041 says the repository is modules), and it is
+   the bigger change.
+
+Whichever is chosen, **the number belongs in a build step**. This repository's own
+discipline says a rule that nobody runs is the rule that rots, and it has already
+been wrong four times about published claims. `zig build size-sql` proves the
+linking half against two real binaries; the fetching half has no equivalent and
+that is exactly why it drifted. A step that builds a scratch dependent importing
+only `nilo_http` and asserts on what landed in its package directory would have
+caught this on the day it broke.
+
+<a name="17"></a>
+## 17. A statement that answers with nothing still has to name a Row
+
+**What happens.** There is no migration runner, which is a decision and a
+defensible one — a Row cannot declare an index or a constraint, and one that could
+would be a migration file in disguise. So `CREATE TABLE` is the application's job,
+and `db.raw` is the only door. Its first argument is a Row:
+
+```zig
+_ = try db.raw(struct {}, run, "CREATE TABLE IF NOT EXISTS accounts (…)", .{});
+```
+
+```
+error: nilo: accounts.Accounts.migrate__anon_51778__struct_51790 is not a Row —
+       it has no `nilo_table`. Add `pub const nilo_table = .{ .name = "<table>" };`
+       to it, or `= <OtherRow>` to read the same table as another Row.
+```
+
+The message is good and it is answering the wrong question: nothing is being
+selected, so there is no shape to describe. What arsip ships is
+`db.raw(Account, run, schema, .{})` — passing the Row of the table *being
+created*, which returns no rows and is only there to satisfy the check. That reads
+like a mistake and is the recommended path by elimination.
+
+**Who hits it.** Every SQLite application, because there is no server to have run
+the DDL elsewhere. Postgres applications mostly have a migration tool already, so
+this lands hardest exactly where the new Wire is aimed.
+
+**What to change.** `db.exec(c, sql, values) !usize` — the same call without the
+Row, answering rows-affected. It is a few lines over the same `fill` path with no
+row filling, it makes `CREATE TABLE`, `PRAGMA`, `VACUUM` and `ANALYZE` express
+themselves honestly, and it removes the one place where a caller passes a type it
+does not mean. Failing that, `guide/sql.md` should show the DDL line it expects
+people to write, because right now everyone invents the same workaround
+separately.
+
+<a name="18"></a>
+## 18. `sql.Uuid` does not compile against SQLite, and the error is the driver's
+
+**What happens.** The SQLite section's headline is that nothing changes:
+
+> Swap two lines and the rest of this page is unchanged.
+> Your handler does not change at all. — `guide/sql.md`
+
+A Row with `public: sql.Uuid` — the type `nilo_sql` exports, the one ADR 0042
+moved down a layer so that generating a key and reading a column are one value —
+does not build:
+
+```
+zig-pkg/zqlite-…/src/conn.zig:399:21: error: Pass a string slice, rather than an
+array, to bind a text/blob. String arrays will be supported when
+https://github.com/ziglang/zig/issues/15893#issuecomment-1925092582 is fixed
+```
+
+That is **zqlite**'s `@compileError`, three layers below anything the application
+wrote, naming a Zig issue. Nothing in it says `Uuid`, says SQLite is the problem,
+or names a route out. In a repository whose `refusals/` directory exists so that
+125 mistakes get a message nilo wrote, this one gets a message a vendored library
+wrote about a compiler bug.
+
+**The cause is one line.** `sql/db.zig`'s `WireWrite` maps a `Uuid` to
+`[Uuid.byte_len]u8` — a Zig **array**. pg.zig binds arrays; zqlite refuses them at
+compile time.
+
+**And the two halves of the module disagree about the column anyway.**
+`dialect.SQLite.accepts` routes a type with a `declaredColumn` — which `Uuid` has,
+`"uuid"` — to `&.{ "TEXT", "VARCHAR", "CLOB" }`. So the schema check wants the
+column to be TEXT while the wire is trying to send sixteen raw bytes. Even with
+the bind fixed, the two would have to be made to agree.
+
+**Who hits it.** Anybody who does the obvious thing. `nilo_id` is the module the
+reference recommends for public ids, `sql.Uuid` **is** `nilo_id`'s `Uuid`, and a
+`uuid` primary or secondary key is the most ordinary column in a modern schema.
+
+**What arsip did.** Wrote its own column type, which is the documented escape
+hatch (ADR 0055) used for something that should not have needed one — thirteen
+lines of `nilo_column` / `nilo_read` / `nilo_write` storing the hyphenated text.
+That turned out to be the better shape for SQLite anyway (`sqlite3` shows the id;
+`WHERE public = '…'` is typeable), which is a hint at the fix.
+
+**What to change.** Two things, and the second matters more than the first:
+
+- **Make `Uuid` travel as text on the SQLite Wire.** Thirty-six bytes rather than
+  sixteen, no BLOB, and it lines up with what `accepts` already claims. Then the
+  guide's promise is true for the type most likely to test it.
+- **A Refusal, not a driver error.** Whatever the answer, `sql/` should decide
+  what a `Uuid` does on each Wire and say so in its own words, with a file in
+  `sql/refusals/` holding the wording — the same way `insertMany`, `.lock`,
+  `tx.deadline`, a list column and `.isolation` already are. Five refusals name
+  the dialect and the sixth escaped, and the sixth is the one people hit first.
+
+<a name="19"></a>
+## 19. There is no phase that is after the pool and before the server
+
+**What happens.** The guide is clear that a query needs no request:
+
+> Where there is no request there is `nilo.Run`, which owns an arena and a
+> lifetime of its own. […] That is the whole of what a migration script or a
+> nightly job needs from this module.
+
+It is not the whole. A `Run` is an arena and a lifetime; what it is not is a
+**connection**. The pool is opened by `nilo_start(io)`, which `listen()` calls on
+every provided service that declares one — so before `listen()` every query is:
+
+```
+error.Disconnected
+```
+
+which names neither the pool nor `listen()` nor anything a reader could act on.
+And after `listen()` there is no "before the server" left: the call does not
+return until the server stops.
+
+So a migration — the thing every SQLite application must do at startup, because
+there is no server to have done it elsewhere — needs an `std.Io` that only the
+running server has. arsip's answer is ten lines: stand up `std.Io.Threaded`, open
+a **second** `Db` on the same file, `nilo_start` it by hand, create the table,
+close it, and only then hand the real `Db` to the App.
+
+The same shape hits every test. `testing.Client` does not call `listen()` either,
+so a test that drives an App with a database has to `nilo_start` the pool itself
+and hold its `Io` alive for as long as it serves — which is
+[item 2](#2) in its third costume.
+
+**Who hits it.** Every application with a database, at the first startup task that
+is not a request: a migration, a seed, a cache warm, a nightly job sharing the
+service's code. And SQLite makes it universal rather than occasional.
+
+**What to change.** The mechanism exists and is public — `nilo_start` is a
+documented hook and `Run` is a documented Scope. What is missing is the sentence
+joining them, and one convenience:
+
+- `guide/sql.md` showing a real `main` that migrates before it listens, including
+  the `std.Io.Threaded`. Fifteen lines against a shape every reader rediscovers.
+- Better: `app.startServices(io)` — or a `nilo.Run` that can be handed an `Io` and
+  start the services registered on an App — so the phase is one call and the
+  second `Db` is unnecessary. That also fixes the test half, because a
+  `testing.Client` could run it.
+- And `error.Disconnected` before any pool has been opened is a different mistake
+  from a database that went away. It could say so: *this `Db` has not been
+  started; `listen()` does it, and outside a server `db.nilo_start(io)` does.*
+
+<a name="20"></a>
+## 20. Four small things that are wrong on the page
+
+Each is one line to fix and none of them costs an hour, which is why they are one
+item rather than four.
+
+**A duplicate key in `build.zig.zon`.** `.zqlite` is declared **twice** — once
+with `.lazy = true` and once without. Zig accepts it silently and the second wins,
+so the manifest says the opposite of what its own comment above it says. (It is
+not the cause of [item 16](#16); the eager fetch happens either way. It is a
+latent trap sitting next to a live one.)
+
+**A build step that does not exist.** `build.zig`'s comment on the SQLite driver
+says *"`zig build sqlite-size` is where the number comes from"*. The step is
+called **`size-sql`**. A published command that errors with `no step named` is the
+smallest possible version of the thing this repository has been burned by four
+times.
+
+**A count that disagrees with itself.** `guide/sql.md` says "five things SQLite
+refuses" and lists five; `docs/reference.md` says "the four things SQLite refuses"
+and lists five.
+
+**And one thing that is right, checked because the others were not.** The
+published SQLite size reproduces **exactly**: `zig build size-sql` gives
+1,677,464 and 2,202,304 bytes, a difference of **524,840** against the 524,840 in
+the guide and the reference. That number was measured and it holds.

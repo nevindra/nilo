@@ -45,6 +45,21 @@ pub const Settings = struct {
     open_signup: bool = true,
 
     log_level: enum { debug, info, warn } = .info,
+
+    /// Where the accounts live. A path, or SQLite's URI form — a bare
+    /// `:memory:` is refused when the pool opens, because a pool of them is
+    /// several separate empty databases.
+    ///
+    /// It has a default and a database URL normally should not, which is the
+    /// point of the milestone: a database that is a file has nothing to run
+    /// beside the process, so "works with nothing set up" survives contact with
+    /// persistence. `ARSIP_SESSION_SECRET` is still the only required setting.
+    db_path: []const u8 = "arsip.db",
+
+    /// Connections held open, and **one of them is the writer** — SQLite allows
+    /// one at a time, so this is `1 + readers` rather than a pool size in the
+    /// usual sense (ADR 0074).
+    db_pool: u16 = 4,
 };
 
 /// `ARSIP_` on the front of every name, so the archive's settings cannot be

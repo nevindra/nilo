@@ -10,7 +10,8 @@ const std = @import("std");
 const nilo = @import("nilo_http");
 const auth = @import("auth.zig");
 const handlers = @import("handlers.zig");
-const Accounts = @import("accounts.zig").Accounts;
+const accounts_mod = @import("accounts.zig");
+const Accounts = accounts_mod.Accounts;
 const Archive = @import("archive.zig").Archive;
 const Settings = @import("settings.zig").Settings;
 
@@ -20,6 +21,21 @@ const testing = std.testing;
 const Server = struct {
     app: nilo.App,
     archive: Archive,
+    /// One database file per Server, in the test runner's temporary directory.
+    ///
+    /// **A file rather than `file:t?mode=memory&cache=shared`**, and the reason
+    /// is the shared part: two Servers alive at once would be one database, so
+    /// the account `signedIn` creates in one test would already be there in the
+    /// next. A path per `tmpDir` is what makes these tests independent.
+    dir: std.testing.TmpDir,
+    db_path: [:0]const u8,
+    /// **`testing.Client` does not call `listen()`, and `listen()` is what opens
+    /// the pool** — so a Server has to do it, with an Io of its own, and hold
+    /// that Io for as long as it serves. This is item 2 in `DX.md` in its third
+    /// costume: a thing the server does at startup that a test driving App
+    /// directly silently does not.
+    threaded: std.Io.Threaded,
+    db: accounts_mod.Db,
     accounts: Accounts,
     limits: Settings,
     client: nilo.testing.Client,
@@ -32,14 +48,37 @@ const Server = struct {
         // By pointer: the App holds a pointer to each store, so none of them may
         // move after `provide`.
         const self = try gpa.create(Server);
+        errdefer gpa.destroy(self);
+
+        var dir = std.testing.tmpDir(.{});
+        errdefer dir.cleanup();
+        const db_path = try std.fmt.allocPrintSentinel(
+            gpa,
+            ".zig-cache/tmp/{s}/arsip.db",
+            .{dir.sub_path},
+            0,
+        );
+        errdefer gpa.free(db_path);
+
+        // The table, on a database of its own, before this one opens — the same
+        // call `main.zig` makes.
+        try accounts_mod.migrateFile(gpa, db_path);
+
         self.* = .{
             .app = nilo.App.init(gpa),
             .archive = .init(gpa),
-            .accounts = .init(gpa),
+            .dir = dir,
+            .db_path = db_path,
+            .threaded = .init(gpa, .{}),
+            .db = .init(gpa, db_path, .{ .size = 2 }),
+            .accounts = undefined,
             .limits = .{ .session_secret = "0123456789abcdef0123456789abcdef" },
             .client = try nilo.testing.Client.init(gpa, .{}),
             .gpa = gpa,
         };
+        self.accounts = .{ .db = &self.db };
+        try self.db.nilo_start(self.threaded.io());
+
         try self.app.provide(&self.archive);
         try self.app.provide(&self.accounts);
         // Forgetting one of these is a 500 in every test that needed it, because
@@ -64,7 +103,10 @@ const Server = struct {
     fn deinit(self: *Server, gpa: std.mem.Allocator) void {
         if (self.cookie) |c| gpa.free(c);
         self.client.deinit();
-        self.accounts.deinit();
+        self.db.deinit();
+        self.threaded.deinit();
+        gpa.free(self.db_path);
+        self.dir.cleanup();
         self.archive.deinit();
         self.app.deinit();
         gpa.destroy(self);
@@ -278,7 +320,12 @@ test "a short password is refused before anything is hashed" {
         \\{"email":"wati@example.dev","name":"Wati","password":"kopi"}
     );
     try testing.expectEqual(@as(u16, 422), refused.status);
-    try testing.expectEqual(@as(usize, 0), try s.accounts.count());
+
+    // Counted through a Run, because there is no request out here — the same
+    // store, the same statement, no server involved.
+    var run: nilo.Run = .init(gpa);
+    defer run.deinit();
+    try testing.expectEqual(@as(usize, 0), try s.accounts.count(&run));
 }
 
 test "three bad fields in one body are named in one answer" {

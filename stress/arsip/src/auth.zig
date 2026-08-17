@@ -37,7 +37,9 @@ const Allocator = std.mem.Allocator;
 /// So the display name is a fixed array, and everything else is an id to look up.
 /// The session goes up the wire on every request, static files included.
 pub const Signed = struct {
-    account: u32,
+    /// `i64` since M3, because a key is what the database says it is and
+    /// arguing with that costs a cast at every boundary instead of one field.
+    account: i64,
     curator: bool = false,
     /// Padded with spaces, because a `[24]u8` has no length. `nameOf` trims.
     name: [24]u8 = @splat(' '),
@@ -170,7 +172,11 @@ fn signUp(
     arena: Allocator,
     form: nilo.Bound(SignUp),
 ) !nilo.Status(201, accounts_mod.Profile) {
-    const first = (try store.count()) == 0;
+    // `c` where M2 passed an `arena`. That is the whole of what M3 changed in
+    // this file: the store's methods take a **Scope** rather than an allocator,
+    // because a query needs somewhere to put its rows *and* a lifetime to stamp
+    // its `Str`s with, and a `*Ctx` is both.
+    const first = (try store.count(c)) == 0;
     if (!limits.open_signup and !first)
         return fail.forbidden("this archive is not taking new accounts", .{});
 
@@ -202,18 +208,19 @@ fn signUp(
     const public = uuid.v7(try c.entropy(uuid.Uuid.v7_entropy), now);
 
     const made = try store.add(
-        arena,
+        c,
         public,
         incoming.email.view(),
         incoming.name.view(),
         stored.text(),
         first, // whoever gets there first is the curator
     ) orelse return fail.conflict("that address already has an account", .{});
+    _ = arena;
 
     try s.set(.{
         .account = made.id,
         .curator = made.curator,
-        .name = packName(made.name),
+        .name = packName(made.name.view()),
     });
     return .{ .value = accounts_mod.profileOf(made) };
 }
@@ -229,10 +236,9 @@ fn signIn(
     c: *nilo.Ctx,
     store: *Accounts,
     s: nilo.Session(Signed),
-    arena: Allocator,
     form: SignIn,
 ) !accounts_mod.Profile {
-    const row = try store.find(arena, form.email.view());
+    const row = try store.find(c, form.email.view());
 
     // **`stored` is optional and null is the point.** A sign-in for an address
     // with no account has no hash to check, and returning early there answers in
@@ -241,7 +247,7 @@ fn signIn(
     // answers false (ADR 0049).
     const ok = try c.verifyPassword(
         pw.huge_pages,
-        if (row) |r| r.password else null,
+        if (row) |r| r.password.view() else null,
         form.password.view(),
     );
     if (!ok) return fail.unauthorized("that is not a sign-in", .{});
@@ -250,15 +256,15 @@ fn signIn(
 
     // The one moment the plaintext is in hand, so the only place a row written
     // at an older Cost can be written forward.
-    if (try pw.needsRehash(account.password, .default)) {
+    if (try pw.needsRehash(account.password.view(), .default)) {
         const fresh = try c.hashPassword(pw.huge_pages, form.password.view());
-        try store.rehash(account.id, fresh.text());
+        try store.rehash(c, account.id, fresh.text());
     }
 
     try s.set(.{
         .account = account.id,
         .curator = account.curator,
-        .name = packName(account.name),
+        .name = packName(account.name.view()),
     });
     return accounts_mod.profileOf(account);
 }

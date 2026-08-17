@@ -41,7 +41,8 @@ const auth = @import("auth.zig");
 const handlers = @import("handlers.zig");
 const settings_mod = @import("settings.zig");
 const Archive = @import("archive.zig").Archive;
-const Accounts = @import("accounts.zig").Accounts;
+const accounts_mod = @import("accounts.zig");
+const Accounts = accounts_mod.Accounts;
 const Settings = settings_mod.Settings;
 
 pub const std_options = nilo.std_options;
@@ -112,9 +113,30 @@ pub fn main(init: std.process.Init) !void {
     defer archive.deinit();
     try app.provide(&archive);
 
-    var accounts: Accounts = .init(gpa);
-    defer accounts.deinit();
+    // M3. The accounts live in a file now, and this is the whole of "start the
+    // database": no service to run beside the process, no URL, no credentials.
+    //
+    // The migration comes first and on a database of its own, because the pool
+    // this one will use is opened by `listen()` and nothing before it — see
+    // `accounts.migrateFile`, which is item 19 in `DX.md`.
+    accounts_mod.migrateFile(gpa, settings.db_path) catch |err| {
+        std.debug.print(
+            "arsip cannot start: the accounts database at \"{s}\" could not be opened ({t})\n",
+            .{ settings.db_path, err },
+        );
+        std.process.exit(2);
+    };
+
+    var db: accounts_mod.Db = .init(gpa, settings.db_path, .{ .size = settings.db_pool });
+    defer db.deinit();
+
+    // Compared against the table it names, once, during `listen()` rather than
+    // at the first request that reached it.
+    db.checking(&.{accounts_mod.Account});
+
+    var accounts: Accounts = .{ .db = &db };
     try app.provide(&accounts);
+    try app.provide(&db);
 
     // Two services of different shapes. `*const Settings` and `*Settings` are
     // different types and are looked up as such, so a read-only service says so

@@ -18,7 +18,8 @@ store), and somebody who wants telling about them (an outbound call, a socket).
 | 1 | The API | — | Does "the signature is the contract" hold when the domain stops being one flat struct? |
 | 1b | The awkward corners | — | Forms, uploads, streamed bodies, blocking work, wildcards — everything a curated example skips |
 | 2 | Identity | `nilo_config`, `nilo_pw`, `nilo_id` | What does adopting three tool modules cost when the guide points them at the reference? |
-| 3 | Postgres | `nilo_sql` | What breaks when the same types have to be a table as well as a body? |
+| 3 | A database that is a file | `nilo_sql` | What breaks when the same types have to be a table as well as a body? |
+| 3b | The same code, a server | — | Whether "swap two lines" survives the swap, against a real Postgres |
 | 4 | The bytes | `nilo_s3` | What happens to a `Str` that has to cross two Services in one request? |
 | 5 | Outbound | `nilo_fetch` | Can a handler call somebody else's API on a deadline without owning the loop? |
 | 6 | Live | — | A socket that outlives the request, and a page to watch it from. |
@@ -123,12 +124,74 @@ Five new items in [`DX.md`](./DX.md), one of them the worst found so far: a type
 with its own `jsonStringify` gets an OpenAPI schema that **contradicts what the
 server sends**, which breaks every generated client that reads a `nilo_id` value.
 
-## M3 — Postgres
+## M3 — A database that is a file ✅
 
-Against the Postgres already running on this machine. The in-memory store from
-M1 goes; the same structs become tables. Migrations, a transaction that has to
-hold, pagination that has to match the query struct from M1, and the Scope seam
-— a Service reaching request-lifetime memory without ever naming a `Ctx`.
+SQLite rather than Postgres, and **one store rather than both**: the accounts
+move to a table and the archive stays in memory. One seam, so the friction is
+attributable — which is the same reason the module list grows one line a
+milestone.
+
+`sql.Sqlite` is the reason this can be small. There is nothing to run beside the
+process, so `zig build run` still works with one setting set, and persistence
+costs a path with a default.
+
+**What held.** The claim under test was the SQLite section's headline — *swap two
+lines and the rest of the page is unchanged* — and for the query surface it is
+true. `db.insert`, `db.one`, `db.find`, `db.count`, `db.update` are the calls the
+Postgres half of the guide describes, and every one of them worked first time
+against a file. `sql.Uuid` **is** `nilo_id`'s `Uuid`, not a second type, so a
+column and a generated key are one value.
+
+The store lost about ninety lines. M2's `Accounts` was an `ArrayList(*Row)` with
+an arena per row and a `nilo.Mutex`, all of it in service of handing back a copy
+that lives as long as the caller's request. What is left is the four rules that
+are about accounts.
+
+**What it cost at the call site: one word.** Every method took an `Allocator` and
+now takes a Scope. `auth.zig` changed in five places and `handlers.zig` not at
+all.
+
+**What did not hold.** `public: sql.Uuid` does not compile against SQLite — the
+error is zqlite's, three layers down, about a Zig issue. arsip writes its own
+column type instead. Item 18 in [`DX.md`](./DX.md), and the sharpest finding of
+the milestone after 16.
+
+40 tests in both modes. What the transcript proved:
+
+- two accounts through a real socket, the second not a curator, both with v7 ids
+  that sort in the order they were made;
+- **`kill` and start again, and `wati@example.dev` signs in with the same
+  password and comes back with the same `public`** — the argon2id hash verified
+  off the disk. The cookie issued before the restart still worked too, which is
+  the sealed session doing what ADR 0035 says: no server state to lose;
+- `WATI@EXAMPLE.DEV` is a 409, because the lookup and the `UNIQUE` are one rule
+  (`COLLATE NOCASE`) rather than two that have to agree;
+- an ordinary `sqlite3` client reads the file while nilo holds it open, and finds
+  the id as text, the bool as 0/1, and the PHC string intact.
+
+**The number.** Adopting `nilo_sql` with the SQLite Wire cost arsip
+**1,223,696 bytes**, stripped `ReleaseFast` — 1,741,896 at M2 against 2,965,592
+at M3, both built here rather than quoted, the M2 side from `git archive 735af19`
+into a scratch directory. Of that, 524,840 is SQLite itself: `zig build size-sql`
+reproduces the published figure **exactly**, which is the second published number
+this project has checked from outside and the first that was right. The remaining
+~699 KB is the rest of `nilo_sql` — row filling, the statement machinery, the
+schema check, both dialects — which arsip did not have before.
+
+**What was not measured, and why not.** Anything about SQLite's speed. Every
+write path in this app goes through argon2id first, which is ~400 ms in a Debug
+build and gated by `password_hashes_at_once` — four concurrent sign-ups took
+~2.1 s each and six concurrent sign-ins ~0.4 s, all of it the hash. The database
+is invisible next to that. A number would have been about `nilo_pw`, so there is
+none.
+
+## M3b — The same code, a server
+
+The line at the top of `accounts.zig` swapped for `sql.Db` and a Postgres URL, and
+nothing else touched. The question is narrow and worth its own milestone because
+M3 already found where it fails: `sql.Uuid` goes back to being the right type, the
+DDL has to move to a migration somebody else runs, and `insertMany` becomes
+available. Whether that is *two lines* or *a day* is the finding.
 
 ## M4 — The bytes
 
