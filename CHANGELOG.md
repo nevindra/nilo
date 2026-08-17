@@ -549,6 +549,78 @@ Nothing you wrote changes. `nilo.Str` is the same declaration it always was.
   that says nothing when it happens. Nothing you wrote changes: the server
   decoded path params and query values through this before and still does.
 
+### `nilo_s3`, and a seventh module
+
+**Object storage — S3, MinIO, R2, anything that speaks the dialect**
+([ADR 0072](./docs/adr/0072-an-object-store-is-a-service-that-dials.md)).
+
+```zig
+const s3 = @import("nilo_s3");
+
+// A bucket is a type. Its name is compiled in, so the host and the path
+// prefix are built once and a name that could never work is refused before
+// the program runs.
+const Avatars = s3.Bucket("avatars", .{ .max_bytes = 2 << 20 });
+
+var store = try s3.open(gpa, .{
+    .endpoint = "https://s3.ap-southeast-1.amazonaws.com",
+    .region = "ap-southeast-1",
+    .credentials = .{ .static = .{
+        .access_key_id = settings.aws_key,
+        .secret_access_key = settings.aws_secret,
+    } },
+});
+defer store.deinit();
+
+var avatars = try Avatars.open(&store);
+defer avatars.deinit();
+try app.provide(&avatars);
+
+fn avatar(avatars: *Avatars, c: *nilo.Ctx, id: []const u8) !void {
+    const object = try avatars.get(c, id);
+    return c.send(200, object.content_type.view(), object.bytes.view());
+}
+```
+
+`get`, `getRange`, `getIf`, `stream`, `put`, `putStream`, `delete`, `head` and
+`presign`. One Store holds the pool, the credentials and the signing key; each
+Bucket is a type over it, and two buckets share one pool.
+
+- **A bounded `get` makes one allocation**, and it holds the body, the content
+  type and the ETag together.
+- **An object over the bucket's `max_bytes` costs a round trip, not a
+  download** — `content-length` is checked before a byte is read.
+- **A signing key is derived once a day**, not once a request
+  ([ADR 0069](./docs/adr/0069-a-signing-key-changes-once-a-day.md)). What a
+  request pays is one SHA-256 and one HMAC.
+- **The canonical request is never assembled as bytes.** It is written straight
+  into the hash, because the bytes would be a buffer on a handler's stack and a
+  handler's stack is held per connection
+  ([ADR 0063](./docs/adr/0063-a-handlers-stack-is-per-connection.md)).
+- **Seven errors**, because a handler would do something different about each:
+  `NotFound`, `TooLarge`, `Throttled`, `Unavailable`, `TimedOut`, `Rejected`,
+  `Failed`. S3's own code is logged rather than sent on — a `Rejected` reaching
+  a client as 403 would be telling the caller they are not allowed when the
+  truth is that the server's credentials are wrong. A skewed clock is read out
+  of the error body and said plainly.
+- **Temporary credentials are one function**, called lazily by the request that
+  notices they are near expiry. There is no background task.
+- **`presign` touches no socket**, and the life it reports is the true one: the
+  smallest of what was asked, what the bucket allows, and what the credentials
+  have left.
+
+**No `LIST`, no `COPY`, no multipart upload.** One sentence covers all three:
+they are where S3 stops being bytes at a key and starts being a document format
+([ADR 0068](./docs/adr/0068-a-bucket-is-a-type-and-a-key-is-not.md)).
+
+`nilo_http` does not import it, so a program that stores nothing links none of
+it. What it costs is in [`bench/result/s3.md`](./bench/result/s3.md), against
+the same seven routes written in Go and Rust: reading a 1 KB object costs
+**11,814 ns of CPU** beyond answering the same bytes from memory, which is 5.0×
+less than Rust with the official AWS SDK and 8.3× less than Go with its own,
+and an idle connection holding a store costs nothing over one that does not.
+Two of ADR 0018's four axes are not yet measured and that file says which.
+
 ### `nilo_fetch`, and a fourth layer
 
 **Calling somebody else's HTTP API from a handler**, as a module of its own
@@ -579,7 +651,12 @@ closes something real:
   until the process dies. `error.TimedOut` is this call's own deadline;
   `error.Canceled` is a shutdown, and the two are told apart rather than
   guessed at.
-- **A bounded drain**, so refusing a 500 MB response does not download it.
+- **A bounded drain**, so refusing a 500 MB response does not download it — and
+  the drain itself, so refusing a small one does not throw the connection away.
+  std does one or the other depending on where the body stopped: from an
+  untouched body its `deinit` reads the whole thing to keep the connection, and
+  from one that was started and stopped it closes the connection however few
+  bytes remain. `max_drain` decides both, which it did not before.
 - **A body ceiling**, enforced while reading, so a lying `content-length` buys
   nothing.
 - **A `Str` in your Scope**, so the body lives exactly as long as the request
@@ -595,6 +672,24 @@ closes something real:
 A 4xx or a 5xx is a `Response`, not an error — the call worked and the service
 said no. Retries, circuit breakers and rate limiting are deliberately absent:
 they are facts about somebody else's service.
+
+**`fetch.Exchange`** is the same policy with the body left on the socket, for
+an answer too big to hold: read the head, decide, then move the bytes into a
+writer rather than into memory.
+
+```zig
+var ex: fetch.Exchange = .idle;
+defer ex.end();
+
+const head = try ex.begin(client, .{ .method = .GET, .url = url });
+if (head.content_length) |n| if (n > ceiling) return error.TooLarge;
+_ = try ex.pipe(&body.writer);   // allocating nothing
+```
+
+`begin`, then one of `take` (into the Scope, bounded), `readInto` (exactly that
+many bytes), or `pipe`; `end` when done. The transfer and redirect buffers are
+the caller's, because their cost is the caller's stack. `nilo_s3` is built on
+it, and `Client.send` is now the same code path with the body taken whole.
 
 **`nilo_http` does not import it**, so a program that calls nobody links no
 HTTP client, no TLS and no certificate bundle. A program that *does* pays

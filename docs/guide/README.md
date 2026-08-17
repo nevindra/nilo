@@ -5,15 +5,18 @@ each one assumes the ones above it — and jump straight in afterwards.
 
 ## Which module a page is about
 
-nilo is a toolkit of six modules rather than one library, and which one a page
+nilo is a toolkit of eight modules rather than one library, and which one a page
 belongs to is decided by a single question — does it need the event loop?
 ([ADR 0041](../adr/0041-a-module-sits-where-the-loop-puts-it.md),
-[ADR 0042](../adr/0042-the-bottom-layer-holds-more-than-one-module.md))
+[ADR 0042](../adr/0042-the-bottom-layer-holds-more-than-one-module.md),
+[ADR 0070](../adr/0070-a-fitting-borrows-the-loop.md))
 
 | Module | What it is | Pages |
 |---|---|---|
 | **`nilo_http`** | the server: routing, handlers, middleware, files, sockets | everything below except the ones named on the right |
 | **`nilo_sql`** | Postgres: your struct is the table | [Talking to Postgres](./sql.md) |
+| **`nilo_s3`** | object storage: your bucket is a type | [the reference](../reference.md#nilo_s3) |
+| **`nilo_fetch`** | calling somebody else's HTTP API from a handler | [the reference](../reference.md#nilo_fetch) |
 | **`nilo_config`** | settings out of the environment, into a struct of yours | [the reference](../reference.md#nilo_config) |
 | **`nilo_pw`** | password hashing: argon2id, stored as PHC | [Sessions](./sessions.md) |
 | **`nilo_id`** | UUIDs, v4 and v7 | [the reference](../reference.md#nilo_id) |

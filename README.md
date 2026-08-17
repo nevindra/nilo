@@ -8,8 +8,8 @@ nilo is a toolkit for that layer. It has one idea.
 
 > **Your types are the contract. The compiler is the check.**
 
-Six modules. The biggest one is an HTTP server, but the server is not the point.
-You import the modules you use, and Zig never compiles the rest.
+Eight modules. The biggest one is an HTTP server, but the server is not the
+point. You import the modules you use, and Zig never compiles the rest.
 
 **It's built for people and for coding agents at the same time**, which turns
 out to be one job rather than two. One rule covers the whole argument list.
@@ -276,9 +276,9 @@ const exe = b.addExecutable(.{
 
 The package is `nilo` and the module is `nilo_http`. **There is no module called
 `nilo`**, because the name belongs to the project rather than to any one part of
-it. `nilo_sql`, `nilo_config`, `nilo_pw`, `nilo_id` and `nilo_core` are its
-siblings, and you add a line above for each one you actually use. In your own
-code, alias it back to something short:
+it. `nilo_sql`, `nilo_s3`, `nilo_fetch`, `nilo_config`, `nilo_pw`, `nilo_id` and
+`nilo_core` are its siblings, and you add a line above for each one you actually
+use. In your own code, alias it back to something short:
 
 ```zig
 const nilo = @import("nilo_http");
@@ -347,6 +347,8 @@ parts of it. [Contributing](#contributing) is what that takes.
 |---|---|---|
 | **`nilo_http`** | routing, typed handlers, middleware, cookies and sessions, static files, streaming, WebSocket, OpenAPI | shipped |
 | **`nilo_sql`** | Postgres. Your struct is the table | shipped: reads, writes, transactions, streaming |
+| **`nilo_s3`** | object storage — S3, MinIO, R2. Your bucket is a type | shipped: get, put, range, stream, presign. No `LIST`, no multipart |
+| **`nilo_fetch`** | calling somebody else's HTTP API from inside a request | shipped: the policy in front of `std.http.Client`. No retries, no circuit breaker |
 | **`nilo_config`** | settings out of the environment, every bad one named at once | shipped. It parses no files, and that's a decision |
 | **`nilo_pw`** | password hashing: argon2id, stored as PHC | shipped: hashing and checking. Rate limiting the endpoint is still yours |
 | **`nilo_id`** | UUIDs, v4 and v7 | shipped: the format. Where the randomness comes from is still yours |
@@ -363,12 +365,15 @@ It's also why `nilo_sql` asks for a Scope instead of a `Ctx`. The same query
 runs inside a handler, inside a CLI, or inside a test with no server in the
 process.
 
-**What's missing is mostly one thing.** Object storage, mail, a Redis client, an
-HTTP client: four modules, one blocker. Nothing here has a supported way to dial
-*out* yet. That seam should be designed once against two callers rather than
-fitted to whichever one shows up first, and it's the most useful thing an
-outside contributor could take on. [`docs/roadmap.md`](./docs/roadmap.md) has
-the full queue, one list per module.
+**The way out is open now.** That paragraph used to say four modules were
+blocked on one thing — nothing here had a supported way to dial *out*. The seam
+was designed once against two callers rather than fitted to the first one
+([ADR 0070](./docs/adr/0070-a-fitting-borrows-the-loop.md)), and both have
+landed: `nilo_fetch` is the way out, and `nilo_s3` is the first module built on
+it. Mail and a Redis client are still unwritten, but they are now ordinary work
+rather than blocked work, which makes them the most useful thing an outside
+contributor could take on. [`docs/roadmap.md`](./docs/roadmap.md) has the full
+queue, one list per module.
 
 **This isn't going to become a junk drawer**, because there's a bar:
 

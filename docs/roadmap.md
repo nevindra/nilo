@@ -29,6 +29,7 @@ can be worked at the same time, by two people or by one person on two days.
 | Fitting | `nilo_fetch` | borrows it | [below](#nilo_fetch--calling-somebody-elses-api) |
 | App | `nilo_http` | owns it | [below](#nilo_http--the-server) |
 | Service | `nilo_sql` | needs it, does not own it | [below](#nilo_sql--postgres) |
+| Service | `nilo_s3` | needs it, does not own it | [below](#nilo_s3--object-storage) |
 
 Each module carries **Next**, numbered in its own order, and **Known gaps**,
 which is what is wrong today with what fixing it would take. A number is a
@@ -295,6 +296,17 @@ it borrows the loop and owns no destination.
 
 ### Known gaps
 
+- **Writing a megabyte costs 2.2× what axum charges for it, and nobody has
+  looked.** On a route that allocates a megabyte, fills it and writes it, with
+  no database and no object store anywhere near it, axum answers 18,160 req/s
+  and nilo 8,215 on the same three cores
+  ([`bench/result/s3.md`](../bench/result/s3.md)). It turned up as a *control*
+  in the object-store comparison, which is the only reason it was seen. The
+  first hypothesis to kill is the arena: allocating a megabyte per request from
+  an arena that resets keeping `arena_keep` bytes means fresh pages and 256
+  page faults every time, where a general allocator hands back the same warm
+  block. Raising `arena_keep` past a megabyte on that route is a one-line
+  experiment. Unrun, so the 2.2× is the only fact here.
 - **There are no counters.** Correlation is covered — request ids and JSON log
   lines ([Errors and logging](./guide/errors.md)) — but metrics are not: how many
   requests, at what statuses, how long. That is a much larger surface than a log
@@ -619,21 +631,89 @@ needs to hold.
 
 ---
 
+## `nilo_s3` — object storage
+
+SigV4 and S3's semantics; the HTTP underneath is `nilo_fetch`
+([ADR 0067](./adr/0067-most-of-an-s3-client-is-not-s3.md),
+[ADR 0072](./adr/0072-an-object-store-is-a-service-that-dials.md)). A bucket is
+a type and a key is not
+([ADR 0068](./adr/0068-a-bucket-is-a-type-and-a-key-is-not.md)); a signing key
+changes once a day ([ADR 0069](./adr/0069-a-signing-key-changes-once-a-day.md)).
+
+### Known gaps
+
+- **`LIST` and `COPY`.** One sentence covers both: they are where S3 stops being
+  bytes at a key and starts being a document format. A list result is XML and a
+  type AWS wrote rather than one the caller did, which is the opposite of what
+  every other call here does. `COPY` carries its own trap for whoever adds it —
+  S3 can answer a copy with **200 and an error in the body**, so a client that
+  checks the status is wrong.
+- **Multipart upload, and therefore upload of unknown size.** `putStream` frames
+  by length because S3 does not accept chunked, so a body whose length is not
+  known before it starts has no way in. Multipart is the only way S3 offers, and
+  it is a protocol rather than a call: initiate, N parts each with its own ETag,
+  then a completion document listing them. XML again.
+- **Nothing is measured through TLS**, the same gap `nilo_fetch` has and for the
+  same reason: every figure in [`bench/result/s3.md`](../bench/result/s3.md) is
+  `http://` against a MinIO in a container. The scheme is not cosmetic here —
+  it decides whether payloads are hashed — so the plaintext numbers carry a
+  SHA-256 over every body that the HTTPS ones would not, and the HTTPS ones
+  carry a TLS record layer the plaintext ones do not. Neither is a correction
+  that can be applied to the other on paper.
+- **The comparison holds four candidates to a contract enforced by reading the
+  source.** Each has to hold the object rather than proxy S3's socket, and a
+  proxy would produce the same bytes while doing less work.
+  [`bench/compare-s3/README.md`](../bench/compare-s3/README.md) names the fix —
+  a route answering a hash of what the client read — and it is unbuilt because
+  the risk is currently zero.
+- **32 requests in every 10-second run of `/o/1k` come back non-2xx**, and
+  nobody knows why. Exactly 32, across six `wrk` runs and two server processes,
+  so it is deterministic rather than flaky, and it is not the in-flight gate.
+  The server logs the S3 code and the error name on every failure and the
+  benchmark driver discards its stderr, so the explanation is already being
+  written and thrown away; re-running one route with the server's mouth open is
+  the next step.
+- **Two of the four axes are unmeasured.** Per-connection memory is 4,670 bytes
+  on `/health`, which never touches the store — by
+  [ADR 0063](./adr/0063-a-handlers-stack-is-per-connection.md) the number a
+  deployment sees is that plus the handler's stack high-water mark, and
+  `/o/1m` and `/stream/1m` exist to price it. Binary size has two scratch
+  programs written for the stripped `ReleaseFast` A/B and no number, so
+  [ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md)'s running total
+  does not yet include this module.
+- **`bench/compare-s3/drive.py` cannot record a candidate that dies.** Bun
+  leaks about a byte per byte read and was killed by the kernel at 27 GB
+  mid-sweep, which lost the whole run rather than one column. It needs a
+  per-candidate route set and a DNF; five of Bun's seven routes are obtainable
+  today, and the Zig-against-Zig row is the one the comparison most wanted.
+  Confine `bun` to a cgroup when working on this — the OOM killer is global and
+  took MinIO and an unrelated container with it.
+
+### Not decided
+
+- **Arbitrary object metadata — `x-amz-meta-*` set by the caller.** Refused on a
+  performance argument rather than a taste one, which means it can be revisited
+  with a measurement instead of an opinion: SigV4 signs a sorted list of header
+  names, and a fixed header set makes that list a compile-time constant. Letting
+  a caller add headers puts a sort in every request. Whoever wants it should
+  bring the number for that sort.
+
+---
+
 ## Modules that do not exist yet
 
 A section rather than a list inside somebody else's, because what decides
 whether one of these gets built is a repository-level seam rather than anything
 in a module that is already here.
 
-- **`nilo_s3` — object storage.** Nothing structural is in the way any more.
-  It dials through `nilo_fetch`, bounds a call with `core.Limits`, and signs
-  with `nilo_core.percent`'s encoding half — the three things it was waiting on
-  are built. What is left is S3 itself: SigV4, the bucket, and the four calls.
-- **A `nilo_mail`, a `nilo_redis`, anything else that dials.** Also unblocked,
-  and each is now a Fitting or a Service by the same question rather than a
-  seam to design first: does it hold a connection to a named system, or is it
-  given an address per call
-  ([ADR 0070](./adr/0070-a-fitting-borrows-the-loop.md))?
+- **A `nilo_mail`, a `nilo_redis`, anything else that dials.** Nothing
+  structural is in the way: each is a Fitting or a Service by one question
+  rather than a seam to design first — does it hold a connection to a named
+  system, or is it given an address per call
+  ([ADR 0070](./adr/0070-a-fitting-borrows-the-loop.md))? `nilo_s3` is the
+  worked example of the second answer, and the most useful thing it leaves
+  behind for these is that `nilo_fetch` turned out to be the right size: it
+  needed one addition, `Exchange`, and no changes.
 
 ---
 

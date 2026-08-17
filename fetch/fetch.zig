@@ -26,13 +26,29 @@
 //!   nothing holds a handler until the process dies. `std.http.Client` has no
 //!   deadline field, so the bound is on the fiber
 //!   ([ADR 0065](../docs/adr/0065-the-way-out-was-open-the-clock-was-not.md)).
-//! - **A bounded drain.** `std.http.Client.Request.deinit` calls
-//!   `discardRemaining()` with no limit when the head was read and the body
-//!   was not, so refusing a 500 MB object still downloads it.
+//! - **A bounded drain, and the drain itself.** `std.http.Client.Request.deinit`
+//!   does two different things depending on the state the body was left in, and
+//!   both of them are wrong for a client that refuses bodies. From
+//!   `.received_head` — nothing read — it calls `discardRemaining()` with no
+//!   limit, so refusing a 500 MB object still downloads it. From a body that
+//!   was *started* and stopped it does the opposite: that state falls into its
+//!   switch's `else` and the connection is marked closing however few bytes are
+//!   left. So `Exchange.dropIfDrainIsDearer` supplies both halves — the ceiling
+//!   for the first case, and the finishing read for the second, without which
+//!   `max_drain` names a limit that decides nothing on the path that reaches
+//!   it. It is asked against the length the response announced; the first
+//!   version asked how many bytes were *buffered*, which is one read buffer,
+//!   and therefore never fired on the case it was written for.
 //! - **A body ceiling**, enforced while reading rather than checked after, so
 //!   a sender lying about `content-length` cannot get past it.
 //! - **A Scope**, so the body comes back as a `Str` that lives exactly as long
 //!   as the request does and nobody frees anything.
+//!
+//! Two shapes, and the second is the first with the middle left out. An
+//! `Exchange` is one call held open — the response head readable, the body
+//! taken into the Scope or piped straight out. `Client.get` and the three
+//! beside it are an Exchange begun and finished in one line, which is what a
+//! handler calling somebody's JSON API wants.
 //!
 //! ## Where it sits
 //!
@@ -113,6 +129,10 @@ pub const Client = struct {
         TimedOut,
         /// The body was longer than `max_body` and reading stopped there.
         BodyTooLarge,
+        /// The body ended before the length its own head announced. A caller
+        /// that sized an allocation from `content-length` has to hear about
+        /// that rather than be handed a buffer with a tail of nothing in it.
+        BodyTooShort,
         /// A call was made before `listen()` ran. A Fitting is finished at
         /// startup like any other service; a unit test that calls a handler
         /// directly without an App gets this.
@@ -179,22 +199,225 @@ pub const Client = struct {
         call: Call,
     ) Error!Response {
         comptime core.checkScope(@TypeOf(c), "fetch.send");
-        if (!self.started) return error.NotStarted;
 
-        const uri = try std.Uri.parse(url);
-        const io = self.inner.io;
+        // The two buffers this call needs, declared where a reader can see what
+        // they cost. They are stack, and by
+        // [ADR 0063](../docs/adr/0063-a-handlers-stack-is-per-connection.md) a
+        // handler's stack is held for the life of the *inbound* connection — so
+        // 6 KiB here is 6 KiB on every connection that ever dials out, which is
+        // a third of what ADR 0070 measured. An `Exchange` takes them as
+        // arguments rather than holding them as fields for exactly that reason:
+        // a caller that follows no redirects pays for no redirect buffer.
+        var redirect_buffer: [2 << 10]u8 = undefined;
+        var transfer_buffer: [4 << 10]u8 = undefined;
 
-        try self.gate.wait(io);
-        defer self.gate.post(io);
+        var ex: Exchange = .idle;
+        defer ex.end();
 
-        var bound: core.Limits.Bound = .idle;
-        defer bound.release();
-        bound.arm(self.limits, call.timeout_ms orelse self.settings.timeout_ms);
+        const head = try ex.begin(self, .{
+            .method = method,
+            .url = url,
+            .headers = call.headers,
+            .body = if (body) |bytes| .{ .slice = bytes } else .none,
+            .timeout_ms = call.timeout_ms,
+            .redirect_buffer = &redirect_buffer,
+            .transfer_buffer = &transfer_buffer,
+        });
 
-        var req = self.inner.request(method, uri, .{ .extra_headers = call.headers }) catch |err| {
-            return self.blame(&bound, err);
+        return .{
+            .status = head.status,
+            .body = try ex.take(c, call.max_body orelse self.settings.max_body),
         };
-        defer self.close(&req);
+    }
+
+    /// Ask the deadline whether this failure is its doing.
+    ///
+    /// **The bound is the authority, not the error**, and that is the one
+    /// thing `fetch/deadline.zig` corrected. This read `err == error.Canceled
+    /// and bound.fired()` until a real timer was first seen to fire, and the
+    /// error that came back was `error.ReadFailed`: `std.Io.Reader` has a
+    /// fixed error set, so `std.http.Client` collapses the cancellation into
+    /// it and keeps the cause in a field it does not return. Any client that
+    /// pattern-matches on `error.Canceled` therefore reports its own timeouts
+    /// as read failures — which is what nilo did, and what only an Engine
+    /// could show ([ADR 0033](../docs/adr/0033-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md)).
+    ///
+    /// Asking the bound instead needs nothing of the error: if this call's own
+    /// timer expired, every failure after it is downstream of that. A
+    /// cancellation from somewhere else — a shutdown — leaves the bound
+    /// saying no, and is passed through as itself, which is the distinction
+    /// that mattered in the first place.
+    fn blame(_: *Client, bound: *core.Limits.Bound, err: anytype) Error {
+        if (bound.fired()) return error.TimedOut;
+        return err;
+    }
+
+    /// What `Request.deinit` would have done without a limit.
+    ///
+    /// This is the *second* of two bounds and the weaker one — it can only see
+    /// what is already buffered. `Exchange.dropIfDrainIsDearer` asks the
+    /// question this one is reaching for, against the length the response
+    /// announced, and runs first.
+    fn close(self: *Client, req: *std.http.Client.Request) void {
+        if (req.connection) |conn| {
+            if (conn.reader().bufferedLen() > self.settings.max_drain) conn.closing = true;
+        }
+        req.deinit();
+    }
+};
+
+/// One call, held open from the request line to the last byte of the body.
+///
+/// `Client.get` and the three beside it are this with the middle left out:
+/// they send, read the whole body into the Scope and hand back a `Response`,
+/// which is what a handler calling somebody's JSON API wants. What they cannot
+/// do is the two things a caller of an *object store* needs — read a response
+/// header, and move a body too big to hold — so those two are here, on a type
+/// that stays open in between.
+///
+/// ```zig
+/// var ex: fetch.Exchange = .idle;
+/// defer ex.end();
+///
+/// const head = try ex.begin(client, .{ .method = .GET, .url = url, .transfer_buffer = &buf });
+/// const etag = head.header("etag");     // valid until the body is touched
+/// _ = try ex.pipe(out);                 // and now it is not
+/// ```
+///
+/// **An Exchange must not be copied once it has begun**, for the reason a
+/// `core.Limits.Bound` must not: `std.http.Client.Response` holds a pointer to
+/// the `Request` beside it, and the deadline slot is registered with the
+/// Engine by address. Declare it, begin it where it stands, and leave it
+/// there — the same shape spelled the same way, so there is one rule rather
+/// than two.
+///
+/// `end` is safe on one that never began, which is what lets the `defer` go
+/// above the `begin` rather than after it.
+pub const Exchange = struct {
+    client: *Client = undefined,
+    bound: core.Limits.Bound = .idle,
+    req: std.http.Client.Request = undefined,
+    res: std.http.Client.Response = undefined,
+    reader: ?*std.Io.Reader = null,
+    /// What the response said its body was, kept so that `end` can decide
+    /// whether reading the rest of it is cheaper than a new connection. Null
+    /// is a body of unknown length, which counts as too much.
+    announced: ?u64 = null,
+    permit: bool = false,
+    open: bool = false,
+
+    /// Nothing held: no permit, no connection, no deadline.
+    pub const idle: Exchange = .{};
+
+    /// What goes out. Everything but the method and the URL has a default, and
+    /// the defaults are the ordinary call.
+    pub const Begin = struct {
+        method: std.http.Method,
+        url: []const u8,
+        /// Written to the wire verbatim and in this order — `std.http.Client`
+        /// promises that, and a signature computed over them depends on it.
+        headers: []const std.http.Header = &.{},
+        body: Body = .none,
+
+        /// Three headers std writes for itself unless told otherwise. A signed
+        /// request has to say exactly what it signed, down to the port in the
+        /// authority, so it overrides rather than trusting two spellings to
+        /// agree.
+        host: ?[]const u8 = null,
+        authorization: ?[]const u8 = null,
+        content_type: ?[]const u8 = null,
+
+        timeout_ms: ?u32 = null,
+
+        /// Where a redirect's `Location` is kept while it is followed. **An
+        /// empty one means redirects are not followed at all** — the response
+        /// comes back as itself, 302 and all.
+        ///
+        /// That is the right default for anything signed: a signature is
+        /// computed over one host and one path, so following a redirect sends
+        /// a request that cannot be valid at the other end — and sends the
+        /// `authorization` header there while it does it.
+        redirect_buffer: []u8 = &.{},
+        /// What the body is read through. Bigger is fewer trips into the
+        /// connection for a large object and more stack held per connection;
+        /// `Client.send` uses 4 KiB.
+        transfer_buffer: []u8 = &.{},
+    };
+
+    /// A body going out: nothing, bytes already in hand, or a reader of a
+    /// known length.
+    ///
+    /// The length is not optional on the streamed one, and that is the whole
+    /// reason this is a union rather than an optional reader. HTTP can frame a
+    /// body of unknown length with `transfer-encoding: chunked`, and the
+    /// services this exists for — S3 among them — answer `411` to it. Asking
+    /// for the length here makes *I do not know it* a compile error rather
+    /// than somebody else's error code.
+    pub const Body = union(enum) {
+        none,
+        slice: []const u8,
+        stream: struct { reader: *std.Io.Reader, len: u64 },
+    };
+
+    /// The response head, and the window in which it can be read.
+    ///
+    /// **Every slice here points into the connection's own read buffer, and
+    /// the first byte of body read overwrites it.** So a caller reads what it
+    /// needs — or copies it — before `take` or `pipe`. That is the bargain
+    /// `sql`'s Borrowed row makes, made here for the same reason: the
+    /// alternative is an allocation per call for text most callers glance at
+    /// once and drop.
+    pub const Head = struct {
+        status: std.http.Status,
+        content_length: ?u64,
+        content_type: ?[]const u8,
+        bytes: []const u8,
+
+        /// A header by name, case-insensitively. Null when it is absent —
+        /// which for `etag` is a fact about the server rather than an error.
+        pub fn header(self: Head, name: []const u8) ?[]const u8 {
+            var it: std.http.HeaderIterator = .init(self.bytes);
+            while (it.next()) |h| {
+                if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
+            }
+            return null;
+        }
+
+        pub fn ok(self: Head) bool {
+            return @intFromEnum(self.status) >= 200 and @intFromEnum(self.status) < 300;
+        }
+    };
+
+    /// Take a permit, arm the deadline, send the head and the body, and read
+    /// the response head: everything up to the first byte of the body.
+    pub fn begin(self: *Exchange, client: *Client, opts: Begin) Client.Error!Head {
+        if (!client.started) return error.NotStarted;
+        self.client = client;
+
+        const io = client.inner.io;
+        const uri = try std.Uri.parse(opts.url);
+
+        // The permit is taken before the deadline is armed, so a caller
+        // queueing for one is not also being timed out of the queue by a clock
+        // it has not started. It goes back in `end`, after the connection.
+        try client.gate.wait(io);
+        self.permit = true;
+
+        self.bound.arm(client.limits, opts.timeout_ms orelse client.settings.timeout_ms);
+
+        self.req = client.inner.request(opts.method, uri, .{
+            .extra_headers = opts.headers,
+            .redirect_behavior = if (opts.redirect_buffer.len == 0)
+                .unhandled
+            else
+                std.http.Client.Request.RedirectBehavior.init(3),
+            .headers = .{
+                .host = if (opts.host) |h| .{ .override = h } else .default,
+                .authorization = if (opts.authorization) |a| .{ .override = a } else .default,
+                .content_type = if (opts.content_type) |t| .{ .override = t } else .default,
+            },
+        }) catch |err| return client.blame(&self.bound, err);
+        self.open = true;
 
         // Ask for the body uncompressed. **Not a default worth inheriting**:
         // `std.http.Client` advertises `gzip, deflate` and then hands back the
@@ -223,64 +446,172 @@ pub const Client = struct {
         // written. The array is what `receiveHead` checks, so a server that
         // ignores the header and gzips anyway is a clean error rather than a
         // `Str` full of bytes nobody can read.
-        req.headers.accept_encoding = .{ .override = "identity" };
-        req.accept_encoding = @splat(false);
-        req.accept_encoding[@intFromEnum(std.http.ContentEncoding.identity)] = true;
+        self.req.headers.accept_encoding = .{ .override = "identity" };
+        self.req.accept_encoding = @splat(false);
+        self.req.accept_encoding[@intFromEnum(std.http.ContentEncoding.identity)] = true;
 
-        if (body) |bytes| {
-            req.transfer_encoding = .{ .content_length = bytes.len };
-            var w = req.sendBody(&.{}) catch |err| return self.blame(&bound, err);
-            w.writer.writeAll(bytes) catch |err| return self.blame(&bound, err);
-            w.end() catch |err| return self.blame(&bound, err);
-        } else {
-            req.sendBodiless() catch |err| return self.blame(&bound, err);
+        switch (opts.body) {
+            .none => self.req.sendBodiless() catch |err| return client.blame(&self.bound, err),
+            .slice => |bytes| {
+                self.req.transfer_encoding = .{ .content_length = bytes.len };
+                var w = self.req.sendBody(&.{}) catch |err| return client.blame(&self.bound, err);
+                w.writer.writeAll(bytes) catch |err| return client.blame(&self.bound, err);
+                w.end() catch |err| return client.blame(&self.bound, err);
+            },
+            .stream => |src| {
+                self.req.transfer_encoding = .{ .content_length = src.len };
+                var w = self.req.sendBody(&.{}) catch |err| return client.blame(&self.bound, err);
+                // Exactly the length that was announced, and nothing else. A
+                // source that runs out early fails here rather than sending a
+                // body that disagrees with the head describing it.
+                src.reader.streamExact64(&w.writer, src.len) catch |err| {
+                    return client.blame(&self.bound, err);
+                };
+                w.end() catch |err| return client.blame(&self.bound, err);
+            },
         }
 
-        var redirect_buffer: [2 << 10]u8 = undefined;
-        var response = req.receiveHead(&redirect_buffer) catch |err| {
-            return self.blame(&bound, err);
+        self.res = self.req.receiveHead(opts.redirect_buffer) catch |err| {
+            return client.blame(&self.bound, err);
         };
 
-        var transfer_buffer: [4 << 10]u8 = undefined;
-        const reader = response.reader(&transfer_buffer);
+        // Read out now, because `Response.reader` deliberately invalidates
+        // them: std sets the head's slices to `undefined` the moment the body
+        // stream starts, and it is right to — the bytes they point at are
+        // about to be read over. What is kept here is the slices rather than a
+        // copy, so the window handed to the caller is the same window std was
+        // protecting, and it is the header of `Head` that says so.
+        const head: Head = .{
+            .status = self.res.head.status,
+            .content_length = self.res.head.content_length,
+            .content_type = self.res.head.content_type,
+            .bytes = self.res.head.bytes,
+        };
 
-        const ceiling = call.max_body orelse self.settings.max_body;
-        const bytes = reader.allocRemaining(c.arena(), .limited(ceiling)) catch |err| switch (err) {
+        self.announced = head.content_length;
+        self.reader = self.res.reader(opts.transfer_buffer);
+        return head;
+    }
+
+    /// The whole body, in the Scope's memory, up to `max` bytes.
+    ///
+    /// One allocation, and it is the body. Past `max` it is
+    /// `error.BodyTooLarge`: the ceiling is enforced while reading rather than
+    /// checked after, so a server lying about `content-length` cannot get past
+    /// it.
+    pub fn take(self: *Exchange, c: anytype, max: usize) Client.Error!Str {
+        comptime core.checkScope(@TypeOf(c), "exchange.take");
+        const reader = self.reader orelse unreachable; // begin first, then take
+        const bytes = reader.allocRemaining(c.arena(), .limited(max)) catch |err| switch (err) {
             error.StreamTooLong => return error.BodyTooLarge,
-            else => |e| return self.blame(&bound, e),
+            else => |e| return self.client.blame(&self.bound, e),
         };
-
-        return .{ .status = response.head.status, .body = c.str(bytes) };
+        return c.str(bytes);
     }
 
-    /// Ask the deadline whether this failure is its doing.
+    /// The body into memory the caller has already sized, exactly filling it.
     ///
-    /// **The bound is the authority, not the error**, and that is the one
-    /// thing `fetch/deadline.zig` corrected. This read `err == error.Canceled
-    /// and bound.fired()` until a real timer was first seen to fire, and the
-    /// error that came back was `error.ReadFailed`: `std.Io.Reader` has a
-    /// fixed error set, so `std.http.Client` collapses the cancellation into
-    /// it and keeps the cause in a field it does not return. Any client that
-    /// pattern-matches on `error.Canceled` therefore reports its own timeouts
-    /// as read failures — which is what nilo did, and what only an Engine
-    /// could show ([ADR 0033](../docs/adr/0033-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md)).
-    ///
-    /// Asking the bound instead needs nothing of the error: if this call's own
-    /// timer expired, every failure after it is downstream of that. A
-    /// cancellation from somewhere else — a shutdown — leaves the bound
-    /// saying no, and is passed through as itself, which is the distinction
-    /// that mattered in the first place.
-    fn blame(_: *Client, bound: *core.Limits.Bound, err: anytype) Error {
-        if (bound.fired()) return error.TimedOut;
-        return err;
+    /// For a caller who read `content-length` off the head and would rather
+    /// allocate once, at the right size, than let `take` grow into it — which
+    /// is what an object store does, because it has a ceiling to check against
+    /// that length before reading anything at all.
+    pub fn readInto(self: *Exchange, buf: []u8) Client.Error!void {
+        const reader = self.reader orelse unreachable; // begin first, then read
+        return reader.readSliceAll(buf) catch |err| switch (err) {
+            error.EndOfStream => error.BodyTooShort,
+            else => |e| self.client.blame(&self.bound, e),
+        };
     }
 
-    /// What `Request.deinit` would have done without a limit.
-    fn close(self: *Client, req: *std.http.Client.Request) void {
-        if (req.connection) |conn| {
-            if (conn.reader().bufferedLen() > self.settings.max_drain) conn.closing = true;
+    /// The body straight into `w`, allocating nothing at all, and how many
+    /// bytes went. What a handler streaming an object into its own response
+    /// wants: the ceiling is the transfer buffer rather than the body.
+    pub fn pipe(self: *Exchange, w: *std.Io.Writer) Client.Error!u64 {
+        const reader = self.reader orelse unreachable; // begin first, then pipe
+        return reader.streamRemaining(w) catch |err| return self.client.blame(&self.bound, err);
+    }
+
+    /// Mark the connection closing when what is left of the body costs more to
+    /// read than a new connection costs to open.
+    ///
+    /// **This is the bound `Client.close` was reaching for and does not
+    /// reach.** That one asks the connection how many bytes are *buffered*,
+    /// which for a 500 MB object that has just been refused is one read
+    /// buffer — 8 KiB, under any sane `max_drain` — so the connection is kept
+    /// and `std.http.Client.Request.deinit` then downloads all 500 MB to keep
+    /// it. The header of this module has claimed since it shipped that a
+    /// refused body is not downloaded, and until this ran it was not so.
+    ///
+    /// `http.Reader.State` carries the remaining length for the ordinary case,
+    /// so there is nothing here to estimate. A chunked body, or one that ends
+    /// when the connection does, has no remaining length to give — and
+    /// something unbounded is over every ceiling, so those drop.
+    fn dropIfDrainIsDearer(self: *Exchange) void {
+        const conn = self.req.connection orelse return;
+        const max_drain = self.client.settings.max_drain;
+        switch (self.req.reader.state) {
+            // Read to the end; the connection is clean.
+            .ready => return,
+
+            // The body was started and stopped, which is every refusal by
+            // `take` — it reads up to `max` *before* deciding. std's `deinit`
+            // marks the connection closing from this state whatever is left of
+            // the body, so a leftover worth keeping has to be finished here or
+            // `max_drain` names a ceiling that decides nothing on the only
+            // path that reaches it.
+            .body_remaining_content_length => |n| {
+                if (n > max_drain) {
+                    conn.closing = true;
+                    return;
+                }
+                const r = self.reader orelse return;
+                _ = r.discardRemaining() catch {
+                    conn.closing = true;
+                };
+            },
+
+            // Nothing was read yet. std's `deinit` drains this one itself and
+            // with no limit, so the only job here is to refuse the ones too
+            // big to be worth it.
+            //
+            // **Do not drain it here.** A HEAD response announces a length and
+            // sends no body at all, and the Exchange's transfer buffer for one
+            // is empty — reading a body that does not exist out of a buffer
+            // that is not there segfaults inside `discardRemaining`, which is
+            // what `s3/bucket.zig`'s `head` found the moment the drain above
+            // was written without this branch beside it.
+            .received_head => {
+                if (!self.req.method.responseHasBody()) return;
+                const left = self.announced orelse std.math.maxInt(u64);
+                if (left > max_drain) conn.closing = true;
+            },
+
+            // Chunked, or a body that ends when the connection does: no
+            // remaining length to weigh, and something unbounded is over every
+            // ceiling there is.
+            else => conn.closing = true,
         }
-        req.deinit();
+    }
+
+    /// Give back the connection and the permit, in that order, and take the
+    /// deadline off. Safe on an Exchange that never began, and safe twice.
+    ///
+    /// The order is the part that is not arbitrary: the permit is what bounds
+    /// how many connections are live, so handing it back before the connection
+    /// would let the next caller in while this one still holds one.
+    pub fn end(self: *Exchange) void {
+        if (self.open) {
+            self.dropIfDrainIsDearer();
+            self.client.close(&self.req);
+            self.open = false;
+            self.reader = null;
+            self.announced = null;
+        }
+        self.bound.release();
+        if (self.permit) {
+            self.client.gate.post(self.client.inner.io);
+            self.permit = false;
+        }
     }
 };
 

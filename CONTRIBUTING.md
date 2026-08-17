@@ -39,7 +39,7 @@ zig build test         # the loop: the suite in Debug, plus the refusals
 zig build test-all     # the above plus the same suite in ReleaseSafe. This is what CI runs
 zig build layering     # check that no module imports upward or sideways
 zig build refusals     # the framework's 62 compile-error checks — NOT the others
-zig build refusals-sql # nilo_sql's 41; refusals-config and refusals-pw for the rest
+zig build refusals-sql # nilo_sql's 41; refusals-config, -pw and -s3 for the rest
 zig build examples     # build all eight examples
 
 zig build test-core    # only nilo_core, both modes. No engine, no module graph
@@ -47,6 +47,7 @@ zig build test-id      # only nilo_id, the same way
 zig build test-config  # only nilo_config, the same way, plus its refusals
 zig build test-pw      # only nilo_pw, the same way, plus its refusals
 zig build test-fetch   # only nilo_fetch, both modes — a real socket, no Engine
+zig build test-s3      # only nilo_s3, both modes, plus its refusals
 
 zig build run          # the benchmark server
 zig build profile      # where the time inside one request goes
@@ -58,7 +59,7 @@ zig build bench-ws-server && python3 bench/ws_idle.py both   # what a socket cos
 Two things worth knowing before they surprise you:
 
 **The refusals never cache.** The compiler keeps nothing from a compilation that
-failed, so all 115 of them get re-analysed on every run. That's why they're the
+failed, so all 125 of them get re-analysed on every run. That's why they're the
 slow part of `zig build test`, and they stay there on purpose.
 
 **The bottom four modules run without the build system.** `zig test core/core.zig`,
@@ -123,13 +124,17 @@ the feature, and it needs a program that proves the message still says the right
 thing.
 
 That means a file in `refusals/` (or `sql/refusals/`, `config/refusals/`,
-`pw/refusals/`) and a row in the matching table in `build.zig`.
+`pw/refusals/`, `s3/refusals/`) and a row in the matching table in `build.zig`.
 [`refusals/README.md`](./refusals/README.md) shows exactly how, including the
 trick for finding out what to put in `.says`: guess, run the **matching** step —
-`refusals`, `refusals-sql`, `refusals-config` or `refusals-pw`, because each one
-runs only its own table and a row added to one while another is running is a
-check that silently never ran —
+`refusals`, `refusals-sql`, `refusals-config`, `refusals-pw` or `refusals-s3`,
+because each one runs only its own table and a row added to one while another is
+running is a check that silently never ran —
 and read what it prints.
+
+**There are five tables now.** That warning gets sharper with each one, and the
+failure is silent by construction: the row is there, the file is there, and the
+step you ran never looked at either.
 
 Leave the `nilo: ` prefix off the `.says` text. The build step adds it, which is
 what makes it impossible to record a failure from inside the standard library as
@@ -282,13 +287,16 @@ at the parser.
 than they want a patch, and an argument is a cheap thing to contribute. You can
 write one in an issue in ten minutes.
 
-**The seam nothing has yet: dialing out.** This is the biggest thing on the
-list. Object storage, mail, a Redis client and an HTTP client are four separate
-modules blocked on one missing piece, because nothing here has a supported way
-to open an outbound connection. The bulkhead covers the way in only. It should
-be designed once against two callers rather than fitted around whichever one
-turns up first, which is exactly the kind of work that goes better with more
-than one person thinking about it.
+**A module that dials out.** This used to be the biggest thing on the list, and
+for the opposite reason: object storage, mail, a Redis client and an HTTP client
+were four modules blocked on one missing piece, because nothing here had a
+supported way to open an outbound connection. That seam was designed once
+against two callers rather than fitted around the first
+([ADR 0070](./docs/adr/0070-a-fitting-borrows-the-loop.md)), and both callers
+have landed — `nilo_fetch` is the way out and `nilo_s3` is the first module on
+top of it. **Mail and Redis are now ordinary work rather than blocked work**,
+which is what makes them a good place to start: the hard question is already
+answered, and `s3/` is a worked example of the answer.
 
 **The small end, which is real work here.** A refusal whose wording could be
 clearer. A guide page that assumes something it shouldn't. An example covering

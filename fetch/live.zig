@@ -29,9 +29,17 @@ const Canned = struct {
     body_len: usize = 0,
     claim_len: ?usize = null,
     status: []const u8 = "200 OK",
+    /// Response headers beyond the two above, each with its own `\r\n`.
+    extra: []const u8 = "",
     /// Filled in by `serveOne` so a test can assert on what arrived.
     seen: [1024]u8 = undefined,
     seen_len: usize = 0,
+    /// The request body, for the tests about what a streamed send puts on the
+    /// wire.
+    body_seen: [1024]u8 = undefined,
+    body_seen_len: usize = 0,
+    /// How many connections have been accepted — see `serveEach`.
+    accepted: usize = 0,
 
     /// `Io.net.Server` cannot report the port it was given, so asking for 0
     /// and reading it back is not available — walk a range instead.
@@ -77,9 +85,14 @@ const Canned = struct {
         var out_buf: [64 << 10]u8 = undefined;
         var writer = stream.writer(self.io, &out_buf);
         const w = &writer.interface;
-        try w.print("HTTP/1.1 {s}\r\nContent-Length: {d}\r\n\r\n", .{
+        // `extra` goes here as well as in `serveEach`, and leaving it out of
+        // one of them is how the header test came to assert against headers
+        // that were never sent: it sets `extra`, it is served by *this*
+        // function, and `head.header("etag").?` panicked on a null.
+        try w.print("HTTP/1.1 {s}\r\nContent-Length: {d}\r\n{s}\r\n", .{
             self.status,
             self.claim_len orelse self.body_len,
+            self.extra,
         });
         try w.splatByteAll('x', self.body_len);
         try w.flush();
@@ -112,6 +125,106 @@ const Canned = struct {
             try w.splatByteAll('x', self.body_len);
             try w.flush();
         }
+    }
+
+    /// Up to `count` connections, each answered until the peer stops sending,
+    /// and a tally of how many were accepted.
+    ///
+    /// The tally is the whole point: whether a client kept a pooled connection
+    /// or dropped it is not visible from the client side at all, and it is
+    /// exactly what the drain policy decides. A second `accept` means the
+    /// first connection was dropped.
+    ///
+    /// **The inner loop is what makes the tally mean that**, and leaving it out
+    /// is how the pair of drain tests came to have one that could not pass. A
+    /// version that closed after one request produced a second `accept` in
+    /// *both* cases — a dropped connection because the client opened a new one,
+    /// and a kept connection because the client came back to a socket this
+    /// server had already closed. Both read as "dropped", so the control test
+    /// asserted a 1 that nothing could produce.
+    fn serveEach(self: *Canned, count: usize) !void {
+        for (0..count) |_| {
+            var stream = try self.server.accept(self.io);
+            defer stream.close(self.io);
+            self.accepted += 1;
+
+            var in_buf: [4 << 10]u8 = undefined;
+            var out_buf: [64 << 10]u8 = undefined;
+            var reader = stream.reader(self.io, &in_buf);
+            var writer = stream.writer(self.io, &out_buf);
+
+            while (true) {
+                // End of head, or end of connection. EOF here is the client
+                // saying it is finished with this socket, which is the signal
+                // to go back to `accept` — not an error.
+                var ended = false;
+                while (true) {
+                    const line = reader.interface.takeDelimiterInclusive('\n') catch {
+                        ended = true;
+                        break;
+                    };
+                    if (std.mem.trimEnd(u8, line, "\r\n").len == 0) break;
+                }
+                if (ended) break;
+
+                const w = &writer.interface;
+                w.print("HTTP/1.1 {s}\r\nContent-Length: {d}\r\n{s}\r\n", .{
+                    self.status,
+                    self.claim_len orelse self.body_len,
+                    self.extra,
+                }) catch break;
+                // A client under test is *allowed* to stop reading and drop the
+                // connection mid-body — that is the whole of what the drain
+                // policy decides, and the write then fails with a reset. Take
+                // the next connection rather than failing the server.
+                //
+                // This is also the guard on the one way these tests can hang
+                // the suite rather than fail it. The body has to fit in kernel
+                // socket buffers, because nothing is reading the far end; if a
+                // future `body_len` stops fitting, the write parks with nothing
+                // to wake it and `zig build test` sits at 0% CPU forever.
+                // Swallowing the error means the worst case is `accepted`
+                // coming out wrong, which is a failed expectation with a line
+                // number.
+                w.splatByteAll('x', self.body_len) catch break;
+                w.flush() catch break;
+            }
+        }
+    }
+
+    /// Read a request whole — head and `content-length` bytes of body — and
+    /// answer it. For the tests about what goes *out*.
+    fn serveWithBody(self: *Canned) !void {
+        var stream = try self.server.accept(self.io);
+        defer stream.close(self.io);
+
+        var in_buf: [64 << 10]u8 = undefined;
+        var reader = stream.reader(self.io, &in_buf);
+
+        var body_len: usize = 0;
+        while (true) {
+            const line = try reader.interface.takeDelimiterInclusive('\n');
+            const trimmed = std.mem.trimEnd(u8, line, "\r\n");
+            if (trimmed.len == 0) break;
+            if (std.ascii.startsWithIgnoreCase(trimmed, "content-length:")) {
+                const value = std.mem.trim(u8, trimmed["content-length:".len..], " \t");
+                body_len = try std.fmt.parseInt(usize, value, 10);
+            }
+            const room = self.seen.len - self.seen_len;
+            if (room < trimmed.len + 1) continue;
+            @memcpy(self.seen[self.seen_len..][0..trimmed.len], trimmed);
+            self.seen[self.seen_len + trimmed.len] = '\n';
+            self.seen_len += trimmed.len + 1;
+        }
+
+        self.body_seen_len = @min(body_len, self.body_seen.len);
+        try reader.interface.readSliceAll(self.body_seen[0..self.body_seen_len]);
+
+        var out_buf: [4 << 10]u8 = undefined;
+        var writer = stream.writer(self.io, &out_buf);
+        const w = &writer.interface;
+        try w.print("HTTP/1.1 {s}\r\nContent-Length: 0\r\n{s}\r\n", .{ self.status, self.extra });
+        try w.flush();
     }
 
     fn close(self: *Canned) void {
@@ -363,6 +476,261 @@ test "the body is asked for uncompressed, so what comes back is the body" {
             // fails in `zig build test` rather than only in `smoke-tls`.
             try testing.expect(std.mem.indexOf(u8, head, "accept-encoding: identity") != null);
             try testing.expect(std.mem.indexOf(u8, head, "gzip") == null);
+        }
+    }.run);
+}
+
+// ---- what an Exchange adds, and the drain that decides a connection ----
+
+test "a refused body costs the connection rather than the download" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+            // 32 KiB offered, a kilobyte allowed. What is left over is nearly
+            // four times `max_drain`, so reading it to keep the connection is
+            // the expensive answer and the connection goes instead.
+            //
+            // **The absolute size is load-bearing and it is not about HTTP.**
+            // This server writes the whole body before the client stops
+            // reading, so every byte of it has to sit in kernel socket buffers
+            // — and a body past what they hold parks the server mid-write with
+            // nothing to wake it. The first draft used a megabyte and hung the
+            // suite; the second used 128 KiB, which is *exactly* this
+            // machine's `net.ipv4.tcp_rmem` default of 131072 and hung it
+            // again, intermittently, depending on where send-buffer
+            // autotuning happened to be. 32 KiB is a quarter of the smallest
+            // default worth worrying about, and the ratio to `max_drain` is
+            // what the test is actually about — so scale both together, never
+            // the body alone.
+            canned.body_len = 32 << 10;
+
+            var served = io.async(Canned.serveEach, .{ &canned, @as(usize, 2) });
+            defer served.cancel(io) catch {};
+
+            var client = try started(io, .{ .max_body = 1024, .max_drain = 8 << 10 });
+            defer client.deinit();
+
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            var buf: [64]u8 = undefined;
+            const url = try canned.url(&buf);
+
+            try testing.expectError(error.BodyTooLarge, client.get(&scope, url, .{}));
+            _ = client.get(&scope, url, .{}) catch {};
+
+            // Two connections means the first was dropped. One would mean it
+            // was kept — which is only possible by reading the megabyte, since
+            // `Request.deinit` drains whatever it keeps.
+            try testing.expectEqual(@as(usize, 2), canned.accepted);
+        }
+    }.run);
+}
+
+test "a leftover under the ceiling is read, and the connection stays" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+            canned.body_len = 32 << 10;
+
+            var served = io.async(Canned.serveEach, .{ &canned, @as(usize, 2) });
+            defer served.cancel(io) catch {};
+
+            // The same body and the same refusal, with the ceiling moved above
+            // it. This is the control: it is the *decision* that changes, not
+            // the request, so a version of `dropIfDrainIsDearer` that always
+            // dropped would fail here and still look right above. The body has
+            // to match the test above byte for byte or the pair stops being a
+            // control.
+            var client = try started(io, .{ .max_body = 1024, .max_drain = 1 << 20 });
+            defer client.deinit();
+
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            var buf: [64]u8 = undefined;
+            const url = try canned.url(&buf);
+
+            try testing.expectError(error.BodyTooLarge, client.get(&scope, url, .{}));
+            // The second call reuses a connection this server has already
+            // closed, so whether it succeeds is the server's business. What is
+            // being asked is whether the client went looking for a new one.
+            _ = client.get(&scope, url, .{}) catch {};
+
+            try testing.expectEqual(@as(usize, 1), canned.accepted);
+        }
+    }.run);
+}
+
+test "a response header is readable before the body is touched" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+            canned.body_len = 5;
+            canned.extra = "ETag: \"d41d8cd9\"\r\nx-amz-request-id: 8F2C\r\n";
+
+            var served = io.async(Canned.serveOne, .{&canned});
+            defer served.cancel(io) catch {};
+
+            var client = try started(io, .{});
+            defer client.deinit();
+
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            var buf: [64]u8 = undefined;
+            var transfer: [1 << 10]u8 = undefined;
+
+            var ex: fetch.Exchange = .idle;
+            defer ex.end();
+
+            const head = try ex.begin(&client, .{
+                .method = .GET,
+                .url = try canned.url(&buf),
+                .transfer_buffer = &transfer,
+            });
+
+            try testing.expect(head.ok());
+            try testing.expectEqual(@as(u64, 5), head.content_length.?);
+            // Case-insensitively, because a server picks its own spelling and
+            // `ETag` is the one S3 uses.
+            try testing.expectEqualStrings("\"d41d8cd9\"", head.header("etag").?);
+            try testing.expectEqualStrings("8F2C", head.header("X-AMZ-REQUEST-ID").?);
+            try testing.expect(head.header("content-md5") == null);
+
+            const body = try ex.take(&scope, 1 << 20);
+            try testing.expectEqualStrings("xxxxx", body.view());
+        }
+    }.run);
+}
+
+test "a body piped out is written rather than held" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+            canned.body_len = 4096;
+
+            var served = io.async(Canned.serveOne, .{&canned});
+            defer served.cancel(io) catch {};
+
+            var client = try started(io, .{});
+            defer client.deinit();
+
+            var buf: [64]u8 = undefined;
+            var transfer: [1 << 10]u8 = undefined;
+
+            // Where the body goes. No Scope anywhere in this test, which is
+            // the property: a 4 KiB object moved through a 1 KiB transfer
+            // buffer, and nothing allocated for either.
+            var out: [8 << 10]u8 = undefined;
+            var w = std.Io.Writer.fixed(&out);
+
+            var ex: fetch.Exchange = .idle;
+            defer ex.end();
+
+            _ = try ex.begin(&client, .{
+                .method = .GET,
+                .url = try canned.url(&buf),
+                .transfer_buffer = &transfer,
+            });
+            const n = try ex.pipe(&w);
+
+            try testing.expectEqual(@as(u64, 4096), n);
+            try testing.expectEqual(@as(usize, 4096), w.buffered().len);
+            try testing.expectEqual(@as(u8, 'x'), w.buffered()[4095]);
+        }
+    }.run);
+}
+
+test "a streamed body sends exactly the length it announced" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var served = io.async(Canned.serveWithBody, .{&canned});
+            defer served.cancel(io) catch {};
+
+            var client = try started(io, .{});
+            defer client.deinit();
+
+            var buf: [64]u8 = undefined;
+            var transfer: [1 << 10]u8 = undefined;
+
+            // A reader over bytes already in hand is still a reader, which is
+            // what makes this testable without a file: the source of a
+            // streamed put is a `*std.Io.Reader` and nothing more.
+            var source = std.Io.Reader.fixed("cinta laut dan langit");
+
+            var ex: fetch.Exchange = .idle;
+            defer ex.end();
+
+            const head = try ex.begin(&client, .{
+                .method = .PUT,
+                .url = try canned.url(&buf),
+                .content_type = "text/plain",
+                .body = .{ .stream = .{ .reader = &source, .len = 21 } },
+                .transfer_buffer = &transfer,
+            });
+            try testing.expect(head.ok());
+
+            served.await(io) catch {};
+            const sent = canned.seen[0..canned.seen_len];
+            try testing.expect(std.mem.startsWith(u8, sent, "PUT /"));
+            try testing.expect(std.mem.indexOf(u8, sent, "content-length: 21") != null);
+            try testing.expect(std.mem.indexOf(u8, sent, "content-type: text/plain") != null);
+            // Framed by content-length, so the bytes arrive as themselves
+            // rather than inside chunk headers a signature never covered.
+            try testing.expect(std.mem.indexOf(u8, sent, "chunked") == null);
+            try testing.expectEqualStrings(
+                "cinta laut dan langit",
+                canned.body_seen[0..canned.body_seen_len],
+            );
+        }
+    }.run);
+}
+
+test "a signed call says its own host and authorization, verbatim" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var served = io.async(Canned.serveOne, .{&canned});
+            defer served.cancel(io) catch {};
+
+            var client = try started(io, .{});
+            defer client.deinit();
+
+            var buf: [64]u8 = undefined;
+            var transfer: [1 << 10]u8 = undefined;
+
+            var ex: fetch.Exchange = .idle;
+            defer ex.end();
+
+            _ = try ex.begin(&client, .{
+                .method = .GET,
+                .url = try canned.url(&buf),
+                // What SigV4 needs and what std would otherwise decide: the
+                // host as it was signed, and an authorization header nobody
+                // reformats.
+                .host = "bucket.s3.example.com",
+                .authorization = "AWS4-HMAC-SHA256 Credential=A/2/us-east-1/s3/aws4_request,Signature=ff",
+                .headers = &.{.{ .name = "x-amz-date", .value = "20260817T000000Z" }},
+                .transfer_buffer = &transfer,
+            });
+
+            served.await(io) catch {};
+            const sent = canned.seen[0..canned.seen_len];
+            try testing.expect(std.mem.indexOf(u8, sent, "host: bucket.s3.example.com") != null);
+            try testing.expect(std.mem.indexOf(u8, sent, "Signature=ff") != null);
+            try testing.expect(std.mem.indexOf(u8, sent, "x-amz-date: 20260817T000000Z") != null);
+            // The one std would have written from the URL, and did not.
+            try testing.expect(std.mem.indexOf(u8, sent, "host: 127.0.0.1") == null);
         }
     }.run);
 }

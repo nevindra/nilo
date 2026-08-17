@@ -1,6 +1,6 @@
 # nilo
 
-A toolkit for Zig — seven modules for the ordinary jobs, of which the largest is an HTTP server. It puts the comfort of writing code first, with performance as a consequence rather than the other way round. It is aimed at people who are used to Go or Node and are giving Zig a try.
+A toolkit for Zig — eight modules for the ordinary jobs, of which the largest is an HTTP server. It puts the comfort of writing code first, with performance as a consequence rather than the other way round. It is aimed at people who are used to Go or Node and are giving Zig a try.
 
 ## Language
 
@@ -111,6 +111,10 @@ _Avoid_: upload stream, multipart, file handle
 **Event stream**:
 A Stream carrying server-sent events — one long response a browser reads with `EventSource`. Each event is flushed on its own, and `live` is how the handler learns the server wants to stop.
 _Avoid_: SSE channel, subscription, push, socket
+
+**Exchange**:
+One outbound call with its answer left on the socket: the response head is read and decided on, and only then are the bytes moved — into a Scope, into a writer, or nowhere at all. What a Body reader is for a request coming in, this is for an answer going the other way. It holds a live request, so it is declared where it stands and never copied.
+_Avoid_: streaming response, handle, cursor, pipe, connection
 
 ### Assembly
 
@@ -243,3 +247,33 @@ _Avoid_: nested transaction, subtransaction, checkpoint, partial rollback
 **Lock**:
 What a read inside a Tx holds its rows with, until that Tx ends. Written where the condition is, settled while compiling, and refused outside a transaction — because there the statement still runs and the promise is gone.
 _Avoid_: row lock, pessimistic locking, select for update, mutex
+
+### Object store
+
+**Store**:
+The endpoint, the region, the credentials, and the signing key they turn into — everything every bucket in the program shares, including one connection pool. It is what changes between a laptop and production, which is why nothing on it is settled while compiling.
+_Avoid_: client, connection, session, provider, backend
+
+**Bucket**:
+A named place objects go, and a type rather than a string. The name is compiled in, so the host and the path prefix are built once and a name that could never work is refused before the program runs. Two buckets over one Store are two types and one pool.
+_Avoid_: container, namespace, folder, prefix, handle
+
+**Key**:
+Where one object sits inside a bucket. A plain runtime string, deliberately — it is data the way a path param is data, and a program that knows all of its keys while compiling does not need an object store. Encoded once on the way out, and never twice.
+_Avoid_: path, filename, object name, id, blob key
+
+**Object**:
+What a bounded read hands back: the bytes, what they are, the tag they carry, and how many there were, all in the Scope's memory and all from one allocation. Refused before a byte moves if it is larger than the bucket allows.
+_Avoid_: blob, file, payload, download, buffer
+
+**Derived key**:
+What actually signs a request — the secret, the date, the region and the service, folded together once and then kept for the day. It changes when the date does and not when the request does, which is what makes signing one hash and one HMAC rather than five.
+_Avoid_: signing secret, session key, token, derived credential
+
+**Canonical request**:
+The exact shape a request has to be reduced to before it can be signed: method, path, query, the signed headers in order, and the payload hash. It is never assembled as bytes — it is written straight into the hash — because the bytes would be a buffer on a handler's stack and a handler's stack is per connection.
+_Avoid_: string to sign, signing payload, request digest, normalized request
+
+**Presigned URL**:
+A link that carries its own signature in the query, so somebody with no credentials can use it once, for a while. The while it reports is the true one — the smallest of what was asked for, what the bucket allows, and what the credentials themselves have left.
+_Avoid_: signed link, temporary URL, share link, token URL

@@ -11,7 +11,7 @@ const std = @import("std");
 /// **Adding a module means adding a row here as well as to `.paths`.** Core
 /// shipped for a whole session with neither, and nothing noticed, because a
 /// list that does not name a directory cannot check it.
-const shipped_roots = [_][]const u8{ "core", "id", "config", "pw", "fetch", "http", "sql" };
+const shipped_roots = [_][]const u8{ "core", "id", "config", "pw", "fetch", "http", "sql", "s3" };
 
 comptime {
     const manifest = @embedFile("build.zig.zon");
@@ -82,6 +82,16 @@ const layers = [_]Layer{
         .may_import = &.{ "nilo_core", "nilo_id", "pg", "live_config" },
         .in_tests = &.{"nilo_http"},
     },
+    // A Service that dials, and **the first module to name a Fitting**
+    // (ADR 0072). That is downward rather than sideways — a Fitting borrows
+    // the loop and owns no destination, a Service holds one — and it is the
+    // import ADR 0070 was built to make legal, which is why this row is one
+    // line rather than an argument.
+    //
+    // No `pg`-shaped dependency to be lazy about: what would have been an
+    // HTTP client and a TLS stack is `std`'s, reached through `nilo_fetch`,
+    // so this module's dependency count is zero (ADR 0067).
+    .{ .root = "s3", .may_import = &.{ "nilo_core", "nilo_fetch", "s3_config" } },
 };
 
 const Layer = struct {
@@ -281,6 +291,60 @@ const sql_refusals = [_]Refusal{
     .{
         .name = "unknown_select_option",
         .says = "a select on unknown_select_option.User was given `.limti`, which is not one of its options.",
+    },
+};
+
+/// The same, for `s3/refusals/`. The fifth table, hung off `test-s3`.
+///
+/// What is checked here is what ADR 0068 said comptime was *for*: not the
+/// endpoint or the credentials, which come from a Config at run time, but the
+/// four things a bucket's own type can be wrong about — and the one that is
+/// not a mistake so much as a leak, a credential written where it would be
+/// compiled into the binary.
+const s3_refusals = [_]Refusal{
+    .{
+        .name = "bucket_name_too_short",
+        .says = "`ab` is 2 characters, and an S3 bucket name is 3 to 63.",
+    },
+    .{
+        .name = "bucket_name_with_an_underscore",
+        .says = "`my_avatars` has an underscore in it, and a host name cannot.",
+    },
+    .{
+        .name = "bucket_name_with_a_capital",
+        .says = "`Avatars` has a capital letter in it, and a bucket addressed as" ++
+            " `Avatars.s3.amazonaws.com` cannot.",
+    },
+    .{
+        .name = "bucket_name_like_an_address",
+        .says = "`192.168.1.1` is shaped like an IP address, and S3 refuses a bucket" ++
+            " named that way.",
+    },
+    .{
+        .name = "a_secret_in_a_bucket_option",
+        .says = "`secret_access_key` is a credential, and a bucket's type is not where one goes.",
+    },
+    .{
+        .name = "presign_over_seven_days",
+        .says = "s3.Bucket(\"links\") has a `presign_max` of 1209600 seconds, and SigV4" ++
+            " refuses anything over seven days (604800).",
+    },
+    .{
+        .name = "max_bytes_of_zero",
+        .says = "s3.Bucket(\"avatars\") has a `max_bytes` of zero, so every get would be" ++
+            " refused before it was made.",
+    },
+    .{
+        .name = "an_option_that_does_not_exist",
+        .says = "s3.Bucket has no option called `maxBytes`.",
+    },
+    .{
+        .name = "put_without_a_content_type",
+        .says = "bucket.put needs `.content_type` on the thing being stored.",
+    },
+    .{
+        .name = "a_streamed_put_with_no_length",
+        .says = "bucket.putStream needs `.len` on what it reads from.",
     },
 };
 
@@ -741,6 +805,36 @@ fn fetchFor(
     });
 }
 
+/// A copy of `nilo_s3` for one optimize mode (ADR 0072).
+///
+/// The first module here that takes two imports, and the second has to be the
+/// *same* `nilo_fetch` as anything else in that mode which holds an
+/// `Exchange` — two modules built from one root are two types to Zig, the same
+/// trap `idFor` documents.
+fn s3For(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    mode: std.builtin.OptimizeMode,
+    core_mod: *std.Build.Module,
+    s3_config: ?*std.Build.Module,
+) *std.Build.Module {
+    const module = b.createModule(.{
+        .root_source_file = b.path("s3/s3.zig"),
+        .target = target,
+        .optimize = mode,
+        .imports = &.{
+            .{ .name = "nilo_core", .module = core_mod },
+            .{ .name = "nilo_fetch", .module = fetchFor(b, target, mode, core_mod) },
+        },
+    });
+    // Only a test build needs it: `s3/live.zig` is named from a `test` block,
+    // and an import reached only from one is never analysed in a build that is
+    // not a test build. Which is what lets the published module carry no
+    // configuration at all.
+    if (s3_config) |cfg| module.addImport("s3_config", cfg);
+    return module;
+}
+
 /// A copy of the server for one optimize mode, for a test root that needs a
 /// running one.
 ///
@@ -946,11 +1040,31 @@ pub fn build(b: *std.Build) void {
     // Registered rather than bound: nothing inside this repository imports it,
     // and that is the point of the module rather than an omission. A dependent
     // writes `@import("nilo_fetch")`; `nilo_http` never does.
-    _ = b.addModule("nilo_fetch", .{
+    const nilo_fetch = b.addModule("nilo_fetch", .{
         .root_source_file = b.path("fetch/fetch.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "nilo_core", .module = nilo_core }},
+    });
+
+    // The object store: a Service that dials, and the first module to import a
+    // Fitting (ADR 0072). Registered rather than bound, like `nilo_fetch` —
+    // nothing inside this repository imports it, and that is the point of the
+    // module rather than an omission.
+    //
+    // **No lazy dependency, because there is no dependency.** `nilo_sql` had
+    // to hide pg.zig behind `.lazy = true` so that an HTTP-only project would
+    // not fetch it (ADR 0040); here the HTTP client and the TLS underneath it
+    // are `std`'s, so a project that never imports this fetches, builds and
+    // links nothing extra at all.
+    _ = b.addModule("nilo_s3", .{
+        .root_source_file = b.path("s3/s3.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "nilo_core", .module = nilo_core },
+            .{ .name = "nilo_fetch", .module = nilo_fetch },
+        },
     });
 
     // The server, under the name it is imported by. Everything else here —
@@ -1220,6 +1334,95 @@ pub fn build(b: *std.Build) void {
     }
     test_step.dependOn(test_fetch_engine_step);
 
+    // The object store. It sits a layer above the Fitting and is tested the
+    // same way: a real socket at both ends on `std.Io.Threaded`, with no
+    // Engine anywhere. What is different is that the server on the other end
+    // **checks the signature** — `s3/canned.zig` rebuilds the canonical
+    // request from the bytes that arrived and answers 403 when it disagrees,
+    // which is the only arrangement in which a signature test means anything
+    // (ADR 0072).
+    //
+    // On `test` rather than beside `test-sql`, because there is no container
+    // in the way: every test that needs a real MinIO skips when `S3_ENDPOINT`
+    // is unset.
+    // Where the live half of those tests connects, or null for "there is no
+    // object store, skip them". Build options rather than variables read
+    // inside the test, for the reason `live_config` gives below: a test binary
+    // that reads the environment behaves differently depending on who ran it.
+    // The variables are still honoured — read here, where reading them is a
+    // build input.
+    const s3_endpoint = b.option(
+        []const u8,
+        "s3-endpoint",
+        "Object store for nilo_s3's live tests (default: $S3_ENDPOINT, else they skip)",
+    ) orelse b.graph.environ_map.get("S3_ENDPOINT");
+
+    const s3_config = b.addOptions();
+    s3_config.addOption(?[]const u8, "endpoint", s3_endpoint);
+    s3_config.addOption(
+        ?[]const u8,
+        "access_key",
+        b.option([]const u8, "s3-access-key", "Access key id for the live tests") orelse
+            b.graph.environ_map.get("S3_ACCESS_KEY"),
+    );
+    s3_config.addOption(
+        ?[]const u8,
+        "secret_key",
+        b.option([]const u8, "s3-secret-key", "Secret access key for the live tests") orelse
+            b.graph.environ_map.get("S3_SECRET_KEY"),
+    );
+    s3_config.addOption(
+        []const u8,
+        "region",
+        b.option([]const u8, "s3-region", "Region for the live tests") orelse
+            b.graph.environ_map.get("S3_REGION") orelse "us-east-1",
+    );
+    // Not optional, and it cannot be: a bucket is a *type*, so which one the
+    // live tests use is settled while compiling. That is the design being
+    // tested rather than a limitation of it.
+    s3_config.addOption(
+        []const u8,
+        "bucket",
+        b.option([]const u8, "s3-bucket", "Bucket for the live tests") orelse
+            b.graph.environ_map.get("S3_BUCKET") orelse "nilo-test",
+    );
+
+    const test_s3_step = b.step(
+        "test-s3",
+        "Run nilo_s3's tests — a fake S3 that checks signatures, and no Engine",
+    );
+    for (test_modes) |mode| {
+        const tests = b.addTest(.{
+            .root_module = s3For(b, target, mode, coreFor(b, target, mode), s3_config.createModule()),
+        });
+        test_s3_step.dependOn(&b.addRunArtifact(tests).step);
+    }
+    test_step.dependOn(test_s3_step);
+
+    // The fifth Refusals table, and CLAUDE.md's warning applies with more
+    // force at five than it did at four: adding a row to one table while
+    // running another is a check that silently never ran.
+    const refusals_s3_step = b.step(
+        "refusals-s3",
+        "Check that each bucket mistake stops in nilo's own words",
+    );
+    for (s3_refusals) |refusal| {
+        const mode_core = coreFor(b, target, .Debug);
+        const module = b.createModule(.{
+            .root_source_file = b.path(b.fmt("s3/refusals/{s}.zig", .{refusal.name})),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{
+                .{ .name = "nilo_s3", .module = s3For(b, target, .Debug, mode_core, null) },
+                .{ .name = "nilo_core", .module = mode_core },
+            },
+        });
+        const refused = b.addObject(.{ .name = refusal.name, .root_module = module });
+        refused.expect_errors = .{ .contains = b.fmt("error: nilo: {s}", .{refusal.says}) };
+        refusals_s3_step.dependOn(&refused.step);
+    }
+    test_s3_step.dependOn(refusals_s3_step);
+
     // TLS and a real endpoint, which nothing else here touches.
     //
     // **Deliberately not on `test` or `test-all`.** It needs a route to the
@@ -1407,6 +1610,32 @@ pub fn build(b: *std.Build) void {
     });
     b.step("bench-fetch-server", "A server that calls out per request, with three controls beside it")
         .dependOn(&b.addInstallArtifact(bench_fetch_server, .{}).step);
+
+    // What an object store costs a server, with the four controls that say how
+    // much of the number is the object store (ADR 0072). Installed rather than
+    // run, for the reason the two above give — and it is the nilo side of
+    // `bench/compare-s3/drive.py`, which holds Go, Rust and Bun to the same
+    // seven routes.
+    //
+    // No `s3_config`: the endpoint and the keys are read from the environment
+    // at startup, which is right for a benchmark and wrong for a test. The
+    // bucket is compiled in, because it is a type (ADR 0068).
+    const bench_s3_server_module = b.createModule(.{
+        .root_source_file = b.path("bench/s3_server.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .strip = stripMeasured(strip, .ReleaseFast),
+        .imports = &.{
+            .{ .name = "nilo_http", .module = bench_http },
+            .{ .name = "nilo_s3", .module = s3For(b, target, .ReleaseFast, bench_core, null) },
+        },
+    });
+    const bench_s3_server = b.addExecutable(.{
+        .name = "nilo-bench-s3-server",
+        .root_module = bench_s3_server_module,
+    });
+    b.step("bench-s3-server", "A server reading an object store per request, with its controls")
+        .dependOn(&b.addInstallArtifact(bench_s3_server, .{}).step);
 
     // What a WebSocket costs while nobody is typing. Installed rather than
     // run for the same reason: `bench/ws_idle.py` starts it, holds thousands

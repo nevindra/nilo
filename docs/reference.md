@@ -5,7 +5,7 @@ The whole surface, as a list. For what any of it is *for*, see
 
 ## The modules
 
-Six ship, and a project links only what it imports
+Eight ship, and a project links only what it imports
 ([ADR 0041](./adr/0041-a-module-sits-where-the-loop-puts-it.md),
 [ADR 0042](./adr/0042-the-bottom-layer-holds-more-than-one-module.md)).
 
@@ -13,6 +13,7 @@ Six ship, and a project links only what it imports
 |---|---|---|
 | `nilo_http` | the server — everything on this page unless it says otherwise | [below](#app) |
 | `nilo_sql` | Postgres | [below](#nilo_sql) |
+| `nilo_s3` | object storage — S3, MinIO, R2, anything that speaks it | [below](#nilo_s3) |
 | `nilo_id` | UUIDs | [below](#nilo_id) |
 | `nilo_config` | settings out of the environment | [below](#nilo_config) |
 | `nilo_pw` | password hashing | [below](#nilo_pw) |
@@ -22,6 +23,7 @@ Six ship, and a project links only what it imports
 ```zig
 const nilo = @import("nilo_http");    // the alias everybody writes
 const sql = @import("nilo_sql");      // only if you talk to Postgres
+const s3 = @import("nilo_s3");        // only if you store objects
 const id = @import("nilo_id");        // only if you make identifiers
 const config = @import("nilo_config");// only if you read settings
 const pw = @import("nilo_pw");        // only if you hash passwords
@@ -464,6 +466,140 @@ ADR 0018's four axes.
 **What it is not**: a retry policy, a circuit breaker or a rate limiter. Those
 are decisions about somebody else's service and belong to whoever knows what
 that service promises.
+
+### `fetch.Exchange`
+
+The four calls above hold the whole body in the Scope, which is right for an
+API answering JSON and wrong for anything measured in megabytes. An `Exchange`
+is the same policy with the body left on the socket: **read the response head,
+decide, then move the bytes somewhere that is not memory.**
+
+```zig
+var ex: fetch.Exchange = .idle;
+defer ex.end();
+
+const head = try ex.begin(client, .{ .method = .GET, .url = url });
+if (head.content_length) |n| if (n > ceiling) return error.TooLarge;
+_ = try ex.pipe(&body.writer);   // straight out, allocating nothing
+```
+
+| | |
+|---|---|
+| `ex.begin(client, .{…})` | `Head` — status, `content_length`, `content_type`, `header(name)` (case-insensitive), `ok()` |
+| `ex.take(c, max)` | the rest of the body as a `Str` in the Scope, refusing over `max` |
+| `ex.readInto(buf)` | exactly `buf.len` bytes, or `error.BodyTooShort` |
+| `ex.pipe(w)` | the rest into a `*std.Io.Writer`, and how many bytes |
+| `ex.end()` | required, and safe twice |
+
+`Begin` takes `headers`, `host`, `authorization`, `content_type`, `timeout_ms`,
+a `body` of `.none` / `.slice` / `.stream`, and the two buffers — an empty
+`redirect_buffer` means redirects are not followed, which is what a signed
+request wants. **The buffers are the caller's because their cost is the
+caller's stack**, and by
+[ADR 0063](./adr/0063-a-handlers-stack-is-per-connection.md) that is per
+connection.
+
+**It must not be copied once begun**: it holds a `std.http.Client.Request`.
+Declare it, fill it where it stands, leave it there.
+
+## `nilo_s3`
+
+Object storage — S3, MinIO, R2, Backblaze, anything that speaks the same
+dialect. A **Service**: it borrows the loop and holds a destination
+([ADR 0070](./adr/0070-a-fitting-borrows-the-loop.md)). SigV4 and S3's
+semantics are all it is; the HTTP underneath is `nilo_fetch`
+([ADR 0067](./adr/0067-most-of-an-s3-client-is-not-s3.md),
+[ADR 0072](./adr/0072-an-object-store-is-a-service-that-dials.md)).
+
+```zig
+const s3 = @import("nilo_s3");
+
+// A bucket is a type, and its name is compiled in (ADR 0068).
+const Avatars = s3.Bucket("avatars", .{ .max_bytes = 2 << 20 });
+
+var store = try s3.open(gpa, .{
+    .endpoint = "https://s3.ap-southeast-1.amazonaws.com",
+    .region = "ap-southeast-1",
+    .credentials = .{ .static = .{
+        .access_key_id = settings.aws_key,
+        .secret_access_key = settings.aws_secret,
+    } },
+});
+defer store.deinit();
+
+var avatars = try Avatars.open(&store);
+defer avatars.deinit();
+try app.provide(&avatars);
+
+fn avatar(avatars: *Avatars, c: *nilo.Ctx, id: []const u8) !void {
+    const object = try avatars.get(c, id);
+    return c.send(200, object.content_type.view(), object.bytes.view());
+}
+```
+
+**One Store, many Buckets.** The Store owns the connection pool, the
+credentials and the derived signing key; a Bucket owns a name and the options
+that go with it. Two buckets over one Store share one pool, and starting a
+Store twice is a no-op.
+
+| Call | |
+|---|---|
+| `bucket.get(c, key)` | `Object` — `bytes`, `content_type`, `etag`, `len`. One allocation holds all four |
+| `bucket.getRange(c, key, .{ .from, .to })` | the same, for a slice. `to` is inclusive |
+| `bucket.getIf(c, key, etag)` | `Conditional` — `.unmodified` or `.object`. A 304 is a success, so it is a union rather than an error |
+| `bucket.stream(c, key, &reading, buf)` | fills a `Reading` — `len`, `content_type`, `etag`, then `pipe(w)` and `close()` |
+| `bucket.put(c, key, .{ .bytes, .content_type })` | also takes `cache_control` and `content_disposition` |
+| `bucket.putStream(c, key, .{ .reader, .len, .content_type })` | framed by length, never chunked — S3 does not accept chunked |
+| `bucket.delete(c, key)` | |
+| `bucket.head(c, key)` | `Meta` — `len`, `content_type`, `etag` |
+| `bucket.presign(c, key, seconds)` | `Presigned` — `url` and `expires_at`. No socket |
+
+`c` is a Scope, the same as everywhere else.
+
+**`s3.Options`**, given to `open`:
+
+| Field | Default | |
+|---|---|---|
+| `endpoint` | — | `https://host[:port]`, no path. **The scheme decides whether payloads are hashed**: `UNSIGNED-PAYLOAD` over TLS, a real SHA-256 over plaintext |
+| `region` | `us-east-1` | |
+| `credentials` | — | `.static` or `.fetch` |
+| `max_in_flight` | 32 | calls at once. An HTTPS connection holds 59,151 bytes, so this times that is the ceiling |
+| `timeout_ms` | 30,000 | one call, end to end |
+| `max_drain` | 64 KiB | how much of a refused body is worth reading to keep the connection |
+| `refresh_margin_s` | 300 | how long before expiry temporary credentials are replaced |
+
+**Bucket options**, the second argument to `Bucket`:
+
+| Field | Default | |
+|---|---|---|
+| `max_bytes` | 8 MiB | the largest object a bounded `get` will hold, **checked against `content-length` before a byte is read** |
+| `style` | `.virtual` | `.path` for MinIO and anything on a bare host |
+| `sse` | null | `.aes256` or `.aws_kms` |
+| `presign_max` | 3600 | the longest life a presigned URL may claim |
+| `key_max` | 512 | the longest key. Comptime because it sizes a stack buffer, and stack is per connection |
+| `session_token_max` | 0 | room for a session token. **Zero is right for static credentials** and costs nothing; STS sources set 2048 and pay per connection |
+
+**Temporary credentials** are one function, called lazily by the request that
+notices they are near expiry — there is no background task:
+
+```zig
+.credentials = .{ .fetch = fetchFromIrsa },   // fn (gpa, io) !s3.Credentials
+```
+
+**Seven errors, because a handler would do something different about each**:
+`NotFound` (the only one with a default status, 404), `TooLarge`, `Throttled`,
+`Unavailable`, `TimedOut`, `Rejected` and `Failed`. S3's own code and message
+are logged rather than sent on — `Rejected` reaching a client as a 403 would be
+telling the caller they are not allowed when the truth is that the *server's*
+credentials are wrong. A skewed clock is read out of the body and said plainly.
+
+**What it is not**: `LIST`, multipart upload, bucket lifecycle, or anything
+else whose success path is XML — [ADR 0068](./adr/0068-a-bucket-is-a-type-and-a-key-is-not.md)
+is where that line is drawn and why.
+
+[`bench/result/s3.md`](../bench/result/s3.md) is what it costs on ADR 0018's
+four axes, against the same seven routes written in Go and Rust — and it says
+plainly which two axes are not yet measured, and why Bun has no row.
 
 ## `nilo_id`
 

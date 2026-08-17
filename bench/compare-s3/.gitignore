@@ -1,0 +1,6 @@
+# Build output. The sources are the harness; the binaries are not.
+__pycache__/
+.gocache/
+go/go-bench
+rust/target/
+node_modules/

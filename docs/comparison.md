@@ -17,6 +17,14 @@ The harness is [`bench/compare/`](../bench/compare/) — `./build.sh` then
 number to be remembered. It is out of the way of `zig build` on purpose: a Zig
 repo should not need a Go toolchain to test itself.
 
+**This page is about the HTTP server only.** `nilo_s3` is compared against Go
+and Rust separately — and against Bun, which could not finish — by a harness of
+its own in
+[`bench/compare-s3/`](../bench/compare-s3/), and written up in
+[`bench/result/s3.md`](../bench/result/s3.md). The two are kept apart because
+they are not the same experiment: that one has a third process on the machine —
+the object store — and splits the cores three ways rather than two.
+
 ## What was held equal
 
 Every candidate serves `GET /users/:id`, returns the **same 982 bytes** of JSON,
