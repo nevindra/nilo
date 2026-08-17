@@ -235,8 +235,8 @@ with `format: binary` whatever the content type is at run time. See
 | `c.stream(status, content_type)` | `!Stream` |
 | `c.streamWith(status, content_type, .{ .buffer = … })` | the same, buffer of your own. Default 4 KB |
 | `c.events()` | `!Events` |
-| `c.upgrade()` | `!Socket` |
-| `c.upgradeWith(.{ .protocol = "chat.v1" })` | the same, naming a subprotocol |
+| `c.upgrade(loop, state)` | `!void` — the connection becomes a WebSocket and `loop` reads it. `{}` when there is no state |
+| `c.upgradeWith(loop, state, .{ .protocol = "chat.v1" })` | the same, naming a subprotocol |
 
 `Content-Type`, `Content-Length`, `Transfer-Encoding` and `Connection` are
 refused by `setHeader`. Set headers before sending. Setting the same header
@@ -720,7 +720,7 @@ the 404 a file that was never there gets.
 
 | | |
 |---|---|
-| `s.receive(&buf)` | `!?Message` — the buffer is the message ceiling |
+| `s.receive()` | `!?Message` — the buffer is the executor's, lent for one message |
 | `s.send(kind, data)` | `.text` or `.binary` |
 | `s.sendText(text)` / `s.sendBinary(bytes)` | |
 | `s.print(fmt, args)` | one text message, formatted — no buffer of your own |
@@ -736,10 +736,12 @@ so with a 1001 — a message loop needs no shutdown branch of its own
 for a handler doing work of its own between messages. Sending on a socket that
 has already closed writes nothing rather than failing.
 
-`c.upgradeWith(.{ .idle_ms = 30_000 })` — how long this connection may say
-nothing before nilo pings it. No answer by the end of the next stretch closes
-it with 1001. Not a deadline: a quiet WebSocket is a working one, so silence
-asks a question rather than ending anything. `0` waits forever.
+`c.upgradeWith(loop, state, .{ .idle_ms = 30_000 })` — how long this connection
+may say nothing before nilo pings it. No answer by the end of the next stretch
+closes it with 1001. Not a deadline: a quiet WebSocket is a working one, so
+silence asks a question rather than ending anything. `0` waits forever.
+`.max_message` is the ceiling on one message, 16 KiB by default; a frame
+announcing more is refused with a 1009 before a byte of it is read.
 
 `Close`: `.normal`, `.going_away`, `.protocol_error`, `.unsupported`,
 `.invalid_payload`, `.policy`, `.too_big`, `.internal`, or a number.
@@ -756,12 +758,14 @@ defer room.deinit();
 try app.provide(&room);
 
 fn chat(c: *nilo.Ctx, room: *nilo.Room) !void {
-    var socket = try c.upgrade();
-    try room.join(&socket);
-    defer room.leave(&socket);
+    return c.upgrade(chatLoop, room);
+}
 
-    var buf: [16 * 1024]u8 = undefined;
-    while (try socket.receive(&buf)) |message| {
+fn chatLoop(socket: *nilo.Socket, room: *nilo.Room) !void {
+    try room.join(socket);
+    defer room.leave(socket);
+
+    while (try socket.receive()) |message| {
         try room.say(message.kind, message.data);
     }
 }

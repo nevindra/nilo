@@ -102,6 +102,13 @@ pub const Ctx = struct {
     /// ever uses it; `.off` is the default, and what a test driving App
     /// directly gets, and it answers "go and read" to everything.
     _waker: bulkhead.Waker = .off,
+    /// Where `upgrade` leaves the socket and the loop that is going to run it.
+    ///
+    /// Points at a slot in the *connection* loop's frame, which is the whole
+    /// point: the loop runs from there, after this request's machinery has
+    /// unwound (ADR 0071). Null for a `Ctx` built by hand in a test, and for
+    /// every request that is not a WebSocket, which is all but a few.
+    _handover: ?*?websocket.Handover = null,
     /// Who the connection came from, as the socket reports it. Empty when
     /// there is no socket — a test driving App directly, a Unix socket.
     _peer: bulkhead.Peer = .{},
@@ -110,7 +117,7 @@ pub const Ctx = struct {
     _request_id: ?Str = null,
     /// Where a generated id is written. Sixteen hex characters, on the Ctx
     /// and therefore on the fiber's stack — not on the connection, whose
-    /// 8,767 idle bytes are an invariant rather than a budget (ADR 0018).
+    /// 4,669 idle bytes are an invariant rather than a budget (ADR 0018).
     _request_id_buf: [16]u8 = undefined,
     /// What this request may do, from `listen()`. Defaults when App was
     /// never listened on, which is what a test gets.
@@ -1053,17 +1060,33 @@ pub const Ctx = struct {
     /// `Cache-Control: no-cache` so nothing stores it, and
     /// `X-Accel-Buffering: no` so an nginx in front does not hold the events
     /// back waiting for a buffer to fill.
-    /// Turn this request into a WebSocket connection (ADR 0022).
+    /// Turn this request into a WebSocket connection (ADR 0022, ADR 0071).
     ///
     /// ```zig
     /// fn echo(c: *nilo.Ctx) !void {
-    ///     var socket = try c.upgrade();
-    ///     var buf: [4096]u8 = undefined;
-    ///     while (try socket.receive(&buf)) |message| {
+    ///     return c.upgrade(echoLoop, {});
+    /// }
+    ///
+    /// fn echoLoop(socket: *nilo.Socket) !void {
+    ///     while (try socket.receive()) |message| {
     ///         try socket.send(message.kind, message.data);
     ///     }
     /// }
     /// ```
+    ///
+    /// **The loop is a function rather than the tail of the handler, and that
+    /// is a memory decision.** A handler that loops in place is suspended
+    /// 1,608 bytes inside the request machinery for the life of the socket —
+    /// the `Ctx`, the parsed head, the route match, none of which the loop can
+    /// reach and all of which a suspended fiber holds (ADR 0063). Handing the
+    /// loop back lets the request unwind first: measured, an upgraded
+    /// connection nobody has spoken to went from 9,290 bytes to 5,186.
+    ///
+    /// `state` is what the handler knows and the loop needs — a name off the
+    /// query, the room this path belongs to. Pass `{}` when there is nothing.
+    /// It is copied into the connection's frame, so it may be up to
+    /// `websocket.state_max` bytes; anything bigger goes in the request arena
+    /// (which outlives the handler, and the loop) with a pointer carried here.
     ///
     /// A request that is not asking to be upgraded is refused with a 400
     /// saying which part is missing, rather than left to fail as framing
@@ -1071,12 +1094,47 @@ pub const Ctx = struct {
     ///
     /// After this the connection is no longer HTTP and cannot carry another
     /// request, which nilo arranges — the handler only has to return.
-    pub fn upgrade(self: *Ctx) !websocket.Socket {
-        return self.upgradeWith(.{});
+    pub fn upgrade(self: *Ctx, comptime loop: anytype, state: anytype) !void {
+        return self.upgradeWith(loop, state, .{});
     }
 
-    /// `upgrade`, agreeing to a sub-protocol.
-    pub fn upgradeWith(self: *Ctx, options: websocket.Options) !websocket.Socket {
+    /// `upgrade`, naming a sub-protocol, a ping interval or a message ceiling.
+    pub fn upgradeWith(
+        self: *Ctx,
+        comptime loop: anytype,
+        state: anytype,
+        options: websocket.Options,
+    ) !void {
+        const State = @TypeOf(state);
+        comptime websocket.checkLoop(loop, State);
+
+        var socket = try self.handshake(options);
+
+        // No connection loop to hand it to — a `Ctx` built by hand in a test,
+        // with nothing above it that will ever run this. Running it here is
+        // the same conversation on a deeper stack, which is exactly what this
+        // call exists to avoid and exactly what a test does not care about.
+        const slot = self._handover orelse {
+            const carried = state;
+            return websocket.runner(loop, State)(&socket, @ptrCast(&carried));
+        };
+
+        slot.* = .{
+            .socket = socket,
+            .run = websocket.runner(loop, State),
+            .path = self._path,
+        };
+        if (@sizeOf(State) > 0) {
+            const carried: *State = @ptrCast(@alignCast(&slot.*.?.state));
+            carried.* = state;
+        }
+    }
+
+    /// The handshake itself: check the request is really one, answer 101, and
+    /// build the Socket. Split out from `upgrade` because both the connection
+    /// loop and a hand-built `Ctx` need it and only one of them hands the loop
+    /// back.
+    fn handshake(self: *Ctx, options: websocket.Options) !websocket.Socket {
         std.debug.assert(!self._sent); // one request, one response
 
         if (self.method != .GET) {
@@ -1135,6 +1193,11 @@ pub const Ctx = struct {
             // holding it. Nothing uses it until the handler joins a Room.
             ._waker = self._waker,
             ._idle_ms = options.idle_ms,
+            // Left null on purpose. The connection loop points it at the slot
+            // beside the Socket in the `Handover` once that struct has stopped
+            // moving; a hand-built `Ctx` with no loop above it falls back to
+            // the Socket's own slot.
+            ._max_message = options.max_message,
         };
     }
 

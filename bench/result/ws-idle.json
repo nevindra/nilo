@@ -1,0 +1,460 @@
+{
+  "http": {
+    "label": "HTTP keep-alive, one 6-byte response",
+    "base_kb": 8108,
+    "rows": [
+      {
+        "n": 500,
+        "rss_kb": 12380,
+        "per_conn": 8749.056,
+        "marginal": 8749.056
+      },
+      {
+        "n": 1000,
+        "rss_kb": 16656,
+        "per_conn": 8753.152,
+        "marginal": 8757.248
+      },
+      {
+        "n": 2000,
+        "rss_kb": 25232,
+        "per_conn": 8767.488,
+        "marginal": 8781.824
+      }
+    ]
+  },
+  "ws-idle": {
+    "label": "WebSocket, upgraded and never spoken to",
+    "base_kb": 8112,
+    "rows": [
+      {
+        "n": 500,
+        "rss_kb": 14636,
+        "per_conn": 13361.152,
+        "marginal": 13361.152
+      },
+      {
+        "n": 1000,
+        "rss_kb": 20904,
+        "per_conn": 13099.008,
+        "marginal": 12836.864
+      },
+      {
+        "n": 2000,
+        "rss_kb": 34168,
+        "per_conn": 13340.672,
+        "marginal": 13582.336
+      }
+    ]
+  },
+  "ws-small": {
+    "label": "WebSocket, 4 KiB buffer, one 6-byte echo",
+    "base_kb": 8116,
+    "rows": [
+      {
+        "n": 500,
+        "rss_kb": 14636,
+        "per_conn": 13352.96,
+        "marginal": 13352.96
+      },
+      {
+        "n": 1000,
+        "rss_kb": 21168,
+        "per_conn": 13365.248,
+        "marginal": 13377.536
+      },
+      {
+        "n": 2000,
+        "rss_kb": 34236,
+        "per_conn": 13373.44,
+        "marginal": 13381.632
+      }
+    ]
+  },
+  "ws-big": {
+    "label": "WebSocket, 64 KiB buffer, one 6-byte echo",
+    "base_kb": 8112,
+    "rows": [
+      {
+        "n": 500,
+        "rss_kb": 14632,
+        "per_conn": 13352.96,
+        "marginal": 13352.96
+      },
+      {
+        "n": 1000,
+        "rss_kb": 21164,
+        "per_conn": 13365.248,
+        "marginal": 13377.536
+      },
+      {
+        "n": 2000,
+        "rss_kb": 34228,
+        "per_conn": 13371.392,
+        "marginal": 13377.536
+      }
+    ]
+  },
+  "ws-big-msg": {
+    "label": "WebSocket, 64 KiB buffer, one 60 KiB echo",
+    "base_kb": 8104,
+    "rows": [
+      {
+        "n": 500,
+        "rss_kb": 44628,
+        "per_conn": 74801.152,
+        "marginal": 74801.152
+      },
+      {
+        "n": 1000,
+        "rss_kb": 81152,
+        "per_conn": 74801.152,
+        "marginal": 74801.152
+      },
+      {
+        "n": 2000,
+        "rss_kb": 154224,
+        "per_conn": 74813.44,
+        "marginal": 74825.728
+      }
+    ]
+  },
+  "ws-deep": {
+    "label": "WebSocket, 4 KiB buffer, 64 KiB of stack touched",
+    "base_kb": 8104,
+    "rows": [
+      {
+        "n": 500,
+        "rss_kb": 46620,
+        "per_conn": 78880.768,
+        "marginal": 78880.768
+      },
+      {
+        "n": 1000,
+        "rss_kb": 85156,
+        "per_conn": 78901.248,
+        "marginal": 78921.728
+      },
+      {
+        "n": 2000,
+        "rss_kb": 162220,
+        "per_conn": 78907.392,
+        "marginal": 78913.536
+      }
+    ]
+  },
+  "gws": {
+    "ws-small": {
+      "label": "WebSocket, one 6-byte echo",
+      "path": "/ws",
+      "base_kb": 9324,
+      "rows": [
+        {
+          "n": 500,
+          "rss_kb": 16044,
+          "gc_kb": 15148,
+          "per_conn": 13762.56,
+          "gc_per_conn": 11927.552,
+          "marginal": 13762.56
+        },
+        {
+          "n": 1000,
+          "rss_kb": 21020,
+          "gc_kb": 19716,
+          "per_conn": 11976.704,
+          "gc_per_conn": 10641.408,
+          "marginal": 10190.848
+        },
+        {
+          "n": 2000,
+          "rss_kb": 31592,
+          "gc_kb": 29136,
+          "per_conn": 11401.216,
+          "gc_per_conn": 10143.744,
+          "marginal": 10825.728
+        }
+      ]
+    },
+    "http": {
+      "label": "HTTP keep-alive, one 6-byte response",
+      "path": "/health",
+      "base_kb": 9308,
+      "rows": [
+        {
+          "n": 500,
+          "rss_kb": 19728,
+          "gc_kb": 19676,
+          "per_conn": 21340.16,
+          "gc_per_conn": 21233.664,
+          "marginal": 21340.16
+        },
+        {
+          "n": 1000,
+          "rss_kb": 29664,
+          "gc_kb": 29236,
+          "per_conn": 20844.544,
+          "gc_per_conn": 20406.272,
+          "marginal": 20348.928
+        },
+        {
+          "n": 2000,
+          "rss_kb": 49184,
+          "gc_kb": 48200,
+          "per_conn": 20416.512,
+          "gc_per_conn": 19912.704,
+          "marginal": 19988.48
+        }
+      ]
+    },
+    "ws-idle": {
+      "label": "WebSocket, upgraded and never spoken to",
+      "path": "/ws",
+      "base_kb": 9332,
+      "rows": [
+        {
+          "n": 500,
+          "rss_kb": 14872,
+          "gc_kb": 14260,
+          "per_conn": 11345.92,
+          "gc_per_conn": 10092.544,
+          "marginal": 11345.92
+        },
+        {
+          "n": 1000,
+          "rss_kb": 19548,
+          "gc_kb": 17880,
+          "per_conn": 10461.184,
+          "gc_per_conn": 8753.152,
+          "marginal": 9576.448
+        },
+        {
+          "n": 2000,
+          "rss_kb": 28428,
+          "gc_kb": 25440,
+          "per_conn": 9777.152,
+          "gc_per_conn": 8247.296,
+          "marginal": 9093.12
+        }
+      ]
+    },
+    "ws-big-msg": {
+      "label": "WebSocket, one 60 KiB echo",
+      "path": "/ws",
+      "base_kb": 9332,
+      "rows": [
+        {
+          "n": 500,
+          "rss_kb": 16152,
+          "gc_kb": 15316,
+          "per_conn": 13967.36,
+          "gc_per_conn": 12255.232,
+          "marginal": 13967.36
+        },
+        {
+          "n": 1000,
+          "rss_kb": 21840,
+          "gc_kb": 19816,
+          "per_conn": 12808.192,
+          "gc_per_conn": 10735.616,
+          "marginal": 11649.024
+        },
+        {
+          "n": 2000,
+          "rss_kb": 32868,
+          "gc_kb": 29300,
+          "per_conn": 12050.432,
+          "gc_per_conn": 10223.616,
+          "marginal": 11292.672
+        }
+      ]
+    }
+  },
+  "nilo": {
+    "http": {
+      "label": "HTTP keep-alive, one 6-byte response",
+      "path": "/health",
+      "base_kb": 8096,
+      "rows": [
+        {
+          "n": 500,
+          "rss_kb": 10364,
+          "gc_kb": 10364,
+          "per_conn": 4644.864,
+          "gc_per_conn": 4644.864,
+          "marginal": 4644.864
+        },
+        {
+          "n": 1000,
+          "rss_kb": 12644,
+          "gc_kb": 12644,
+          "per_conn": 4657.152,
+          "gc_per_conn": 4657.152,
+          "marginal": 4669.44
+        },
+        {
+          "n": 2000,
+          "rss_kb": 17216,
+          "gc_kb": 17216,
+          "per_conn": 4669.44,
+          "gc_per_conn": 4669.44,
+          "marginal": 4681.728
+        }
+      ]
+    },
+    "ws-idle": {
+      "label": "WebSocket, upgraded and never spoken to",
+      "path": "/ws/idle",
+      "base_kb": 8100,
+      "rows": [
+        {
+          "n": 500,
+          "rss_kb": 10616,
+          "gc_kb": 10616,
+          "per_conn": 5152.768,
+          "gc_per_conn": 5152.768,
+          "marginal": 5152.768
+        },
+        {
+          "n": 1000,
+          "rss_kb": 13152,
+          "gc_kb": 13152,
+          "per_conn": 5173.248,
+          "gc_per_conn": 5173.248,
+          "marginal": 5193.728
+        },
+        {
+          "n": 2000,
+          "rss_kb": 18216,
+          "gc_kb": 18216,
+          "per_conn": 5179.392,
+          "gc_per_conn": 5179.392,
+          "marginal": 5185.536
+        }
+      ]
+    },
+    "ws-small": {
+      "label": "WebSocket, one 6-byte echo",
+      "path": "/ws/small",
+      "base_kb": 8096,
+      "rows": [
+        {
+          "n": 500,
+          "rss_kb": 10820,
+          "gc_kb": 10820,
+          "per_conn": 5578.752,
+          "gc_per_conn": 5578.752,
+          "marginal": 5578.752
+        },
+        {
+          "n": 1000,
+          "rss_kb": 13384,
+          "gc_kb": 13384,
+          "per_conn": 5414.912,
+          "gc_per_conn": 5414.912,
+          "marginal": 5251.072
+        },
+        {
+          "n": 2000,
+          "rss_kb": 18456,
+          "gc_kb": 18456,
+          "per_conn": 5304.32,
+          "gc_per_conn": 5304.32,
+          "marginal": 5193.728
+        }
+      ]
+    },
+    "ws-big": {
+      "label": "WebSocket, 64 KiB receive buffer, one 6-byte echo",
+      "path": "/ws/big",
+      "base_kb": 8096,
+      "rows": [
+        {
+          "n": 500,
+          "rss_kb": 10664,
+          "gc_kb": 10664,
+          "per_conn": 5259.264,
+          "gc_per_conn": 5259.264,
+          "marginal": 5259.264
+        },
+        {
+          "n": 1000,
+          "rss_kb": 13212,
+          "gc_kb": 13212,
+          "per_conn": 5238.784,
+          "gc_per_conn": 5238.784,
+          "marginal": 5218.304
+        },
+        {
+          "n": 2000,
+          "rss_kb": 18084,
+          "gc_kb": 18084,
+          "per_conn": 5113.856,
+          "gc_per_conn": 5113.856,
+          "marginal": 4988.928
+        }
+      ]
+    },
+    "ws-big-msg": {
+      "label": "WebSocket, one 60 KiB echo",
+      "path": "/ws/big",
+      "base_kb": 8164,
+      "rows": [
+        {
+          "n": 500,
+          "rss_kb": 11648,
+          "gc_kb": 11648,
+          "per_conn": 7135.232,
+          "gc_per_conn": 7135.232,
+          "marginal": 7135.232
+        },
+        {
+          "n": 1000,
+          "rss_kb": 14172,
+          "gc_kb": 14172,
+          "per_conn": 6152.192,
+          "gc_per_conn": 6152.192,
+          "marginal": 5169.152
+        },
+        {
+          "n": 2000,
+          "rss_kb": 19232,
+          "gc_kb": 19232,
+          "per_conn": 5666.816,
+          "gc_per_conn": 5666.816,
+          "marginal": 5181.44
+        }
+      ]
+    },
+    "ws-deep": {
+      "label": "WebSocket, 64 KiB of stack touched",
+      "path": "/ws/deep",
+      "base_kb": 8160,
+      "rows": [
+        {
+          "n": 500,
+          "rss_kb": 42864,
+          "gc_kb": 42864,
+          "per_conn": 71073.792,
+          "gc_per_conn": 71073.792,
+          "marginal": 71073.792
+        },
+        {
+          "n": 1000,
+          "rss_kb": 77416,
+          "gc_kb": 77416,
+          "per_conn": 70918.144,
+          "gc_per_conn": 70918.144,
+          "marginal": 70762.496
+        },
+        {
+          "n": 2000,
+          "rss_kb": 146524,
+          "gc_kb": 146524,
+          "per_conn": 70842.368,
+          "gc_per_conn": 70842.368,
+          "marginal": 70766.592
+        }
+      ]
+    }
+  }
+}

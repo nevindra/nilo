@@ -19,7 +19,7 @@
 //! encrypted and signed with `XChaCha20Poly1305`, and handed back as one
 //! cookie. That is the reason to prefer this over an id pointing at a store
 //! rather than a detail of how it is written: there is no table, no expiry
-//! sweep, no lock, and nothing added to the 8,767 bytes an idle connection
+//! sweep, no lock, and nothing added to the 4,669 bytes an idle connection
 //! holds ([ADR 0018](../docs/adr/0018-the-trade-budget-has-three-axes.md)).
 //! A request that does not ask for a session runs the code it ran before.
 //!

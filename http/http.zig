@@ -232,7 +232,8 @@ pub const Events = @import("stream.zig").Events;
 /// big to hold in the request arena (ADR 0020).
 pub const Body = @import("body.zig").Body;
 
-/// An open WebSocket connection, from `c.upgrade()` (ADR 0022).
+/// An open WebSocket connection. A loop handed to `c.upgrade(loop, state)` is
+/// given one and reads it until the conversation ends (ADR 0022, ADR 0071).
 pub const Socket = @import("websocket.zig").Socket;
 
 /// Everything else WebSocket: `Message`, `Kind`, `Close`, `Options`.
@@ -589,6 +590,7 @@ test {
     _ = @import("range.zig");
     _ = @import("sendfile.zig");
     _ = @import("websocket.zig");
+    _ = @import("scratch.zig");
     _ = @import("room.zig");
     _ = @import("testing.zig");
     _ = @import("middleware.zig");

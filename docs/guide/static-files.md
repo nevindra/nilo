@@ -62,7 +62,7 @@ above or below the asset adds nothing to the request.
 
 That timing is the whole design, not an optimisation on top of it. A gzip
 compressor needs a 64 KB window: one per connection would take an idle
-connection from 8,767 bytes to roughly ten times that, and one per request would
+connection from 4,669 bytes to roughly fifteen times that, and one per request would
 put an allocation on the path where the budget is one
 ([ADR 0018](../adr/0018-the-trade-budget-has-three-axes.md)). A file that never
 changes escapes both, because it can be compressed before the socket is open.

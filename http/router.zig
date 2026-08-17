@@ -242,7 +242,7 @@ pub const Router = struct {
         return null;
     }
 
-    pub fn match(self: *const Router, method: http1.Method, path: []const u8) ?Match {
+    pub noinline fn match(self: *const Router, method: http1.Method, path: []const u8) ?Match {
         var buf: [max_segments][]const u8 = undefined;
         const trimmed = trimSlashes(path);
         const parts = split(trimmed, &buf) orelse return null;

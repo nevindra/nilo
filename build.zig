@@ -573,6 +573,26 @@ const refusals = [_]Refusal{
         .says = "the segment \"img*\" of route \"/files/img*\" mixes `*` with other text.",
     },
     .{
+        .name = "ws_loop_not_a_function",
+        .says = "a WebSocket route runs a function on the socket, and comptime_int is not one",
+    },
+    .{
+        .name = "ws_loop_not_a_socket",
+        .says = "a WebSocket loop's first argument is *nilo.Socket, not *ctx.Ctx",
+    },
+    .{
+        .name = "ws_loop_wrong_arity",
+        .says = "a WebSocket loop takes *Socket and nothing else, because upgrade was given no state; this one takes 2 arguments",
+    },
+    .{
+        .name = "ws_state_mismatch",
+        .says = "upgrade was given state of type u32, and the loop's second argument is str.Str",
+    },
+    .{
+        .name = "ws_state_too_big",
+        .says = "a WebSocket loop may carry 128 bytes of state and ws_state_too_big.Seat is 184; put it in the request arena and carry a pointer to it",
+    },
+    .{
         .name = "wildcard_not_last",
         .says = "the route pattern \"/files/*/raw\" has a `*` that is not the last segment.",
     },
@@ -1387,6 +1407,23 @@ pub fn build(b: *std.Build) void {
     });
     b.step("bench-fetch-server", "A server that calls out per request, with three controls beside it")
         .dependOn(&b.addInstallArtifact(bench_fetch_server, .{}).step);
+
+    // What a WebSocket costs while nobody is typing. Installed rather than
+    // run for the same reason: `bench/ws_idle.py` starts it, holds thousands
+    // of sockets open against it and reads `VmRSS`.
+    const bench_ws_server_module = b.createModule(.{
+        .root_source_file = b.path("bench/ws_server.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .strip = stripMeasured(strip, .ReleaseFast),
+        .imports = &.{.{ .name = "nilo_http", .module = bench_http }},
+    });
+    const bench_ws_server = b.addExecutable(.{
+        .name = "nilo-bench-ws-server",
+        .root_module = bench_ws_server_module,
+    });
+    b.step("bench-ws-server", "A server of idle WebSockets, for measuring what one costs")
+        .dependOn(&b.addInstallArtifact(bench_ws_server, .{}).step);
 
     // Each mode needs its own copy of everything the module imports, down to
     // zio: a module carries the optimize mode it was created with, and this

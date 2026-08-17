@@ -1,28 +1,38 @@
-//! WebSocket — the connection that stops being HTTP (ADR 0022).
+//! WebSocket — the connection that stops being HTTP (ADR 0022, ADR 0071).
 //!
 //! ```zig
 //! fn echo(c: *nilo.Ctx) !void {
-//!     var socket = try c.upgrade();
-//!     var buf: [4096]u8 = undefined;
-//!     while (try socket.receive(&buf)) |message| {
+//!     return c.upgrade(echoLoop, {});
+//! }
+//!
+//! fn echoLoop(socket: *nilo.Socket) !void {
+//!     while (try socket.receive()) |message| {
 //!         try socket.send(message.kind, message.data);
 //!     }
 //! }
 //! ```
 //!
-//! The handler owns the loop, the same way a streaming handler owns its
+//! The caller owns the loop, the same way a streaming handler owns its
 //! `Stream`: nilo does the handshake, the framing and the housekeeping
-//! frames, and then gets out of the way.
+//! frames, and then gets out of the way. What it does **not** do is let the
+//! handler keep the loop — a handler that loops in place is suspended inside
+//! the request machinery for the life of the socket, and a suspended fiber
+//! holds every byte of its stack (ADR 0063). So the handler hands the loop
+//! back and the connection loop runs it, which is `Handover` below and
+//! ADR 0071: 9,290 bytes an idle socket down to 5,186.
 //!
-//! Memory is the buffer passed to `receive` and nothing else. A message
-//! split across frames is reassembled into that buffer, and one too big for
-//! it closes the connection with 1009 rather than growing anything.
+//! Memory is one buffer per message **in flight**, not one per open socket. It
+//! comes from the executor's free list when a message starts arriving and goes
+//! back when the conversation goes quiet (`http/scratch.zig`). A message split
+//! across frames is reassembled into it, and one bigger than
+//! `Options.max_message` closes the connection with 1009 rather than growing
+//! anything.
 //!
 //! **No byte of a message is copied twice** (ADR 0052). A frame that is
 //! already in the connection's read buffer — which is nearly every frame, and
 //! every frame at all under the size of one read — is unmasked *as* it is
-//! copied into the handler's buffer, in one pass. A frame too big to have
-//! arrived whole is read straight into the handler's buffer, past the read
+//! copied into the message buffer, in one pass. A frame too big to have
+//! arrived whole is read straight into the message buffer, past the read
 //! buffer entirely, and unmasked where it lands. There is no third case.
 
 const std = @import("std");
@@ -31,6 +41,7 @@ const bulkhead = @import("bulkhead.zig");
 const http1 = @import("http1.zig");
 const json_mod = @import("json.zig");
 const room_mod = @import("room.zig");
+const scratch_mod = @import("scratch.zig");
 
 /// The string every WebSocket handshake in the world hashes against. It has
 /// no meaning; it is there so that a server which merely echoes the key
@@ -64,13 +75,153 @@ pub const Options = struct {
     /// costs a live one two frames a minute. Proxies that drop quiet
     /// connections usually do so at sixty.
     idle_ms: u32 = 30_000,
+
+    /// The biggest message this socket will assemble. One past it closes the
+    /// connection with 1009 rather than growing anything.
+    ///
+    /// This is the buffer's size, and the buffer is **not** this connection's:
+    /// it comes from the executor's free list when a message starts arriving
+    /// and goes back when the connection goes quiet (`http/scratch.zig`). So
+    /// raising it costs one buffer per message *in flight* rather than one per
+    /// open socket, which is the change that made having the option worth it
+    /// at all — see `default_max_message`.
+    max_message: usize = default_max_message,
 };
 
-// There is deliberately no `max_message` here. The buffer handed to
-// `receive` is the limit, and one limit is better than two: an option set to
-// a megabyte and a 4 KB buffer means the option is a lie, and the way you
-// find out is a connection closing with 1009 for no visible reason. Ask for
-// the size you can hold.
+/// The default ceiling on one message, and the size of a buffer on the
+/// executor's free list.
+///
+/// **ADR 0022 refused to have this option at all**, on the grounds that the
+/// buffer handed to `receive` was already the limit and one limit is better
+/// than two. That was right about the limits and wrong about where the buffer
+/// should live: a buffer declared in the handler is a local in a frame that
+/// stays live for the whole connection, so a socket that had received one
+/// 60 KiB message held 74,809 bytes per idle connection against 13,375 for one
+/// that had not. `http/scratch.zig` has the measurement and the shape that
+/// replaced it — and the option comes back because a shared buffer has to have
+/// a size before anybody asks for one.
+///
+/// 16 KiB because it is what `examples/chat` asked for when the number was the
+/// handler's to pick, and a chat line is far inside it.
+pub const default_max_message = 16 * 1024;
+
+/// The most a handler may carry into its loop, in bytes.
+///
+/// The state travels in the connection loop's frame — the one frame this whole
+/// arrangement exists to keep under a page — so it is a fixed slot rather than
+/// an allocation, and a fixed slot needs a ceiling. Anything bigger goes in the
+/// request arena, which is alive for as long as the loop is, with a pointer to
+/// it carried here, and `refusals/ws_state_too_big.zig` says so at compile time
+/// rather than truncating anything.
+///
+/// **128 and not 32, because a `Str` is not the same size in both optimize
+/// modes.** It carries the use-after-request trap's marker in Debug and does
+/// not in release, so it is 40 bytes and then 16 — and the first version of
+/// this number was 32, which refused `c.upgrade(loop, c.query("name").?)`
+/// under `zig build test` and accepted it under `-Doptimize=ReleaseFast`. **A
+/// comptime refusal that depends on the optimize mode is worse than no
+/// refusal**, because it turns a design rule into a build-configuration
+/// surprise. 128 holds three Debug `Str`s, which is past anything worth
+/// carrying by value; the mode still decides the arithmetic, but nothing a
+/// caller would plausibly write lands on either side of it.
+pub const state_max = 128;
+
+/// The alignment the state slot can promise. Wider than a pointer so a
+/// `u128` or a vector fits; a type that wants more is refused rather than
+/// quietly misaligned.
+pub const state_align = 16;
+
+/// A socket the handler has handed back, and the function that is going to
+/// run it.
+///
+/// **Where the loop's frame sits is what a WebSocket costs while it is quiet.**
+/// A handler that keeps the loop itself parks 1,608 bytes inside
+/// `App.serveRequest` — the `Ctx`, the parsed request, the route match — and a
+/// suspended fiber holds every one of those bytes for the life of the
+/// connection, which for a chat tab is hours (ADR 0063). So the handler does
+/// the handshake and returns; the connection loop takes this back and runs the
+/// loop from its own frame, a page higher up, with the request's machinery
+/// already unwound. See ADR 0071.
+pub const Handover = struct {
+    socket: Socket,
+    run: *const fn (*Socket, *const anyopaque) anyerror!void,
+    /// The route this socket came in on, for the one log line that can be
+    /// written about it. Points into the request arena, which is alive for as
+    /// long as the loop is.
+    path: []const u8 = "",
+    /// Where this socket's message buffer is parked between messages. It lives
+    /// here rather than on the `Socket` so that a loop which walks out without
+    /// a word still gives the buffer back — the connection loop has the
+    /// `defer`, and points `socket._scratch` here once this struct has stopped
+    /// moving.
+    scratch: ?[]align(std.heap.page_size_min) u8 = null,
+    state: [state_max]u8 align(state_align) = undefined,
+};
+
+/// Type-erase `loop` so the connection loop can call it without knowing what
+/// the handler carried. The state was copied into `Handover.state` by
+/// `Ctx.upgrade`; this is the other half of that.
+pub fn runner(
+    comptime loop: anytype,
+    comptime State: type,
+) *const fn (*Socket, *const anyopaque) anyerror!void {
+    return struct {
+        fn call(socket: *Socket, state: *const anyopaque) anyerror!void {
+            if (State == void) return loop(socket);
+            const carried: *const State = @ptrCast(@alignCast(state));
+            return loop(socket, carried.*);
+        }
+    }.call;
+}
+
+/// What a socket loop has to look like, checked where the mistake is made.
+///
+/// The messages name the argument list the caller wrote, because that is what
+/// they have to change — a loop is an ordinary function and the only thing
+/// nilo asks of it is its first parameter (ADR 0027).
+pub fn checkLoop(comptime loop: anytype, comptime State: type) void {
+    const Loop = @TypeOf(loop);
+    const info = switch (@typeInfo(Loop)) {
+        .@"fn" => |f| f,
+        else => @compileError("nilo: a WebSocket route runs a function on the socket, and " ++
+            @typeName(Loop) ++ " is not one"),
+    };
+    const wants: usize = if (State == void) 1 else 2;
+    if (info.params.len != wants) {
+        // The function's own type is not named here the way every other
+        // refusal names what the caller wrote: `@typeName` of a function with
+        // an inferred error set is four lines of `@typeInfo(@typeInfo(…))`,
+        // which buries the sentence it is supposed to help.
+        @compileError("nilo: a WebSocket loop takes " ++ (if (State == void)
+            "*Socket and nothing else, because upgrade was given no state"
+        else
+            "*Socket and the state passed to upgrade (" ++ @typeName(State) ++ ")") ++
+            "; this one takes " ++ num(info.params.len) ++ " argument" ++
+            (if (info.params.len == 1) "" else "s"));
+    }
+    if (info.params[0].type != *Socket) {
+        @compileError("nilo: a WebSocket loop's first argument is *nilo.Socket, not " ++
+            @typeName(info.params[0].type orelse anyopaque));
+    }
+    if (State != void and info.params[1].type != State) {
+        @compileError("nilo: upgrade was given state of type " ++ @typeName(State) ++
+            ", and the loop's second argument is " ++
+            @typeName(info.params[1].type orelse anyopaque));
+    }
+    if (@sizeOf(State) > state_max) {
+        @compileError("nilo: a WebSocket loop may carry " ++ num(state_max) ++
+            " bytes of state and " ++ @typeName(State) ++ " is " ++ num(@sizeOf(State)) ++
+            "; put it in the request arena and carry a pointer to it");
+    }
+    if (@alignOf(State) > state_align) {
+        @compileError("nilo: a WebSocket loop's state is aligned to " ++ num(state_align) ++
+            " bytes and " ++ @typeName(State) ++ " needs " ++ num(@alignOf(State)));
+    }
+}
+
+fn num(comptime n: usize) []const u8 {
+    return std.fmt.comptimePrint("{d}", .{n});
+}
 
 pub const Kind = enum { text, binary };
 
@@ -183,6 +334,17 @@ pub const Socket = struct {
     _room: ?*room_mod.Room = null,
     _ticket: ?room_mod.Ticket = null,
 
+    /// Where this connection's message buffer is parked between messages.
+    ///
+    /// Points at the Ctx's slot on a real server, so that a handler which
+    /// leaves its loop without a word still gives the buffer back — see
+    /// `Ctx._ws_scratch`. Null for a Socket a test built by hand, which falls
+    /// back to `_own_scratch` and hands it back when `receive` runs out.
+    _scratch: ?*?[]align(std.heap.page_size_min) u8 = null,
+    _own_scratch: ?[]align(std.heap.page_size_min) u8 = null,
+    /// The message ceiling: the size of the buffer taken from the free list.
+    _max_message: usize = default_max_message,
+
     /// How long silence is allowed to last before this end asks after the
     /// other. Zero waits forever — see `Options.idle_ms`.
     _idle_ms: u32 = 0,
@@ -201,11 +363,17 @@ pub const Socket = struct {
     /// Fragmented messages are reassembled into `buf`. Ping frames are
     /// answered and close frames are echoed without the handler seeing
     /// either: they are the protocol keeping itself alive.
-    pub fn receive(self: *Socket, buf: []u8) Error!?Message {
-        if (self._closed) return null;
+    pub fn receive(self: *Socket) Error!?Message {
+        if (self._closed) {
+            self.giveScratch();
+            return null;
+        }
 
         var filled: usize = 0;
         var kind: ?Kind = null;
+        // Empty until the first frame of a message turns up, and the same
+        // slice for every frame of it after that.
+        var buf: []align(std.heap.page_size_min) u8 = &.{};
 
         while (true) {
             // Anything the room posted while this connection was quiet goes
@@ -221,6 +389,7 @@ pub const Socket = struct {
             // half-collected here is a message the other end never finished.
             if (self.stopping()) {
                 self.closeWith(.going_away) catch {};
+                self.giveScratch();
                 return null;
             }
 
@@ -229,7 +398,15 @@ pub const Socket = struct {
             // thinks, and asking the kernel instead would park a connection
             // that has a whole message sitting in memory.
             if (self._in.bufferedLen() == 0) {
-                switch (self._waker.wait(self._idle_ms)) {
+                // `filled == 0` is what says the buffer holds nothing anybody
+                // still wants: a fragmented message waiting for its next frame
+                // keeps it, and a message already handed over does not, because
+                // the next one overwrites it regardless. Whether it is actually
+                // given back is `park`'s to decide, and it only does so once
+                // the connection has gone quiet — giving it back before every
+                // wait costs an allocator round trip per message and measured
+                // 1.68M messages a second down to 990k.
+                switch (self.park(filled == 0)) {
                     // Round again, and the `deliver` above writes it out.
                     .posted => continue,
                     .readable => {},
@@ -259,12 +436,22 @@ pub const Socket = struct {
             // Something arrived, so the question is answered whatever it was.
             self._awaiting_pong = false;
 
+            // From here there may be bytes to keep, so there has to be
+            // somewhere to keep them. Taken now rather than at the top of the
+            // call: a socket that parks and never hears anything again never
+            // holds one.
+            buf = self.takeScratch() catch {
+                self.closeWith(.internal) catch {};
+                return error.ReadFailed;
+            };
+
             // What is left of `buf`, not the whole of it: a fragment that
             // cannot fit beside the ones already collected is refused on what
             // its header claims, before a byte of it is read.
             const frame = self.nextHeader(buf.len - filled) catch |err| switch (err) {
                 error.EndOfStream => {
                     self._closed = true;
+                    self.giveScratch();
                     return null;
                 },
                 else => |e| return e,
@@ -365,7 +552,7 @@ pub const Socket = struct {
     /// Ask the other end to answer, which is how a connection through a
     /// proxy that drops quiet ones stays up. Nothing goes out on a socket
     /// that has closed, for the reason `send` gives.
-    pub fn ping(self: *Socket, data: []const u8) Error!void {
+    pub noinline fn ping(self: *Socket, data: []const u8) Error!void {
         if (self._closed) return;
         return self.sendFrame(.ping, data);
     }
@@ -428,7 +615,7 @@ pub const Socket = struct {
     /// everybody — so each one is a single write, and the whole burst is one
     /// flush. A connection that was away for ten messages costs one syscall
     /// to catch up, not ten.
-    fn deliver(self: *Socket) Error!void {
+    noinline fn deliver(self: *Socket) Error!void {
         const in_room = self._room orelse return;
         const t = self._ticket orelse return;
 
@@ -577,7 +764,7 @@ pub const Socket = struct {
 
     /// Deal with a ping, pong or close. Returns true if the conversation
     /// carries on, false if the other end has closed.
-    fn handleControl(self: *Socket, frame: Frame) Error!bool {
+    noinline fn handleControl(self: *Socket, frame: Frame) Error!bool {
         var payload: [125]u8 = undefined;
         const data = payload[0..@intCast(frame.len)];
         self.readPayload(data, frame.mask) catch |err| return self.fail(err);
@@ -608,6 +795,95 @@ pub const Socket = struct {
             },
             else => return self.fail(error.ProtocolError),
         }
+    }
+
+    /// How long this connection has to say something before its buffers are
+    /// worth more to the kernel than to us. `App.idle_peek_ms`'s number and
+    /// its reasoning: long enough that a socket in the middle of a
+    /// conversation never reaches it, short enough that a chat tab between two
+    /// sentences always does.
+    const idle_peek_ms = 200;
+
+    /// Park until there is something to do, handing the connection's buffer
+    /// pages back if it goes quiet first.
+    ///
+    /// `App.waitOrRelease` does exactly this between two requests, and stops
+    /// the moment a handler upgrades: a socket never goes back round that loop
+    /// (ADR 0022). So the twelve kilobytes an idle keep-alive connection hands
+    /// back were held for the whole life of every WebSocket, which is a thing
+    /// nobody had measured — `bench/ws_server.zig` and `bench/ws_idle.py` now
+    /// do, and the entry is in `bench/result/http.md`.
+    ///
+    /// The short wait first is the whole design, and it is the HTTP side's
+    /// lesson rather than a new one: releasing on every park took the
+    /// keep-alive path from 1.31M req/s to 626k, because `MADV_DONTNEED` in a
+    /// process with eight threads shoots TLB entries down on all of them. A
+    /// socket with a conversation on it answers inside 200ms and never pays.
+    /// Where this socket's buffer is parked. The Ctx's slot on a real server,
+    /// its own field for a Socket a test built by hand — resolved on every
+    /// call rather than once, because a `Socket` is handed to the handler by
+    /// value and a pointer into the copy `upgrade` returned would dangle.
+    fn slot(self: *Socket) *?[]align(std.heap.page_size_min) u8 {
+        return self._scratch orelse &self._own_scratch;
+    }
+
+    /// This socket's message buffer, taken from the executor's free list the
+    /// first time a message needs one.
+    /// The slot holds the whole allocation, which the free list rounds up to a
+    /// page; what comes back is exactly `_max_message` of it, so the ceiling a
+    /// caller was promised is the ceiling a caller gets. A buffer that was
+    /// quietly bigger than the option said is precisely the "the option is a
+    /// lie" that ADR 0022 refused to ship.
+    fn takeScratch(self: *Socket) error{OutOfMemory}![]align(std.heap.page_size_min) u8 {
+        const parked = self.slot();
+        const whole = parked.* orelse whole: {
+            const fresh = try scratch_mod.take(self._max_message);
+            parked.* = fresh;
+            break :whole fresh;
+        };
+        return whole[0..@min(self._max_message, whole.len)];
+    }
+
+    /// Give it back. Safe to call when there is nothing to give.
+    fn giveScratch(self: *Socket) void {
+        const parked = self.slot();
+        if (parked.*) |buf| {
+            scratch_mod.give(buf);
+            parked.* = null;
+        }
+    }
+
+    fn park(self: *Socket, may_give_buffer: bool) bulkhead.Woken {
+        // A ping limit shorter than the peek is left alone rather than
+        // reordered: the peek is supposed to be a prefix of the wait, not
+        // longer than it.
+        if (self._idle_ms != 0 and self._idle_ms <= idle_peek_ms) {
+            return self._waker.wait(self._idle_ms);
+        }
+        switch (self._waker.wait(idle_peek_ms)) {
+            .timed_out => {},
+            else => |woken| return woken,
+        }
+        // Quiet. The allocation stays and nothing here allocates, so ADR
+        // 0018's per-request invariant is untouched; the next frame faults the
+        // pages back in as zeroes, which is all a buffer about to be
+        // overwritten needs to be.
+        // The message buffer goes back to the executor's free list here and
+        // nowhere else. A socket in the middle of a conversation answers inside
+        // the peek and never reaches this, so the free list is not on the
+        // message path at all — it is touched once when a socket first speaks
+        // and once when it stops.
+        if (may_give_buffer) self.giveScratch();
+        bulkhead.releaseIdlePages(self._in, self._out);
+        // And the stack under all of it — on a socket the frames above are
+        // live, so this is normally nothing; it is here because the same call
+        // is what an HTTP connection between two requests wants and the cost
+        // of asking is one syscall on a connection that has already gone
+        // quiet.
+        self._waker.releaseStack();
+        return self._waker.wait(
+            if (self._idle_ms == 0) 0 else self._idle_ms - idle_peek_ms,
+        );
     }
 
     /// One frame, written but not flushed. `deliver` is why the flush is
@@ -833,10 +1109,19 @@ const testing = std.testing;
 /// supply its own and the waiting costs nothing. ADR 0033: a guard that has
 /// never been seen to fire is not a guard.
 const Quiet = struct {
-    silences: u32,
-    asked: u32 = 0,
-    /// What the socket was told to wait, recorded so a test can check the
-    /// limit actually travelled.
+    /// How long the client stays quiet, counted across every wait the socket
+    /// makes.
+    ///
+    /// A test says how long the silence lasts rather than how many waits it
+    /// takes to sit through — `park` spends a stretch of silence as a short
+    /// peek and then the rest of it, and a stub that counted calls would make
+    /// every one of these a test of that shape instead of of the heartbeat.
+    quiet_ms: u64,
+    /// What the silence has cost so far: the limits of the waits that ran out,
+    /// added up. A test checks it to prove the whole limit travelled.
+    spent_ms: u64 = 0,
+    /// What the last wait was told, recorded so a test can check that a socket
+    /// with no idle limit ends up waiting with none.
     last_limit_ms: u32 = 0,
 
     fn waker(self: *Quiet) bulkhead.Waker {
@@ -848,8 +1133,11 @@ const Quiet = struct {
             fn f(target: ?*anyopaque, limit_ms: u32) bulkhead.Woken {
                 const q: *Quiet = @ptrCast(@alignCast(target.?));
                 q.last_limit_ms = limit_ms;
-                if (q.asked < q.silences) {
-                    q.asked += 1;
+                // A wait with no limit cannot run out, so the only thing that
+                // ends it is the other end speaking.
+                if (limit_ms == 0) return .readable;
+                if (q.spent_ms + limit_ms <= q.quiet_ms) {
+                    q.spent_ms += limit_ms;
                     return .timed_out;
                 }
                 return .readable;
@@ -858,11 +1146,14 @@ const Quiet = struct {
         .post = struct {
             fn f(_: ?*anyopaque) void {}
         }.f,
+        .release_stack = struct {
+            fn f(_: ?*anyopaque) void {}
+        }.f,
     };
 };
 
 test "a connection that says nothing is asked whether it is still there" {
-    var quiet = Quiet{ .silences = 1 };
+    var quiet = Quiet{ .quiet_ms = 30_000 };
     var in = std.Io.Reader.fixed("");
     var bytes: [64]u8 = undefined;
     var out = std.Io.Writer.fixed(&bytes);
@@ -875,16 +1166,17 @@ test "a connection that says nothing is asked whether it is still there" {
     };
 
     // One stretch of silence, then a readable socket with nothing on it.
-    try testing.expect(try socket.receive(&bytes) == null);
+    try testing.expect(try socket.receive() == null);
 
-    // The limit reached the Engine rather than being dropped on the way.
-    try testing.expectEqual(@as(u32, 30_000), quiet.last_limit_ms);
+    // The whole limit reached the Engine rather than being dropped on the way,
+    // however many waits it was spent across.
+    try testing.expectEqual(@as(u64, 30_000), quiet.spent_ms);
     // An empty ping: 0x89, length 0. Asking, not closing.
     try testing.expectEqualStrings("\x89\x00", out.buffered());
 }
 
 test "a connection that never answers the question is closed with 1001" {
-    var quiet = Quiet{ .silences = 2 };
+    var quiet = Quiet{ .quiet_ms = 2_000 };
     var in = std.Io.Reader.fixed("");
     var bytes: [64]u8 = undefined;
     var out = std.Io.Writer.fixed(&bytes);
@@ -896,7 +1188,7 @@ test "a connection that never answers the question is closed with 1001" {
         ._idle_ms = 1_000,
     };
 
-    try testing.expect(try socket.receive(&bytes) == null);
+    try testing.expect(try socket.receive() == null);
 
     // The ping, then a close frame carrying 1001 — `going_away`, which is
     // what a client that stopped answering has done.
@@ -904,7 +1196,10 @@ test "a connection that never answers the question is closed with 1001" {
 }
 
 test "silence with no limit set waits, exactly as it did before heartbeats" {
-    var quiet = Quiet{ .silences = 0 };
+    // Long enough to get past the peek `park` takes before handing the
+    // connection's pages back, which is the only bounded wait a socket with no
+    // idle limit ever makes.
+    var quiet = Quiet{ .quiet_ms = 200 };
     var in = std.Io.Reader.fixed("");
     var bytes: [64]u8 = undefined;
     var out = std.Io.Writer.fixed(&bytes);
@@ -916,7 +1211,7 @@ test "silence with no limit set waits, exactly as it did before heartbeats" {
         ._idle_ms = 0,
     };
 
-    try testing.expect(try socket.receive(&bytes) == null);
+    try testing.expect(try socket.receive() == null);
     try testing.expectEqual(@as(u32, 0), quiet.last_limit_ms);
     // Nothing sent: zero means wait, and waiting is not an event.
     try testing.expectEqualStrings("", out.buffered());
@@ -968,9 +1263,22 @@ const Peer = struct {
     }
 
     fn socket(self: *Peer) Socket {
+        return self.socketHolding(default_max_message);
+    }
+
+    /// A socket with a ceiling of the caller's choosing, for the tests about
+    /// what happens at it. The buffer itself comes from the free list either
+    /// way — the size is all a test gets to pick now (ADR 0022's `max_message`,
+    /// which that ADR refused and `http/scratch.zig` brought back).
+    fn socketHolding(self: *Peer, max_message: usize) Socket {
         self.in = .fixed(self.to_server.items);
         self.out = .fixed(&self.from_server);
-        return .{ ._in = &self.in, ._out = &self.out, ._stopping = null };
+        return .{
+            ._in = &self.in,
+            ._out = &self.out,
+            ._stopping = null,
+            ._max_message = max_message,
+        };
     }
 
     fn sent(self: *const Peer) []const u8 {
@@ -1167,8 +1475,7 @@ test "a text message arrives unmasked, and is echoed back without a mask" {
     try peer.frame(true, 1, "hello");
     var socket = peer.socket();
 
-    var buf: [64]u8 = undefined;
-    const message = (try socket.receive(&buf)).?;
+    const message = (try socket.receive()).?;
     try testing.expectEqual(Kind.text, message.kind);
     try testing.expectEqualStrings("hello", message.data);
 
@@ -1185,8 +1492,7 @@ test "a message split across frames is put back together" {
     try peer.frame(true, 0, "world"); // continuation, final
     var socket = peer.socket();
 
-    var buf: [64]u8 = undefined;
-    const message = (try socket.receive(&buf)).?;
+    const message = (try socket.receive()).?;
     try testing.expectEqualStrings("hello, world", message.data);
 }
 
@@ -1208,14 +1514,13 @@ test "a frame that arrives a few bytes at a time is the same message" {
     var out = std.Io.Writer.fixed(&bytes);
     var socket: Socket = .{ ._in = &trickle.reader, ._out = &out, ._stopping = null };
 
-    var buf: [1024]u8 = undefined;
-    const first = (try socket.receive(&buf)).?;
+    const first = (try socket.receive()).?;
     try testing.expectEqual(Kind.binary, first.kind);
     try testing.expectEqualStrings(long, first.data);
 
-    const second = (try socket.receive(&buf)).?;
+    const second = (try socket.receive()).?;
     try testing.expectEqualStrings("and then a short one", second.data);
-    try testing.expect(try socket.receive(&buf) == null);
+    try testing.expect(try socket.receive() == null);
 }
 
 test "a ping is answered without the handler hearing about it" {
@@ -1225,8 +1530,7 @@ test "a ping is answered without the handler hearing about it" {
     try peer.frame(true, 1, "yes"); // and then a real message
     var socket = peer.socket();
 
-    var buf: [64]u8 = undefined;
-    const message = (try socket.receive(&buf)).?;
+    const message = (try socket.receive()).?;
     try testing.expectEqualStrings("yes", message.data);
 
     // 0x8a = FIN + pong, carrying the ping's payload back.
@@ -1241,8 +1545,7 @@ test "a ping in the middle of a fragmented message does not disturb it" {
     try peer.frame(true, 0, "a message");
     var socket = peer.socket();
 
-    var buf: [64]u8 = undefined;
-    const message = (try socket.receive(&buf)).?;
+    const message = (try socket.receive()).?;
     try testing.expectEqualStrings("half a message", message.data);
     try testing.expectEqualStrings("\x8a\x02hi", peer.sent());
 }
@@ -1256,8 +1559,7 @@ test "a close is echoed and ends the conversation" {
     try peer.frame(true, 8, &payload);
     var socket = peer.socket();
 
-    var buf: [64]u8 = undefined;
-    try testing.expectEqual(@as(?Message, null), try socket.receive(&buf));
+    try testing.expectEqual(@as(?Message, null), try socket.receive());
     // 0x88 = FIN + close, and the same payload back: the closing handshake.
     try testing.expectEqualStrings("\x88\x08" ++ "\x03\xe8bye up", peer.sent());
 
@@ -1283,8 +1585,7 @@ test "a close frame that is not one is refused rather than echoed" {
     try peer.frame(true, 8, "\x03");
     var socket = peer.socket();
 
-    var buf: [64]u8 = undefined;
-    try testing.expectError(error.ProtocolError, socket.receive(&buf));
+    try testing.expectError(error.ProtocolError, socket.receive());
     try testing.expectEqualStrings("\x88\x02\x03\xea", peer.sent()); // 1002
 
     // A code nobody assigned. 1005 in particular means "no code was sent",
@@ -1297,7 +1598,7 @@ test "a close frame that is not one is refused rather than echoed" {
         std.mem.writeInt(u16, &raw, code, .big);
         try other.frame(true, 8, &raw);
         var s = other.socket();
-        try testing.expectError(error.ProtocolError, s.receive(&buf));
+        try testing.expectError(error.ProtocolError, s.receive());
         try testing.expectEqualStrings("\x88\x02\x03\xea", other.sent());
     }
 
@@ -1310,7 +1611,7 @@ test "a close frame that is not one is refused rather than echoed" {
         std.mem.writeInt(u16, &raw, code, .big);
         try other.frame(true, 8, &raw);
         var s = other.socket();
-        try testing.expectEqual(@as(?Message, null), try s.receive(&buf));
+        try testing.expectEqual(@as(?Message, null), try s.receive());
         try testing.expect(s.closedCleanly());
     }
 }
@@ -1321,8 +1622,7 @@ test "a close reason that is not UTF-8 is refused with the framing intact" {
     try peer.frame(true, 8, "\x03\xe8\xff\xfe");
     var socket = peer.socket();
 
-    var buf: [64]u8 = undefined;
-    try testing.expectError(error.ProtocolError, socket.receive(&buf));
+    try testing.expectError(error.ProtocolError, socket.receive());
     try testing.expectEqualStrings("\x88\x02\x03\xea", peer.sent());
 }
 
@@ -1351,8 +1651,7 @@ test "an unmasked frame from a client is refused" {
     try peer.unmaskedFrame(1, "hello");
     var socket = peer.socket();
 
-    var buf: [64]u8 = undefined;
-    try testing.expectError(error.ProtocolError, socket.receive(&buf));
+    try testing.expectError(error.ProtocolError, socket.receive());
     // 1002, and said properly rather than by hanging up.
     try testing.expectEqualStrings("\x88\x02\x03\xea", peer.sent());
 }
@@ -1363,8 +1662,7 @@ test "text that is not UTF-8 is refused with the status that says so" {
     try peer.frame(true, 1, "\xff\xfe");
     var socket = peer.socket();
 
-    var buf: [64]u8 = undefined;
-    try testing.expectError(error.ProtocolError, socket.receive(&buf));
+    try testing.expectError(error.ProtocolError, socket.receive());
     // 1007, invalid payload — not 1002, which would say the framing was
     // wrong when the framing was fine.
     try testing.expectEqualStrings("\x88\x02\x03\xef", peer.sent());
@@ -1374,7 +1672,7 @@ test "text that is not UTF-8 is refused with the status that says so" {
     defer other.deinit();
     try other.frame(true, 2, "\xff\xfe");
     var binary_socket = other.socket();
-    const message = (try binary_socket.receive(&buf)).?;
+    const message = (try binary_socket.receive()).?;
     try testing.expectEqual(Kind.binary, message.kind);
     try testing.expectEqualStrings("\xff\xfe", message.data);
 }
@@ -1383,10 +1681,9 @@ test "a message bigger than the buffer closes the connection rather than growing
     var peer: Peer = .{};
     defer peer.deinit();
     try peer.frame(true, 1, "x" ** 200);
-    var socket = peer.socket();
+    var socket = peer.socketHolding(100);
 
-    var buf: [64]u8 = undefined;
-    try testing.expectError(error.MessageTooBig, socket.receive(&buf));
+    try testing.expectError(error.MessageTooBig, socket.receive());
     // 1009.
     try testing.expectEqualStrings("\x88\x02\x03\xf1", peer.sent());
 }
@@ -1398,10 +1695,9 @@ test "a frame announcing more than the buffer holds is refused before its bytes 
     // reader that trusted the header would sit waiting for the rest.
     try peer.frame(true, 1, "x" ** 300);
     std.mem.writeInt(u16, peer.to_server.items[2..4], 60_000, .big);
-    var socket = peer.socket();
+    var socket = peer.socketHolding(100);
 
-    var small: [100]u8 = undefined;
-    try testing.expectError(error.MessageTooBig, socket.receive(&small));
+    try testing.expectError(error.MessageTooBig, socket.receive());
     try testing.expectEqualStrings("\x88\x02\x03\xf1", peer.sent()); // 1009
 }
 
@@ -1413,10 +1709,9 @@ test "fragments are measured against what is left of the buffer, not all of it" 
     defer peer.deinit();
     try peer.frame(false, 1, "x" ** 40);
     try peer.frame(true, 0, "y" ** 40);
-    var socket = peer.socket();
+    var socket = peer.socketHolding(64);
 
-    var buf: [64]u8 = undefined;
-    try testing.expectError(error.MessageTooBig, socket.receive(&buf));
+    try testing.expectError(error.MessageTooBig, socket.receive());
     try testing.expectEqualStrings("\x88\x02\x03\xf1", peer.sent());
 }
 
@@ -1426,8 +1721,7 @@ test "a continuation with nothing to continue is a protocol error" {
     try peer.frame(true, 0, "orphan");
     var socket = peer.socket();
 
-    var buf: [64]u8 = undefined;
-    try testing.expectError(error.ProtocolError, socket.receive(&buf));
+    try testing.expectError(error.ProtocolError, socket.receive());
 }
 
 test "a reserved bit set means an extension nobody negotiated" {
@@ -1437,8 +1731,7 @@ test "a reserved bit set means an extension nobody negotiated" {
     peer.to_server.items[0] |= 0x40; // RSV1
     var socket = peer.socket();
 
-    var buf: [64]u8 = undefined;
-    try testing.expectError(error.ProtocolError, socket.receive(&buf));
+    try testing.expectError(error.ProtocolError, socket.receive());
 }
 
 test "a long message uses the sixteen-bit length form, both ways" {
@@ -1448,8 +1741,7 @@ test "a long message uses the sixteen-bit length form, both ways" {
     try peer.frame(true, 2, long);
     var socket = peer.socket();
 
-    var buf: [1024]u8 = undefined;
-    const message = (try socket.receive(&buf)).?;
+    const message = (try socket.receive()).?;
     try testing.expectEqualStrings(long, message.data);
 
     try socket.sendBinary(long);
@@ -1510,14 +1802,13 @@ test "a shutdown ends the loop, and the client is told why" {
     var stopping = std.atomic.Value(bool).init(false);
     socket._stopping = &stopping;
 
-    var buf: [64]u8 = undefined;
-    try testing.expectEqualStrings("still typing", (try socket.receive(&buf)).?.data);
+    try testing.expectEqualStrings("still typing", (try socket.receive()).?.data);
 
     // A deploy starts. The handler's loop ends on its own — no `live()`
     // branch of its own — and the other end gets a close rather than a
     // socket that stopped answering (ADR 0020).
     stopping.store(true, .release);
-    try testing.expectEqual(@as(?Message, null), try socket.receive(&buf));
+    try testing.expectEqual(@as(?Message, null), try socket.receive());
     try testing.expectEqualStrings("\x88\x02\x03\xe9", peer.sent()); // 1001
     try testing.expect(!socket.closedCleanly());
 }
@@ -1528,11 +1819,10 @@ test "a client that vanishes is the end of the conversation, not an error" {
     try peer.frame(true, 1, "one last thing");
     var socket = peer.socket();
 
-    var buf: [64]u8 = undefined;
-    _ = (try socket.receive(&buf)).?;
+    _ = (try socket.receive()).?;
     // The stream simply stops. A tab closed, a network gone — the most
     // ordinary way a WebSocket ends, and the same `null` a close frame gives.
-    try testing.expectEqual(@as(?Message, null), try socket.receive(&buf));
+    try testing.expectEqual(@as(?Message, null), try socket.receive());
     try testing.expect(!socket.closedCleanly());
 }
 
@@ -1544,8 +1834,7 @@ test "a close frame is told apart from a client that vanished" {
     try peer.frame(true, 8, &payload);
     var socket = peer.socket();
 
-    var buf: [64]u8 = undefined;
-    try testing.expectEqual(@as(?Message, null), try socket.receive(&buf));
+    try testing.expectEqual(@as(?Message, null), try socket.receive());
     try testing.expect(socket.closedCleanly());
 }
 

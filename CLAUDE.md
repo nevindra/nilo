@@ -58,7 +58,7 @@ Three files carry context this one deliberately does not repeat:
 - **`CONTEXT.md`** — the project's vocabulary, and the words it refuses to use
   (Ctx not "Context", Str not "string", keep not "dupe", Refusal not "negative
   test"). Match it in code, comments, docs and commit messages.
-- **`docs/adr/`** — 70 binding decisions, each naming the alternative it
+- **`docs/adr/`** — 71 binding decisions, each naming the alternative it
   rejected. Check here before proposing a design change; "why not X?" usually
   already has an answer on file. **ADR 0041 decides which module new work goes
   in and ADR 0042 decides what that module may import**, and they are the two
@@ -77,7 +77,7 @@ goes in an ADR, a number goes in `docs/history.md`, a rule goes in a build step.
 
 Two of those rules are build steps rather than paragraphs, and they are the ones
 to lean on: `zig build layering` refuses an import that goes upward or sideways,
-and the four `refusals` steps check the wording of 110 error messages. Prefer making
+and the four `refusals` steps check the wording of 115 error messages. Prefer making
 a new rule enforceable that way over writing it down here — a paragraph nobody
 runs is the thing that rots.
 
@@ -98,7 +98,7 @@ zig build test-config  # only nilo_config, the same way, plus its refusals
 zig build test-pw      # only nilo_pw, the same way, plus its refusals
 zig build test-fetch   # only nilo_fetch, both modes — a real socket, no Engine
 zig build layering     # check that no module imports upward or sideways
-zig build refusals     # the framework's 57 compile-error checks — NOT the others
+zig build refusals     # the framework's 62 compile-error checks — NOT the others
 zig build refusals-sql # nilo_sql's 41; also run by test-sql
 zig build refusals-config  # nilo_config's 9, and refusals-pw for nilo_pw's 3
 zig build smoke-tls -Dnetwork   # a real HTTPS endpoint — NOT part of test
@@ -107,7 +107,9 @@ zig build fuzz -- --iterations 1000000 --seed 0x…   # generated requests at th
 zig build bench-sql    # what a prepared statement is worth, against a real Postgres
 zig build bench-sql-server  # a server reading Postgres per request, for wrk/oha
 zig build bench-fetch-server # what an outbound call costs, with its controls
+zig build bench-ws-server  # a server of idle WebSockets, for what one costs
 python3 bench/mem.py --port … --path …   # memory per idle connection, any server
+python3 bench/ws_idle.py both            # the same axis for WebSockets, nilo and gws
 zig build run          # the benchmark server (bench/main.zig): GET /users/:id, ~1 KB JSON
 zig build profile      # where the time inside one request goes
 zig build run-{hello,rest,orders,forms,spa,stream,chat,outbound}  # run one example
@@ -211,13 +213,18 @@ them are hard:
 - **Allocations per request.** Held by `test "the request path stays inside its
   allocation budget"` in `http/app.zig`. A DX feature may not add one to a path
   that did not ask for it.
-- **Memory per idle connection.** 8,767 bytes for the framework, flat — and
-  that is a **floor rather than a total**. A suspended fiber holds its stack at
-  its high-water mark, so a handler adds every byte of stack it ever touched,
-  one for one, for the life of the connection: an ordinary database route
-  measures 17,022 ([ADR 0063](docs/adr/0063-a-handlers-stack-is-per-connection.md)).
+- **Memory per idle connection.** 4,669 bytes for the framework, flat, and
+  5,186 for an idle WebSocket — and that is a **floor rather than a total**. A
+  suspended fiber holds its stack at its high-water mark, so a handler adds
+  every byte of stack it ever touched, one for one, for the life of the
+  connection: an ordinary database route measured 17,022
+  ([ADR 0063](docs/adr/0063-a-handlers-stack-is-per-connection.md)).
   Every feature that costs per-connection memory states the number in its own
   ADR, and **in this framework the arena is cheaper than the stack**.
+  **Where a fiber is suspended is also what it costs** — the framework's own
+  frames are kept under one page on purpose, and a `std.log` call inlined into
+  a connection loop puts its format machinery there
+  ([ADR 0071](docs/adr/0071-where-a-connection-waits-is-what-it-costs.md)).
 - Throughput and p99: DX wins below 10%.
 - Binary size: a feature the linker cannot drop states its measured cost, as a
   stripped `ReleaseFast` number, in the running total in ADR 0018.
@@ -244,15 +251,28 @@ closing section saying whether the number can be pushed further, so the next
 person starts from the ranked levers rather than from the top. A run that
 changed nothing still earns an entry if somebody would otherwise repeat it.
 
-This is a rule because the repository has already been wrong twice about
-numbers that *were* published: `connect_on_init` was documented in three files
-and had never worked ([ADR 0062](docs/adr/0062-a-pool-that-dialled-itself-whatever-it-was-told.md)),
-and "8,767 bytes per idle connection, flat" was repeated in four and described
-a handler nobody deploys ([ADR 0063](docs/adr/0063-a-handlers-stack-is-per-connection.md)).
-Both were found by re-measuring, and neither would have been findable from
-prose. **A number with no run behind it decays into a claim.**
+This is a rule because the repository has already been wrong four times about
+things that *were* published: `connect_on_init` was documented in three files
+and had never worked ([ADR 0062](docs/adr/0062-a-pool-that-dialled-itself-whatever-it-was-told.md));
+"8,767 bytes per idle connection, flat" was repeated in four and described
+a handler nobody deploys ([ADR 0063](docs/adr/0063-a-handlers-stack-is-per-connection.md));
+three modules were listed as blocked on a seam that had been open since
+[ADR 0040](docs/adr/0040-a-service-that-needs-the-loop-is-finished-when-the-loop-exists.md),
+on the strength of a dependency manifest nobody opened; and the 8,767 was then
+repeated in six more files while half of it was a page the connection was
+holding for no reason
+([ADR 0071](docs/adr/0071-where-a-connection-waits-is-what-it-costs.md)).
+Three were found by re-measuring and one by reading somebody else's manifest;
+none would have been findable from prose. **A number with no run behind it
+decays into a claim, and a premise decays the same way and costs more, because
+a wrong premise gets planned against.**
 
-Three habits go with it, each of which caught something here:
+**A conclusion of "blocked on somebody else" gets one more hour than it feels
+like it needs.** ADR 0063 recorded the stack fix as blocked on zio, wrote it
+into the roadmap and filed an issue; the call it needed was public in the
+pinned version, one file over. Nothing downstream ever re-tests a blocker.
+
+Five habits go with it, each of which caught something here:
 
 - **Say what the number was measured *through*.** Every figure in this cycle
   was taken across a Docker published port, and the same server over a unix
@@ -264,6 +284,13 @@ Three habits go with it, each of which caught something here:
 - **Put something next to it.** `/health`, `/fixed/:id` and `/deep/:id` exist
   in `bench/sql_server.zig` only so `/people/:id` has controls, and the fourth
   route is what proved the memory finding had nothing to do with the database.
+- **Build the before, do not quote it.** The primary metric was 1.31M req/s in
+  a published table and 1.42M on the same machine months later, so a change
+  measured against the published figure would have claimed a 9% win it did not
+  earn. `git archive HEAD | tar -x` into a scratch directory is one command.
+- **Pin both sides, or the number is about the scheduler.** Unpinned, gws
+  echoes 1,029,308 messages a second on this box; pinned to the cores nilo
+  gets, 1,587,149 against nilo's 1,703,176. The honest margin is 7.4%, not 68%.
 
 Then the lesson goes to `docs/history.md` and the decision to an ADR, the way
 everything else does. `bench/result/` is the raw record those two cite.

@@ -36,7 +36,94 @@ after a module. Alias the import back and the rest of your code is unchanged:
 const nilo = @import("nilo_http");
 ```
 
+### Breaking: a WebSocket handler hands its loop back
+
+`c.upgrade()` no longer returns a `Socket` for the handler to loop over. It
+takes the loop as a function, answers the handshake, and returns:
+
+```zig
+// was
+fn chat(c: *nilo.Ctx, room: *nilo.Room) !void {
+    var socket = try c.upgrade();
+    var buf: [4096]u8 = undefined;
+    while (try socket.receive(&buf)) |m| try room.say(m.kind, m.data);
+}
+
+// now
+fn chat(c: *nilo.Ctx, room: *nilo.Room) !void {
+    return c.upgrade(chatLoop, room);
+}
+
+fn chatLoop(socket: *nilo.Socket, room: *nilo.Room) !void {
+    while (try socket.receive()) |m| try room.say(m.kind, m.data);
+}
+```
+
+Three things move at once and they are all the same change. The loop is a
+named function; `receive` takes no buffer, because the message arrives in one
+the executor lends the socket while the message is in flight and takes back
+when the conversation goes quiet; and anything the handler knows that the loop
+needs is the second argument to `upgrade`, up to 128 bytes — a `Str`, a
+pointer, a service — with `{}` when there is nothing. `c.upgradeWith(loop,
+state, .{ .protocol = …, .idle_ms = …, .max_message = … })` is the long form.
+
+**This is worth 16 KB per open socket and it is why the shape changed.** A
+handler that keeps the loop is a suspended fiber holding the request's whole
+frame — the `Ctx`, the parsed head, the route match — and its own receive
+buffer, for as long as the tab is open. An idle WebSocket cost **21,561 bytes
+and now costs 5,194**, and one that had received a single 60 KiB message cost
+87,101 and now costs 5,181
+([ADR 0071](./docs/adr/0071-where-a-connection-waits-is-what-it-costs.md)).
+
+One consequence to know about: **an open WebSocket no longer counts as a
+request in flight**, so a shutdown is not held for the grace period by every
+idle chat tab.
+
 Nothing else about the API changed in this release.
+
+### Memory per idle connection is 4,669 bytes
+
+Down from 8,767, for HTTP and WebSocket alike, and nothing in your code has to
+change to get it. Ten thousand idle keep-alive connections is 47 MB rather
+than 88 MB.
+
+The connection's read and write buffers already went back to the kernel when
+it went quiet; what was left was two pages of fiber stack, and one of them was
+there only because the connection then suspended itself four kilobytes deeper
+than it needed to. The idle wait now happens at the connection loop's own
+frame, the request's machinery is a frame of its own that unwinds before it,
+and the cold half of a request — the log lines nobody hits, which cost stack
+whether or not they print — is out of line. Throughput did not pay for it:
+`GET /users/:id` measures 1,485,190 req/s against a same-machine baseline of
+1,424,878, with p99 55µs against 61µs.
+
+The floor is still a floor. A handler that touches 64 KiB of stack still holds
+64 KiB per connection, one byte for one byte
+([ADR 0063](./docs/adr/0063-a-handlers-stack-is-per-connection.md)) — **in this
+framework the arena is cheaper than the stack** is unchanged advice.
+
+### Fixed: a WebSocket went deaf after its first message
+
+**A socket that had sent anything stopped receiving `Room` broadcasts and
+stopped being pinged.** `examples/chat` is what that looks like from outside:
+two tabs, type in one and the other sees it, type in the other and the first
+never hears from it again. `Options.idle_ms` had the same hole — it only ever
+pinged a socket that had never spoken, so the heartbeat meant to catch a client
+that has gone away could not catch one that had ever said anything.
+
+The engine re-armed its `NetPoll` completion on the way *out* of a `.readable`,
+before the caller had read the bytes. `NetPoll` is level-triggered, so that
+poll completed at once against data still in the kernel's receive buffer; the
+next wait found it already done, answered `.readable` for bytes that had since
+been read, and dropped the fiber into a blocking read with no deadline on it,
+where nothing could reach it. The poll is armed on the way *in* now, and
+`Waker.wait` states it as the contract it is: **`.readable` is answered once
+per arrival of bytes, not once per call.**
+
+Worth knowing how it survived: the HTTP suite runs against in-memory buffers
+with `Waker.off`, which answers `.readable` to everything by design, so no test
+could see it, and no benchmark touched a WebSocket until this cycle. It was
+found by measuring something else.
 
 ### `nilo_sql` runs
 

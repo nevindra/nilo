@@ -2,18 +2,20 @@
 //!
 //! ```zig
 //! fn chat(c: *nilo.Ctx, room: *nilo.Room) !void {
-//!     var socket = try c.upgrade();
-//!     try room.join(&socket);
-//!     defer room.leave(&socket);
+//!     return c.upgrade(chatLoop, room);
+//! }
 //!
-//!     var buf: [16 * 1024]u8 = undefined;
-//!     while (try socket.receive(&buf)) |message| {
+//! fn chatLoop(socket: *nilo.Socket, room: *nilo.Room) !void {
+//!     try room.join(socket);
+//!     defer room.leave(socket);
+//!
+//!     while (try socket.receive()) |message| {
 //!         try room.say(message.kind, message.data);
 //!     }
 //! }
 //! ```
 //!
-//! The loop is ADR 0022's, unchanged. `receive` grew a second thing to wait
+//! The loop is the echo server's, unchanged. `receive` grew a second thing to wait
 //! for and did not grow a second shape: a post that arrives while this
 //! connection is quiet is written out by *this* fiber, inside `receive`,
 //! before it goes back to waiting. A handler never sees it and never writes a
@@ -729,8 +731,7 @@ test "what one connection says reaches a socket another handler is holding" {
     // The listener's own fiber is what writes it out, inside `receive`. Its
     // reader is empty, so the call ends by saying the connection is over —
     // after the post has gone.
-    var buf: [64]u8 = undefined;
-    try testing.expect(try listener.receive(&buf) == null);
+    try testing.expect(try listener.receive() == null);
 
     // One unmasked text frame: a server never masks. 0x81, then the length,
     // then the bytes.
@@ -738,7 +739,7 @@ test "what one connection says reaches a socket another handler is holding" {
 
     // And the speaker hears itself, which is what a chat wants — one code
     // path for "say something", not one for me and one for everyone else.
-    try testing.expect(try speaker.receive(&buf) == null);
+    try testing.expect(try speaker.receive() == null);
     try testing.expectEqualStrings("\x81\x0fhello everybody", speaker_out.buffered());
 }
 
@@ -760,8 +761,7 @@ test "a burst waiting for one connection arrives in the order it was said" {
 
     // Three posts, one `receive`, and one flush at the end of them — a
     // connection that was away for a burst catches up in a single syscall.
-    var buf: [64]u8 = undefined;
-    try testing.expect(try socket.receive(&buf) == null);
+    try testing.expect(try socket.receive() == null);
     try testing.expectEqualStrings(
         "\x81\x03one\x81\x03two\x81\x09and three",
         out.buffered(),
@@ -790,8 +790,7 @@ test "a seat given up stops receiving, and frees what it never read" {
 
     // Nothing written: the socket is not in the room any more, and `receive`
     // has no seat to drain.
-    var buf: [64]u8 = undefined;
-    try testing.expect(try socket.receive(&buf) == null);
+    try testing.expect(try socket.receive() == null);
     try testing.expectEqualStrings("", out.buffered());
 }
 

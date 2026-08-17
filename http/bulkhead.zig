@@ -221,9 +221,9 @@ pub const Options = struct {
 
     /// The most connections this process holds at once. 0 means no limit.
     ///
-    /// A connection costs a measured 8,767 bytes before it has asked for
-    /// anything, so this number times nine kilobytes is what the server
-    /// may hold: the default is about 88 MB. That is the whole point of
+    /// A connection costs a measured 4,669 bytes before it has asked for
+    /// anything, so this number times five kilobytes is what the server
+    /// may hold: the default is about 47 MB. That is the whole point of
     /// having it. Without a cap a server does not fail at a number
     /// somebody chose, it fails when the machine runs out, and what
     /// notices is the OOM killer — which takes the process down along with
@@ -438,6 +438,14 @@ const engine_waker: Waker.VTable = .{
         fn f(target: ?*anyopaque) void {
             const wake: *engine.Wake = @ptrCast(@alignCast(target.?));
             wake.post();
+        }
+    }.f,
+    .release_stack = struct {
+        fn f(_: ?*anyopaque) void {
+            // The target is not needed: it is *this* fiber's stack, and the
+            // Engine asks the coroutine it is running on rather than being
+            // told which connection is asking.
+            engine.releaseIdleStack();
         }
     }.f,
 };
@@ -732,6 +740,30 @@ pub fn releaseIdlePages(in: *std.Io.Reader, out: *std.Io.Writer) void {
 /// Nothing happens off POSIX. Windows has `DiscardVirtualMemory` for the same
 /// job and it is not wired up here, so a Windows build keeps the pages and the
 /// old numbers — which is the behaviour that shipped, not a new fault.
+/// Hand back the pages behind a buffer that is not the connection's.
+///
+/// A WebSocket's message ceiling is a buffer the *handler* declared, usually on
+/// its own stack, and a suspended fiber holds every page of its stack that it
+/// ever touched ([ADR 0063](../docs/adr/0063-a-handlers-stack-is-per-connection.md)).
+/// So a socket that once received a 60 KiB message held 60 KiB for as long as
+/// it stayed open, measured at 74,809 bytes per idle connection against 13,375
+/// for the same socket that never saw one.
+///
+/// The bounds are exact rather than guessed, which is the whole reason this is
+/// allowed to exist: `receive` is *handed* the slice, so there is no arithmetic
+/// from a stack's limit that could run one page into a neighbouring fiber's
+/// live stack. Aligned inward, so a 4 KiB buffer that straddles two pages
+/// covers no whole page and nothing happens — which is the right answer, since
+/// the case worth paying a syscall for is the big one.
+///
+/// The caller must be done with the bytes. `Socket.receive` does this only when
+/// it has no message half-collected and is about to park, at which point the
+/// previous message is already forfeit — the next one overwrites the buffer
+/// whatever happens here.
+pub fn releaseScratchPages(buf: []u8) void {
+    dontNeed(buf);
+}
+
 fn dontNeed(buf: []u8) void {
     if (builtin.os.tag == .windows) return;
     if (buf.len == 0) return;
@@ -798,6 +830,15 @@ pub const Waker = struct {
     pub const VTable = struct {
         wait: *const fn (target: ?*anyopaque, limit_ms: u32) Woken,
         post: *const fn (target: ?*anyopaque) void,
+        /// Hand back the pages of this connection's fiber stack that are below
+        /// its current frame, for a connection that has gone quiet.
+        ///
+        /// It sits on `Waker` because `Waker` is what a connection's fiber
+        /// looks like from up here: the thing that parks it, wakes it, and now
+        /// gives back what parking it costs. nilo has no other handle on a
+        /// fiber and is not getting one — naming the Engine anywhere but the
+        /// Engine is what ADR 0002 refuses.
+        release_stack: *const fn (target: ?*anyopaque) void,
     };
 
     /// No Engine underneath: every wait says "go and read", every post is
@@ -813,6 +854,9 @@ pub const Waker = struct {
         .post = struct {
             fn f(_: ?*anyopaque) void {}
         }.f,
+        .release_stack = struct {
+            fn f(_: ?*anyopaque) void {}
+        }.f,
     };
 
     /// Park until the socket has something to read, somebody posts, or
@@ -821,6 +865,15 @@ pub const Waker = struct {
     /// The caller must have drained its read buffer first — a reader with
     /// bytes still in it is readable whatever the socket thinks, and this
     /// would park a connection that is holding a whole frame already.
+    ///
+    /// **`.readable` is answered once per arrival of bytes, not once per
+    /// call.** A wait that follows a read the caller has already done must
+    /// park, not answer `.readable` again for bytes that are gone — an Engine
+    /// that gets this wrong sends the caller into a blocking read where
+    /// neither a `post` nor the next limit can reach it, and the connection
+    /// silently stops taking part in either. It is stated here because it is
+    /// the Engine's half of the bargain and it cannot be seen from a test
+    /// against `off`, which answers `.readable` to everything by design.
     pub fn wait(self: Waker, limit_ms: u32) Woken {
         return self.vtable.wait(self.target, limit_ms);
     }
@@ -829,6 +882,17 @@ pub const Waker = struct {
     /// this exists at all.
     pub fn post(self: Waker) void {
         self.vtable.post(self.target);
+    }
+
+    /// Give this connection's dead stack pages back, for a connection that has
+    /// gone quiet. Everything below the current frame; nothing above it.
+    ///
+    /// Only correct where the caller is about to wait and means to stay
+    /// waiting: the pages fault back in as zeroes, so this pays for itself
+    /// once and costs again on every return trip. `Socket.park` calls it
+    /// behind the same 200ms peek that gates the buffers.
+    pub fn releaseStack(self: Waker) void {
+        self.vtable.release_stack(self.target);
     }
 };
 

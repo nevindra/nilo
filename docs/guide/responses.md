@@ -18,7 +18,7 @@ fn handler(c: *nilo.Ctx) !void { … }
 | `c.sendFile(.{ .file = f, … })` | an open file, closed here — see [Files](#files) |
 | `c.stream(200, "text/csv")` | a response written in pieces — [Streaming](./streaming.md) |
 | `c.events()` | a stream of server-sent events |
-| `c.upgrade()` | turn the connection into a [WebSocket](./websocket.md) |
+| `c.upgrade(loop, state)` | turn the connection into a [WebSocket](./websocket.md) and hand it to `loop` |
 
 ## Headers
 

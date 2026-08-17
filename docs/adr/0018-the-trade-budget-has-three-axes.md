@@ -10,7 +10,7 @@ The metrics section of `docs/history.md` already separated them; this ADR turns 
 |---|---|---|
 | **Throughput and p99** | DX wins below 10%, as ADR 0001 says | Nowhere yet — no quiet machine |
 | **Allocations per request** | Hard invariant. A DX feature may not add one to a path that did not ask for it | A test: *the request path stays inside its allocation budget* |
-| **Memory per idle connection** | Hard invariant. Every new feature states its cost or has none. **A floor, not a total** — a handler adds every byte of stack it touches ([ADR 0063](./0063-a-handlers-stack-is-per-connection.md)) | Measured across 1,000 held-open connections; four routes in `bench/sql_server.zig` separate the framework's share from the handler's |
+| **Memory per idle connection** | Hard invariant, and **4,669 bytes** as of [ADR 0071](./0071-where-a-connection-waits-is-what-it-costs.md). Every new feature states its cost or has none. **A floor, not a total** — a handler adds every byte of stack it touches ([ADR 0063](./0063-a-handlers-stack-is-per-connection.md)) | Measured across 1,000 held-open connections; four routes in `bench/sql_server.zig` and five in `bench/ws_server.zig` separate the framework's share from the handler's |
 
 The reason for the split is that the three are not the same kind of number.
 
@@ -18,7 +18,7 @@ The reason for the split is that the three are not the same kind of number.
 
 **Allocations are not elastic, because they are what p99 is made of.** An allocation added to the request path is not 10% slower on average; it is fine a million times and then it is a `mmap`, and that one request is the tail. p99 is a primary metric precisely so that winning on throughput while stalling the tail does not count, and the way to keep p99 flat is TigerBeetle's: allocate at startup, then stop (ADR 0015). Three is the number, it is what a test enforces, and a fourth needs a reason rather than a benchmark that came out level.
 
-**Memory per connection is not elastic either, because it decides what the server can hold.** At ~21 KB, a hundred thousand idle keep-alive connections is 2 GB. A feature that adds 4 KB to `Ctx` does not make anything slower; it makes the same box hold a fifth fewer connections, and nobody notices until the box is full. So the rule is not a percentage, it is a disclosure: a feature that costs per-connection memory says how much, in the ADR that introduces it.
+**Memory per connection is not elastic either, because it decides what the server can hold.** At ~21 KB — where this was written — a hundred thousand idle keep-alive connections is 2 GB; at 4,669 it is 467 MB, and the whole of the difference was **where the connection was suspended** rather than what it held (ADR 0071). A feature that adds 4 KB to `Ctx` does not make anything slower; it makes the same box hold a fifth fewer connections, and nobody notices until the box is full. So the rule is not a percentage, it is a disclosure: a feature that costs per-connection memory says how much, in the ADR that introduces it.
 
 ## What "low memory" is allowed to mean
 
@@ -64,6 +64,7 @@ Measured stripped, `ReleaseFast`, on the examples in this repository.
 | Parsing the database URL rather than letting a driver drop half the options ([ADR 0062](./0062-a-pool-that-dialled-itself-whatever-it-was-told.md)) | +0 | +0 |
 | Four routes in a benchmark, to find out what the memory axis actually measures ([ADR 0063](./0063-a-handlers-stack-is-per-connection.md)) | +0 | +0 |
 | An outbound HTTP client, `nilo_fetch` ([ADR 0070](./0070-a-fitting-borrows-the-loop.md)) | +0 | +0 |
+| Waiting at the connection loop's frame, and a WebSocket loop handed back to it ([ADR 0071](./0071-where-a-connection-waits-is-what-it-costs.md)) | +1,288 B | not taken |
 
 `nilo_fetch` is +0 on both examples because neither imports it, and that is the
 whole of the row rather than an accident: a module nothing names is never
@@ -77,6 +78,8 @@ binaries and the rest of the axes.
 The second row is one measurement of six changes because they landed together, which is a worse record than the first row and is noted as such. The split it does show is the useful part: `hello` has one route returning text and pays +6 KB, which is the failure-body writer and nothing else — that part is unconditional. The remaining +8 KB on `rest` is the body describer and the schema walker, and those are generated per body type, so they are paid by applications that have bodies.
 
 The third row is nearly the same on both, which says what it is: the name renderer and the extra descriptions live in the document writer, and the document writer is linked in whether or not `docs()` is called — the same unconditional cost the first row is about, and the same open question in `docs/roadmap.md`.
+
+The ADR 0071 row is unconditional too, and is the only row here that is a *cost bought deliberately*: cold paths that used to be inlined copies are now real functions, which is what makes the connection loop's frame small enough to fit in a page. `hello` has no WebSocket route and pays all 1,288 bytes of it. 0.14% of the binary for 4,096 bytes on every connection the process holds is the trade, stated rather than defended.
 
 The fourth row is a real zero rather than a rounded one: the same three examples came out byte-for-byte identical, because both halves of that change — the message rewriting and the earlier check — happen while compiling and a message that is never produced is a string that never exists. It is a row rather than an omission because the rule is that a feature states its cost, and "none" is a number somebody may want to check later.
 

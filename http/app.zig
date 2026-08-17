@@ -26,6 +26,8 @@ const budget = @import("budget.zig");
 const watchdog = @import("watchdog.zig");
 const session_mod = @import("session.zig");
 const password_mod = @import("password.zig");
+const scratch = @import("scratch.zig");
+const websocket = @import("websocket.zig");
 
 const Ctx = ctx_mod.Ctx;
 
@@ -668,7 +670,8 @@ pub const App = struct {
 
         while (true) {
             // Find out whether this connection is going quiet before deciding
-            // to give its pages back.
+            // to give its pages back, and then do the waiting *here* —
+            // this frame, not `readHead`'s.
             //
             // Doing it unconditionally costs more than it saves: on a busy
             // keep-alive connection the next request is already arriving, so
@@ -678,14 +681,13 @@ pub const App = struct {
             // down TLB entries on all of them. So the pages only go once a
             // short read has come back empty, which a connection under load
             // never sees and a browser tab between clicks always does.
-            waitOrRelease(in, out, deadlines);
+            waitForRequest(in, out, deadlines, waker);
 
-            // Waiting for the next request to start is the idle limit, not
-            // the header one. Re-armed every time round: a connection that
-            // has just served a request is idle again from now, not from
-            // whenever it was accepted.
-            deadlines.armIdle();
-            const keep_going = self.handleRequest(arena.allocator(), &lifetime, &in_flight, in, out, deadlines, waker, peer);
+            var served = self.serveRequest(arena.allocator(), &lifetime, &in_flight, in, out, deadlines, waker, peer);
+            // A handler that upgraded runs its loop here rather than inside
+            // `serveRequest`, so that the request's 1,608 bytes are unwound
+            // before a socket suspends for the next hour (ADR 0071).
+            runHandover(&served);
             // The request is done: every Str of its goes stale, then the
             // bag is emptied in one go.
             //
@@ -696,7 +698,7 @@ pub const App = struct {
             // add up to memory nobody can account for.
             lifetime.end();
             _ = arena.reset(.{ .retain_with_limit = arena_keep });
-            if (!keep_going) return;
+            if (!served.keep_alive) return;
         }
     }
 
@@ -709,27 +711,67 @@ pub const App = struct {
     /// syscall and some page faults on the next request, not the connection.
     const idle_peek_ms = 200;
 
+    /// Wait for the next request to start, and hand this connection's pages
+    /// back if it goes quiet first.
+    ///
     /// Give the client `idle_peek_ms` to say something. If it does, this is a
     /// busy connection and nothing else happens — the bytes stay buffered and
     /// the request that follows reads them. If it does not, the connection is
     /// idle and its buffers are worth more to the kernel than to us.
     ///
+    /// **The long wait belongs here rather than in `readHead`, and that is the
+    /// whole point of the function.** A suspended fiber holds its stack down to
+    /// the frame it is suspended in, so where a connection waits decides what
+    /// it costs while it waits. The first version released the pages and then
+    /// walked straight back down into `handleRequest` → `readHead` → `fillMore`
+    /// and slept there, four kilobytes deeper, faulting in everything it had
+    /// just given away: the madvise ran on every idle connection and the
+    /// measured cost per connection did not move by a byte. Waiting at this
+    /// frame is what makes the release stick — 8,753 bytes an idle keep-alive
+    /// connection to 4,657, and the difference is exactly one page
+    /// ([ADR 0063](../docs/adr/0063-a-handlers-stack-is-per-connection.md)).
+    ///
     /// Every error is swallowed: a broken connection is `handleRequest`'s to
     /// diagnose and report, and it will meet the same failure one call later
-    /// with all the machinery for saying so.
-    fn waitOrRelease(in: *std.Io.Reader, out: *std.Io.Writer, deadlines: bulkhead.Deadlines) void {
+    /// with all the machinery for saying so. A wait that runs out of the idle
+    /// limit leaves the deadline expired, so `readHead` fails at once and the
+    /// connection closes without a second full idle period.
+    fn waitForRequest(
+        in: *std.Io.Reader,
+        out: *std.Io.Writer,
+        deadlines: bulkhead.Deadlines,
+        waker: bulkhead.Waker,
+    ) void {
         // Already holding a pipelined request: not idle, and the buffer is
         // live data that must not be discarded.
-        if (in.seek != in.end) return;
+        if (in.seek != in.end) {
+            deadlines.armIdle();
+            return;
+        }
 
         deadlines.armPeek(idle_peek_ms);
         in.fillMore() catch {
-            if (deadlines.timedOut()) bulkhead.releaseIdlePages(in, out);
+            if (deadlines.timedOut()) {
+                bulkhead.releaseIdlePages(in, out);
+                waker.releaseStack();
+            }
         };
+
+        // Waiting for the next request to start is the idle limit, not the
+        // header one. Armed every time round: a connection that has just
+        // served a request is idle again from now, not from whenever it was
+        // accepted.
+        deadlines.armIdle();
+        if (in.seek == in.end) in.fillMore() catch {};
     }
 
     /// Handle exactly one request from `in`, writing the answer to `out`.
     /// Returns true if the connection may be used for another request.
+    ///
+    /// The shape a test drives App with, and the shape everything but the
+    /// connection loop wants. A handler that upgrades has its socket loop run
+    /// here, on this frame — which is a page deeper than the connection loop
+    /// would run it, and does not matter to anything that calls this.
     pub fn handleRequest(
         self: *App,
         arena: std.mem.Allocator,
@@ -741,6 +783,41 @@ pub const App = struct {
         waker: bulkhead.Waker,
         peer: bulkhead.Peer,
     ) bool {
+        var served = self.serveRequest(arena, lifetime, in_flight, in, out, deadlines, waker, peer);
+        runHandover(&served);
+        return served.keep_alive;
+    }
+
+    /// What one request left behind.
+    ///
+    /// `handover` is set when the handler turned the connection into a
+    /// WebSocket: the socket is open, the handshake is answered, and the loop
+    /// that is going to read it has not started. Running it is the caller's,
+    /// so that it runs from the caller's frame (ADR 0071).
+    pub const Served = struct {
+        keep_alive: bool,
+        handover: ?websocket.Handover = null,
+    };
+
+    /// Answer one request, and hand back a socket if the handler opened one.
+    ///
+    /// `noinline` deliberately. Everything this touches — the `Ctx`, the
+    /// parsed head, the route match — is 1,608 bytes that the connection loop
+    /// must not be holding while it waits for the next request, and a frame
+    /// the compiler inlines is a frame that lives as long as its host's
+    /// (ADR 0063).
+    pub noinline fn serveRequest(
+        self: *App,
+        arena: std.mem.Allocator,
+        lifetime: *str_mod.Lifetime,
+        in_flight: *fail.InFlight,
+        in: *std.Io.Reader,
+        out: *std.Io.Writer,
+        deadlines: bulkhead.Deadlines,
+        waker: bulkhead.Waker,
+        peer: bulkhead.Peer,
+    ) Served {
+        var handover: ?websocket.Handover = null;
         const failure = &in_flight.failure;
         in_flight.startRequest("", "");
         // On a real server the fiber slot is already installed and wins;
@@ -763,7 +840,7 @@ pub const App = struct {
                 },
                 error.HeadTooLong => sendFinal(out, RESPONSE_431),
             }
-            return false;
+            return .{ .keep_alive = false };
         };
         // From here there is a request to answer, and a stop has to wait for
         // it. Not before: until the head arrived this connection was parked
@@ -775,7 +852,7 @@ pub const App = struct {
         var r = http1.Request{};
         http1.parseHead(raw_head, &r) catch {
             sendFinal(out, RESPONSE_400);
-            return false;
+            return .{ .keep_alive = false };
         };
 
         // Every `Str` from this request points into the head, and the head is
@@ -793,7 +870,7 @@ pub const App = struct {
         // if this decision said there would be no such path.
         const borrowed = !http1.readsMore(&r);
         const request_head = if (borrowed) raw_head else copy: {
-            const copied = arena.dupe(u8, raw_head) catch return false;
+            const copied = arena.dupe(u8, raw_head) catch return .{ .keep_alive = false };
             // The two slices the parser left pointing into the old bytes.
             // Everything derived below — the path, the query, the params —
             // comes off `r.target`, so moving these two moves all of it.
@@ -821,7 +898,7 @@ pub const App = struct {
             ._request = &r,
             ._path = path,
             ._query = raw_query,
-            ._query_params = ctx_mod.parseQuery(arena, raw_query) catch return false,
+            ._query_params = ctx_mod.parseQuery(arena, raw_query) catch return .{ .keep_alive = false },
             ._head = request_head,
             ._head_borrowed = borrowed,
             ._watch = &in_flight.watch,
@@ -841,6 +918,10 @@ pub const App = struct {
             // keep-alive connection without a word is how a deploy turns
             // into a handful of failed requests nobody can reproduce.
             ._stopping = &self.stop.requested,
+            // Where a handler that upgrades leaves the socket. The slot is
+            // this frame's, and what is in it is copied out on the way back —
+            // the caller runs the loop from *its* frame (ADR 0071).
+            ._handover = &handover,
         };
 
         // A request that matched no route still runs the middleware: a
@@ -859,7 +940,7 @@ pub const App = struct {
             // data, and a router that saw it as a separator would let a
             // request reach a route it does not name.
             const params = match.params[0..match.n_params];
-            ctx_mod.decodeParams(arena, params) catch return false;
+            ctx_mod.decodeParams(arena, params) catch return .{ .keep_alive = false };
             c._params = params;
             chain = match.chain;
             terminal = match.handler;
@@ -907,19 +988,8 @@ pub const App = struct {
             // is closed: the next request on it would read leftover bytes
             // of unclear provenance.
             if (c._sent) {
-                // A write that ran out of time is the ordinary way a
-                // response to a client that stopped reading ends, and
-                // "handler failed" sends whoever reads the log looking for a
-                // bug in a handler that did nothing wrong (ADR 0023).
-                if (deadlines.timedOut()) {
-                    std.log.warn(
-                        "{s} {s}: gave up writing after {d}ms — the client stopped reading",
-                        .{ @tagName(c.method), path, deadlines.write_ms },
-                    );
-                } else {
-                    std.log.warn("handler {s} {s} failed after answering: {s}", .{ @tagName(c.method), path, @errorName(err) });
-                }
-                return false;
+                warnFailedAfterAnswering(&c, path, deadlines, err);
+                return .{ .keep_alive = false, .handover = handover };
             }
             // Nothing sent yet: this is a clean failure. A body nobody read
             // still has to be discarded so the connection can be reused —
@@ -927,8 +997,8 @@ pub const App = struct {
             // reason to drop keep-alive. If it cannot be discarded the
             // answer still goes out; only the connection is given up.
             const reusable = drain(&c, in, &r);
-            sendFailure(&c, failure, err) catch return false;
-            return reusable;
+            sendFailure(&c, failure, err) catch return .{ .keep_alive = false, .handover = handover };
+            return .{ .keep_alive = reusable, .handover = handover };
         };
         watchdog.finish(&in_flight.watch, @tagName(c.method), path, c._took_over);
 
@@ -939,10 +1009,25 @@ pub const App = struct {
         if (!c._sent) {
             // A handler that returned without answering meant an empty 200.
             // No content type, because there is no content to give one to.
-            sendDirect(&c, 200, "", "") catch return false;
+            sendDirect(&c, 200, "", "") catch return .{ .keep_alive = false, .handover = handover };
         }
-        if (c._stream != null) return endAbandonedStream(&c);
-        return reusable;
+        if (c._stream != null) return .{ .keep_alive = endAbandonedStream(&c), .handover = handover };
+        return .{ .keep_alive = reusable, .handover = handover };
+    }
+
+    /// Run the socket a handler handed back, from the caller's frame.
+    ///
+    /// The `Handover` has stopped moving by the time this is called, which is
+    /// what lets the Socket's buffer slot point at the one beside it: the loop
+    /// may walk out without a word, and a buffer nobody hands back is a leak
+    /// per connection.
+    fn runHandover(served: *Served) void {
+        const h = if (served.handover) |*it| it else return;
+        h.socket._scratch = &h.scratch;
+        defer if (h.scratch) |buf| scratch.give(buf);
+        h.run(&h.socket, &h.state) catch |err| warnSocketFailed(h.path, err);
+        // A connection that has been a WebSocket cannot go back to being HTTP.
+        served.keep_alive = false;
     }
 
     /// The static file `path` names, if any set holds one. Only GET and
@@ -1462,7 +1547,7 @@ fn headerValue(c: *const Ctx, name: []const u8) ?[]const u8 {
 /// anything still in the stream's buffer — that lived in the handler's own
 /// frame and went with it — which is why this says so out loud rather than
 /// quietly tidying up (ADR 0020).
-fn endAbandonedStream(c: *Ctx) bool {
+noinline fn endAbandonedStream(c: *Ctx) bool {
     const open = c._stream.?;
     c._stream = null;
     std.log.warn(
@@ -1473,6 +1558,43 @@ fn endAbandonedStream(c: *Ctx) bool {
     if (open.chunked and !open.drop) http1.writeLastChunk(c._out) catch return false;
     c._out.flush() catch return false;
     return c.keepAlive();
+}
+
+/// A handler that failed after it had already answered, said out loud.
+///
+/// `noinline` for the reason the whole cold half of `handleRequest` is:
+/// **a format string costs stack whether or not it is ever printed.** Zig
+/// builds the argument tuple and the `Io.Writer` state in the frame of
+/// whatever function the call is inlined into, and that frame belongs to the
+/// connection for as long as the connection is open — so four log sites
+/// nobody hits put kilobytes on every idle browser tab. Measured across the
+/// cold paths, moving them out took `handleConnection` from 3,704 bytes to
+/// 1,976; the connection loop is where that is worth counting, not here
+/// (see [ADR 0063](../docs/adr/0063-a-handlers-stack-is-per-connection.md)).
+noinline fn warnFailedAfterAnswering(
+    c: *Ctx,
+    path: []const u8,
+    deadlines: bulkhead.Deadlines,
+    err: anyerror,
+) void {
+    // A write that ran out of time is the ordinary way a response to a client
+    // that stopped reading ends, and "handler failed" sends whoever reads the
+    // log looking for a bug in a handler that did nothing wrong (ADR 0023).
+    if (deadlines.timedOut()) {
+        std.log.warn(
+            "{s} {s}: gave up writing after {d}ms — the client stopped reading",
+            .{ @tagName(c.method), path, deadlines.write_ms },
+        );
+    } else {
+        std.log.warn("handler {s} {s} failed after answering: {s}", .{ @tagName(c.method), path, @errorName(err) });
+    }
+}
+
+/// A socket loop that returned an error. `noinline` for `warnFailedAfterAnswering`'s
+/// reason: this one sits on the connection loop's frame, which is the frame an
+/// idle WebSocket is holding.
+noinline fn warnSocketFailed(path: []const u8, err: anyerror) void {
+    std.log.warn("the WebSocket loop on {s} failed: {s}", .{ path, @errorName(err) });
 }
 
 fn sendFinal(out: *std.Io.Writer, response: []const u8) void {
@@ -1517,7 +1639,7 @@ fn sendDirect(c: *Ctx, status: u16, content_type: []const u8, body: []const u8) 
 /// used if there is one; otherwise the error goes through the mapping
 /// table, and anything unrecognised becomes a 500 logged with its error
 /// name (ADR 0005).
-fn sendFailure(c: *Ctx, failure: *const fail.Failure, err: anyerror) !void {
+noinline fn sendFailure(c: *Ctx, failure: *const fail.Failure, err: anyerror) !void {
     const status = fail.resolveStatus(failure, err);
     const message: []const u8 = if (failure.isSet()) failure.message() else blk: {
         if (status == 500) {
@@ -3738,8 +3860,9 @@ test "a WebSocket is allowed to sit quiet once the handshake is done" {
     defer d.deinit();
     try d.app.get("/ws", struct {
         fn run(c: *Ctx) anyerror!void {
-            _ = try c.upgrade();
+            return c.upgrade(loop, {});
         }
+        fn loop(_: *websocket.Socket) anyerror!void {}
     }.run);
     try d.app.resolveChains();
 
@@ -5075,9 +5198,11 @@ test "a HEAD with a range gets the head a GET would have, and no body" {
 // ---- WebSocket (ADR 0022) ----
 
 fn echoSocket(c: *Ctx) anyerror!void {
-    var socket = try c.upgrade();
-    var buf: [1024]u8 = undefined;
-    while (try socket.receive(&buf)) |message| {
+    return c.upgrade(echoLoop, {});
+}
+
+fn echoLoop(socket: *websocket.Socket) anyerror!void {
+    while (try socket.receive()) |message| {
         try socket.send(message.kind, message.data);
     }
 }
@@ -5171,6 +5296,70 @@ test "a WebSocket allocates nothing per message, however many it carries" {
     // written straight to the connection.
     try testing.expectEqual(@as(usize, 1), counting.allocs);
     try testing.expectEqual(@as(usize, 0), counting.resizes);
+}
+
+test "the loop runs after the handler has returned, not inside it" {
+    // The whole point of the shape: `serveRequest` is finished with — its
+    // `Ctx`, its parsed head and its route match are gone — before a byte of
+    // the conversation is read (ADR 0071).
+    const Trace = struct {
+        var handler_returned: bool = false;
+        var loop_saw_it: bool = false;
+
+        fn open(c: *Ctx) anyerror!void {
+            handler_returned = false;
+            loop_saw_it = false;
+            defer handler_returned = true;
+            return c.upgrade(loop, {});
+        }
+        fn loop(socket: *websocket.Socket) anyerror!void {
+            loop_saw_it = handler_returned;
+            while (try socket.receive()) |_| {}
+        }
+    };
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/ws", Trace.open);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, upgrade_request);
+
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 101"));
+    try testing.expect(Trace.loop_saw_it);
+}
+
+test "what the handler knew reaches the loop, by value" {
+    // A `Str` off the query is the case `examples/chat` needs: the handler can
+    // read the request and the loop cannot, so whatever it learned has to
+    // travel across on its own.
+    const Carry = struct {
+        var seen: [32]u8 = undefined;
+        var seen_len: usize = 0;
+
+        fn open(c: *Ctx) anyerror!void {
+            const name = c.query("name") orelse return error.NoName;
+            return c.upgrade(loop, name);
+        }
+        fn loop(socket: *websocket.Socket, name: str_mod.Str) anyerror!void {
+            seen_len = name.view().len;
+            @memcpy(seen[0..seen_len], name.view());
+            while (try socket.receive()) |_| {}
+        }
+    };
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/ws", Carry.open);
+
+    var h = Harness.init();
+    defer h.deinit();
+    _ = h.send(&app, "GET /ws?name=ada HTTP/1.1\r\nHost: x\r\n" ++
+        "Upgrade: websocket\r\nConnection: Upgrade\r\n" ++
+        "Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n");
+
+    try testing.expectEqualStrings("ada", Carry.seen[0..Carry.seen_len]);
 }
 
 test "a request that is not asking to be upgraded is told which part is missing" {

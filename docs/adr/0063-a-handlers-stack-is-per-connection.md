@@ -1,5 +1,15 @@
 # A handler's stack is per connection, not per request
 
+> **Half of this was overturned by
+> [ADR 0071](./0071-where-a-connection-waits-is-what-it-costs.md).** The
+> finding below — a suspended fiber holds every byte of stack its handler
+> touched — is right and unchanged. The conclusion, "the shape that fits
+> cannot be built because zio does not expose the running fiber's stack", was
+> wrong on both counts: it can (`zio.coro.Coroutine.getCurrent()`), and doing
+> it alone changes nothing, because the connection walks back down and sleeps
+> deeper than the release ran. The floor is now **4,669 bytes**, not 8,767.
+> Read this for the rule and 0065 for what came of it.
+
 [ADR 0018](./0018-the-trade-budget-has-three-axes.md) makes memory per idle
 connection a hard axis and gives it a number: **8,767 bytes, flat.**
 `CLAUDE.md` repeats it and adds *"Every feature that costs per-connection

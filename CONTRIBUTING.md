@@ -38,7 +38,7 @@ with a vibe.
 zig build test         # the loop: the suite in Debug, plus the refusals
 zig build test-all     # the above plus the same suite in ReleaseSafe. This is what CI runs
 zig build layering     # check that no module imports upward or sideways
-zig build refusals     # the framework's 57 compile-error checks — NOT the others
+zig build refusals     # the framework's 62 compile-error checks — NOT the others
 zig build refusals-sql # nilo_sql's 41; refusals-config and refusals-pw for the rest
 zig build examples     # build all eight examples
 
@@ -50,14 +50,15 @@ zig build test-fetch   # only nilo_fetch, both modes — a real socket, no Engin
 
 zig build run          # the benchmark server
 zig build profile      # where the time inside one request goes
-zig build run-hello    # or rest, orders, forms, spa, stream, chat
+zig build run-hello    # or rest, orders, forms, spa, stream, chat, outbound
 zig build fuzz -- --iterations 1000000 --seed 0x…
+zig build bench-ws-server && python3 bench/ws_idle.py both   # what a socket costs idle
 ```
 
 Two things worth knowing before they surprise you:
 
 **The refusals never cache.** The compiler keeps nothing from a compilation that
-failed, so all 110 of them get re-analysed on every run. That's why they're the
+failed, so all 115 of them get re-analysed on every run. That's why they're the
 slow part of `zig build test`, and they stay there on purpose.
 
 **The bottom four modules run without the build system.** `zig test core/core.zig`,
@@ -102,7 +103,7 @@ way ([ADR 0018](./docs/adr/0018-the-trade-budget-has-three-axes.md)):
 |---|---|
 | Throughput and p99 | a nicer API wins if it costs under 10% |
 | Allocations per request | fixed. Currently 1, held by a test |
-| Memory per idle connection | 8,767 bytes is the **floor**, and a handler adds every byte of stack it touches ([ADR 0063](./docs/adr/0063-a-handlers-stack-is-per-connection.md)). Every feature states its own cost |
+| Memory per idle connection | 4,669 bytes is the **floor**, and a handler adds every byte of stack it touches ([ADR 0063](./docs/adr/0063-a-handlers-stack-is-per-connection.md), [ADR 0071](./docs/adr/0071-where-a-connection-waits-is-what-it-costs.md)). Every feature states its own cost |
 | Binary size | anything the linker can't drop states its measured cost, as a stripped `ReleaseFast` number |
 
 Say which one your change spends, and by how much, when you *propose* it. Not
@@ -173,11 +174,19 @@ numbers were, and what they changed — plus what a number was measured
 port and 458k over a unix socket. Close with whether the number can be pushed
 further, ranked, so the next person starts where you stopped.
 
-This is a rule because the repository has already published two numbers that
+This is a rule because the repository has already published three numbers that
 were wrong: `connect_on_init` was documented in three files and had never
-worked, and the flat 8,767 bytes was repeated in four and described a handler
-nobody deploys. Both were found by re-measuring. A number with no run behind it
-decays into a claim.
+worked; the flat 8,767 bytes was repeated in four and described a handler
+nobody deploys; and it was then repeated in six more while a page of it was
+being held for no reason at all
+([ADR 0071](./docs/adr/0071-where-a-connection-waits-is-what-it-costs.md)). All
+three were found by re-measuring. A number with no run behind it decays into a
+claim.
+
+Pin both sides of a comparison, too. Unpinned, gws echoes 1,029,308 messages a
+second on the machine in `bench/result/http.md`; pinned to the cores nilo gets,
+1,587,149 against nilo's 1,703,176. Publishing the first would have claimed a
+68% win where the real one is 7.4%.
 
 The roadmap holds nothing that's finished. When something ships, its entry
 leaves entirely. No strikethrough, no "done", no summary of how it went. The

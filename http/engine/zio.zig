@@ -174,7 +174,7 @@ pub const Stop = struct {
 ///
 /// A server with no cap does not fail at a number somebody chose — it
 /// fails when the machine runs out, and what notices is the OOM killer.
-/// Every connection costs a measured 8,767 bytes before it has asked for
+/// Every connection costs a measured 4,669 bytes before it has asked for
 /// anything, so a cap is the one option that turns that figure into a
 /// number an operator can multiply.
 ///
@@ -388,7 +388,7 @@ pub const Clocks = struct {
 /// Bounding an operation that is **not** a read or a write on a connection
 /// nilo holds — an outbound call by a Service, where the socket belongs to a
 /// driver and there is nothing here to set a timeout on
-/// (ADR 0065).
+/// (ADR 0071).
 ///
 /// `Clocks` above is the inbound half and works by setting a timeout on the
 /// stream. This half cannot: it cancels the *fiber* instead, which is what
@@ -474,7 +474,14 @@ pub const Wake = struct {
     cq: zio.CompletionQueue,
     wake: zio.ev.Async,
     poll: zio.ev.NetPoll,
+    /// The post half. Submitted once and re-submitted the moment it fires,
+    /// because a notify carries no data that anybody has to read first.
     armed: bool = false,
+    /// The readable half, which is **not** re-submitted on the way out — see
+    /// `wait`. Separate from `armed` because handing a completion that is
+    /// already submitted back to `submit` crashes zio (zio#673), so the two
+    /// halves cannot share one flag once they stop being re-armed together.
+    poll_armed: bool = false,
 
     pub fn init(handle: zio.ev.Backend.NetHandle) Wake {
         return .{
@@ -500,9 +507,26 @@ pub const Wake = struct {
     /// `limit_ms` of 0 waits with no limit at all.
     pub fn wait(self: *Wake, limit_ms: u32) Woken {
         if (!self.armed) {
-            self.cq.submit(&self.poll.c);
             self.cq.submit(&self.wake.c);
             self.armed = true;
+        }
+        // Armed on the way *in*, after the caller has read whatever the last
+        // `.readable` was about, rather than on the way out of it.
+        //
+        // `NetPoll` is level-triggered, so a poll re-submitted while the bytes
+        // are still sitting in the kernel's receive buffer completes
+        // immediately — and the next `wait` finds that completion already
+        // done, answers `.readable` for data the caller has since read, and
+        // drops the caller into a blocking read that neither a post nor the
+        // limit can reach. Every WebSocket stopped hearing broadcasts and
+        // stopped being pinged the moment it sent its first message.
+        //
+        // `Waker` in `bulkhead.zig` states it as the contract it is: one
+        // `.readable` per arrival of bytes, not one per call. Measured in
+        // `bench/result/http.md`.
+        if (!self.poll_armed) {
+            self.cq.submit(&self.poll.c);
+            self.poll_armed = true;
         }
 
         while (true) {
@@ -533,7 +557,7 @@ pub const Wake = struct {
             }
             if (done == &self.poll.c) {
                 self.poll.c = .init(.net_poll);
-                self.cq.submit(&self.poll.c);
+                self.poll_armed = false;
                 return .readable;
             }
             // Neither of ours. Nothing else is ever submitted to this queue,
@@ -548,6 +572,82 @@ pub const Wake = struct {
         self.wake.notify();
     }
 };
+
+/// Hand back the pages of the *running* fiber's stack that are below its
+/// current frame.
+///
+/// A suspended fiber holds its stack at the high-water mark it ever reached,
+/// for the life of the connection, one byte for one byte
+/// ([ADR 0063](../../docs/adr/0063-a-handlers-stack-is-per-connection.md)).
+/// The frames that took it there have long since returned; the pages have not.
+///
+/// **ADR 0063 recorded this as blocked on zio and it never was.** It looked for
+/// the running fiber through `runtime.getCurrentTaskOrNull`, which is not
+/// re-exported, and concluded there was no supported way. There is, by another
+/// door: `zio.coro.Coroutine.getCurrent()` is public in the pinned v0.17.0 and
+/// carries `context.stack_info`, which is `base` and `limit`. The upstream ask
+/// ([zio#677](https://github.com/lalinsky/zio/issues/677)) was answered by
+/// pointing at it.
+///
+/// Three things make the arithmetic safe, and they are the whole reason this is
+/// allowed to exist at all — zio carves 64 stacks out of one slab, so a range
+/// that ran one page past its own would zero a neighbouring connection's live
+/// stack, silently and rarely:
+///
+///  1. **`limit` is the committed floor, not the reservation's.** Everything
+///     from `limit` to `base` is mapped read-write; below it is `PROT_NONE`.
+///     So the range can never reach the guard page.
+///  2. **The bounds are checked against where this call actually is.** If the
+///     stack pointer is not inside `[limit, base]` then `getCurrent` is not
+///     describing the stack under our feet, and nothing happens.
+///  3. **The page this call is standing on is never in the range**, so the
+///     `madvise` call's own frames are never inside what it is releasing.
+///     `margin` is what makes that true at every alignment; see its doc.
+///
+/// `MADV_DONTNEED` rather than the `MADV_FREE` that `coro.stackRecycle` uses:
+/// `FREE` is lazy and leaves the pages in `VmRSS` until the machine is under
+/// pressure, which is exactly the number this exists to move. `DONTNEED` does
+/// not decommit — the mapping stays read-write and the pages fault back in as
+/// zeroes, which is all a dead frame needs to be.
+/// Bytes below this call's own frame that are never released.
+///
+/// **A page of margin is not the same thing as a page of safety, and getting
+/// that backwards made this function do nothing for a year of its short life.**
+/// The first version left four *pages*, reasoning that more slack is safer. It
+/// is not: the whole point is to release the pages a returned call chain
+/// touched, and on this framework that chain is four to six kilobytes deep — so
+/// a sixteen-kilobyte margin reached past every page there was to give back and
+/// the call was a syscall that freed nothing. Measured: an idle keep-alive
+/// connection was 8,634 bytes with the release wired in and 8,634 without it.
+///
+/// What actually has to be true is narrower. `madvise` may not zero anything
+/// the return path still reads, which is this frame, and the red zone the ABI
+/// lets a leaf function write below the stack pointer — 128 bytes on x86-64.
+/// Subtracting `margin` *before* rounding down to a page boundary makes the
+/// page holding both of them fall outside the range at every alignment: the
+/// floor is at most `frame - margin`, which is below `frame - 128`. Everything
+/// under it is stack that has not been used yet and faults back in as zeroes,
+/// which is what a fresh frame wants anyway.
+const stack_margin = 512;
+
+pub fn releaseIdleStack() void {
+    if (builtin.os.tag == .windows) return;
+    const running = zio.coro.Coroutine.getCurrent() orelse return;
+    const info = running.context.stack_info;
+
+    var marker: u8 = 0;
+    const frame = @intFromPtr(&marker);
+    if (frame <= info.limit + stack_margin or frame > info.base) return;
+
+    const page = std.heap.pageSize();
+    const start = std.mem.alignForward(usize, info.limit, page);
+    const floor = std.mem.alignBackward(usize, frame - stack_margin, page);
+    if (floor <= start) return;
+
+    const ptr: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(start);
+    // A failure leaves the pages resident, which is where they were anyway.
+    std.posix.madvise(ptr, floor - start, std.posix.MADV.DONTNEED) catch {};
+}
 
 /// Run `handler(state, in, out, clocks, wake, peer)` for every accepted
 /// connection, each in its own fiber, until that connection is done. The

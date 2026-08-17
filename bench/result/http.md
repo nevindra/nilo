@@ -80,6 +80,22 @@ Three runs of 30 seconds, `wrk -t4 -c64`, after a discarded 10-second warm-up:
 
 Spread is about 3%. No socket errors, no non-2xx, in any run.
 
+Re-taken two cycles later against the same binary shape, 20 seconds each, with
+a same-machine baseline built from the commit before the change so the two are
+not a quote against a measurement:
+
+| | before ADR 0071 | after |
+|---|---|---|
+| run 1 | 1,443,627 req/s, p99 63µs | 1,420,908 req/s, p99 62µs |
+| run 2 | 1,406,129 req/s, p99 61µs | 1,444,746 req/s, p99 60µs |
+| run 3 | — | 1,485,190 req/s, p99 55µs |
+
+The whole machine is faster than it was for the table above, which is why the
+baseline was rebuilt rather than compared against the published 1.31M. Against
+that baseline the change is **not a regression and probably a small win**: a
+request that touches one page of stack instead of two takes fewer TLB entries
+and fewer faults, which is enough to pay for the `noinline` calls it costs.
+
 "Server CPU" is `utime+stime` from `/proc/<pid>/stat` over the run, against a
 ceiling of 800% — eight hardware threads on four physical cores. At ~600% the
 server is **not saturated**, which means 1.31M is where the load generator ran
@@ -250,6 +266,12 @@ been used costs. Re-measured through the same harness as the table above, the
 per-connection figure is **8,767 bytes** and just as flat — 8,749 at 1,000
 connections against 8,769 at 10,000.
 
+> That figure stood for two cycles and is now **4,669**. What was left was two
+> pages of fiber stack, and one of them was there only because the connection
+> suspended itself four kilobytes deeper than it had to — see *Memory per idle
+> WebSocket* below and
+> [ADR 0071](../../docs/adr/0071-where-a-connection-waits-is-what-it-costs.md).
+
 **That is the framework's floor, and the same bug turned out to be alive one
 layer down.** Buffer pages stopped being held; *stack* pages never did. A
 suspended fiber holds its stack at its high-water mark until the connection
@@ -272,6 +294,208 @@ retains up to `arena_keep` and so holds a page on any connection that has served
 something. That is a deliberate trade for not reallocating per request, and it
 is the next thing to look at rather than a defect.
 
+## Memory per idle WebSocket
+
+Asked because [gws](https://github.com/lxzan/gws) claims a low memory footprint
+and nobody here had a number to put beside it. The published figures were all
+HTTP: an upgraded connection had never been measured, and the WebSocket path
+differs in one way that should matter — `App.serveRequest` is left behind at
+`c.upgrade()`, so the idle release never runs again and the two buffers it
+hands back are held for as long as the socket is open.
+
+Method: `bench/ws_server.zig` and `bench/ws_idle.py`, six scenarios each on a
+freshly started server, `VmRSS` read after the sockets settle, at 500 / 1,000 /
+2,000 sockets so the marginal figure can be read off rather than assumed. Same
+machine and method as the table above, so the HTTP row is the control rather
+than a quote. `IDLE_MS=0` — the framework's 30-second keepalive would have
+every fiber in the measurement waking to ping, which is a different thing to
+measure.
+
+Three things changed across this cycle and the columns are in the order they
+landed: the message buffer stopped belonging to the handler
+(`http/scratch.zig`), then the idle wait and the socket loop both moved up to
+the connection loop's frame
+([ADR 0071](../../docs/adr/0071-where-a-connection-waits-is-what-it-costs.md)).
+
+| what the connection is | at the start | pooled buffer | loop handed back |
+|---|---|---|---|
+| HTTP keep-alive, one 6-byte response | 8,763 | 8,753 | **4,669** |
+| WebSocket, upgraded and never spoken to | 21,619 | 9,290 | **5,186** |
+| WebSocket, one 6-byte echo | 21,561 | 9,282 | **5,194** |
+| WebSocket, 64 KiB ceiling, one 6-byte echo | 21,565 | 9,290 | **5,218** |
+| WebSocket, 64 KiB ceiling, one 60 KiB echo | 87,101 | 9,282 | **5,181** |
+| WebSocket, 64 KiB of stack touched in the loop | 87,099 | 74,858 | 70,767 |
+
+All three columns are the marginal figure at 2,000 sockets — `(RSS at 2,000 −
+RSS at 1,000) / 1,000` — which is the one that does not carry the server's own
+8 MB baseline in it.
+
+**An idle WebSocket cost 21,561 bytes and now costs 5,194** — a quarter of what
+it was. Ten thousand idle chat tabs are 52 MB rather than 216 MB. Flat to
+within 30 bytes from 500 sockets to 2,000, the way the HTTP figure is.
+
+The rows are there to stop each other being misread:
+
+- **Declaring a big buffer costs nothing.** 64 KiB and the default measure the
+  same to within eight bytes, because `VmRSS` counts pages that were touched
+  and a 6-byte message touches one of them.
+- **Receiving one big message used to cost it forever.** In the first column
+  the 60 KiB echo holds 61,440 bytes more than the small one for the life of
+  the socket, because the receive buffer was a local in the handler's frame.
+  Once the buffer comes from the executor's free list instead, that row is the
+  same as the others: the buffer goes back when the conversation goes quiet.
+- **The last row is the control that keeps the rest honest.** 64 KiB touched on
+  the loop's own stack still costs 64 KiB per connection, one byte for one
+  byte. [ADR 0063](../../docs/adr/0063-a-handlers-stack-is-per-connection.md)'s
+  finding is unchanged by any of this — what changed is how much stack the
+  framework leaves under a parked socket, not whether a fiber holds it.
+
+### The measurement that said nothing was happening
+
+Worth writing down because it cost most of a day and the mistake is easy to
+repeat.
+
+With the stack release wired into the idle path, `strace -c` confirmed the
+`madvise` ran on every idle connection, and **`VmRSS` per connection did not
+move by a byte** — 8,767 before, 8,767 after. Two causes, found by printing
+what the release actually saw (`base - limit`, `base - frame`, and the length
+handed back) rather than by reasoning about it:
+
+1. **Four pages of margin below the frame.** The chain being released is four
+   to six kilobytes deep, so sixteen kilobytes of margin reached past every
+   page there was to give back. A page of margin is not a page of safety; what
+   has to be protected is this frame and the 128-byte red zone under it.
+2. **The connection then walked back down and slept there.** `waitOrRelease`
+   released and returned, and the loop called `serveRequest` → `readHead` →
+   `fillMore` and suspended four kilobytes deeper than the frame the release
+   had run at, faulting straight back in what it had given away.
+
+Measured live chain, `base - frame` at the point the connection is suspended:
+
+| | idle keep-alive | parked WebSocket |
+|---|---|---|
+| at the start | 5,561 | 6,457 |
+| cold paths out of line | 3,497 | 4,233 |
+| `serveRequest` out of line | 1,721 | 4,345 |
+| loop handed back | 2,105 | **2,617** |
+
+The stack is charged by the page, so only the crossings matter: both columns
+now sit under 4,096 and hold one page where they used to hold two. The
+`serveRequest` row is the one that looks wrong and is not — taking the request
+frame out of line moved 1,608 bytes off the *HTTP* chain and none off the
+WebSocket's, because a handler that keeps its own loop is suspended inside that
+frame. That is the measurement the API change came out of.
+
+### The finding was not the memory
+
+The release did not work at first, and finding out why turned up something
+worse than the bytes. `strace -c` said `madvise` fired for a socket that had
+never been spoken to and never for one that had echoed a single message, so
+sockets that had received anything were not parking at all.
+
+They were not. `Wake.wait` in `http/engine/zio.zig` re-armed its `NetPoll`
+completion **on the way out of a `.readable`, before the caller had read the
+bytes**. `NetPoll` is level-triggered, so that re-submitted poll completed at
+once against data still sitting in the kernel's receive buffer — and the next
+wait found it already done, answered `.readable` for bytes that had since been
+read, and dropped the fiber into a blocking read with no deadline on it.
+
+**Nothing could reach it there.** Not a `Room` post, not the idle limit. So:
+
+- a WebSocket stopped receiving broadcasts the moment it sent its first
+  message, which is `examples/chat` failing at what the example exists to show
+  — two tabs, type in one and the other sees it, type in the other and the
+  first never hears from it again;
+- `Options.idle_ms` only ever pinged a socket that had never spoken. With
+  `IDLE_MS=1000` a silent socket is pinged at 1.0s and closed at 2.0s; one that
+  had sent six bytes got nothing in six seconds. The heartbeat ADR 0022 built
+  to catch a client that has gone away could not catch one that had ever said
+  anything.
+
+Both were reproduced against the shipped `examples/chat` and both are fixed by
+arming the poll on the way *in* to the next wait instead — after the caller has
+read. `Waker` in `http/bulkhead.zig` now states it as the Engine contract it is:
+one `.readable` per arrival of bytes, not one per call.
+
+It is worth saying how this survived: it is invisible from the test suite. The
+HTTP suite runs against in-memory buffers with `Waker.off`, which answers
+`.readable` to everything by design, so no test could see it — and no benchmark
+touched a WebSocket until this one. **The bug was found by measuring something
+else.**
+
+### Against gws
+
+The library that put the question, measured through the same harness on the
+same machine: `bench/compare/gws/`, gws v1.10.1 on Go 1.26.3, no compression,
+no `ParallelEnabled`, no deadline — the shape that matches what nilo is doing
+and the one that is kindest to gws's number. Go's `VmRSS` holds a heap the
+collector has not returned, so its server exposes `/gc` and every row is read
+twice; the figures below are after `runtime.GC()` and `debug.FreeOSMemory()`,
+which is the reading that charges gws for connections rather than for garbage.
+
+| what the connection is | nilo, at the start | nilo, now | gws |
+|---|---|---|---|
+| HTTP keep-alive, one 6-byte response | 8,763 | **4,669** | 19,913 |
+| WebSocket, upgraded and never spoken to | 21,619 | **5,186** | 8,247 |
+| WebSocket, one 6-byte echo | 21,561 | **5,194** | 10,144 |
+| WebSocket, one 60 KiB echo | 87,101 | **5,181** | 10,224 |
+
+The first column is why the comparison was worth running. gws was ahead on the
+idle socket by a quarter and ahead on the 60 KiB one by **7.3×**, and both of
+those were nilo paying for a design choice rather than for anything a
+WebSocket needs:
+
+- the receive buffer was a local in the handler's frame, so a socket that had
+  ever received a big message held it until it closed. gws's payload comes from
+  a `sync.Pool` and `message.Close()` puts it back. `http/scratch.zig` is the
+  same idea: the buffer belongs to the executor, is borrowed while a message is
+  arriving, and goes back when the connection goes quiet.
+- the handler kept the loop, so a parked socket was suspended inside the
+  request machinery. gws parks in its own read loop with the HTTP request long
+  gone. ADR 0071 is the same idea: the handler hands the loop back.
+
+Throughput, same machine, both servers pinned to the same four physical cores
+and driven by the same client — `bench/compare/wsload/`, which uses gws's own
+client so neither side is measured through a different implementation. 64
+connections, 64-byte payloads, serial round trips, 20 seconds:
+
+| | nilo | gws |
+|---|---|---|
+| echo throughput, run 1 | **1,736,133 msg/s** | 1,615,326 |
+| echo throughput, run 2 | **1,703,176 msg/s** | 1,587,149 |
+| p50 | **31–32µs** | 33–34µs |
+| p99 | **97–100µs** | 112–116µs |
+| p999 | **173–258µs** | 328–368µs |
+
+**7.4% on throughput, 14% on p99, 40% on p999 — a real win and a narrow one on
+the headline, and the number is only honest because both were pinned.** An
+earlier unpinned run had gws at 1,029,308 msg/s and would have been reported as
+nilo winning by 68%. That was the load generator and the server fighting over
+cores, not the two libraries, and it is the same trap `bench/bench.sh` unpinned
+falls into on the HTTP side.
+
+Two things the table cannot say. gws's per-connection figure is still falling
+at 2,000 sockets (11,346 → 9,093 raw for the idle row) where nilo's is flat to
+within 30 bytes, so the two are converging from opposite directions and gws
+would need a bigger run to pin down. And every gws number moves with when the
+collector last ran — its idle row read 7,989 one afternoon and 8,247 the next,
+against nilo moving by eight — which is why both readings are in
+`bench/result/ws-idle.json` and why the gws column deserves less precision than
+it is printed with.
+
+### What is not measured
+
+**A message big enough to be worth pooling, under load.** Every throughput
+figure here is 64 bytes, which never leaves one page of the free list's buffer.
+What a 60 KiB message costs at a thousand messages a second — where the free
+list's byte budget starts refusing spares and the allocator gets called — is
+the number that would decide whether `keep_bytes` is right, and nothing here
+answers it.
+
+**Compression.** gws was run with `PermessageDeflate` off, which is the shape
+that matches nilo and the one kindest to gws's memory number. A deployment that
+turns it on is a different comparison in both directions.
+
 ## Reproducing this
 
 ```bash
@@ -287,6 +511,46 @@ taskset -c 4-7,12-15 wrk -t4 -c64 -d15s -s bench/mixed.lua http://127.0.0.1:8787
 
 zig build profile -Doptimize=ReleaseFast
 ```
+
+Memory per idle connection, HTTP and WebSocket, and the same figures for gws
+beside them:
+
+```bash
+zig build bench-ws-server -Doptimize=ReleaseFast
+( cd bench/compare/gws && go build -o gws-bench . )
+
+# `both` starts and stops each server itself; `nilo` or `gws` does one.
+STEPS=500,1000,2000 python3 bench/ws_idle.py both
+```
+
+WebSocket throughput, both servers driven by the same client so neither is
+measured through a different implementation:
+
+```bash
+( cd bench/compare/wsload && go build -o wsload . )
+
+IDLE_MS=0 taskset -c 0-3,8-11 ./zig-out/bin/nilo-bench-ws-server &
+taskset -c 4-7,12-15 ./bench/compare/wsload/wsload \
+    -url ws://127.0.0.1:8789/ws/small -conns 64 -d 20s -warmup 3s -payload 64
+```
+
+**Pin both sides or the number is about the scheduler.** Unpinned, gws measures
+1,029,308 msg/s on this machine and pinned it measures 1,595,350 — a 55%
+difference that has nothing to do with gws.
+
+The live chain a suspended connection holds — the number that decides how many
+pages it costs — is not exposed anywhere, and is read by printing it from
+`releaseIdleStack` in `http/engine/zio.zig`:
+
+```zig
+std.debug.print("stack: size={d} live={d} release={d}\n", .{
+    info.base - info.limit, info.base - frame, floor - start,
+});
+```
+
+One connection of each kind against that build says where every byte is. It is
+three lines and it is how ADR 0071 was found, so it is written down here rather
+than left in the engine.
 
 `bench/bench.sh` runs the first of those with the repo's defaults and no
 pinning. Unpinned on this machine it reports 1,071,374 req/s with a p99 of

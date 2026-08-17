@@ -415,29 +415,16 @@ it borrows the loop and owns no destination.
 
 ---
 
-### Giving a quiet connection its stack back
+### What a big message costs a busy server
 
-**Memory per idle connection is 8,767 bytes plus every byte of stack the
-handler ever touched, one for one**
-([ADR 0063](./adr/0063-a-handlers-stack-is-per-connection.md)). A suspended
-fiber holds its stack at its high-water mark until the connection closes, so a
-handler with a 64 KiB buffer on the stack costs 64 KiB per connection rather
-than per request.
-
-The fix is one line in `releaseIdlePages`, which already hands a quiet
-connection's read and write buffers back and is already gated on a short read
-coming back empty — so it costs a busy connection nothing. **What blocks it is
-that zio does not expose the running fiber's stack bounds.** Guessing a floor
-is not available: zio carves 64 stacks from one slab mapping, so an `madvise`
-one page past the limit would zero a neighbouring connection's live stack.
-
-The ask is narrower than it looks and it is **filed as
-[zio#677](https://github.com/lalinsky/zio/issues/677)**: `coro.stackRecycle` is
-already public and already does the `madvise`, and `coro.Stack` carries `base`
-and `limit` — what is missing is any supported way to obtain the `StackInfo` of
-the *running* fiber. Once that lands, release `[limit, frame)` beside the two
-buffers. Measured before and after with `bench/sql_server.zig`'s `/deep/:id`,
-which exists for this.
+Every WebSocket throughput figure in `bench/result/http.md` is a 64-byte
+payload, which never leaves the first page of the buffer the executor lends a
+socket. What a 60 KiB message costs at a thousand a second — where
+`http/scratch.zig`'s byte budget starts refusing spares and the page allocator
+gets called on the message path — is unmeasured, and it is the number that
+would say whether `keep_bytes = 64 KiB` a thread is the right size or a guess
+that happened to work. `bench/compare/wsload/` takes a `-payload`, so the run
+is there; the interpretation is what is missing.
 
 ## `nilo_sql` — Postgres
 

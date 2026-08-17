@@ -21,37 +21,51 @@ pub const std_options = nilo.std_options;
 pub const std_options_debug_io = nilo.debug_io;
 
 /// One WebSocket connection, from a handler that looks like every other
-/// handler: it takes what it needs and holds the connection until it ends.
+/// handler: it takes what it needs, answers the handshake, and says which
+/// function is going to read the socket.
 ///
+/// **The handler returns, and that is deliberate.** A handler that kept the
+/// loop would be suspended inside the request machinery — the `Ctx`, the
+/// parsed head, the route match — for as long as the tab is open, and a
+/// suspended fiber holds every byte of its stack (ADR 0063, ADR 0071).
+/// Handing the loop back lets all of that unwind first.
+///
+/// `room` is a service, so the loop takes it the same way this does. Anything
+/// else the loop needs comes over as the third argument to `upgrade`.
+fn chat(c: *nilo.Ctx, room: *nilo.Room) !void {
+    return c.upgrade(chatLoop, room);
+}
+
 /// The loop is the same one an echo server writes. Nothing in it mentions the
 /// other connections, and nothing in it handles an incoming broadcast —
 /// `receive` writes those out on the way past, from this fiber, because a
 /// connection's bytes belong to the fiber serving it (ADR 0029).
-fn chat(c: *nilo.Ctx, room: *nilo.Room) !void {
-    var socket = try c.upgrade();
-
+fn chatLoop(socket: *nilo.Socket, room: *nilo.Room) !void {
     // `join` takes a seat, `leave` gives it back. The `defer` is not optional
     // and not a nicety: Zig has no destructor, and a seat nobody gives up is
     // one the next connection cannot have. It is correct on every path out of
     // here, including the ones that fail before ever joining.
-    try room.join(&socket);
-    defer room.leave(&socket);
+    try room.join(socket);
+    defer room.leave(socket);
 
     // Formatted straight into the post the room was going to allocate
     // anyway — no buffer of ours in between, and nothing to guess the size of
     // (ADR 0052).
     try room.print("welcome, {d} here", .{room.count()});
 
-    // This buffer is the message ceiling: one bigger than it closes the
-    // connection with 1009 rather than growing anything. Ask for what you can
-    // hold, which for a chat line is generous.
+    // No buffer here, and that is the point: the bytes of a message live in
+    // one the executor lends this socket while the message is arriving and
+    // takes back when the conversation goes quiet. A buffer declared here
+    // would be a local in a frame that stays alive for as long as the tab is
+    // open, which is 16 KiB per tab whether anybody is typing or not
+    // (`http/scratch.zig`). The ceiling is `upgradeWith(.{ .max_message = … })`
+    // and defaults to the same 16 KiB.
     //
     // The loop has no shutdown branch and does not need one: `receive` ends
     // the conversation itself when the server is stopping, and tells the
     // other end why, so a deploy is not held open by whoever is still typing
     // (ADR 0020, ADR 0052).
-    var buf: [16 * 1024]u8 = undefined;
-    while (try socket.receive(&buf)) |message| {
+    while (try socket.receive()) |message| {
         // To everybody, including whoever typed it. One code path, not one
         // for me and another for everyone else.
         try room.say(message.kind, message.data);

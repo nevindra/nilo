@@ -79,7 +79,7 @@ pub const Options = struct {
     /// something the project has measured and published
     /// ([ADR 0018](../docs/adr/0018-the-trade-budget-has-three-axes.md)). A
     /// compressor needs a 64 KB window: one per connection would take an
-    /// idle connection from 8,767 bytes to something like ten times that,
+    /// idle connection from 4,669 bytes to something like fifteen times that,
     /// and one per request would be an allocation on the request path where
     /// the invariant is one. A file that never changes has a third option —
     /// compress it before the socket is even open, and spend nothing at all

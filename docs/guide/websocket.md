@@ -1,14 +1,16 @@
 # WebSocket
 
 A WebSocket handler is a handler. It takes services by type, sits behind the same
-middleware, and is registered with `app.get` like everything else — the only
-difference is that it doesn't return for a while:
+middleware, and is registered with `app.get` like everything else. What it does
+differently is hand the connection to a loop and return:
 
 ```zig
 fn echo(c: *nilo.Ctx) !void {
-    var socket = try c.upgrade();
-    var buf: [16 * 1024]u8 = undefined;
-    while (try socket.receive(&buf)) |message| {
+    return c.upgrade(echoLoop, {});
+}
+
+fn echoLoop(socket: *nilo.Socket) !void {
+    while (try socket.receive()) |message| {
         try socket.send(message.kind, message.data);
     }
 }
@@ -22,13 +24,42 @@ reassembly and the closing handshake. Ping and pong are answered inside
 
 `c.upgrade()` fails with a 400 if the request isn't a WebSocket handshake, so a
 browser that wandered onto the URL gets told rather than hung up on.
-`c.upgradeWith(.{ .protocol = "chat.v1" })` names a subprotocol.
+`c.upgradeWith(loop, state, .{ .protocol = "chat.v1" })` names a subprotocol.
+
+### Why the loop is a separate function
+
+Because a suspended fiber holds its stack, and where a socket waits is what it
+costs while it waits. A handler that looped in place would be parked *inside*
+the request — holding the `Ctx`, the parsed head and the route match, none of
+which the loop can reach — for as long as the tab is open. Returning first lets
+all of that unwind: an idle socket costs **5,186 bytes** instead of 9,290
+([ADR 0071](../adr/0071-where-a-connection-waits-is-what-it-costs.md)).
+
+### Carrying something into the loop
+
+The second argument to `upgrade` is whatever the handler knows and the loop
+needs. Services are the common case, and they arrive the same way they arrive
+anywhere:
+
+```zig
+fn chat(c: *nilo.Ctx, room: *nilo.Room) !void {
+    return c.upgrade(chatLoop, room);
+}
+
+fn chatLoop(socket: *nilo.Socket, room: *nilo.Room) !void { … }
+```
+
+Anything else works the same way — a `Str` off the query, a number off the
+path. It travels in the connection's own frame, so it is **128 bytes at most**;
+a struct bigger than that goes in `c.arena()`, which is alive for as long as the
+loop is, with a pointer carried across. The compiler says so rather than
+truncating anything. `{}` is what you pass when there is nothing to carry.
 
 ## The message loop
 
 | | |
 |---|---|
-| `socket.receive(&buf)` | the next message, or `null` when it's over |
+| `socket.receive()` | the next message, or `null` when it's over |
 | `socket.send(kind, data)` | one message, `.text` or `.binary` |
 | `socket.sendText(text)` / `sendBinary(bytes)` | the shorthands |
 | `socket.print(fmt, args)` | one text message, formatted |
@@ -38,10 +69,18 @@ browser that wandered onto the URL gets told rather than hung up on.
 | `socket.closedCleanly()` | whether the other end said goodbye |
 | `socket.live()` | false once the server is stopping, exactly as a stream's is |
 
-**The buffer you pass to `receive` is the message ceiling** — there is no second
-limit to contradict it. A frame announcing more than it holds is refused before a
-byte of its payload is read, with a `1009`. Nothing is allocated per message, and
-no byte of one is copied twice
+**`receive` takes no buffer, and that is a memory decision rather than a
+convenience.** The bytes of a message live in a buffer the executor lends this
+socket while the message is arriving and takes back when the conversation goes
+quiet, so what a process holds is one buffer per message *in flight* rather
+than one per open socket. On the workload WebSockets are for — ten thousand
+chat tabs with four people typing — those are different numbers by three
+orders of magnitude.
+
+The ceiling is `upgradeWith(loop, state, .{ .max_message = … })` and defaults
+to 16 KiB. A frame announcing more than that is refused before a byte of its
+payload is read, with a `1009`. Nothing is allocated per message, and no byte
+of one is copied twice
 ([ADR 0052](../adr/0052-a-message-is-copied-once-and-framed-once.md)).
 
 `receive` returns `null` three ways: the client closed politely, the client
@@ -52,7 +91,7 @@ loop needs no shutdown check of its own**. `socket.closedCleanly()` tells the
 first apart from the rest afterwards:
 
 ```zig
-while (try socket.receive(&buf)) |message| { … }
+while (try socket.receive()) |message| { … }
 if (!socket.closedCleanly()) std.log.info("client vanished", .{});
 ```
 
@@ -133,12 +172,14 @@ defer room.deinit();
 try app.provide(&room);
 
 fn chat(c: *nilo.Ctx, room: *nilo.Room) !void {
-    var socket = try c.upgrade();
-    try room.join(&socket);
-    defer room.leave(&socket);
+    return c.upgrade(chatLoop, room);
+}
 
-    var buf: [16 * 1024]u8 = undefined;
-    while (try socket.receive(&buf)) |message| {
+fn chatLoop(socket: *nilo.Socket, room: *nilo.Room) !void {
+    try room.join(socket);
+    defer room.leave(socket);
+
+    while (try socket.receive()) |message| {
         try room.say(message.kind, message.data);
     }
 }
@@ -147,7 +188,7 @@ fn chat(c: *nilo.Ctx, room: *nilo.Room) !void {
 That loop is the one an echo server writes. Nothing in it mentions the other
 connections and nothing handles an incoming broadcast — `receive` writes those
 out on the way past, from the fiber that owns the socket. The rest of the API is
-in [the reference](../reference.md#room). `defer room.leave(&socket)` is the part
+in [the reference](../reference.md#room). `defer room.leave(socket)` is the part
 that isn't optional: Zig has no destructor, and a seat nobody gives up is one the
 next connection can't have.
 
@@ -175,8 +216,9 @@ client and nobody else, and why a full backlog is a policy named at the room
 how many went) rather than a disconnect
 ([ADR 0038](../adr/0038-a-broadcast-rings-a-bell-it-does-not-write.md)). It adds
 4 measured bytes per idle connection. The design that needed a second fiber per
-connection was 8,673 against a budget of 8,767, which is what kept this off the
-list for two stages ([ADR 0029](../adr/0029-a-spawned-fiber-belongs-to-the-server.md)).
+connection was 8,673 bytes against a per-connection budget that was 8,767 at the
+time, which is what kept this off the list for two stages
+([ADR 0029](../adr/0029-a-spawned-fiber-belongs-to-the-server.md)).
 
 What else came out of that work is [`nilo.spawn`](../reference.md#concurrency),
 for work that is not a request at all.
@@ -191,7 +233,8 @@ deadline. Silence asks whether the client is still there; an answer buys another
 stretch; a client that misses the next one is closed with `1001`.
 
 ```zig
-var socket = try c.upgradeWith(.{ .idle_ms = 60_000 });  // 30s by default, 0 waits forever
+// 30s by default, 0 waits forever
+return c.upgradeWith(chatLoop, room, .{ .idle_ms = 60_000 });
 ```
 
 Thirty seconds costs a dead connection about a minute to notice and a live one
@@ -201,7 +244,7 @@ two frames a minute. Proxies that drop quiet connections usually do so at sixty
 ## What isn't here
 
 `permessage-deflate`. It's negotiated in the handshake, and a compressor per
-connection is a 64 KB window against a budget of 8,767 bytes — so it needs a
+connection is a 64 KB window against a budget of 4,669 bytes — so it needs a
 design rather than a switch.
 
 One number worth knowing before a chat server meets its users: an open socket is

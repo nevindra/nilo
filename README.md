@@ -13,7 +13,7 @@ You import the modules you use, and Zig never compiles the rest.
 
 **It's built for people and for coding agents at the same time**, which turns
 out to be one job rather than two. One rule covers the whole argument list.
-Nothing depends on the order you wrote it in. And 91 error messages are held in
+Nothing depends on the order you wrote it in. And 115 error messages are held in
 place by a build step, so a mistake comes back as a sentence while your code is
 still compiling instead of as a 500 at runtime. That helps you, and it helps
 whatever is writing code next to you.
@@ -325,9 +325,9 @@ store, you should find that job already done, in a module small enough to read
 in one sitting. Things get built here because the job is common, not because
 the job is interesting.
 
-**Quick.** One allocation per request. 8,767 bytes per idle connection for the
-framework itself, flat — plus whatever stack your handler touches, which is
-held for as long as the connection is.
+**Quick.** One allocation per request. 4,669 bytes per idle connection for the
+framework itself, flat, and an idle WebSocket is 5,186 — plus whatever stack
+your handler touches, which is held for as long as the connection is.
 Those are measurements with tests holding them in place, not adjectives.
 
 **Cheerful.** Nothing here scolds you. When you get something wrong, you get a
@@ -408,14 +408,14 @@ Most frameworks say "fast" and "lightweight". Here are numbers instead:
 | | |
 |---|---|
 | **1 allocation** | per request. A test fails if it ever becomes 2. |
-| **8,767 bytes** | per idle connection, for the framework. Flat from 1,000 connections to 10,000. A handler adds the stack it touches ([ADR 0063](./docs/adr/0063-a-handlers-stack-is-per-connection.md)). |
-| **57µs** | p99, 9× below Go's `net/http` and 11× below Fiber |
+| **4,669 bytes** | per idle connection, for the framework. Flat from 1,000 connections to 10,000. An idle WebSocket is 5,186. A handler adds the stack it touches ([ADR 0063](./docs/adr/0063-a-handlers-stack-is-per-connection.md), [ADR 0071](./docs/adr/0071-where-a-connection-waits-is-what-it-costs.md)). |
+| **55µs** | p99, 9× below Go's `net/http` and 11× below Fiber |
 | **5.4 MB** | idle server |
 
 Throughput is 1.4M req/s, and it's the least interesting number on the page.
 [The benchmarks page says so itself](./bench/result/http.md): at this payload, the
 top of the table is five servers making identical syscalls. The two numbers that
-are actually properties of the design are the 8,767 and the 1.
+are actually properties of the design are the 4,669 and the 1.
 
 Binary size is the fourth number, and it's a large part of why the modules are
 kept apart. Zig doesn't compile what nothing imports, so an HTTP-only project
@@ -453,9 +453,9 @@ been built yet, and no allocate-per-request version shipped in the meantime.
 
 An error message is a feature right up until somebody refactors it into mush.
 
-So this repository tests its error messages. There are **91 programs in it that
+So this repository tests its error messages. There are **115 programs in it that
 are supposed to fail to compile**, and a build step that checks the wording of
-every single failure (56 for HTTP, 28 for SQL, 5 for config, 2 for passwords).
+every single failure (62 for HTTP, 41 for SQL, 9 for config, 3 for passwords).
 
 ```
 $ zig build
@@ -514,7 +514,7 @@ that starts anyway.
 
 That's the same list a person in a hurry needs. One rule for the whole argument
 list, so there's very little to misremember. Registration order that doesn't
-matter, so a new route can go anywhere in the file. 91 held error messages, so a
+matter, so a new route can go anywhere in the file. 115 held error messages, so a
 mistake comes back as a sentence at build time rather than a 500 at runtime.
 
 Point one at [`docs/reference.md`](./docs/reference.md) for the whole API on one

@@ -337,7 +337,7 @@ fn longLived(gpa: std.mem.Allocator) !void {
         var in = std.Io.Reader.fixed(wire[0..frame_len]);
         var out = std.Io.Writer.fixed(away);
         var socket = websocket.Socket{ ._in = &in, ._out = &out, ._stopping = null };
-        const got = (try socket.receive(room)) orelse unreachable;
+        const got = (try socket.receive()) orelse unreachable;
         sink += got.data.len;
     }
     const ws_full = (clock() - t) / ws_rounds;
@@ -348,7 +348,7 @@ fn longLived(gpa: std.mem.Allocator) !void {
         var in = std.Io.Reader.fixed(empty_wire[0..empty_len]);
         var out = std.Io.Writer.fixed(away);
         var socket = websocket.Socket{ ._in = &in, ._out = &out, ._stopping = null };
-        const got = (try socket.receive(room)) orelse unreachable;
+        const got = (try socket.receive()) orelse unreachable;
         sink += got.data.len + 1;
     }
     const ws_empty = (clock() - t) / ws_rounds;
@@ -377,7 +377,7 @@ fn longLived(gpa: std.mem.Allocator) !void {
         var in = std.Io.Reader.fixed(chat_wire[0..chat_len]);
         var out = std.Io.Writer.fixed(away);
         var socket = websocket.Socket{ ._in = &in, ._out = &out, ._stopping = null };
-        const got = (try socket.receive(room)) orelse unreachable;
+        const got = (try socket.receive()) orelse unreachable;
         sink += got.data.len;
     }
     const ws_chat = (clock() - t) / ws_rounds;
