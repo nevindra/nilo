@@ -71,8 +71,8 @@ state, .{ .protocol = …, .idle_ms = …, .max_message = … })` is the long fo
 handler that keeps the loop is a suspended fiber holding the request's whole
 frame — the `Ctx`, the parsed head, the route match — and its own receive
 buffer, for as long as the tab is open. An idle WebSocket cost **21,561 bytes
-and now costs 5,194**, and one that had received a single 60 KiB message cost
-87,101 and now costs 5,181
+and now costs 5,183**, and one that had received a single 60 KiB message cost
+87,101 and now costs 5,186 — the same socket either way, which is the point
 ([ADR 0071](./docs/adr/0071-where-a-connection-waits-is-what-it-costs.md)).
 
 One consequence to know about: **an open WebSocket no longer counts as a
@@ -93,9 +93,11 @@ there only because the connection then suspended itself four kilobytes deeper
 than it needed to. The idle wait now happens at the connection loop's own
 frame, the request's machinery is a frame of its own that unwinds before it,
 and the cold half of a request — the log lines nobody hits, which cost stack
-whether or not they print — is out of line. Throughput did not pay for it:
-`GET /users/:id` measures 1,485,190 req/s against a same-machine baseline of
-1,424,878, with p99 55µs against 61µs.
+whether or not they print — is out of line. Throughput did not pay for it and
+did not gain from it either: four interleaved 30-second runs against a
+same-machine baseline average 1,429,293 req/s against 1,420,424, which is
+**+0.6% and less than the spread of either column.** Read that row as
+unchanged.
 
 The floor is still a floor. A handler that touches 64 KiB of stack still holds
 64 KiB per connection, one byte for one byte

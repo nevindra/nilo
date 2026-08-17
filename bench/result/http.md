@@ -23,9 +23,13 @@ way on the same machine, is [`comparison.md`](../../docs/comparison.md).
 | OS | Ubuntu 26.04, kernel 7.0.0-29-generic |
 | Governor | `powersave`, boost enabled |
 | Zig | 0.16.0 |
-| Load generator | wrk 4.2.0, built from source |
-| Commit | `a2c344c` |
+| Load generator | wrk 4.2.0, built from source; `bench/compare/wsload/` for WebSockets |
+| Commit | `a2c344c` for the first tables; **`dcadb46`** for everything in this cycle, against a baseline of `0492be0` |
 | Transport | loopback — no NIC, no driver, no wire |
+
+`dcadb46` is the merged tree — the change rebased onto `0492be0` — so the
+figures below are from the code that ships rather than from the branch it was
+developed on. Where a number was taken on both, both are given.
 
 Two of those rows do most of the damage to how far these numbers travel. **SMT
 is on**, which is why the core split below is not the obvious one. And
@@ -80,21 +84,35 @@ Three runs of 30 seconds, `wrk -t4 -c64`, after a discarded 10-second warm-up:
 
 Spread is about 3%. No socket errors, no non-2xx, in any run.
 
-Re-taken two cycles later against the same binary shape, 20 seconds each, with
-a same-machine baseline built from the commit before the change so the two are
-not a quote against a measurement:
+Re-taken two cycles later, 30 seconds each, against a same-machine baseline
+built from `0492be0` — the commit this change was rebased onto — so the two are
+a measurement against a measurement rather than against a published figure. The
+two servers were run **alternately in the same session**, four pairs, so a
+machine that drifts drifts under both:
 
-| | before ADR 0071 | after |
-|---|---|---|
-| run 1 | 1,443,627 req/s, p99 63µs | 1,420,908 req/s, p99 62µs |
-| run 2 | 1,406,129 req/s, p99 61µs | 1,444,746 req/s, p99 60µs |
-| run 3 | — | 1,485,190 req/s, p99 55µs |
+| pair | before (`0492be0`) | after (ADR 0071) | after − before |
+|---|---|---|---|
+| 1 | 1,443,307 req/s, p99 65µs | 1,469,457 req/s, p99 58µs | +1.8% |
+| 2 | 1,445,694 req/s, p99 62µs | 1,427,047 req/s, p99 70µs | −1.3% |
+| 3 | 1,454,942 req/s, p99 59µs | 1,454,035 req/s, p99 63µs | −0.1% |
+| 4 | 1,337,753 req/s, p99 82µs | 1,366,634 req/s, p99 98µs | +2.2% |
+
+Mean 1,420,424 before and 1,429,293 after — **+0.6%, which is less than the
+spread of either column.** The honest reading is that HTTP throughput did not
+move. The sign changes between pairs, and pair 4 is 8% below pair 3 on *both*
+sides, which is what run-to-run noise looks like on a desktop; anything under
+about ±2% here is not a result.
+
+An earlier draft of this file read a single 1,485,190 against a single
+1,424,878 and called the change "probably a small win", reasoning that one page
+of stack instead of two costs fewer TLB entries. The reasoning may still be
+right and the measurement never supported it: **one run each is not a
+comparison, it is two samples from the same noisy distribution.** The claim is
+withdrawn rather than restated more carefully. What the change is *for* is the
+memory axis, and that one moved by 47%.
 
 The whole machine is faster than it was for the table above, which is why the
-baseline was rebuilt rather than compared against the published 1.31M. Against
-that baseline the change is **not a regression and probably a small win**: a
-request that touches one page of stack instead of two takes fewer TLB entries
-and fewer faults, which is enough to pay for the `noinline` calls it costs.
+baseline was rebuilt rather than compared against the published 1.31M.
 
 "Server CPU" is `utime+stime` from `/proc/<pid>/stat` over the run, against a
 ceiling of 800% — eight hardware threads on four physical cores. At ~600% the
@@ -304,12 +322,13 @@ differs in one way that should matter — `App.serveRequest` is left behind at
 hands back are held for as long as the socket is open.
 
 Method: `bench/ws_server.zig` and `bench/ws_idle.py`, six scenarios each on a
-freshly started server, `VmRSS` read after the sockets settle, at 500 / 1,000 /
-2,000 sockets so the marginal figure can be read off rather than assumed. Same
-machine and method as the table above, so the HTTP row is the control rather
-than a quote. `IDLE_MS=0` — the framework's 30-second keepalive would have
-every fiber in the measurement waking to ping, which is a different thing to
-measure.
+freshly started server, `VmRSS` read after the sockets settle, in steps so the
+marginal figure can be read off rather than assumed — 500 / 1,000 / 2,000 for
+the comparison below, and out to 5,000 and 10,000 for the figures that get
+quoted, which is a distinction the next section is about. Same machine and
+method as the table above, so the HTTP row is the control rather than a quote.
+`IDLE_MS=0` — the framework's 30-second keepalive would have every fiber in the
+measurement waking to ping, which is a different thing to measure.
 
 Three things changed across this cycle and the columns are in the order they
 landed: the message buffer stopped belonging to the handler
@@ -320,19 +339,58 @@ the connection loop's frame
 | what the connection is | at the start | pooled buffer | loop handed back |
 |---|---|---|---|
 | HTTP keep-alive, one 6-byte response | 8,763 | 8,753 | **4,669** |
-| WebSocket, upgraded and never spoken to | 21,619 | 9,290 | **5,186** |
-| WebSocket, one 6-byte echo | 21,561 | 9,282 | **5,194** |
-| WebSocket, 64 KiB ceiling, one 6-byte echo | 21,565 | 9,290 | **5,218** |
-| WebSocket, 64 KiB ceiling, one 60 KiB echo | 87,101 | 9,282 | **5,181** |
-| WebSocket, 64 KiB of stack touched in the loop | 87,099 | 74,858 | 70,767 |
+| WebSocket, upgraded and never spoken to | 21,619 | 9,290 | **5,190** |
+| WebSocket, one 6-byte echo | 21,561 | 9,282 | **5,255** |
+| WebSocket, 64 KiB ceiling, one 6-byte echo | 21,565 | 9,290 | **5,190** |
+| WebSocket, 64 KiB ceiling, one 60 KiB echo | 87,101 | 9,282 | **5,247** |
+| WebSocket, 64 KiB of stack touched in the loop | 87,099 | 74,858 | 70,746 |
 
 All three columns are the marginal figure at 2,000 sockets — `(RSS at 2,000 −
 RSS at 1,000) / 1,000` — which is the one that does not carry the server's own
 8 MB baseline in it.
 
-**An idle WebSocket cost 21,561 bytes and now costs 5,194** — a quarter of what
-it was. Ten thousand idle chat tabs are 52 MB rather than 216 MB. Flat to
-within 30 bytes from 500 sockets to 2,000, the way the HTTP figure is.
+The last column was taken twice, a rebase apart: once on the change alone and
+once on the merged tree that ships, which is the run above. **The two agree to
+within 66 bytes on every row** — 4,669 both times on the HTTP control, 5,186
+against 5,190 on the idle socket, 70,767 against 70,746 on the stack control.
+
+#### At 2,000 sockets two of those rows are still a transient
+
+The `one 6-byte echo` and `one 60 KiB echo` rows read 5,255 and 5,247 above,
+which is 60-odd bytes above the rows beside them, and the difference is not a
+property of anything. Taking the same run out to 10,000 sockets says so — the
+marginal figure, `(RSS at N − RSS at N−1) / step`:
+
+| what the connection is | 500 | 1,000 | 2,000 | 5,000 | 10,000 | avg at 10,000 |
+|---|---|---|---|---|---|---|
+| HTTP keep-alive, one 6-byte response | 4,645 | 4,669 | 4,674 | 4,672 | 4,672 | 4,671 |
+| WebSocket, never spoken to | 5,161 | 5,194 | 5,190 | 5,183 | **5,183** | 5,183 |
+| WebSocket, one 6-byte echo | 5,636 | 5,186 | 5,198 | 5,190 | **5,183** | 5,209 |
+| WebSocket, 64 KiB ceiling, one 6-byte echo | 5,284 | 5,194 | 5,194 | 5,184 | **5,182** | 5,190 |
+| WebSocket, 64 KiB ceiling, one 60 KiB echo | 7,012 | 5,308 | 5,177 | 5,187 | **5,186** | 5,283 |
+| WebSocket, 64 KiB of stack touched | 71,082 | 70,853 | 70,722 | 70,726 | **70,719** | 70,746 |
+
+**Marginal equals average at 10,000 on every row**, which is the strongest form
+this measurement takes: the cost is a property of a connection rather than
+something that steps, compounds or amortises. The rows that looked different at
+2,000 are the first message's buffer being paid for once by the server and
+divided by a smaller N — the `60 KiB echo` row starts at 7,012 and ends at
+5,186, and nothing about the socket changed in between.
+
+**All four WebSocket rows land within four bytes of each other.** A socket that
+has echoed 60 KiB costs the same as one that has never been spoken to, which is
+exactly what `http/scratch.zig` was built to make true and is the one row worth
+checking after any change to it.
+
+So the figures to quote are the converged ones: **4,669 bytes per idle
+keep-alive connection** — the number ADR 0018 carries, and every reading from
+500 to 10,000 sockets is inside 4,645–4,674 — and **5,183 bytes per idle
+WebSocket**, whatever it has received.
+
+**An idle WebSocket cost 21,561 bytes and now costs 5,183** — a quarter of what
+it was. Ten thousand idle chat tabs are 52 MB rather than 216 MB, and that is
+now a measured row rather than an extrapolation: 10,000 held-open sockets read
+58,732 kB against a 8,116 kB baseline.
 
 The rows are there to stop each other being misread:
 
@@ -433,12 +491,24 @@ collector has not returned, so its server exposes `/gc` and every row is read
 twice; the figures below are after `runtime.GC()` and `debug.FreeOSMemory()`,
 which is the reading that charges gws for connections rather than for garbage.
 
-| what the connection is | nilo, at the start | nilo, now | gws |
-|---|---|---|---|
-| HTTP keep-alive, one 6-byte response | 8,763 | **4,669** | 19,913 |
-| WebSocket, upgraded and never spoken to | 21,619 | **5,186** | 8,247 |
-| WebSocket, one 6-byte echo | 21,561 | **5,194** | 10,144 |
-| WebSocket, one 60 KiB echo | 87,101 | **5,181** | 10,224 |
+Both columns at **10,000 held-open sockets**, per-connection average with the
+server's own baseline subtracted, gws's read after a forced `runtime.GC()` and
+`debug.FreeOSMemory()`:
+
+| what the connection is | nilo, at the start | nilo, now | gws | nilo/gws |
+|---|---|---|---|---|
+| HTTP keep-alive, one 6-byte response | 8,763 | **4,671** | 19,528 | **4.2× better** |
+| WebSocket, upgraded and never spoken to | 21,619 | **5,183** | 7,836 | **1.5× better** |
+| WebSocket, one 6-byte echo | 21,561 | **5,183** | 9,598 | **1.9× better** |
+| WebSocket, one 60 KiB echo | 87,101 | **5,186** | 9,685 | **1.9× better** |
+
+gws was taken to 10,000 as well rather than left at the 2,000 the first run
+stopped at, because a comparison where one side is converged and the other is
+not is a comparison with a thumb on it. It cost one command and it moved gws's
+best row in gws's favour — the idle socket reads 8,206 at 2,000 and **7,836 at
+10,000**, so the margin on that row is 1.5× rather than the 1.6× a shorter run
+would have published. **Run the other side out too, especially when it helps
+them**; the number that survives is worth more than the one that flatters.
 
 The first column is why the comparison was worth running. gws was ahead on the
 idle socket by a quarter and ahead on the 60 KiB one by **7.3×**, and both of
@@ -457,44 +527,100 @@ WebSocket needs:
 Throughput, same machine, both servers pinned to the same four physical cores
 and driven by the same client — `bench/compare/wsload/`, which uses gws's own
 client so neither side is measured through a different implementation. 64
-connections, 64-byte payloads, serial round trips, 20 seconds:
+connections, serial round trips, 20 seconds after a 3-second warm-up, the two
+servers started **alternately in one session** so neither gets a colder machine
+than the other:
 
-| | nilo | gws |
+| payload | run | nilo | gws | nilo − gws |
+|---|---|---|---|---|
+| 64 B | 1 | **1,672,617 msg/s** | 1,563,759 | +7.0% |
+| 64 B | 2 | **1,685,719 msg/s** | 1,558,146 | +8.2% |
+| 1 KiB | 1 | **1,592,039 msg/s** | 1,486,730 | +7.1% |
+| 1 KiB | 2 | **1,582,707 msg/s** | 1,511,168 | +4.7% |
+
+| percentile | nilo | gws |
 |---|---|---|
-| echo throughput, run 1 | **1,736,133 msg/s** | 1,615,326 |
-| echo throughput, run 2 | **1,703,176 msg/s** | 1,587,149 |
-| p50 | **31–32µs** | 33–34µs |
-| p99 | **97–100µs** | 112–116µs |
-| p999 | **173–258µs** | 328–368µs |
+| p50 | **32–34µs** | 34–35µs |
+| p90 | **62–65µs** | 70–74µs |
+| p99 | **102–112µs** | 121–128µs |
+| p999 | **304–419µs** | 460–493µs |
 
-**7.4% on throughput, 14% on p99, 40% on p999 — a real win and a narrow one on
-the headline, and the number is only honest because both were pinned.** An
-earlier unpinned run had gws at 1,029,308 msg/s and would have been reported as
-nilo winning by 68%. That was the load generator and the server fighting over
-cores, not the two libraries, and it is the same trap `bench/bench.sh` unpinned
-falls into on the HTTP side.
+**nilo is ahead on every run, by 5–8% on throughput and 12–15% on p99, and the
+spread between runs is as wide as half the margin.** Quote it as "about 7%",
+not as a figure with a decimal point in it: four runs put it at 7.0, 8.2, 7.1
+and 4.7, and a fifth would land somewhere in that band too. The tail is the
+firmer of the two claims — nilo's p999 is better than gws's in every run by
+more than either one's spread.
 
-Two things the table cannot say. gws's per-connection figure is still falling
-at 2,000 sockets (11,346 → 9,093 raw for the idle row) where nilo's is flat to
-within 30 bytes, so the two are converging from opposite directions and gws
-would need a bigger run to pin down. And every gws number moves with when the
-collector last ran — its idle row read 7,989 one afternoon and 8,247 the next,
-against nilo moving by eight — which is why both readings are in
-`bench/result/ws-idle.json` and why the gws column deserves less precision than
-it is printed with.
+The number is only honest because both sides were pinned. An earlier unpinned
+run had gws at 1,029,308 msg/s and would have been reported as nilo winning by
+68%. That was the load generator and the server fighting over cores, not the two
+libraries, and it is the same trap `bench/bench.sh` unpinned falls into on the
+HTTP side.
+
+Two things the table cannot say. **gws's figure has still not converged at
+10,000, where nilo's settles to the byte by 5,000.** On the idle row its raw
+marginal runs 11,543 → 9,183 → 7,954 → 8,486 → 8,033 while its average after GC
+runs 10,043 → 8,724 → 8,253 → 7,805 → 7,836; the two are still 200 bytes apart
+at the last step, which by the test applied to nilo's own table means the number
+is not yet a property of a connection. It is falling, so a longer run moves it
+further in gws's favour, and **7,836 should be read as an upper bound rather
+than a figure.** And every gws number moves with when the collector last ran:
+its idle row has read 7,989, 8,247, 8,206 and 7,836 across four runs, against
+nilo moving by four bytes. Every reading is in `bench/result/ws-idle.json`, and
+**the gws column deserves less precision than it is printed with** — treat it as
+8k, 10k, 20k. The ratio is what survives, and at 1.5× on gws's best row it
+survives with room to spare.
 
 ### What is not measured
 
-**A message big enough to be worth pooling, under load.** Every throughput
-figure here is 64 bytes, which never leaves one page of the free list's buffer.
-What a 60 KiB message costs at a thousand messages a second — where the free
-list's byte budget starts refusing spares and the allocator gets called — is
+**A message big enough to be worth pooling, under load.** The throughput
+figures go up to 1 KiB, which still never leaves the first page of the free
+list's buffer. What a 60 KiB message costs at a thousand messages a second —
+where the byte budget starts refusing spares and the allocator gets called — is
 the number that would decide whether `keep_bytes` is right, and nothing here
-answers it.
+answers it. The memory table has the 60 KiB row but only one message per socket,
+which is the opposite corner: it proves the buffer is given *back*, not what
+handing it back and forth costs when it never goes quiet.
 
 **Compression.** gws was run with `PermessageDeflate` off, which is the shape
 that matches nilo and the one kindest to gws's memory number. A deployment that
 turns it on is a different comparison in both directions.
+
+## Binary size
+
+The fourth axis of [ADR 0018](../../docs/adr/0018-the-trade-budget-has-three-axes.md),
+and the one this change spends. Stripped `ReleaseFast`, every example rather
+than the usual two, against `0492be0` **built from a `git archive` of that
+commit into a scratch directory** rather than quoted from the table in
+ADR 0018 — the whole reason that rule exists is that the published figure and
+the same binary rebuilt months later are not the same number.
+
+| binary | `0492be0` | `dcadb46` | delta |
+|---|---|---|---|
+| `example-hello` | 886,680 | 887,920 | **+1,240** |
+| `example-stream` | 907,032 | 908,320 | +1,288 |
+| `example-chat` | 919,912 | 922,392 | **+2,480** |
+| `example-forms` | 950,368 | 951,688 | +1,320 |
+| `example-rest` | 1,032,968 | 1,034,304 | **+1,336** |
+| `example-spa` | 1,044,992 | 1,046,248 | +1,256 |
+| `example-orders` | 1,125,256 | 1,126,704 | +1,448 |
+| `example-outbound` | 1,585,848 | 1,587,136 | +1,288 |
+| `nilo-hello` (the benchmark server) | 890,384 | 892,896 | +2,512 |
+
+**Every example pays, which is what "unconditional" means and is the point of
+measuring all eight rather than two.** The floor is 1,240 bytes: cold paths
+that used to be inlined copies are now real functions, and that is what buys
+the connection loop's frame a single page. `chat` is the top of the range at
+2,480 because it is the one example that opens a WebSocket and so links the
+handover as well.
+
+`nilo-hello` is +2,512 rather than +1,240 on nearly the same source, which is
+worth noticing before somebody quotes the wrong one: it is `bench/main.zig`,
+not `examples/hello`, and it is a different program. **A row in the ADR 0018
+table means the example, and the two names are one character apart.**
+
+0.14% of the binary, for 4,096 bytes on every connection the process holds.
 
 ## Reproducing this
 
@@ -521,7 +647,18 @@ zig build bench-ws-server -Doptimize=ReleaseFast
 
 # `both` starts and stops each server itself; `nilo` or `gws` does one.
 STEPS=500,1000,2000 python3 bench/ws_idle.py both
+
+# far enough out that marginal meets average — this is the run to trust,
+# and both sides get it
+STEPS=500,1000,2000,5000,10000 python3 bench/ws_idle.py nilo
+STEPS=500,1000,2000,5000,10000 python3 bench/ws_idle.py gws
 ```
+
+**Take it to 10,000 before quoting a marginal figure.** At 2,000 sockets two of
+the rows above still carry the first message's buffer divided by too small an
+N, and read 60 bytes high. The tell is that marginal and average disagree; when
+they meet, the number is a property of a connection. Every step costs about
+fifteen seconds, so the longer run is minutes rather than an afternoon.
 
 WebSocket throughput, both servers driven by the same client so neither is
 measured through a different implementation:
@@ -532,11 +669,23 @@ measured through a different implementation:
 IDLE_MS=0 taskset -c 0-3,8-11 ./zig-out/bin/nilo-bench-ws-server &
 taskset -c 4-7,12-15 ./bench/compare/wsload/wsload \
     -url ws://127.0.0.1:8789/ws/small -conns 64 -d 20s -warmup 3s -payload 64
+
+# the same client against gws, on the same cores; `-payload 1024` for the
+# second pair of rows
+taskset -c 0-3,8-11 ./bench/compare/gws/gws-bench &
+taskset -c 4-7,12-15 ./bench/compare/wsload/wsload \
+    -url ws://127.0.0.1:8790/ws -conns 64 -d 20s -warmup 3s -payload 64
 ```
 
 **Pin both sides or the number is about the scheduler.** Unpinned, gws measures
-1,029,308 msg/s on this machine and pinned it measures 1,595,350 — a 55%
-difference that has nothing to do with gws.
+1,029,308 msg/s on this machine and pinned it measures 1,558,146–1,563,759 — a
+52% difference that has nothing to do with gws.
+
+**Start them alternately, not one library's runs and then the other's.** This
+box drifts by 8% over a few minutes; four consecutive runs of one server and
+then four of the other would charge the drift to whichever went second. Every
+comparison in this file is interleaved for that reason, and the HTTP
+before/after table is four `before, after` pairs rather than three of each.
 
 The live chain a suspended connection holds — the number that decides how many
 pages it costs — is not exposed anywhere, and is read by printing it from
@@ -558,6 +707,42 @@ pinning. Unpinned on this machine it reports 1,071,374 req/s with a p99 of
 worse, because the server asks for one thread per CPU and then the load
 generator wants four more. The script is the convenient form; the pinned
 commands are the ones that measure something.
+
+## Can these be pushed further
+
+Ranked, so the next person starts here rather than at the top of the file.
+
+**1. The 4,096 bytes is a floor, not a target.** A parked connection holds one
+page of stack, and the live chain under it is 2,105 bytes on HTTP and 2,617 on
+a WebSocket — both comfortably inside the page and neither anywhere near the
+next crossing down, because there isn't one. **Halving the live chain again
+would buy nothing**: the kernel charges a page. Anyone who reads the live-chain
+table and reaches for another 500 bytes is optimising a number that no longer
+converts into memory. This is the single most likely mistake to make from this
+document.
+
+**2. What is left is 573 bytes on HTTP and 1,087 on a WebSocket, and nobody
+knows what they are.** Subtract the page from 4,669 and 5,183. That remainder
+is the whole of the remaining budget and it has never been broken down — it is
+the connection's own structures, whatever the read and write buffers do not
+give back, and the 514-byte gap between the two rows is presumably `Socket`.
+**Measuring it is cheap and has not been done**, which makes it the first thing
+to run, not the first thing to optimise. It is also 21% of a WebSocket's cost,
+so it is the only lever here with a number attached that is worth having.
+
+**3. Below one page per connection needs a different architecture, and that is
+a decision rather than a lever.** nilo parks a fiber per connection, and a
+parked fiber holds at least one page. gws does not — a goroutine's stack starts
+at 2 KB and grows — which is most of why its idle socket is within 1.6× of
+nilo's despite a garbage collector. Going lower means not holding a fiber per
+connection: a state machine per connection, and the whole of nilo's API is that
+a handler is an ordinary function that can block. **The trade is the API, and
+it is not on the table.**
+
+**4. Throughput on the WebSocket path has never been profiled.** `zig build
+profile` measures a request; nothing measures a message. The 5–8% margin over
+gws is a black box — it could be the frame parser, the syscall count, or the
+scheduler, and no lever can be ranked until something says which.
 
 ## What is still missing
 

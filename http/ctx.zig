@@ -1080,7 +1080,7 @@ pub const Ctx = struct {
     /// the `Ctx`, the parsed head, the route match, none of which the loop can
     /// reach and all of which a suspended fiber holds (ADR 0063). Handing the
     /// loop back lets the request unwind first: measured, an upgraded
-    /// connection nobody has spoken to went from 9,290 bytes to 5,186.
+    /// connection nobody has spoken to went from 9,290 bytes to 5,183.
     ///
     /// `state` is what the handler knows and the loop needs — a name off the
     /// query, the room this path belongs to. Pass `{}` when there is nothing.

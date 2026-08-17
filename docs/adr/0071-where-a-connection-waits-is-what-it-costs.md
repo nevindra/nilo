@@ -5,7 +5,7 @@ suspended fiber holds its stack, wrote the rule down, and recorded the fix as
 blocked on zio. **Both halves of that were wrong.** The block did not exist,
 and releasing the stack was not the fix. This ADR is what replaced it, and it
 took a keep-alive connection from **8,767 bytes to 4,669** and an idle
-WebSocket from **9,290 to 5,186**.
+WebSocket from **9,290 to 5,183**.
 
 ## The block that was not there
 
@@ -144,45 +144,59 @@ cheap one.
 
 ## What it costs
 
-Against [ADR 0018](./0018-the-trade-budget-has-three-axes.md)'s four axes,
-measured on the same machine in one sitting — `bench/result/http.md` has the
-runs:
+Against [ADR 0018](./0018-the-trade-budget-has-three-axes.md)'s four axes, on
+the merged tree (`dcadb46`) against a `git archive` rebuild of the commit it
+sits on (`0492be0`), the two servers run alternately in one session so a
+machine that drifts drifts under both. `bench/result/http.md` has every run:
 
 | axis | before | after |
 |---|---|---|
 | Allocations per request | 1 | 1 — unchanged, nothing here allocates |
 | Memory per idle keep-alive connection | 8,767 | **4,669** |
-| Memory per idle WebSocket | 9,290 | **5,186** |
-| Throughput, `GET /users/:id` | 1,424,878 req/s | **1,485,190** |
-| p99, the same | 61µs | **55µs** |
-| Throughput, 64-byte echo | 1,704,321 msg/s | 1,703,176–1,736,133 — unchanged |
-| Binary size, stripped `ReleaseFast` | 890,384 B | **891,672 B** — +1,288 |
+| Memory per idle WebSocket | 9,290 | **5,183** |
+| Throughput, `GET /users/:id` | 1,420,424 req/s | 1,429,293 — **unchanged** |
+| p99, the same | 59–82µs | 58–98µs — unchanged |
+| Throughput, 64-byte echo | 1,704,321 msg/s | 1,672,617–1,685,719 — unchanged |
+| Binary size, stripped `ReleaseFast`, `examples/hello` | 886,680 B | **887,920 B** — +1,240 |
 
-**Throughput went up, which was not the point and is worth explaining rather
-than banking.** A request that touches one page of stack instead of two takes
-fewer TLB entries and fewer faults, and the `noinline` calls it pays for are
-one call each on a path that was already making thousands. The echo figure is
-two runs either side of the before-number, so the honest reading of that row is
-*unchanged*, not *improved*.
+**Only the memory row moved, and that is the whole of the claim.** An earlier
+draft of this ADR read a single 1,485,190 against a single 1,424,878 and said
+throughput had gone up, reasoning that one page of stack instead of two costs
+fewer TLB entries. Four interleaved pairs put the difference at +0.6% with the
+sign changing between pairs and a spread of 8% inside each column — **one run
+each is not a comparison.** The claim is withdrawn rather than restated more
+carefully; a change that spends binary size to buy memory does not also need to
+have been free, and saying so would have cost this ADR its credibility on the
+row that is real.
 
-The 1,288 bytes are the cold paths becoming real functions instead of inlined
+The 1,240 bytes are the cold paths becoming real functions instead of inlined
 copies — `sendFailure`, `endAbandonedStream`, the two log helpers,
 `Socket.deliver`, `handleControl`, `ping` — plus one trampoline per distinct
-socket loop in the program. `nilo-hello` has no WebSocket route at all and
+socket loop in the program. `examples/hello` has no WebSocket route at all and
 still pays it, which is the disclosure ADR 0018 asks for rather than a defence
 of it: it is 0.14% of the binary, and it buys 4,096 bytes on every connection
-the process ever holds.
+the process ever holds. `examples/chat`, which does open a socket, pays 2,480.
 
 ## Consequences
 
 - **ADR 0018's memory axis is 4,669 bytes**, still a floor and still not a
   total: ADR 0063's finding stands unchanged, and a handler still adds every
   byte of stack it touches. `/ws/deep` — a loop that `@memset`s 64 KiB —
-  measures 70,767.
+  measures 70,719.
 - **ADR 0022's shape is superseded.** "A WebSocket is a handler that does not
   return" becomes "a WebSocket is a handler that hands its loop back". The rest
   of that ADR — the framing, the housekeeping frames, the closing handshake —
   is untouched.
+- **The comparison that prompted this is now won on both axes, and narrowly on
+  one of them.** [gws](https://github.com/lxzan/gws) was ahead on an idle
+  socket by up to 19% and on a socket that had seen a 60 KiB message by 9×;
+  it is now behind on every memory row by 1.5× to 4.2×, and behind on echo
+  throughput by 5–8% with both sides pinned to the same four cores. **The
+  throughput margin is small enough that it must be quoted as a band**, and
+  `bench/result/http.md` says why: four runs put it at 7.0, 8.2, 7.1 and 4.7
+  percent. The tail is the firmer claim — p999 is better in every run by more
+  than either side's spread. gws stays the control for this axis; a change that
+  regresses one of those rows should be visible in one command.
 - **An open WebSocket no longer counts as a request in flight.** It used to,
   because the loop ran inside `serveRequest` and the counter bracketed it, so
   every idle chat tab added the full grace period to a shutdown. That

@@ -326,7 +326,7 @@ in one sitting. Things get built here because the job is common, not because
 the job is interesting.
 
 **Quick.** One allocation per request. 4,669 bytes per idle connection for the
-framework itself, flat, and an idle WebSocket is 5,186 — plus whatever stack
+framework itself, flat, and an idle WebSocket is 5,183 — plus whatever stack
 your handler touches, which is held for as long as the connection is.
 Those are measurements with tests holding them in place, not adjectives.
 
@@ -408,7 +408,7 @@ Most frameworks say "fast" and "lightweight". Here are numbers instead:
 | | |
 |---|---|
 | **1 allocation** | per request. A test fails if it ever becomes 2. |
-| **4,669 bytes** | per idle connection, for the framework. Flat from 1,000 connections to 10,000. An idle WebSocket is 5,186. A handler adds the stack it touches ([ADR 0063](./docs/adr/0063-a-handlers-stack-is-per-connection.md), [ADR 0071](./docs/adr/0071-where-a-connection-waits-is-what-it-costs.md)). |
+| **4,669 bytes** | per idle connection, for the framework. Flat from 1,000 connections to 10,000. An idle WebSocket is 5,183. A handler adds the stack it touches ([ADR 0063](./docs/adr/0063-a-handlers-stack-is-per-connection.md), [ADR 0071](./docs/adr/0071-where-a-connection-waits-is-what-it-costs.md)). |
 | **55µs** | p99, 9× below Go's `net/http` and 11× below Fiber |
 | **5.4 MB** | idle server |
 

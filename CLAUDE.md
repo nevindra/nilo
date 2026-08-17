@@ -214,7 +214,7 @@ them are hard:
   allocation budget"` in `http/app.zig`. A DX feature may not add one to a path
   that did not ask for it.
 - **Memory per idle connection.** 4,669 bytes for the framework, flat, and
-  5,186 for an idle WebSocket — and that is a **floor rather than a total**. A
+  5,183 for an idle WebSocket — and that is a **floor rather than a total**. A
   suspended fiber holds its stack at its high-water mark, so a handler adds
   every byte of stack it ever touched, one for one, for the life of the
   connection: an ordinary database route measured 17,022
@@ -272,7 +272,7 @@ like it needs.** ADR 0063 recorded the stack fix as blocked on zio, wrote it
 into the roadmap and filed an issue; the call it needed was public in the
 pinned version, one file over. Nothing downstream ever re-tests a blocker.
 
-Five habits go with it, each of which caught something here:
+Six habits go with it, each of which caught something here:
 
 - **Say what the number was measured *through*.** Every figure in this cycle
   was taken across a Docker published port, and the same server over a unix
@@ -284,13 +284,28 @@ Five habits go with it, each of which caught something here:
 - **Put something next to it.** `/health`, `/fixed/:id` and `/deep/:id` exist
   in `bench/sql_server.zig` only so `/people/:id` has controls, and the fourth
   route is what proved the memory finding had nothing to do with the database.
-- **Build the before, do not quote it.** The primary metric was 1.31M req/s in
-  a published table and 1.42M on the same machine months later, so a change
-  measured against the published figure would have claimed a 9% win it did not
-  earn. `git archive HEAD | tar -x` into a scratch directory is one command.
+- **Build the before, do not quote it — then run both more than once.** The
+  primary metric was 1.31M req/s in a published table and 1.42M on the same
+  machine months later, so a change measured against the published figure would
+  have claimed a 9% win it did not earn. `git archive HEAD | tar -x` into a
+  scratch directory is one command. Doing that and then taking **one run each**
+  still published a 4% win that four interleaved pairs put at +0.6% with the
+  sign changing between pairs. Interleave them, and if the margin is inside the
+  spread, the answer is "unchanged".
+- **Take a per-connection figure out until marginal meets average, and take the
+  other side of the comparison out too.** At 2,000 sockets two WebSocket rows
+  read 60 bytes high and looked like a property of the socket; at 10,000 all
+  four collapsed onto 5,183. Marginal disagreeing with average means you are
+  still measuring a transient. Running gws to 10,000 as well cost one command
+  and moved its best row *in its favour*, from 8,206 to 7,836 — **run it out
+  especially when it helps them**, because a comparison where one side is
+  converged and the other is not has a thumb on it.
 - **Pin both sides, or the number is about the scheduler.** Unpinned, gws
   echoes 1,029,308 messages a second on this box; pinned to the cores nilo
-  gets, 1,587,149 against nilo's 1,703,176. The honest margin is 7.4%, not 68%.
+  gets, 1,558,146 against nilo's 1,685,719. The honest margin is 5–8%, not
+  68% — and it is a band rather than a figure because four runs put it at
+  7.0, 8.2, 7.1 and 4.7. **A margin narrower than its own spread is quoted
+  as a range or it is quoted wrong.**
 
 Then the lesson goes to `docs/history.md` and the decision to an ADR, the way
 everything else does. `bench/result/` is the raw record those two cite.

@@ -32,7 +32,7 @@ Because a suspended fiber holds its stack, and where a socket waits is what it
 costs while it waits. A handler that looped in place would be parked *inside*
 the request — holding the `Ctx`, the parsed head and the route match, none of
 which the loop can reach — for as long as the tab is open. Returning first lets
-all of that unwind: an idle socket costs **5,186 bytes** instead of 9,290
+all of that unwind: an idle socket costs **5,183 bytes** instead of 9,290
 ([ADR 0071](../adr/0071-where-a-connection-waits-is-what-it-costs.md)).
 
 ### Carrying something into the loop

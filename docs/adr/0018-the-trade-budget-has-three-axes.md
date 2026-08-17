@@ -64,7 +64,7 @@ Measured stripped, `ReleaseFast`, on the examples in this repository.
 | Parsing the database URL rather than letting a driver drop half the options ([ADR 0062](./0062-a-pool-that-dialled-itself-whatever-it-was-told.md)) | +0 | +0 |
 | Four routes in a benchmark, to find out what the memory axis actually measures ([ADR 0063](./0063-a-handlers-stack-is-per-connection.md)) | +0 | +0 |
 | An outbound HTTP client, `nilo_fetch` ([ADR 0070](./0070-a-fitting-borrows-the-loop.md)) | +0 | +0 |
-| Waiting at the connection loop's frame, and a WebSocket loop handed back to it ([ADR 0071](./0071-where-a-connection-waits-is-what-it-costs.md)) | +1,288 B | not taken |
+| Waiting at the connection loop's frame, and a WebSocket loop handed back to it ([ADR 0071](./0071-where-a-connection-waits-is-what-it-costs.md)) | +1,240 B | +1,336 B |
 
 `nilo_fetch` is +0 on both examples because neither imports it, and that is the
 whole of the row rather than an accident: a module nothing names is never
@@ -79,7 +79,7 @@ The second row is one measurement of six changes because they landed together, w
 
 The third row is nearly the same on both, which says what it is: the name renderer and the extra descriptions live in the document writer, and the document writer is linked in whether or not `docs()` is called — the same unconditional cost the first row is about, and the same open question in `docs/roadmap.md`.
 
-The ADR 0071 row is unconditional too, and is the only row here that is a *cost bought deliberately*: cold paths that used to be inlined copies are now real functions, which is what makes the connection loop's frame small enough to fit in a page. `hello` has no WebSocket route and pays all 1,288 bytes of it. 0.14% of the binary for 4,096 bytes on every connection the process holds is the trade, stated rather than defended.
+The ADR 0071 row is unconditional too, and is the only row here that is a *cost bought deliberately*: cold paths that used to be inlined copies are now real functions, which is what makes the connection loop's frame small enough to fit in a page. `hello` has no WebSocket route and pays all 1,240 bytes of it. 0.14% of the binary for 4,096 bytes on every connection the process holds is the trade, stated rather than defended. All eight examples were measured rather than two, because the row is unconditional and a row that claims to be unconditional should be checked against something that could disprove it: the spread is 1,240 to 2,480 bytes, and the top of it is `chat`, the one example that opens a WebSocket and so also links the handover. The numbers are in [`bench/result/http.md`](../../bench/result/http.md) with the baseline they were taken against.
 
 The fourth row is a real zero rather than a rounded one: the same three examples came out byte-for-byte identical, because both halves of that change — the message rewriting and the earlier check — happen while compiling and a message that is never produced is a string that never exists. It is a row rather than an omission because the rule is that a feature states its cost, and "none" is a number somebody may want to check later.
 

@@ -147,93 +147,141 @@
     "ws-small": {
       "label": "WebSocket, one 6-byte echo",
       "path": "/ws",
-      "base_kb": 9324,
+      "base_kb": 9304,
       "rows": [
         {
           "n": 500,
-          "rss_kb": 16044,
-          "gc_kb": 15148,
-          "per_conn": 13762.56,
-          "gc_per_conn": 11927.552,
-          "marginal": 13762.56
+          "rss_kb": 15804,
+          "gc_kb": 15036,
+          "per_conn": 13312.0,
+          "gc_per_conn": 11739.136,
+          "marginal": 13312.0
         },
         {
           "n": 1000,
-          "rss_kb": 21020,
-          "gc_kb": 19716,
-          "per_conn": 11976.704,
-          "gc_per_conn": 10641.408,
-          "marginal": 10190.848
+          "rss_kb": 21092,
+          "gc_kb": 19820,
+          "per_conn": 12070.912,
+          "gc_per_conn": 10768.384,
+          "marginal": 10829.824
         },
         {
           "n": 2000,
-          "rss_kb": 31592,
-          "gc_kb": 29136,
-          "per_conn": 11401.216,
-          "gc_per_conn": 10143.744,
-          "marginal": 10825.728
+          "rss_kb": 31696,
+          "gc_kb": 29020,
+          "per_conn": 11464.704,
+          "gc_per_conn": 10094.592,
+          "marginal": 10858.496
+        },
+        {
+          "n": 5000,
+          "rss_kb": 64708,
+          "gc_kb": 58576,
+          "per_conn": 11346.7392,
+          "gc_per_conn": 10090.9056,
+          "marginal": 11268.096
+        },
+        {
+          "n": 10000,
+          "rss_kb": 112388,
+          "gc_kb": 103036,
+          "per_conn": 10555.8016,
+          "gc_per_conn": 9598.1568,
+          "marginal": 9764.864
         }
       ]
     },
     "http": {
       "label": "HTTP keep-alive, one 6-byte response",
       "path": "/health",
-      "base_kb": 9308,
+      "base_kb": 9464,
       "rows": [
         {
           "n": 500,
-          "rss_kb": 19728,
-          "gc_kb": 19676,
-          "per_conn": 21340.16,
-          "gc_per_conn": 21233.664,
-          "marginal": 21340.16
+          "rss_kb": 19660,
+          "gc_kb": 19748,
+          "per_conn": 20881.408,
+          "gc_per_conn": 21061.632,
+          "marginal": 20881.408
         },
         {
           "n": 1000,
-          "rss_kb": 29664,
-          "gc_kb": 29236,
-          "per_conn": 20844.544,
-          "gc_per_conn": 20406.272,
-          "marginal": 20348.928
+          "rss_kb": 30408,
+          "gc_kb": 29512,
+          "per_conn": 21446.656,
+          "gc_per_conn": 20529.152,
+          "marginal": 22011.904
         },
         {
           "n": 2000,
-          "rss_kb": 49184,
-          "gc_kb": 48200,
-          "per_conn": 20416.512,
-          "gc_per_conn": 19912.704,
-          "marginal": 19988.48
+          "rss_kb": 49288,
+          "gc_kb": 48284,
+          "per_conn": 20389.888,
+          "gc_per_conn": 19875.84,
+          "marginal": 19333.12
+        },
+        {
+          "n": 5000,
+          "rss_kb": 106316,
+          "gc_kb": 105100,
+          "per_conn": 19835.2896,
+          "gc_per_conn": 19586.2528,
+          "marginal": 19465.557333333334
+        },
+        {
+          "n": 10000,
+          "rss_kb": 202376,
+          "gc_kb": 200172,
+          "per_conn": 19754.1888,
+          "gc_per_conn": 19528.4992,
+          "marginal": 19673.088
         }
       ]
     },
     "ws-idle": {
       "label": "WebSocket, upgraded and never spoken to",
       "path": "/ws",
-      "base_kb": 9332,
+      "base_kb": 9456,
       "rows": [
         {
           "n": 500,
-          "rss_kb": 14872,
-          "gc_kb": 14260,
-          "per_conn": 11345.92,
-          "gc_per_conn": 10092.544,
-          "marginal": 11345.92
+          "rss_kb": 15092,
+          "gc_kb": 14360,
+          "per_conn": 11542.528,
+          "gc_per_conn": 10043.392,
+          "marginal": 11542.528
         },
         {
           "n": 1000,
-          "rss_kb": 19548,
-          "gc_kb": 17880,
-          "per_conn": 10461.184,
-          "gc_per_conn": 8753.152,
-          "marginal": 9576.448
+          "rss_kb": 19576,
+          "gc_kb": 17976,
+          "per_conn": 10362.88,
+          "gc_per_conn": 8724.48,
+          "marginal": 9183.232
         },
         {
           "n": 2000,
-          "rss_kb": 28428,
-          "gc_kb": 25440,
-          "per_conn": 9777.152,
-          "gc_per_conn": 8247.296,
-          "marginal": 9093.12
+          "rss_kb": 27344,
+          "gc_kb": 25576,
+          "per_conn": 9158.656,
+          "gc_per_conn": 8253.44,
+          "marginal": 7954.432
+        },
+        {
+          "n": 5000,
+          "rss_kb": 52204,
+          "gc_kb": 47564,
+          "per_conn": 8754.7904,
+          "gc_per_conn": 7804.5184,
+          "marginal": 8485.546666666667
+        },
+        {
+          "n": 10000,
+          "rss_kb": 91428,
+          "gc_kb": 85984,
+          "per_conn": 8393.9328,
+          "gc_per_conn": 7836.4672,
+          "marginal": 8033.0752
         }
       ]
     },
@@ -244,27 +292,43 @@
       "rows": [
         {
           "n": 500,
-          "rss_kb": 16152,
-          "gc_kb": 15316,
-          "per_conn": 13967.36,
-          "gc_per_conn": 12255.232,
-          "marginal": 13967.36
+          "rss_kb": 16772,
+          "gc_kb": 15204,
+          "per_conn": 15237.12,
+          "gc_per_conn": 12025.856,
+          "marginal": 15237.12
         },
         {
           "n": 1000,
-          "rss_kb": 21840,
-          "gc_kb": 19816,
-          "per_conn": 12808.192,
-          "gc_per_conn": 10735.616,
-          "marginal": 11649.024
+          "rss_kb": 21800,
+          "gc_kb": 19792,
+          "per_conn": 12767.232,
+          "gc_per_conn": 10711.04,
+          "marginal": 10297.344
         },
         {
           "n": 2000,
-          "rss_kb": 32868,
-          "gc_kb": 29300,
-          "per_conn": 12050.432,
-          "gc_per_conn": 10223.616,
-          "marginal": 11292.672
+          "rss_kb": 32432,
+          "gc_kb": 29196,
+          "per_conn": 11827.2,
+          "gc_per_conn": 10170.368,
+          "marginal": 10887.168
+        },
+        {
+          "n": 5000,
+          "rss_kb": 63036,
+          "gc_kb": 56844,
+          "per_conn": 10998.5792,
+          "gc_per_conn": 9730.4576,
+          "marginal": 10446.165333333332
+        },
+        {
+          "n": 10000,
+          "rss_kb": 110416,
+          "gc_kb": 103908,
+          "per_conn": 10351.0016,
+          "gc_per_conn": 9684.5824,
+          "marginal": 9703.424
         }
       ]
     }
@@ -273,186 +337,282 @@
     "http": {
       "label": "HTTP keep-alive, one 6-byte response",
       "path": "/health",
-      "base_kb": 8096,
+      "base_kb": 8112,
       "rows": [
         {
           "n": 500,
-          "rss_kb": 10364,
-          "gc_kb": 10364,
+          "rss_kb": 10380,
+          "gc_kb": 10380,
           "per_conn": 4644.864,
           "gc_per_conn": 4644.864,
           "marginal": 4644.864
         },
         {
           "n": 1000,
-          "rss_kb": 12644,
-          "gc_kb": 12644,
+          "rss_kb": 12660,
+          "gc_kb": 12660,
           "per_conn": 4657.152,
           "gc_per_conn": 4657.152,
           "marginal": 4669.44
         },
         {
           "n": 2000,
-          "rss_kb": 17216,
-          "gc_kb": 17216,
+          "rss_kb": 17224,
+          "gc_kb": 17224,
+          "per_conn": 4665.344,
+          "gc_per_conn": 4665.344,
+          "marginal": 4673.536
+        },
+        {
+          "n": 5000,
+          "rss_kb": 30912,
+          "gc_kb": 30912,
           "per_conn": 4669.44,
           "gc_per_conn": 4669.44,
-          "marginal": 4681.728
+          "marginal": 4672.170666666667
+        },
+        {
+          "n": 10000,
+          "rss_kb": 53724,
+          "gc_kb": 53724,
+          "per_conn": 4670.6688,
+          "gc_per_conn": 4670.6688,
+          "marginal": 4671.8976
         }
       ]
     },
     "ws-idle": {
       "label": "WebSocket, upgraded and never spoken to",
       "path": "/ws/idle",
-      "base_kb": 8100,
+      "base_kb": 8116,
       "rows": [
         {
           "n": 500,
-          "rss_kb": 10616,
-          "gc_kb": 10616,
-          "per_conn": 5152.768,
-          "gc_per_conn": 5152.768,
-          "marginal": 5152.768
+          "rss_kb": 10636,
+          "gc_kb": 10636,
+          "per_conn": 5160.96,
+          "gc_per_conn": 5160.96,
+          "marginal": 5160.96
         },
         {
           "n": 1000,
-          "rss_kb": 13152,
-          "gc_kb": 13152,
-          "per_conn": 5173.248,
-          "gc_per_conn": 5173.248,
+          "rss_kb": 13172,
+          "gc_kb": 13172,
+          "per_conn": 5177.344,
+          "gc_per_conn": 5177.344,
           "marginal": 5193.728
         },
         {
           "n": 2000,
-          "rss_kb": 18216,
-          "gc_kb": 18216,
-          "per_conn": 5179.392,
-          "gc_per_conn": 5179.392,
-          "marginal": 5185.536
+          "rss_kb": 18240,
+          "gc_kb": 18240,
+          "per_conn": 5183.488,
+          "gc_per_conn": 5183.488,
+          "marginal": 5189.632
+        },
+        {
+          "n": 5000,
+          "rss_kb": 33424,
+          "gc_kb": 33424,
+          "per_conn": 5183.0784,
+          "gc_per_conn": 5183.0784,
+          "marginal": 5182.805333333334
+        },
+        {
+          "n": 10000,
+          "rss_kb": 58732,
+          "gc_kb": 58732,
+          "per_conn": 5183.0784,
+          "gc_per_conn": 5183.0784,
+          "marginal": 5183.0784
         }
       ]
     },
     "ws-small": {
       "label": "WebSocket, one 6-byte echo",
       "path": "/ws/small",
-      "base_kb": 8096,
+      "base_kb": 8112,
       "rows": [
         {
           "n": 500,
-          "rss_kb": 10820,
-          "gc_kb": 10820,
-          "per_conn": 5578.752,
-          "gc_per_conn": 5578.752,
-          "marginal": 5578.752
+          "rss_kb": 10864,
+          "gc_kb": 10864,
+          "per_conn": 5636.096,
+          "gc_per_conn": 5636.096,
+          "marginal": 5636.096
         },
         {
           "n": 1000,
-          "rss_kb": 13384,
-          "gc_kb": 13384,
-          "per_conn": 5414.912,
-          "gc_per_conn": 5414.912,
-          "marginal": 5251.072
+          "rss_kb": 13396,
+          "gc_kb": 13396,
+          "per_conn": 5410.816,
+          "gc_per_conn": 5410.816,
+          "marginal": 5185.536
         },
         {
           "n": 2000,
-          "rss_kb": 18456,
-          "gc_kb": 18456,
+          "rss_kb": 18472,
+          "gc_kb": 18472,
           "per_conn": 5304.32,
           "gc_per_conn": 5304.32,
-          "marginal": 5193.728
+          "marginal": 5197.824
+        },
+        {
+          "n": 5000,
+          "rss_kb": 33676,
+          "gc_kb": 33676,
+          "per_conn": 5235.5072,
+          "gc_per_conn": 5235.5072,
+          "marginal": 5189.632
+        },
+        {
+          "n": 10000,
+          "rss_kb": 58984,
+          "gc_kb": 58984,
+          "per_conn": 5209.2928,
+          "gc_per_conn": 5209.2928,
+          "marginal": 5183.0784
         }
       ]
     },
     "ws-big": {
       "label": "WebSocket, 64 KiB receive buffer, one 6-byte echo",
       "path": "/ws/big",
-      "base_kb": 8096,
+      "base_kb": 8112,
       "rows": [
         {
           "n": 500,
-          "rss_kb": 10664,
-          "gc_kb": 10664,
-          "per_conn": 5259.264,
-          "gc_per_conn": 5259.264,
-          "marginal": 5259.264
+          "rss_kb": 10692,
+          "gc_kb": 10692,
+          "per_conn": 5283.84,
+          "gc_per_conn": 5283.84,
+          "marginal": 5283.84
         },
         {
           "n": 1000,
-          "rss_kb": 13212,
-          "gc_kb": 13212,
+          "rss_kb": 13228,
+          "gc_kb": 13228,
           "per_conn": 5238.784,
           "gc_per_conn": 5238.784,
-          "marginal": 5218.304
+          "marginal": 5193.728
         },
         {
           "n": 2000,
-          "rss_kb": 18084,
-          "gc_kb": 18084,
-          "per_conn": 5113.856,
-          "gc_per_conn": 5113.856,
-          "marginal": 4988.928
+          "rss_kb": 18300,
+          "gc_kb": 18300,
+          "per_conn": 5216.256,
+          "gc_per_conn": 5216.256,
+          "marginal": 5193.728
+        },
+        {
+          "n": 5000,
+          "rss_kb": 33488,
+          "gc_kb": 33488,
+          "per_conn": 5197.0048,
+          "gc_per_conn": 5197.0048,
+          "marginal": 5184.170666666667
+        },
+        {
+          "n": 10000,
+          "rss_kb": 58792,
+          "gc_kb": 58792,
+          "per_conn": 5189.632,
+          "gc_per_conn": 5189.632,
+          "marginal": 5182.2592
         }
       ]
     },
     "ws-big-msg": {
       "label": "WebSocket, one 60 KiB echo",
       "path": "/ws/big",
-      "base_kb": 8164,
+      "base_kb": 8112,
       "rows": [
         {
           "n": 500,
-          "rss_kb": 11648,
-          "gc_kb": 11648,
-          "per_conn": 7135.232,
-          "gc_per_conn": 7135.232,
-          "marginal": 7135.232
+          "rss_kb": 11536,
+          "gc_kb": 11536,
+          "per_conn": 7012.352,
+          "gc_per_conn": 7012.352,
+          "marginal": 7012.352
         },
         {
           "n": 1000,
-          "rss_kb": 14172,
-          "gc_kb": 14172,
-          "per_conn": 6152.192,
-          "gc_per_conn": 6152.192,
-          "marginal": 5169.152
+          "rss_kb": 14128,
+          "gc_kb": 14128,
+          "per_conn": 6160.384,
+          "gc_per_conn": 6160.384,
+          "marginal": 5308.416
         },
         {
           "n": 2000,
-          "rss_kb": 19232,
-          "gc_kb": 19232,
-          "per_conn": 5666.816,
-          "gc_per_conn": 5666.816,
-          "marginal": 5181.44
+          "rss_kb": 19184,
+          "gc_kb": 19184,
+          "per_conn": 5668.864,
+          "gc_per_conn": 5668.864,
+          "marginal": 5177.344
+        },
+        {
+          "n": 5000,
+          "rss_kb": 34380,
+          "gc_kb": 34380,
+          "per_conn": 5379.6864,
+          "gc_per_conn": 5379.6864,
+          "marginal": 5186.901333333333
+        },
+        {
+          "n": 10000,
+          "rss_kb": 59700,
+          "gc_kb": 59700,
+          "per_conn": 5282.6112,
+          "gc_per_conn": 5282.6112,
+          "marginal": 5185.536
         }
       ]
     },
     "ws-deep": {
       "label": "WebSocket, 64 KiB of stack touched",
       "path": "/ws/deep",
-      "base_kb": 8160,
+      "base_kb": 8112,
       "rows": [
         {
           "n": 500,
-          "rss_kb": 42864,
-          "gc_kb": 42864,
-          "per_conn": 71073.792,
-          "gc_per_conn": 71073.792,
-          "marginal": 71073.792
+          "rss_kb": 42820,
+          "gc_kb": 42820,
+          "per_conn": 71081.984,
+          "gc_per_conn": 71081.984,
+          "marginal": 71081.984
         },
         {
           "n": 1000,
           "rss_kb": 77416,
           "gc_kb": 77416,
-          "per_conn": 70918.144,
-          "gc_per_conn": 70918.144,
-          "marginal": 70762.496
+          "per_conn": 70967.296,
+          "gc_per_conn": 70967.296,
+          "marginal": 70852.608
         },
         {
           "n": 2000,
-          "rss_kb": 146524,
-          "gc_kb": 146524,
-          "per_conn": 70842.368,
-          "gc_per_conn": 70842.368,
-          "marginal": 70766.592
+          "rss_kb": 146480,
+          "gc_kb": 146480,
+          "per_conn": 70844.416,
+          "gc_per_conn": 70844.416,
+          "marginal": 70721.536
+        },
+        {
+          "n": 5000,
+          "rss_kb": 353684,
+          "gc_kb": 353684,
+          "per_conn": 70773.1456,
+          "gc_per_conn": 70773.1456,
+          "marginal": 70725.632
+        },
+        {
+          "n": 10000,
+          "rss_kb": 698992,
+          "gc_kb": 698992,
+          "per_conn": 70746.112,
+          "gc_per_conn": 70746.112,
+          "marginal": 70719.0784
         }
       ]
     }

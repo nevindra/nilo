@@ -25,7 +25,7 @@ Then read these four, in this order. They're the whole background you need:
 | [`README.md`](./README.md) | what this is and what it refuses to be |
 | [`CONTEXT.md`](./CONTEXT.md) | the vocabulary, and the words this project won't use |
 | [`CLAUDE.md`](./CLAUDE.md) | the working brief: layout, commands, invariants, conventions |
-| [`docs/adr/`](./docs/adr/) | 70 decisions, each one naming the alternative it beat |
+| [`docs/adr/`](./docs/adr/) | 71 decisions, each one naming the alternative it beat |
 
 The ADRs are the important one. Before you propose a design change, check
 whether it already has a file. "Why not X?" usually has an answer on record, and
@@ -183,10 +183,13 @@ being held for no reason at all
 three were found by re-measuring. A number with no run behind it decays into a
 claim.
 
-Pin both sides of a comparison, too. Unpinned, gws echoes 1,029,308 messages a
+Pin both sides of a comparison, too, and start them alternately rather than all
+of one and then all of the other. Unpinned, gws echoes 1,029,308 messages a
 second on the machine in `bench/result/http.md`; pinned to the cores nilo gets,
-1,587,149 against nilo's 1,703,176. Publishing the first would have claimed a
-68% win where the real one is 7.4%.
+1,558,146 against nilo's 1,685,719. Publishing the first would have claimed a
+68% win where the real one is 5–8% — a band, because four runs put it at 7.0,
+8.2, 7.1 and 4.7, and a margin narrower than its own spread is quoted as a
+range or it is quoted wrong.
 
 The roadmap holds nothing that's finished. When something ships, its entry
 leaves entirely. No strikethrough, no "done", no summary of how it went. The

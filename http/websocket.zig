@@ -19,7 +19,7 @@
 //! the request machinery for the life of the socket, and a suspended fiber
 //! holds every byte of its stack (ADR 0063). So the handler hands the loop
 //! back and the connection loop runs it, which is `Handover` below and
-//! ADR 0071: 9,290 bytes an idle socket down to 5,186.
+//! ADR 0071: 9,290 bytes an idle socket down to 5,183.
 //!
 //! Memory is one buffer per message **in flight**, not one per open socket. It
 //! comes from the executor's free list when a message starts arriving and goes
