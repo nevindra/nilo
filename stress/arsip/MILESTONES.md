@@ -37,7 +37,7 @@ a file `zig fetch` would not have shipped.
 
 Done: `zig build`, `zig build run`, `zig build test` (Debug and ReleaseSafe).
 
-## M1 — The API
+## M1 — The API ✅
 
 The domain, in memory, with no infrastructure anywhere: documents inside
 folders, a body with a struct and a list inside it, query structs for filtering
@@ -50,6 +50,11 @@ enums in bodies, tagged unions, optional nested structs, a field name that is a
 Zig keyword, a list of lists — because the claim under test is that the
 compiler is the check, and a claim like that is only interesting where it might
 break.
+
+Done: 13 routes, 42 tests in both modes, `src/copy.zig` for the `Str` boundary.
+Nothing on the list had to be dropped. Five findings, of which the one worth
+acting on is the pair of byte-identical schemas a `Meta_Str`/`Meta_Text` split
+puts in every generated client.
 
 ## M2 — Identity
 
