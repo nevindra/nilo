@@ -48,6 +48,31 @@ driver call it wraps** — a quarter of one percent of a key lookup. That number
 is the whole run-time price of the typed layer over this driver, and it had
 never been measured before.
 
+### And what it is worth to a server, which is more
+
+The table above is one connection sending one statement at a time. A server is
+not that, and the difference turns out to matter in nilo's favour.
+`bench/sql_server.zig` with `PREPARED=0` against the same binary with it on,
+wrk, same box:
+
+| | before | after | |
+|---|---|---|---|
+| **one request at a time** (c=1) | 14,876 req/s, p50 64.5 µs | 18,456 req/s, p50 52 µs | **+24%** |
+| pool 8, c=32 | 89,293 req/s, p99 848 µs | 134,971 req/s, p99 564 µs | **+51%** |
+| pool 32, c=64 | 105,667 req/s, p99 1.38 ms | 176,635 req/s, p99 0.99 ms | **+67%** |
+| pool 64, c=64 | 112,030 req/s, p99 1.99 ms | 190,945 req/s, p99 1.88 ms | **+70%** |
+
+**The first row is the honest one and the rest are the interesting ones.**
+Unloaded, 12 µs off a 64 µs request is the 19% arithmetic says it should be.
+Loaded, it is two to three times that — because **a pool connection is a
+serial queue**, and time not spent holding one is capacity. Cutting 30% off
+how long a query holds its connection raises what that connection can push by
+about 43%, and Postgres spending less of itself on Parse gives back the rest.
+
+The caveat belongs next to the number: this benchmark's request *is* the
+query. A service that does other work per request sees the same absolute
+12 µs against a larger total.
+
 ## What was decided
 
 **On by default, keyed by a 128-bit hash of the statement text.**
@@ -118,10 +143,13 @@ Against [ADR 0018](./0018-the-trade-budget-has-three-axes.md)'s four axes:
   driver's cache is per connection and allocated when the connection is.
 - **Memory per idle connection.** Nothing on an HTTP connection. On a *database*
   connection it is one entry per distinct statement that connection has sent —
-  bounded by the program, and paid by pg.zig rather than by nilo.
-- **Throughput and p99.** −11.4 µs on a key lookup through `db.find` (30.1%),
-  −13.3 µs on a page with a sort (14.1%). This is the one axis a feature has
-  ever *bought* rather than spent.
+  bounded by the program, and paid by pg.zig rather than by nilo. Measured at a
+  pool of 64 with one statement in flight: **56 kB across the pool, 0.9 kB a
+  connection.**
+- **Throughput and p99.** The axis this bought rather than spent. −11.4 µs on a
+  key lookup through `db.find` (30.1%) and −13.3 µs on a page with a sort
+  (14.1%) at the driver; **+51% to +70% requests a second through a server**,
+  with p50 down 33–45%.
 - **Binary size.** +0 stripped ReleaseFast on every example — the name is a
   string constant per distinct statement, and a program that sends none pays
   nothing.

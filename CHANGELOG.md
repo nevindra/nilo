@@ -123,6 +123,11 @@ worth most to the cheap queries a service runs most of
 **pgbouncer in transaction mode** set `.prepared = false`, or a statement
 prepared on one server connection is missing on the next.
 
+Through a server rather than a stopwatch it is worth more than the per-query
+share suggests: **89k → 135k req/s at a pool of eight, 106k → 177k at
+thirty-two, 112k → 191k at sixty-four**, with p50 down 33–45%. A pool
+connection is a serial queue, so time not spent holding one is capacity.
+
 **Set operations and pipelining are refused, and both are measured or argued
 rather than skipped.** Over one table `UNION`, `INTERSECT` and `EXCEPT` are
 boolean algebra on the `WHERE` clause and the module writes all of it; over
