@@ -1,6 +1,6 @@
 # nilo against other frameworks
 
-[`benchmarks.md`](./benchmarks.md) ended with "no other framework was built or
+[`bench/result/http.md`](../bench/result/http.md) ended with "no other framework was built or
 run, so nothing here says how nilo places." This closes that gap. Eight other
 servers were written against the same route, verified to return nilo's response
 byte for byte, and run on the same four physical cores with the same load
@@ -32,7 +32,7 @@ encoding and puts 12 bytes of framing on the wire nobody else was sending.
 | Server | pinned to `0-3,8-11` — 4 physical cores and their SMT siblings |
 | Client | pinned to `4-7,12-15` — the other 4 |
 | Load | `wrk -t4 -c64`, 10s warm-up discarded, 3 × 20s, median reported |
-| Machine | as in [`benchmarks.md`](./benchmarks.md#the-machine) — Ryzen 7 9700X, loopback |
+| Machine | as in [`bench/result/http.md`](../bench/result/http.md#the-machine) — Ryzen 7 9700X, loopback |
 
 What is **not** equal, and cannot be: response header sets differ, so bytes on
 the wire run from 1,099 (http.zig) to 1,171 (Node) against nilo's 1,110. That
@@ -73,7 +73,7 @@ figures, so the two disagree by exactly this much and for this reason.
 
 ### The field is compressed, and that was predictable
 
-[`benchmarks.md`](./benchmarks.md#the-number-that-reframes-the-budget) measured
+[`bench/result/http.md`](../bench/result/http.md#the-number-that-reframes-the-budget) measured
 nilo's own code at about 4% of a request's CPU, the other 96% being `epoll`,
 `recv`, `send` and the TCP path. A comparison at this payload therefore mostly
 measures the kernel, and the table agrees: the top five are inside 20% of each
@@ -104,7 +104,7 @@ Fiber is 21% behind on throughput and **11× behind on p99**. Bun with eight
 processes is close on throughput and 45× behind at the tail — `SO_REUSEPORT`
 hands accepts to whichever process the kernel picks, and it does not pick
 evenly. These are the same 64 connections and the same 4 client threads for
-every row, so unlike the saturation table in `benchmarks.md`, none of this is
+every row, so unlike the saturation table in `bench/result/http.md`, none of this is
 client queueing.
 
 This is the result that matters, and it is the one ADR 0018 already said to care
@@ -116,7 +116,7 @@ This is the measurement that changed the code. As first measured, nilo was
 **seventh of nine** at 16,961 bytes — http.zig held a connection in two thirds
 of that, Bun in a fiftieth. Chasing why turned up something the number was
 hiding, and the fix is described in
-[`benchmarks.md`](./benchmarks.md#giving-the-pages-back): a keep-alive
+[`bench/result/http.md`](../bench/result/http.md#giving-the-pages-back): a keep-alive
 connection was holding every page its buffers had ever touched, and now hands
 them back between requests. nilo's row below is re-measured through the same
 harness afterwards; nothing else moved.

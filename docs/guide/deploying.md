@@ -191,7 +191,7 @@ configured, so `clientIp()` falls back to `peer()` rather than reading the
 closest thing to hand, which would be the forgery.
 
 Requests-per-second figures now exist, on one quiet box:
-[`../benchmarks.md`](../benchmarks.md) for nilo alone and
+[`bench/result/http.md`](../../bench/result/http.md) for nilo alone and
 [`../comparison.md`](../comparison.md) against eight other servers. Read the
 caveats in both — loopback, no TLS, no database, and a handler that touches
 Postgres makes every row in them the same.

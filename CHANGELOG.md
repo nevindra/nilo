@@ -721,7 +721,7 @@ One allocation per request and 8,767 bytes per idle connection, both hard
 invariants held by tests rather than by intent
 ([ADR 0018](./docs/adr/0018-the-trade-budget-has-three-axes.md)). Measured
 numbers and the method behind them are in
-[`docs/benchmarks.md`](./docs/benchmarks.md), with eight other servers through
+[`bench/result/http.md`](./bench/result/http.md), with eight other servers through
 the same harness in [`docs/comparison.md`](./docs/comparison.md).
 
 ### What is not in it

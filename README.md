@@ -413,7 +413,7 @@ Most frameworks say "fast" and "lightweight". Here are numbers instead:
 | **5.4 MB** | idle server |
 
 Throughput is 1.4M req/s, and it's the least interesting number on the page.
-[The benchmarks page says so itself](./docs/benchmarks.md): at this payload, the
+[The benchmarks page says so itself](./bench/result/http.md): at this payload, the
 top of the table is five servers making identical syscalls. The two numbers that
 are actually properties of the design are the 8,767 and the 1.
 
@@ -540,7 +540,7 @@ When you want *why* rather than *how*:
 | [`docs/roadmap.md`](./docs/roadmap.md) | what's next, what's refused, what's undecided |
 | [`docs/history.md`](./docs/history.md) | what got measured, and what turned out to be wrong |
 | [`docs/comparison.md`](./docs/comparison.md) | how this sits next to the other Zig options |
-| [`docs/benchmarks.md`](./docs/benchmarks.md) | the numbers, and what they don't mean |
+| [`bench/result/`](./bench/result/) | every benchmark run, and what each one changed |
 
 ## Contributing
 

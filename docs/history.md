@@ -15,7 +15,7 @@ One entry was worse than a deferral. "Router: path params, query params" sat in 
 - **Primary:** requests per second **and p99** on a routed GET with a path param returning ~1 KB of JSON, keep-alive, no pipelining.
 - **Secondary:** memory per idle connection.
 
-p99 is counted so that winning on throughput while stalling the tail does not count. [ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md) turned that separation into the rule: throughput may slip 10% for DX, while allocations per request and memory per idle connection are hard invariants. Published figures are in [`benchmarks.md`](./benchmarks.md) and [`comparison.md`](./comparison.md).
+p99 is counted so that winning on throughput while stalling the tail does not count. [ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md) turned that separation into the rule: throughput may slip 10% for DX, while allocations per request and memory per idle connection are hard invariants. Published figures are in [`bench/result/http.md`](../bench/result/http.md) and [`comparison.md`](./comparison.md).
 
 Two numbers never needed a quiet machine. **Allocations per request is 1** — the JSON body and nothing else; it was 6, then 3. **Memory per idle connection** was first recorded at ~21 KB, then 16,961 on the real machine, and is 8,767 flat since a keep-alive connection stopped holding every buffer page it had ever touched until close.
 
@@ -371,7 +371,7 @@ The binding work ([ADR 0036](./adr/0036-a-binding-hands-its-failures-to-the-hand
 
 ## The pool is the knob, and it has a curve
 
-**Connections against throughput, on the loopback bench at 64 client connections: 2 → 60k req/s, 4 → 99k, 8 → 133k, 16 → 148k, 32 → 180k, 64 → 206k.** The default is 10. **p99 is best at 32 (784 µs) and worse at 64 (1.03 ms)** while throughput is still climbing — the tail turns around before the headline does, which is the usual sign that the database has more connections than it can use. A query costs the server **11.4 µs of kernel time and 3.1 µs of user time**, so it is the socket rather than the module: nothing in nilo's half is what a bigger pool is buying past.
+**Connections against throughput, at 64 client connections across a Docker published port: 2 → 60k req/s, 4 → 99k, 8 → 133k, 16 → 148k, 32 → 180k, 64 → 206k.** The default is 10. **p99 is best at 32 (784 µs) and worse at 64 (1.03 ms)** while throughput is still climbing — the tail turns around before the headline does, which is the usual sign that the database has more connections than it can use. A query costs the server **11.4 µs of kernel time and 3.1 µs of user time**, so it is the socket rather than the module: nothing in nilo's half is what a bigger pool is buying past.
 
 ## The flat number was flat because nothing was happening
 
@@ -392,3 +392,13 @@ The binding work ([ADR 0036](./adr/0036-a-binding-hands-its-failures-to-the-hand
 **Prepared statements measured 30% at one connection and 51–70% through a server**, and the gap is the useful part. `bench/sql_server.zig` with `PREPARED=0` against the same binary with it on: 89k → 135k req/s at a pool of eight, 106k → 177k at thirty-two, 112k → 191k at sixty-four. At one request in flight it is +24%, which is what the arithmetic predicts — 12 µs off a 64 µs request.
 
 The rest comes from where the queueing is. **A pool connection serves one query at a time, so the time a query holds it is not latency, it is occupancy** — cut 30% off the hold and that connection can push about 43% more, before counting the CPU Postgres stops spending on Parse. Which means **a per-query saving is worth measuring twice: once unloaded, where it tells the truth about the work, and once at the pool, where it tells the truth about the service.** The first number was the one this ADR nearly shipped with, and it understates by a factor of two and a half.
+
+## Half the throughput was in the connection string
+
+**The same server and the same query: 197k req/s across a Docker published port, 359k over loopback TCP, 458k over a unix socket.** Bridge → unix is **+133%**, and p99 halves from 1.65 ms to 0.91 ms. There is no `docker-proxy` in that path — it is plain iptables DNAT to a container address, which is the *fast* way to do the slow thing, and it still costs 57% of the throughput to conntrack and a second netfilter traversal per packet, paid twice a round trip several hundred thousand times a second.
+
+**Every database figure in this cycle was taken through the slow one, and the whole set was published before anybody asked what it was measured through.** The ratios all survived — prepared statements are worth the same fraction either way — but the absolutes were understated by half, and ADR 0059's "215,000 requests a second" was really the floor rather than the number. **A transport is part of a figure, not a footnote on one**, and the fix is procedural: `bench/result/` now says which transport every table used, and `CLAUDE.md` makes it one of three standing habits.
+
+The load generator was checked before any of this was believed: wrk at 2, 4 and 8 threads gave 496k, 482k and 483k req/s, flat and slightly *down* with more threads. **~490k is what this box does with three programs on eight physical cores**, so the unix-socket figure is 94% of the machine and not 94% of nilo. A ceiling nobody measured is a ceiling that gets attributed to the wrong program.
+
+The advice this produces costs nothing to take: **a co-located Postgres should be reached over its unix socket**, `postgres://user:pass@%2Fvar%2Frun%2Fpostgresql%2F.s.PGSQL.5432/app` — pg.zig wants the full socket path, not libpq's directory, and percent-encoded so the URL parser keeps the slashes in the host.

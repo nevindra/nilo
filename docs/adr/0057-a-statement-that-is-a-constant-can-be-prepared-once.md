@@ -53,7 +53,9 @@ never been measured before.
 The table above is one connection sending one statement at a time. A server is
 not that, and the difference turns out to matter in nilo's favour.
 `bench/sql_server.zig` with `PREPARED=0` against the same binary with it on,
-wrk, same box:
+wrk, same box, **across a Docker published port** — the absolutes are a floor
+for that reason and the ratios are not affected; see the transport table in
+[`bench/result/sql.md`](../../bench/result/sql.md):
 
 | | before | after | |
 |---|---|---|---|

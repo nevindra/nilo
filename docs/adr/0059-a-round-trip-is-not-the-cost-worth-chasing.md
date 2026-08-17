@@ -43,7 +43,11 @@ through the `Io` it was handed, which under the engine is zio's. **That is an
 argument.** `bench/sql_server.zig` is the measurement — a ReleaseFast server
 whose every request is a `db.find`, with `/health` beside it as the control.
 
-wrk, 4 threads, 16-core box with the load generator and Postgres on it too:
+wrk, 4 threads, 16-core box with the load generator and Postgres on it too,
+**across a Docker published port** — which was later measured to cost 57% of the
+throughput, so every absolute in this section is a floor. Over a unix socket the
+same binary serves 458,467 req/s. The ratios and the conclusion are unaffected;
+[`bench/result/sql.md`](../../bench/result/sql.md) has the transport table.
 
 | connections | req/s | p50 | p99 |
 |---|---|---|---|

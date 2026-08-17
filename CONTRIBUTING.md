@@ -88,7 +88,7 @@ way ([ADR 0018](./docs/adr/0018-the-trade-budget-has-three-axes.md)):
 |---|---|
 | Throughput and p99 | a nicer API wins if it costs under 10% |
 | Allocations per request | fixed. Currently 1, held by a test |
-| Memory per idle connection | fixed at 8,767 bytes. Every feature states its own cost |
+| Memory per idle connection | 8,767 bytes is the **floor**, and a handler adds every byte of stack it touches ([ADR 0063](./docs/adr/0063-a-handlers-stack-is-per-connection.md)). Every feature states its own cost |
 | Binary size | anything the linker can't drop states its measured cost, as a stripped `ReleaseFast` number |
 
 Say which one your change spends, and by how much, when you *propose* it. Not
@@ -145,8 +145,25 @@ Documentation is part of the change, not a follow-up:
 |---|---|
 | a design decision | a new file in [`docs/adr/`](./docs/adr/) |
 | something you measured, or a guess that turned out wrong | [`docs/history.md`](./docs/history.md) |
+| a benchmark you ran | [`bench/result/`](./bench/result/) — one file an area |
 | something now built | delete its entry from [`docs/roadmap.md`](./docs/roadmap.md) |
 | something a user has to change | [`CHANGELOG.md`](./CHANGELOG.md) |
+
+**A benchmark that changed a decision gets written down where it can be
+re-run.** `bench/result/http.md` is the server, `bench/result/sql.md` is the
+database, and a new area gets a new file rather than a paragraph in an existing
+one. The entry says what was run, on what machine, at what commit, what the
+numbers were, and what they changed — plus what a number was measured
+*through*, because a transport is part of a figure and not a footnote. The same
+`bench-sql` server measured 197k requests a second across a Docker published
+port and 458k over a unix socket. Close with whether the number can be pushed
+further, ranked, so the next person starts where you stopped.
+
+This is a rule because the repository has already published two numbers that
+were wrong: `connect_on_init` was documented in three files and had never
+worked, and the flat 8,767 bytes was repeated in four and described a handler
+nobody deploys. Both were found by re-measuring. A number with no run behind it
+decays into a claim.
 
 The roadmap holds nothing that's finished. When something ships, its entry
 leaves entirely. No strikethrough, no "done", no summary of how it went. The

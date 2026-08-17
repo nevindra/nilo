@@ -12,7 +12,7 @@ running — is [`zig build profile`](#what-a-request-costs-in-process), and it i
 the more portable of the two.
 
 How these numbers place against Go, Rust, Node and http.zig, measured the same
-way on the same machine, is [`comparison.md`](./comparison.md).
+way on the same machine, is [`comparison.md`](../../docs/comparison.md).
 
 ## The machine
 
@@ -65,10 +65,10 @@ split, so **the server is on four physical cores.**
 ## Throughput and latency
 
 The primary metric, as `bench/bench.sh` has stated it since stage 1 and as the
-first row of [ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md)'s budget
+first row of [ADR 0018](../../docs/adr/0018-the-trade-budget-has-three-axes.md)'s budget
 puts it: a routed `GET` with a path param returning ~1 KB of JSON, keep-alive,
 no pipelining. The target is `GET /users/:id` in
-[`bench/main.zig`](../bench/main.zig), 982 bytes of body, CORS installed, no logger.
+[`bench/main.zig`](../main.zig), 982 bytes of body, CORS installed, no logger.
 
 Three runs of 30 seconds, `wrk -t4 -c64`, after a discarded 10-second warm-up:
 
@@ -129,7 +129,7 @@ box, one request is **181ns of nilo's own work**:
 | write the response | 31ns | 17.2% |
 | arena alloc + reset | 6ns | 3.7% |
 
-[`history.md`](./history.md#after-010-what-the-router-scan-actually-costs)
+[`history.md`](../../docs/history.md#after-010-what-the-router-scan-actually-costs)
 recorded 585ns for the same harness on the machine it was written on, so this
 box is about 3.2× faster. The router table moved with it — the mixed set went
 from 27/47/56/107/167ns to 13/20/19/38/60ns across 1/5/25/50/100 routes, between
@@ -147,14 +147,14 @@ other ~96% is the kernel: `epoll`, `recv`, `send`, and the TCP/IP path — on
 loopback, where it is at its cheapest.
 
 That is worth stating plainly next to
-[ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md), because it
+[ADR 0001](../../docs/adr/0001-dx-wins-below-the-10-percent-threshold.md), because it
 makes the 10% rule more generous than it sounds. Ten percent of nilo's own work
 is 18ns, which is **0.4% of the request**. The DX budget was never the thing
 standing between this framework and a throughput number.
 
 ## Correctness under load
 
-Not a speed measurement. [ADR 0007](./adr/0007-failure-box-bound-to-the-fiber.md)
+Not a speed measurement. [ADR 0007](../../docs/adr/0007-failure-box-bound-to-the-fiber.md)
 binds a fail function's `Failure` to the fiber rather than the thread, and
 `bench/mixed.lua` is what would catch it if that were wrong: alternating hits on
 a user that exists and one that does not, checking every body against the id it
@@ -171,7 +171,7 @@ Not one message crossed between concurrent requests in 13.7 million of them.
 
 ## Memory per idle connection
 
-The third row of [ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md)'s
+The third row of [ADR 0018](../../docs/adr/0018-the-trade-budget-has-three-axes.md)'s
 budget, described there as a hard invariant that every feature has to state a
 cost against — and until now not measured, because `bench.sh` says outright that
 it does not measure it.
@@ -258,7 +258,7 @@ closes, so a handler adds every byte it touches — measured one for one, from
 **17,022 bytes** per idle connection rather than 8,749, and a handler with a
 64 KiB buffer on its stack holds 64 KiB per connection rather than per request.
 `bench/sql_server.zig` has the four routes that separate the causes, and
-[ADR 0063](./adr/0063-a-handlers-stack-is-per-connection.md) has the tables.
+[ADR 0063](../../docs/adr/0063-a-handlers-stack-is-per-connection.md) has the tables.
 
 The gate is the whole design. Releasing on every trip round the loop, which was
 the first attempt, took throughput from 1.31M to **626k** — a 52% loss, because
@@ -305,7 +305,7 @@ commands are the ones that measure something.
 - **A NIC.** Everything here is loopback, so the throughput figures are a
   ceiling that real hardware will not reach.
 - ~~**Anything to compare against.**~~ *Done* —
-  [`comparison.md`](./comparison.md) runs eight other servers through this same
+  [`comparison.md`](../../docs/comparison.md) runs eight other servers through this same
   harness on this same machine. nilo is first on throughput, first-equal on
   tail latency, third of nine on memory per connection, and last on release
   build time at 7.4s — though its edit loop is 0.4s, which is 0.2s behind Go and

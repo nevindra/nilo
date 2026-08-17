@@ -404,6 +404,15 @@ So: ask zio for `StackInfo.limit` on the current task, then release
 
 ### Known gaps
 
+- **A pool connection carries result state for 32 columns whatever the Row
+  has.** pg.zig's `result_state_size` defaults to 32 and nilo takes the
+  default, so a two-column Row pays for thirty it will never fill — a few
+  hundred bytes a connection, held for the life of the pool. This module is
+  the one place that can size it honestly: every statement is a comptime
+  constant, so the widest Row a `Db` can ever read is known before the program
+  runs. It is small next to the stack finding
+  ([ADR 0063](./adr/0063-a-handlers-stack-is-per-connection.md)) and it is
+  free, which is the only reason it is written down.
 - **An enum column that has not named its type is not checked at startup.**
   An enum carrying `pub const nilo_column = "user_role"` is judged like any
   other column; one that does not is not, because a Postgres enum's type name

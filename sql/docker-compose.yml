@@ -29,6 +29,10 @@ services:
     # by the wrong user.
     volumes:
       - pgdata:/home/postgres/pgdata
+      # The unix socket, so a benchmark can ask what loopback TCP costs.
+      # `bench/RESULTS.md` has the answer; nothing in the test suite needs
+      # this, and a host without the directory just gets an empty mount.
+      - /tmp/nilo-pgsock:/var/run/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U nilo -d nilo"]
       interval: 2s

@@ -816,9 +816,15 @@ moment there is an event loop to dial through — so a server starts with its
 database switched off, and the first request that needs it gets
 `error.Disconnected`.
 
+**A database on the same box should be reached over its unix socket** —
+`postgres://app:secret@%2Fvar%2Frun%2Fpostgresql%2F.s.PGSQL.5432/shop`, the
+full socket path with the slashes percent-encoded. Same server and same query:
+197k req/s across a Docker published port, 359k over loopback TCP, 458k over
+the socket, with p99 halved ([`bench/result/sql.md`](../bench/result/sql.md)).
+
 | `Opts` | |
 |---|---|
-| `size` | connections held open. Default 10. The knob with a real curve behind it: 8 → 133k req/s, 16 → 148k, 32 → 180k, 64 → 206k on the loopback bench, with p99 best at 32. Each one is a Postgres backend and a slot against `max_connections` |
+| `size` | connections held open. Default 10. The knob with a real curve behind it: 8 → 133k req/s, 16 → 148k, 32 → 180k, 64 → 206k, with p99 best at 32. Each one is a Postgres backend and a slot against `max_connections` |
 | `connect_on_init` | how many to dial during `listen()`. Default 0 — set it to `size` when driving a `Db` from a `std.Io.Threaded` ([ADR 0062](./adr/0062-a-pool-that-dialled-itself-whatever-it-was-told.md)) |
 | `timeout_ms` | how long a caller waits for a free connection. Default 10,000 |
 | `schema_mismatch_is_fatal` | whether a Row that disagrees with its table stops startup. Default true |

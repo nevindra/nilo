@@ -65,7 +65,7 @@ SERVER_CPUS=0-5,12-17 CLIENT_CPUS=6-11,18-23 python3 drive.py
 ```
 
 The reasoning, and what it cost to find out, is in
-[`docs/benchmarks.md`](../../docs/benchmarks.md#how-the-cores-were-split-and-why-it-is-not-obvious).
+[`bench/result/http.md`](../result/http.md#how-the-cores-were-split-and-why-it-is-not-obvious).
 
 ## What is here
 

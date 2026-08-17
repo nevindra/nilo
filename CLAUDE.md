@@ -210,6 +210,42 @@ spends, and the number, is part of proposing it — not something worked out aft
 it lands, or left for review to ask about. That applies to a design argued in a
 session as much as to a diff, and a proposal that skips it is not finished.
 
+### A benchmark that was run gets written down
+
+**[`bench/result/`](bench/result/) gets an entry for every run that changed a
+decision, and the entry says what it changed.** Not the terminal, not a commit
+body, not a sentence in a session — the file. One file an area, named for it:
+[`http.md`](bench/result/http.md) for the server,
+[`sql.md`](bench/result/sql.md) for the database. Each carries what was run,
+the machine, the commit, the numbers, and the decision they moved — and a
+closing section saying whether the number can be pushed further, so the next
+person starts from the ranked levers rather than from the top. A run that
+changed nothing still earns an entry if somebody would otherwise repeat it.
+
+This is a rule because the repository has already been wrong twice about
+numbers that *were* published: `connect_on_init` was documented in three files
+and had never worked ([ADR 0062](docs/adr/0062-a-pool-that-dialled-itself-whatever-it-was-told.md)),
+and "8,767 bytes per idle connection, flat" was repeated in four and described
+a handler nobody deploys ([ADR 0063](docs/adr/0063-a-handlers-stack-is-per-connection.md)).
+Both were found by re-measuring, and neither would have been findable from
+prose. **A number with no run behind it decays into a claim.**
+
+Three habits go with it, each of which caught something here:
+
+- **Say what the number was measured *through*.** Every figure in this cycle
+  was taken across a Docker published port, and the same server over a unix
+  socket is 133% faster. The ratios survived; the absolutes were half.
+- **Measure a per-operation saving twice** — once unloaded, where it tells the
+  truth about the work, and once at the pool, where it tells the truth about
+  the service. Prepared statements are 24% at one request in flight and 67%
+  at a pool under load, because a pool connection is a serial queue.
+- **Put something next to it.** `/health`, `/fixed/:id` and `/deep/:id` exist
+  in `bench/sql_server.zig` only so `/people/:id` has controls, and the fourth
+  route is what proved the memory finding had nothing to do with the database.
+
+Then the lesson goes to `docs/history.md` and the decision to an ADR, the way
+everything else does. `bench/result/` is the raw record those two cite.
+
 ## Conventions
 
 **Error messages are a feature, and a build step holds them.** Each file in

@@ -307,6 +307,32 @@ gets `error.Disconnected`, which is the truth.
 Set `.connect_on_init = 2` if you would rather find out at startup — in
 production, that is usually what you want.
 
+### If the database is on the same box, do not use TCP
+
+This is the largest performance number in the whole module and it is a
+connection string rather than anything in your code:
+
+```zig
+// 458,000 req/s with a real query per request
+var db = sql.Db.init(gpa,
+    "postgres://app:secret@%2Fvar%2Frun%2Fpostgresql%2F.s.PGSQL.5432/shop", .{});
+```
+
+Measured on one box, same server, same query: a Docker published port serves
+197k requests a second, loopback TCP 359k, **a unix socket 458k** — and p99
+halves. The cost is conntrack and netfilter, paid per packet, twice a round
+trip ([`bench/result/sql.md`](../../bench/result/sql.md)).
+
+Two things about the spelling, because both are easy to get wrong:
+
+- The host is the **full socket path**, `/var/run/postgresql/.s.PGSQL.5432`,
+  not the directory libpq wants.
+- **Percent-encode the slashes** — `%2F` — or the URL parser will not keep them
+  in the host field. Getting it wrong is `error.Unexpected`.
+
+A container reaching a database on the host does this by mounting the socket
+directory; `sql/docker-compose.yml` shows the other direction.
+
 ## Reading
 
 ```zig
