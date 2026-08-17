@@ -65,15 +65,18 @@
 //! | **types** | `types.zig` | Timestamp and Json — value, not arithmetic. `Uuid` is `nilo_id`'s, and `AsText` is the door out |
 //! | **schema** | `schema.zig` | Row against table, while the server starts |
 //! | **Wire** | `wire.zig` | the contract a driver meets |
-//! | **the driver** | `postgres.zig` | pg.zig, and the only file that names it |
+//! | **the drivers** | `postgres.zig`, `sqlite.zig` | pg.zig and zqlite, and the only two files that name either |
 //! | **Db** | `db.zig` | what a handler holds, and where `Str` stops |
 //! | **live tests** | `live.zig` | the half that needs a real Postgres |
 //!
 //! Two seams rather than one, because two different things get replaced
 //! independently: swapping the driver changes how bytes reach the socket,
-//! adding a database changes the SQL itself. Both are fitted now, and only
-//! Postgres is filled in — the point is that `$1` is not hardcoded, not that
-//! a second dialect exists.
+//! adding a database changes the SQL itself. **Both are filled in twice
+//! now** — Postgres over a socket and SQLite over a file
+//! ([ADR 0073](../docs/adr/0073-a-file-has-no-socket-to-wait-on.md),
+//! [ADR 0074](../docs/adr/0074-one-writer-is-not-a-setting-it-is-the-database.md)) —
+//! and the second of each is what turned the claim that the seams were in the
+//! right place into evidence.
 //!
 //! **The dependency runs one way: this module imports `nilo`, and `nilo`
 //! does not know this module exists.** That is what makes the feature cost
@@ -85,6 +88,13 @@
 //! whole write half is 53 KB and the rest is pg.zig's TLS dependency. ADR
 //! 0040 has the numbers and the argument for why being a TLS client is not
 //! the thing ADR 0028 refused.
+//!
+//! **SQLite is 524,840 bytes on top of that, and only for a program that
+//! names it.** Both drivers live here, so both are fetched and this module
+//! links libc whichever one you use — but `sql/sqlite.zig` is analysed only
+//! when something names it, so the amalgamation is dropped outright by the
+//! linker. A binary holding `sql.Db` and nothing else contains zero SQLite
+//! strings; `zig build size-sql` is the A/B, and ADR 0073 has both numbers.
 
 const std = @import("std");
 
@@ -96,6 +106,7 @@ pub const statement = @import("statement.zig");
 pub const schema = @import("schema.zig");
 pub const types = @import("types.zig");
 pub const postgres = @import("postgres.zig");
+pub const sqlite = @import("sqlite.zig");
 pub const db = @import("db.zig");
 
 /// What a handler holds. `*sql.Db` in a signature is a service like any
@@ -116,6 +127,47 @@ pub const Db = db.Db;
 /// handler's argument list
 /// ([ADR 0060](../docs/adr/0060-a-second-database-is-a-second-type.md)).
 pub const Named = db.Named;
+
+/// The same thing over SQLite: a database in a file rather than behind a
+/// socket.
+///
+/// ```zig
+/// const Db = sql.Sqlite(.{ .threading = .{ .hop = nilo } });
+///
+/// fn show(db: *Db, c: *nilo.Ctx, id: i64) !?User {
+///     return db.find(User, c, id);
+/// }
+/// ```
+///
+/// Everything above this line is the same — the same Row, the same
+/// conditions, the same `Str` rule — because the Dialect writes the SQL and
+/// the Wire carries it, and a handler names neither
+/// ([ADR 0061](../docs/adr/0061-the-second-dialect-is-the-test-of-the-seam.md)).
+/// What is *not* the same is written where it happens rather than here:
+/// `insertMany` and `tx.deadline` are Refusals, `.lock` is a Refusal, and a
+/// list column has nowhere to live.
+///
+/// **`threading` has no default and that is deliberate**, so this call is one
+/// line longer than `sql.Db` is. SQLite runs inside this process, so a
+/// statement either holds the executor thread it is on or pays a hop to the
+/// Engine's thread pool, and which is right is a fact about a deployment
+/// ([ADR 0073](../docs/adr/0073-a-file-has-no-socket-to-wait-on.md)).
+pub fn Sqlite(comptime opts: sqlite.Options) type {
+    return db.DbOf(sqlite.Wire(opts), dialect.SQLite, "");
+}
+
+/// A second SQLite database, named the way `Named` names a second Postgres
+/// one — and the same call to reach for when a program holds both kinds at
+/// once, which [ADR 0060](../docs/adr/0060-a-second-database-is-a-second-type.md)
+/// already made expressible.
+pub fn SqliteNamed(comptime name: []const u8, comptime opts: sqlite.Options) type {
+    if (name.len == 0) @compileError(
+        "nilo: `sql.SqliteNamed(\"\")` has no name, so it is `sql.Sqlite` with extra steps.\n" ++
+            "  Give it the one a reader would want in the argument list: " ++
+            "`sql.SqliteNamed(\"cache\", …)`, `sql.SqliteNamed(\"audit\", …)`.",
+    );
+    return db.DbOf(sqlite.Wire(opts), dialect.SQLite, name);
+}
 
 /// The Dialect used unless something says otherwise — and the only one with
 /// a Wire behind it. `sql.dialect.SQLite` is the second, SQL half only, and
@@ -260,6 +312,7 @@ test {
     _ = schema;
     _ = types;
     _ = postgres;
+    _ = sqlite;
     _ = db;
     // The tests that need a database. Every one of them skips when
     // `DATABASE_URL` is unset, so this line costs nothing to somebody who

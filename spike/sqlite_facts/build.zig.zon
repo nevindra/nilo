@@ -1,0 +1,16 @@
+// Five claims about SQLite that ADR 0074 makes and had not run. The
+// dependency is the one ADR 0073 chose, so this measures the library nilo
+// would actually ship against rather than SQLite in the abstract.
+.{
+    .name = .sqlite_facts_spike,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0x614a93c74f7651df,
+    .dependencies = .{
+        .zqlite = .{
+            .url = "git+https://github.com/karlseguin/zqlite.zig#b519eea9b1a2b5fcad68af6d0629e717e8746684",
+            .hash = "zqlite-0.0.1-RWLaY8M8nAB4m0tlSpT9A5PGUwX_JfWC5VlPjLe7lG2Q",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "main.zig" },
+}

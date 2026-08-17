@@ -60,6 +60,14 @@ say which.
 `bench/sql.zig`, `PREPARED=0` against the same binary with it on. Same
 connection, same rows, same everything else.
 
+> **Method note, added 2026-08-17.** These two tables were taken with **one
+> pass per side**. The harness now runs five interleaved passes and prints the
+> range as well as the best — see [§9.5](#95-the-timing-arm-exists-and-this-machine-cannot-run-it)
+> for why. Nothing below was re-run, so the tables and the current output are
+> not the same measurement. The conclusions survive on margin — a fixed ~11 µs
+> is far outside any plausible spread on an eight-core box — but a re-run is
+> owed before these numbers are compared against a new one.
+
 **Over the Docker bridge** (`127.0.0.1:5433` → DNAT → `172.22.0.2:5432`):
 
 | | parsed every time | prepared once | saved |
@@ -480,6 +488,183 @@ pool by two to three times. **Every difference above could change size or
 direction behind a pool**, and `drive.py` is the harness that has not been
 built.
 
+## 9. SQLite: counters that hold, and a machine that cannot be timed
+
+Taken 2026-08-17 on a **different machine from everything above**: a two-core
+shared vCPU (Xeon Platinum 8255C, 7 GB), where the numbers in §1–§8 came from
+eight physical cores. **Almost nothing in this section is a timing, and that is
+the method rather than an apology.** A throughput figure taken on a shared vCPU
+is a figure about the neighbours. Resident bytes and syscall counts are not, so
+those are what was taken.
+
+The exception is [§9.5](#95-the-timing-arm-exists-and-this-machine-cannot-run-it),
+which is here because the *harness* was built and is worth having even though
+its numbers are not.
+
+The raw record is [`spike/sqlite_facts`](../../spike/sqlite_facts/), which runs
+against zqlite 0.0.1 / SQLite 3.53.0 — the library the Wire ships with rather
+than SQLite in the abstract, because the flags a wrapper passes to
+`sqlite3_open_v2` decide several of these.
+
+### What a pool connection holds
+
+One writer and eight readers over a 2.9 MB table, 50,000 rows:
+
+| | total | per connection |
+|---|---|---|
+| opened, idle | 252 KiB | **28 KiB** |
+| after every reader has scanned the whole table | 16,892 KiB | **1,876 KiB** |
+
+`PRAGMA cache_size` defaults to `-2000` — 2,000 KiB — and **it is a ceiling,
+not an allocation**. ADR 0074's first draft said a connection holds "roughly
+2 MB … for the life of the pool" and that is only true of the second row. The
+correction is the useful part: a service doing primary-key lookups pays the
+first row, and the number a deployment sees is its working set.
+
+Two numbers not to confuse with these: **an idle HTTP connection is unaffected**
+(a pool connection is not a request's), and the prepared statements ADR 0057
+keeps are on top of both and are still unmeasured.
+
+### What the page cache buys, in reads
+
+If the ceiling costs 1.8 MiB a connection when it is reached, what does
+lowering it cost? Reads are a counter, so this is answerable here.
+
+| `cache_size` | 5,000 primary-key lookups over 200 hot rows | three full scans of the 2.9 MB table |
+|---|---|---|
+| −2000 KiB | 10 `pread64` | 2,261 `pread64` |
+| −512 KiB | 10 | 2,265 |
+| −128 KiB | 10 | 2,265 |
+| −32 KiB | 10 | 2,265 |
+| −8 KiB | **15,005** | — |
+
+**The 2 MiB default buys nothing at either shape.** A hot working set fits in
+32 KiB and reads the same ten pages whatever the ceiling; a scan larger than the
+cache re-reads regardless, so 62× the memory is worth four reads out of 2,265.
+The cliff between −32 and −8 KiB is the working set no longer fitting.
+
+**This is not an argument for a small default**, and the limit is the
+measurement rather than caution: the cliff sits wherever the working set sits,
+and this one is 200 rows on a box whose OS page cache holds the whole file. A
+database larger than RAM is where SQLite's page cache stops being a duplicate of
+the operating system's, and nothing here reaches that.
+
+### Binary size, which is the axis this module actually spends
+
+`zig build size-sql -Doptimize=ReleaseFast` builds two programs differing by one
+line — which database the single route reads. Stripped:
+
+| | bytes |
+|---|---|
+| names `sql.Db` (Postgres) | 1,677,464 |
+| names `sql.Sqlite` | 2,202,304 |
+| **SQLite's cost to a program that uses it** | **524,840** |
+
+And the number that mattered more, because it was a claim rather than a
+measurement until it was checked:
+
+```
+$ strings zig-out/bin/nilo-size-pg_only    | grep -ci sqlite
+0
+```
+
+Both drivers live in one module, so both are fetched and the module links libc
+whichever you use — but `sql/sqlite.zig` is analysed only when something names
+it, so the amalgamation is dropped outright. **A Postgres-only binary carries
+zero SQLite.**
+
+### Five behavioural claims, and the one that was wrong
+
+ADR 0074 was written from SQLite's documentation and said so. Running it held
+five claims — `:memory:` is private per connection, the shared URI form is one
+database, WAL is unavailable in memory and *answers `memory` rather than
+failing*, a shared in-memory database dies with its last connection, and a
+read-only connection to a file refuses a write.
+
+The sixth was found by a test failing rather than by reading, and it is the one
+worth carrying forward: **`OpenFlags.ReadOnly` does not survive
+`mode=memory`.** SQLite's URI `mode=` parameter takes precedence over the flags
+handed to `sqlite3_open_v2`, so a "read-only" connection to a shared in-memory
+database writes. On a file the same flag refuses.
+
+That matters because the read-only reader is the backstop under routing
+`db.raw` by its first keyword. In memory there is no backstop — so the test
+that holds it opens a file, and the rule that locking tests cannot run in
+memory is a correctness requirement rather than a coverage preference.
+
+### 9.5 The timing arm exists, and this machine cannot run it
+
+`zig build bench-sql` now has a SQLite half. It needs no server — a file in
+`/tmp`, made and dropped by the program — and it asks the same question §1 asks
+of Postgres, in the same three statement shapes, plus a write arm at both
+`synchronous` settings because [ADR 0074](../../docs/adr/0074-one-writer-is-not-a-setting-it-is-the-database.md)
+will not let a SQLite number be published without its durability beside it.
+
+**It was run, and the run's finding is about the machine.** Three consecutive
+passes of the same side of the same comparison gave 4,537, 6,158 and 8,281
+ns/query — a spread of 1.8×. `uptime` explains it: load average **5.03 on two
+cores**, so the box is oversubscribed 2.5× by neighbours nothing here controls.
+
+That changed the harness rather than the write-up. Each comparison now runs
+five interleaved passes, and prints two things instead of one: the best pass on
+each side, and **the range of the saving across pairs**. What that prints here:
+
+| | best of 5 | saving | across the passes |
+|---|---|---|---|
+| a bare round trip | 4,275 → 444 ns | 89.6% | 76.7% … 95.0% |
+| a key lookup | 30,410 → 12,001 ns | 60.5% | 49.2% … 72.2% |
+| a page with a sort | 518,888 → 538,973 ns | −3.9% | **−7.5% … +24.7%** |
+| `db.find` through the module | 11,103 → 5,064 ns | 54.4% | 33.1% … 72.9% |
+
+**Read the last column, not the third.** A key lookup's saving is somewhere
+between a half and three quarters, which is a band too wide to put in a
+sentence about a default. The absolutes are worse than useless: 12 µs for a
+primary-key lookup against a 1,000-row table is roughly ten times what SQLite
+costs on a machine nobody else is using, and taking the *minimum* of five
+passes did not rescue it — an earlier single pass had come in at 4,537.
+
+Two things do survive the noise, because they are structural rather than
+marginal:
+
+- **Preparing once is worth much more on SQLite than on Postgres**, and the
+  reason is arithmetic rather than a measurement. On Postgres, skipping Parse
+  and Describe saves 31% of a key lookup (§1) because the round trip is still
+  there underneath. On SQLite there is no round trip: `sqlite3_prepare_v2` *is*
+  the statement's fixed cost, so removing it removes most of what a cheap query
+  costs. Every pass on every machine will put this well above §1's 31%.
+- **On a statement whose own work dominates, it is worth nothing.** The page
+  with a sort scans a thousand rows and sorts them; a prepare is ~20 µs against
+  ~500 µs of that, so the true saving is a few percent and the ±25% band above
+  is entirely noise. Postgres kept 15% on the same shape because its round trip
+  does not scale with the sort. **`prepared` is a fixed-cost optimisation, and
+  what it is worth is decided by what it is a fraction of.**
+
+The write arm printed 33 µs at `NORMAL` against 1.78 ms at `FULL` — 54×. That
+one is a disk measurement and belongs to this VPS's storage rather than to
+SQLite or to nilo, and it is in the harness so that the default is never quoted
+without its alternative.
+
+**Nothing in that table should be copied into a document.** It is here so the
+next person knows the harness runs, knows what it prints, and knows what the
+run has to be repeated on.
+
+### What is missing from this section, and it is most of a benchmark
+
+- **Every timing that means anything**, for the reason §9.5 gives. And the one
+  ADR 0073 is explicitly waiting for is not even in the harness: `.hop` against
+  `.in_fiber` needs the Engine and a load generator — a run of `bench-sql-server`
+  with each — rather than a single-threaded program.
+- **A comparison.** §8 puts `nilo_sql` beside nine Postgres clients. The
+  equivalent for SQLite — Go's `mattn/go-sqlite3` or `modernc`, Rust's
+  `rusqlite`, Bun's `bun:sqlite` — is unbuilt, and building it on a shared
+  vCPU would produce a table nobody should quote.
+- **Contention.** One process throughout. What `busy_timeout` does when two
+  writers meet is the case the reader/writer split exists for.
+- **Download size and build seconds**, which every `nilo_sql` user now pays for
+  a driver half of them will not use. The amalgamation is the slow half — a
+  cold `zig build test-sql` spent about a minute of CPU inside `zig clang` —
+  and "about a minute" is an impression rather than a measurement.
+
 ## Reproducing this
 
 ```bash
@@ -488,6 +673,10 @@ docker compose -f sql/docker-compose.yml up -d
 # per-operation, both sides of the subtraction
 zig build bench-sql -Doptimize=ReleaseFast
 PREPARED=0 zig build bench-sql -Doptimize=ReleaseFast
+
+# The SQLite half of that same program needs nothing at all — no Docker, no
+# DATABASE_URL. Leave the variable unset and the Postgres half says it was
+# skipped; the SQLite half still runs. See §9.5 before quoting its output.
 
 # the server, then wrk at it from the same box
 zig build bench-sql-server -Doptimize=ReleaseFast

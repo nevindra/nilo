@@ -80,7 +80,7 @@ goes in an ADR, a number goes in `docs/history.md`, a rule goes in a build step.
 
 Two of those rules are build steps rather than paragraphs, and they are the ones
 to lean on: `zig build layering` refuses an import that goes upward or sideways,
-and the five `refusals` steps check the wording of 125 error messages. Prefer making
+and the five `refusals` steps check the wording of 129 error messages. Prefer making
 a new rule enforceable that way over writing it down here — a paragraph nobody
 runs is the thing that rots.
 
@@ -102,14 +102,14 @@ zig build test-pw      # only nilo_pw, the same way, plus its refusals
 zig build test-fetch   # only nilo_fetch, both modes — a real socket, no Engine
 zig build test-s3      # only nilo_s3, both modes, plus its refusals
 zig build layering     # check that no module imports upward or sideways
-zig build refusals     # the framework's 62 compile-error checks — NOT the others
-zig build refusals-sql # nilo_sql's 41; also run by test-sql
+zig build refusals     # the framework's 63 compile-error checks — NOT the others
+zig build refusals-sql # nilo_sql's 44; also run by test-sql
 zig build refusals-config  # nilo_config's 9, and refusals-pw for nilo_pw's 3
 zig build refusals-s3  # nilo_s3's 10; also run by test-s3
 zig build smoke-tls -Dnetwork   # a real HTTPS endpoint — NOT part of test
 zig build examples     # build all eight examples
 zig build fuzz -- --iterations 1000000 --seed 0x…   # generated requests at the parser
-zig build bench-sql    # what a prepared statement is worth, against a real Postgres
+zig build bench-sql    # what a prepared statement is worth: SQLite always, Postgres if reachable
 zig build bench-sql-server  # a server reading Postgres per request, for wrk/oha
 zig build bench-fetch-server # what an outbound call costs, with its controls
 zig build bench-s3-server  # a server reading an object store per request, with its controls
@@ -207,7 +207,7 @@ Bottom to top. Each layer knows nothing about the one above it.
 | **Core** | `core/` | `Str`, the Scope, the clock and percent coding. The vocabulary every layer agrees about, and no IO at all — a separate module (`nilo_core`) that names no Engine, so `zig test core/core.zig` runs the whole of it (ADR 0041). A file gets in by being needed by two layers, which is how `percent` arrived (ADR 0066). |
 | **Tools** | `id/`, `config/`, `pw/` | one job each, no event loop, and `nilo_core` is the most they may import. All three import nothing at all (ADR 0042, ADR 0043, ADR 0048). |
 | **Fitting** | `fetch/` | borrows the loop, owns no destination — an HTTP client for calling somebody else's API. Imports `nilo_core` and nothing else; its tests run under `std.Io.Threaded` with no Engine, which is the entry condition for the layer (ADR 0070). |
-| **Services** | `sql/`, `s3/` | borrow the loop and hold a named system — a Postgres pool, an object store's endpoint and credentials. `s3/` is the only module that imports a Fitting, which is downward and is what the layer was built for (ADR 0072). Neither may name `nilo_http`. |
+| **Services** | `sql/`, `s3/` | borrow the loop and hold a named system — a Postgres pool, a SQLite file, an object store's endpoint and credentials. **A SQLite statement is the one thing down here that blocks with nothing to wait on**, which is why `sqlite.Options.threading` has no default (ADR 0073). `s3/` is the only module that imports a Fitting, which is downward and is what the layer was built for (ADR 0072). Neither may name `nilo_http`. |
 | **Engine** | `http/engine/zio.zig` | accept, read, write. **The only file in the repo allowed to name zio** (ADR 0002). |
 | **Bulkhead** | `http/bulkhead.zig` | the entire contract nilo asks of an Engine, listed in that file's header. `Options` is declared here rather than by the Engine, so swapping engines cannot change what a user writes. |
 | **HTTP + App** | `http/http1.zig`, `http/router.zig`, `http/app.zig` | parse, match, dispatch. `App.handleRequest` takes only a `*std.Io.Reader`/`*std.Io.Writer`, which is why almost every HTTP behaviour is tested against in-memory buffers with no server. |

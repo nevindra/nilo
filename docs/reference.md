@@ -12,7 +12,7 @@ Eight ship, and a project links only what it imports
 | | | |
 |---|---|---|
 | `nilo_http` | the server — everything on this page unless it says otherwise | [below](#app) |
-| `nilo_sql` | Postgres | [below](#nilo_sql) |
+| `nilo_sql` | Postgres and [SQLite](#sqlite) | [below](#nilo_sql) |
 | `nilo_s3` | object storage — S3, MinIO, R2, anything that speaks it | [below](#nilo_s3) |
 | `nilo_id` | UUIDs | [below](#nilo_id) |
 | `nilo_config` | settings out of the environment | [below](#nilo_config) |
@@ -22,7 +22,7 @@ Eight ship, and a project links only what it imports
 
 ```zig
 const nilo = @import("nilo_http");    // the alias everybody writes
-const sql = @import("nilo_sql");      // only if you talk to Postgres
+const sql = @import("nilo_sql");      // only if you talk to Postgres or SQLite
 const s3 = @import("nilo_s3");        // only if you store objects
 const id = @import("nilo_id");        // only if you make identifiers
 const config = @import("nilo_config");// only if you read settings
@@ -1080,6 +1080,11 @@ long as the response takes. `max_total_bytes` counts held bytes only. See
 A second module, imported separately. A project that never imports it links
 none of it ([ADR 0040](./adr/0040-a-service-that-needs-the-loop-is-finished-when-the-loop-exists.md)).
 
+**Two databases, one API.** `sql.Db` is Postgres and `sql.Sqlite(…)` is SQLite;
+everything on the rest of this page is written once and works against either.
+[SQLite](#sqlite) says what it takes to open one and lists the four things it
+refuses.
+
 ```zig
 const sql = @import("nilo_sql");
 ```
@@ -1155,6 +1160,89 @@ An identity key, a sequence default and a generated column need nothing said
 about them — an insert names a subset of the Row's columns and `RETURNING`
 brings the rest back. Indexes and constraints are refused on the record: a Row
 cannot say one, and one that could would be a migration file.
+
+### SQLite
+
+The same `Db`, over a file instead of a server. Everything below this section —
+Rows, queries, batches, upserts, conditions, streaming, transactions — is the
+same code and the same types; what changes is the four things SQLite refuses,
+listed at the end.
+
+```zig
+const Db = sql.Sqlite(.{ .threading = .{ .hop = nilo } });
+
+var db = Db.init(gpa, "/var/lib/app/shop.db", .{});
+defer db.deinit();
+try app.provide(&db);
+```
+
+`threading` **has no default and the compiler will not let you leave it out**.
+SQLite is a library reading a file rather than a server on a socket, so there
+is no wait for the event loop to park on and the choice cannot be made for you
+([ADR 0073](./adr/0073-a-file-has-no-socket-to-wait-on.md)):
+
+| | |
+|---|---|
+| `.{ .hop = nilo }` | hand each statement to the Engine's thread pool and park the fiber. Costs a few microseconds per statement; **no statement can stall an executor thread**. The payload is `nilo` itself, passed in because `sql/` may not import `nilo_http` |
+| `.in_fiber` | run it on the fiber that asked. Faster when every statement is a cached lookup; a slow one holds a thread that serves other connections |
+
+Which is the better default is unmeasured and is `docs/roadmap.md`'s Next 1 for
+this module. When in doubt take `.hop`: its bad case is a few microseconds and
+`.in_fiber`'s is a stalled thread.
+
+| `sqlite.Options` | |
+|---|---|
+| `threading` | above. **No default** |
+| `busy_timeout_ms` | how long to wait for a lock another *process* holds before answering `error.Locked`. Default 5,000 |
+| `cache_kib` | `PRAGMA cache_size`, or null for SQLite's 2,000 KiB. **A ceiling, not an allocation**: a connection holds 28 KiB opened and grows towards this as pages are touched ([`bench/result/sql.md`](../bench/result/sql.md) §9) |
+| `synchronous` | `.normal` (the default, WAL's recommended setting — the database cannot corrupt, a power cut can lose recent transactions) or `.full`. `OFF` is not offered |
+
+`wire.OpenOpts` is the same struct both drivers take, so `size`, `timeout_ms`
+and the rest are written the same way. **`size` is one writer and `size - 1`
+readers**, and that is the database rather than a setting: SQLite allows one
+writer at a time, so writes queue on a single connection and reads run beside
+them under WAL ([ADR 0074](./adr/0074-one-writer-is-not-a-setting-it-is-the-database.md)).
+`connect_on_init` is ignored — a file is opened or it is not.
+
+Every connection is primed with `journal_mode = WAL` and `foreign_keys = ON`.
+Which connection a statement takes is decided by its first keyword: `SELECT`
+and `PRAGMA` take a reader, everything else takes the writer. That is exact for
+everything this module generates and a **guess for `db.raw`**, whose text is
+yours — a `raw` that writes and looks like a read lands on a read-only
+connection and fails loudly. On a file. Not in memory, where SQLite's URI
+`mode=` overrides the open flags and the backstop is absent.
+
+The url is a path, or SQLite's URI form. **A bare `:memory:` is refused at
+`open`**, because a pool of them is several separate empty databases; the
+shared form `file:name?mode=memory&cache=shared` is one, and lives only as
+long as a connection to it does.
+
+`sql.SqliteNamed("cache", .{…})` is the second-database form, exactly as
+`sql.Named` is for Postgres. `sql.sqlite.version` is the bundled SQLite's
+version string — the amalgamation is vendored by the driver, so it is what the
+build pinned rather than what the machine had.
+
+**What SQLite refuses, while compiling, naming the dialect:**
+
+| | why |
+|---|---|
+| `insertMany` | no `unnest` and no array parameter. The batch form SQLite has grows its own statement text, which is the rule this module is built on. Write a row at a time inside one transaction — cheap here, because there is no round trip to pay per statement |
+| `.lock` | writers are serialised by a lock over the whole database, so there is no row to hold against anybody |
+| `tx.deadline` | needs the database to enforce it, and there is no server. `sqlite3_interrupt` aborts the whole connection rather than one statement. `busy_timeout_ms` covers the case that actually happens |
+| a list column | no array type. A list belongs in its own table, or in a TEXT column your own code encodes |
+| `.isolation` other than `.serializable` | SQLite gives every transaction a snapshot and serialises the writers. There is no weaker level to ask for |
+
+So **code that batches is not portable between the two dialects**, and that is
+the seam refusing rather than lying. The schema check is weaker too, by exactly
+as much as SQLite is: a column's declared type is free text and what is
+enforced is one of five affinities, so it catches a `Str` field over an
+`INTEGER` column and does not catch an `i32` over a column holding values that
+do not fit.
+
+SQLite costs **524,840 bytes** to a program that names it and **zero** to one
+that does not — both drivers live in one module, but `sql/sqlite.zig` is
+analysed only when something names it, so a Postgres-only binary carries no
+amalgamation at all.
 
 ### Queries
 

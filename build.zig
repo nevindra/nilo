@@ -79,7 +79,10 @@ const layers = [_]Layer{
     },
     .{
         .root = "sql",
-        .may_import = &.{ "nilo_core", "nilo_id", "pg", "live_config" },
+        // Two drivers, two rows in this list, and both are third-party rather
+        // than sideways: a Wire names a driver and nothing above it
+        // (ADR 0039, ADR 0073).
+        .may_import = &.{ "nilo_core", "nilo_id", "pg", "zqlite", "live_config" },
         .in_tests = &.{"nilo_http"},
     },
     // A Service that dials, and **the first module to name a Fitting**
@@ -131,6 +134,22 @@ const sql_refusals = [_]Refusal{
     .{
         .name = "a_second_database_with_no_name",
         .says = "`sql.Named(\"\")` has no name, so it is `sql.Db` with extra steps.",
+    },
+    // The three the SQLite Wire adds. All three are things the *dialect*
+    // cannot do rather than things this module declines to write, which is why
+    // each message says what SQLite does instead of what nilo wants
+    // (ADR 0073, ADR 0074).
+    .{
+        .name = "sqlite_wire_without_threading",
+        .says = "a sqlite Wire has to say where its statements run.",
+    },
+    .{
+        .name = "sqlite_deadline",
+        .says = "tx.deadline is not available on the sqlite dialect.",
+    },
+    .{
+        .name = "sqlite_weaker_isolation",
+        .says = "the sqlite dialect has no .read_committed isolation level.",
     },
     .{
         .name = "any_empty",
@@ -1124,6 +1143,18 @@ pub fn build(b: *std.Build) void {
         nilo_sql.addImport("pg", pg.module("pg"));
     }
 
+    // The other driver, the same way. It compiles the SQLite amalgamation, so
+    // the module links libc — and **that is a cost a Postgres-only program
+    // pays too**, because both Wires live in one module (ADR 0073). What it
+    // must not cost is the megabyte of C: `sql/sqlite.zig` is only analysed
+    // when something names it, so a program that does not should link none of
+    // it. That is an A/B rather than an argument, and `zig build sqlite-size`
+    // is where the number comes from.
+    if (b.lazyDependency("zqlite", .{ .target = target, .optimize = optimize })) |zqlite| {
+        nilo_sql.addImport("zqlite", zqlite.module("zqlite"));
+        nilo_sql.link_libc = true;
+    }
+
     // The benchmark target: a routed GET with a path param returning ~1KB
     // of JSON, which is the primary metric in docs/history.md.
     const bench = b.createModule(.{
@@ -1562,6 +1593,16 @@ pub fn build(b: *std.Build) void {
         bench_sql_module.addImport("pg", pg.module("pg"));
         bench_nilo_sql.addImport("pg", pg.module("pg"));
     }
+    // The benchmark copy of the module needs both drivers for the same reason
+    // the published one does: `sql/sql.zig` names them both, and which one a
+    // program *uses* is the thing `size-sql` exists to weigh.
+    if (b.lazyDependency("zqlite", .{ .target = target, .optimize = .ReleaseFast })) |zqlite| {
+        bench_nilo_sql.addImport("zqlite", zqlite.module("zqlite"));
+        bench_nilo_sql.link_libc = true;
+        // And the root module too, because `bench/sql.zig` names
+        // `sql.Sqlite` — the executable is the thing that links the C.
+        bench_sql_module.link_libc = true;
+    }
     bench_sql_module.addImport("live_config", bench_live_config);
     const bench_sql = b.addExecutable(.{ .name = "nilo-bench-sql", .root_module = bench_sql_module });
     b.step("bench-sql", "Time a statement parsed every call against one prepared once")
@@ -1586,6 +1627,38 @@ pub fn build(b: *std.Build) void {
     });
     b.step("bench-sql-server", "A server whose every request reads Postgres, for a load generator")
         .dependOn(&b.addInstallArtifact(bench_sql_server, .{}).step);
+
+    // The fourth axis, for the module that added a megabyte of C to it
+    // (ADR 0073). Two programs that differ by one line — which database the
+    // one route reads — so the difference between their stripped sizes is
+    // what SQLite costs, and `pg_only`'s size against an HTTP-only binary is
+    // the claim that a program which never names SQLite links none of it.
+    //
+    // Installed rather than run: nothing here is meant to serve anything.
+    // `ls -l zig-out/bin/nilo-size-*` is the measurement.
+    const size_sql_step = b.step(
+        "size-sql",
+        "Build the two programs whose stripped sizes price the SQLite Wire",
+    );
+    for ([_][]const u8{ "pg_only", "sqlite_only" }) |which| {
+        const module = b.createModule(.{
+            .root_source_file = b.path(b.fmt("bench/size/{s}.zig", .{which})),
+            .target = target,
+            .optimize = .ReleaseFast,
+            // Always stripped, whatever `-Dstrip` says: an A/B carrying debug
+            // info measures the debug info.
+            .strip = true,
+            .imports = &.{
+                .{ .name = "nilo_http", .module = bench_http },
+                .{ .name = "nilo_sql", .module = bench_nilo_sql },
+            },
+        });
+        const exe_size = b.addExecutable(.{
+            .name = b.fmt("nilo-size-{s}", .{which}),
+            .root_module = module,
+        });
+        size_sql_step.dependOn(&b.addInstallArtifact(exe_size, .{}).step);
+    }
 
     // What a Fitting costs, against a `std.http.Client` doing the same call
     // with none of the policy round it (ADR 0070). Installed rather than run,
@@ -1695,6 +1768,10 @@ pub fn build(b: *std.Build) void {
         });
         if (b.lazyDependency("pg", .{ .target = target, .optimize = mode })) |pg| {
             under_test.addImport("pg", pg.module("pg"));
+        }
+        if (b.lazyDependency("zqlite", .{ .target = target, .optimize = mode })) |zqlite| {
+            under_test.addImport("zqlite", zqlite.module("zqlite"));
+            under_test.link_libc = true;
         }
         under_test.addOptions("live_config", live_config);
         const sql_tests = b.addTest(.{ .root_module = under_test });

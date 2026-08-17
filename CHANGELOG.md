@@ -288,6 +288,71 @@ The module is still not an ORM and still refuses joins, aggregates and
 migrations
 ([ADR 0039](./docs/adr/0039-the-shape-of-a-query-is-settled-while-compiling.md)).
 
+### `nilo_sql` speaks SQLite
+
+`sql.Db` is Postgres and **`sql.Sqlite(…)` is SQLite**. Everything above this
+line — Rows, conditions, `find`, `select`, `stream`, transactions, savepoints,
+the schema check — is the same code against either, because the driver was
+always behind a seam and this is the seam being used
+([ADR 0073](./docs/adr/0073-a-file-has-no-socket-to-wait-on.md)).
+
+```zig
+const Db = sql.Sqlite(.{ .threading = .{ .hop = nilo } });
+
+var db = Db.init(gpa, "/var/lib/app/shop.db", .{ .size = 5 });
+defer db.deinit();
+try app.provide(&db);
+```
+
+**`threading` has no default and will not compile without one.** SQLite is a
+library reading a file, so there is no socket to wait on and no answer the
+framework can pick for you: `.{ .hop = nilo }` hands the statement to the
+Engine's thread pool and costs a few microseconds; `.in_fiber` runs it on the
+fiber that asked and is faster until one statement is slow, at which point it
+holds a thread that was serving other connections. Which should be advised is
+unmeasured and is the module's next benchmark.
+
+- **One writer and `size - 1` readers**, and that is the database rather than
+  a setting — SQLite allows one writer at a time, and under WAL the readers run
+  beside it. Writes queue on a `std.Io.Mutex`, so a fiber waiting its turn
+  parks instead of holding a thread
+  ([ADR 0074](./docs/adr/0074-one-writer-is-not-a-setting-it-is-the-database.md)).
+- Every connection is primed with WAL, `foreign_keys = ON`, and
+  `synchronous = NORMAL` — WAL's recommended setting, where the database cannot
+  corrupt and a power cut can lose recent transactions. `.full` is one word
+  away and `OFF` is not offered.
+- **Which connection a statement takes is its first keyword.** Exact for
+  everything the module generates; a guess for `db.raw`, and the guess is safe
+  because a reader is opened read-only. On a file. In memory SQLite's URI
+  `mode=` overrides the open flag, which is why a bare `:memory:` is refused at
+  `open` and the shared form is the one to write.
+- **Five Refusals, each naming the dialect**: `insertMany` (no `unnest`, and
+  SQLite's batch form grows its own statement text), `.lock` (writers are
+  serialised by a database-wide lock, so there is no row to hold), `tx.deadline`
+  (`sqlite3_interrupt` aborts the connection rather than the statement —
+  `busy_timeout_ms` covers the case that happens), a list column (no array
+  type), and any isolation below `.serializable` (there is nothing weaker to
+  ask for). **So code that batches is not portable between the two**, which is
+  the seam refusing rather than lying.
+
+**It costs 524,840 bytes to a program that names it and zero to one that does
+not.** Both drivers live in one module, but `sql/sqlite.zig` is only analysed
+when something names it, so the linker drops the amalgamation outright —
+checked with `strings … | grep -ci sqlite` rather than argued
+([`bench/result/sql.md`](./bench/result/sql.md) §9). A pool connection holds
+28 KiB opened, growing towards `cache_size` as pages are touched; the 2 MiB
+default was measured to buy nothing at either shape tested.
+
+The driver is [zqlite.zig](https://github.com/karlseguin/zqlite.zig), which
+bundles the SQLite 3.53.0 amalgamation and is `.lazy = true` — a project that
+uses Postgres or no database at all fetches, builds and links none of it.
+`nilo_sql` links libc now, which it did not before.
+
+`zig build bench-sql` grew a SQLite half that needs no server, and its
+comparisons now run five interleaved passes and print the spread as well as the
+best. That change came from the harness catching itself: three consecutive
+passes of one measurement on a loaded machine differed by 1.8×.
+
 ### A WebSocket message, once through
 
 Receiving one used to copy every byte into your buffer and then walk the same

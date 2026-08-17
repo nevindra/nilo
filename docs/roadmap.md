@@ -28,7 +28,7 @@ can be worked at the same time, by two people or by one person on two days.
 | Core | `nilo_pw` | needs none | [below](#nilo_pw--hashing-a-password) |
 | Fitting | `nilo_fetch` | borrows it | [below](#nilo_fetch--calling-somebody-elses-api) |
 | App | `nilo_http` | owns it | [below](#nilo_http--the-server) |
-| Service | `nilo_sql` | needs it, does not own it | [below](#nilo_sql--postgres) |
+| Service | `nilo_sql` | needs it, does not own it | [below](#nilo_sql--postgres-and-sqlite) |
 | Service | `nilo_s3` | needs it, does not own it | [below](#nilo_s3--object-storage) |
 
 Each module carries **Next**, numbered in its own order, and **Known gaps**,
@@ -438,27 +438,62 @@ would say whether `keep_bytes = 64 KiB` a thread is the right size or a guess
 that happened to work. `bench/compare/wsload/` takes a `-payload`, so the run
 is there; the interpretation is what is missing.
 
-## `nilo_sql` — Postgres
+## `nilo_sql` — Postgres and SQLite
 
 ### Next
 
-1. **A SQLite Wire.** The Dialect is written and the seam held — twelve of
-   thirteen declarations fitted unchanged, and the thirteenth widened
-   `ListForm` to four values
-   ([ADR 0061](./adr/0061-the-second-dialect-is-the-test-of-the-seam.md)). What
-   is left is the half that speaks to the database, and it has a design
-   question in front of it rather than a coding one: **SQLite is a blocking
-   file read, not a socket.** A Postgres wait suspends the fiber and frees the
-   thread, which is what buys 215,000 requests a second
-   ([ADR 0059](./adr/0059-a-round-trip-is-not-the-cost-worth-chasing.md)); a
-   SQLite call has no descriptor to wait on, so it either holds its thread or
-   pays a `nilo.blocking` hop, and which is right depends on numbers nobody
-   has — a local read is microseconds, a write behind a contended database
-   lock is not. Measure that before writing anything. The C dependency is the
-   smaller half.
+1. **Decide whether a SQLite statement hops or runs in the fiber.** The Wire
+   ships with the choice as a field that has no default, so every program says
+   which it wants and neither is a guess
+   ([ADR 0073](./adr/0073-a-file-has-no-socket-to-wait-on.md)). What nobody has
+   is the number that should make one of them the advised setting: a hop costs
+   a few microseconds and so does a cached read, so `.in_fiber` is plausibly
+   faster for a lookup service and plausibly fatal for one that scans.
+
+   **This needs the machine `bench/result/sql.md` §1–§8 came from.** The
+   counters that could be taken on a shared vCPU have been
+   ([§9](../bench/result/sql.md), [`spike/sqlite_facts`](../spike/sqlite_facts/));
+   this is the one that cannot. Both settings, unloaded and behind the pool,
+   because §2 is the standing warning that a per-operation saving measured only
+   unloaded understated its worth at a pool by two to three times.
+
+   Half the harness is built and half is not. `zig build bench-sql` has a
+   SQLite arm that needs no server and answers the *unloaded* half — but only
+   for `.in_fiber`, because a hop needs the Engine that program does not have.
+   The loaded half wants `bench/sql_server.zig` pointed at a SQLite `Db`, which
+   does not exist yet and is the smaller of the two jobs.
 
 ### Known gaps
 
+- **The SQLite half has no live test against contention.** The Wire's own
+  tests run one process, so the case the reader/writer split exists for —
+  two writers meeting, `busy_timeout` expiring, `Locked` coming back — has a
+  design and no test. It is the same shape as the Postgres gap two entries
+  down and wants the same thing: a build step that stands up a second writer,
+  which here is a second process on the same file rather than a socket.
+- **`insertMany` on SQLite is a Refusal, so a Row is not portable by
+  itself.** There is no `unnest` and no array parameter, and the batch form
+  SQLite has grows its own statement text
+  ([ADR 0061](./adr/0061-the-second-dialect-is-the-test-of-the-seam.md)). Code
+  written against Postgres therefore does not compile against SQLite if it
+  batches, which is the cost of the seam refusing rather than lying — and it
+  is worth knowing before somebody plans a migration on the assumption that
+  swapping the Dialect is free. The same applies to `.lock` and
+  `tx.deadline`.
+- **`db.raw` is routed by its first keyword.** Exact for everything the module
+  generates, because the module wrote the text; a guess for `db.raw`, where the
+  text is the caller's
+  ([ADR 0074](./adr/0074-one-writer-is-not-a-setting-it-is-the-database.md)).
+  A guess that goes the wrong way lands on a read-only connection and fails
+  loudly — **on a file.** On an in-memory database it does not, because
+  SQLite's URI `mode=` takes precedence over the open flags, so the backstop is
+  absent in exactly the environment a test suite reaches for first.
+- **A SQLite pool connection is a per-connection cost nilo has not had
+  before.** 28 KiB opened, growing to 1,876 KiB once it has touched
+  `cache_size` worth of pages ([§9](../bench/result/sql.md)). That is not an
+  idle HTTP connection's memory — a pool connection is not a request's — but it
+  is memory an operator has to multiply, next to a framework whose whole
+  per-connection story is 4,669 bytes.
 - **A pool connection carries result state for 32 columns whatever the Row
   has.** pg.zig's `result_state_size` defaults to 32 and nilo takes the
   default, so a two-column Row pays for thirty it will never fill — a few

@@ -19,6 +19,22 @@
             .hash = "pg-0.0.0-Wp_7gUqUBgDARGCn8B7brldZRA9lmDQGn262ySg2tg3W",
             .lazy = true,
         },
+        // The other driver behind `nilo_sql`, and lazy for the same reason.
+        // Unlike pg.zig it brings **no dependencies of its own** — it bundles
+        // and statically links the SQLite amalgamation, which is what makes it
+        // the whole of the C question rather than the start of it
+        // (ADR 0073). Three files and 47 KB of Zig over the top, which is also
+        // the answer to "what if it stops": `sql/wire.zig` is a seam, and one
+        // file gets rewritten rather than every call site.
+        .zqlite = .{
+            .url = "git+https://github.com/karlseguin/zqlite.zig#b519eea9b1a2b5fcad68af6d0629e717e8746684",
+            .hash = "zqlite-0.0.1-RWLaY8M8nAB4m0tlSpT9A5PGUwX_JfWC5VlPjLe7lG2Q",
+            .lazy = true,
+        },
+        .zqlite = .{
+            .url = "git+https://github.com/karlseguin/zqlite.zig#b519eea9b1a2b5fcad68af6d0629e717e8746684",
+            .hash = "zqlite-0.0.1-RWLaY8M8nAB4m0tlSpT9A5PGUwX_JfWC5VlPjLe7lG2Q",
+        },
     },
     // One directory per module that ships (ADR 0041), and this list is the
     // one place that has to remember they exist — held by a comptime check
