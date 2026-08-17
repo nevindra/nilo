@@ -278,6 +278,22 @@ const config_refusals = [_]Refusal{
         .name = "config_not_a_source",
         .says = "a Config is read from a source, and comptime_int cannot be one.",
     },
+    .{
+        .name = "config_source_has_no_get",
+        .says = "a Config is read from a source and config_source_has_no_get.NotASource is not one.",
+    },
+    .{
+        .name = "config_layered_not_a_tuple",
+        .says = "a layered source takes a tuple of sources, and source.Fixed is not one.",
+    },
+    .{
+        .name = "config_layered_with_no_layers",
+        .says = "a layered source with no layers would read nothing.",
+    },
+    .{
+        .name = "config_layered_not_a_source",
+        .says = "layer 2 of a layered source is comptime_int, and that cannot be a source.",
+    },
 };
 
 /// The same, for `pw/refusals/`. They hang off `test-pw` for the reason the

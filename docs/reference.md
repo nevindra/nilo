@@ -436,8 +436,48 @@ whether the port is one this machine may bind is your question.
 | `config.Env{ .environ = … }` | the environment block, read where it lies. Allocates nothing. POSIX only |
 | `config.Map{ .map = init.environ_map }` | the portable half, and what Windows uses |
 | `config.Fixed{ .pairs = &.{ .{ "PORT", "9000" } } }` | pairs of your own — the seam for a file you parsed yourself |
+| `config.Dotenv{ .text = … }` | a `.env`'s **text**. You open the file; this reads it |
+| `config.layered(.{ a, b })` | several sources in the order they win — the first with the name answers |
 
-**It parses no files.** `std.zon.parse` is in the standard library;
+### A `.env`
+
+`Dotenv` takes text, not a path
+([ADR 0064](./adr/0064-a-dotenv-is-text-somebody-else-read.md)), so the module
+still opens no file and still allocates nothing. **The text has to outlive the
+Config** — a `[]const u8` field points into it, exactly as it points into the
+environment block.
+
+```zig
+const text = std.fs.cwd().readFileAlloc(arena, ".env", 64 * 1024) catch "";
+const file = config.Dotenv{ .text = text };
+
+const read = config.from(Settings, config.layered(.{
+    config.Env{ .environ = init.minimal.environ },   // a set variable wins
+    file,                                            // the file is the floor
+}));
+
+try file.report(stderr);   // writes nothing when the file is clean
+```
+
+| | |
+|---|---|
+| `f.get("PORT")` | `?[]const u8` — the first line setting that name |
+| `f.failed()`, `f.failedCount()` | lines that meant to be settings and are not |
+| `f.failures()` | an iterator of `BadLine` |
+| `f.report(w)` | every bad line, one per line. Writes nothing when there are none |
+
+A `BadLine` is `.number`, `.why`, `.name`, and `.say(w)`. `Wrong` is
+`no_equals`, `empty_name`, `bad_name`, `unbalanced_quote` — all about the shape
+of the line; whether the value converts is `Reason`'s question. **A report never
+quotes a value**, because a `.env` is where a password lives.
+
+Reads `NAME=value`, blank lines, `#` comments on their own line, `'` and `"`
+quoting, an optional `export ` prefix, and CRLF. **Refuses** escapes, multi-line
+values, `${OTHER}` interpolation, and comments after a value — so
+`PASSWORD=abc#123` is intact, and `PORT=8080 # the port` says
+`PORT has to be a whole number, not "8080 # the port"` rather than guessing.
+
+**It opens no files.** `std.zon.parse` is in the standard library;
 [sam701/zig-toml](https://github.com/sam701/zig-toml) is the one to reach for
 if the file has to be TOML. Either way the pairs come back as a `Fixed` and
 this module never had to carry the dependency.

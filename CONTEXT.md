@@ -119,12 +119,20 @@ A long-lived thing registered once when the App is built — a database connecti
 _Avoid_: dependency, state, context value, DI container
 
 **Config**:
-A struct of the caller's own, one field per setting, filled from the environment before the socket opens. Field names are the variable names upper-cased, a field's default is what "not set" means, and reading one either answers the struct or names every setting that could not be read. It is text and numbers and nothing else: a Config parses no files, and what it cannot become is a compile error rather than a startup one.
-_Avoid_: settings object, options, env, dotenv, configuration file
+A struct of the caller's own, one field per setting, filled from a Source before the socket opens. Field names are the variable names upper-cased, a field's default is what "not set" means, and reading one either answers the struct or names every setting that could not be read. It is text and numbers and nothing else: a Config opens no files, and what it cannot become is a compile error rather than a startup one.
+_Avoid_: settings object, options, env, configuration file
 
 **Setting**:
 One field of a Config, and the one environment variable it is read from. Its type is the whole of what it may be — text, a number, a bool, an enum, or any of those wrapped in `?` — and nilo's opinion about it stops at whether the text converts.
 _Avoid_: option, flag, variable, key, parameter, knob
+
+**Source**:
+Where a Config's values come from — anything answering `get(name) ?[]const u8`, checked as a shape while compiling rather than through a vtable. Four are supplied (`Env`, `Map`, `Fixed`, `Dotenv`) and `layered` puts them in the order they win, first one with the name answering. A Source holds text somebody else read; none of them touches the filesystem.
+_Avoid_: provider, backend, loader, store
+
+**Dotenv**:
+A `.env`'s text read as a Source — the file is the caller's to open, and the text has to outlive the Config read through it. A line that meant to be a setting and is not is reported with its number, never skipped, and a report never quotes a value.
+_Avoid_: dotenv file, env file, envfile
 
 **Middleware**:
 A piece of work that runs before and after a handler, operates at the Ctx layer, and produces no value for the handler. Middleware enforces; a Resolved value provides.

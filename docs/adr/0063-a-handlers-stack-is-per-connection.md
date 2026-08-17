@@ -77,10 +77,19 @@ Releasing the stack below the frame pointer belongs in `releaseIdlePages`
 beside the two buffers, at no extra cost on any path that matters.
 
 What blocks it is one number: **the low end of the running fiber's stack.**
-zio does not expose it — `StackInfo.limit` is a field of a private struct
-reached through the runtime's internals, and nilo may not name those (only
-`http/engine/zio.zig` may name zio at all, ADR 0002, and reaching past its
-public surface would break on a version bump).
+
+The block is narrower than it first looks, and worth stating precisely because
+it decides what to ask upstream for. **The operation is already public**:
+`zio.coro.stackRecycle(info)` does the `madvise` over `[limit, base)`, guard
+page and uncommitted region excluded, and `zio.coro.Stack` — `StackInfo`, with
+`base` and `limit` on it — is public too. What is missing is the *argument*.
+There is no supported way to obtain the `StackInfo` of the **running** fiber:
+`runtime.getCurrentTaskOrNull()` is `pub` but `zio.zig` imports `runtime.zig`
+with `const` rather than `pub const`, and the one threadlocal that holds it is
+called `current_context_DO_NOT_ACCESS_DIRECTLY` and is not re-exported. So a
+public function's only argument cannot be publicly obtained for the case that
+wants it — checked against `main` as well as the pinned `v0.17.0`, and filed
+upstream as [zio#677](https://github.com/lalinsky/zio/issues/677).
 
 Guessing a floor is not an option and it is worth saying why, because it is the
 tempting shortcut: **zio carves 64 stacks out of one slab mapping.** An

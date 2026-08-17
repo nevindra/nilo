@@ -160,13 +160,6 @@ It imports nothing, allocates nothing, and is over before the socket opens.
 
 ### Not decided
 
-- **`.env`, and whether reading one file is still refusing file formats.** The
-  refusal is real and argued — a parser is a dependency every importer carries,
-  and `Fixed` is the seam for a program that wants one. But a `.env` is fifty
-  lines rather than two thousand, it needs no dependency, and it is the one
-  format whose whole purpose is to hold what this module already reads. Nobody
-  has decided whether that makes it the exception or makes it the first step
-  down the slope the refusal exists to avoid.
 - **Whether a Config can say a setting is secret.** Marking one would let
   `report` and any future logging print `PGPASSWORD=***` rather than the value.
   It is a small feature with a large blast radius if it is trusted and wrong —
@@ -379,9 +372,13 @@ that zio does not expose the running fiber's stack bounds.** Guessing a floor
 is not available: zio carves 64 stacks from one slab mapping, so an `madvise`
 one page past the limit would zero a neighbouring connection's live stack.
 
-So: ask zio for `StackInfo.limit` on the current task, then release
-`[limit, frame)` beside the two buffers. Measured before and after with
-`bench/sql_server.zig`'s `/deep/:id`, which exists for this.
+The ask is narrower than it looks and it is **filed as
+[zio#677](https://github.com/lalinsky/zio/issues/677)**: `coro.stackRecycle` is
+already public and already does the `madvise`, and `coro.Stack` carries `base`
+and `limit` — what is missing is any supported way to obtain the `StackInfo` of
+the *running* fiber. Once that lands, release `[limit, frame)` beside the two
+buffers. Measured before and after with `bench/sql_server.zig`'s `/deep/:id`,
+which exists for this.
 
 ## `nilo_sql` — Postgres
 
@@ -628,8 +625,13 @@ module the change is in.
   finished answer to depend on and that is the argument rather than a gap:
   [kubkon/zig-yaml](https://github.com/kubkon/zig-yaml) skips 322 of the ~400
   cases in the official suite, written by a Zig core contributor, and a partial
-  YAML parser misreads real files quietly instead of refusing them. `.env` is
-  the one that stays open, in that module's own list.
+  YAML parser misreads real files quietly instead of refusing them.
+
+  `config.Dotenv` is not the exception it looks like: it takes *text*, opens no
+  file, and needs no dependency at all
+  ([ADR 0064](./adr/0064-a-dotenv-is-text-somebody-else-read.md)). What the
+  module refuses is the filesystem, and a format whose parser somebody else has
+  to maintain.
 - **A `recover` middleware.** Zig cannot recover from a panic at all, so there
   is nothing to build ([ADR 0008](./adr/0008-no-recover-middleware.md)).
 - **TLS.** Terminated in front, and that is the answer rather than the plan

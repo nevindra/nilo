@@ -63,6 +63,16 @@ is the seam: a program that wants TOML picks its own parser and hands the pairs
 over. What this module owns is the half no parser does — a struct of your own,
 filled or refused, with the failures collected.
 
+> **Amended by [ADR 0064](./0064-a-dotenv-is-text-somebody-else-read.md).** The
+> refusal is now *it does not **open** a file*, and `config.Dotenv` reads a
+> `.env` out of text the caller supplies. Both arguments this ADR actually makes
+> below — zig-toml's 2,000 lines that every importer would fetch, zig-yaml's 322
+> skipped conformance cases — are about depending on somebody else's parser, and
+> neither one reaches a fifty-line `NAME=value` scanner that needs no dependency.
+> What was defended is intact: no allocation, no `std.fs`, and tests that run
+> under a plain `zig test`. It was the summary that was too wide, not the
+> reasoning.
+
 **Four reasons, and it stays four.** `missing`, `not_a_number`,
 `not_true_or_false`, `not_a_choice`. Whether the port is one this machine may
 bind is the program's own question, and a reason set that grew to answer it
@@ -222,6 +232,12 @@ the failure.
   the seam already exists, which makes it the first thing to reconsider if
   enough people write the same fifty lines. The roadmap holds it as an open
   question rather than a queued item.
+
+  > **Settled by [ADR 0064](./0064-a-dotenv-is-text-somebody-else-read.md).**
+  > `config.Dotenv` takes the text and `config.layered` puts sources in the
+  > order they win. This bullet turned out to be asking the wrong question: the
+  > choice was never `.env` against the refusal, it was where the refusal's line
+  > actually sat.
 - **Nothing here can read a secret out of anywhere but the environment.** A
   Config field is text the process was started with, so a value in a vault, a
   file mounted by an orchestrator or a KMS call is out — those need IO, which

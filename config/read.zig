@@ -32,6 +32,7 @@
 
 const std = @import("std");
 const convert = @import("convert.zig");
+const source_mod = @import("source.zig");
 
 pub const Reason = convert.Reason;
 
@@ -246,7 +247,7 @@ pub fn Read(comptime T: type) type {
 /// gives about a Scope: the check refuses an unsuitable type in a sentence
 /// and generates the code a direct call generates.
 pub fn fill(comptime T: type, comptime prefix: []const u8, source: anytype) Read(T) {
-    checkSource(@TypeOf(source));
+    source_mod.check(@TypeOf(source));
     const entries = &Table(T, prefix).entries;
     const fields = @typeInfo(T).@"struct".fields;
 
@@ -340,34 +341,11 @@ fn checkPrefix(comptime prefix: []const u8) void {
     }
 }
 
-/// Refuse anything that is not a source, in nilo's own words.
-fn checkSource(comptime S: type) void {
-    comptime {
-        const Holder = switch (@typeInfo(S)) {
-            .pointer => |p| if (p.size == .one) p.child else S,
-            else => S,
-        };
-
-        const advice = "\n  A source answers `get(name: []const u8) ?[]const u8`" ++
-            " — `config.Env`, `config.Map`, or a `config.Fixed` of your own.";
-
-        switch (@typeInfo(Holder)) {
-            .@"struct", .@"union", .@"enum", .@"opaque" => {},
-            else => @compileError("nilo: a Config is read from a source, and " ++
-                @typeName(S) ++ " cannot be one." ++ advice),
-        }
-
-        if (!@hasDecl(Holder, "get")) @compileError(
-            "nilo: a Config is read from a source and " ++ @typeName(S) ++ " is not one." ++ advice,
-        );
-    }
-}
-
 const testing = std.testing;
 
 /// A source of fixed pairs — what the tests below read from, and what a
 /// program that has parsed a file of its own hands over.
-const Fixed = @import("source.zig").Fixed;
+const Fixed = source_mod.Fixed;
 
 const Settings = struct {
     port: u16 = 8080,

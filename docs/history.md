@@ -402,3 +402,11 @@ The rest comes from where the queueing is. **A pool connection serves one query 
 The load generator was checked before any of this was believed: wrk at 2, 4 and 8 threads gave 496k, 482k and 483k req/s, flat and slightly *down* with more threads. **~490k is what this box does with three programs on eight physical cores**, so the unix-socket figure is 94% of the machine and not 94% of nilo. A ceiling nobody measured is a ceiling that gets attributed to the wrong program.
 
 The advice this produces costs nothing to take: **a co-located Postgres should be reached over its unix socket**, `postgres://user:pass@%2Fvar%2Frun%2Fpostgresql%2F.s.PGSQL.5432/app` — pg.zig wants the full socket path, not libpq's directory, and percent-encoded so the URL parser keeps the slashes in the host.
+
+## A refusal was narrower than its own headline
+
+**ADR 0043 said `nilo_config` "does not parse a file". Both arguments it actually made were about dependencies, and neither one reached a `.env`.** zig-toml is ~2,000 lines every importer would fetch; zig-yaml skips 322 of ~400 conformance cases. A fifty-line `NAME=value` scanner that needs no dependency was never on the far side of either sentence — it was on the far side of the *summary* of them. Moving the line to **"does not open a file"** kept everything the refusal was defending (no allocation, no `std.fs`, tests that run under a plain `zig test`) and cost nothing it was defending, because `Dotenv` takes text rather than a path ([ADR 0064](./adr/0064-a-dotenv-is-text-somebody-else-read.md)).
+
+**Re-read the argument, not the headline, before extending a refusal.** A refusal compresses into a slogan over time, and the slogan is what gets quoted in four files while the reasoning sits in one.
+
+**The binary-size measurement that mattered was the one that did not move.** 237,528 bytes before and after for a program that reads a Config and never names `Dotenv` — byte for byte, against a `git worktree` of the parent commit. Measuring only the with-feature program would have produced 6,448 bytes and no way to tell whether existing users were paying part of it. `pub` declarations nobody names cost nothing because Zig never analyses them, and that is a claim worth a second binary rather than a sentence. Both runs are in [`bench/RESULTS.md`](../bench/RESULTS.md).

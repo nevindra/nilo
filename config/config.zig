@@ -34,12 +34,14 @@
 //! wrote about a binding — which is the argument for this module existing
 //! at all. A person who has read a `Query(T)` has already read this.
 //!
-//! **What it will not do is parse a file.** No TOML, no YAML, no `.env`
-//! (ADR 0043). `std.zon.parse` is in the standard library and costs a
-//! project nothing; a program that wants TOML picks its own parser and
-//! hands the pairs over as a `Fixed`. What this module owns is the half
-//! neither of those does: a struct of your own, filled or refused, with
-//! **every** bad setting named at once rather than the first.
+//! **What it will not do is open a file** (ADR 0064). No path is passed to
+//! anything here and `std.fs` is not imported, which is what keeps the
+//! module allocation-free and runnable under a plain `zig test`. A `.env` is
+//! read as *text somebody else read*, and TOML or YAML arrive as pairs
+//! through `Fixed` — so a parser is a dependency the program chooses rather
+//! than one every importer carries. What this module owns is the half no
+//! parser does: a struct of your own, filled or refused, with **every** bad
+//! setting named at once rather than the first.
 //!
 //! ```zig
 //! 3 settings could not be read from the environment:
@@ -47,8 +49,25 @@
 //!   DATABASE_URL is not set
 //!   LOG_LEVEL has to be one of debug, info, warn, not "verbose"
 //! ```
+//!
+//! **A `.env` is a source, and sources go in an order.** The first layer
+//! that has the name answers, so a variable somebody actually set beats the
+//! file without anything having to know it did:
+//!
+//! ```zig
+//! const text = std.fs.cwd().readFileAlloc(arena, ".env", 64 * 1024) catch "";
+//! const file = config.Dotenv{ .text = text };
+//!
+//! const read = config.from(Settings, config.layered(.{
+//!     config.Env{ .environ = init.minimal.environ },
+//!     file,
+//! }));
+//!
+//! try file.report(stderr);   // writes nothing when the file is clean
+//! ```
 
 const std = @import("std");
+const dotenv_mod = @import("dotenv.zig");
 const read_mod = @import("read.zig");
 const source_mod = @import("source.zig");
 
@@ -69,6 +88,19 @@ pub const Map = source_mod.Map;
 /// Pairs written out where they are used, and the seam a program hands its
 /// own parsed values through.
 pub const Fixed = source_mod.Fixed;
+/// A `.env`'s text, read as a source. The file is the caller's to open
+/// (ADR 0064).
+pub const Dotenv = dotenv_mod.Dotenv;
+/// One line of a `.env` that meant to be a setting and is not.
+pub const BadLine = dotenv_mod.BadLine;
+/// Why one line of a `.env` is not a setting.
+pub const Wrong = dotenv_mod.Wrong;
+
+/// Several sources in the order they win — the first that has the name
+/// answers. See `Layered`.
+pub const layered = source_mod.layered;
+/// The type `layered` returns, for a program that wants to name it.
+pub const Layered = source_mod.Layered;
 
 pub const Options = struct {
     /// Put in front of every name before it is looked up: `.{ .prefix =
@@ -155,8 +187,85 @@ test "a Config that cannot be read hands back every reason at once" {
     try testing.expectEqual(@as(usize, 3), r.failedCount());
 }
 
+test "a Config is read from a .env" {
+    const r = from(Settings, Dotenv{ .text =
+    \\# what this thing serves on
+    \\PORT=9000
+    \\DATABASE_URL="postgres://localhost/app"
+    \\LOG_LEVEL=warn
+    \\
+    });
+
+    const settings = r.value().?;
+    try testing.expectEqual(@as(u16, 9000), settings.port);
+    try testing.expectEqualStrings("postgres://localhost/app", settings.database_url);
+    try testing.expectEqual(.warn, settings.log_level);
+}
+
+test "a set variable beats the .env under it" {
+    // The arrangement the whole feature exists for: the file is what a
+    // machine has when nobody said otherwise, and the environment is
+    // somebody saying otherwise.
+    const r = from(Settings, layered(.{
+        Fixed{ .pairs = &.{.{ "PORT", "3000" }} },
+        Dotenv{ .text = "PORT=9000\nDATABASE_URL=postgres://localhost/app\n" },
+    }));
+
+    const settings = r.value().?;
+    try testing.expectEqual(@as(u16, 3000), settings.port);
+    // And what the environment does not set still comes from the file.
+    try testing.expectEqualStrings("postgres://localhost/app", settings.database_url);
+}
+
+test "a .env that sets nothing leaves the Config on its defaults" {
+    // What a missing file looks like once `readFileAlloc` has been `catch ""`d,
+    // which is the shape the doc comment shows.
+    const r = from(Settings, layered(.{
+        Fixed{ .pairs = &.{.{ "DATABASE_URL", "postgres://" }} },
+        Dotenv{ .text = "" },
+    }));
+    try testing.expectEqual(@as(u16, 8080), r.value().?.port);
+}
+
+test "a line that is not a setting is a mistake the .env reports, not the Config" {
+    // The two reports answer different questions and neither guesses at the
+    // other's: the file says line 2 is not a setting, and the Config says
+    // DATABASE_URL is not set. A program prints both.
+    const file = Dotenv{ .text = "PORT=9000\nDATABASE_URL postgres://localhost\n" };
+    const r = from(Settings, file);
+
+    try testing.expect(file.failed());
+    try testing.expectEqual(@as(usize, 1), file.failedCount());
+    try testing.expectEqual(@as(?Settings, null), r.value());
+    try testing.expectEqual(@as(usize, 1), r.failedCount());
+
+    var buf: [512]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try file.report(&w);
+    try r.report(&w);
+
+    try testing.expectEqualStrings(
+        \\1 line is not a setting:
+        \\  line 2 has no `=`, so it sets nothing
+        \\1 setting could not be read from the environment:
+        \\  DATABASE_URL is not set
+        \\
+    , buf[0..w.end]);
+}
+
+test "a prefix reads a .env the same way it reads the environment" {
+    const r = fromWith(Settings, .{ .prefix = "NILO_" }, Dotenv{ .text =
+    \\NILO_PORT=9000
+    \\NILO_DATABASE_URL=postgres://
+    \\
+    });
+    try testing.expect(!r.failed());
+    try testing.expectEqual(@as(u16, 9000), r.value().?.port);
+}
+
 test {
     _ = @import("convert.zig");
+    _ = @import("dotenv.zig");
     _ = @import("read.zig");
     _ = @import("source.zig");
 }

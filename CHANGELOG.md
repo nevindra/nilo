@@ -529,10 +529,37 @@ pub fn main(init: std.process.Init) !void {
   ```
 
   `read.failures()` walks them if you would rather write your own.
-- **It parses no files, and that is a decision.** `config.Fixed` is the seam a
+- **It opens no files, and that is the decision.** `config.Fixed` is the seam a
   program hands its own parsed pairs through, so TOML is a dependency you pick
   rather than one this module makes every project carry. `std.zon.parse` is in
   the standard library and costs nothing.
+- **A `.env` is a source, and you open the file**
+  ([ADR 0064](./docs/adr/0064-a-dotenv-is-text-somebody-else-read.md)).
+  `config.Dotenv` takes the *text*, so the module still allocates nothing and
+  still imports nothing. `config.layered` puts sources in the order they win —
+  the first with the name answers, which is how a variable somebody actually
+  set beats the file:
+
+  ```zig
+  const text = std.fs.cwd().readFileAlloc(arena, ".env", 64 * 1024) catch "";
+  const file = config.Dotenv{ .text = text };
+
+  const read = config.from(Settings, config.layered(.{
+      config.Env{ .environ = init.minimal.environ },
+      file,
+  }));
+
+  try file.report(stderr);   // writes nothing when the file is clean
+  ```
+
+  The text has to outlive the Config, exactly as the environment block does.
+  A line that meant to be a setting and is not is **reported with its number,
+  never skipped** — otherwise a missing `=` on line 7 reads as "DATABASE_URL is
+  not set" about a file that plainly sets it. Reads quoting, `export `, CRLF and
+  `#` comments on their own line; refuses escapes, interpolation and comments
+  after a value, so `PASSWORD=abc#123` survives. A report never quotes a value.
+  **6,448 bytes** for a program that uses it, and byte-for-byte zero for one
+  that does not.
 - **Text is `[]const u8`, not `Str`.** Settings are read once and held for the
   life of the process; the lifetime a `Str` carries has nothing to say about
   them, and `config.Env` reads the environment block where it lies rather than
