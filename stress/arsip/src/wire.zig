@@ -8,50 +8,73 @@
 
 const std = @import("std");
 const nilo = @import("nilo_http");
+const auth = @import("auth.zig");
 const handlers = @import("handlers.zig");
+const Accounts = @import("accounts.zig").Accounts;
 const Archive = @import("archive.zig").Archive;
 const Settings = @import("settings.zig").Settings;
 
 const testing = std.testing;
 
-/// An App with the whole API on it, plus the store it needs.
+/// An App with the whole API on it, plus the two stores it needs.
 const Server = struct {
     app: nilo.App,
     archive: Archive,
+    accounts: Accounts,
     limits: Settings,
     client: nilo.testing.Client,
+    /// The sealed cookie, once something has signed in. Kept here so a test
+    /// reads like a session rather than like a header.
+    cookie: ?[]const u8 = null,
+    gpa: std.mem.Allocator,
 
     fn init(gpa: std.mem.Allocator) !*Server {
-        // By pointer: the App holds a pointer to the Archive, so neither may
+        // By pointer: the App holds a pointer to each store, so none of them may
         // move after `provide`.
         const self = try gpa.create(Server);
         self.* = .{
             .app = nilo.App.init(gpa),
             .archive = .init(gpa),
-            .limits = .{},
+            .accounts = .init(gpa),
+            .limits = .{ .session_secret = "0123456789abcdef0123456789abcdef" },
             .client = try nilo.testing.Client.init(gpa, .{}),
+            .gpa = gpa,
         };
         try self.app.provide(&self.archive);
-        // Forgetting this line is a 500 in every test that needed it, because
+        try self.app.provide(&self.accounts);
+        // Forgetting one of these is a 500 in every test that needed it, because
         // the check that would have named it runs in `listen()` and the test
-        // client does not call `listen()`. See `DX.md`.
+        // client does not call `listen()`. See item 2 in `DX.md`.
         try self.app.provide(@as(*const Settings, &self.limits));
-        try handlers.mount(self.app.group("/v1"));
-        self.app.docs(.{ .title = "arsip", .version = "0.1.0" });
+
+        // What `.session_secret` becomes. Set directly, because these tests
+        // never call `listen()` — a handler asking for a `Session(T)` with no key
+        // answers 500 with a sentence naming the option, which is the right
+        // behaviour and not what any of these are testing.
+        self.app.session_key = @splat(0xA5);
+
+        const v1_prefix = "/v1";
+        const v1 = self.app.group(v1_prefix);
+        try auth.mountOpen(v1);
+        try handlers.mount(v1_prefix, v1);
+        self.app.docs(.{ .title = "arsip", .version = "0.2.0" });
         return self;
     }
 
     fn deinit(self: *Server, gpa: std.mem.Allocator) void {
+        if (self.cookie) |c| gpa.free(c);
         self.client.deinit();
+        self.accounts.deinit();
         self.archive.deinit();
         self.app.deinit();
         gpa.destroy(self);
     }
 
     fn send(self: *Server, method: []const u8, path: []const u8, body: ?[]const u8) !nilo.testing.Answer {
-        var head: std.Io.Writer.Allocating = .init(testing.allocator);
+        var head: std.Io.Writer.Allocating = .init(self.gpa);
         defer head.deinit();
-        try head.writer.print("{s} {s} HTTP/1.1\r\nHost: t\r\nX-Operator: wati\r\n", .{ method, path });
+        try head.writer.print("{s} {s} HTTP/1.1\r\nHost: t\r\n", .{ method, path });
+        if (self.cookie) |c| try head.writer.print("Cookie: {s}\r\n", .{c});
         if (body) |b| {
             try head.writer.print("Content-Type: application/json\r\nContent-Length: {d}\r\n\r\n{s}", .{ b.len, b });
         } else {
@@ -59,7 +82,47 @@ const Server = struct {
         }
         return self.client.send(&self.app, head.written());
     }
+
+    /// Sign up, and keep whatever `Set-Cookie` came back. **One argon2id hash,
+    /// so about 13 ms** — which is why the tests below sign in once and reuse it
+    /// rather than doing this per request.
+    fn signUp(self: *Server, email: []const u8, name: []const u8) !nilo.testing.Answer {
+        var body: std.Io.Writer.Allocating = .init(self.gpa);
+        defer body.deinit();
+        try body.writer.print(
+            "{{\"email\":\"{s}\",\"name\":\"{s}\",\"password\":\"kopi-tubruk-manis\"}}",
+            .{ email, name },
+        );
+
+        const answer = try self.send("POST", "/v1/sign-up", body.written());
+        try self.keepCookie(answer);
+        return answer;
+    }
+
+    fn keepCookie(self: *Server, answer: nilo.testing.Answer) !void {
+        const set = answer.header("set-cookie") orelse return;
+        // Only the `name=value` part goes back up; the attributes are the
+        // browser's business.
+        const upto = std.mem.indexOfScalar(u8, set, ';') orelse set.len;
+        if (self.cookie) |old| self.gpa.free(old);
+        self.cookie = try self.gpa.dupe(u8, set[0..upto]);
+    }
+
+    fn forgetCookie(self: *Server) void {
+        if (self.cookie) |c| self.gpa.free(c);
+        self.cookie = null;
+    }
 };
+
+/// A Server with somebody signed in, which is what most of these tests want.
+/// The first account is the curator, so this one can reach everything.
+fn signedIn(gpa: std.mem.Allocator) !*Server {
+    const s = try Server.init(gpa);
+    errdefer s.deinit(gpa);
+    const answer = try s.signUp("wati@example.dev", "Wati");
+    if (answer.status != 201) return error.SignUpFailed;
+    return s;
+}
 
 fn field(body: []const u8, name: []const u8) ![]const u8 {
     const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, body, .{});
@@ -73,7 +136,7 @@ fn field(body: []const u8, name: []const u8) ![]const u8 {
 
 test "the whole life of a document, over the wire" {
     const gpa = testing.allocator;
-    var s = try Server.init(gpa);
+    var s = try signedIn(gpa);
     defer s.deinit(gpa);
 
     // A folder that did not exist answers 201; the same folder again answers 200.
@@ -113,25 +176,114 @@ test "the whole life of a document, over the wire" {
     try testing.expectEqual(@as(u16, 404), missing.status);
 }
 
-test "the guard runs whether or not the handler asked for the operator" {
+test "the whole sign-up, sign-in, sign-out round trip through one cookie" {
     const gpa = testing.allocator;
     var s = try Server.init(gpa);
     defer s.deinit(gpa);
 
-    const anonymous = try s.client.get(&s.app, "/v1/docs");
+    // Nothing is signed in, so the guarded prefix refuses — and the message
+    // names the route to fix it rather than saying "unauthorized".
+    const anonymous = try s.send("GET", "/v1/docs", null);
     try testing.expectEqual(@as(u16, 401), anonymous.status);
+    const why = try field(anonymous.body, "error");
+    defer gpa.free(why);
+    try testing.expect(std.mem.indexOf(u8, why, "/v1/sign-in") != null);
 
-    const named = try s.send("GET", "/v1/docs", null);
-    try testing.expectEqual(@as(u16, 200), named.status);
+    // Whoever signs up first is the curator.
+    const made = try s.signUp("wati@example.dev", "Wati");
+    try testing.expectEqual(@as(u16, 201), made.status);
+    try testing.expect(s.cookie != null);
+    // The response carries a profile and no hash, which is a property of the
+    // type rather than of remembering to leave a field out.
+    try testing.expect(std.mem.indexOf(u8, made.body, "argon2") == null);
+    try testing.expect(std.mem.indexOf(u8, made.body, "\"curator\":true") != null);
 
-    // ...and the curator prefix refuses somebody who is merely signed in.
+    // The `public` id is a v7, and it goes out as text rather than as sixteen
+    // numbers — `Uuid` carries a `jsonStringify`, so `nilo_http` needs no
+    // knowledge of `nilo_id` at all.
+    const public = try field(made.body, "public");
+    defer gpa.free(public);
+    try testing.expectEqual(@as(usize, 36), public.len);
+    try testing.expectEqual(@as(u8, '7'), public[14]);
+
+    // The cookie is the whole session: nothing was kept on the server.
+    const signed = try s.send("GET", "/v1/whoami", null);
+    try testing.expectEqual(@as(u16, 200), signed.status);
+    try testing.expect(std.mem.indexOf(u8, signed.body, "\"name\":\"Wati\"") != null);
+
+    // A second account is not the curator, so the curators' prefix refuses it —
+    // and says who it refused.
+    const second = try s.signUp("budi@example.dev", "Budi");
+    try testing.expectEqual(@as(u16, 201), second.status);
     const nosy = try s.send("GET", "/v1/curate/report", null);
     try testing.expectEqual(@as(u16, 403), nosy.status);
+    const refusal = try field(nosy.body, "error");
+    defer gpa.free(refusal);
+    try testing.expect(std.mem.indexOf(u8, refusal, "Budi") != null);
+
+    // Signing out deletes the cookie in this browser, and dropping it locally
+    // is the same thing from the server's side — there is nothing else to undo.
+    const out = try s.send("POST", "/v1/sign-out", null);
+    try testing.expectEqual(@as(u16, 204), out.status);
+    s.forgetCookie();
+    try testing.expectEqual(@as(u16, 401), (try s.send("GET", "/v1/whoami", null)).status);
+
+    // And signing back in with the right password works, with the wrong one not.
+    const wrong = try s.send("POST", "/v1/sign-in",
+        \\{"email":"budi@example.dev","password":"salah-sekali"}
+    );
+    try testing.expectEqual(@as(u16, 401), wrong.status);
+
+    const back = try s.send("POST", "/v1/sign-in",
+        \\{"email":"budi@example.dev","password":"kopi-tubruk-manis"}
+    );
+    try testing.expectEqual(@as(u16, 200), back.status);
+    try s.keepCookie(back);
+    try testing.expectEqual(@as(u16, 200), (try s.send("GET", "/v1/whoami", null)).status);
+}
+
+test "a sign-in for an address with no account is refused the same way as a wrong password" {
+    const gpa = testing.allocator;
+    var s = try Server.init(gpa);
+    defer s.deinit(gpa);
+
+    _ = try s.signUp("wati@example.dev", "Wati");
+    s.forgetCookie();
+
+    // Same status, and the same sentence — the point of `verifyPassword` taking
+    // an optional `stored` is that the no-account path does the work anyway, so
+    // the form cannot be turned into a list of which addresses are registered.
+    const no_account = try s.send("POST", "/v1/sign-in",
+        \\{"email":"nobody@example.dev","password":"kopi-tubruk-manis"}
+    );
+    const wrong_password = try s.send("POST", "/v1/sign-in",
+        \\{"email":"wati@example.dev","password":"salah-sekali"}
+    );
+    try testing.expectEqual(@as(u16, 401), no_account.status);
+    try testing.expectEqual(@as(u16, 401), wrong_password.status);
+
+    const a = try field(no_account.body, "error");
+    defer gpa.free(a);
+    const b = try field(wrong_password.body, "error");
+    defer gpa.free(b);
+    try testing.expectEqualStrings(a, b);
+}
+
+test "a short password is refused before anything is hashed" {
+    const gpa = testing.allocator;
+    var s = try Server.init(gpa);
+    defer s.deinit(gpa);
+
+    const refused = try s.send("POST", "/v1/sign-up",
+        \\{"email":"wati@example.dev","name":"Wati","password":"kopi"}
+    );
+    try testing.expectEqual(@as(u16, 422), refused.status);
+    try testing.expectEqual(@as(usize, 0), try s.accounts.count());
 }
 
 test "three bad fields in one body are named in one answer" {
     const gpa = testing.allocator;
-    var s = try Server.init(gpa);
+    var s = try signedIn(gpa);
     defer s.deinit(gpa);
 
     _ = try s.send("PUT", "/v1/folders/kantor", "{\"name\":\"Kantor\"}");
@@ -149,7 +301,7 @@ test "three bad fields in one body are named in one answer" {
 
 test "a query struct that does not fit is refused before the handler runs" {
     const gpa = testing.allocator;
-    var s = try Server.init(gpa);
+    var s = try signedIn(gpa);
     defer s.deinit(gpa);
 
     const bad = try s.send("GET", "/v1/docs?sort=sideways", null);
@@ -162,7 +314,7 @@ test "a query struct that does not fit is refused before the handler runs" {
 
 test "a multipart form with a file in it, and the 303 it answers with" {
     const gpa = testing.allocator;
-    var s = try Server.init(gpa);
+    var s = try signedIn(gpa);
     defer s.deinit(gpa);
 
     _ = try s.send("PUT", "/v1/folders/kantor", "{\"name\":\"Kantor\"}");
@@ -179,12 +331,16 @@ test "a multipart form with a file in it, and the 303 it answers with" {
         "%PDF-1.7 hello\r\n" ++
         "--" ++ boundary ++ "--\r\n";
 
+    // Built by hand rather than through `send`, because this is the one request
+    // whose Content-Type is not JSON — so the cookie has to be carried by hand
+    // too. M1 sent an `X-Operator:` header here and M2 sends the session, which
+    // is the whole of what changed on the client's side.
     var raw: std.Io.Writer.Allocating = .init(gpa);
     defer raw.deinit();
     try raw.writer.print(
-        "POST /v1/docs/1/attach HTTP/1.1\r\nHost: t\r\nX-Operator: wati\r\n" ++
+        "POST /v1/docs/1/attach HTTP/1.1\r\nHost: t\r\nCookie: {s}\r\n" ++
             "Content-Type: multipart/form-data; boundary={s}\r\nContent-Length: {d}\r\n\r\n{s}",
-        .{ boundary, form.len, form },
+        .{ s.cookie.?, boundary, form.len, form },
     );
 
     const answer = try s.client.send(&s.app, raw.written());
@@ -204,7 +360,7 @@ test "a multipart form with a file in it, and the 303 it answers with" {
 
 test "a body read in pieces files what parses and counts what does not" {
     const gpa = testing.allocator;
-    var s = try Server.init(gpa);
+    var s = try signedIn(gpa);
     defer s.deinit(gpa);
 
     _ = try s.send("PUT", "/v1/folders/kantor", "{\"name\":\"Kantor\"}");
@@ -227,7 +383,7 @@ test "a body read in pieces files what parses and counts what does not" {
 
 test "a wildcard is the one param a handler cannot take as an argument" {
     const gpa = testing.allocator;
-    var s = try Server.init(gpa);
+    var s = try signedIn(gpa);
     defer s.deinit(gpa);
 
     _ = try s.send("PUT", "/v1/folders/kantor", "{\"name\":\"Kantor\"}");
@@ -243,7 +399,7 @@ test "a wildcard is the one param a handler cannot take as an argument" {
 
 test "a body deeper than eight levels parses, and its errors stop naming the field" {
     const gpa = testing.allocator;
-    var s = try Server.init(gpa);
+    var s = try signedIn(gpa);
     defer s.deinit(gpa);
 
     // Nine levels is fine on the happy path.
@@ -270,7 +426,7 @@ test "a body deeper than eight levels parses, and its errors stop naming the fie
 
 test "the API description names every shape the signatures mention" {
     const gpa = testing.allocator;
-    var s = try Server.init(gpa);
+    var s = try signedIn(gpa);
     defer s.deinit(gpa);
 
     const doc = try s.client.get(&s.app, "/openapi.json");

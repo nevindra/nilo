@@ -69,7 +69,7 @@ held by a handler that forgot `nilo.blocking`, an unrelated `/health` took
 **3.635s**; with the same work wrapped, **0.0019s**. nilo warned about it on the
 first request, with nobody else on the server.
 
-## M2 — Identity
+## M2 — Identity ✅
 
 `nilo_config` reads the settings out of the environment into a struct. `nilo_pw`
 hashes the password; `nilo_id` gives every document a v7. A session cookie
@@ -79,6 +79,49 @@ without one.
 Three tool modules land at once because they arrive together in real life, and
 because the reference is all there is for two of them — whether that is enough
 is the finding.
+
+**The claim under test was narrow and it held.** M1 authenticated on an
+`X-Operator:` header. M2 replaced that with a sealed cookie and an argon2id
+password behind it, and **`handlers.zig` and `intake.zig` did not change** — every
+signature still says `Operator` or `Curator`, and the aliases at the top of
+`handlers.zig` are there so that is checkable rather than claimed. What did change
+is `authenticate`, which is the one function that ever knew.
+
+23 routes, 40 tests in both modes. What the transcript proved, in the order it was
+run:
+
+- a bad `.env` line and a bad setting are two reports, and both name the problem
+  without quoting the value: `line 2 has no \`=\`, so it sets nothing`,
+  `ARSIP_LOG_LEVEL has to be one of debug, info, warn, not "loud"`;
+- a 14-byte `ARSIP_SESSION_SECRET` is refused by arsip's own check, so the message
+  can name the setting rather than the byte count;
+- the first account is the curator; the second gets
+  `only a curator can do that, and Budi is not one` from a resolver it never asked
+  for;
+- a wrong password and an address with no account answer the same sentence, and
+  the two v7 ids sort in the order they were made (`01a01053…`, `01a01054…`);
+- 2,000 bytes of PDF through a multipart form and back out byte-identical, with
+  the row carrying `"filename":"q3.pdf"` and none of the bytes;
+- 2.1 MB of NDJSON streamed in: `{"filed":40000,"skipped":1,"bytes":2228903}`.
+
+The measurement worth keeping is the watchdog one, re-run at M2's scale. A handler
+that holds its thread: **`/health` took 811 ms** behind it, and nilo said so —
+`held its thread for 1136ms. Every other request being served on that thread waited
+the whole time.` The same work through `nilo.blocking`: **0.0007–0.001 s**. The log
+line for that `/health` says `83µs`, which is the useful detail — the request
+itself was never slow, so nothing but the watchdog could have told you.
+
+Two bugs found were arsip's own and both are worth remembering. A store method
+copying its result onto `self.gpa` instead of the caller's arena leaked three
+allocations a sign-up, and only the wire tests caught it — the store's own tests
+freed by hand. And `nameOf(signed: Signed) []const u8` returns a slice into a
+by-value parameter, which dangles: it came back `Sri  ahyuni ????|@?` in Debug.
+Both are Zig rather than nilo, and both are the second-order price of "a session
+may hold no slice".
+
+Five new items in [`DX.md`](./DX.md), one of them the worst found so far: a type
+with its own `jsonStringify` gets an OpenAPI schema that **contradicts what the
+server sends**, which breaks every generated client that reads a `nilo_id` value.
 
 ## M3 — Postgres
 

@@ -19,51 +19,14 @@ const Text = domain.Text;
 const Doc = domain.Doc;
 const Allocator = std.mem.Allocator;
 
-/// Neither a service nor request data: worked out *from* the request, once,
-/// whichever route asked for it. M2 replaces the body of `authenticate` with a
-/// session cookie and a password, and no handler below changes.
-pub const Operator = struct {
-    pub const nilo_resolve = authenticate;
-
-    name: Str,
-    curator: bool,
-};
-
-fn authenticate(c: *nilo.Ctx) !Operator {
-    const who = c.header("X-Operator") orelse
-        return fail.unauthorized("this endpoint needs an X-Operator header", .{});
-    if (who.len() == 0) return fail.unauthorized("X-Operator is empty", .{});
-    return .{ .name = who, .curator = who.eql("bu-sri") };
-}
-
-/// A resolved value built out of **another resolved value** rather than out of
-/// a second copy of the auth code. That is the whole reason a resolver may take
-/// one: `Curator` is `Operator` plus a refusal, and neither of them reads a
-/// header twice — both are worked out once per request, whichever route or
-/// middleware asks first.
-pub const Curator = struct {
-    pub const nilo_resolve = onlyCurators;
-
-    name: Str,
-};
-
-fn onlyCurators(operator: Operator) !Curator {
-    if (!operator.curator) return fail.forbidden(
-        "only a curator can do that, and {s} is not one",
-        .{operator.name.view()},
-    );
-    return .{ .name = operator.name };
-}
-
-/// A prefix guard. A resolved value alone is the wrong tool for securing a
-/// prefix — only routes that name one get it, so a handler that forgets the
-/// argument is simply not authenticated. `useOn` applies whether the handler
-/// cooperates or not, and `c.resolve` is how the two meet: this lookup and the
-/// handler's argument are the same one lookup, not two.
-pub fn requireCurator(c: *nilo.Ctx, next: nilo.Next) !void {
-    _ = try c.resolve(Curator);
-    try next.run(c);
-}
+/// M1 declared these here and resolved them from an `X-Operator:` header. M2
+/// moved them to `auth.zig`, where they come out of a sealed session cookie with
+/// an argon2id password behind it — and **nothing else in this file changed.**
+/// The aliases are here so that sentence is checkable rather than a claim: every
+/// signature below still says `Operator` and `Curator`.
+const auth = @import("auth.zig");
+pub const Operator = auth.Operator;
+pub const Curator = auth.Curator;
 
 // ---- folders ----
 
@@ -210,17 +173,6 @@ fn rawDoc(c: *nilo.Ctx, store: *Archive, arena: Allocator, id: u32) !void {
     try c.send(200, "text/plain; charset=utf-8", out.written());
 }
 
-// ---- who is asking ----
-
-const Profile = struct {
-    name: Str,
-    curator: bool,
-};
-
-fn me(operator: Operator) Profile {
-    return .{ .name = operator.name, .curator = operator.curator };
-}
-
 /// Takes the `Curator`, not the `Operator`. The middleware on this prefix has
 /// already resolved one; asking for it here is a read of that same value rather
 /// than a second check somebody could forget to write.
@@ -233,10 +185,17 @@ fn report(store: *Archive, curator: Curator) !domain.Summary {
 
 /// A plugin is an ordinary function that takes a group. Nothing to register,
 /// and the same function mounts at any prefix.
-pub fn mount(g: anytype) !void {
-    try g.use(requireOperator);
+///
+/// It takes the prefix as well, which is the part that is not free: the guard on
+/// this group has to let `/sign-up` and `/sign-in` through, that exception is a
+/// path string, and a `Group` does not publish the prefix it was built with. So
+/// the caller says it twice — once to `app.group`, once here — and a constant is
+/// the only thing keeping the two in step. See `auth.guardOperator` and item 13
+/// in `DX.md`.
+pub fn mount(comptime prefix: []const u8, g: anytype) !void {
+    try g.use(auth.guardOperator(prefix));
 
-    try g.get("/me", me);
+    try auth.mountSigned(g);
     try g.get("/folders", listFolders);
     try g.put("/folders/:slug", putFolder);
     try g.get("/folders/:folder/docs", listInFolder);
@@ -252,16 +211,9 @@ pub fn mount(g: anytype) !void {
     try @import("intake.zig").mount(g);
 
     const curators = g.group("/curate");
-    try curators.use(requireCurator);
+    try curators.use(auth.requireCurator);
     try curators.get("/report", report);
     try @import("intake.zig").mountCurate(curators);
-}
-
-/// Registered on the whole group rather than named by each handler, so a route
-/// added later is guarded whether or not its author remembered.
-fn requireOperator(c: *nilo.Ctx, next: nilo.Next) !void {
-    _ = try c.resolve(Operator);
-    try next.run(c);
 }
 
 fn requireFolder(store: *Archive, folder: Str) !void {
@@ -361,8 +313,12 @@ test "a document that is not there is a null, which is the 404" {
     try testing.expectEqual(@as(?Doc, null), try getDoc(&f.store, f.arena(), 404));
 }
 
-test "the profile a curator sees is the one the resolver worked out" {
-    const seen = me(.{ .name = .static("bu-sri"), .curator = true });
-    try testing.expect(seen.curator);
-    try testing.expectEqualStrings("bu-sri", seen.name.view());
+test "the report is behind a Curator, which is a type rather than a check" {
+    var f: Fixture = .init(testing.allocator);
+    defer f.deinit();
+
+    _ = try f.store.file(f.arena(), "kantor", .{ .title = "laporan" });
+    const seen = try report(&f.store, .{ .name = .static("bu-sri") });
+    try testing.expectEqual(@as(usize, 1), seen.docs);
+    try testing.expectEqual(@as(usize, 1), seen.draft);
 }

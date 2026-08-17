@@ -240,7 +240,10 @@ test "reindexing is an ordinary call when there is no server under it" {
 
     _ = try store.file(scratch.allocator(), "kantor", .{ .title = "laporan" });
 
-    const done = try reindex(&store, &.{ .reindex_rounds = 4 });
+    // Since M2 the Settings come from the environment, so `session_secret` has
+    // no default and a literal has to say something. That is the point of a
+    // field with no default: the compiler asked.
+    const done = try reindex(&store, &.{ .session_secret = "x" ** 32, .reindex_rounds = 4 });
     try testing.expect(!done.held_thread);
 }
 

@@ -8,16 +8,25 @@ Each says what happens, who runs into it, and what would have to change. The
 ranking is by how many users hit it and how badly, not by how hard it is to fix.
 
 Found in: **M0** scaffolding, **M1** the JSON API, **M1b** forms, uploads,
-streamed bodies, blocking work and wildcards.
+streamed bodies, blocking work and wildcards, **M2** accounts, passwords, sealed
+sessions and settings from the environment.
+
+**The number is an id, not a rank.** The table is sorted worst first, so a new
+item can land at the top without renumbering the ones below it.
 
 | # | Item | Area | Sev |
 |---|---|---|---|
+| 14 | [A type with its own `jsonStringify` gets a schema that contradicts the wire](#14) | openapi | **critical** |
+| 11 | [Three published examples of the password and id API do not compile](#11) | docs | high |
+| 13 | [There is no way to guard a prefix except two paths in it](#13) | middleware | high |
 | 1 | [Identical generic instantiations get two identical schemas](#1) | openapi | high |
 | 2 | [A service you forgot is a 500 in tests, not a name](#2) | services, testing | high |
 | 3 | [Past eight levels a body error says nothing at all](#3) | convert | high |
+| 15 | [A 422 has two shapes, and only one of them is nilo's](#15) | convert, docs | medium |
 | 4 | [A `union(enum)` has a derivable schema and gets `{}`](#4) | openapi | medium |
 | 5 | [`Bound(T)` cannot be built from the testing page](#5) | testing | medium |
 | 6 | [The `Str`→`Text` walk is unaddressed past two levels](#6) | docs | medium |
+| 12 | [Settings are read before the loop, and Zig 0.16 wants a loop to read them](#12) | config, docs | medium |
 | 7 | [An alias does not name a generic instantiation](#7) | openapi docs | low |
 | 8 | [The `zig init` template is not the one the guide edits](#8) | docs | low |
 | 9 | [A mismatched `.optimize` has no warning, but its twin does](#9) | build | low |
@@ -70,10 +79,14 @@ worst possible shape for a clue, because the evidence points at the test.
 App in a test and drives requests through it — and adds a service later. The
 better the test coverage, the more places it lands at once.
 
-**What to change.** Run the same check the first time a request goes through an
-App, or expose it as `app.check()` and have `testing.Client.init` call it.
-`guide/testing.md`'s worked example builds an App by hand and provides one
-service, so the gap stays invisible until your second one.
+**What to change.** **The check is already public.** `app.checkServices()` exists
+and returns `error.MissingService`; `listen()` calls it and nothing else does. So
+the fix is not new machinery, it is one call — `testing.Client.init` running it, or
+`App.handleRequest` running it once on the first request. Failing that, one line in
+`guide/testing.md` telling a reader to call it themselves, because a public
+function nobody is told about is a function nobody calls. arsip hit this twice in
+M1 and once more in M2 (`*const Settings`, newly required) before finding out it
+existed.
 
 <a name="3"></a>
 ## 3. Past eight levels a body error says nothing at all
@@ -223,10 +236,23 @@ the same symptom** — a server that is merely slow — and `listen()` *does* wa
 about that one, on the grounds that a symptom you cannot see is one you will not
 find. Two identical symptoms, one warning.
 
+**What arsip added to this in M2.** It made the mistake itself, and in the place
+that costs most. arsip's own `build.zig` passed `.optimize` through for the
+executable and *not* for the test step, which loops over `.{ .Debug,
+.ReleaseSafe }` — so the ReleaseSafe half of the suite ran a ReleaseSafe program
+against a Debug nilo for two milestones, and the gate
+`guide/testing.md` recommends was checking a configuration nobody deploys. Nothing
+said so. The tell, once you know to look, is in the compile command line:
+`-OReleaseSafe` next to `-Mroot=` and `-ODebug` next to `-Mnilo_http=`.
+
+**Who hits it.** Anybody following the guide's own advice to run their suite in
+both modes, because that is the code where the dependency is fetched twice.
+
 **What to change.** Whether the build can see it at all is the open question: the
 check compares the dependent's optimize mode against the one nilo was built with,
 which is knowable at comptime. If it is reachable, it belongs beside the two
-warnings `listen()` already gives.
+warnings `listen()` already gives — and it wants to fire for *test* artifacts too,
+which is where it would actually have caught this.
 
 <a name="10"></a>
 ## 10. A ReleaseSafe build is a minute and 677 MB
@@ -255,3 +281,210 @@ code is linked whether or not `docs()` is ever called.
 measured baseline rather than from "release builds feel slow". The first useful
 run is the same measurement against a nilo example of known size, which would say
 whether this is nilo, zio, or Zig.
+
+<a name="11"></a>
+## 11. Three published examples of the password and id API do not compile
+
+**What happens.** Three separate published snippets, each one line, each wrong in
+a way the compiler catches immediately:
+
+| Where | What it shows | Why it does not compile |
+|---|---|---|
+| `guide/sessions.md`, `docs/reference.md`, `http/ctx.zig`'s own doc comment | `c.hashPassword(pw.huge_pages, form.password)` | `hashPassword` takes a `[]const u8`; `form.password` is a `Str`. Wants `.view()`. |
+| `docs/reference.md`, `nilo_id` section | `uuid.v7(entropy, nilo.nowMillis())` | `nowMillis()` answers an `i64` and `v7` takes a `u64`. Wants `@intCast`. |
+| `docs/reference.md`, the failing section | `nilo.fail(401, "…")` | `fail` is a namespace, not a function. Wants `fail.unauthorized`. |
+
+None of them is hard to fix once you see the error, and every one of them is the
+*first* thing a person writes when they reach that page. The third is the worst,
+because it makes the reader think they have misunderstood the API rather than
+found a typo.
+
+**Who hits it.** Everybody who copies a line rather than retyping it, which is
+everybody, and it is the same three lines for all of them. The `Str`/`[]const u8`
+one is in **three** places, so it is a copy that has already been made twice.
+
+**What to change.** The wording is not the fix — the fix is a build step, and this
+repository already has the shape of one. `refusals/` is a directory of programs
+that must *fail* to compile with a message nilo wrote, held by a table in
+`build.zig`. The mirror image is a directory of the guide's own snippets that must
+*succeed*, held the same way — `zig build examples-compile`, one file a snippet,
+and a doc example that drifts becomes a red build rather than a reader's evening.
+That is a bigger change than three edits and it is the one that stops the fourth.
+
+<a name="12"></a>
+## 12. Settings are read before the loop, and Zig 0.16 wants a loop to read them
+
+**What happens.** `nilo_config` is built to run before anything opens — it reads
+the environment where it lies and it opens no file, which is right and is
+[ADR 0064](../../docs/adr/0064-a-dotenv-is-text-somebody-else-read.md). Two things
+then need an `std.Io` that does not exist yet, because the thing that will supply
+one is `listen()`, further down the same function:
+
+- **reading the `.env`.** `config.Dotenv` takes *text*, so the program opens the
+  file. In Zig 0.16 that is `std.Io.Dir.cwd().readFileAlloc(io, …)`, and `io` has
+  to come from somewhere — so arsip stands up `std.Io.Threaded` for the length of
+  one 98-byte read and tears it down again. Nine lines where the reference shows
+  one.
+- **printing the report.** `read.report(w)` wants a `*std.Io.Writer`, and getting
+  one for stderr wants an `Io` for the same reason. arsip renders into a
+  `std.Io.Writer.fixed(&buf)` and prints the buffer with `std.debug.print`, which
+  needs nothing.
+
+Both workarounds are three lines and neither is discoverable; the second one also
+puts a fixed ceiling (8 KB here) on a report whose length depends on how many
+settings are wrong.
+
+**Who hits it.** Every program that wants a `.env` on a laptop, which the guide
+itself recommends. The report half hits everybody, because a config failure is the
+one thing you print before you have a server.
+
+**What to change.** Nothing about the layering — `nilo_config` opening a file
+would be the wrong fix and ADR 0064 says why. What is missing is
+`guide/config.md` showing the whole of a real `main`: the threaded `Io` for the
+read, the fixed writer for the report, and why each is there. Fifteen lines of
+guide against a shape every reader has to rediscover.
+
+<a name="13"></a>
+## 13. There is no way to guard a prefix except two paths in it
+
+**What happens.** Every API with accounts has the same shape: one prefix, almost
+all of it behind a session, and two routes inside it that cannot be — you cannot
+require a session to create one. nilo offers `app.use(mw)` and
+`app.useOn(prefix, mw)`, and a `Group` offers `use` and `useOn(sub, mw)`. There is
+nothing that removes a middleware, nothing that attaches one to a single route,
+and no `exceptOn`. So `g.use(requireOperator)` on `/v1` guards `/v1/sign-up` too,
+and sign-up answers 401 — **which is what it did**, on the first run of M2, in ten
+tests at once.
+
+Registering the open routes first does not help and is worth saying out loud:
+chains are resolved in `listen()`, so mounting order carries no meaning
+([ADR 0009](../../docs/adr/0009-middleware-is-an-onion-with-one-hole.md)). It
+looks like it should work, which is the expensive part.
+
+The three ways out, all bad in different ways:
+
+1. **A path skip-list inside the middleware.** What arsip does
+   ([`src/auth.zig`](./src/auth.zig), `guardOperator`). Default-deny, so a route
+   added later is guarded by accident rather than exposed by accident — which is
+   the right direction. The cost is that the exception is a **string** compared
+   against `c.path()`, in a framework whose claim is that the compiler checks the
+   contract. Rename the route and the guard protects a 404 while the real one goes
+   open, and nothing fails to compile.
+2. **`useOn` per resource subgroup.** Declarative, and default-*allow*: every new
+   prefix is unguarded until somebody remembers. This is the one that ships a
+   security hole eventually.
+3. **Move the open routes out of the prefix** — `/sign-in` beside `/v1` rather
+   than inside it. Free, and it means the URL layout is decided by the middleware
+   rather than by the API.
+
+There is a second cost stacked on (1): a `Middleware` is a bare
+`*const fn (*Ctx, Next) anyerror!void` with nowhere to keep state, so the prefix
+has to be a comptime parameter of a function returning one — and **a `Group` does
+not publish the prefix it was built with**. `Group(prefix)` has `prefix` as a
+comptime parameter of the type and no `pub const prefix` inside it, so a
+`mount(g: anytype)` plugin cannot ask `g` where it is mounted. arsip's
+`handlers.mount` therefore takes the prefix as a second argument and `main.zig`
+keeps the two in step with a local constant. Parsing `@typeName(@TypeOf(g))` is
+the only alternative and is not something to ship.
+
+**Who hits it.** Everybody with a login form. This is not an edge case; it is the
+second thing built after the first CRUD route.
+
+**What to change.** Two changes, and the second is smaller than the first:
+
+- `pub const prefix = prefix;` inside `Group(prefix)`. One line, and it makes a
+  plugin able to know where it is — which is a thing several other features would
+  want too.
+- `useOn`'s opposite. The honest version is not a string skip-list promoted into
+  the framework; it is **per-route middleware** — `g.postWith(mw_list, "/x", h)`,
+  or a `g.open("/sign-up", signUp)` that marks a route as exempt from the group's
+  chain. Either puts the exception where the route is declared, so renaming the
+  route moves the exception with it and the compiler stays in the loop. That is the
+  property nilo sells and the one the workaround gives up.
+
+<a name="14"></a>
+## 14. A type with its own `jsonStringify` gets a schema that contradicts the wire
+
+**What happens.** `nilo_id`'s `Uuid` carries a `jsonStringify`, and that is the
+whole reason `nilo_http` needs no knowledge of `nilo_id`
+([ADR 0046](../../docs/adr/0046-randomness-is-an-argument.md)) — a `Uuid` in a
+response comes out as text and the HTTP module never learns the type exists. It
+works. Over the wire:
+
+```json
+{"public":"01a01053-4b22-7677-a5ba-b46a1f52d384","email":"wati@example.dev",…}
+```
+
+And `GET /openapi.json`, from the same running server, same field:
+
+```json
+"Uuid": {"type":"object","properties":{"bytes":{"type":"string"}},"required":["bytes"]}
+```
+
+**The description says object-with-a-`bytes`-field. The server sends a
+36-character string.** `openapi.zig` reflects the struct's fields; `std.json` calls
+`jsonStringify`; nothing reconciles the two. A client generated from this document
+fails to parse **every response carrying a `public`** — which here is sign-up,
+sign-in and whoami, i.e. all three account endpoints.
+
+This is the only wrong schema in a 29-schema document, and everything around it is
+right: `Upload` renders as `{"type":"string","format":"binary"}` under
+`multipart/form-data`, `Patch(T)` renders as `anyOf: [T, null]` and drops out of
+`required`, enums render their choices. That is what makes it dangerous — the
+document is trustworthy enough that nobody checks this field.
+
+**Who hits it.** Every application that returns a `nilo_id` value, which is the
+one the reference recommends for public ids. Also every application returning a
+`nilo_sql` `Row` with a `Timestamp` or a `Uuid` in it, for the same reason — those
+two carry `jsonStringify` as well
+([ADR 0039](../../docs/adr/0039-the-shape-of-a-query-is-settled-while-compiling.md)).
+
+**What to change.** The repository already has the machinery and pointed it at the
+other half of the problem: ADR 0039's `covers()` decides at comptime which types
+the generated writer may touch and **sends anything with its own `jsonStringify`
+down the general path**. The same test — `@hasDecl(T, "jsonStringify")` — is what
+`openapi.zig` needs, and there are two honest answers once it has it:
+
+1. Let a type say what it renders as. `pub const openapi_schema = .{ .type = "string", .format = "uuid" };` beside the `jsonStringify`, which is where the author of the custom writer already is, and is the same shape as `nilo_resolve` and `nilo_sql_type`. `Uuid` and `Timestamp` each gain one line and every downstream document is right.
+2. Refuse to guess. A type with a `jsonStringify` and no `openapi_schema` becomes `{}` with a description saying the writer is custom — wrong but *visibly* wrong, which beats confidently wrong.
+
+(1) is the fix; (2) is what should happen to a third-party type that has not
+opted in. Both are better than reflecting fields the writer does not use.
+
+<a name="15"></a>
+## 15. A 422 has two shapes, and only one of them is nilo's
+
+**What happens.** `Bound(T)` collects every field that would not *convert* and
+answers one 422 naming all of them:
+
+```json
+{"error":"2 fields did not fit: \"kind\" is not one of the known choices (note, invoice, photo, contract): \"gold\"; \"visibility\" is not one of the known choices (private, team, public): \"loud\"","status":422}
+```
+
+That is the feature working, and it is genuinely good. But *validation* — the
+rules a type cannot state, which is most of them — is a sequence of `fail`
+functions, and the first one wins:
+
+```
+POST /v1/sign-up {"email":"bukan-alamat","name":"X","password":"pendek"}
+{"error":"a password wants at least 10 characters; that one has 6","status":422}
+```
+
+Two things are wrong with that body and the client is told about one. Fix it, post
+again, get told about the other — the twenty-questions game `Bound(T)` exists to
+end, back again one layer up. So an application ends up answering 422 in two
+shapes: nilo's collected one for type failures and its own single-sentence one for
+rule failures, and a client has to handle both.
+
+**Who hits it.** Everybody, at the first rule a Zig type cannot express: a minimum
+length, an `@` in an address, an end date after a start date.
+
+**What to change.** Not a validation DSL — that is a framework growing a second
+language, and nilo's whole position is that the type is the contract. The smaller
+thing is to let an application *add* to the collection `Bound` already has, so the
+two kinds of failure come out as one answer in one shape. Something like
+`body.also("password", "wants at least 10 characters")` before `body.fail()`, and
+the existing message machinery does the rest. Failing that, the honest move is a
+paragraph in `guide/forms.md` saying that rule checks do not join the collected
+422 and showing how to accumulate them by hand — because right now the guide shows
+the good half and stops.

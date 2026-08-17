@@ -1,32 +1,49 @@
 //! arsip's build, written the way a dependent writes one.
 //!
-//! The imports list below grows one line per milestone and starts at one, on
-//! purpose: `nilo_sql` drags pg.zig and four transitive dependencies behind a
+//! The imports list grows one line per milestone and started at one, on purpose:
+//! `nilo_sql` drags pg.zig and four transitive dependencies behind a
 //! `.lazy = true` flag (ADR 0040), and the only way to find out whether that
-//! property survives contact with a real project is to have a project that
-//! does not name it yet. Adding a module here should be the whole cost of
-//! adopting it. When it is not, that goes in `DX.md`.
+//! property survives contact with a real project is to have a project that does
+//! not name it yet. Adding a module should be the whole cost of adopting it.
+//! When it is not, that goes in `DX.md`.
+//!
+//! **`niloFor` exists because the first version of this file got it wrong.**
+//! `guide/getting-started.md` says to pass `.optimize` through to the
+//! dependency, and `guide/testing.md` says to run your own suite in both
+//! optimize modes. Do both the obvious way — resolve `b.dependency` once from
+//! `standardOptimizeOption`, then loop over two modes building tests — and the
+//! ReleaseSafe test binary links a **Debug** nilo. Nothing warns; the only
+//! evidence is `-ODebug` next to `-Mnilo_http=` in a command line nobody reads.
+//! One dependency instance per mode is the fix. See item 9 in `DX.md`.
 
 const std = @import("std");
+
+fn niloFor(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) []const std.Build.Module.Import {
+    const nilo = b.dependency("nilo", .{ .target = target, .optimize = optimize });
+    return b.allocator.dupe(std.Build.Module.Import, &.{
+        .{ .name = "nilo_http", .module = nilo.module("nilo_http") },
+        // M2. Three tool modules, and three lines is the whole cost of them: no
+        // event loop, no transitive dependency, nothing fetched. Still no
+        // `nilo_sql`, so pg.zig and its four remain undownloaded.
+        .{ .name = "nilo_config", .module = nilo.module("nilo_config") },
+        .{ .name = "nilo_id", .module = nilo.module("nilo_id") },
+        .{ .name = "nilo_pw", .module = nilo.module("nilo_pw") },
+    }) catch @panic("out of memory");
+}
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Same `.optimize` through to the dependency: building nilo in Debug under
-    // a ReleaseFast program is legal, slow, and nothing warns about it
-    // (guide/getting-started.md).
-    const nilo = b.dependency("nilo", .{ .target = target, .optimize = optimize });
-
-    const imports: []const std.Build.Module.Import = &.{
-        .{ .name = "nilo_http", .module = nilo.module("nilo_http") },
-    };
-
     const root = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = imports,
+        .imports = niloFor(b, target, optimize),
     });
 
     const exe = b.addExecutable(.{ .name = "arsip", .root_module = root });
@@ -46,7 +63,8 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path("src/main.zig"),
                 .target = target,
                 .optimize = mode,
-                .imports = imports,
+                // Per mode, not once. This is the line the comment above is about.
+                .imports = niloFor(b, target, mode),
             }),
         });
         test_step.dependOn(&b.addRunArtifact(t).step);
