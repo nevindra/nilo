@@ -127,23 +127,30 @@ const Canned = struct {
         }
     }
 
-    /// Up to `count` connections, each answered until the peer stops sending,
-    /// and a tally of how many were accepted.
+    /// `count` **requests**, however many connections they arrive on, and a
+    /// tally of how many connections that took.
     ///
     /// The tally is the whole point: whether a client kept a pooled connection
     /// or dropped it is not visible from the client side at all, and it is
     /// exactly what the drain policy decides. A second `accept` means the
     /// first connection was dropped.
     ///
-    /// **The inner loop is what makes the tally mean that**, and leaving it out
-    /// is how the pair of drain tests came to have one that could not pass. A
-    /// version that closed after one request produced a second `accept` in
-    /// *both* cases — a dropped connection because the client opened a new one,
-    /// and a kept connection because the client came back to a socket this
-    /// server had already closed. Both read as "dropped", so the control test
-    /// asserted a 1 that nothing could produce.
+    /// **Counting requests rather than connections is what keeps this from
+    /// hanging the suite**, and both of the other spellings did. A version that
+    /// closed after answering one produced a second `accept` in *both* cases —
+    /// a dropped connection because the client opened a new one, and a kept
+    /// connection because the client came back to a socket this server had
+    /// already closed — so the tally could not tell them apart and the control
+    /// test asserted a 1 that nothing could produce. Fixing that by looping
+    /// `for (0..count)` over *accepts* then parked the server on an `accept`
+    /// that never comes the moment the client did the right thing and kept its
+    /// connection: two requests on one socket leaves the second accept
+    /// outstanding, and whether the test finishes comes down to whether
+    /// `cancel` wins a race against it. Requests are what the client makes and
+    /// what the test counts, so they are what the loop should be bounded by.
     fn serveEach(self: *Canned, count: usize) !void {
-        for (0..count) |_| {
+        var served: usize = 0;
+        while (served < count) {
             var stream = try self.server.accept(self.io);
             defer stream.close(self.io);
             self.accepted += 1;
@@ -153,7 +160,7 @@ const Canned = struct {
             var reader = stream.reader(self.io, &in_buf);
             var writer = stream.writer(self.io, &out_buf);
 
-            while (true) {
+            while (served < count) {
                 // End of head, or end of connection. EOF here is the client
                 // saying it is finished with this socket, which is the signal
                 // to go back to `accept` — not an error.
@@ -166,6 +173,14 @@ const Canned = struct {
                     if (std.mem.trimEnd(u8, line, "\r\n").len == 0) break;
                 }
                 if (ended) break;
+
+                // Counted on arrival rather than on a completed answer. A
+                // client that refuses this body may drop the connection before
+                // the write finishes, and a request that was made is one the
+                // loop has to account for — counting replies instead leaves it
+                // short and sends it back to `accept` for a connection nobody
+                // is going to open.
+                served += 1;
 
                 const w = &writer.interface;
                 w.print("HTTP/1.1 {s}\r\nContent-Length: {d}\r\n{s}\r\n", .{
