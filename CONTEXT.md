@@ -236,6 +236,10 @@ _Avoid_: backend, flavor, adapter, driver
 The half that speaks to the database: run this query with these values, hand back rows, begin and end a transaction. Everything a database can do that this module does not is reached directly, not through here.
 _Avoid_: driver, client, connection layer, bulkhead
 
+**Writer and reader**:
+The two roles a pooled connection can have when the database is a file rather than a server: one connection that may write, and several opened read-only. Not a tuning choice — SQLite serialises writers over the whole database, so the split is what the database is, and a pool of equal connections would be describing something that does not exist.
+_Avoid_: primary and replica, leader and follower, read replica, master — all four name a second database, which is a second type here (ADR 0060), and these are two roles against one file.
+
 **Tx**:
 One transaction in flight, holding a connection until it ends. It ends however the handler leaves — committed, rolled back, or abandoned — because the connection has to go back fit for whoever takes it next.
 _Avoid_: transaction, unit of work, session, scope — and "scope" stays on this list now that a Scope is a thing here, because it is the wrong word for this one specifically: a Scope ends one way and a Tx ends three.

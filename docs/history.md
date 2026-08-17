@@ -498,3 +498,74 @@ The tell is that it only happened to one library. GORM, Drizzle, Prisma and dies
 **Then the fix segfaulted on the one response shape that has no body.** Draining the leftover is right for a body that was started and stopped, and wrong everywhere else: a HEAD announces a `content-length` and sends nothing, its transfer buffer is empty, and `discardRemaining` on it walks off the end. It took `s3/bucket.zig`'s `head` down on the next run. The lesson is not "handle HEAD" — it is that **a `content-length` is a claim about a body, not evidence there is one**, and the state machine already knew the difference. The branch that was collapsed into one ceiling is now four arms that each say which of std's behaviours they are correcting, because that is the thing nobody can infer from the code.
 
 **Confine a foreign runtime before you load it, because the OOM killer is global.** Bun taking 27 GB did not only kill Bun: it killed MinIO, an unrelated Postgres container and the session driving the benchmark, twice, and the first of those looks exactly like a flaky harness. `systemd-run --user --scope -p MemoryMax=6G -p MemorySwapMax=0` turns a dead machine into a dead candidate, and the whole diagnosis above ran under it. **The kernel log is also the first place to look and was not the first place looked** — `journalctl -k` named the process, the RSS and the constraint in one line, after two rounds of guessing at the harness.
+
+## The second Wire, and the four things reading could not have settled
+
+**A configured maximum is not a cost.** ADR 0074 was written saying a SQLite
+pool connection holds "roughly 2 MB of page cache … for the life of the pool",
+from `cache_size`'s documented default of 2,000 KiB. Measured, a connection
+holds **28 KiB opened and 1,876 KiB once it has touched that many pages** —
+the default is a ceiling SQLite grows towards, and the two rows are two
+different deployments rather than a range. The follow-up was cheaper than the
+correction and worth more: at 5,000 primary-key lookups the ceiling buys
+**ten `pread64` at 2,000 KiB and ten at 32 KiB**, and on scans larger than any
+cache it buys four reads out of 2,265. **A number lifted from a default page is
+a claim about configuration, not about behaviour**, and this one had already
+been written into an ADR before anybody ran it.
+
+**The shortcut environment is not a faster version of the real one.** The Wire
+routes `db.raw` by its first keyword and leans on read-only reader connections
+as the backstop when that guess goes wrong. The test asserting the backstop
+**failed**, because SQLite's URI `mode=` parameter takes precedence over the
+flags handed to `sqlite3_open_v2` — so `OpenFlags.ReadOnly` against
+`file:x?mode=memory&cache=shared` writes, where the same flag against a file
+refuses. The in-memory database used to avoid needing Docker had silently
+removed the mechanism the design rests on. It sits beside a second one found
+the same afternoon: `PRAGMA journal_mode = WAL` in memory returns `memory`
+rather than failing, so a suite that ran entirely there would never once have
+executed in the journal mode it ships in. **Both are invisible from the
+documentation and from the code; only a file shows either.**
+
+**An escape hatch that reads like one, and is not.** `nilo.blocking` lives in
+`http/bulkhead.zig`, which `sql/` may not name — `zig build layering` refuses
+it — so the obvious way out was `std.Io.concurrent`, whose doc comment promises
+to run a function "such that the caller can progress while waiting". zio
+implements that vtable slot as `spawnTask`: it starts a **fiber**, so a
+blocking C call inside one holds an executor thread exactly as it would have
+held the caller's. Reading the implementation took one grep and changed the
+whole shape of the module — the threading choice became a field the caller
+fills in, because the module that has to make the decision cannot reach the
+mechanism. **A promise in a doc comment is about the interface; what it costs
+is in whoever implements it.**
+
+**And the loss that was an upgrade.** `std.Thread.Mutex` is gone in Zig 0.16.
+Its replacement is `std.Io.Mutex`, which takes the `Io` on every call and waits
+through the vtable's futex slots — so a fiber queueing for the single writer
+connection *parks* rather than holding its thread, through zio under a server
+and through `std.Io.Threaded` in a test. The `io` argument this Wire had been
+ignoring, on the grounds that a file has no socket to dial, turned out to be
+the one thing it needed: **there is nothing to wait on, and there is still
+something to wait for.**
+
+**A benchmark that takes one pass has no way to know it is measuring the
+neighbours.** `bench/sql.zig` gained a SQLite half, and its first three
+consecutive runs put the same side of the same comparison at 4,537, 6,158 and
+8,281 ns — a 1.8× spread, on a box whose `uptime` read **load average 5.03 on
+two cores**. Nothing in the printout said so: one pass produces one number and
+one number looks like a measurement. The harness now runs five interleaved
+passes and prints the *range* of the saving beside the best, which turned a
+tidy "60.5%" into "49.2% … 72.2%" — the honest answer, and the one that stops
+the number being copied into a document. Taking the minimum did not rescue it
+either; a later best-of-five came in worse than an earlier single pass.
+**CLAUDE.md's "interleave them, and if the margin is inside the spread the
+answer is unchanged" is a property a harness should hold, not a habit a person
+should remember**, and §1's Postgres tables predate it.
+
+**The zero was a claim until it was grepped.** Both drivers live in one module,
+so every `nilo_sql` user fetches pg.zig and zqlite and links libc whichever they
+use. The argument that a program naming only `sql.Db` still links no SQLite
+rests on Zig analysing `sql/sqlite.zig` lazily and the linker dropping the
+amalgamation — true, and true about *this* linker on *this* target rather than
+guaranteed by the language. `strings … | grep -ci sqlite` answers 0 against the
+Postgres-only binary and 71 against the other, which is why the A/B is a build
+step and two greppable binaries instead of a sentence.

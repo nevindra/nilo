@@ -14,7 +14,7 @@ belongs to is decided by a single question — does it need the event loop?
 | Module | What it is | Pages |
 |---|---|---|
 | **`nilo_http`** | the server: routing, handlers, middleware, files, sockets | everything below except the ones named on the right |
-| **`nilo_sql`** | Postgres: your struct is the table | [Talking to Postgres](./sql.md) |
+| **`nilo_sql`** | Postgres and SQLite: your struct is the table | [Talking to a database](./sql.md) |
 | **`nilo_s3`** | object storage: your bucket is a type | [the reference](../reference.md#nilo_s3) |
 | **`nilo_fetch`** | calling somebody else's HTTP API from a handler | [the reference](../reference.md#nilo_fetch) |
 | **`nilo_config`** | settings out of the environment, into a struct of yours | [the reference](../reference.md#nilo_config) |
@@ -65,10 +65,11 @@ const nilo = @import("nilo_http");
     and range requests, and a file too big to hold opened per request.
 14. [Errors](./errors.md) — failing a request from anywhere, what a client is
     told, and request ids for tying a failure to its log line.
-15. [Talking to Postgres](./sql.md) — `nilo_sql`: your struct is the table, the
-    query is a constant, and a misspelled column is a build error. It takes a
-    Scope rather than a `Ctx`, so the same query runs with no server in the
-    process.
+15. [Talking to a database](./sql.md) — `nilo_sql`: your struct is the table,
+    the query is a constant, and a misspelled column is a build error. It takes
+    a Scope rather than a `Ctx`, so the same query runs with no server in the
+    process. Postgres and SQLite, written the same way — and the section on
+    SQLite says which five things it refuses and why.
 
 ## Shipping it
 

@@ -346,7 +346,7 @@ parts of it. [Contributing](#contributing) is what that takes.
 | Module | What it does | Where it is |
 |---|---|---|
 | **`nilo_http`** | routing, typed handlers, middleware, cookies and sessions, static files, streaming, WebSocket, OpenAPI | shipped |
-| **`nilo_sql`** | Postgres. Your struct is the table | shipped: reads, writes, transactions, streaming |
+| **`nilo_sql`** | Postgres and SQLite. Your struct is the table | shipped: reads, writes, transactions, streaming. SQLite refuses batches, row locks and deadlines, and says so while compiling |
 | **`nilo_s3`** | object storage — S3, MinIO, R2. Your bucket is a type | shipped: get, put, range, stream, presign. No `LIST`, no multipart |
 | **`nilo_fetch`** | calling somebody else's HTTP API from inside a request | shipped: the policy in front of `std.http.Client`. No retries, no circuit breaker |
 | **`nilo_config`** | settings out of the environment, every bad one named at once | shipped. It parses no files, and that's a decision |
@@ -429,6 +429,13 @@ That's measured, not hoped for. A server that does run queries costs 733 KB
 more, and
 [ADR 0040](./docs/adr/0040-a-service-that-needs-the-loop-is-finished-when-the-loop-exists.md)
 accounts for every byte of it.
+
+The same holds one level down. `nilo_sql` now carries two drivers, and a
+program that names only the Postgres one links **zero bytes** of SQLite —
+checked by building two programs that differ by one line and grepping both
+([`bench/result/sql.md`](./bench/result/sql.md) §9). Naming SQLite costs 525 KB,
+which is the amalgamation, and it's the price of a database that ships inside
+the binary.
 
 ### How the trade-offs get made
 
