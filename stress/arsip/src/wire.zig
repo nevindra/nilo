@@ -10,6 +10,7 @@ const std = @import("std");
 const nilo = @import("nilo_http");
 const handlers = @import("handlers.zig");
 const Archive = @import("archive.zig").Archive;
+const Settings = @import("settings.zig").Settings;
 
 const testing = std.testing;
 
@@ -17,6 +18,7 @@ const testing = std.testing;
 const Server = struct {
     app: nilo.App,
     archive: Archive,
+    limits: Settings,
     client: nilo.testing.Client,
 
     fn init(gpa: std.mem.Allocator) !*Server {
@@ -26,9 +28,14 @@ const Server = struct {
         self.* = .{
             .app = nilo.App.init(gpa),
             .archive = .init(gpa),
+            .limits = .{},
             .client = try nilo.testing.Client.init(gpa, .{}),
         };
         try self.app.provide(&self.archive);
+        // Forgetting this line is a 500 in every test that needed it, because
+        // the check that would have named it runs in `listen()` and the test
+        // client does not call `listen()`. See `DX.md`.
+        try self.app.provide(@as(*const Settings, &self.limits));
         try handlers.mount(self.app.group("/v1"));
         self.app.docs(.{ .title = "arsip", .version = "0.1.0" });
         return self;
@@ -151,6 +158,114 @@ test "a query struct that does not fit is refused before the handler runs" {
     const message = try field(bad.body, "error");
     defer gpa.free(message);
     try testing.expect(std.mem.indexOf(u8, message, "sort") != null);
+}
+
+test "a multipart form with a file in it, and the 303 it answers with" {
+    const gpa = testing.allocator;
+    var s = try Server.init(gpa);
+    defer s.deinit(gpa);
+
+    _ = try s.send("PUT", "/v1/folders/kantor", "{\"name\":\"Kantor\"}");
+    _ = try s.send("POST", "/v1/folders/kantor/docs", "{\"title\":\"Laporan\"}");
+
+    const boundary = "----arsip";
+    const form =
+        "--" ++ boundary ++ "\r\n" ++
+        "Content-Disposition: form-data; name=\"caption\"\r\n\r\n" ++
+        "Laporan asli\r\n" ++
+        "--" ++ boundary ++ "\r\n" ++
+        "Content-Disposition: form-data; name=\"file\"; filename=\"q3.pdf\"\r\n" ++
+        "Content-Type: application/pdf\r\n\r\n" ++
+        "%PDF-1.7 hello\r\n" ++
+        "--" ++ boundary ++ "--\r\n";
+
+    var raw: std.Io.Writer.Allocating = .init(gpa);
+    defer raw.deinit();
+    try raw.writer.print(
+        "POST /v1/docs/1/attach HTTP/1.1\r\nHost: t\r\nX-Operator: wati\r\n" ++
+            "Content-Type: multipart/form-data; boundary={s}\r\nContent-Length: {d}\r\n\r\n{s}",
+        .{ boundary, form.len, form },
+    );
+
+    const answer = try s.client.send(&s.app, raw.written());
+    try testing.expectEqual(@as(u16, 303), answer.status);
+    try testing.expectEqualStrings("/v1/docs/1", answer.header("location").?);
+
+    // The bytes come back under the type the client claimed, and the document
+    // carries the metadata without carrying the file.
+    const back = try s.send("GET", "/v1/docs/1/attachment", null);
+    try testing.expectEqualStrings("application/pdf", back.header("content-type").?);
+    try testing.expect(std.mem.indexOf(u8, back.body, "%PDF-1.7 hello") != null);
+
+    const doc = try s.send("GET", "/v1/docs/1", null);
+    try testing.expect(std.mem.indexOf(u8, doc.body, "\"filename\":\"q3.pdf\"") != null);
+    try testing.expect(std.mem.indexOf(u8, doc.body, "%PDF") == null);
+}
+
+test "a body read in pieces files what parses and counts what does not" {
+    const gpa = testing.allocator;
+    var s = try Server.init(gpa);
+    defer s.deinit(gpa);
+
+    _ = try s.send("PUT", "/v1/folders/kantor", "{\"name\":\"Kantor\"}");
+
+    const ndjson =
+        \\{"title":"Nota 1","kind":"invoice"}
+        \\{"title":"Nota 2","tags":["bulk"]}
+        \\{ not json at all }
+        \\
+        \\{"title":"Nota 3"}
+    ;
+    const answer = try s.send("POST", "/v1/folders/kantor/import", ndjson);
+    try testing.expectEqual(@as(u16, 200), answer.status);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, answer.body, .{});
+    defer parsed.deinit();
+    try testing.expectEqual(@as(i64, 3), parsed.value.object.get("filed").?.integer);
+    try testing.expectEqual(@as(i64, 1), parsed.value.object.get("skipped").?.integer);
+}
+
+test "a wildcard is the one param a handler cannot take as an argument" {
+    const gpa = testing.allocator;
+    var s = try Server.init(gpa);
+    defer s.deinit(gpa);
+
+    _ = try s.send("PUT", "/v1/folders/kantor", "{\"name\":\"Kantor\"}");
+    _ = try s.send("PUT", "/v1/folders/rumah", "{\"name\":\"Rumah\"}");
+    _ = try s.send("POST", "/v1/folders/kantor/docs", "{\"title\":\"Laporan\"}");
+    _ = try s.send("POST", "/v1/folders/rumah/docs", "{\"title\":\"Cerita\"}");
+
+    const under = try s.send("GET", "/v1/tree/kantor", null);
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, under.body, .{});
+    defer parsed.deinit();
+    try testing.expectEqual(@as(i64, 1), parsed.value.object.get("total").?.integer);
+}
+
+test "a body deeper than eight levels parses, and its errors stop naming the field" {
+    const gpa = testing.allocator;
+    var s = try Server.init(gpa);
+    defer s.deinit(gpa);
+
+    // Nine levels is fine on the happy path.
+    const good = try s.send("POST", "/v1/deep",
+        \\{"down":{"down":{"down":{"down":{"down":{"down":{"down":{"down":{"down":{"leaf":7}}}}}}}}}}
+    );
+    try testing.expectEqual(@as(u16, 200), good.status);
+
+    // A mistake at level eight is named exactly...
+    const named = try s.send("POST", "/v1/deep",
+        \\{"down":{"down":{"down":{"down":{"down":{"down":{"down":{"down":"nope"}}}}}}}}
+    );
+    try testing.expectEqual(@as(u16, 400), named.status);
+    try testing.expect(std.mem.indexOf(u8, named.body, "down.down") != null);
+
+    // ...and one at level nine is a bare 400 with nothing to go on. That is
+    // the documented cliff, and `DX.md` argues it should say so.
+    const bare = try s.send("POST", "/v1/deep",
+        \\{"down":{"down":{"down":{"down":{"down":{"down":{"down":{"down":{"down":{"leaf":"x"}}}}}}}}}}
+    );
+    try testing.expectEqual(@as(u16, 400), bare.status);
+    try testing.expect(std.mem.indexOf(u8, bare.body, "down") == null);
 }
 
 test "the API description names every shape the signatures mention" {

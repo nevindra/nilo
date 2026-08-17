@@ -39,8 +39,16 @@ fn Row(comptime T: type) type {
     };
 }
 
-const DocRow = Row(Doc);
 const FolderRow = Row(Folder);
+
+/// A document's row carries one thing its JSON does not: the bytes of whatever
+/// was attached to it. They sit here rather than in `Doc` so that listing a
+/// hundred documents does not serialise a hundred PDFs.
+const DocRow = struct {
+    memory: std.heap.ArenaAllocator,
+    value: Doc,
+    blob: ?Text = null,
+};
 
 pub const Archive = struct {
     gpa: Allocator,
@@ -255,6 +263,62 @@ pub const Archive = struct {
         _ = self.docs.orderedRemove(at);
         self.drop(DocRow, row);
         return true;
+    }
+
+    /// Replace whatever was attached. The bytes go into the row's own arena,
+    /// so they are freed with the document and never separately.
+    pub fn attach(
+        self: *Archive,
+        into: Allocator,
+        id: u32,
+        filename: Text,
+        content_type: Text,
+        bytes: Text,
+    ) !?Doc {
+        try self.lock.lock();
+        defer self.lock.unlock();
+
+        const row = self.findDoc(id) orelse return null;
+        const mine = row.memory.allocator();
+
+        const kept = try mine.dupe(u8, bytes);
+        row.value.attachment = .{
+            .filename = try mine.dupe(u8, filename),
+            .content_type = try mine.dupe(u8, content_type),
+            .bytes = kept.len,
+        };
+        row.blob = kept;
+
+        return try copy.into(Doc, into, row.value, .own);
+    }
+
+    /// The bytes, copied into the request. The same reason every other read
+    /// copies: the response is written after the handler returns.
+    pub fn attachment(self: *Archive, into: Allocator, id: u32) !?struct { content_type: Text, bytes: Text } {
+        try self.lock.lock();
+        defer self.lock.unlock();
+
+        const row = self.findDoc(id) orelse return null;
+        const blob = row.blob orelse return null;
+        return .{
+            .content_type = try into.dupe(u8, row.value.attachment.?.content_type),
+            .bytes = try into.dupe(u8, blob),
+        };
+    }
+
+    /// Deliberately expensive, and deliberately not IO. A handler that calls
+    /// this straight holds its OS thread and every other request being served
+    /// on it; `nilo.blocking` is what moves it off. Both are wired up in
+    /// `intake.zig` so the difference can be watched rather than described.
+    /// Fixed cost rather than one that grows with the archive, so the two
+    /// routes in `intake.zig` are comparable however many documents happen to
+    /// be filed when somebody runs them.
+    pub fn reindex(self: *Archive, rounds: u32) usize {
+        var hash: u64 = self.docs.items.len;
+        var i: u64 = 0;
+        const spins = @as(u64, rounds) * 1000;
+        while (i < spins) : (i += 1) hash = hash *% 6364136223846793005 +% 1442695040888963407;
+        return @intCast(hash & 0xffff);
     }
 
     pub fn summary(self: *Archive) !domain.Summary {

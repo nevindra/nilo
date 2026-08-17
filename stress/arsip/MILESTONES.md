@@ -16,6 +16,7 @@ store), and somebody who wants telling about them (an outbound call, a socket).
 |---|---|---|---|
 | 0 | Scaffold | `nilo_http` | Can a dependent outside the repository build at all? |
 | 1 | The API | — | Does "the signature is the contract" hold when the domain stops being one flat struct? |
+| 1b | The awkward corners | — | Forms, uploads, streamed bodies, blocking work, wildcards — everything a curated example skips |
 | 2 | Identity | `nilo_config`, `nilo_pw`, `nilo_id` | What does adopting three tool modules cost when the guide points them at the reference? |
 | 3 | Postgres | `nilo_sql` | What breaks when the same types have to be a table as well as a body? |
 | 4 | The bytes | `nilo_s3` | What happens to a `Str` that has to cross two Services in one request? |
@@ -52,9 +53,21 @@ compiler is the check, and a claim like that is only interesting where it might
 break.
 
 Done: 13 routes, 42 tests in both modes, `src/copy.zig` for the `Str` boundary.
-Nothing on the list had to be dropped. Five findings, of which the one worth
-acting on is the pair of byte-identical schemas a `Meta_Str`/`Meta_Text` split
-puts in every generated client.
+Nothing on the list had to be dropped.
+
+## M1b — The awkward corners ✅
+
+M1 walked the JSON path, which is the path every framework's example walks. This
+one goes at the surfaces a curated example is chosen to avoid, one route per
+surface: a multipart form with a file in it, the bytes back out through a `*Ctx`,
+a body too big to hold read in pieces, work that is not IO with and without
+`nilo.blocking`, a wildcard, a `*const` service, a resolver built from another
+resolver, and a body nine levels deep.
+
+20 routes, 54 tests. The measurement worth keeping: with both worker threads
+held by a handler that forgot `nilo.blocking`, an unrelated `/health` took
+**3.635s**; with the same work wrapped, **0.0019s**. nilo warned about it on the
+first request, with nobody else on the server.
 
 ## M2 — Identity
 

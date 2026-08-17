@@ -104,6 +104,16 @@ pub const Advance = struct {
     to: Stage,
 };
 
+/// A file somebody attached, as far as anybody reading JSON is concerned. The
+/// bytes are deliberately not in here: they live beside the row and go out
+/// through an endpoint of their own, because a document listing that carried
+/// two megabytes of PDF per item would be a different kind of mistake.
+pub const Attached = struct {
+    filename: Text,
+    content_type: Text,
+    bytes: usize,
+};
+
 /// What goes out. The same shape as `NewDoc` with the text type swapped and the
 /// server's own fields added — which is exactly why `Meta` and `Section` are
 /// generic rather than written twice.
@@ -117,7 +127,16 @@ pub const Doc = struct {
     meta: ?Meta(Text),
     sections: []const Section(Text),
     tags: []const Text,
+    attachment: ?Attached = null,
 };
+
+/// A shape whose only property is depth, for finding out where nilo stops
+/// naming the field that broke. `guide/requests.md` says eight levels and then
+/// a plain 400; this is the type that asks.
+pub fn Deep(comptime levels: u8) type {
+    if (levels == 0) return struct { leaf: u32 };
+    return struct { down: Deep(levels - 1) };
+}
 
 pub const NewFolder = struct {
     name: Str,

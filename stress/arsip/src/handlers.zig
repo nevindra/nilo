@@ -36,13 +36,32 @@ fn authenticate(c: *nilo.Ctx) !Operator {
     return .{ .name = who, .curator = who.eql("bu-sri") };
 }
 
-/// A prefix guard. A resolved value is the wrong tool here — only routes that
-/// name one get it, so a handler that forgets the argument is simply not
-/// authenticated. `useOn` applies whether the handler cooperates or not, and
-/// `c.resolve` makes the two the same one lookup.
+/// A resolved value built out of **another resolved value** rather than out of
+/// a second copy of the auth code. That is the whole reason a resolver may take
+/// one: `Curator` is `Operator` plus a refusal, and neither of them reads a
+/// header twice — both are worked out once per request, whichever route or
+/// middleware asks first.
+pub const Curator = struct {
+    pub const nilo_resolve = onlyCurators;
+
+    name: Str,
+};
+
+fn onlyCurators(operator: Operator) !Curator {
+    if (!operator.curator) return fail.forbidden(
+        "only a curator can do that, and {s} is not one",
+        .{operator.name.view()},
+    );
+    return .{ .name = operator.name };
+}
+
+/// A prefix guard. A resolved value alone is the wrong tool for securing a
+/// prefix — only routes that name one get it, so a handler that forgets the
+/// argument is simply not authenticated. `useOn` applies whether the handler
+/// cooperates or not, and `c.resolve` is how the two meet: this lookup and the
+/// handler's argument are the same one lookup, not two.
 pub fn requireCurator(c: *nilo.Ctx, next: nilo.Next) !void {
-    const operator = try c.resolve(Operator);
-    if (!operator.curator) return fail.forbidden("only a curator can read this", .{});
+    _ = try c.resolve(Curator);
     try next.run(c);
 }
 
@@ -202,8 +221,11 @@ fn me(operator: Operator) Profile {
     return .{ .name = operator.name, .curator = operator.curator };
 }
 
-fn report(store: *Archive, operator: Operator) !domain.Summary {
-    std.debug.assert(operator.curator); // the middleware already refused otherwise
+/// Takes the `Curator`, not the `Operator`. The middleware on this prefix has
+/// already resolved one; asking for it here is a read of that same value rather
+/// than a second check somebody could forget to write.
+fn report(store: *Archive, curator: Curator) !domain.Summary {
+    _ = curator;
     return store.summary();
 }
 
@@ -227,9 +249,12 @@ pub fn mount(g: anytype) !void {
     try g.delete("/docs/:id", deleteDoc);
     try g.post("/docs/:id/advance", advanceDoc);
 
+    try @import("intake.zig").mount(g);
+
     const curators = g.group("/curate");
     try curators.use(requireCurator);
     try curators.get("/report", report);
+    try @import("intake.zig").mountCurate(curators);
 }
 
 /// Registered on the whole group rather than named by each handler, so a route

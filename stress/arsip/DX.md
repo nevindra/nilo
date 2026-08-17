@@ -1,196 +1,257 @@
-# What fought back
+# The improvement list
 
-The findings log. One entry per thing that cost time, in the milestone that
-found it, with what it would take to fix. **An entry earns its place by being
-something a second user would hit too** — a mistake only this app made is not a
-finding.
+Everything arsip hit that nilo should change, as items to pick up rather than as
+a narrative. **An item earns its place by being something a second user would
+hit too** — a mistake only this app made is not one.
 
-Severity is about the user, not the code:
+Each says what happens, who runs into it, and what would have to change. The
+ranking is by how many users hit it and how badly, not by how hard it is to fix.
 
-- **blocker** — there is no way to do it; you stop.
-- **friction** — there is a way, and you had to find it somewhere other than
-  where you looked first.
-- **paper cut** — you found it, it just cost a minute you did not expect.
-- **note** — nothing is wrong; it is worth writing down before it becomes one.
+Found in: **M0** scaffolding, **M1** the JSON API, **M1b** forms, uploads,
+streamed bodies, blocking work and wildcards.
 
----
-
-## M0 — Scaffold
-
-### `zig init` gives you a `build.zig` you delete rather than edit — paper cut
-
-`docs/guide/getting-started.md` says `zig init` first, correctly: `zig fetch
---save` refuses without a `build.zig`. But the `build.zig` it writes is a
-library-and-executable template around `src/root.zig`, and the guide's snippet
-is a fragment that assumes a different file. You replace the file rather than
-paste into it, and you delete `src/root.zig`.
-
-That is Zig's template rather than nilo's, and nothing can be done about the
-template. What could be done is one sentence in the guide: *replace the
-generated `build.zig` with this, and delete `src/root.zig`.*
-
-### A dependent has to guess `.optimize` matters — note
-
-The guide does say to pass `.optimize` through to the dependency, and says
-plainly that not doing so is "legal and slow, and nothing warns about it". It
-is in the right place and it is easy to skim past, which is what makes it worth
-recording: the failure mode is a server that is merely slow, and that is the
-same failure mode `std_options_debug_io` has — which nilo *does* warn about at
-`listen()`. Two symptoms, one warning.
-
-Whether the build can see it at all is the open question: the check would have
-to compare the dependent's optimize mode against the one nilo was built with,
-which is knowable at comptime. Worth asking before M7.
-
-### Four of the eight modules have no guide page — note, to be tested at M2–M5
-
-`docs/guide/README.md` is explicit about it rather than silent: `nilo_s3`,
-`nilo_fetch`, `nilo_config` and `nilo_id` are pointed at sections of
-`docs/reference.md`, and `nilo_pw` at the Sessions page. So this is a stated
-position, not an oversight, and the interesting question is whether it holds:
-**can you adopt a module from a reference section alone?**
-
-M2 answers it for `nilo_config` and `nilo_id`, M4 for `nilo_s3`, M5 for
-`nilo_fetch`. Recording it now so the answer is measured rather than
-remembered — if the reference turns out to be enough, that is a finding worth
-having too, and it costs the project four pages it was going to write.
+| # | Item | Area | Sev |
+|---|---|---|---|
+| 1 | [Identical generic instantiations get two identical schemas](#1) | openapi | high |
+| 2 | [A service you forgot is a 500 in tests, not a name](#2) | services, testing | high |
+| 3 | [Past eight levels a body error says nothing at all](#3) | convert | high |
+| 4 | [A `union(enum)` has a derivable schema and gets `{}`](#4) | openapi | medium |
+| 5 | [`Bound(T)` cannot be built from the testing page](#5) | testing | medium |
+| 6 | [The `Str`→`Text` walk is unaddressed past two levels](#6) | docs | medium |
+| 7 | [An alias does not name a generic instantiation](#7) | openapi docs | low |
+| 8 | [The `zig init` template is not the one the guide edits](#8) | docs | low |
+| 9 | [A mismatched `.optimize` has no warning, but its twin does](#9) | build | low |
+| 10 | [A ReleaseSafe build is a minute and 677 MB](#10) | build | open |
 
 ---
 
-## M1 — The API
+<a name="1"></a>
+## 1. Identical generic instantiations get two identical schemas
 
-1,381 lines across six files, 42 tests, both optimize modes. Everything the
-milestone set out to build got built; nothing had to be given up. What follows
-is what it cost.
-
-### Two generic instantiations that render identically get two identical schemas — friction
-
-`Meta(Str)` is the body half and `Meta(Text)` is the row half — one shape, the
-`Str`/`[]const u8` split the framework itself asks for
-([ADR 0004](../../docs/adr/0004-request-arena-and-the-str-type.md)). The
-generated document holds both, under `Meta_Str` and `Meta_Text`, and they are
-**byte-identical**:
-
-```
-"Meta_Str":  {"properties":{"author":{"type":"string"}, …}}
-"Meta_Text": {"properties":{"author":{"type":"string"}, …}}   # the same object
-```
-
-Same again for `Section_Str` and `Section_Text`. A generated client gets four
-types where two would do, and no field of any of them differs — because the
-thing that distinguishes the two instantiations is a *Zig* lifetime, and a
+**What happens.** `Meta(Str)` is the body half of a shape and `Meta(Text)` is the
+row half — the split nilo itself asks for
+([ADR 0004](../../docs/adr/0004-request-arena-and-the-str-type.md)). Both end up
+in `components/schemas`, as `Meta_Str` and `Meta_Text`, and they are
+**byte-identical**. Same for `Section_Str` and `Section_Text`. A generated client
+gets four types where two would do, and no field of any of them differs —
+because what distinguishes the two instantiations is a Zig lifetime, and a
 lifetime has no rendering in JSON.
 
-`guide/openapi.md` names the near-miss and stops one short of it: where two
-generics render to the **same name** and are not the same shape, neither keeps
-the name. The case here is the mirror — **different names, the same shape** —
-and it is not the exotic one. It is what happens to every application that
-follows the `Str`-in/`Text`-out rule on a shape more than one level deep, which
-is to say every application past the size of `examples/rest`.
+**Who hits it.** Every application that follows the `Str`-in / `Text`-out rule on
+a shape more than one level deep. That is everything past the size of
+`examples/rest`.
 
-The fix looks small and is a decision rather than a patch: when two schemas
-render byte-identically, emit one and point both `$ref`s at it. The name to
-keep would presumably be the one without the suffix. Worth an ADR, because
-"identical rendering" is a weaker equality than "the same type" and the
-document should say which one it means.
+**What to change.** When two schemas render byte-identically, emit one and point
+both `$ref`s at it; keep the name without the suffix.
+`guide/openapi.md#named-shapes` already handles the mirror case — two generics
+that render to the *same name* and are *not* the same shape lose the name — so
+the machinery to compare is close by. It wants an ADR rather than a patch,
+because "renders identically" is a weaker equality than "is the same type" and
+the document should say which one it means.
 
-### An alias does not name a generic instantiation — paper cut
+<a name="2"></a>
+## 2. A service you forgot is a 500 in tests, not a name
 
-`pub const NewDoc = Filing(Str);` reads well in Zig and the API description
-calls the shape `Filing_Str`, because the name comes from the compiler's name
-for the instantiation and a Zig alias creates no new one. Nothing is wrong; it
-is just that the name a client sees is decided somewhere other than where you
-thought you decided it. One sentence in `guide/openapi.md#named-shapes` would
-cover it — *an alias is not a name; write the struct out if the client's type
-name matters.*
+**What happens.** `listen()` refuses to open the socket when a route needs a
+service nobody registered, and the message is excellent:
 
-### A tagged union: refused going in, undescribed coming out — friction
+```
+error: service *main.Db was never registered, but 4 routes need it
+("/users", "/users/:id", "/admin/stats", …) — call app.provide() before app.listen()
+```
 
-Two different answers to one question, and both are defensible on their own:
+`nilo.testing.Client` does not call `listen()`. So in a test the same mistake is
+a **500 with no explanation**, on every route that needed the service, and
+nothing anywhere names the type. Two of arsip's tests failed exactly this way,
+and the routes they tested worked perfectly over a real socket — which is the
+worst possible shape for a clue, because the evidence points at the test.
 
-- **As a body** it is a compile error, in nilo's own words, naming the route and
+**Who hits it.** Anybody who does what `guide/testing.md` recommends — builds an
+App in a test and drives requests through it — and adds a service later. The
+better the test coverage, the more places it lands at once.
+
+**What to change.** Run the same check the first time a request goes through an
+App, or expose it as `app.check()` and have `testing.Client.init` call it.
+`guide/testing.md`'s worked example builds an App by hand and provides one
+service, so the gap stays invisible until your second one.
+
+<a name="3"></a>
+## 3. Past eight levels a body error says nothing at all
+
+**What happens.** nilo names the field that broke, at depth, and it is one of the
+best things about it:
+
+```
+"sections[0].lines[0]" has to be text, not a number
+"down.down.down.down.down.down.down.down" has to be an object, not text
+```
+
+At the ninth level that becomes:
+
+```
+{"error":"Bad Request","status":400}
+```
+
+Not a worse sentence — **no sentence**. No field, no reason, no hint that depth
+is what happened. `guide/requests.md` does say "below that a mistake is a plain
+400 again", so this is documented; what is not documented is how sheer the cliff
+is from the client's side.
+
+The happy path is unaffected at any depth: a valid nine-level body parses and
+round-trips.
+
+**Who hits it.** Anybody whose body wraps a domain shape in two envelopes. Eight
+is generous, but it is a fixed budget spent by the *outer* structure, so the
+first person to add a `{"data":{"attributes":…}}` wrapper pays it on shapes that
+used to fit.
+
+**What to change.** Cheapest useful fix: keep the fallback and say why —
+*this body is nested deeper than nilo names fields to, so it cannot say which
+part is wrong.* That turns a dead end into a fact. Raising the depth is a
+separate question with a comptime cost attached.
+
+<a name="4"></a>
+## 4. A `union(enum)` has a derivable schema and gets `{}`
+
+**What happens.** Two different answers to one question:
+
+- As a **body**, a compile error in nilo's own words, naming the route and
   listing what a handler may ask for. Good message, found immediately.
-- **As a return type** it compiles, and serialises correctly —
-  `{"link":{"url":"…"}}`, externally tagged, exactly what `std.json` does.
-  The API description says `"schema": {}`.
+- As a **return type**, it compiles and serialises correctly —
+  `{"link":{"url":"…"}}`, externally tagged, exactly what `std.json` does. The
+  API description says `"schema": {}`.
 
-So the wire format is well-defined and the document declines to describe it.
+So the wire format is well defined and the document declines to describe it.
 `guide/openapi.md` covers this under "a type with no JSON shape is `{}` —
-anything, which is true", and for an untagged union that is the honest answer.
-For a `union(enum)` it is not: the shape is a `oneOf` of one-key objects and it
-is derivable from the type with no annotation anywhere, which is the standard
-this feature holds itself to everywhere else.
+anything, which is true", which is the honest answer for an *untagged* union. For
+a `union(enum)` it is not: the shape is a `oneOf` of one-key objects, derivable
+from the type with no annotation anywhere — which is the standard this feature
+holds itself to everywhere else.
 
-Nothing was blocked — `Advanced` is a union inside the store and never crosses
-the wire, and where a union *would* have crossed, an explicit struct was
-clearer anyway. Recording it because the next person will spend the same twenty
-minutes finding out, and because the two halves currently disagree about
-whether a union is a thing nilo knows.
+**Who hits it.** Anybody modelling a result that is one of several shapes. It is
+the natural Zig way to say that, and the two halves of nilo currently disagree
+about whether it is a thing nilo knows.
 
-### `Bound(T)` is the one handler argument a test cannot build from the guide — friction
+**What to change.** Either derive the `oneOf` for a tagged union, or refuse it in
+the return position the way it is already refused in the argument position. The
+one thing not worth keeping is the split, where it works and is undescribed.
 
-`guide/testing.md` shows every other argument built by hand — a query struct is
-`.{ .value = … }`, a body is the struct, a resolved value is the struct. A
-`Bound(T)` is neither: it has private fields and is built by
+<a name="5"></a>
+## 5. `Bound(T)` cannot be built from the testing page
+
+**What happens.** `guide/testing.md` shows every handler argument built by hand —
+a query struct is `.{ .value = … }`, a body is the struct, a resolved value is
+the struct. `Bound(T)` is none of those: it has private fields and is built by
 
 ```zig
 nilo.Bound(NewDoc).from(value, @splat(.{}))
 ```
 
 where the second argument is `[fields.len]convert.Outcome` and `@splat(.{})`
-means "every field bound fine". `from` is public and documented in
-`http/bound.zig`; `Outcome`'s fields all have defaults, which is what makes the
-`@splat` work. None of that is in the guide, so the route to it is reading the
-framework's source — which is exactly the thing a testing page exists to save.
+means "every field bound fine". `from` is public and `Outcome`'s fields all have
+defaults, which is what makes the `@splat` work — none of which is in the guide,
+so the route to it is reading `http/bound.zig`.
 
-Two sentences and the snippet above in `guide/testing.md` closes it. A
-`Bound(T).ok(value)` helper would close it better, and is the smaller change of
-the two.
+**Who hits it.** Anybody who takes the advice in
+`guide/forms.md#when-one-field-is-wrong-and-the-rest-are-fine` and then writes a
+test for that handler.
 
-### The `Str` boundary is one walk per shape, and the walk is yours to write — note
+**What to change.** A `Bound(T).ok(value)` helper, plus the snippet in
+`guide/testing.md`. The helper is the smaller change and removes the need to know
+`Outcome` exists at all.
 
-`guide/services.md` gives two rules that are both right and both cost the same
-thing on a nested shape. **A service takes `[]const u8`, not `Str`** — so
-something has to convert at the boundary. **A read hands back a copy in the
-request arena** — so something has to walk the shape on the way out too. And a
-row that owns its text has to walk it on the way in. Three walks of one shape.
+<a name="6"></a>
+## 6. The `Str`→`Text` walk is unaddressed past two levels
+
+**What happens.** `guide/services.md` gives two rules that are both right and
+both cost the same thing. **A service takes `[]const u8`, not `Str`** — so
+something converts at the boundary. **A read hands back a copy in the request
+arena** — so something walks the shape on the way out. A row that owns its text
+walks it on the way in. Three walks of one shape.
 
 For `examples/rest` that is two `dupe` calls and the guide writes them inline.
 For a document with an optional `meta`, a list of `sections` each holding a list
 of `lines`, and a list of `tags`, it is three hand-written walks — three places
 to forget a field the day somebody adds one.
 
-What this app did instead is [`src/copy.zig`](./src/copy.zig): 137 lines,
-mostly comment, one reflective `into(Target, allocator, source, .borrow|.own)`
-that serves all three. It is not hard code and writing it was not the friction
-— **realising it was needed was**, somewhere around the fourth hand-written
-`dupe` loop.
+arsip wrote [`src/copy.zig`](./src/copy.zig) instead: 137 lines, mostly comment,
+one reflective `into(Target, allocator, source, .borrow|.own)` serving all three.
+Writing it was not the friction — **realising it was needed was**, somewhere
+around the fourth hand-written `dupe` loop.
 
-This is a note rather than a finding because there is a real argument for
-leaving it out: it is `@typeInfo` walking a user's own types, it has opinions
-about what "the same shape" means, and a framework that shipped it would own
-those opinions forever. But `guide/services.md` currently ends at "[`examples/
-orders`] does the whole of this on a domain with lines, an address and a
-customer in it" — and what `orders` actually does is write the walks by hand.
-A paragraph saying *past two levels, write the converter once by reflection*
-would have saved the discovery, whether or not the converter ever ships.
+**Who hits it.** Everybody, at the point their domain stops being flat.
 
-### What did not fight back
+**What to change.** Not necessarily the code: a converter that walks a user's own
+types has opinions about what "the same shape" means, and shipping it means
+owning those opinions forever. But `guide/services.md` currently ends at
+"[`examples/orders`] does the whole of this on a domain with lines, an address
+and a customer in it" — and what `orders` does is write the walks by hand. A
+paragraph saying *past two levels, write the converter once by reflection* costs
+nothing and saves the discovery.
 
-Worth recording, because a stress test that only lists complaints is not a
-measurement:
+<a name="7"></a>
+## 7. An alias does not name a generic instantiation
 
-- **The keyword field.** `@"type"` round-trips as `type` through the body, the
-  response, the enum error message (`"type" is not one of the known choices`)
-  and the API description. It was on the list as a likely break and was not one.
-- **Depth.** `"sections[0].lines[0]" has to be text, not a number` — a list,
-  inside a struct, inside a list, named exactly. Nothing else in this class of
-  framework does that.
-- **`Patch(T)` over a struct.** The guide only shows `Patch(Str)`.
-  `Patch(Meta(Str))` works, and `{"meta":null}` versus `{}` versus
-  `{"meta":{…}}` arrive as three distinguishable things.
-- **The positional rule across a group prefix.** `group("/v1")` +
-  `"/folders/:folder/docs"` + `fn (…, folder: Str, …)` needed no thought at all.
-- **`listen()` counting the undescribed route.** `1 of 13 routes write their
-  own response` is exactly right, and it is the sort of thing that is normally
-  found six months later by a client generator.
+**What happens.** `pub const NewDoc = Filing(Str);` reads well in Zig, and the API
+description calls the shape `Filing_Str` — the name comes from the compiler's
+name for the instantiation, and a Zig alias creates no new one.
+
+**What to change.** One sentence in `guide/openapi.md#named-shapes`: *an alias is
+not a name; write the struct out if the client's type name matters.*
+
+<a name="8"></a>
+## 8. The `zig init` template is not the one the guide edits
+
+**What happens.** `guide/getting-started.md` correctly says `zig init` first —
+`zig fetch --save` refuses without a `build.zig`. But the template it writes is a
+library-and-executable scaffold around `src/root.zig`, and the guide's snippet is
+a fragment assuming a different file. You replace the file rather than paste into
+it, and delete `src/root.zig`.
+
+**What to change.** One sentence: *replace the generated `build.zig` with this,
+and delete `src/root.zig`.* The template is Zig's and cannot be changed here.
+
+<a name="9"></a>
+## 9. A mismatched `.optimize` has no warning, but its twin does
+
+**What happens.** Not passing `.optimize` through to `b.dependency("nilo", …)`
+builds nilo in Debug under a `ReleaseFast` program. The guide says so, and says
+plainly that it is "legal and slow, and nothing warns about it".
+
+What makes it an item is the symmetry: **forgetting `std_options_debug_io` has
+the same symptom** — a server that is merely slow — and `listen()` *does* warn
+about that one, on the grounds that a symptom you cannot see is one you will not
+find. Two identical symptoms, one warning.
+
+**What to change.** Whether the build can see it at all is the open question: the
+check compares the dependent's optimize mode against the one nilo was built with,
+which is knowable at comptime. If it is reachable, it belongs beside the two
+warnings `listen()` already gives.
+
+<a name="10"></a>
+## 10. A ReleaseSafe build is a minute and 677 MB
+
+**What happens.** Measured on arsip at ~1,900 lines, this machine, cold compile:
+
+| Mode | Compile | Compiler RSS |
+|---|---|---|
+| Debug | 3–6s | 199 MB |
+| ReleaseSafe | 65–105s | 626–677 MB |
+
+`guide/testing.md` recommends running your own suite in both modes, and is right
+to — the bug behind
+[ADR 0019](../../docs/adr/0019-a-response-owns-its-headers.md) passed 175 tests
+in Debug and segfaulted in release. But a minute a run puts the second mode
+outside the loop anybody actually runs.
+
+**What is not established.** Whether any of it is attributable to a nilo feature.
+`app.docs()` looked like ~15s until the runs were repeated: two docs-on builds
+came in at 80s and 105s, so the gap sits inside the spread of one configuration
+and the honest answer is *unchanged*. The binary difference is real and tiny —
+536 bytes — consistent with `guide/openapi.md`'s own claim that the generator's
+code is linked whether or not `docs()` is ever called.
+
+**What to change.** Nothing yet. This is here so the next person starts from a
+measured baseline rather than from "release builds feel slow". The first useful
+run is the same measurement against a nilo example of known size, which would say
+whether this is nilo, zio, or Zig.

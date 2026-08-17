@@ -43,6 +43,7 @@ const std = @import("std");
 const nilo = @import("nilo_http");
 const handlers = @import("handlers.zig");
 const Archive = @import("archive.zig").Archive;
+const Settings = @import("settings.zig").Settings;
 
 pub const std_options = nilo.std_options;
 pub const std_options_debug_io = nilo.debug_io;
@@ -61,6 +62,12 @@ pub fn main() !void {
     var archive: Archive = .init(gpa);
     defer archive.deinit();
     try app.provide(&archive);
+
+    // Two services of different shapes. `*const Settings` and `*Settings` are
+    // different types and are looked up as such, so a read-only service says
+    // so in the signature of every handler that takes one.
+    const limits: Settings = .{};
+    try app.provide(&limits);
 
     try app.use(nilo.logger.with(.{ .request_id = true }));
 
@@ -81,5 +88,7 @@ test {
     _ = @import("copy.zig");
     _ = @import("archive.zig");
     _ = @import("handlers.zig");
+    _ = @import("intake.zig");
+    _ = @import("settings.zig");
     _ = @import("wire.zig");
 }
