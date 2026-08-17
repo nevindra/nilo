@@ -1,0 +1,45 @@
+[package]
+name = "rust-ops"
+version = "0.0.0"
+edition = "2021"
+
+[[bin]]
+name = "rust-ops"
+path = "src/ops.rs"
+
+[dependencies]
+# The control, and the driver two of the three arms sit on.
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
+tokio = { version = "1", features = ["rt", "macros"] }
+chrono = "0.4"
+serde_json = "1"
+
+# The ORM. `diesel-async` with the postgres feature is diesel's query builder
+# over tokio-postgres, which is why it is here instead of diesel proper: the
+# sync backend links libpq, this box has no libpq, and — more to the point —
+# subtracting an ORM from the driver it actually uses is the clean comparison.
+# It is the same relationship GORM has to pgx.
+# `32-column-tables` because the wide fixture is twenty columns and diesel's
+# default ceiling is sixteen. That ceiling is itself worth knowing: the trait
+# impls are generated per arity, so raising it costs compile time — which is a
+# trade-off the build-time table records rather than a defect.
+diesel = { version = "2.2", default-features = false, features = ["chrono", "postgres_backend", "32-column-tables"] }
+diesel-async = { version = "0.5", features = ["postgres"] }
+# Declared only to switch on `async-await-macro`. diesel-async reaches for
+# `futures_util::try_join!` and does not enable the feature that defines it, so
+# without this line feature unification leaves it off and diesel-async will not
+# compile. Nothing in this crate names futures-util directly.
+futures-util = { version = "0.3", features = ["async-await-macro"] }
+
+# The typed-query library, and the closest thing in Rust to what nilo_sql is.
+# It brings its own driver rather than using tokio-postgres, so its distance
+# from the control is a driver difference as well as a mapper one — said out
+# loud in the report rather than left for a reader to assume.
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio", "postgres", "chrono", "macros",
+] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

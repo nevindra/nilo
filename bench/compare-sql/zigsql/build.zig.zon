@@ -1,0 +1,24 @@
+.{
+    .name = .zigsql,
+    .version = "0.0.0",
+    .fingerprint = 0xd3fe64fe938414e,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        // The repository this benchmark measures, reached by path rather than
+        // by URL: the point is to time the working tree, not a release.
+        .nilo = .{ .path = "../../.." },
+        // The driver, pinned to the exact commit the root `build.zig.zon`
+        // pins. The raw arm is the control for `nilo_sql`, so it has to be the
+        // same pg.zig — a control on a different version measures the driver's
+        // release notes.
+        .pg = .{
+            .url = "git+https://github.com/lalinsky/pg.zig#a2c98876a7d8a36b1771679ce912bfead46ee8f6",
+            .hash = "pg-0.0.0-Wp_7gUqUBgDARGCn8B7brldZRA9lmDQGn262ySg2tg3W",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

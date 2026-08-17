@@ -1,0 +1,68 @@
+// Prisma needs a schema of its own, which is itself part of what is being
+// compared: nilo_sql, Drizzle and this file are three answers to "where does
+// the shape of a row live". nilo's is the Zig struct the handler already
+// returns; Drizzle's is a TypeScript value; Prisma's is a fifth language with
+// its own generator step.
+//
+// Written by hand rather than by `prisma db pull`, so it stays readable next
+// to fixture.sql and a reader can see the four columns are the same four.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model nilo_compare_people {
+  id         BigInt   @id
+  email      String
+  age        Int
+  created_at DateTime @db.Timestamptz(6)
+}
+
+model nilo_compare_wide {
+  id BigInt @id
+  t1 String
+  t2 String
+  t3 String
+  t4 String
+  t5 String
+  t6 String
+  t7 String
+  n1 Int
+  n2 Int
+  n3 Int
+  n4 Int
+  n5 Int
+  n6 BigInt
+  d1 DateTime @db.Timestamptz(6)
+  d2 DateTime @db.Timestamptz(6)
+  d3 DateTime @db.Timestamptz(6)
+  d4 DateTime @db.Timestamptz(6)
+  b1 Boolean
+  b2 Boolean
+}
+
+model nilo_compare_writes {
+  id         BigInt   @id
+  email      String
+  age        Int
+  created_at DateTime @db.Timestamptz(6)
+}
+
+model nilo_compare_updates {
+  id         BigInt   @id
+  email      String
+  age        Int
+  created_at DateTime @db.Timestamptz(6)
+}
+
+model nilo_compare_deletes {
+  id         BigInt   @id
+  email      String
+  age        Int
+  created_at DateTime @db.Timestamptz(6)
+}

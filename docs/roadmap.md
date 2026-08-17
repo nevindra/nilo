@@ -553,6 +553,11 @@ worked list of what a library can owe a service without becoming an ORM.
 Anything missing below is missing on merit rather than because ADR 0039 ruled
 it out.
 
+Everything below is about *features*. On speed the two have already been put
+side by side, along with eight other libraries, in
+[`bench/result/sql.md` §8](../bench/result/sql.md) — so nothing here needs
+measuring first.
+
 **Every box is empty, and that is the point.** This file holds nothing that is
 built, so a line here is deleted when it ships rather than ticked and kept —
 the box is for the afternoon between the two. A box is also not a schedule:

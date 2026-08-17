@@ -1,0 +1,16 @@
+# Build output and caches for the four candidate toolchains. The root
+# .gitignore already covers Zig's (`.zig-cache/`, `zig-out/`, `zig-pkg/`); the
+# other three languages bring their own, and a `git add -A` here otherwise
+# stages about eleven thousand files.
+.gocache/
+go/go-ops
+rust/target/
+node/node_modules/
+node/.prisma/
+
+# Measurement output. Kept out on purpose: a result file is 1.3 MB of block
+# timings, and the numbers that matter are transcribed into
+# `../result/sql.md` §8, which is the record. Committing the raw JSON would put
+# a second copy in the repository that nothing keeps in step — and the run it
+# came from is reproducible from the README.
+results/
