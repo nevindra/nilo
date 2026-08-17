@@ -28,6 +28,26 @@ const std = @import("std");
 const nilo = @import("nilo_http");
 const fetch = @import("fetch.zig");
 
+/// Quieten the log for one test, and the reason it has to be done this way is
+/// worth the four lines.
+///
+/// `App.listen` warns when its root source file is missing
+/// `std_options_debug_io` or `std_options`, which is right for a program and
+/// **unsatisfiable in a test**: the root of a test binary is Zig's own
+/// `test_runner.zig`, so no declaration in this file or any other can be the
+/// one it looks for. The warnings are therefore correct, unavoidable, and
+/// about a root nobody deploys.
+///
+/// They still cost something, because `zig build` prints a red
+/// `failed command:` line for any step that writes to stderr — so a passing
+/// suite looked like a failing one, which is how a real failure went unread
+/// here for a fortnight. The test runner's own log function checks
+/// `std.testing.log_level` and resets it to `.warn` before each test, so this
+/// is scoped to the test that calls it and nothing else.
+fn hushStartupWiring() void {
+    std.testing.log_level = .err;
+}
+
 const testing = std.testing;
 
 // `listen()` warns twice here about the two root-file lines being missing, and
@@ -110,6 +130,7 @@ const Serving = struct {
 };
 
 test "an endpoint that never answers is given up on, and says which clock did it" {
+    hushStartupWiring();
     const gpa = std.heap.smp_allocator;
 
     var quiet: Quiet = .{};

@@ -1060,6 +1060,10 @@ test "a URL is the base, the prefix and the key encoded once" {
 }
 
 test "a key longer than the bucket was built for is refused rather than truncated" {
+    // The refusal names the option to raise, in a log line. Right in a program,
+    // noise in a suite: `zig build` prints a red `failed command:` for any step
+    // that writes to stderr, so a clean run reads like a broken one.
+    testing.log_level = .err;
     var store = try Store.open(testing.allocator, .{
         .endpoint = "http://127.0.0.1:9000",
         .credentials = .{ .static = .{ .access_key_id = "A", .secret_access_key = "B" } },

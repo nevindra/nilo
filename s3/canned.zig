@@ -566,9 +566,18 @@ test "an object over the ceiling is refused before a byte of it is read" {
     }.run);
 }
 
-test "S3 saying no becomes one of the seven, with its code in the log" {
+// Named for what it checks. It used to say "with its code in the log", which
+// nothing here holds: the assertions are the mapped error and the signature,
+// and the log line is neither read nor captured. A test name is a claim, and
+// this file's own history has four entries about claims with nothing behind
+// them.
+test "S3 saying no becomes one of the seven" {
     try withIo(struct {
         fn run(io: std.Io) !void {
+            // The refusal path logs the S3 code on purpose, which is right in a
+            // program and noise in a suite — `zig build` prints a red
+            // `failed command:` for any step that writes to stderr.
+            testing.log_level = .err;
             var canned = try Canned.open(io);
             defer canned.close();
             canned.answer = .{
@@ -835,6 +844,9 @@ test "temporary credentials send a token, and sign it" {
 test "a bucket whose token does not fit says which option to raise" {
     try withIo(struct {
         fn run(io: std.Io) !void {
+            // Says it in a log line, which is the point of the test and noise
+            // in the build output. The error is what gets asserted.
+            testing.log_level = .err;
             var canned = try Canned.open(io);
             defer canned.close();
 
