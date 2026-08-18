@@ -186,6 +186,54 @@ makes the 10% rule more generous than it sounds. Ten percent of nilo's own work
 is 18ns, which is **0.4% of the request**. The DX budget was never the thing
 standing between this framework and a throughput number.
 
+### What a union in the response was costing
+
+`serialise the body` is 33% of that 181ns, and one shape was paying about three
+times what the rest do. `covers` is answered for the **whole** value — one field
+the generated writer does not recognise takes the entire struct to `std.json`
+with it — and until [ADR 0085](../../docs/adr/0085-a-type-says-how-its-json-is-spelled.md)
+it did not recognise a `union(enum)` at all. So a response with one union field
+anywhere in it paid `std.json`'s byte-at-a-time string escaping for every string
+in the response.
+
+Photon's alert rule, 374 bytes, one long string, one float, two enums:
+
+| | ns, across six runs |
+|---|---|
+| **A** `std.json`, externally tagged — what nilo sent | 248–317 |
+| **B** generated writer, externally tagged — identical bytes | 86–93 |
+| **C** generated writer, internally tagged — the new encoding | 88–95 |
+| **D** *control:* the union flattened into a plain struct by hand | 88–94 |
+| **E** a 104-byte payload through A | 81–88 |
+| **F** the same payload through C | 24–25 |
+
+**2.8× to 3.2×** on the large payload, **3.4× to 3.5×** on the small one. Quoted
+as a band because `std.json`'s row moves 28% between runs while the other three
+sit inside 8ns of each other; the best pair alone would have read 3.6×.
+
+Two of these rows exist only to stop the headline being over-read.
+
+**D is the ceiling**, and C lands on it — the two swap places between runs. That
+is the finding: an internally tagged union costs nothing against a struct with
+no union in it, so the hand-written flattening people do today to stay on the
+fast path buys no speed, only boilerplate. **B against C** says internal versus
+external tagging is not a performance question at all, which removes the one
+objection the new encoding could have attracted. And **E/F** says the win is not
+an artefact of one long string — the small payload's ratio is the larger of the
+two.
+
+Five interleaved pairs of 200,000 iterations per run, ReleaseFast, on the machine
+above.
+
+```
+zig run spike/union_json/main.zig -O ReleaseFast
+```
+
+[`spike/union_json/`](../../spike/union_json/) has the program and what each row
+is for. Its one weakness is that it copies `writeString` and `nextEscape` out of
+`http/json.zig` rather than importing them, so it measures the shape of the
+writer rather than the exact bytes the framework ships.
+
 ## Correctness under load
 
 Not a speed measurement. [ADR 0007](../../docs/adr/0007-failure-box-bound-to-the-fiber.md)

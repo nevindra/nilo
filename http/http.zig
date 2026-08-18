@@ -31,6 +31,25 @@ pub const Run = @import("nilo_core").Run;
 /// without adding an import to its build.
 pub const percent = @import("nilo_core").percent;
 
+/// The reader a type marked with `nilo_json` hands to `std.json`, so that a
+/// body carrying an internally tagged union or a renamed enum can be read back
+/// ([ADR 0085](../docs/adr/0085-a-type-says-how-its-json-is-spelled.md)):
+///
+/// ```zig
+/// const Condition = union(enum) {
+///     pub const nilo_json = .{ .tag = "signal" };
+///     pub const jsonParse = nilo.jsonParseFor(@This());
+///
+///     metrics: MetricCondition,
+///     logs: LogCondition,
+/// };
+/// ```
+///
+/// Writing needs no such line — `json.write` asks the marker itself. Reading
+/// does, because `std.json` is what chooses a parser for a type and nothing can
+/// add a declaration to a type somebody else wrote.
+pub const jsonParseFor = @import("jsonmark.zig").parseFor;
+
 pub const Method = @import("http1.zig").Method;
 pub const Options = @import("bulkhead.zig").Options;
 
@@ -582,6 +601,7 @@ test {
     _ = @import("engine/zio.zig");
     _ = @import("fuzz.zig");
     _ = @import("json.zig");
+    _ = @import("jsonmark.zig");
     _ = @import("scan.zig");
     _ = @import("static.zig");
     _ = @import("router.zig");

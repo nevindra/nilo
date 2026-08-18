@@ -155,6 +155,77 @@ guess.
 `*Ctx`, for a handler that already holds an open file and has its own `etag`,
 `size` or `cache_control` to give it. It closes the file, on every way out.
 
+## JSON shapes of your own
+
+A struct is its JSON and an enum is its tag name, and that covers nearly
+everything. Two shapes it doesn't cover are the ones a REST API tends to be full
+of, and a type says which it wants with one declaration
+([ADR 0085](../adr/0085-a-type-says-how-its-json-is-spelled.md)).
+
+**A union is externally tagged by default** — `{"metrics":{…}}`, one object with
+one key — which is what `std.json` writes and what nilo sends if you say
+nothing. `.tag` asks for the other encoding, with the variant's name beside its
+own fields:
+
+<!-- compiles -->
+```zig
+const nilo = @import("nilo_http");
+
+const Condition = union(enum) {
+    pub const nilo_json = .{ .tag = "signal" };
+    pub const jsonParse = nilo.jsonParseFor(@This());
+
+    metrics: struct { metric_name: []const u8, threshold: f64 },
+    logs: struct { query: []const u8, count_over: u32 = 1 },
+    disabled,
+};
+
+const Severity = enum {
+    pub const nilo_json = .{ .rename_all = .SCREAMING_SNAKE_CASE };
+    pub const jsonParse = nilo.jsonParseFor(@This());
+
+    info,
+    needs_attention,
+};
+
+const Rule = struct { id: u32, severity: Severity, condition: Condition };
+```
+
+```json
+{"id":3,"severity":"NEEDS_ATTENTION","condition":{"signal":"logs","query":"level:error","count_over":5}}
+```
+
+A variant carrying nothing is the tag on its own — `{"signal":"disabled"}`.
+
+**`rename_all` spells a name the way the wire wants it.** It applies to an
+enum's tags and to a union's variant names, both of which are *values* in the
+JSON. It does not touch field names, which are keys.
+
+| | `not_found` becomes |
+|---|---|
+| `.lowercase` | `notfound` |
+| `.UPPERCASE` | `NOTFOUND` |
+| `.camelCase` | `notFound` |
+| `.PascalCase` | `NotFound` |
+| `.SCREAMING_SNAKE_CASE` | `NOT_FOUND` |
+| `.@"kebab-case"` | `not-found` |
+
+The first two join the words rather than keeping the underscore, which is what
+serde does and what the names literally say. `.SCREAMING_SNAKE_CASE` is the one
+that keeps it. There is no `.snake_case`, because that is what a Zig field name
+already is.
+
+**Why the second line.** Writing needs no `jsonParse` — nilo makes the call, so
+it reads the marker itself. Reading does, because `std.json` is what picks a
+parser for a type and nothing can add a declaration to a type you wrote. So the
+type hands over a reader nilo supplies. Leave the line off if the type is only
+ever sent and never received; nilo will say so if you add it to a type that
+never said its JSON was spelled differently.
+
+The generated API description follows either encoding, so a client generated
+from it reads what the server actually sends
+([the API description](./openapi.md)).
+
 ## One request, one response
 
 A response is written and flushed in one go. There is no "start the response,

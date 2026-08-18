@@ -27,6 +27,7 @@
 
 const std = @import("std");
 const Str = @import("nilo_core").Str;
+const mark = @import("jsonmark.zig");
 
 /// Serialise `value` as JSON. Uses the generated writer when the type is one
 /// it covers, and `std.json` when it is not — decided while compiling, so
@@ -44,6 +45,10 @@ pub fn write(w: *std.Io.Writer, value: anytype) std.Io.Writer.Error!void {
 /// Answerable only while compiling — it reads the types of a struct's fields —
 /// so call it as `comptime covers(T)`.
 pub fn covers(comptime T: type) bool {
+    // Reading the marker is what checks it, and this is the line that makes the
+    // check happen at all: a `.tag` on a struct describes nothing and would
+    // otherwise sit there doing nothing in silence.
+    if (mark.marked(T)) _ = mark.of(T);
     if (T == Str) return true;
     if (T == []const u8 or T == []u8) return true;
     return switch (@typeInfo(T)) {
@@ -51,6 +56,36 @@ pub fn covers(comptime T: type) bool {
         // An enum with a writer of its own is not just its tag name.
         .@"enum" => !hasDecl(T, "jsonStringify"),
         .optional => |o| covers(o.child),
+
+        // A tagged union, in both encodings.
+        //
+        // Externally tagged — `{"metrics":{…}}` — is what `std.json` writes and
+        // what this used to hand to it. Covering it here changes no byte and is
+        // worth 258ns → 90ns on a 374-byte payload, because `covers` is
+        // answered for the *whole* value: one union field anywhere sent the
+        // entire response to `std.json`, strings included.
+        //
+        // Internally tagged — `{"signal":"metrics",…}` — is what the type asks
+        // for with `nilo_json`, and `std.json` has no way to write it at all
+        // (ADR 0085). An empty variant is only writable in that encoding: there
+        // is a name to send and no object to put it in.
+        .@"union" => |u| covered: {
+            if (hasDecl(T, "jsonStringify")) break :covered false;
+            // Nothing in an untagged union says which arm is live, so nothing
+            // can write it. Same reading `openapi.zig` gives it (ADR 0077).
+            if (u.tag_type == null) break :covered false;
+            // Reading the marker is also what checks it, so a `.tag` on the
+            // wrong shape is refused the moment the type reaches a response.
+            const tagged = if (mark.of(T)) |m| m.tag != null else false;
+            for (u.fields) |f| {
+                if (f.type == void) {
+                    if (!tagged) break :covered false;
+                    continue;
+                }
+                if (!covers(f.type)) break :covered false;
+            }
+            break :covered true;
+        },
         // `std.json` writes a `[N]u8` as a *string*, not as a list of numbers:
         // `[3]u8{ 1, 2, 3 }` comes out as three escaped characters in quotes.
         // Rather than reproduce that rule and its edges, an array of bytes is
@@ -81,7 +116,20 @@ fn writeValue(comptime T: type, w: *std.Io.Writer, value: T) std.Io.Writer.Error
         .int, .comptime_int => return w.printInt(value, 10, .lower, .{}),
         // Left to std.json on purpose — see the header comment.
         .float, .comptime_float => return std.json.Stringify.value(value, .{}, w),
-        .@"enum" => return writeString(w, @tagName(value)),
+        // A tag name is a Zig identifier, so it can never need escaping and the
+        // quotes around it belong in the same literal as the name. That is what
+        // makes `rename_all` free: the spelling is settled while compiling, so
+        // a renamed enum writes exactly as much as a plain one.
+        .@"enum" => |e| {
+            if (e.is_exhaustive) switch (value) {
+                inline else => |tag| return w.writeAll(
+                    comptime "\"" ++ mark.wire(@tagName(tag), mark.of(T)) ++ "\"",
+                ),
+            };
+            // A non-exhaustive enum can hold a value no field names, which is
+            // `@tagName`'s to answer rather than a switch's.
+            return writeString(w, @tagName(value));
+        },
         .optional => return if (value) |payload|
             writeValue(@TypeOf(payload), w, payload)
         else
@@ -94,6 +142,39 @@ fn writeValue(comptime T: type, w: *std.Io.Writer, value: T) std.Io.Writer.Error
                 try writeValue(@TypeOf(item), w, item);
             }
             return w.writeByte(']');
+        },
+
+        .@"union" => {
+            const m = comptime mark.of(T);
+            const key = comptime if (m) |said| said.tag else null;
+            switch (value) {
+                inline else => |payload, active| {
+                    const arm = comptime mark.wire(@tagName(active), m);
+                    const Payload = @TypeOf(payload);
+
+                    if (comptime key) |k| {
+                        // Internally tagged: the discriminator and the
+                        // variant's own fields share one object, so the arm is
+                        // written flat rather than nested. An empty variant is
+                        // the whole object.
+                        if (Payload == void) {
+                            return w.writeAll(comptime "{\"" ++ k ++ "\":\"" ++ arm ++ "\"}");
+                        }
+                        try w.writeAll(comptime "{\"" ++ k ++ "\":\"" ++ arm ++ "\"");
+                        inline for (@typeInfo(Payload).@"struct".fields) |f| {
+                            try w.writeAll(comptime ",\"" ++ f.name ++ "\":");
+                            try writeValue(f.type, w, @field(payload, f.name));
+                        }
+                        return w.writeByte('}');
+                    }
+
+                    // Externally tagged: one object, one key, the variant's
+                    // name — byte for byte what `std.json` writes.
+                    try w.writeAll(comptime "{\"" ++ arm ++ "\":");
+                    try writeValue(Payload, w, payload);
+                    return w.writeByte('}');
+                },
+            }
         },
 
         .@"struct" => |s| {
@@ -301,7 +382,9 @@ test "a type that writes itself is left alone, and so is a tuple" {
     };
     comptime std.debug.assert(!covers(Custom));
     comptime std.debug.assert(!covers(struct { u32, u32 }));
-    comptime std.debug.assert(!covers(union(enum) { a: u32 }));
+    // Nothing in an untagged union says which arm is live, so nothing can
+    // write it — the same reading `openapi.zig` gives it (ADR 0077).
+    comptime std.debug.assert(!covers(union { a: u32, b: bool }));
     // A struct holding one of those falls back with it.
     comptime std.debug.assert(!covers(struct { inner: Custom }));
 
@@ -310,4 +393,129 @@ test "a type that writes itself is left alone, and so is a tuple" {
     defer out.deinit();
     try write(&out.writer, Custom{ .n = 5 });
     try testing.expectEqualStrings("5", out.written());
+}
+
+/// What `write` produced, for a type whose whole point is *not* being what
+/// `std.json` would have written. `expectSame` is the right check for every
+/// other shape here and the wrong one for these.
+fn expectJson(expected: []const u8, value: anytype) !void {
+    comptime std.debug.assert(covers(@TypeOf(value)));
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try write(&out.writer, value);
+    try testing.expectEqualStrings(expected, out.written());
+}
+
+test "a union that says nothing is written the way std.json writes it" {
+    const Link = union(enum) { url: []const u8, id: u32 };
+    try expectSame(Link{ .url = "https://example.dev" });
+    try expectSame(Link{ .id = 9 });
+
+    // And so is one nested in a struct, which is the shape that used to send
+    // the whole response to std.json.
+    const Held = struct { name: []const u8, link: Link };
+    try expectSame(Held{ .name = "wati", .link = .{ .id = 9 } });
+}
+
+test "a union that says its tag writes the tag beside the variant's own fields" {
+    const Condition = union(enum) {
+        pub const nilo_json = .{ .tag = "signal" };
+
+        metrics: struct { metric_name: []const u8, threshold: f64 },
+        logs: struct { query: []const u8, count_over: u32 },
+    };
+
+    try expectJson(
+        \\{"signal":"metrics","metric_name":"system.cpu.utilization","threshold":0.9}
+    , Condition{ .metrics = .{ .metric_name = "system.cpu.utilization", .threshold = 0.9 } });
+
+    try expectJson(
+        \\{"signal":"logs","query":"level:error","count_over":5}
+    , Condition{ .logs = .{ .query = "level:error", .count_over = 5 } });
+}
+
+test "a variant carrying nothing is the tag on its own" {
+    const Step = union(enum) {
+        pub const nilo_json = .{ .tag = "step" };
+
+        queued,
+        running: struct { pid: u32 },
+    };
+
+    // Written out rather than as `Step.queued`, which is the *tag* enum's
+    // field and would be a different type entirely.
+    try expectJson(
+        \\{"step":"queued"}
+    , Step{ .queued = {} });
+    try expectJson(
+        \\{"step":"running","pid":41}
+    , Step{ .running = .{ .pid = 41 } });
+}
+
+test "a tag and a case together rename the variant but not its fields" {
+    const Channel = union(enum) {
+        pub const nilo_json = .{ .tag = "kind", .rename_all = .@"kebab-case" };
+
+        web_hook: struct { target_url: []const u8 },
+        discord_dm: struct { user_id: u32 },
+    };
+
+    // The variant is renamed because it is a value on the wire. `target_url`
+    // is a field name and is left alone, which is the line this cut draws.
+    try expectJson(
+        \\{"kind":"web-hook","target_url":"https://example.dev/hook"}
+    , Channel{ .web_hook = .{ .target_url = "https://example.dev/hook" } });
+    try expectJson(
+        \\{"kind":"discord-dm","user_id":7}
+    , Channel{ .discord_dm = .{ .user_id = 7 } });
+}
+
+test "an enum that says its case comes out in it, and one that does not is its tag name" {
+    const Agg = enum {
+        pub const nilo_json = .{ .rename_all = .SCREAMING_SNAKE_CASE };
+
+        avg,
+        rate_per_second,
+    };
+    try expectJson("\"AVG\"", Agg.avg);
+    try expectJson("\"RATE_PER_SECOND\"", Agg.rate_per_second);
+
+    const Plain = enum { avg, rate_per_second };
+    try expectSame(Plain.rate_per_second);
+}
+
+test "a renamed enum inside a struct is renamed there too" {
+    const Severity = enum {
+        pub const nilo_json = .{ .rename_all = .UPPERCASE };
+
+        info,
+        critical,
+    };
+    const Alert = struct { id: u32, severity: Severity };
+
+    try expectJson(
+        \\{"id":3,"severity":"CRITICAL"}
+    , Alert{ .id = 3, .severity = .critical });
+}
+
+test "a union with a variant the writer cannot touch falls back whole" {
+    const Custom = struct {
+        n: u32,
+        pub fn jsonStringify(self: @This(), jw: anytype) !void {
+            try jw.write(self.n);
+        }
+    };
+    // One arm out of reach takes the union with it, exactly as one field does
+    // for a struct — `covers` errs narrow on purpose.
+    comptime std.debug.assert(!covers(union(enum) { a: u32, b: Custom }));
+
+    // A union that writes itself is left alone whatever its arms are.
+    const Writes = union(enum) {
+        a: u32,
+        pub fn jsonStringify(self: @This(), jw: anytype) !void {
+            try jw.write(self.a);
+        }
+    };
+    comptime std.debug.assert(!covers(Writes));
 }

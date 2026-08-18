@@ -734,3 +734,51 @@ harness has now run at all. Marking it turned up a third thing: the prelude
 exports `id`, so a handler parameter called `id` will not compile there. The
 parameter is `key`, which is what an object store calls it anyway.
 
+
+## A mechanism that errs narrow, and what the narrowness was costing
+
+`covers` decides while compiling which types nilo's own JSON writer may touch,
+and everything else goes to `std.json` unchanged. That is the right design and
+it is stated as such in the file's own header: the cost of being wrong is a
+response that differs from what nilo used to send, so it errs narrow. What
+nobody had done was price the erring.
+
+**It is answered for the whole value, not per field.** One type it does not
+recognise takes the entire struct to `std.json` with it — every string in the
+response included, which is the exact work the generated writer exists to avoid.
+It did not recognise a `union(enum)` at all, so any response with a union
+anywhere in it was paying between 2.8× and 3.2×
+([`bench/result/http.md`](../bench/result/http.md)). Nothing was wrong; the
+fallback simply had a price and the price had never been on a scale. **The
+lesson generalises past this one: a fast path with a fallback has two numbers,
+and this repository had only ever measured the first.**
+
+**The control is what turned it from plausible into decided.** The run put four
+things side by side, and the one that mattered was the payload with the union
+flattened into a plain struct by hand — what somebody writes today to stay on
+the fast path. The new encoding landed on it, the two swapping places between
+runs, which says the union support is free and the hand-written flattening buys
+boilerplate rather than speed. Without that row the honest claim would have
+stopped at "faster than before".
+
+It is also a band rather than a figure, 2.8× to 3.2×, because `std.json`'s own
+row moves 28% between runs while the other three sit inside 8ns of each other.
+Quoting the best pair would have read 3.6×.
+
+**A refusal was right and still became a feature.**
+[ADR 0077](./adr/0077-a-lifetime-has-no-rendering-in-json.md) refused a
+`union(enum)` as a request body because "nothing in the type says which arm
+arrived", which was true and is still true. The way past it was to give the type
+a way to say it rather than to weaken the check
+([ADR 0085](./adr/0085-a-type-says-how-its-json-is-spelled.md)). Worth keeping
+because the reflex on meeting one of this repository's refusals is to argue with
+the refusal, and the argument that worked was about the type.
+
+**And the half nilo could not have: `std.json` picks the parser.** Writing is
+nilo's call, so a marker is enough. Reading is `std.json`'s, dispatched on
+`std.meta.hasFn(T, "jsonParse")`, and nothing can add a declaration to a type
+somebody else wrote — so the type hands over a function nilo supplies, and the
+feature is two declarations rather than one. The alternative was a JSON parser
+in this repository, with the unicode escapes and number edges that come with
+one. Same trade the header of `json.zig` already made for floats, arriving on
+the other side of the same file.

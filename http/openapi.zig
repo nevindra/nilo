@@ -31,6 +31,7 @@ const std = @import("std");
 const http1 = @import("http1.zig");
 const str_mod = @import("nilo_core");
 const patch_mod = @import("patch.zig");
+const mark = @import("jsonmark.zig");
 
 const Str = str_mod.Str;
 
@@ -55,9 +56,9 @@ pub const Schema = union(enum) {
     /// What a type said about itself, because it writes its own JSON and this
     /// module cannot read that off its fields (ADR 0076).
     told: Told,
-    /// A `union(enum)`, which `std.json` writes externally tagged — one
-    /// object with one key, the name of the active field (ADR 0077).
-    one_of: []const Case,
+    /// A `union(enum)`, in whichever encoding the type asked for (ADR 0077,
+    /// ADR 0085).
+    one_of: OneOf,
     /// A type that writes its own JSON and did **not** say what it looks like.
     /// Emitted as `{}` with a note — the fields are known to be the wrong
     /// answer, so anything derived from them would be a confident lie.
@@ -96,8 +97,22 @@ pub const Object = struct {
     fields: []const Field,
 };
 
-/// One arm of a tagged union: the key `std.json` writes, and the shape under
-/// it.
+/// A `union(enum)` and its two encodings.
+///
+/// `tag` is null for the one `std.json` writes — an object with a single key,
+/// the arm's name — and is the discriminator's own key when the type said so
+/// with `nilo_json` ([ADR 0085](./adr/0085-a-type-says-how-its-json-is-spelled.md)).
+/// The two are different documents, not a different rendering of one: the first
+/// nests the arm under its name, the second puts the name beside the arm's own
+/// fields, and a generated client cannot read one from the other.
+pub const OneOf = struct {
+    tag: ?[]const u8 = null,
+    cases: []const Case,
+};
+
+/// One arm of a tagged union: the name it goes by on the wire, and the shape
+/// that comes with it. The name is the Zig field's unless `rename_all` said
+/// otherwise, which is why it is carried rather than read back off the type.
 pub const Case = struct {
     name: []const u8,
     schema: *const Schema,
@@ -231,6 +246,10 @@ pub fn schemaOf(comptime T: type) *const Schema {
 fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
     comptime {
         if (depth >= max_depth) return held(.unknown);
+        // The same reason `covers` does it: reading the marker is what checks
+        // it, so a marker on a shape it cannot describe is refused rather than
+        // quietly ignored (ADR 0085).
+        if (mark.marked(T)) _ = mark.of(T);
         if (T == Str) return held(.string);
         // A file is bytes, not the three-field struct it is carried in.
         if (T == @import("form.zig").Upload) return held(.binary);
@@ -262,7 +281,10 @@ fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
             .int, .comptime_int => held(.integer),
             .float, .comptime_float => held(.number),
 
+            // The choices are the names that go out, which is not the same as
+            // the field names once `rename_all` is in play (ADR 0085).
             .@"enum" => |e| blk: {
+                if (mark.marked(T)) break :blk held(.{ .choice = mark.wireNames(T) });
                 var names: []const []const u8 = &.{};
                 for (e.fields) |f| names = names ++ [_][]const u8{f.name};
                 break :blk held(.{ .choice = names });
@@ -276,12 +298,20 @@ fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
             // *untagged* union still gets `{}`, which is the honest answer:
             // nothing in the type says which arm is live, so nothing can.
             .@"union" => |u| if (u.tag_type == null) held(.unknown) else blk: {
+                const said = mark.of(T);
+                const names = mark.wireNames(T);
                 var cases: []const Case = &.{};
-                for (u.fields) |f| cases = cases ++ [_]Case{.{
-                    .name = f.name,
-                    .schema = schemaWithin(f.type, depth + 1),
+                for (u.fields, names) |f, on_the_wire| cases = cases ++ [_]Case{.{
+                    .name = on_the_wire,
+                    // A variant carrying nothing has no shape under its name,
+                    // and only the internally tagged encoding can say so — the
+                    // name is the whole of the object there (ADR 0085).
+                    .schema = if (f.type == void) held(.unknown) else schemaWithin(f.type, depth + 1),
                 }};
-                break :blk held(.{ .one_of = cases });
+                break :blk held(.{ .one_of = .{
+                    .tag = if (said) |m| m.tag else null,
+                    .cases = cases,
+                } });
             },
 
             .@"struct" => |s| blk: {
@@ -562,7 +592,7 @@ const Components = struct {
             },
             .array => |item| self.add(item),
             .nullable => |inner| self.add(inner),
-            .one_of => |cases| for (cases) |case| self.add(case.schema),
+            .one_of => |o| for (o.cases) |case| self.add(case.schema),
             else => {},
         }
     }
@@ -711,9 +741,14 @@ const Components = struct {
                 }
                 break :blk true;
             },
-            .one_of => |cases| blk: {
-                if (cases.len != b.one_of.len) break :blk false;
-                for (cases, b.one_of) |one, other| {
+            .one_of => |o| blk: {
+                // The encoding is part of the shape, not a rendering of it: the
+                // same arms under a discriminator are a different document, and
+                // merging the two would hand a client one name for both.
+                if ((o.tag == null) != (b.one_of.tag == null)) break :blk false;
+                if (o.tag) |key| if (!std.mem.eql(u8, key, b.one_of.tag.?)) break :blk false;
+                if (o.cases.len != b.one_of.cases.len) break :blk false;
+                for (o.cases, b.one_of.cases) |one, other| {
                     if (!std.mem.eql(u8, one.name, other.name)) break :blk false;
                     if (!rendersTheSame(one.schema, other.schema)) break :blk false;
                 }
@@ -1034,14 +1069,44 @@ fn writeSchema(
             try w.writeByte('}');
         },
 
+        // Two encodings, two documents.
+        //
         // Externally tagged: `{"link":{"url":"…"}}` — one key, whose name is
         // the arm. Written out as the alternatives rather than as `{}`, which
         // is what a union used to get while serialising perfectly well
         // (ADR 0077). A void arm carries no value and is the bare key.
-        .one_of => |cases| {
+        //
+        // Internally tagged: `{"signal":"metrics","threshold":0.9}` — the arm's
+        // own fields, with the discriminator among them (ADR 0085). The arm may
+        // already be a named component, and nothing can be merged into a
+        // `$ref`, so the two halves are put side by side with `allOf` — which is
+        // the pattern OpenAPI has for exactly this. `discriminator` names the
+        // key, and each arm pins its own value with a one-item `enum`, which is
+        // what makes the choice unambiguous without a `mapping` that anonymous
+        // structs could not be given anyway.
+        .one_of => |o| {
             try w.writeAll("{\"oneOf\":[");
-            for (cases, 0..) |case, i| {
+            for (o.cases, 0..) |case, i| {
                 if (i > 0) try w.writeByte(',');
+                if (o.tag) |key| {
+                    // `allOf: [{}, X]` and `X` say the same thing, so a variant
+                    // with nothing under it is written as the tag alone.
+                    const bare = case.schema.* == .unknown;
+                    if (!bare) {
+                        try w.writeAll("{\"allOf\":[");
+                        try writeSchema(w, components, case.schema);
+                        try w.writeByte(',');
+                    }
+                    try w.writeAll("{\"type\":\"object\",\"properties\":{");
+                    try writeString(w, key);
+                    try w.writeAll(":{\"type\":\"string\",\"enum\":[");
+                    try writeString(w, case.name);
+                    try w.writeAll("]}},\"required\":[");
+                    try writeString(w, key);
+                    try w.writeAll("]}");
+                    if (!bare) try w.writeAll("]}");
+                    continue;
+                }
                 try w.writeAll("{\"type\":\"object\",\"properties\":{");
                 try writeString(w, case.name);
                 try w.writeByte(':');
@@ -1050,7 +1115,13 @@ fn writeSchema(
                 try writeString(w, case.name);
                 try w.writeAll("]}");
             }
-            try w.writeAll("]}");
+            try w.writeAll("]");
+            if (o.tag) |key| {
+                try w.writeAll(",\"discriminator\":{\"propertyName\":");
+                try writeString(w, key);
+                try w.writeByte('}');
+            }
+            try w.writeByte('}');
         },
 
         // OpenAPI 3.1 is JSON Schema, so a nullable value is written as the
@@ -1258,6 +1329,67 @@ test "a tagged union is the alternatives it can be, one key each" {
 test "an untagged union still says nothing, because nothing in it says which arm is live" {
     const Bytes = union { a: u32, b: f32 };
     try expectSchema(Bytes, "{}");
+}
+
+test "a union that says its tag is described with the discriminator beside the fields" {
+    const Condition = union(enum) {
+        pub const nilo_json = .{ .tag = "signal" };
+
+        metrics: struct { threshold: f64 },
+        logs: struct { query: []const u8 },
+    };
+    // `allOf` rather than a merge, because the arm may already be a named
+    // component and nothing can be merged into a `$ref` (ADR 0085).
+    try expectSchema(Condition,
+        \\{"oneOf":[{"allOf":[{"type":"object","properties":{"threshold":{"type":"number"}},"required":["threshold"]},{"type":"object","properties":{"signal":{"type":"string","enum":["metrics"]}},"required":["signal"]}]},{"allOf":[{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]},{"type":"object","properties":{"signal":{"type":"string","enum":["logs"]}},"required":["signal"]}]}],"discriminator":{"propertyName":"signal"}}
+    );
+}
+
+test "a variant carrying nothing is the discriminator on its own" {
+    const Step = union(enum) {
+        pub const nilo_json = .{ .tag = "step" };
+
+        queued,
+        running: struct { pid: u32 },
+    };
+    try expectSchema(Step,
+        \\{"oneOf":[{"type":"object","properties":{"step":{"type":"string","enum":["queued"]}},"required":["step"]},{"allOf":[{"type":"object","properties":{"pid":{"type":"integer"}},"required":["pid"]},{"type":"object","properties":{"step":{"type":"string","enum":["running"]}},"required":["step"]}]}],"discriminator":{"propertyName":"step"}}
+    );
+}
+
+test "a renamed variant is described by the name that goes out, not the Zig one" {
+    const Channel = union(enum) {
+        pub const nilo_json = .{ .tag = "kind", .rename_all = .@"kebab-case" };
+
+        web_hook: struct { url: []const u8 },
+    };
+    try expectSchema(Channel,
+        \\{"oneOf":[{"allOf":[{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]},{"type":"object","properties":{"kind":{"type":"string","enum":["web-hook"]}},"required":["kind"]}]}],"discriminator":{"propertyName":"kind"}}
+    );
+}
+
+test "a renamed enum lists the choices it actually sends" {
+    const Agg = enum {
+        pub const nilo_json = .{ .rename_all = .SCREAMING_SNAKE_CASE };
+
+        avg,
+        rate_per_second,
+    };
+    // The document promising `avg` while the server sends `AVG` is the exact
+    // failure ADR 0076 was written about, arriving from a new direction.
+    try expectSchema(Agg, "{\"type\":\"string\",\"enum\":[\"AVG\",\"RATE_PER_SECOND\"]}");
+}
+
+test "the same arms under two encodings are two shapes, not one component" {
+    const External = union(enum) { a: struct { n: u32 } };
+    const Internal = union(enum) {
+        pub const nilo_json = .{ .tag = "kind" };
+        a: struct { n: u32 },
+    };
+    // A client cannot read one of these from the other, so merging them under
+    // one name would be the `Meta_Str`/`Meta_Text` fix applied where it is
+    // wrong (ADR 0077).
+    try testing.expect(!comptime Components.rendersTheSame(schemaOf(External), schemaOf(Internal)));
 }
 
 test "one shape split only by a lifetime is one component" {

@@ -205,6 +205,53 @@ with `format: binary` whatever the content type is at run time. See
 
 `Headers` holds up to 8 by value; a ninth is a compile error.
 
+## JSON shapes
+
+A struct is its fields and an enum is its tag name. A type that wants something
+else says so with `nilo_json`, which is plain data and is read while compiling
+([ADR 0085](./adr/0085-a-type-says-how-its-json-is-spelled.md)).
+
+<!-- compiles -->
+```zig
+const nilo = @import("nilo_http");
+
+const Condition = union(enum) {
+    pub const nilo_json = .{ .tag = "signal", .rename_all = .@"kebab-case" };
+    pub const jsonParse = nilo.jsonParseFor(@This());
+
+    metrics: struct { threshold: f64 },
+    log_volume: struct { query: []const u8 },
+    disabled,
+};
+```
+
+| | |
+|---|---|
+| `.tag` | the discriminator's key. A `union(enum)` only: the variant's name goes under it, and the variant's own fields go beside it in the same object |
+| `.rename_all` | how a variant's name or an enum's tag is spelled on the wire. Not field names |
+
+`.rename_all` takes `.lowercase`, `.UPPERCASE`, `.camelCase`, `.PascalCase`,
+`.SCREAMING_SNAKE_CASE` and `.@"kebab-case"`. The first two join the words
+(`not_found` → `notfound`); `.SCREAMING_SNAKE_CASE` keeps the underscore. There
+is no `.snake_case` — that is what a Zig field name already is, and asking for
+it is a compile error rather than a no-op.
+
+`nilo.jsonParseFor(@This())` is the reader, and it is a second line because
+`std.json` picks the parser for a type and nothing can add a declaration to a
+type you wrote. Only needed if the type arrives in a request; sending needs
+nothing. Adding it to a type with no `nilo_json` is a compile error.
+
+Without a marker a `union(enum)` is externally tagged — `{"metrics":{…}}`, what
+`std.json` writes — and it is written by nilo's own writer either way. An
+*untagged* union has nothing saying which arm is live and is left to `std.json`
+whole. A variant carrying no payload is legal under `.tag` and is the
+discriminator on its own; under the default encoding it is not covered.
+
+The generated API description follows whichever encoding the type asked for:
+`oneOf` of one-key objects for the default, and `oneOf` with `discriminator`
+plus a per-arm `allOf` for a tagged one. See
+[Responses](./guide/responses.md#json-shapes-of-your-own).
+
 ## `Ctx`
 
 ### Reading

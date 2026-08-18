@@ -516,6 +516,54 @@ const refusals = [_]Refusal{
         .says = "the handler for route \"/\" has to be a function, not comptime_int.",
     },
     .{
+        .name = "json_marker_field_not_recognised",
+        .says = "`json_marker_field_not_recognised.Condition`'s `nilo_json` has a field `tagged`, which is not something it can say.",
+    },
+    .{
+        .name = "json_marker_is_not_a_struct",
+        .says = "`json_marker_is_not_a_struct.Condition`'s `nilo_json` is a comptime_int, and it says how this type's JSON is spelled, so it is written as a struct.",
+    },
+    .{
+        .name = "json_marker_says_nothing",
+        .says = "`json_marker_says_nothing.Condition`'s `nilo_json` is empty, so it says nothing about this type's JSON and nothing changes.",
+    },
+    .{
+        .name = "json_reader_for_a_renamed_union",
+        .says = "`json_reader_for_a_renamed_union.Channel` hands nilo's JSON reader a `nilo_json` with only `rename_all` on it, and it is a union.",
+    },
+    .{
+        .name = "json_reader_with_no_marker",
+        .says = "`json_reader_with_no_marker.Condition` asks for nilo's JSON reader and has no `nilo_json`, so there is nothing for the reader to do differently from `std.json`.",
+    },
+    .{
+        .name = "json_rename_all_is_already_zig",
+        .says = "`json_rename_all_is_already_zig.Severity` asks for `.rename_all = .snake_case`, which is what a Zig field name already is, so it would change nothing.",
+    },
+    .{
+        .name = "json_rename_all_unknown_case",
+        .says = "`json_rename_all_unknown_case.Severity` asks for `.rename_all = .Titlecase`, which is not a case nilo writes.",
+    },
+    .{
+        .name = "json_tag_collides_with_a_field",
+        .says = "`json_tag_collides_with_a_field.Condition`'s `.tag` is \"kind\" and its variant `metrics` already has a field called `kind`, so that key would be written twice and a reader would pick one of them.",
+    },
+    .{
+        .name = "json_tag_is_empty",
+        .says = "`json_tag_is_empty.Condition`'s `.tag` is the empty string, so the variant's name would go under a key with no name.",
+    },
+    .{
+        .name = "json_tag_on_a_struct",
+        .says = "`json_tag_on_a_struct.Condition` says `.tag = \"signal\"`, which puts the name of the live variant into the JSON — and this is a struct, which has no variants.",
+    },
+    .{
+        .name = "json_tag_on_an_untagged_union",
+        .says = "`json_tag_on_an_untagged_union.Condition` says `.tag = \"signal\"` and is an untagged union, so nothing in it knows which variant is live and there is no name to write.",
+    },
+    .{
+        .name = "json_variant_carries_no_fields",
+        .says = "`json_variant_carries_no_fields.Condition`'s variant `metrics` carries a f64, and an internally tagged union writes the variant's fields beside the tag — so the variant has to have fields.",
+    },
+    .{
         .name = "param_is_a_many_pointer",
         .says = "argument 1 of the handler for route \"/greet/:name\" is a [*]const u8, which cannot be matched.",
     },

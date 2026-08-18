@@ -96,7 +96,10 @@ with the code — which is what this whole feature exists to avoid
 
 **Shapes.** A type with no JSON shape is `{}` — "anything", which is true. An
 **untagged** union is one: nothing in the type says which arm is live. A
-`union(enum)` is not, and gets the `oneOf` `std.json` actually writes.
+`union(enum)` is not, and gets a `oneOf` of whichever encoding it actually
+sends — the one `std.json` writes by default, or, if the type carries
+`nilo_json`, a discriminated one with `discriminator` and each arm pinned to its
+own tag value ([JSON shapes](./responses.md#json-shapes-of-your-own)).
 
 ## One shape, two lifetimes
 

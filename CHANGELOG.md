@@ -5,6 +5,66 @@ What was measured and what was got wrong on the way is in
 [`docs/history.md`](./docs/history.md); what is coming is in
 [`docs/roadmap.md`](./docs/roadmap.md).
 
+## Unreleased
+
+### A type can say how its JSON is spelled
+
+`std.json` writes a union one way — `{"metrics":{…}}`, one object with one key.
+Most REST APIs use the other one, and there was no way to ask for it short of a
+hand-written `jsonStringify` and `jsonParse` per type. Now there is
+([ADR 0085](./docs/adr/0085-a-type-says-how-its-json-is-spelled.md)):
+
+```zig
+const Condition = union(enum) {
+    pub const nilo_json = .{ .tag = "signal", .rename_all = .lowercase };
+    pub const jsonParse = nilo.jsonParseFor(@This());
+
+    metrics: MetricCondition,
+    logs: LogCondition,
+};
+```
+
+```json
+{"signal":"metrics","metric_name":"system.cpu.utilization","threshold":0.9}
+```
+
+`.tag` is the discriminator's key. `.rename_all` spells a variant's name or an
+enum's tag the way the wire wants it, and takes `.lowercase`, `.UPPERCASE`,
+`.camelCase`, `.PascalCase`, `.SCREAMING_SNAKE_CASE` and `.@"kebab-case"`. It
+does not touch field names. A variant carrying nothing is the tag on its own.
+
+The second line is only needed for a type that *arrives* in a request. Sending
+needs nothing, because nilo makes that call and reads the marker itself; reading
+is `std.json`'s call, and nothing can add a declaration to a type you wrote.
+
+A `union(enum)` as a request body used to be a compile error, on the grounds
+that nothing in the type said which arm arrived. `.tag` is the type saying it,
+so that shape now works.
+
+The generated API description follows whichever encoding the type asked for, so
+a client generated from it reads what the server actually sends. A tagged union
+is `oneOf` with `discriminator`; an untagged union is still `{}`.
+
+### Responses carrying a union got two to three times faster
+
+Not a new feature and nothing to change. `covers` decides while compiling which
+types nilo's own JSON writer may touch, it is answered for the **whole** value,
+and it did not recognise a `union(enum)` at all — so one union field anywhere
+sent the entire response to `std.json`, every string in it included.
+
+On a 374-byte payload with a union in it that is **2.8× to 3.2×**, and 3.4× to
+3.5× on a 104-byte one. The bytes are unchanged: an unmarked union is still
+written externally tagged, and the tests hold nilo's output against `std.json`'s
+value by value. [`bench/result/http.md`](./bench/result/http.md) has the run and
+the controls.
+
+### Also
+
+Twelve new refusals cover the ways of writing the marker wrong, taking the
+framework's table from 63 to 75 and the five tables from 129 to 141. The one
+worth knowing is a `.tag` whose name a variant already uses as a field: that is
+the only mistake here that would corrupt the wire rather than fail.
+
 ## 0.2.0
 
 **0.1.0 was an HTTP server called zfast. 0.2.0 is a toolkit called nilo, and

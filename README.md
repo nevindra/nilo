@@ -13,7 +13,7 @@ point. You import the modules you use, and Zig never compiles the rest.
 
 **It's built for people and for coding agents at the same time**, which turns
 out to be one job rather than two. One rule covers the whole argument list.
-Nothing depends on the order you wrote it in. And 129 error messages are held in
+Nothing depends on the order you wrote it in. And 141 error messages are held in
 place by a build step, so a mistake comes back as a sentence while your code is
 still compiling instead of as a 500 at runtime. That helps you, and it helps
 whatever is writing code next to you.
