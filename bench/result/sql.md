@@ -560,6 +560,28 @@ line — which database the single route reads. Stripped:
 | names `sql.Sqlite` | 2,202,304 |
 | **SQLite's cost to a program that uses it** | **524,840** |
 
+**Re-run after the twenty-findings pass** (ADRs 0075–0084), same machine, same
+command, both trees built from a `git archive` so the before is built rather
+than quoted:
+
+| | before | after | Δ |
+|---|---|---|---|
+| names `sql.Db` | 1,677,464 | 1,694,344 | +16,880 |
+| names `sql.Sqlite` | 2,202,304 | 2,217,696 | +15,392 |
+| **SQLite's own cost** | **524,840** | **523,352** | −1,488 |
+
+The published figure moved, which is the point of re-running it: 524,840 had
+been reproduced exactly twice and was on its way to being a constant. Most of
+the growth is not SQLite's — `example-hello`, which has no database in it at
+all, moved 881,296 → 892,696 on the same pass, so the framework grew by about
+11 KB and both probes carry it. SQLite's own share went *down* by 1,488 bytes,
+which is the Dialect learning what form a uuid takes
+([ADR 0078](../../docs/adr/0078-a-uuid-is-whatever-the-database-stores.md))
+replacing what the SQLite Wire used to do about it.
+
+`strings … | grep -ci sqlite` still answers 0 against the Postgres-only binary,
+which is the claim that actually matters and the one this A/B exists for.
+
 And the number that mattered more, because it was a claim rather than a
 measurement until it was checked:
 

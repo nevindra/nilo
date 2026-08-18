@@ -100,7 +100,17 @@ the request body has a field "address.zip" this endpoint does not know. It takes
 ```
 
 That goes eight levels down — the same depth the API description and the
-staleness trap follow — and below that a mistake is a plain 400 again.
+staleness trap follow. Below that there is no field name left to quote, so the
+400 says which wall it hit instead of saying nothing:
+
+```
+the request body is valid JSON and does not fit this endpoint, but it is nested
+deeper than 8 levels — which is as far as nilo follows a body — so it cannot say
+which part is wrong. The mistake is somewhere below that.
+```
+
+That sentence means the shape is too deep to name, not that the depth itself is
+refused: a body that *fits* is parsed however deep it goes.
 
 A `Str` field lives in the request arena, so — like every `Str` — it stops being
 valid when the request ends. `keep` it if the value goes into a service.
@@ -118,7 +128,10 @@ fn placeOrder(b: nilo.Bound(NewOrder)) !nilo.Status(201, Order) {
 ```
 
 `b.fail()` is a 422 naming each one; `b.failures()` is there when the answer
-wants a shape of its own. `Bound(Query(T))` does the same for the query string,
+wants a shape of its own. `b.must("total", order.total > 0, "has to be more
+than nothing")` puts a rule of your own into the same answer, so an endpoint
+does not end up refusing in two shapes.
+`Bound(Query(T))` does the same for the query string,
 and the full account — including the three cases that stay a plain 400 — is
 under [Forms](./forms.md#when-one-field-is-wrong-and-the-rest-are-fine), where
 it matters most.

@@ -1,0 +1,12 @@
+.{
+    .name = .dependent,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0xbb9077a4e164cd9b,
+    .dependencies = .{
+        // By path, so the check measures this working copy rather than
+        // whatever is published.
+        .nilo = .{ .path = "../.." },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "main.zig" },
+}

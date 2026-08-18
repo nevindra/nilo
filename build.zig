@@ -556,6 +556,10 @@ const refusals = [_]Refusal{
         .says = "app.provide() wants a pointer to a service, not provide_not_a_pointer.Db.",
     },
     .{
+        .name = "openapi_marker_has_no_type",
+        .says = "openapi_marker_has_no_type.Uuid's `nilo_openapi` has no `type`, so it does not say what this value looks like in JSON. Write `pub const nilo_openapi = .{ .type = \"string\" };`, with `type` one of \"string\", \"integer\", \"number\" or \"boolean\", and an optional `format`.",
+    },
+    .{
         .name = "query_field_cannot_convert",
         .says = "the field `tags: []const u8` of the `Query(query_field_cannot_convert.Search)` on route \"/users\" is not something a query value can become.",
     },
@@ -682,6 +686,171 @@ const refusals = [_]Refusal{
 };
 
 const Refusal = struct { name: []const u8, says: []const u8 };
+
+/// The mirror of `refusals/`: programs from the documentation that have to
+/// **succeed**.
+///
+/// Three published one-liners did not compile at the same time — a `Str`
+/// where a `[]const u8` goes, an `i64` where a `u64` goes, a namespace called
+/// as a function — and each was the first thing somebody types on reaching
+/// that page. The sign-in example was worse: four mistakes in five lines,
+/// including a `db.acquire()` that has never existed. Prose cannot hold this,
+/// and a directory of copies of the snippets would drift from the snippets
+/// (ADR 0083).
+///
+/// So the guide *is* the source. A `zig` block with `<!-- compiles -->` above
+/// it — invisible where the page is read — is extracted while `build.zig`
+/// runs, put behind `docs/snippets/types.zig`, and compiled. A block of loose
+/// statements says `<!-- compiles: body -->` and gets `values.zig` and a
+/// function around it as well.
+const Snippets = struct {
+    /// The pages scanned. Deliberately a list rather than a walk of `docs/`:
+    /// what is checked should be a decision somebody made.
+    ///
+    /// **These cache, and the refusals do not.** A compilation that succeeds
+    /// leaves something behind, so a warm run of all six is ~30ms each and
+    /// only a page that changed is re-analysed. That is the opposite of
+    /// `refusals/` (ADR 0027) and it is why this can afford to grow.
+    const pages = [_][]const u8{
+        "README.md",
+        "docs/reference.md",
+        "docs/guide/sessions.md",
+        "docs/guide/config.md",
+    };
+
+    const opens = "<!-- compiles";
+    const fence = "```";
+
+    const Block = struct {
+        name: []const u8,
+        source: []const u8,
+    };
+
+    /// Every marked block in every page, ready to compile.
+    fn collect(b: *std.Build, types: []const u8, values: []const u8) []const Block {
+        const io = b.graph.io;
+        var found: std.ArrayList(Block) = .empty;
+
+        for (pages) |page| {
+            const text = b.build_root.handle.readFileAlloc(
+                io,
+                page,
+                b.allocator,
+                .limited(4 << 20),
+            ) catch @panic("cannot read a documentation page");
+
+            // What the marked declaration blocks on this page have declared
+            // so far. A page is read top to bottom, so a block naming a type
+            // the block above it introduced is right rather than incomplete —
+            // and it is what lets the guide show the struct once.
+            var declared: std.ArrayList(u8) = .empty;
+
+            var lines = std.mem.splitScalar(u8, text, '\n');
+            var at: usize = 0;
+            while (lines.next()) |line| {
+                const trimmed = std.mem.trim(u8, line, " \t\r");
+                if (!std.mem.startsWith(u8, trimmed, opens)) continue;
+                const is_body = std.mem.indexOf(u8, trimmed, "body") != null;
+
+                // The fence is the next line, and anything else is a marker
+                // written above the wrong thing.
+                const fenced = lines.next() orelse break;
+                if (!std.mem.startsWith(u8, std.mem.trim(u8, fenced, " \t\r"), fence ++ "zig"))
+                    @panic("a `<!-- compiles -->` marker is not above a ```zig block");
+
+                var block: std.ArrayList(u8) = .empty;
+                while (lines.next()) |inside| {
+                    if (std.mem.startsWith(u8, std.mem.trim(u8, inside, " \t\r"), fence)) break;
+                    // A page should show the import a snippet needs, and the
+                    // prelude has already made that name. Keeping both is two
+                    // declarations of `id` in one file.
+                    if (imports(inside)) continue;
+                    block.appendSlice(b.allocator, inside) catch @panic("OOM");
+                    block.append(b.allocator, '\n') catch @panic("OOM");
+                }
+
+                at += 1;
+                found.append(b.allocator, .{
+                    .name = b.fmt("{s}_{d}", .{ slug(b, page), at }),
+                    // A block of statements deliberately does *not* get the
+                    // declarations above it: a `fn signIn(c: *nilo.Ctx, …)`
+                    // and the `c` such a block says cannot both exist, and
+                    // the statements are the ones that need `c`.
+                    .source = if (is_body)
+                        b.fmt("{s}\n{s}\n{s}\n", .{ types, values, wrapped(b, block.items) })
+                    else
+                        b.fmt("{s}\n{s}\n{s}\n{s}\n", .{
+                            types,
+                            declared.items,
+                            block.items,
+                            forcing(b, block.items),
+                        }),
+                }) catch @panic("OOM");
+
+                if (!is_body) {
+                    declared.appendSlice(b.allocator, block.items) catch @panic("OOM");
+                    declared.append(b.allocator, '\n') catch @panic("OOM");
+                }
+            }
+        }
+
+        return found.items;
+    }
+
+    /// Whether this line is a snippet naming a module the prelude has named.
+    fn imports(line: []const u8) bool {
+        const trimmed = std.mem.trimStart(u8, line, " \t");
+        return std.mem.startsWith(u8, trimmed, "const ") and
+            std.mem.indexOf(u8, trimmed, "@import(") != null;
+    }
+
+    /// A run of statements, as something the compiler will look at. `export`
+    /// is what makes it look: an unreferenced private function is never
+    /// analysed, so a snippet inside one would be checked for syntax and
+    /// nothing else.
+    fn wrapped(b: *std.Build, block: []const u8) []const u8 {
+        return b.fmt(
+            "export fn snippet() void {{ statements() catch {{}}; }}\n" ++
+                "fn statements() anyerror!void {{\n{s}\n}}\n",
+            .{block},
+        );
+    }
+
+    /// The same, for a block that declares functions: one exported function
+    /// that takes the address of each, which is what drags their bodies in.
+    fn forcing(b: *std.Build, block: []const u8) []const u8 {
+        var out: std.ArrayList(u8) = .empty;
+        out.appendSlice(b.allocator, "export fn snippet() void {\n") catch @panic("OOM");
+
+        var lines = std.mem.splitScalar(u8, block, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trimStart(u8, line, " \t");
+            const after = if (std.mem.startsWith(u8, trimmed, "pub fn "))
+                trimmed["pub fn ".len..]
+            else if (std.mem.startsWith(u8, trimmed, "fn "))
+                trimmed["fn ".len..]
+            else
+                continue;
+            const open = std.mem.indexOfScalar(u8, after, '(') orelse continue;
+            out.appendSlice(b.allocator, b.fmt("    _ = &{s};\n", .{after[0..open]})) catch @panic("OOM");
+        }
+
+        out.appendSlice(b.allocator, "}\n") catch @panic("OOM");
+        return out.items;
+    }
+
+    /// `docs/guide/sessions.md` → `sessions`, which is what the object is
+    /// called and therefore what a failure names.
+    fn slug(b: *std.Build, page: []const u8) []const u8 {
+        const base = std.fs.path.basename(page);
+        const dot = std.mem.lastIndexOfScalar(u8, base, '.') orelse base.len;
+        const name = b.allocator.dupe(u8, base[0..dot]) catch @panic("OOM");
+        for (name) |*ch| {
+            if (!std.ascii.isAlphanumeric(ch.*)) ch.* = '_';
+        }
+        return name;
+    }
+};
 
 /// The suite runs in both modes, and `-Doptimize=` does not change that — a
 /// lifetime bug passes in `Debug`, where the bytes a dangling pointer points at
@@ -992,10 +1161,151 @@ const Layering = struct {
     };
 };
 
+/// What somebody else's project downloads when it names this one.
+///
+/// `build.zig.zon` has claimed since ADR 0040 that "a project that serves HTTP
+/// and never imports `nilo_sql` does not fetch, build or link any of it", and
+/// two thirds of that were true. `strings` and `nm` over such a program find no
+/// SQLite and no libpq, so *link* held. *Fetch* did not: `b.lazyDependency` is
+/// a request rather than a conditional, so both drivers were downloaded by
+/// every dependent whatever they imported — 11.1 MB against 2.7 MB used, found
+/// by an application that had no database in it at all (ADR 0075).
+///
+/// The sentence lived in four files and none of them ran. This is the version
+/// that runs: `bench/dependent/` is a project importing `nilo_http` and nothing
+/// else, and `zig build --fetch` against an **empty** package cache says what
+/// it actually costs. Anything but zio landing in there fails the step.
+///
+/// Off `test` on purpose, the way `smoke-tls` is: it needs the internet, and a
+/// gate that passes because a machine had no route is worse than no gate.
+const FetchCheck = struct {
+    /// The one package a dependent that serves HTTP is supposed to pay for.
+    const allowed = "zio-";
+
+    fn step(b: *std.Build, network: bool) void {
+        const self = b.allocator.create(FetchCheck) catch @panic("OOM");
+        self.* = .{
+            ._step = .init(.{
+                .id = .custom,
+                .name = "fetch-check",
+                .owner = b,
+                .makeFn = make,
+            }),
+            .network = network,
+        };
+        b.step(
+            "fetch-check",
+            "Count what a dependent that serves HTTP downloads — needs -Dnetwork",
+        ).dependOn(&self._step);
+    }
+
+    _step: std.Build.Step,
+    network: bool,
+
+    fn make(s: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!void {
+        const self: *FetchCheck = @fieldParentPtr("_step", s);
+        const b = s.owner;
+        const io = b.graph.io;
+
+        if (!self.network) {
+            // The same shape `smoke-tls` uses: say it skipped rather than
+            // report a pass nobody earned.
+            std.debug.print(
+                "fetch-check: skipped, because it downloads packages. `zig build fetch-check -Dnetwork` runs it.\n",
+                .{},
+            );
+            return;
+        }
+
+        // **Both caches have to be cold, and finding that out is the whole
+        // subtlety of this step.** A dependent keeps unpacked packages in its
+        // own `zig-pkg/` and downloaded tarballs in the global cache, and
+        // either one being warm makes the wrong answer look like the right
+        // one: with `zig-pkg/` populated nothing is downloaded, so counting
+        // downloads says zero; with the global cache populated everything in
+        // the manifest is unpacked whether or not the build asked for it, so
+        // counting `zig-pkg/` says everything. The first two versions of this
+        // step got one each.
+        const cache = try b.cache_root.join(b.allocator, &.{"fetch-check"});
+        b.build_root.handle.deleteTree(io, "bench/dependent/zig-pkg") catch {};
+        b.cache_root.handle.deleteTree(io, "fetch-check") catch {};
+        try b.cache_root.handle.createDirPath(io, "fetch-check");
+
+        const dependent = try b.build_root.join(b.allocator, &.{ "bench", "dependent" });
+        const result = try s.captureChildProcess(b.allocator, options.progress_node, &.{
+            b.graph.zig_exe,
+            "build",
+            "--build-file",
+            try std.fs.path.join(b.allocator, &.{ dependent, "build.zig" }),
+            "--cache-dir",
+            try std.fs.path.join(b.allocator, &.{ cache, "local" }),
+            "--global-cache-dir",
+            cache,
+        });
+        switch (result.term) {
+            .exited => |code| if (code != 0) return s.fail(
+                "nilo: the dependent in `bench/dependent/` did not build, so nothing was counted",
+                .{},
+            ),
+            else => return s.fail("nilo: the dependent's build did not exit normally", .{}),
+        }
+
+        // `p/` holds one tarball per package that was actually downloaded.
+        // Missing means nothing was, which cannot happen — zio is not lazy —
+        // so it is a failure rather than a pass.
+        var packages = b.build_root.handle.openDir(io, try std.fs.path.join(
+            b.allocator,
+            &.{ cache, "p" },
+        ), .{ .iterate = true }) catch |err| return s.fail(
+            "nilo: nothing was downloaded into `{s}/p` ({t}), which not even zio should manage",
+            .{ cache, err },
+        );
+        defer packages.close(io);
+
+        var unwanted: usize = 0;
+        var iterator = packages.iterate();
+        while (try iterator.next(io)) |entry| {
+            if (std.mem.startsWith(u8, entry.name, allowed)) continue;
+            unwanted += 1;
+            try s.addError(
+                "nilo: a dependent that imports only `nilo_http` downloaded `{s}`.\n" ++
+                    "  Something in build.zig asks for it unconditionally — `b.lazyDependency` is a\n" ++
+                    "  request, not a conditional, so it has to sit behind the option that wants it\n" ++
+                    "  (ADR 0075).",
+                .{entry.name},
+            );
+        }
+        if (unwanted > 0) return error.MakeFailed;
+    }
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const strip = b.option(bool, "strip", "Leave debug info out: halves a release build, costs nothing measurable at runtime, and leaves a panic without file and line");
+
+    // Whether the database drivers are wanted, and it defaults to **who is
+    // asking** rather than to a fixed answer (ADR 0075).
+    //
+    // `b.lazyDependency` does not mean "fetch this if somebody imports it". It
+    // means *request* this: it answers null on the pass that finds the package
+    // missing, enqueues the download and re-runs the build. Called at the top
+    // of `build()` it therefore runs for every dependent whatever they import,
+    // and `.lazy = true` in the manifest buys nothing — which is how an app
+    // that serves HTTP and names no SQL came to download 11.1 MB of Postgres
+    // and SQLite driver before it compiled a line.
+    //
+    // So the call has to sit behind something only a project that wants the
+    // module sets. `b.pkg_hash` is empty for the package being built and is
+    // the dependency's own hash when somebody else is building it, which makes
+    // the honest default expressible: this repository builds all of itself,
+    // and a dependent gets the drivers when it asks for them with
+    // `b.dependency("nilo", .{ .sql = true })`.
+    const want_sql = b.option(
+        bool,
+        "sql",
+        "Build nilo_sql and fetch its drivers — on for this repository, off for a dependent until it asks (see ADR 0075)",
+    ) orelse (b.pkg_hash.len == 0);
 
     const zio = b.dependency("zio", .{
         .target = target,
@@ -1123,8 +1433,15 @@ pub fn build(b: *std.Build) void {
     // is not analysed in a build that is not a test build, so the module
     // published here links no server. `under_test` below is where that name
     // is supplied.
+    // **The module exists either way, and what changes is its root file**
+    // (ADR 0075). A dependent that did not ask for SQL and imports it anyway
+    // gets `sql/unbuilt.zig`, which is a `@compileError` in nilo's own words
+    // naming the one line that fixes it. The alternative — leaving the module
+    // out of the graph — makes `dep.module("nilo_sql")` a panic from inside
+    // `std.Build` about a name it could not find, which is somebody else's
+    // sentence about our decision.
     const nilo_sql = b.addModule("nilo_sql", .{
-        .root_source_file = b.path("sql/sql.zig"),
+        .root_source_file = b.path(if (want_sql) "sql/sql.zig" else "sql/unbuilt.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -1133,26 +1450,29 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // The driver, reached lazily so that it is fetched only once something
-    // asks for this module. `lazyDependency` answers null on the pass that
-    // discovers it is missing and the build re-runs itself after the
-    // download, which is why this is an `if` rather than an `orelse`
-    // unreachable. Everything above `sql/postgres.zig` names the Wire, not
-    // pg.zig (ADR 0039).
-    if (b.lazyDependency("pg", .{ .target = target, .optimize = optimize })) |pg| {
-        nilo_sql.addImport("pg", pg.module("pg"));
-    }
+    // The driver, reached lazily and **behind `want_sql`**, which is what
+    // makes the laziness real: see the comment on the option above, and
+    // ADR 0075. `lazyDependency` answers null on the pass that discovers it is
+    // missing and the build re-runs itself after the download, which is why
+    // this is an `if` rather than an `orelse unreachable`. Everything above
+    // `sql/postgres.zig` names the Wire, not pg.zig (ADR 0039).
+    if (want_sql) {
+        if (b.lazyDependency("pg", .{ .target = target, .optimize = optimize })) |pg| {
+            nilo_sql.addImport("pg", pg.module("pg"));
+        }
 
-    // The other driver, the same way. It compiles the SQLite amalgamation, so
-    // the module links libc — and **that is a cost a Postgres-only program
-    // pays too**, because both Wires live in one module (ADR 0073). What it
-    // must not cost is the megabyte of C: `sql/sqlite.zig` is only analysed
-    // when something names it, so a program that does not should link none of
-    // it. That is an A/B rather than an argument, and `zig build sqlite-size`
-    // is where the number comes from.
-    if (b.lazyDependency("zqlite", .{ .target = target, .optimize = optimize })) |zqlite| {
-        nilo_sql.addImport("zqlite", zqlite.module("zqlite"));
-        nilo_sql.link_libc = true;
+        // The other driver, the same way. It compiles the SQLite amalgamation,
+        // so the module links libc — and **that is a cost a Postgres-only
+        // program pays too**, because both Wires live in one module
+        // (ADR 0073). What it must not cost is the megabyte of C:
+        // `sql/sqlite.zig` is only analysed when something names it, so a
+        // program that does not should link none of it. That is an A/B rather
+        // than an argument, and `zig build size-sql` is where the number comes
+        // from.
+        if (b.lazyDependency("zqlite", .{ .target = target, .optimize = optimize })) |zqlite| {
+            nilo_sql.addImport("zqlite", zqlite.module("zqlite"));
+            nilo_sql.link_libc = true;
+        }
     }
 
     // The benchmark target: a routed GET with a path param returning ~1KB
@@ -1464,7 +1784,7 @@ pub fn build(b: *std.Build) void {
     const network = b.option(
         bool,
         "network",
-        "Let smoke-tls reach the internet (default: false, and its tests skip)",
+        "Let smoke-tls and fetch-check reach the internet (default: false, and their tests skip)",
     ) orelse false;
     const net_config = b.addOptions();
     net_config.addOption(bool, "enabled", network);
@@ -1487,6 +1807,12 @@ pub fn build(b: *std.Build) void {
         const tests = b.addTest(.{ .root_module = root });
         smoke_tls_step.dependOn(&b.addRunArtifact(tests).step);
     }
+
+    // What a dependent downloads, held by something other than a sentence in
+    // four files (ADR 0075). Not on `test` for the reason `smoke-tls` is not:
+    // it needs a route to the internet, and a gate that goes green because a
+    // machine had none is worse than no gate.
+    FetchCheck.step(b, network);
 
     // The layering, held by something other than a paragraph (ADR 0042).
     test_step.dependOn(Layering.step(b));
@@ -1589,19 +1915,25 @@ pub fn build(b: *std.Build) void {
             .{ .name = "nilo_sql", .module = bench_nilo_sql },
         },
     });
-    if (b.lazyDependency("pg", .{ .target = target, .optimize = .ReleaseFast })) |pg| {
-        bench_sql_module.addImport("pg", pg.module("pg"));
-        bench_nilo_sql.addImport("pg", pg.module("pg"));
-    }
-    // The benchmark copy of the module needs both drivers for the same reason
-    // the published one does: `sql/sql.zig` names them both, and which one a
-    // program *uses* is the thing `size-sql` exists to weigh.
-    if (b.lazyDependency("zqlite", .{ .target = target, .optimize = .ReleaseFast })) |zqlite| {
-        bench_nilo_sql.addImport("zqlite", zqlite.module("zqlite"));
-        bench_nilo_sql.link_libc = true;
-        // And the root module too, because `bench/sql.zig` names
-        // `sql.Sqlite` — the executable is the thing that links the C.
-        bench_sql_module.link_libc = true;
+    // Behind `want_sql` like the published module's, and for the same reason:
+    // this file runs top to bottom in a *dependent's* build too, so a
+    // `lazyDependency` call that a benchmark nobody outside this repository
+    // will ever run still bills them for the download (ADR 0075).
+    if (want_sql) {
+        if (b.lazyDependency("pg", .{ .target = target, .optimize = .ReleaseFast })) |pg| {
+            bench_sql_module.addImport("pg", pg.module("pg"));
+            bench_nilo_sql.addImport("pg", pg.module("pg"));
+        }
+        // The benchmark copy of the module needs both drivers for the same
+        // reason the published one does: `sql/sql.zig` names them both, and
+        // which one a program *uses* is the thing `size-sql` exists to weigh.
+        if (b.lazyDependency("zqlite", .{ .target = target, .optimize = .ReleaseFast })) |zqlite| {
+            bench_nilo_sql.addImport("zqlite", zqlite.module("zqlite"));
+            bench_nilo_sql.link_libc = true;
+            // And the root module too, because `bench/sql.zig` names
+            // `sql.Sqlite` — the executable is the thing that links the C.
+            bench_sql_module.link_libc = true;
+        }
     }
     bench_sql_module.addImport("live_config", bench_live_config);
     const bench_sql = b.addExecutable(.{ .name = "nilo-bench-sql", .root_module = bench_sql_module });
@@ -1766,12 +2098,18 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "nilo_http", .module = framework },
             },
         });
-        if (b.lazyDependency("pg", .{ .target = target, .optimize = mode })) |pg| {
-            under_test.addImport("pg", pg.module("pg"));
-        }
-        if (b.lazyDependency("zqlite", .{ .target = target, .optimize = mode })) |zqlite| {
-            under_test.addImport("zqlite", zqlite.module("zqlite"));
-            under_test.link_libc = true;
+        // The third and last pair, behind `want_sql` for the reason the other
+        // two are (ADR 0075). This one was the expensive one: a dependent runs
+        // this loop while configuring their own build, so *nilo's own test
+        // suite* was what charged them the second copy of both drivers.
+        if (want_sql) {
+            if (b.lazyDependency("pg", .{ .target = target, .optimize = mode })) |pg| {
+                under_test.addImport("pg", pg.module("pg"));
+            }
+            if (b.lazyDependency("zqlite", .{ .target = target, .optimize = mode })) |zqlite| {
+                under_test.addImport("zqlite", zqlite.module("zqlite"));
+                under_test.link_libc = true;
+            }
         }
         under_test.addOptions("live_config", live_config);
         const sql_tests = b.addTest(.{ .root_module = under_test });
@@ -1893,6 +2231,54 @@ pub fn build(b: *std.Build) void {
         refusals_step.dependOn(&refused.step);
     }
     test_step.dependOn(refusals_step);
+
+    // And the mirror of it: the documentation's own snippets, which have to
+    // compile (ADR 0083). Only built when `nilo_sql` is — the running example
+    // has a database in it, and `-Dsql=false` is a project that has not asked
+    // for one.
+    const snippets_step = b.step(
+        "snippets",
+        "Compile the snippets the documentation publishes",
+    );
+    if (want_sql) {
+        const io = b.graph.io;
+        const types = b.build_root.handle.readFileAlloc(
+            io,
+            "docs/snippets/types.zig",
+            b.allocator,
+            .limited(64 << 10),
+        ) catch @panic("cannot read docs/snippets/types.zig");
+        const values = b.build_root.handle.readFileAlloc(
+            io,
+            "docs/snippets/values.zig",
+            b.allocator,
+            .limited(64 << 10),
+        ) catch @panic("cannot read docs/snippets/values.zig");
+
+        // Written into the cache rather than into the tree: the snippet's
+        // one copy is the one in the page.
+        const written = b.addWriteFiles();
+        for (Snippets.collect(b, types, values)) |snippet| {
+            const module = b.createModule(.{
+                .root_source_file = written.add(
+                    b.fmt("{s}.zig", .{snippet.name}),
+                    snippet.source,
+                ),
+                .target = target,
+                .optimize = .Debug,
+                .imports = &.{
+                    .{ .name = "nilo_http", .module = nilo_http },
+                    .{ .name = "nilo_sql", .module = nilo_sql },
+                    .{ .name = "nilo_id", .module = nilo_id },
+                    .{ .name = "nilo_pw", .module = nilo_pw },
+                    .{ .name = "nilo_config", .module = nilo_config },
+                },
+            });
+            const compiled = b.addObject(.{ .name = snippet.name, .root_module = module });
+            snippets_step.dependOn(&compiled.step);
+        }
+    }
+    test_step.dependOn(snippets_step);
 
     // Every example is built by `zig build examples`, so one that stops
     // compiling is a failed build rather than a surprise for the first

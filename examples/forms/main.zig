@@ -250,7 +250,14 @@ fn register(
     var buf: [4096]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
 
-    if (incoming.value()) |form| {
+    // A rule this application has and no Zig type can state. `must` puts it
+    // in the same list as the conversions nilo did itself, so a person who
+    // is 12 and left the email box empty is told both at once rather than
+    // one now and one after they fix it.
+    const grown_up = if (incoming.value()) |form| form.age >= 18 else true;
+    const checked = incoming.must("age", grown_up, "has to be 18 or over");
+
+    if (checked.value()) |form| {
         try w.writeAll(page_head ++ "<h1>Registered</h1><p>");
         try writeEscaped(&w, form.email.view());
         try w.print(", {d}. <a href=\"/\">back</a></p>", .{form.age});
@@ -260,7 +267,7 @@ fn register(
     // Everything that did not bind, in nilo's own words. Writing the
     // sentence yourself would be a second wording of the same mistake.
     try w.writeAll(page_head ++ "<h1>Register</h1><ul class=\"problems\">");
-    var it = incoming.failures();
+    var it = checked.failures();
     while (it.next()) |problem| {
         var sentence: [fail.max_message]u8 = undefined;
         var s = std.Io.Writer.fixed(&sentence);
@@ -274,8 +281,8 @@ fn register(
 
     // The boxes hold what was typed, not what it would have become: somebody
     // who wrote "soon" in the age box needs to see "soon" to fix it.
-    try writeField(&w, "email", incoming.given("email").view());
-    try writeField(&w, "age", incoming.given("age").view());
+    try writeField(&w, "email", checked.given("email").view());
+    try writeField(&w, "age", checked.given("age").view());
     try w.writeAll("<button>Register</button></form>");
 
     // 422 rather than 400: the request was understood and its contents were
@@ -582,6 +589,28 @@ test "a registration with two bad fields comes back with both, and with what was
 
     // And the box still holds what was typed, so it can be corrected.
     try testing.expect(std.mem.indexOf(u8, answer.body, "name=\"age\" value=\"soon\"") != null);
+}
+
+test "a rule this application has comes back beside the ones nilo has" {
+    var app = nilo.App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/register", register);
+
+    var client = try nilo.testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    // The age converts perfectly well and is still refused, which is the
+    // half no type can state.
+    const answer = try client.postWith(
+        &app,
+        "/register",
+        "application/x-www-form-urlencoded",
+        "email=wati%40example.dev&age=12",
+    );
+    try testing.expectEqual(@as(u16, 422), answer.status);
+    try testing.expect(std.mem.indexOf(u8, answer.body, "&quot;age&quot; has to be 18 or over") != null);
+    // And it is one answer in one shape: the box still holds what was typed.
+    try testing.expect(std.mem.indexOf(u8, answer.body, "name=\"age\" value=\"12\"") != null);
 }
 
 test "what was typed comes back escaped, not as markup" {

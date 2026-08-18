@@ -93,8 +93,22 @@ pub const Lock = enum {
 };
 
 /// Postgres, and for now the only one.
+/// How a database stores a `Uuid`, which is the one column type the two Wires
+/// disagree about (ADR 0078).
+pub const UuidForm = enum {
+    /// Sixteen bytes, which is what a Postgres `uuid` column is.
+    bytes,
+    /// The thirty-six hyphenated characters. What SQLite gets, because SQLite
+    /// has no uuid type — and what `acceptsSqlite` has always said it wants.
+    text,
+};
+
 pub const Postgres = struct {
     pub const name = "postgres";
+
+    /// Sixteen bytes. `uuid` is a real column type here and the driver has an
+    /// encoder for it.
+    pub const uuid_form: UuidForm = .bytes;
 
     /// Numbered from one, and numbered by the walker rather than counted
     /// here, so a condition that writes two parameters cannot lose track.
@@ -433,6 +447,14 @@ pub const Postgres = struct {
 pub const SQLite = struct {
     pub const name = "sqlite";
 
+    /// Text, and this row is why `sql.Uuid` compiles here at all (ADR 0078).
+    /// SQLite has no uuid type; `acceptsSqlite` routes the column to TEXT
+    /// because `Uuid` declares one, and the write half used to disagree with
+    /// it by trying to send sixteen raw bytes — which zqlite refuses while
+    /// compiling, in its own words, about a Zig issue. Thirty-six characters
+    /// also means `sqlite3` shows the id and `WHERE public = '…'` is typeable.
+    pub const uuid_form: UuidForm = .text;
+
     /// `?1`, numbered, and numbered rather than bare `?` for the same reason
     /// Postgres numbers: the walker counts, and a condition that writes two
     /// parameters must not lose track of which is which.
@@ -625,10 +647,10 @@ pub const SQLite = struct {
 pub fn assertDialect(comptime D: type) void {
     comptime {
         const owed = [_][]const u8{
-            "name",   "placeholder", "quote",   "list_form",
-            "limit",  "offset",      "accepts", "introspect",
-            "readAs", "bindAs",      "arrayOf", "qualify",
-            "lock",
+            "name",   "placeholder", "quote",     "list_form",
+            "limit",  "offset",      "accepts",   "introspect",
+            "readAs", "bindAs",      "arrayOf",   "qualify",
+            "lock",   "uuid_form",
         };
         for (owed) |decl| {
             if (!@hasDecl(D, decl)) @compileError(

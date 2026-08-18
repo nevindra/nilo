@@ -139,7 +139,7 @@ fn signUp(arena: std.mem.Allocator, b: nilo.Bound(nilo.Form(SignUp))) !Page {
     var it = b.failures();
     while (it.next()) |f| {
         f.field      // "age"
-        f.reason     // .not_a_number
+        f.reason     // .not_a_number — null when it is a rule of yours
         f.given      // Str "soon" — what arrived
         f.expected   // "a whole number"
         try f.say(w) // nilo's own sentence, so yours cannot drift from it
@@ -156,12 +156,48 @@ fn signUp(arena: std.mem.Allocator, b: nilo.Bound(nilo.Form(SignUp))) !Page {
 The field name in `given("…")` is checked while compiling — a typo there would
 otherwise be an empty box nobody notices.
 
-### What it does not do
+### Your own rules, in the same answer
 
-The reasons are exactly the conversions nilo already performs: `.missing`,
+The reasons above are exactly the conversions nilo performs: `.missing`,
 `.not_a_number`, `.not_true_or_false`, `.not_a_choice`, `.wrong_kind`. **This
 is not a validator.** Whether the age is plausible, whether the email has an
 `@`, whether the two passwords match — all yours.
+
+What nilo does carry is the *answer*. Write the rule, hand over the sentence,
+and it comes out beside nilo's own in one 422 rather than as a second shape a
+client has to handle:
+
+```zig
+fn signUp(b: nilo.Bound(NewUser)) !nilo.Status(201, User) {
+    const in = b.value() orelse return b.fail();
+
+    const checked = b
+        .must("password", in.password.view().len >= 10, "wants at least 10 characters")
+        .must("email", hasAt(in.email.view()), "has to look like an address");
+    if (checked.failed()) return checked.fail();
+
+    return db.create(in);
+}
+```
+
+```
+2 fields did not fit: "email" has to look like an address;
+"password" wants at least 10 characters
+```
+
+The bool is the rule **holding**, not failing — read the call as the sentence it
+makes: password must be at least 10 characters. The label is nilo's, so a rule
+in a query string says `?page stops at 100` without you knowing that slot spells
+things differently.
+
+`must` returns a `Checked`, which has `value`, `failed`, `failedCount`,
+`given`, `failures` and `fail` — the same names, so nothing above has to be
+rewritten to use it. A `Failure` from a rule has `reason == null` and its own
+words in `said`; conversion failures still come first, because a rule checked
+against a field that never bound was checked against nothing.
+
+A handler that checks no rules never builds a `Checked` and pays nothing for
+this ([ADR 0082](../adr/0082-a-rule-of-your-own-joins-the-answer.md)).
 
 And three things stay a plain 400, because none of them leaves a binding to
 hand back: a body that is not a form at all, text that is not JSON, and a field

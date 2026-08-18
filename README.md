@@ -210,15 +210,16 @@ redeploying, and finding the next:
 
 ### Passwords are a value
 
+<!-- compiles: body -->
 ```zig
 // signing up
-const stored = try c.hashPassword(gpa, form.password);
-_ = try db.insert(User, conn, .{ .email = form.email, .password = stored.text() });
+const stored = try c.hashPassword(gpa, form.password.view());
+_ = try db.insert(User, c, .{ .email = form.email, .password = stored.text() });
 
 // signing in
-const row = try db.find(User, conn, .{ .email = form.email });
-if (!try c.verifyPassword(gpa, if (row) |r| r.password else null, form.password))
-    return nilo.fail(401, "that is not a sign-in");
+const row = try db.one(User, c, .{ .where = .{ .email = form.email } });
+if (!try c.verifyPassword(gpa, if (row) |r| r.password.view() else null, form.password.view()))
+    return nilo.fail.unauthorized("that is not a sign-in", .{});
 ```
 
 argon2id, stored as a PHC string that any other library can read. One hash costs
@@ -424,9 +425,14 @@ are actually properties of the design are the 4,669 and the 1.
 
 Binary size is the fourth number, and it's a large part of why the modules are
 kept apart. Zig doesn't compile what nothing imports, so an HTTP-only project
-pays **zero bytes** for `nilo_sql` and never even fetches a Postgres driver.
-That's measured, not hoped for. A server that does run queries costs 733 KB
-more, and
+pays **zero bytes** for `nilo_sql` and downloads no database driver either —
+the drivers sit behind `.sql = true` on the dependency, and
+`zig build fetch-check -Dnetwork` builds a project that imports only the server
+and fails if anything but zio lands. Both halves are measured, and the second
+one only since
+[ADR 0075](./docs/adr/0075-a-lazy-dependency-is-a-request.md): before it, the
+bytes claim was true and the download claim was 11.1 MB out. A server that does
+run queries costs 733 KB more, and
 [ADR 0040](./docs/adr/0040-a-service-that-needs-the-loop-is-finished-when-the-loop-exists.md)
 accounts for every byte of it.
 

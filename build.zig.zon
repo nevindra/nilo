@@ -11,9 +11,15 @@
         // The driver behind `nilo_sql`, and lazy on purpose: it brings four
         // transitive dependencies of its own (buffer, metrics, xsync, tls),
         // and a project that serves HTTP and never imports the SQL module
-        // should not fetch, build or link any of them. `build.zig` reaches
-        // for this through `b.lazyDependency`, so it is downloaded the first
-        // time something actually asks for the module (ADR 0039).
+        // should not fetch, build or link any of them (ADR 0039).
+        //
+        // **`.lazy = true` is half of that and the smaller half.** It stops
+        // Zig fetching this package while reading the manifest; it does
+        // nothing about `build.zig` asking for it, and `b.lazyDependency`
+        // *asks* — it answers null on the pass that finds the package missing
+        // and enqueues the download. So the calls sit behind `-Dsql`, which is
+        // off for a dependent until they pass `.sql = true`. ADR 0075 is where
+        // that was found, a year after the sentence above was published.
         .pg = .{
             .url = "git+https://github.com/lalinsky/pg.zig#a2c98876a7d8a36b1771679ce912bfead46ee8f6",
             .hash = "pg-0.0.0-Wp_7gUqUBgDARGCn8B7brldZRA9lmDQGn262ySg2tg3W",
@@ -30,10 +36,6 @@
             .url = "git+https://github.com/karlseguin/zqlite.zig#b519eea9b1a2b5fcad68af6d0629e717e8746684",
             .hash = "zqlite-0.0.1-RWLaY8M8nAB4m0tlSpT9A5PGUwX_JfWC5VlPjLe7lG2Q",
             .lazy = true,
-        },
-        .zqlite = .{
-            .url = "git+https://github.com/karlseguin/zqlite.zig#b519eea9b1a2b5fcad68af6d0629e717e8746684",
-            .hash = "zqlite-0.0.1-RWLaY8M8nAB4m0tlSpT9A5PGUwX_JfWC5VlPjLe7lG2Q",
         },
     },
     // One directory per module that ships (ADR 0041), and this list is the

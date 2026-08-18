@@ -7,6 +7,10 @@ pub const App = @import("app.zig").App;
 /// registered beneath it. Named here so a plugin can spell out the type it
 /// takes instead of using `anytype`.
 pub const Group = @import("app.zig").Group;
+/// A group and the middlewares its routes are excused from — what `without`
+/// hands back (ADR 0080). Named here because a plugin taking one by type
+/// rather than as `anytype` has to be able to write it down.
+pub const GroupOf = @import("app.zig").GroupOf;
 
 pub const Ctx = @import("ctx.zig").Ctx;
 pub const Str = @import("nilo_core").Str;

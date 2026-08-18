@@ -55,6 +55,7 @@ pub const panic = nilo.panic;                     // optional: name the request 
 | `app.provide(&thing)` | register a service, looked up later by its pointer type |
 | `app.use(mw)` | middleware, everywhere |
 | `app.useOn(prefix, mw)` | middleware, under a path prefix |
+| `app.without(mw)` | the same App with `mw` off for the routes registered through what comes back — how a sign-up route sits inside a guarded prefix ([ADR 0080](./adr/0080-a-route-can-say-it-is-not-covered.md)) |
 | `app.group(prefix)` | a group — see below |
 | `app.get / post / put / delete / patch / head / options (pattern, handler)` | a route |
 | `app.route(method, pattern, handler)` | any other method |
@@ -62,6 +63,7 @@ pub const panic = nilo.panic;                     // optional: name the request 
 | `app.staticWith(url_prefix, dir_path, options)` | the same, with [options](#static-options) |
 | `app.docs(options)` | serve an [OpenAPI document](./guide/openapi.md) |
 | `app.listen(options)` | run until stopped. Stops the process on a startup error |
+| `app.start(io)` | everything `listen()` does before it accepts anything — services checked, chains resolved, pools opened, schemas checked. For a migration, a script or a test; `listen()` does not repeat it ([ADR 0079](./adr/0079-there-is-a-phase-before-the-server.md)) |
 | `app.shutdown()` | stop, from any thread or from inside a handler |
 | `app.tryListen / tryRoute / tryStatic / tryStaticWith` | the same calls, error returned rather than reported |
 | `app.checkServices()` | `error.MissingService` if a route needs one nobody provided |
@@ -70,11 +72,18 @@ pub const panic = nilo.panic;                     // optional: name the request 
 
 ### `Group`
 
-`app.group("/api")` returns one. It has `group`, `use`, `useOn`, `provide`,
-`get`, `post`, `put`, `delete`, `patch`, `head`, `options`, `route`, `tryRoute`,
-`static`, `staticWith`, `tryStatic`, `tryStaticWith` — the same as an App, minus
-`listen`, `docs` and `shutdown`. The prefix is compile-time text and must be
-literal; the type is `nilo.Group("/api")`.
+`app.group("/api")` returns one. It has `group`, `use`, `useOn`, `without`,
+`provide`, `get`, `post`, `put`, `delete`, `patch`, `head`, `options`, `route`,
+`tryRoute`, `static`, `staticWith`, `tryStatic`, `tryStaticWith` — the same as an
+App, minus `listen`, `docs` and `shutdown`. The prefix is compile-time text and
+must be literal; the type is `nilo.Group("/api")`.
+
+`@TypeOf(g).mounted_at` is where it is mounted — `"/api"`, and `""` for an App,
+so a plugin taking `anytype` can ask either.
+
+`g.without(mw)` is the same group with `mw` off for the routes registered
+through it, which is how the two routes that create a session sit inside a
+prefix that requires one. Its type is `nilo.GroupOf("/api", &.{mw})`.
 
 ### `listen` options
 
@@ -142,13 +151,22 @@ same slot as what it wraps.
 | `b.failed()`, `b.failedCount()` | whether, and how many |
 | `b.failures()` | an iterator of `Failure` |
 | `b.given("name")` | `Str` — the text that arrived, bound or not. Name checked while compiling |
+| `b.must("name", holds, "wants …")` | a rule of your own, added to the same answer → `Checked` |
+| `Bound(W).ok(value)` | a binding where everything bound, for a test calling the handler directly |
 
-A `Failure` carries `field`, `reason`, `given`, `kind`, `expected`, and
+A `Failure` carries `field`, `reason`, `given`, `kind`, `expected`, `said`, and
 `say(w)` — nilo's own sentence for it. `reason` is one of `.missing`,
-`.not_a_number`, `.not_true_or_false`, `.not_a_choice`, `.wrong_kind`; that is
-the whole list, and it is not a validator. Nothing is allocated per failed
-field. See [Forms](./guide/forms.md#when-one-field-is-wrong-and-the-rest-are-fine)
+`.not_a_number`, `.not_true_or_false`, `.not_a_choice`, `.wrong_kind`, or
+**null when the failure is a rule of yours**; that is the whole list, and it is
+not a validator. Nothing is allocated per failed field. See
+[Forms](./guide/forms.md#when-one-field-is-wrong-and-the-rest-are-fine)
 and [ADR 0036](./adr/0036-a-binding-hands-its-failures-to-the-handler.md).
+
+`must` returns a `Checked`, which has the same `value`, `failed`,
+`failedCount`, `given`, `failures` and `fail`, and one more `must` to chain.
+`holds` is the rule holding, not failing. A handler that checks no rules never
+builds one and pays nothing
+([ADR 0082](./adr/0082-a-rule-of-your-own-joins-the-answer.md)).
 
 ## Handler returns
 
@@ -608,12 +626,17 @@ UUIDs, as a module of their own
 same `Uuid` `nilo_sql` reads a `uuid` column into, so a generated key goes
 straight into an insert. Nothing here allocates and nothing here does IO.
 
+<!-- compiles: body -->
 ```zig
 const id = @import("nilo_id");
 
-const key = id.v7(try c.entropy(id.Uuid.v7_entropy), nilo.nowMillis());
-_ = try db.insert(User, c, .{ .id = key, .email = form.email });
+// `nowMillis` answers an `i64` — a clock reads backwards as well as forwards —
+// and a v7 takes the six bytes of a `u64`.
+const key = id.v7(try c.entropy(id.Uuid.v7_entropy), @intCast(nilo.nowMillis()));
+_ = try db.insert(Doc, c, .{ .id = key, .title = nilo.Str.static("notes") });
 ```
+
+where `Doc.id` is a `sql.Uuid`, which is this same type.
 
 | | |
 |---|---|
@@ -655,9 +678,13 @@ const Settings = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
+    var buf: [4096]u8 = undefined;
+    var out = std.Io.File.stderr().writer(init.io, &buf);
+
     const read = config.fromEnv(Settings, init.minimal.environ);
     const settings = read.value() orelse {
-        try read.report(stderr);
+        try read.report(&out.interface);
+        try out.interface.flush();
         std.process.exit(2);
     };
     // an ordinary struct — `app.provide(&settings)` makes it a Service
@@ -705,7 +732,7 @@ Config** — a `[]const u8` field points into it, exactly as it points into the
 environment block.
 
 ```zig
-const text = std.fs.cwd().readFileAlloc(arena, ".env", 64 * 1024) catch "";
+const text = std.Io.Dir.cwd().readFileAlloc(io, ".env", gpa, .limited(64 * 1024)) catch "";
 const file = config.Dotenv{ .text = text };
 
 const read = config.from(Settings, config.layered(.{
@@ -713,8 +740,13 @@ const read = config.from(Settings, config.layered(.{
     file,                                            // the file is the floor
 }));
 
-try file.report(stderr);   // writes nothing when the file is clean
+try file.report(w);   // writes nothing when the file is clean
 ```
+
+`io` and `environ` both come from `main`'s own argument, and `w` is
+`std.Io.File.stderr().writer(io, &buf)`'s `.interface`. The whole of a real
+`main` — the one this is a fragment of — is on
+[the settings page](./guide/config.md#the-whole-of-a-real-main).
 
 | | |
 |---|---|
@@ -745,19 +777,20 @@ Password hashing
 ([ADR 0048](./adr/0048-a-password-hash-is-gated-because-forgetting-is-silent.md)).
 Argon2id, in the PHC form everybody else writes.
 
+<!-- compiles: body -->
 ```zig
 // signing up
-const stored = try c.hashPassword(pw.huge_pages, form.password);
-_ = try db.insert(User, conn, .{ .email = form.email, .password = stored.text() });
+const stored = try c.hashPassword(pw.huge_pages, form.password.view());
+_ = try db.insert(User, c, .{ .email = form.email, .password = stored.text() });
 
 // signing in
-const row = try db.find(User, conn, .{ .email = form.email });
-if (!try c.verifyPassword(pw.huge_pages, if (row) |r| r.password else null, form.password))
-    return nilo.fail(401, "that is not a sign-in");
+const row = try db.one(User, c, .{ .where = .{ .email = form.email } });
+if (!try c.verifyPassword(pw.huge_pages, if (row) |r| r.password.view() else null, form.password.view()))
+    return nilo.fail.unauthorized("that is not a sign-in", .{});
 
 // and while the plaintext is still in hand, if the Cost has gone up since
-if (row) |r| if (try pw.needsRehash(r.password, .default)) {
-    const fresh = try c.hashPassword(pw.huge_pages, form.password);
+if (row) |r| if (try pw.needsRehash(r.password.view(), .default)) {
+    const fresh = try c.hashPassword(pw.huge_pages, form.password.view());
     _ = try db.update(User, c, .{ .set = .{ .password = fresh.text() }, .where = .{ .id = r.id } });
 };
 ```
@@ -1060,6 +1093,20 @@ long as the response takes. `max_total_bytes` counts held bytes only. See
 | `path` | `"/openapi.json"` |
 | `ui_path` | `"/docs"` — empty for none |
 
+A type with a `jsonStringify` is described by what it says, not by its fields —
+`std.json` calls the function and never reads them, so reflecting them would
+describe something the server does not send
+([ADR 0076](./adr/0076-a-type-that-writes-its-own-json-says-so.md)):
+
+```zig
+pub const nilo_openapi = .{ .type = "string", .format = "uuid" };
+```
+
+`type` is required — `"string"`, `"integer"`, `"number"`, `"boolean"` — and
+`format` is an optional hint. nilo's own types carry it already (`Uuid`,
+`Timestamp`, `Decimal`, `Interval`, `Inet`). One with a custom writer and no
+marker gets `{}` and a description saying so.
+
 ## Testing
 
 | | |
@@ -1165,7 +1212,7 @@ cannot say one, and one that could would be a migration file.
 
 The same `Db`, over a file instead of a server. Everything below this section —
 Rows, queries, batches, upserts, conditions, streaming, transactions — is the
-same code and the same types; what changes is the four things SQLite refuses,
+same code and the same types; what changes is the five things SQLite refuses,
 listed at the end.
 
 ```zig
@@ -1232,6 +1279,13 @@ build pinned rather than what the machine had.
 | a list column | no array type. A list belongs in its own table, or in a TEXT column your own code encodes |
 | `.isolation` other than `.serializable` | SQLite gives every transaction a snapshot and serialises the writers. There is no weaker level to ask for |
 
+A `sql.Uuid` is **not** on that list, and only stopped being on it in
+[ADR 0078](./adr/0078-a-uuid-is-whatever-the-database-stores.md). SQLite has no
+uuid type, so one travels as the thirty-six hyphenated characters into a TEXT
+column — which is what the schema check has always asked for, and what makes
+`sqlite3` show the id and `WHERE public = '…'` typeable. Postgres still sends
+sixteen bytes. Your Row says `public: sql.Uuid` either way.
+
 So **code that batches is not portable between the two dialects**, and that is
 the seam refusing rather than lying. The schema check is weaker too, by exactly
 as much as SQLite is: a column's declared type is free text and what is
@@ -1239,7 +1293,7 @@ enforced is one of five affinities, so it catches a `Str` field over an
 `INTEGER` column and does not catch an `i32` over a column holding values that
 do not fit.
 
-SQLite costs **524,840 bytes** to a program that names it and **zero** to one
+SQLite costs **523,352 bytes** to a program that names it and **zero** to one
 that does not — both drivers live in one module, but `sql/sqlite.zig` is
 analysed only when something names it, so a Postgres-only binary carries no
 amalgamation at all.
@@ -1272,6 +1326,7 @@ request ([ADR 0041](./adr/0041-a-module-sits-where-the-loop-puts-it.md)).
 | `db.deleteReturning(User, c, .{ .where = … })` | `![]User` — the rows that were removed |
 | `db.stream(User, c, .{ … })` | rows one at a time; see below |
 | `db.raw(User, c, sql, .{ … })` | `![]User` — a statement this module will not write |
+| `db.exec(c, sql, .{ … })` | `!usize` — a statement that answers with *nothing*, and the rows it changed. `CREATE TABLE`, `CREATE INDEX`, `PRAGMA`, `VACUUM`. No Row, because none is being filled ([ADR 0078](./adr/0078-a-uuid-is-whatever-the-database-stores.md)) |
 | `db.begin(c, .{})` | `!Tx`. `.{ .isolation = …, .read_only = … }` rides on the `BEGIN`; see below |
 
 **Set operations are conditions.** Over one table `UNION` is

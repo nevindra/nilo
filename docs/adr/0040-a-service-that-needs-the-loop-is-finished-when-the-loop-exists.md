@@ -141,10 +141,18 @@ it**, measured on the same machine, stripped `ReleaseFast`:
 Nearly all of the first jump is pg.zig's dependency on ianic/tls.zig, which
 has no build option to turn off; the whole write half, transactions and
 streaming included, is the 53 KB between the last two rows. A project that
-does not import `nilo_sql` links none of it — the dependency is marked
-`.lazy = true` in `build.zig.zon` and is not even downloaded — and the
-HTTP-only binary contains no pg or TLS content at all, checked rather than
-assumed.
+does not import `nilo_sql` links none of it, and the HTTP-only binary contains
+no pg or TLS content at all — checked rather than assumed.
+
+**The "and is not even downloaded" half of that was wrong for a year, and
+[ADR 0075](./0075-a-lazy-dependency-is-a-request.md) is where it was
+corrected.** `.lazy = true` stops Zig fetching a package while reading the
+manifest; it says nothing about `build.zig` asking for one, and
+`b.lazyDependency` *asks*. Called at the top of `build()` it ran for every
+dependent whatever they imported, so an application with no database in it
+downloaded 11.1 MB of driver. The linking claim above held throughout, checked
+with `strings` and `nm`; the fetching claim is now held by
+`zig build fetch-check -Dnetwork` rather than by this paragraph.
 
 ## The TLS question, which ADR 0028 does not answer
 

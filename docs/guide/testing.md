@@ -36,7 +36,17 @@ const profile = try me(.{ .id = 7, .name = .static("wati") });
 
 // a body argument is the parsed struct, not JSON text
 const created = try createUser(&db, .{ .name = .static("wati"), .age = 30 });
+
+// a binding where everything bound, which is what most tests want
+const signed_up = try signUp(.ok(.{ .email = .static("wati@example.com"), .age = 31 }));
 ```
+
+`Bound(W)` is the one argument a test cannot spell as a plain struct — it has
+private fields, because a half-filled struct is exactly what it exists to
+withhold. `.ok(value)` is the binding where every field bound. To test the
+*other* branch, drive the request through the test client below: what a handler
+does with a failure is a 422 on the wire, and that is the thing worth asserting
+on.
 
 `nilo.blocking` and `nilo.Mutex` both work with no server under them, so a
 handler that uses either is still callable from a test.
@@ -108,6 +118,31 @@ arena, exactly as a real connection does between requests.
 lot — an answer that doesn't fit is truncated rather than failing.
 
 None of this is on the request path, and none of it exists in a running server.
+
+### Two things `listen()` does that the client does not
+
+**It checks the services.** `listen()` refuses to open the socket when a route
+needs a service nobody registered, and names the type and the routes. A test
+driving the App itself gets a 500 on those routes instead — with the type in the
+log, since
+[ADR 0079](../adr/0079-there-is-a-phase-before-the-server.md), rather than in
+silence. `try app.checkServices();` after the `provide` calls is the whole gate,
+and it is worth one line in a test that registers a lot of routes.
+
+**It starts the services.** A `*Db` provided to an App has no pool until
+`nilo_start` runs, and until then every query answers `error.Disconnected`. So a
+test with a database needs the phase:
+
+```zig
+var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+defer threaded.deinit();          // must outlive every query below
+
+try app.provide(&db);
+try app.start(threaded.io());     // services checked, pools open, schema checked
+```
+
+`app.start` also runs `db.checking`, which is worth having in a test for its own
+sake: a Row that disagrees with its table passes an entire suite otherwise.
 
 ## Running the suite
 

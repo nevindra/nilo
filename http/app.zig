@@ -90,6 +90,10 @@ pub const App = struct {
     requirements: std.ArrayList(service_mod.Requirement) = .empty,
     /// Middleware registrations, in the order `use` was called.
     scoped: std.ArrayList(mw.Scoped) = .empty,
+    /// Routes that said a middleware does not cover them, from `without`
+    /// (ADR 0080). Empty for almost every App: the shape it exists for is the
+    /// sign-up route inside a prefix that requires a session.
+    exemptions: std.ArrayList(mw.Exemption) = .empty,
     /// Directories loaded into memory by `static`, searched only when no
     /// route matched (ADR 0010).
     static_sets: std.ArrayList(static_mod.Set) = .empty,
@@ -128,6 +132,18 @@ pub const App = struct {
     /// with no sessions, and for one a test drives directly — a test that
     /// wants sessions sets this field.
     session_key: ?session_mod.Key = null,
+    /// Whether `nilo_start` has been run over the registry. `start` and
+    /// `listen` both get there and a program that migrates before it serves
+    /// does both, so this is what stops a pool being opened twice
+    /// (ADR 0079).
+    services_started: bool = false,
+
+    /// Where this is mounted, which for an App is nowhere — the empty prefix.
+    ///
+    /// Here so that a plugin written as `fn mount(g: anytype) !void` can ask
+    /// without caring whether it was handed a group or the App itself, which
+    /// is the shape `guide/routing.md` recommends (ADR 0080).
+    pub const mounted_at = "";
 
     /// What one request is allowed to do. Declared on the Ctx, which is
     /// what reads it.
@@ -149,6 +165,7 @@ pub const App = struct {
         self.static_sets.deinit(self.gpa);
         self.static_chains.deinit(self.gpa);
         self.scoped.deinit(self.gpa);
+        self.exemptions.deinit(self.gpa);
         self.requirements.deinit(self.gpa);
         self.services.deinit();
         self.router.deinit();
@@ -199,6 +216,40 @@ pub const App = struct {
     pub fn useOn(self: *App, prefix: []const u8, middleware: mw.Middleware) !void {
         std.debug.assert(prefix.len > 0 and prefix[0] == '/');
         try self.scoped.append(self.gpa, .{ .prefix = prefix, .middleware = middleware });
+    }
+
+    /// The App, with `middleware` off for the routes registered through what
+    /// this hands back.
+    ///
+    /// The shape it exists for is the one every API with accounts has: a prefix
+    /// behind a session, and the two routes inside it that cannot be, because
+    /// you cannot require a session to create one
+    /// ([ADR 0080](../docs/adr/0080-a-route-can-say-it-is-not-covered.md)).
+    ///
+    /// ```zig
+    /// const v1 = app.group("/v1");
+    /// try v1.use(requireOperator);
+    ///
+    /// const open = v1.without(requireOperator);
+    /// try open.post("/sign-up", signUp);
+    /// try open.post("/sign-in", signIn);
+    /// ```
+    ///
+    /// **The default stays deny.** Everything in the group is guarded and a
+    /// route says otherwise about itself, so a route added later is guarded by
+    /// accident rather than exposed by accident. And the exception is written
+    /// where the route is — rename the route and it moves with it, which a
+    /// string compared against `c.path()` inside the middleware would not.
+    pub fn without(self: *App, comptime middleware: mw.Middleware) GroupOf("", &.{middleware}) {
+        return .{ .app = self };
+    }
+
+    /// Record that `pattern` is not covered by `middleware`, whatever a
+    /// `use`/`useOn` says. Called by the route methods on a group built with
+    /// `without`, never by hand — the point is that the exception is attached
+    /// by the registration rather than typed as a second string.
+    fn exempt(self: *App, pattern: []const u8, middleware: mw.Middleware) !void {
+        try self.exemptions.append(self.gpa, .{ .pattern = pattern, .middleware = middleware });
     }
 
     /// Serve the contents of `dir_path` under `url_prefix`.
@@ -447,7 +498,7 @@ pub const App = struct {
     pub fn resolveChains(self: *App) !void {
         self.freeChains();
         for (self.router.routes.items) |*r| {
-            r.chain = try mw.chainFor(self.gpa, self.scoped.items, r.pattern);
+            r.chain = try mw.chainFor(self.gpa, self.scoped.items, self.exemptions.items, r.pattern);
         }
         try self.buildDocs();
 
@@ -470,7 +521,7 @@ pub const App = struct {
             self.gpa.free(chains);
         }
         for (set.files, chains) |file, *chain| {
-            chain.* = try mw.chainFor(self.gpa, self.scoped.items, file.url);
+            chain.* = try mw.chainFor(self.gpa, self.scoped.items, self.exemptions.items, file.url);
             made += 1;
         }
         return chains;
@@ -596,14 +647,52 @@ pub const App = struct {
         try bulkhead.serve(self.gpa, options_, &self.stop, self, startServices, handleConnection);
     }
 
+    /// Everything `listen()` does **before it accepts anything**, for a
+    /// program that is not going to listen yet.
+    ///
+    /// The services are checked, the middleware chains are resolved, and every
+    /// service that declared `nilo_start` is started — so a `Db` has its pool
+    /// and has had its schema checked, and a query works.
+    ///
+    /// **There was no such phase, and every application with a database needed
+    /// one** (ADR 0079). A `nilo.Run` is an arena and a lifetime; what it is
+    /// not is a connection, and the pool is opened only by `listen()`, which
+    /// does not return. So a migration — the thing a SQLite application must do
+    /// at startup, because there is no server to have done it elsewhere — was
+    /// `error.Disconnected` or ten lines standing a second pool up by hand.
+    ///
+    /// ```zig
+    /// var threaded: std.Io.Threaded = .init(gpa, .{});
+    /// defer threaded.deinit();
+    ///
+    /// try app.start(threaded.io());          // the pool is open from here
+    /// try migrate(&db);
+    /// try app.listen(.{ .port = 8080 });     // does not start them twice
+    /// ```
+    ///
+    /// Idempotent: `listen()` calls the same code and skips it if this has
+    /// already run, so the two orders above and below cost the same.
+    pub fn start(self: *App, io: std.Io) !void {
+        try self.checkServices();
+        try self.resolveChains();
+        try self.startServices(io, .{});
+    }
+
     /// Finish building the services that could not be finished before the
     /// event loop existed.
     ///
     /// Called by the Engine from inside `listen()`, after the port is taken
-    /// and before anything is accepted (ADR 0040). Nothing is kept: a
-    /// service that needs the loop after startup took a copy of it here,
-    /// and the App has no use for one.
+    /// and before anything is accepted (ADR 0040), and by `start` above for a
+    /// caller with an `Io` of their own. Nothing is kept: a service that needs
+    /// the loop after startup took a copy of it here, and the App has no use
+    /// for one.
+    ///
+    /// **Once, whichever of the two got here first.** Opening a pool twice
+    /// leaks the first one, and a program that migrates before it listens does
+    /// both.
     fn startServices(self: *App, io: std.Io, limits: bulkhead.Limits) anyerror!void {
+        if (self.services_started) return;
+        self.services_started = true;
         try self.services.start(io, limits);
     }
 
@@ -960,7 +1049,7 @@ pub const App = struct {
             // allocation, bounded by the middleware count, and paid only by
             // a 404 or a 405.
             if (self.scoped.items.len > 0) {
-                chain = mw.chainFor(arena, self.scoped.items, path) catch &.{};
+                chain = mw.chainFor(arena, self.scoped.items, self.exemptions.items, path) catch &.{};
             }
             // No route for this method, but the path itself is spelled out
             // by routes under other methods. "There is nothing here" and
@@ -1083,6 +1172,16 @@ pub const App = struct {
 /// nothing to `App`'s state. It is a way of typing less that disappears
 /// entirely by the time the server runs.
 pub fn Group(comptime prefix: []const u8) type {
+    return GroupOf(prefix, &.{});
+}
+
+/// A group, and the middlewares the routes registered through it say do not
+/// cover them (ADR 0080).
+///
+/// `excluded` is empty for every group `app.group()` hands back; `without`
+/// is what puts something in it, and what comes back is a different type, so
+/// which routes carry an exception is decided while compiling.
+pub fn GroupOf(comptime prefix: []const u8, comptime excluded: []const mw.Middleware) type {
     comptime checkPrefix(prefix);
 
     return struct {
@@ -1090,10 +1189,37 @@ pub fn Group(comptime prefix: []const u8) type {
 
         app: *App,
 
+        /// Where this group is mounted.
+        ///
+        /// Published because a plugin written as `fn mount(g: anytype) !void`
+        /// otherwise cannot ask, and the prefix is a comptime parameter of the
+        /// type rather than a field — so the only way to get at it was parsing
+        /// `@typeName(@TypeOf(g))`, which is not a thing to ship (ADR 0080).
+        pub const mounted_at = prefix;
+
         /// A group inside this one. `app.group("/api").group("/v1")` and
         /// `app.group("/api/v1")` are the same thing.
-        pub fn group(self: Self, comptime sub: []const u8) Group(prefix ++ sub) {
+        pub fn group(self: Self, comptime sub: []const u8) GroupOf(prefix ++ sub, excluded) {
             return .{ .app = self.app };
+        }
+
+        /// This group with `middleware` off for the routes registered through
+        /// what comes back — see `App.without`, which is the same call at the
+        /// top level.
+        pub fn without(self: Self, comptime middleware: mw.Middleware) GroupOf(
+            prefix,
+            excluded ++ &[_]mw.Middleware{middleware},
+        ) {
+            return .{ .app = self.app };
+        }
+
+        /// Record this route's exceptions, if it has any. Inlined into every
+        /// registration below; `excluded` is empty for almost every group, and
+        /// an empty `inline for` compiles to nothing.
+        fn excepting(self: Self, comptime pattern: []const u8) !void {
+            inline for (excluded) |middleware| {
+                try self.app.exempt(comptime joined(prefix, pattern), middleware);
+            }
         }
 
         /// Middleware on everything in this group — `app.useOn(prefix, …)`,
@@ -1119,36 +1245,43 @@ pub fn Group(comptime prefix: []const u8) type {
 
         pub fn get(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
             comptime typed.check(joined(prefix, pattern), handler);
+            try self.excepting(pattern);
             return self.app.get(comptime joined(prefix, pattern), handler);
         }
 
         pub fn post(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
             comptime typed.check(joined(prefix, pattern), handler);
+            try self.excepting(pattern);
             return self.app.post(comptime joined(prefix, pattern), handler);
         }
 
         pub fn put(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
             comptime typed.check(joined(prefix, pattern), handler);
+            try self.excepting(pattern);
             return self.app.put(comptime joined(prefix, pattern), handler);
         }
 
         pub fn delete(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
             comptime typed.check(joined(prefix, pattern), handler);
+            try self.excepting(pattern);
             return self.app.delete(comptime joined(prefix, pattern), handler);
         }
 
         pub fn patch(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
             comptime typed.check(joined(prefix, pattern), handler);
+            try self.excepting(pattern);
             return self.app.patch(comptime joined(prefix, pattern), handler);
         }
 
         pub fn head(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
             comptime typed.check(joined(prefix, pattern), handler);
+            try self.excepting(pattern);
             return self.app.head(comptime joined(prefix, pattern), handler);
         }
 
         pub fn options(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
             comptime typed.check(joined(prefix, pattern), handler);
+            try self.excepting(pattern);
             return self.app.options(comptime joined(prefix, pattern), handler);
         }
 
@@ -1159,6 +1292,7 @@ pub fn Group(comptime prefix: []const u8) type {
             comptime handler: anytype,
         ) !void {
             comptime typed.check(joined(prefix, pattern), handler);
+            try self.excepting(pattern);
             return self.app.route(method, comptime joined(prefix, pattern), handler);
         }
 
@@ -1169,6 +1303,7 @@ pub fn Group(comptime prefix: []const u8) type {
             comptime handler: anytype,
         ) !void {
             comptime typed.check(joined(prefix, pattern), handler);
+            try self.excepting(pattern);
             return self.app.tryRoute(method, comptime joined(prefix, pattern), handler);
         }
 
@@ -1276,6 +1411,54 @@ fn checkRootWiring() void {
         "the Engine's debug lines are switched on and will drown out your own. Add to your " ++
             "root source file: pub const std_options = nilo.std_options;",
         .{},
+    );
+    warnIfBuiltDifferently();
+}
+
+/// What the *program* was built at, which is not the same question as what
+/// nilo was built at.
+///
+/// `std` is one module per compilation and it takes the root's optimize mode,
+/// so a constant of std's own says which that was even when read from a module
+/// built at another. `default_level` separates the three that matter;
+/// `ReleaseFast` and `ReleaseSmall` are the same answer to it, which is why
+/// the message names them as a pair rather than guessing.
+const program_mode: ?std.builtin.OptimizeMode = switch (std.log.default_level) {
+    .debug => .Debug,
+    .info => .ReleaseSafe,
+    else => null,
+};
+
+/// Nilo built in `Debug` under a `ReleaseFast` program: legal, slow, and
+/// silent until now (ADR 0084).
+///
+/// It happens by leaving `.optimize` out of `b.dependency("nilo", …)`, and it
+/// has the same symptom as forgetting `std_options_debug_io` — a server that
+/// is merely slow — which nilo has warned about since the beginning. Two
+/// identical symptoms deserve two warnings.
+///
+/// The one that costs most is a *test* build: a suite looping over `.{ .Debug,
+/// .ReleaseSafe }` and passing neither through was checking a ReleaseSafe
+/// program against a Debug nilo for two milestones, which is why this is
+/// reached from the test client as well as from `listen()`.
+pub fn warnIfBuiltDifferently() void {
+    const ours = @import("builtin").mode;
+    const differs = comptime if (program_mode) |theirs|
+        theirs != ours
+    else
+        ours == .Debug or ours == .ReleaseSafe;
+
+    if (comptime !differs) return;
+
+    std.log.warn(
+        "nilo was built in {s} and this program in {s}, which is legal and slow. " ++
+            "Pass the mode through: b.dependency(\"nilo\", .{{ .target = target, " ++
+            ".optimize = optimize }}) — in the test step too, which is the one that " ++
+            "usually gets missed.",
+        .{
+            @tagName(ours),
+            comptime if (program_mode) |theirs| @tagName(theirs) else "ReleaseFast or ReleaseSmall",
+        },
     );
 }
 
@@ -2241,6 +2424,68 @@ test "a field below the top level is named by where it is, not left to a bare 40
         const head = std.fmt.bufPrint(
             &head_buf,
             "POST /orders HTTP/1.1\r\nContent-Length: {d}\r\n\r\n",
+            .{case.body.len},
+        ) catch unreachable;
+        var request_buf: [1024]u8 = undefined;
+        const request = std.fmt.bufPrint(&request_buf, "{s}{s}", .{ head, case.body }) catch unreachable;
+        const response = h.send(&app, request).response;
+
+        try testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 400 Bad Request\r\n"));
+        testing.expect(try Harness.saysFailure(response, case.says)) catch |err| {
+            std.debug.print("body {s}\n  wanted: {s}\n  got:    {s}\n", .{ case.body, case.says, response });
+            return err;
+        };
+    }
+}
+
+// Nine levels, which is one more than the walk follows. The bottom is where
+// the mistake goes, so nothing above it can account for the refusal.
+const Deep9 = struct { value: u32 };
+const Deep8 = struct { down: Deep9 };
+const Deep7 = struct { down: Deep8 };
+const Deep6 = struct { down: Deep7 };
+const Deep5 = struct { down: Deep6 };
+const Deep4 = struct { down: Deep5 };
+const Deep3 = struct { down: Deep4 };
+const Deep2 = struct { down: Deep3 };
+const Deep1 = struct { down: Deep2 };
+const Deep0 = struct { down: Deep1 };
+
+fn takeDeep(incoming: Deep0) !struct { value: u32 } {
+    return .{ .value = incoming.down.down.down.down.down.down.down.down.down.value };
+}
+
+test "a body nested past the depth the walk follows says so, rather than nothing" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/deep", takeDeep);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const opens = "{\"down\":" ** 9;
+    const closes = "}" ** 9;
+
+    const cases = [_]struct { body: []const u8, says: []const u8 }{
+        // Below the ceiling there is nothing left to name, and the old
+        // answer was a bare 400 with no sentence in it at all (ADR 0081).
+        .{
+            .body = opens ++ "{\"value\":\"no\"}" ++ closes,
+            .says = "nested deeper than 8 levels",
+        },
+        // The last level the walk *can* name still names it, so the new
+        // sentence appears only where the old one said nothing.
+        .{
+            .body = opens ++ "\"oops\"" ++ closes,
+            .says = "\"down.down.down.down.down.down.down.down.down\" has to be an object, not text",
+        },
+    };
+
+    for (cases) |case| {
+        var head_buf: [128]u8 = undefined;
+        const head = std.fmt.bufPrint(
+            &head_buf,
+            "POST /deep HTTP/1.1\r\nContent-Length: {d}\r\n\r\n",
             .{case.body.len},
         ) catch unreachable;
         var request_buf: [1024]u8 = undefined;
@@ -6602,4 +6847,156 @@ test "a nilo.Mutex still locks after being wrapped for the detector" {
     defer h.deinit();
     const answer = h.send(&app, "GET /guarded HTTP/1.1\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 200"));
+}
+
+fn guard(c: *Ctx, next: mw.Next) anyerror!void {
+    if (c.header("X-Operator") == null) return fail.unauthorized("sign in first", .{});
+    try next.run(c);
+}
+
+fn signedIn() []const u8 {
+    return "in";
+}
+
+fn signUp() []const u8 {
+    return "made";
+}
+
+test "a route can say a group's middleware does not cover it" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+
+    const v1 = app.group("/v1");
+    try v1.use(guard);
+    try v1.get("/whoami", signedIn);
+
+    // The whole shape this exists for: you cannot require a session to create
+    // one (ADR 0080). Default-deny — the guard is on the group and the route
+    // says otherwise about itself.
+    const open = v1.without(guard);
+    try open.post("/sign-up", signUp);
+
+    var client = try @import("testing.zig").Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    try testing.expectEqual(@as(u16, 401), (try client.get(&app, "/v1/whoami")).status);
+    try testing.expectEqual(@as(u16, 200), (try client.post(&app, "/v1/sign-up", "")).status);
+
+    // And the guard still works where it was not excused.
+    const with_header = try client.send(
+        &app,
+        "GET /v1/whoami HTTP/1.1\r\nHost: t\r\nX-Operator: wati\r\n\r\n",
+    );
+    try testing.expectEqual(@as(u16, 200), with_header.status);
+}
+
+test "an exception frees one route from one middleware, and nothing else" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+
+    const v1 = app.group("/v1");
+    try v1.use(guard);
+    const open = v1.without(guard);
+    try open.post("/sign-up", signUp);
+    // A sibling registered the ordinary way keeps the guard — the exception
+    // is attached by the registration, not by the prefix.
+    try v1.post("/invite", signUp);
+
+    var client = try @import("testing.zig").Client.init(testing.allocator, .{});
+    defer client.deinit();
+    try testing.expectEqual(@as(u16, 200), (try client.post(&app, "/v1/sign-up", "")).status);
+    try testing.expectEqual(@as(u16, 401), (try client.post(&app, "/v1/invite", "")).status);
+}
+
+test "a group says where it is mounted, so a plugin can ask" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+
+    const v1 = app.group("/v1");
+    const inner = v1.group("/admin");
+    try testing.expectEqualStrings("/v1", @TypeOf(v1).mounted_at);
+    try testing.expectEqualStrings("/v1/admin", @TypeOf(inner).mounted_at);
+    // Including through `without`, which is a different type and the same
+    // prefix.
+    try testing.expectEqualStrings("/v1", @TypeOf(v1.without(guard)).mounted_at);
+    // And the App answers too, so a plugin handed either can ask.
+    try testing.expectEqualStrings("", App.mounted_at);
+}
+
+/// A service that needs the loop, in the shape `nilo_sql`'s `Db` has one:
+/// `init` opens nothing and `nilo_start` is where the pool would be built.
+const Opened = struct {
+    times: usize = 0,
+    io_seen: bool = false,
+
+    pub fn nilo_start(self: *Opened, io: std.Io) !void {
+        self.times += 1;
+        self.io_seen = io.vtable != undefined;
+    }
+};
+
+fn readsOpened(_: *Opened) []const u8 {
+    return "ok";
+}
+
+test "app.start opens the services, and listen does not open them again" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    var opened: Opened = .{};
+    try app.provide(&opened);
+    try app.get("/thing", readsOpened);
+
+    // The phase there was not: after the pool, before the server (ADR 0079).
+    try app.start(threaded.io());
+    try testing.expectEqual(@as(usize, 1), opened.times);
+
+    // And a second call is not a second pool. `listen()` reaches the same
+    // code, so a program that migrates before it serves does both.
+    try app.start(threaded.io());
+    try app.startServices(threaded.io(), .{});
+    try testing.expectEqual(@as(usize, 1), opened.times);
+}
+
+test "app.start refuses when a route needs a service nobody provided" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/thing", readsOpened);
+
+    // Through the predicate rather than `app.start`, which logs each gap
+    // before it fails — the same reason the `listen()` test above uses it: a
+    // test process that writes an error log is reported as a failure, and
+    // those lines are the feature rather than the accident.
+    const missing = app.missingService().?;
+    try testing.expectEqualStrings("/thing", missing.route);
+    try testing.expectEqualStrings(@typeName(Opened), missing.type_name);
+
+    // And nothing was opened, because the gate is in front of the pools.
+    try testing.expect(!app.services_started);
+}
+
+test "the mode nilo reads off std is the one the program was built at" {
+    // Here nilo and the program are the same compilation, so what this holds
+    // is the *derivation* rather than the warning: `warnIfBuiltDifferently`
+    // is only ever right if `std.log.default_level` tracks the optimize mode
+    // of the root (ADR 0084). If a future std stops doing that, the warning
+    // starts firing at everybody or at nobody, and this is what notices.
+    //
+    // The suite runs in Debug and ReleaseSafe, so two of the three arms are
+    // covered every run.
+    switch (@import("builtin").mode) {
+        .Debug => try testing.expectEqual(@as(?std.builtin.OptimizeMode, .Debug), program_mode),
+        .ReleaseSafe => try testing.expectEqual(@as(?std.builtin.OptimizeMode, .ReleaseSafe), program_mode),
+        // ReleaseFast and ReleaseSmall are one answer, which is why the
+        // warning names them as a pair rather than picking one.
+        .ReleaseFast, .ReleaseSmall => try testing.expectEqual(
+            @as(?std.builtin.OptimizeMode, null),
+            program_mode,
+        ),
+    }
+
+    // And nothing is said here, because the two agree.
+    warnIfBuiltDifferently();
 }

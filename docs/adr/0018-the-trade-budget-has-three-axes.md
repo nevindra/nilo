@@ -65,6 +65,7 @@ Measured stripped, `ReleaseFast`, on the examples in this repository.
 | Four routes in a benchmark, to find out what the memory axis actually measures ([ADR 0063](./0063-a-handlers-stack-is-per-connection.md)) | +0 | +0 |
 | An outbound HTTP client, `nilo_fetch` ([ADR 0070](./0070-a-fitting-borrows-the-loop.md)) | +0 | +0 |
 | Waiting at the connection loop's frame, and a WebSocket loop handed back to it ([ADR 0071](./0071-where-a-connection-waits-is-what-it-costs.md)) | +1,240 B | +1,336 B |
+| Twenty findings from an application, closed together ([ADRs 0075](./0075-a-lazy-dependency-is-a-request.md)–[0084](./0084-a-library-can-tell-what-mode-the-program-was-built-in.md)) | +11,400 B | +17,272 B |
 
 `nilo_fetch` is +0 on both examples because neither imports it, and that is the
 whole of the row rather than an accident: a module nothing names is never
@@ -86,6 +87,10 @@ The fourth row is a real zero rather than a rounded one: the same three examples
 The last row is +0 on both because neither example opens a WebSocket, which is the property that row exists to record: the linker still drops the whole of it. `chat`, which does, pays **+896 bytes** — the 128-wide unmasking, the close-frame validation, `print`, `json` and the room's roll. It is the first entry here measured on an example other than these two, because these two would have shown nothing.
 
 The `nilo_sql` row is +0 for a reason worth stating rather than glossing: **no example in this repository imports the module**, so none of the seven links a byte of it — not the driver, not its four transitive dependencies. That is [ADR 0040](./0040-a-service-that-needs-the-loop-is-finished-when-the-loop-exists.md)'s property observed rather than argued, and it is why a row of SQL work can be measured here at all. What the module's own additions cost is paid by a project that imports it, and inside that project each of these is instantiated per Row and per call site: a service that never reads an array column links no `readList`, and one that never batches links no `unnest` statement.
+
+**The last row is the worst-recorded one here and is written down as such**: ten ADRs in one figure, because they landed as one pass over a list somebody else wrote. It is measured rather than estimated — `git archive HEAD | tar -x` into a scratch directory, both trees built with `-Doptimize=ReleaseFast -Dstrip=true`, `hello` 881,296 → 892,696 and `rest` 1,014,736 → 1,032,008. The useful split is by section rather than by feature: on `hello` it is `.text` +8,128, `.data.rel.ro` +2,632 and `.rodata` +567, so it is **code rather than message strings**, which is what an unconditional cost looks like. `hello` has no body type, no binding, no service and no document, so what it pays for is the App itself — a start phase before the server, an exemption list on the chain resolver, and a third startup warning. Nothing here was attributed further, and a later change to any of the three should re-measure rather than subtract from this.
+
+The same pass costs +16,880 bytes on `bench/size/pg_only.zig` and +15,392 on `sqlite_only.zig`, which moves the published *difference* between them — what SQLite costs a program that uses it — from 524,840 to **523,352**. That number was quoted in four places and reproduced exactly twice; it is a different number now, and [`bench/result/sql.md`](../../bench/result/sql.md) carries the run.
 
 `orders`, the largest example, is 1,327,992 bytes stripped. It is not a row here because it has no before.
 

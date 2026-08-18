@@ -28,6 +28,13 @@
 //! application's, and a reason set that grew to answer that would be a
 //! validator wearing a smaller name.
 //!
+//! What *is* nilo's job is the answer, and `must` lets the application put
+//! its own sentence into it (ADR 0082). nilo supplies the label, the
+//! collecting, the status and the order — all things it already supplies to
+//! its own sentences — and the application supplies the words, so a rule and
+//! a conversion cannot come out looking like two different programs wrote
+//! them. It still knows no rule and writes none.
+//!
 //! What is *not* a per-field failure stays a hard 400: a body that is not a
 //! form at all, text that is not JSON at all, and a field the endpoint has
 //! never heard of. None of those leave a binding to hand back, and the
@@ -70,7 +77,11 @@ pub const Outcome = convert.Outcome;
 pub const Failure = struct {
     /// The field's name, spelled the way the struct spells it.
     field: []const u8,
-    reason: Reason,
+    /// Why the value would not convert — or **null when this is a rule of
+    /// the application's own** rather than anything nilo could not do
+    /// (ADR 0082). A rule has no `Reason` because `Reason` is the closed list
+    /// of things a conversion can fail at, and the type says so.
+    reason: ?Reason,
     /// The text that arrived, or empty when there was none to quote.
     given: Str,
     /// What arrived when it was not text; empty otherwise.
@@ -78,6 +89,9 @@ pub const Failure = struct {
     /// What this field would have taken, in the words the messages use —
     /// "text", "a whole number", "one of newest, oldest".
     expected: []const u8,
+    /// A rule's own words — "wants at least 10 characters". Empty unless
+    /// `reason` is null.
+    said: []const u8 = "",
 
     _say: *const fn (Failure, *std.Io.Writer) anyerror!void,
 
@@ -117,6 +131,7 @@ pub fn Bound(comptime W: type) type {
             name: []const u8,
             expected: []const u8,
             say: *const fn (Failure, *std.Io.Writer) anyerror!void,
+            say_rule: *const fn (Failure, *std.Io.Writer) anyerror!void,
         };
 
         const table = blk: {
@@ -125,10 +140,19 @@ pub fn Bound(comptime W: type) type {
                 .name = f.name,
                 .expected = expectedFor(f.type),
                 .say = sayerFor(slot, f.type, f.name),
+                .say_rule = ruleSayerFor(slot, f.name),
             };
             const frozen = t;
             break :blk frozen;
         };
+
+        /// What a binding with no rules against it points at, so that
+        /// carrying room for rules is the `Checked` type's business and not
+        /// every handler's (ADR 0082).
+        const no_rules: Rules = @splat("");
+
+        /// One message per field, in the struct's own order.
+        pub const Rules = [fields.len][]const u8;
 
         _value: T,
         _outcomes: Outcomes,
@@ -138,6 +162,18 @@ pub fn Bound(comptime W: type) type {
         /// did not fill.
         pub fn from(filled: T, outcomes: Outcomes) Self {
             return .{ ._value = filled, ._outcomes = outcomes };
+        }
+
+        /// A binding where every field bound — what a test hands a handler
+        /// it is calling directly.
+        ///
+        /// `from` is the engine's constructor and wants an outcome per
+        /// field; a test that only wants a working binding should not have
+        /// to know `Outcome` exists (ADR 0082). Nothing is quoted back by
+        /// `given` here, because nothing failed and there is nothing to put
+        /// back in a box.
+        pub fn ok(filled: T) Self {
+            return .{ ._value = filled, ._outcomes = @splat(.{}) };
         }
 
         /// The binding, or null when any field failed.
@@ -182,11 +218,12 @@ pub fn Bound(comptime W: type) type {
         /// Why each field that did not bind did not bind, in the order the
         /// struct declares them.
         pub fn failures(self: *const Self) Failures {
-            return .{ ._outcomes = &self._outcomes };
+            return .{ ._outcomes = &self._outcomes, ._rules = &no_rules };
         }
 
         pub const Failures = struct {
             _outcomes: *const Outcomes,
+            _rules: *const Rules,
             _at: usize = 0,
 
             pub fn next(self: *Failures) ?Failure {
@@ -194,8 +231,7 @@ pub fn Bound(comptime W: type) type {
                     const i = self._at;
                     self._at += 1;
                     const o = self._outcomes[i];
-                    const reason = o.reason orelse continue;
-                    return .{
+                    if (o.reason) |reason| return .{
                         .field = table[i].name,
                         .reason = reason,
                         .given = o.given,
@@ -203,8 +239,118 @@ pub fn Bound(comptime W: type) type {
                         .expected = table[i].expected,
                         ._say = table[i].say,
                     };
+                    // A rule of the application's own, in the same order and
+                    // the same shape as one of nilo's (ADR 0082).
+                    const said = self._rules[i];
+                    if (said.len == 0) continue;
+                    return .{
+                        .field = table[i].name,
+                        .reason = null,
+                        .given = o.given,
+                        .kind = o.kind,
+                        .expected = table[i].expected,
+                        .said = said,
+                        ._say = table[i].say_rule,
+                    };
                 }
                 return null;
+            }
+        };
+
+        /// A rule of the application's own, added to whatever this binding
+        /// already holds, so that both come out as **one** 422 in one shape.
+        ///
+        /// ```zig
+        /// const in = b.value() orelse return b.fail();
+        /// const checked = b
+        ///     .must("password", in.password.view().len >= 10, "wants at least 10 characters")
+        ///     .must("email", hasAt(in.email.view()), "has to look like an address");
+        /// if (checked.failed()) return checked.fail();
+        /// ```
+        ///
+        /// `holds` is the rule *holding*, not failing — read it as the
+        /// sentence it makes: password must be at least 10 characters. Still
+        /// not a validation language (ADR 0036): nilo writes no rule and
+        /// knows none, it only carries the sentence the application wrote
+        /// next to the ones it wrote itself.
+        pub fn must(
+            self: Self,
+            comptime name: []const u8,
+            holds: bool,
+            said: []const u8,
+        ) Checked {
+            const start: Checked = .{ ._bound = self };
+            return start.must(name, holds, said);
+        }
+
+        /// A binding plus the application's own rules.
+        ///
+        /// A separate type rather than two more fields on every binding,
+        /// because room for the rules is the one thing this costs and a
+        /// handler that checks none should not carry it — a handler's stack
+        /// is per-connection (ADR 0063, ADR 0082).
+        pub const Checked = struct {
+            _bound: Self,
+            _rules: Rules = @splat(""),
+
+            /// Chained after the first. The same call in every position.
+            pub fn must(
+                self: Checked,
+                comptime name: []const u8,
+                holds: bool,
+                said: []const u8,
+            ) Checked {
+                if (holds) return self;
+                var out = self;
+                const i = comptime indexOf(name);
+                // Two sentences about one field is one too many, so the
+                // first thing said about it wins — and nilo's own goes
+                // first, because a rule checked against a field that never
+                // bound was checked against nothing.
+                if (out._bound._outcomes[i].reason == null and out._rules[i].len == 0) {
+                    out._rules[i] = said;
+                }
+                return out;
+            }
+
+            /// The binding, or null when any field failed to convert **or**
+            /// any rule did not hold.
+            pub fn value(self: Checked) ?T {
+                if (self.failed()) return null;
+                return self._bound._value;
+            }
+
+            pub fn failed(self: Checked) bool {
+                if (self._bound.failed()) return true;
+                for (self._rules) |said| {
+                    if (said.len > 0) return true;
+                }
+                return false;
+            }
+
+            pub fn failedCount(self: Checked) usize {
+                var n: usize = 0;
+                for (self._bound._outcomes, self._rules) |o, said| {
+                    if (o.reason != null or said.len > 0) n += 1;
+                }
+                return n;
+            }
+
+            /// The text that arrived under `name`, exactly as on the binding.
+            pub fn given(self: Checked, comptime name: []const u8) Str {
+                return self._bound.given(name);
+            }
+
+            /// Both kinds of failure, in the order the struct declares its
+            /// fields — there is no second iterator to remember.
+            pub fn failures(self: *const Checked) Failures {
+                return .{ ._outcomes = &self._bound._outcomes, ._rules = &self._rules };
+            }
+
+            /// Stop the request with a 422 naming every one of them.
+            pub fn fail(self: Checked) fail_mod.Error {
+                var it = self.failures();
+                return sayAll(self.failedCount(), &it);
             }
         };
 
@@ -217,16 +363,22 @@ pub fn Bound(comptime W: type) type {
         /// allocates nothing. A 422 rather than a 400 because the request
         /// was understood and its contents were not.
         pub fn fail(self: Self) fail_mod.Error {
+            var it = self.failures();
+            return sayAll(self.failedCount(), &it);
+        }
+
+        /// One sentence per failure, in one 422. Shared with `Checked` so
+        /// that a rule of the application's own cannot come out worded
+        /// differently from one of nilo's.
+        fn sayAll(n: usize, it: *Failures) fail_mod.Error {
             var buf: [fail_mod.max_message]u8 = undefined;
             var w = std.Io.Writer.fixed(&buf);
 
             // Counted only when there is more than one. A single failure
             // reads exactly as it did before any of this existed, which is
             // the most common case and the one already worth reading.
-            const n = self.failedCount();
             if (n > 1) w.print("{d} fields did not fit: ", .{n}) catch {};
 
-            var it = self.failures();
             var first = true;
             while (it.next()) |f| {
                 if (!first) w.writeAll("; ") catch break;
@@ -346,7 +498,9 @@ fn sayerFor(
 ) *const fn (Failure, *std.Io.Writer) anyerror!void {
     return struct {
         fn say(f: Failure, w: *std.Io.Writer) anyerror!void {
-            switch (f.reason) {
+            // Installed only against an outcome that has one, so the reason
+            // is there — a rule failure carries `say_rule` instead.
+            switch (f.reason.?) {
                 .missing => try sayMissing(slot, F, name, w),
                 // Only a JSON body reaches this: a value that is the wrong
                 // kind of thing rather than text that would not convert.
@@ -359,6 +513,21 @@ fn sayerFor(
                 else
                     unreachable,
             }
+        }
+    }.say;
+}
+
+/// The function that writes one *rule's* sentence. The application supplies
+/// the words and nilo supplies the label, so a rule about `password` points
+/// at it the same way a conversion failure does — and out of a query string
+/// it says `?password`, the same as everything else in that slot.
+fn ruleSayerFor(
+    comptime slot: Slot,
+    comptime name: []const u8,
+) *const fn (Failure, *std.Io.Writer) anyerror!void {
+    return struct {
+        fn say(f: Failure, w: *std.Io.Writer) anyerror!void {
+            try w.print(labelFor(slot, name) ++ " {s}", .{f.said});
         }
     }.say;
 }
@@ -436,12 +605,12 @@ test "the failures come back in the order the struct declares them" {
 
     const first = it.next().?;
     try testing.expectEqualStrings("email", first.field);
-    try testing.expectEqual(Reason.missing, first.reason);
+    try testing.expectEqual(@as(?Reason, .missing), first.reason);
     try testing.expectEqualStrings("text", first.expected);
 
     const second = it.next().?;
     try testing.expectEqualStrings("age", second.field);
-    try testing.expectEqual(Reason.not_a_number, second.reason);
+    try testing.expectEqual(@as(?Reason, .not_a_number), second.reason);
     try testing.expectEqualStrings("soon", second.given.view());
     try testing.expectEqualStrings("a whole number", second.expected);
 
@@ -550,6 +719,124 @@ test "the text that arrived is readable whether or not it converted" {
     try testing.expectEqualStrings("true", b.given("newsletter").view());
     // Never sent, so there is nothing to put back.
     try testing.expectEqualStrings("", b.given("email").view());
+}
+
+test "a binding a test built by hand needs to know nothing about outcomes" {
+    const b: Bare = .ok(.{
+        .email = Str.static("wati@example.com"),
+        .age = 31,
+        .newsletter = true,
+    });
+
+    try testing.expect(!b.failed());
+    try testing.expectEqual(@as(u32, 31), b.value().?.age);
+    // Nothing failed, so there is nothing to put back in a box.
+    try testing.expectEqualStrings("", b.given("age").view());
+}
+
+test "a rule of the application's own joins the failures nilo already found" {
+    const b: Bare = .ok(.{
+        .email = Str.static("bukan-alamat"),
+        .age = 31,
+        .newsletter = false,
+    });
+
+    const checked = b
+        .must("email", false, "has to look like an address")
+        .must("age", true, "has to be 18 or over");
+
+    try testing.expect(checked.failed());
+    try testing.expectEqual(@as(usize, 1), checked.failedCount());
+    // The value is withheld for a rule exactly as it is for a conversion.
+    try testing.expectEqual(@as(?SignUp, null), checked.value());
+
+    var it = checked.failures();
+    const only = it.next().?;
+    try testing.expectEqualStrings("email", only.field);
+    // A rule has no `Reason`, because `Reason` is the closed list of things
+    // a conversion can fail at.
+    try testing.expectEqual(@as(?Reason, null), only.reason);
+    try testing.expectEqualStrings("has to look like an address", only.said);
+    try testing.expectEqualStrings("\"email\" has to look like an address", saidBy(only));
+    try testing.expectEqual(@as(?Failure, null), it.next());
+}
+
+test "a rule that holds is not a failure, and a binding with none is unchanged" {
+    const b: Bare = .ok(.{ .email = Str.static("wati@example.com"), .age = 31, .newsletter = false });
+    const checked = b.must("age", true, "has to be 18 or over");
+
+    try testing.expect(!checked.failed());
+    try testing.expectEqual(@as(usize, 0), checked.failedCount());
+    try testing.expectEqual(@as(u32, 31), checked.value().?.age);
+
+    var it = checked.failures();
+    try testing.expectEqual(@as(?Failure, null), it.next());
+}
+
+test "two kinds of failure come out as one 422 in one shape" {
+    var in_flight = fail_mod.InFlight{};
+    in_flight.startRequest("POST", "/sign-up");
+    const previous = bulkhead.setFallbackSlot(&in_flight);
+    defer _ = bulkhead.setFallbackSlot(previous);
+
+    // The age would not convert, and the email breaks a rule of the
+    // application's own. Before this, a client learned about one of them.
+    const b = Bare.from(undefined, .{
+        .{ .given = Str.static("bukan-alamat") },
+        .{ .reason = .not_a_number, .given = Str.static("soon") },
+        .{},
+    });
+    const checked = b.must("email", false, "has to look like an address");
+
+    try testing.expectEqual(@as(usize, 2), checked.failedCount());
+    try testing.expectError(error.Failed, asUnion(checked.fail()));
+    try testing.expectEqual(@as(u16, 422), in_flight.failure.status);
+    try testing.expectEqualStrings(
+        "2 fields did not fit: \"email\" has to look like an address; " ++
+            "\"age\" has to be a whole number, not \"soon\"",
+        in_flight.failure.message(),
+    );
+}
+
+test "nilo's own sentence wins, and the first rule on a field is the one said" {
+    // A rule checked against a field that never bound was checked against
+    // nothing, so the conversion failure stands.
+    const b = Bare.from(undefined, .{
+        .{},
+        .{ .reason = .not_a_number, .given = Str.static("soon") },
+        .{},
+    });
+    const checked = b
+        .must("age", false, "has to be 18 or over")
+        .must("email", false, "has to look like an address")
+        .must("email", false, "is already registered");
+
+    var it = checked.failures();
+    try testing.expectEqualStrings("\"email\" has to look like an address", saidBy(it.next().?));
+    try testing.expectEqualStrings("\"age\" has to be a whole number, not \"soon\"", saidBy(it.next().?));
+    try testing.expectEqual(@as(?Failure, null), it.next());
+}
+
+test "a rule out of a query string is labelled the way that slot labels things" {
+    const Page = struct { page: u32 };
+    const b = Bound(struct {
+        pub const nilo_query = Page;
+        value: Page,
+    }).ok(.{ .page = 5000 });
+
+    const checked = b.must("page", false, "stops at 100");
+    var it = checked.failures();
+    try testing.expectEqualStrings("?page stops at 100", saidBy(it.next().?));
+}
+
+test "a binding with no rules against it carries no room for any" {
+    // The one thing this feature costs is stack, and a handler that checks
+    // no rules does not pay it: the room lives in `Checked`, which such a
+    // handler never builds (ADR 0082).
+    try testing.expect(@sizeOf(Bare.Checked) >= @sizeOf(Bare) + @sizeOf(Bare.Rules));
+    // And the room it costs is one slice per field, not one per rule: three
+    // fields, 48 bytes, whether the handler writes one rule or ten.
+    try testing.expectEqual(@as(usize, 3 * @sizeOf([]const u8)), @sizeOf(Bare.Rules));
 }
 
 test "a binding of a form is still a binding of the struct inside it" {

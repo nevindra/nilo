@@ -25,6 +25,13 @@
 //! }
 //! ```
 //!
+//! `stderr` there is the one piece of shorthand in this comment, because
+//! getting a `*std.Io.Writer` for it is Zig's question rather than this
+//! module's: `std.Io.File.stderr().writer(init.io, &buf)`, and `.interface`
+//! is the writer. The `io` comes from `main`'s own argument, which is also
+//! what opens a `.env` — `docs/guide/config.md` writes the whole `main` out,
+//! and that page's version is compiled by `zig build snippets` (ADR 0083).
+//!
 //! **A field is a setting and its name is the variable.** `database_url` is
 //! read from `DATABASE_URL`; a default is what "not set" means; a `?T` is a
 //! setting that may be absent. That is the same sentence

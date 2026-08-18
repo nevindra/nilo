@@ -52,10 +52,35 @@ pub const Schema = union(enum) {
     /// A file out of a multipart form — `{"type":"string","format":"binary"}`,
     /// which is how OpenAPI 3.1 says "bytes" (ADR 0031).
     binary,
+    /// What a type said about itself, because it writes its own JSON and this
+    /// module cannot read that off its fields (ADR 0076).
+    told: Told,
+    /// A `union(enum)`, which `std.json` writes externally tagged — one
+    /// object with one key, the name of the active field (ADR 0077).
+    one_of: []const Case,
+    /// A type that writes its own JSON and did **not** say what it looks like.
+    /// Emitted as `{}` with a note — the fields are known to be the wrong
+    /// answer, so anything derived from them would be a confident lie.
+    untold,
     /// A type with no useful JSON shape, or one nested deeper than this
     /// module follows. Emitted as `{}`, which in JSON Schema means "anything"
     /// — true, and better than a wrong claim.
     unknown,
+};
+
+/// What a `pub const nilo_openapi` says, and the whole of what it may say.
+///
+/// Deliberately two fields. The point is to let a type that writes its own
+/// JSON name the shape it writes, not to give anybody a second way to describe
+/// a struct — a type whose fields *are* its JSON needs none of this, and one
+/// that wants `pattern`, `minimum` and `examples` is asking this module to
+/// become a JSON Schema builder, which ADR 0018 prices and refuses.
+pub const Told = struct {
+    /// `"string"`, `"integer"`, `"number"`, `"boolean"` — a JSON type.
+    type: []const u8,
+    /// OpenAPI's `format`: `"uuid"`, `"date-time"`, `"decimal"`. Optional
+    /// because it is a hint to a generator rather than a constraint.
+    format: ?[]const u8 = null,
 };
 
 /// A struct, and the name of the Zig type it came from.
@@ -69,6 +94,13 @@ pub const Object = struct {
     /// where it was written.
     name: ?[]const u8,
     fields: []const Field,
+};
+
+/// One arm of a tagged union: the key `std.json` writes, and the shape under
+/// it.
+pub const Case = struct {
+    name: []const u8,
+    schema: *const Schema,
 };
 
 pub const Field = struct {
@@ -209,6 +241,22 @@ fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
             return held(.{ .nullable = schemaWithin(T.nilo_patch, depth + 1) });
         }
 
+        // **A type that writes its own JSON is not described by its fields**
+        // (ADR 0076). `std.json` calls `jsonStringify` and never looks at the
+        // struct, so reflecting the struct describes something the server does
+        // not send: a `Uuid` went out as a 36-character string and was
+        // documented as an object with a `bytes` field, which broke every
+        // generated client that read one.
+        //
+        // The same test ADR 0039 uses to decide what its generated writer may
+        // touch, asked here for the same reason. What a type says about itself
+        // wins; a type that says nothing gets `{}` and a note, because being
+        // visibly silent beats being confidently wrong.
+        if (writesItsOwnJson(T)) {
+            if (@hasDecl(T, "nilo_openapi")) return held(.{ .told = toldOf(T) });
+            return held(.untold);
+        }
+
         return switch (@typeInfo(T)) {
             .bool => held(.boolean),
             .int, .comptime_int => held(.integer),
@@ -221,6 +269,20 @@ fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
             },
 
             .optional => |o| held(.{ .nullable = schemaWithin(o.child, depth + 1) }),
+
+            // A tagged union has a derivable shape and used to get `{}`
+            // (ADR 0077). `std.json` writes it externally tagged — one object
+            // with one key — so JSON Schema says it with `oneOf`. An
+            // *untagged* union still gets `{}`, which is the honest answer:
+            // nothing in the type says which arm is live, so nothing can.
+            .@"union" => |u| if (u.tag_type == null) held(.unknown) else blk: {
+                var cases: []const Case = &.{};
+                for (u.fields) |f| cases = cases ++ [_]Case{.{
+                    .name = f.name,
+                    .schema = schemaWithin(f.type, depth + 1),
+                }};
+                break :blk held(.{ .one_of = cases });
+            },
 
             .@"struct" => |s| blk: {
                 // A tuple is a list of mixed things, which JSON Schema can
@@ -257,6 +319,44 @@ fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
                 held(.{ .array = schemaWithin(a.child, depth + 1) }),
 
             else => held(.unknown),
+        };
+    }
+}
+
+/// `T.nilo_openapi`, read field by field rather than coerced.
+///
+/// It is written as `.{ .type = "string", .format = "uuid" }` in a module that
+/// may not import this one — `nilo_id` imports nothing at all (ADR 0042) — so
+/// it arrives as an anonymous struct and there is no shared type to coerce it
+/// to. Reading it here is also where a mistake gets a sentence: a marker with
+/// no `type` is the one way to write this wrong, and it would otherwise be a
+/// `has no member named 'type'` pointing at a line of nilo's.
+fn toldOf(comptime T: type) Told {
+    comptime {
+        const said = T.nilo_openapi;
+        const Said = @TypeOf(said);
+        if (!@hasField(Said, "type")) @compileError(
+            "nilo: " ++ @typeName(T) ++ "'s `nilo_openapi` has no `type`, so it does not say " ++
+                "what this value looks like in JSON. Write `pub const nilo_openapi = " ++
+                ".{ .type = \"string\" };`, with `type` one of \"string\", \"integer\", " ++
+                "\"number\" or \"boolean\", and an optional `format`.",
+        );
+        return .{
+            .type = said.type,
+            .format = if (@hasField(Said, "format")) said.format else null,
+        };
+    }
+}
+
+/// Whether `T` supplies the JSON `std.json` writes for it.
+///
+/// `@hasDecl` only answers for a container, so the kind is checked first —
+/// asking it about `u32` is a compile error rather than a false.
+fn writesItsOwnJson(comptime T: type) bool {
+    comptime {
+        return switch (@typeInfo(T)) {
+            .@"struct", .@"union", .@"enum", .@"opaque" => @hasDecl(T, "jsonStringify"),
+            else => false,
         };
     }
 }
@@ -415,6 +515,10 @@ const Components = struct {
     /// `Page_Order`. When that happens neither gets the name, and both are
     /// written out where they appear. Bigger document, still a true one.
     contested: [max_components]bool = @splat(false),
+    /// The other name this slot answers to, when a shape arrived twice
+    /// because its `Str` half and its `Text` half are separate Zig types
+    /// (ADR 0077). Empty for every other slot, which is most of them.
+    twin: [max_components][]const u8 = @splat(""),
     count: usize = 0,
 
     fn gather(self: *Components, ops: []const Operation) void {
@@ -441,6 +545,13 @@ const Components = struct {
                         // is what keeps a self-referential one from looping.
                         if (self.contested[i]) return;
                         self.contested[i] = true;
+                    } else if (self.lifetimeTwinOf(full, schema)) |i| {
+                        // The same shape, once with `Str` in it and once with
+                        // `Text` — one JSON shape wearing two Zig lifetimes
+                        // (ADR 0077). Its fields were walked when the first
+                        // half was seen.
+                        self.twin[i] = full;
+                        return;
                     } else if (self.count < max_components) {
                         self.names[self.count] = full;
                         self.schemas[self.count] = schema;
@@ -451,6 +562,7 @@ const Components = struct {
             },
             .array => |item| self.add(item),
             .nullable => |inner| self.add(inner),
+            .one_of => |cases| for (cases) |case| self.add(case.schema),
             else => {},
         }
     }
@@ -477,6 +589,41 @@ const Components = struct {
         return true;
     }
 
+    /// The slot holding this shape's other half, if it has one.
+    ///
+    /// **What splits it is a Zig lifetime, and a lifetime has no rendering in
+    /// JSON.** `Meta(Str)` is the body half of a shape and `Meta(Text)` is the
+    /// row half, which is the split nilo itself asks for
+    /// ([ADR 0004](../docs/adr/0004-request-arena-and-the-str-type.md)); both
+    /// used to reach a generated client as `Meta_Str` and `Meta_Text`,
+    /// byte-identical and twice.
+    ///
+    /// Narrow on purpose (ADR 0077): only a `_Str`/`_Text` pair over the same
+    /// stem, and only when the two render the same all the way down. Anything
+    /// else keeps its own name — `Page_Order` and `Page_User` share field
+    /// names and are not the same shape.
+    fn lifetimeTwinOf(self: *const Components, full: []const u8, schema: *const Schema) ?usize {
+        const stem = stemOf(full) orelse return null;
+        for (self.names[0..self.count], 0..) |other, i| {
+            if (self.twin[i].len > 0) continue;
+            const other_stem = stemOf(other) orelse continue;
+            if (!std.mem.eql(u8, stem, other_stem)) continue;
+            if (std.mem.eql(u8, other, full)) continue;
+            if (rendersTheSame(self.schemas[i], schema)) return i;
+        }
+        return null;
+    }
+
+    /// The name without the half that is only a lifetime: `Meta_Str` → `Meta`.
+    /// Null for a name that is not one half of such a pair.
+    fn stemOf(name: []const u8) ?[]const u8 {
+        for ([_][]const u8{ "_Str", "_Text" }) |half| {
+            if (std.mem.endsWith(u8, name, half) and name.len > half.len)
+                return name[0 .. name.len - half.len];
+        }
+        return null;
+    }
+
     /// The slot this shape is named in, or null if it has no name of its own
     /// in this document — either it never had one, or something else wanted
     /// the same one.
@@ -488,6 +635,7 @@ const Components = struct {
     fn indexOf(self: *const Components, full: []const u8) ?usize {
         for (self.names[0..self.count], 0..) |name, i| {
             if (std.mem.eql(u8, name, full)) return i;
+            if (self.twin[i].len > 0 and std.mem.eql(u8, self.twin[i], full)) return i;
         }
         return null;
     }
@@ -498,9 +646,17 @@ const Components = struct {
     /// `User` meaning two shapes produces code that does not compile — so
     /// where that happens both keep their full names.
     fn writeName(self: *const Components, w: *std.Io.Writer, i: usize) !void {
+        return writeComponentName(w, self.nameAt(i));
+    }
+
+    /// A merged pair drops the half that was only a lifetime, so the client
+    /// gets `Meta` rather than one of `Meta_Str` and `Meta_Text` standing in
+    /// for both.
+    fn nameAt(self: *const Components, i: usize) []const u8 {
         const full = self.names[i];
+        if (self.twin[i].len > 0) return stemOf(full) orelse full;
         const short = shortNameOf(full);
-        return writeComponentName(w, if (self.shortIsFree(i, short)) short else full);
+        return if (self.shortIsFree(i, short)) short else full;
     }
 
     fn shortIsFree(self: *const Components, i: usize, short: []const u8) bool {
@@ -509,9 +665,61 @@ const Components = struct {
             // A contested slot is written nowhere, so it is not competing
             // for the short name it would otherwise have taken.
             if (self.contested[j]) continue;
-            if (j != i and std.mem.eql(u8, shortNameOf(other), short)) return false;
+            const other_short = if (self.twin[j].len > 0)
+                (stemOf(other) orelse other)
+            else
+                shortNameOf(other);
+            if (j != i and std.mem.eql(u8, other_short, short)) return false;
         }
         return true;
+    }
+
+    /// Whether two schemas produce the same JSON, all the way down.
+    ///
+    /// Stronger than `sameShape`, and needed for a stronger claim: `sameShape`
+    /// only has to tell two *different* types that rendered to one name apart,
+    /// so field names are enough. Merging two shapes into one component says
+    /// they are interchangeable to a client, which is a claim about every
+    /// field's type as well (ADR 0077).
+    ///
+    /// Terminates because `max_depth` caps a Schema's height — a type holding
+    /// one of its own becomes `unknown` at the eighth level.
+    fn rendersTheSame(a: *const Schema, b: *const Schema) bool {
+        if (a == b) return true;
+        if (std.meta.activeTag(a.*) != std.meta.activeTag(b.*)) return false;
+        return switch (a.*) {
+            .string, .integer, .number, .boolean, .binary, .untold, .unknown => true,
+            .told => |t| std.mem.eql(u8, t.type, b.told.type) and
+                ((t.format == null and b.told.format == null) or
+                    (t.format != null and b.told.format != null and
+                        std.mem.eql(u8, t.format.?, b.told.format.?))),
+            .choice => |names| blk: {
+                if (names.len != b.choice.len) break :blk false;
+                for (names, b.choice) |one, other| {
+                    if (!std.mem.eql(u8, one, other)) break :blk false;
+                }
+                break :blk true;
+            },
+            .array => |item| rendersTheSame(item, b.array),
+            .nullable => |inner| rendersTheSame(inner, b.nullable),
+            .object => |o| blk: {
+                if (o.fields.len != b.object.fields.len) break :blk false;
+                for (o.fields, b.object.fields) |f, g| {
+                    if (!std.mem.eql(u8, f.name, g.name)) break :blk false;
+                    if (f.required != g.required) break :blk false;
+                    if (!rendersTheSame(f.schema, g.schema)) break :blk false;
+                }
+                break :blk true;
+            },
+            .one_of => |cases| blk: {
+                if (cases.len != b.one_of.len) break :blk false;
+                for (cases, b.one_of) |one, other| {
+                    if (!std.mem.eql(u8, one.name, other.name)) break :blk false;
+                    if (!rendersTheSame(one.schema, other.schema)) break :blk false;
+                }
+                break :blk true;
+            },
+        };
     }
 
     /// Whether anything in this document promises a failure, and so whether
@@ -792,6 +1000,25 @@ fn writeSchema(
         .binary => try w.writeAll("{\"type\":\"string\",\"format\":\"binary\"}"),
         .unknown => try w.writeAll("{}"),
 
+        .told => |t| {
+            try w.writeAll("{\"type\":");
+            try writeString(w, t.type);
+            if (t.format) |f| {
+                try w.writeAll(",\"format\":");
+                try writeString(w, f);
+            }
+            try w.writeByte('}');
+        },
+
+        // `{}` means "anything", which is true. The description is there
+        // because a reader who sees `{}` on one field of an otherwise precise
+        // document should be told it is a gap somebody can close rather than a
+        // shape nobody could name (ADR 0076).
+        .untold => try w.writeAll(
+            "{\"description\":\"This type writes its own JSON, and has not said what it looks like." ++
+                " Add `pub const nilo_openapi = .{ .type = \\\"string\\\" };` to it to describe the value it sends.\"}",
+        ),
+
         .choice => |names| {
             try w.writeAll("{\"type\":\"string\",\"enum\":[");
             for (names, 0..) |name, i| {
@@ -805,6 +1032,25 @@ fn writeSchema(
             try w.writeAll("{\"type\":\"array\",\"items\":");
             try writeSchema(w, components, item);
             try w.writeByte('}');
+        },
+
+        // Externally tagged: `{"link":{"url":"…"}}` — one key, whose name is
+        // the arm. Written out as the alternatives rather than as `{}`, which
+        // is what a union used to get while serialising perfectly well
+        // (ADR 0077). A void arm carries no value and is the bare key.
+        .one_of => |cases| {
+            try w.writeAll("{\"oneOf\":[");
+            for (cases, 0..) |case, i| {
+                if (i > 0) try w.writeByte(',');
+                try w.writeAll("{\"type\":\"object\",\"properties\":{");
+                try writeString(w, case.name);
+                try w.writeByte(':');
+                try writeSchema(w, components, case.schema);
+                try w.writeAll("},\"required\":[");
+                try writeString(w, case.name);
+                try w.writeAll("]}");
+            }
+            try w.writeAll("]}");
         },
 
         // OpenAPI 3.1 is JSON Schema, so a nullable value is written as the
@@ -997,6 +1243,122 @@ test "a type that refers to itself stops rather than expanding for ever" {
     // JSON Schema for "anything", which is true.
     try testing.expect(std.mem.indexOf(u8, json, "{}") != null);
     try testing.expect(std.mem.startsWith(u8, json, "{\"type\":\"object\""));
+}
+
+test "a tagged union is the alternatives it can be, one key each" {
+    const Target = union(enum) {
+        link: struct { url: []const u8 },
+        count: u32,
+    };
+    try expectSchema(Target,
+        \\{"oneOf":[{"type":"object","properties":{"link":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}},"required":["link"]},{"type":"object","properties":{"count":{"type":"integer"}},"required":["count"]}]}
+    );
+}
+
+test "an untagged union still says nothing, because nothing in it says which arm is live" {
+    const Bytes = union { a: u32, b: f32 };
+    try expectSchema(Bytes, "{}");
+}
+
+test "one shape split only by a lifetime is one component" {
+    // What the `Str`-in / `Text`-out rule produces: the same generic twice,
+    // and two Zig types that render identically (ADR 0077).
+    const Meta = struct {
+        fn of(comptime T: type) type {
+            return struct { label: T, note: ?T };
+        }
+    };
+    const Body = struct { meta: Meta.of(Str) };
+    const Row = struct { meta: Meta.of([]const u8) };
+
+    var components: Components = .{};
+    components.add(comptime schemaOf(Body));
+    components.add(comptime schemaOf(Row));
+
+    // One slot, answering to both names, written without the half that was
+    // only a lifetime. Three components rather than four: `Body`, `Row`, and
+    // the one `Meta`.
+    try testing.expectEqual(@as(usize, 3), components.count);
+    const meta = components.indexOf(comptime nameOf(Meta.of(Str)).?).?;
+    try testing.expectEqual(meta, components.indexOf(comptime nameOf(Meta.of([]const u8)).?).?);
+
+    const written = components.nameAt(meta);
+    try testing.expect(std.mem.endsWith(u8, written, "_of"));
+    try testing.expect(std.mem.indexOf(u8, written, "_Str") == null);
+    try testing.expect(std.mem.indexOf(u8, written, "_Text") == null);
+}
+
+test "two shapes that only look alike keep their own names" {
+    const Order = struct { id: u32 };
+    const User = struct { id: u32 };
+    const Page = struct {
+        fn of(comptime T: type) type {
+            return struct { items: []const T };
+        }
+    };
+
+    var components: Components = .{};
+    components.add(comptime schemaOf(Page.of(Order)));
+    components.add(comptime schemaOf(Page.of(User)));
+
+    // `Page_of_Order` and `Page_of_User` are neither a `_Str`/`_Text` pair nor
+    // the same shape, so nothing is merged: two pages, two item types.
+    try testing.expectEqual(@as(usize, 4), components.count);
+}
+
+test "a type that writes its own JSON is described by what it says, not by its fields" {
+    // The shape of `nilo_id`'s `Uuid`, written out here so this test does not
+    // need the module: sixteen bytes that go out as thirty-six characters.
+    const Uuid = struct {
+        bytes: [16]u8,
+        pub const nilo_openapi = .{ .type = "string", .format = "uuid" };
+        pub fn jsonStringify(_: @This(), jw: anytype) !void {
+            try jw.write("00000000-0000-0000-0000-000000000000");
+        }
+    };
+    try expectSchema(Uuid, "{\"type\":\"string\",\"format\":\"uuid\"}");
+}
+
+test "a format is optional, and left out rather than guessed" {
+    const Money = struct {
+        text: []const u8,
+        pub const nilo_openapi = .{ .type = "string" };
+        pub fn jsonStringify(self: @This(), jw: anytype) !void {
+            try jw.write(self.text);
+        }
+    };
+    try expectSchema(Money, "{\"type\":\"string\"}");
+}
+
+test "a custom writer that says nothing is visibly silent rather than confidently wrong" {
+    const Opaque = struct {
+        secret: u32,
+        pub fn jsonStringify(_: @This(), jw: anytype) !void {
+            try jw.write("whatever it likes");
+        }
+    };
+    const json = try schemaJson(Opaque);
+    defer testing.allocator.free(json);
+
+    // The one thing that must not happen: describing `secret`, which the
+    // writer above never sends. That was the bug (ADR 0076).
+    try testing.expect(std.mem.indexOf(u8, json, "secret") == null);
+    try testing.expect(std.mem.indexOf(u8, json, "writes its own JSON") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "nilo_openapi") != null);
+}
+
+test "a custom writer inside a struct does not describe the struct's fields either" {
+    const Uuid = struct {
+        bytes: [16]u8,
+        pub const nilo_openapi = .{ .type = "string", .format = "uuid" };
+        pub fn jsonStringify(_: @This(), jw: anytype) !void {
+            try jw.write("…");
+        }
+    };
+    const Account = struct { public: Uuid, email: Str };
+    try expectSchema(Account,
+        \\{"type":"object","properties":{"public":{"type":"string","format":"uuid"},"email":{"type":"string"}},"required":["public","email"]}
+    );
 }
 
 test "text that would break the JSON is escaped" {

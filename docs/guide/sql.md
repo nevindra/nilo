@@ -8,6 +8,23 @@ const nilo = @import("nilo_http");
 const sql = @import("nilo_sql");
 ```
 
+**Ask for it in `build.zig` first**, with one field beside the two you already
+pass:
+
+```zig
+const nilo = b.dependency("nilo", .{
+    .target = target,
+    .optimize = optimize,
+    .sql = true,          // ← fetches pg.zig and zqlite; without it, this module refuses to build
+});
+```
+
+That flag exists because the drivers are 11 MB and most projects want neither.
+Leaving it out and importing `nilo_sql` anyway is a compile error saying this
+in one sentence, rather than a missing module or a mysterious `pg` — see
+[ADR 0075](../adr/0075-a-lazy-dependency-is-a-request.md), which is also the
+account of why `.lazy = true` on its own was not enough.
+
 The idea is the same one the HTTP half runs on, pointed at a database: **the
 struct you already wrote is the contract, and the compiler is the check.**
 
@@ -443,6 +460,13 @@ refusing rather than quietly doing something else, and it is worth knowing
 before you plan a migration on the assumption that swapping the line at the top
 is free.
 
+A `sql.Uuid` is **not** on that list. SQLite has no uuid type, so one travels as
+the thirty-six hyphenated characters into a TEXT column — which is what
+`sqlite3` shows you and what `WHERE public = '…'` takes. Postgres still sends
+sixteen bytes. Your Row says `public: sql.Uuid` either way, and neither the
+insert nor the read changes
+([ADR 0078](../adr/0078-a-uuid-is-whatever-the-database-stores.md)).
+
 The schema check is weaker here too, and by exactly as much as SQLite is. A
 column's declared type is free text — `VARCHAR(255)`, `NVARCHAR` and `CLOB` are
 all one thing to the database — so the check catches a `Str` field over an
@@ -466,7 +490,7 @@ a file cannot.
 
 ### What it costs
 
-524,840 bytes to a program that names `sql.Sqlite`, and **zero to one that does
+523,352 bytes to a program that names `sql.Sqlite`, and **zero to one that does
 not** — the driver is fetched lazily and `sql/sqlite.zig` is only analysed when
 something names it, so a Postgres-only binary carries no SQLite at all. A pool
 connection holds 28 KiB when opened and grows towards `cache_size` as it
@@ -562,8 +586,43 @@ defer run.deinit();
 const adults = try db.select(User, &run, .{ .where = .{ .age = .{ .gt = 18 } } });
 ```
 
-Same query, same rows, no server in the process. That is the whole of what a
-migration script or a nightly job needs from this module.
+Same query, same rows, no server in the process.
+
+**A `Run` is an arena and a lifetime. What it is not is a connection.** The
+pool is opened by `nilo_start`, and until something calls it every query answers
+`error.Disconnected` — so a script, a migration, or a test needs one more line
+than the snippet above
+([ADR 0079](../adr/0079-there-is-a-phase-before-the-server.md)):
+
+```zig
+var threaded: std.Io.Threaded = .init(gpa, .{});   // std's own, not the Engine
+defer threaded.deinit();
+try db.nilo_start(threaded.io());                  // the pool is open from here
+
+var run = nilo.Run.init(gpa);
+defer run.deinit();
+```
+
+Inside a program that also serves, `app.start(io)` is the same thing for every
+service the App holds at once — the phase after the pool and before the server:
+
+```zig
+var threaded: std.Io.Threaded = .init(gpa, .{});
+defer threaded.deinit();
+
+try app.provide(&db);
+try app.start(threaded.io());        // services checked, pools open, schema checked
+
+var run = nilo.Run.init(gpa);
+defer run.deinit();
+_ = try db.exec(&run, schema_sql, .{});
+
+try app.listen(.{ .port = 8080 });   // does not open them a second time
+```
+
+**A SQLite application needs this and most Postgres ones do not**: there is no
+server to have created the tables somewhere else, so `zig build run` on a fresh
+machine has to do it.
 
 ## Writing
 
@@ -959,6 +1018,25 @@ const tally = try db.raw(Report, c,
 `raw` still fills your struct, still uses the arena, still follows the `Str`
 rule. It gives up the compile-time column check and nothing else; the
 `SELECT` list has to line up with the struct's fields by position.
+
+### A statement that answers with nothing
+
+`CREATE TABLE`, `CREATE INDEX`, `PRAGMA`, `VACUUM`, `ANALYZE`, a `DELETE` you
+wrote by hand — nothing is selected, so there is no struct to fill. That is
+`db.exec`, and it answers with the number of rows it changed:
+
+```zig
+_ = try db.exec(&run,
+    \\CREATE TABLE IF NOT EXISTS accounts (
+    \\  id    INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    \\  email TEXT NOT NULL UNIQUE COLLATE NOCASE
+    \\)
+, .{});
+```
+
+**A SQLite application needs this and a Postgres one usually doesn't**: there's
+no server to have run the DDL somewhere else, so creating the table is your job
+at startup. `tx.exec` is the same call inside a transaction.
 
 The line is drawn there because a builder's dialect surface grows with the
 builder, and joins and aggregates are where databases disagree most. A

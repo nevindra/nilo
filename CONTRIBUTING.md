@@ -40,6 +40,7 @@ zig build test-all     # the above plus the same suite in ReleaseSafe. This is w
 zig build layering     # check that no module imports upward or sideways
 zig build refusals     # the framework's 63 compile-error checks — NOT the others
 zig build refusals-sql # nilo_sql's 44; refusals-config, -pw and -s3 for the rest
+zig build snippets     # the documentation's marked snippets, which must compile
 zig build examples     # build all eight examples
 
 zig build test-core    # only nilo_core, both modes. No engine, no module graph
@@ -168,6 +169,16 @@ Documentation is part of the change, not a follow-up:
 | a benchmark you ran | [`bench/result/`](./bench/result/) — one file an area |
 | something now built | delete its entry from [`docs/roadmap.md`](./docs/roadmap.md) |
 | something a user has to change | [`CHANGELOG.md`](./CHANGELOG.md) |
+
+**A snippet you publish is a program, so let the build compile it.** Put
+`<!-- compiles -->` above the fenced `zig` block — `<!-- compiles: body -->` if
+it is a run of statements rather than declarations — and `zig build snippets`
+extracts it, puts [`docs/snippets/types.zig`](./docs/snippets/types.zig) in
+front of it and compiles it. The block in the page stays the only copy. Writing
+that step found seven mistakes in one five-line example, including a
+`db.acquire()` that has never existed
+([ADR 0083](./docs/adr/0083-the-guide-is-the-source-of-its-own-snippets.md)),
+and unlike the refusals these cache, so marking one more costs almost nothing.
 
 **A benchmark that changed a decision gets written down where it can be
 re-run.** `bench/result/http.md` is the server, `bench/result/sql.md` is the

@@ -293,11 +293,31 @@ pub fn wrap(comptime pattern: []const u8, comptime f: anytype) router.CtxHandler
                 const P = p.type.?;
                 switch (comptime roles[i]) {
                     .ctx => args[i] = c,
-                    .service => args[i] = c._services.get(P) orelse
+                    // **Logged as well as answered** (ADR 0079). `listen()`
+                    // refuses to open the socket over this and names the type
+                    // and the routes, so a server never reaches here — but
+                    // `testing.Client` does not call `listen()`, and a test
+                    // used to get a bare 500 on every route that wanted the
+                    // service with nothing anywhere naming it. That is the
+                    // worst shape a clue can have, because the same routes
+                    // work over a real socket, so the evidence points at the
+                    // test.
+                    .service => args[i] = c._services.get(P) orelse {
+                        // A warning and not an error, for the reason the
+                        // unopened pool logs one: `std.log.err` fails the
+                        // test runner, and this fires in a test by design.
+                        std.log.warn(
+                            "service {s} was never registered, and route \"{s}\" needs it. " ++
+                                "`app.listen()` refuses to start over this and says which routes; " ++
+                                "a test driving the App itself does not, so here it is. " ++
+                                "Call app.provide() before serving.",
+                            .{ @typeName(P), pattern },
+                        );
                         return fail.internal(
                             "service {s} was never registered; call app.provide() before app.listen()",
                             .{@typeName(P)},
-                        ),
+                        );
+                    },
                     .param => |nth| args[i] = try paramValue(P, c, param_names[nth]),
                     .body => args[i] = try c.json(P),
                     .query => args[i] = .{ .value = try queryValue(P.nilo_query, c) },

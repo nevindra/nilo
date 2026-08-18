@@ -1163,8 +1163,13 @@ test "the document names every shape that has a name, and the paths that have pa
     // Including the shapes that are generic, which is what makes writing one
     // `Addressed(Text)` instead of two `Address` structs a free choice.
     try testing.expect(std.mem.indexOf(u8, document, "#/components/schemas/Page_Order") != null);
-    try testing.expect(std.mem.indexOf(u8, document, "#/components/schemas/Addressed_Str") != null);
-    try testing.expect(std.mem.indexOf(u8, document, "#/components/schemas/Addressed_Text") != null);
+
+    // And `Addressed(Str)` and `Addressed(Text)` are **one** shape here, not
+    // two: what separates them is a Zig lifetime, and a lifetime has no
+    // rendering in JSON, so a client gets one `Addressed` (ADR 0077).
+    try testing.expect(std.mem.indexOf(u8, document, "#/components/schemas/Addressed\"") != null);
+    try testing.expect(std.mem.indexOf(u8, document, "Addressed_Str") == null);
+    try testing.expect(std.mem.indexOf(u8, document, "Addressed_Text") == null);
 
     // An enum is the list of what it may be, keyword or no keyword.
     try testing.expect(std.mem.indexOf(u8, document, "\"enum\":[\"draft\",\"placed\",\"packed\"") != null);

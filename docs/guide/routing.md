@@ -106,3 +106,16 @@ its prefix, so every prefix is a different type. To spell one out, the type is
 
 Passing the App itself works too, since it has the same methods: a plugin mounted
 at the root is `try metrics(&app)`.
+
+**A group says where it is mounted**, which is what a plugin needs when its own
+routes have to know their absolute paths — a link in a response body, a redirect
+target:
+
+```zig
+fn metrics(g: anytype) !void {
+    const here = @TypeOf(g).mounted_at;   // "/internal"
+    …
+}
+```
+
+An App answers `""`, which is what a plugin mounted at the root should read.

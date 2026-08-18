@@ -45,6 +45,36 @@ CORS can answer a preflight for a path that has no route.
 
 See [ADR 0009](../adr/0009-middleware-is-an-onion-of-ctx-functions.md).
 
+### The two routes that can't be guarded
+
+Every API with accounts has the same shape: a prefix behind a session, and two
+routes inside it that can't be — **you can't require a session to create one.**
+
+```zig
+const v1 = app.group("/v1");
+try v1.use(requireOperator);          // everything under /v1
+
+const open = v1.without(requireOperator);
+try open.post("/sign-up", signUp);    // …except these two
+try open.post("/sign-in", signIn);
+```
+
+`without(mw)` hands back the same group with that one middleware off for the
+routes registered through it. Everything else in the chain still runs — your
+logger still logs the sign-up, CORS still answers its preflight.
+
+**The default stays deny**, which is the point: a route added to `/v1` next month
+is guarded because nobody did anything, rather than open because nobody
+remembered. And the exception is written where the route is, so renaming
+`/sign-up` moves it — where the alternative, a list of paths compared against
+`c.path()` inside the middleware, would go on guarding a route that no longer
+exists while the real one went open, with nothing failing to compile
+([ADR 0080](../adr/0080-a-route-can-say-it-is-not-covered.md)).
+
+Registering the open routes before the `use` call does **not** work and it looks
+like it should: chains are resolved in `listen()`, so mount order carries no
+meaning at all (ADR 0009).
+
 ## The built-in two
 
 ```zig

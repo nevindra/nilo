@@ -569,3 +569,72 @@ amalgamation — true, and true about *this* linker on *this* target rather than
 guaranteed by the language. `strings … | grep -ci sqlite` answers 0 against the
 Postgres-only binary and 71 against the other, which is why the A/B is a build
 step and two greppable binaries instead of a sentence.
+
+## Twenty findings from somebody else's application
+
+An application was written against the published pages and kept a ranked list
+of everything that cost it an hour. Working through all twenty is what this
+stage is; six things in it are worth keeping.
+
+**A published snippet decays exactly the way a published number does, and for
+the same reason: nobody runs it.** Three one-liners in the guide and the
+reference did not compile, each the first thing somebody types on reaching that
+page. Writing the build step that compiles them
+([ADR 0083](./adr/0083-the-guide-is-the-source-of-its-own-snippets.md)) found
+**four more in one five-line sign-in example** — a `db.acquire()` that has never
+existed, `find` handed a condition where a key goes, a `Form(T)` read without
+its `.value`, and a session set with the wrong struct — plus a real gap in
+`nilo_sql`: `.where = .{ .email = form.email }` with a `Str` did not compile at
+all, which is the most ordinary thing anybody does with request text. Six of the
+seven were invisible to reading, and the seventh was a gap nobody had reason to
+look for. The snippet stays in the page and the step extracts it; a directory of
+copies would drift, which this file already has four entries about.
+
+**A loud diagnostic on a path that tests exercise has to be a warning.** The
+Zig test runner counts an `err`-level log as a failed test, whatever
+`testing.log_level` says. Two new diagnostics — an unopened pool, a service
+nobody provided — fire exactly where a test drives them, so at `err` they turned
+a passing suite red and the pressure is then to delete the diagnostic rather
+than fix it. Both are `warn`, which is also what `listen()` has always used for
+the mistakes that are about the shape of the program rather than about this
+request.
+
+**A diagnostic that fires on a program's shape can be wrong about the program;
+one that fires on what the program did cannot.** `testing.Client.send` briefly
+checked every route for a missing service and broke a legitimate example test
+that never calls the route in question. The check that survived is per-route and
+fires when the handler actually asks
+([ADR 0079](./adr/0079-there-is-a-phase-before-the-server.md)).
+
+**A library can read the optimize mode of the program that imports it.** This
+was written down as an open question and it is a fifteen-minute experiment:
+`std` is one module per compilation and takes the *root's* mode, so
+`std.log.default_level` read from inside nilo says what the program was built
+at, while `@import("builtin").mode` says what nilo was built at. Comparing them
+is the warning that had been assumed impossible
+([ADR 0084](./adr/0084-a-library-can-tell-what-mode-the-program-was-built-in.md)).
+The case it exists for is a test step, so it fires from the test client too.
+
+**`b.lazyDependency` is a request, not a conditional**, and measuring what a
+dependent downloads has two caches to clear rather than one — the project's
+`zig-pkg/` and the global cache's `p/`. Warm either one and the measurement
+gives a confident wrong answer in either direction: nothing downloaded, or
+everything unpacked
+([ADR 0075](./adr/0075-a-lazy-dependency-is-a-request.md)). Both wrong versions
+looked like passes.
+
+**A figure that reproduces twice is on its way to being a constant.** "SQLite
+costs 524,840 bytes" was measured, published in four places, and reproduced
+exactly by the application that went looking for something wrong with it — the
+one item on its list of twenty that turned out to be *right*. It is 523,352
+now. Nothing about SQLite changed; the framework around it grew by about 11 KB
+and the two probes carry different amounts of it. **A difference between two
+binaries is not a property of the thing that differs**, and the way to notice
+is to build the before rather than quote it: `git archive HEAD | tar -x` into a
+scratch directory, both trees built with the same flags, on the same afternoon.
+
+**A build step that succeeds caches; one that fails does not.** All 46 refusals
+are re-analysed on every run because the compiler keeps nothing from a failed
+compilation — which is why they are the slow part of `zig build test` and why
+the snippet checks, which are the same shape pointed the other way, cost ~30ms
+each warm. That asymmetry decides which of the two can afford to grow.

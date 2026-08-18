@@ -23,7 +23,10 @@ fn niloFor(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
 ) []const std.Build.Module.Import {
-    const nilo = b.dependency("nilo", .{ .target = target, .optimize = optimize });
+    // `.sql = true` is what fetches pg.zig and zqlite, and leaving it out is
+    // what stops them being fetched — which is the fix for item 16 in `DX.md`
+    // and is the whole of what adopting it cost here (ADR 0075).
+    const nilo = b.dependency("nilo", .{ .target = target, .optimize = optimize, .sql = true });
     return b.allocator.dupe(std.Build.Module.Import, &.{
         .{ .name = "nilo_http", .module = nilo.module("nilo_http") },
         // M2. Three tool modules, and three lines is the whole cost of them: no

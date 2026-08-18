@@ -17,6 +17,11 @@ the path is relative to the working directory the server runs in
 
 warning: std.log will block the event loop. Add to your root source file:
 pub const std_options_debug_io = nilo.debug_io;
+
+warning: nilo was built in Debug and this program in ReleaseSafe, which is legal
+and slow. Pass the mode through: b.dependency("nilo", .{ .target = target,
+.optimize = optimize }) — in the test step too, which is the one that usually
+gets missed.
 ```
 
 That line is the whole answer, so it is also the last thing on the screen:

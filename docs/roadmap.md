@@ -322,7 +322,7 @@ it borrows the loop and owns no destination.
   practice a file that large is a video or an archive and is compressed already.
   A handler returning JSON gets no such thing either, and the reason is the one
   that shaped the static half: a deflate compressor needs a 64 KB window, so one
-  per connection would multiply the 8,767 bytes an idle connection holds and one
+  per connection would multiply the 4,669 bytes an idle connection holds and one
   per request would break the allocation budget
   ([ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md)). The shape that
   fits is a pool of compressors sized to the thread count rather than the
@@ -353,7 +353,13 @@ it borrows the loop and owns no destination.
   because the switch is a runtime `null` check
   ([ADR 0017](./adr/0017-the-api-description-comes-from-the-signatures.md)).
   Fixing it needs a build option that a `zig fetch` dependent has to thread
-  through, which is a worse ergonomic problem than the one it solves.
+  through. That argument was "a worse ergonomic problem than the one it solves"
+  until `.sql = true` shipped
+  ([ADR 0075](./adr/0075-a-lazy-dependency-is-a-request.md)), so the shape is
+  now known and the objection is only about the size: one line in a
+  `b.dependency` call is a fair price for 11 MB of driver nobody downloads and
+  a poor one for 14 KB of binary nobody notices. If a second option lands for
+  another reason, this rides along with it.
 - **The API description is silent about authentication.** A handler taking a
   `CurrentUser` needs an `Authorization` header and the document does not say
   so, because the header is a line of Zig inside the resolver rather than
@@ -368,10 +374,12 @@ it borrows the loop and owns no destination.
   signature settles — but it is the rule that costs the most, and if a way is
   ever found to state a failure in a type without inventing an annotation, this
   is where it goes.
-- **`describeBadBody` walks eight levels and then stops.** Deeper than that, a
-  bad field is a plain 400 again. Same limit as the schema walker and the
-  staleness trap, and for the same reason: a type holding one of its own has to
-  stop somewhere.
+- **`describeBadBody` walks eight levels and then stops.** Deeper than that the
+  400 says the ceiling was reached rather than which field is wrong
+  ([ADR 0081](./adr/0081-a-ceiling-that-is-reached-is-said-out-loud.md)). Same
+  limit as the schema walker and the staleness trap, and for the same reason: a
+  type holding one of its own has to stop somewhere. Raising it is the part
+  nobody has costed.
 - **The logged duration of a streamed response is its lifetime, not its
   latency.** One line per request is the contract, and a stream's line arrives
   when the stream ends. Time to first byte is a different number and wants a
@@ -768,7 +776,7 @@ module the change is in.
   point the same way. Rendering means producing a string per request, which is
   an allocation per request, which is the one axis
   [ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md) treats as a hard
-  invariant rather than a budget — the 8,767 bytes and the single allocation are
+  invariant rather than a budget — the 4,669 bytes and the single allocation are
   what nilo has to sell, and a template layer spends both. And the two shapes
   Zig actually offers are far apart with nothing argued for in between:
   comptime-checked templates, which are a compiler of their own, and runtime

@@ -431,7 +431,7 @@ Nothing about the API changed to get any of it. What *did* change:
   Together with the clock this is what `nilo_id` was waiting for:
 
   ```zig
-  const key = id.v7(try c.entropy(id.Uuid.v7_entropy), nilo.nowMillis());
+  const key = id.v7(try c.entropy(id.Uuid.v7_entropy), @intCast(nilo.nowMillis()));
   ```
 - **`sql.Timestamp.now()`** — so `created_at` is a field a handler fills
   rather than a database default it has to remember to set.
@@ -964,7 +964,81 @@ if (!try c.verifyPassword(pw.huge_pages, if (row) |r| r.password else null, form
 - **`zig build test-pw`**, and `zig test pw/pw.zig` with no `build.zig` at all
    — the same entry condition `nilo_id` and `nilo_config` have.
 
+### Twenty things an application found
+
+An application written against the published pages kept a list of everything
+that cost it an hour. All twenty are closed here. The ones you have to do
+something about come first.
+
+- **Breaking: `nilo_sql` is asked for.** Add `.sql = true` to your
+  `b.dependency("nilo", …)` and nothing else changes; leave it out and
+  importing `nilo_sql` is a compile error saying this in one sentence. The flag
+  is what fetches pg.zig and zqlite — **11 MB of driver that every dependent
+  was downloading**, including one with no database in it at all, because
+  `b.lazyDependency` is a request rather than a conditional
+  ([ADR 0075](./docs/adr/0075-a-lazy-dependency-is-a-request.md)). `zig build
+  fetch-check` is the measurement, run against an empty package cache.
+- **Breaking: a type with its own `jsonStringify` needs `pub const
+  nilo_openapi`.** The generator used to describe such a type by its *fields*,
+  so `Uuid` appeared in the document as `{ bytes: [16]integer }` while the wire
+  carried a string — a document that contradicts the endpoint it describes.
+  Say what it looks like instead: `pub const nilo_openapi = .{ .type =
+  "string", .format = "uuid" };`. Missing it is a compile error naming the type
+  ([ADR 0076](./docs/adr/0076-a-type-that-writes-its-own-json-says-so.md)).
+  nilo's own — `Uuid`, `Timestamp`, `AsText` — carry theirs.
+- **`app.start(io)`** — the phase there was not: after the services are open
+  and before a socket exists, for the migration or the seed that has to run
+  against a live pool. `listen()` reaches the same code, so a program that does
+  both does not open two pools
+  ([ADR 0079](./docs/adr/0079-there-is-a-phase-before-the-server.md)).
+- **`g.without(mw)`** — the same group with one middleware off for the routes
+  registered through it, which is how `/v1` gets a session guard and
+  `/v1/sign-up` still answers. The default stays deny and the exception lives
+  where the route is, so renaming the route moves it
+  ([ADR 0080](./docs/adr/0080-a-route-can-say-it-is-not-covered.md)).
+  **`@TypeOf(g).mounted_at`** publishes the prefix a group was built with,
+  which a plugin had no way to ask for.
+- **`b.must("field", holds, "wants …")`** — a rule of your own, in the same 422
+  as the fields nilo could not convert. Validation is still yours and nilo
+  writes no rule; what it carries is the answer, so an endpoint stops refusing
+  in two shapes ([ADR 0082](./docs/adr/0082-a-rule-of-your-own-joins-the-answer.md)).
+  **`Bound(T).ok(value)`** builds one for a test without knowing `Outcome`
+  exists.
+- **`db.exec(c, sql, values)`** — a statement that answers with nothing, which
+  had to invent a Row to have one. **`sql.Uuid` works on SQLite**: it binds as
+  36 characters there and as 16 bytes on Postgres, which is what each stores
+  ([ADR 0078](./docs/adr/0078-a-uuid-is-whatever-the-database-stores.md)) — it
+  used to be a compile error from three layers down naming a Zig issue. And **a
+  condition takes a `Str`**: `.where = .{ .email = form.email }` is what
+  everybody writes and it did not compile.
+- **A body nested deeper than nilo follows says so.** Past eight levels the 400
+  was empty — no field, no reason, indistinguishable from a body that is not
+  JSON. It now says which wall it hit
+  ([ADR 0081](./docs/adr/0081-a-ceiling-that-is-reached-is-said-out-loud.md)).
+- **A mismatched `.optimize` is a warning**, at `listen()` and at the first
+  `testing.Client` — the test step being the one that usually gets missed
+  ([ADR 0084](./docs/adr/0084-a-library-can-tell-what-mode-the-program-was-built-in.md)).
+- **A `union(enum)` gets a `oneOf` schema** instead of `{}`, and one shape that
+  differs only by a lifetime — `Filing(Str)` and `Filing(Text)` — is one
+  component rather than two
+  ([ADR 0077](./docs/adr/0077-a-lifetime-has-no-rendering-in-json.md)).
+- **`zig build snippets`** compiles the documentation's own snippets, which is
+  how seven mistakes in one five-line example were found
+  ([ADR 0083](./docs/adr/0083-the-guide-is-the-source-of-its-own-snippets.md)).
+  New page: [Settings](./docs/guide/config.md), with the whole of a `main` that
+  reads a `.env` — the `Io` both halves need comes from `main`'s own argument.
+
 ### What it costs
+
+The twenty findings above cost **+11,400 bytes** on the hello example and
+**+17,272** on rest, stripped `ReleaseFast`, measured against a build of the
+previous commit rather than against a published figure. It is `.text` rather
+than strings, and `hello` — no body type, no binding, no service, no document —
+pays most of it, so it is unconditional: an App with a start phase before the
+server, an exemption list on the chain resolver, and a third startup warning.
+Allocations per request, memory per idle connection and p99 are unchanged, and
+the same pass moved what SQLite costs a program that uses it from 524,840 bytes
+to **523,352**.
 
 A project that never signs anybody in links **0 bytes** of `nilo_pw` — measured,
 a stripped `ReleaseFast` build before and after is byte-identical in every

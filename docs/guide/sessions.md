@@ -4,7 +4,7 @@
 const Signed = struct { user: u32, admin: bool = false };
 
 fn signIn(s: nilo.Session(Signed), form: nilo.Form(Login)) !nilo.Redirect(303) {
-    const id = try accounts.check(form.email, form.password) orelse
+    const id = try accounts.check(form.email, form.password.view()) orelse
         return .to("/login?wrong");
     try s.set(.{ .user = id });
     return .to("/");
@@ -164,20 +164,25 @@ line it draws around [middleware and resolved values](./middleware.md).
 **Checking the password is the one half nilo does provide**, because getting it
 wrong is quiet:
 
+<!-- compiles -->
 ```zig
 const pw = @import("nilo_pw"); // the hashing module, for `pw.huge_pages` and `pw.Cost`
 
-fn signIn(c: *nilo.Ctx, s: nilo.Session(User), form: nilo.Form(SignIn)) !Redirect(303) {
-    const db = c.service(*Db).?;
-    const conn = try db.acquire();
-    defer conn.release();
+fn signIn(
+    c: *nilo.Ctx,
+    db: *sql.Db,
+    s: nilo.Session(Signed),
+    form: nilo.Form(SignIn),
+) !nilo.Redirect(303) {
+    const row = try db.one(Account, c, .{ .where = .{ .email = form.value.email } });
+    if (!try c.verifyPassword(
+        pw.huge_pages,
+        if (row) |r| r.password.view() else null,
+        form.value.password.view(),
+    )) return nilo.fail.unauthorized("that is not a sign-in", .{});
 
-    const row = try db.find(Account, conn, .{ .email = form.email });
-    if (!try c.verifyPassword(pw.huge_pages, if (row) |r| r.password else null, form.password))
-        return nilo.fail.unauthorized("that is not a sign-in", .{});
-
-    try s.set(.{ .id = row.?.id });
-    return .{ .location = "/" };
+    try s.set(.{ .user = @intCast(row.?.id) });
+    return .to("/");
 }
 ```
 
@@ -202,17 +207,20 @@ Three things about that call are the whole reason it exists
 
 Signing somebody up is the other direction:
 
+<!-- compiles: body -->
 ```zig
-const stored = try c.hashPassword(pw.huge_pages, form.password);
-_ = try db.insert(Account, conn, .{ .email = form.email, .password = stored.text() });
+const stored = try c.hashPassword(pw.huge_pages, form.password.view());
+_ = try db.insert(Account, c, .{ .email = form.email, .password = stored.text() });
 ```
 
 And when a sign-in succeeds is the one moment the plaintext is in hand, so it
 is the only place a row written at an older Cost can be written forward:
 
+<!-- compiles: body -->
 ```zig
-if (try pw.needsRehash(row.?.password, .default)) {
-    const fresh = try c.hashPassword(pw.huge_pages, form.password);
+const row = try db.one(Account, c, .{ .where = .{ .email = form.email } });
+if (try pw.needsRehash(row.?.password.view(), .default)) {
+    const fresh = try c.hashPassword(pw.huge_pages, form.password.view());
     _ = try db.update(Account, c, .{
         .set = .{ .password = fresh.text() },
         .where = .{ .id = row.?.id },

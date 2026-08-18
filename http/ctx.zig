@@ -400,7 +400,7 @@ pub const Ctx = struct {
     /// the Gate that says how many may run at once (ADR 0048).
     ///
     /// ```zig
-    /// const stored = try c.hashPassword(gpa, form.password);
+    /// const stored = try c.hashPassword(gpa, form.password.view());
     /// _ = try db.insert(User, conn, .{ .email = form.email, .password = stored.text() });
     /// ```
     ///
@@ -436,7 +436,7 @@ pub const Ctx = struct {
     ///
     /// ```zig
     /// const row = try db.find(User, conn, .{ .email = form.email });
-    /// if (!try c.verifyPassword(gpa, if (row) |r| r.password else null, form.password))
+    /// if (!try c.verifyPassword(gpa, if (row) |r| r.password else null, form.password.view()))
     ///     return nilo.fail(401, "that is not a sign-in");
     /// ```
     ///
@@ -1267,7 +1267,9 @@ fn describeBadBody(
         .{ comptime fieldList(T), kindOf(dynamic) },
     );
 
-    return describeObject(T, arena, dynamic.object, "", max_body_depth) orelse err;
+    var deeper = false;
+    if (describeObject(T, arena, dynamic.object, "", max_body_depth, &deeper)) |found| return found;
+    return if (deeper) tooDeep() else err;
 }
 
 /// Turn a failed body parse into one outcome per field of `T`, instead of
@@ -1357,7 +1359,9 @@ fn collectBadBody(
                 any = true;
                 if (f.defaultValue()) |default| @field(out, f.name) = default;
             } else {
-                return describeField(f.type, arena, given, f.name, max_body_depth) orelse err;
+                var deeper = false;
+                if (describeField(f.type, arena, given, f.name, max_body_depth, &deeper)) |found| return found;
+                return if (deeper) tooDeep() else err;
             }
         } else if (f.default_value_ptr == null) {
             outcomes[i].reason = .missing;
@@ -1391,6 +1395,7 @@ fn describeObject(
     object: std.json.ObjectMap,
     where: []const u8,
     comptime depth: u8,
+    deeper: *bool,
 ) ?anyerror {
     // Something the body carries that the endpoint has no room for. Almost
     // always a typo, which is why the known names go out with it.
@@ -1422,7 +1427,7 @@ fn describeObject(
     // shape for the field it landed in — here, or somewhere further down.
     inline for (@typeInfo(T).@"struct".fields) |f| {
         if (object.get(f.name)) |given| {
-            if (describeField(f.type, arena, given, nameWithin(arena, where, f.name), depth)) |found| {
+            if (describeField(f.type, arena, given, nameWithin(arena, where, f.name), depth, deeper)) |found| {
                 return found;
             }
         }
@@ -1439,6 +1444,7 @@ fn describeField(
     given: std.json.Value,
     name: []const u8,
     comptime depth: u8,
+    deeper: *bool,
 ) ?anyerror {
     // Asked of `T` and not of what is inside it, so an optional still says
     // "text or null" rather than dropping the half that makes it optional.
@@ -1459,9 +1465,19 @@ fn describeField(
         );
     }
 
-    if (depth == 0) return null;
     // An optional sent as null fits and holds nothing to look inside.
     if (given == .null) return null;
+    // **The bottom of the budget, and it used to be silent.** A body nested
+    // deeper than this answered a bare 400 with no field, no reason and no
+    // hint that depth was what happened — the cliff is documented and how
+    // sheer it looks from the client's side was not (ADR 0081). The walk still
+    // stops, because there is nothing below here it can name; what changes is
+    // that the caller is told a ceiling was reached, and says so instead of
+    // saying nothing.
+    if (depth == 0) {
+        if (hasInsides(T, given)) deeper.* = true;
+        return null;
+    }
 
     const Inner = if (comptime patch_mod.isPatch(T)) T.nilo_patch else switch (@typeInfo(T)) {
         .optional => |o| o.child,
@@ -1469,19 +1485,52 @@ fn describeField(
     };
 
     if (Inner != Str) switch (@typeInfo(Inner)) {
-        .@"struct" => return describeObject(Inner, arena, given.object, name, depth - 1),
+        .@"struct" => return describeObject(Inner, arena, given.object, name, depth - 1, deeper),
         .pointer => |p| {
             // `[]const u8` is text, which has nothing inside it to describe.
             if (p.size != .slice or p.child == u8) return null;
             for (given.array.items, 0..) |item, i| {
                 const at = std.fmt.allocPrint(arena, "{s}[{d}]", .{ name, i }) catch name;
-                if (describeField(p.child, arena, item, at, depth - 1)) |found| return found;
+                if (describeField(p.child, arena, item, at, depth - 1, deeper)) |found| return found;
             }
         },
         else => {},
     };
 
     return null;
+}
+
+/// Whether there is anything below this value worth having walked into — a
+/// struct, or a list of something that is not bytes. A `Str` at the ceiling is
+/// not a body that is too deep; it is the bottom of one that fits.
+fn hasInsides(comptime T: type, given: std.json.Value) bool {
+    const Inner = if (comptime patch_mod.isPatch(T)) T.nilo_patch else switch (@typeInfo(T)) {
+        .optional => |o| o.child,
+        else => T,
+    };
+    if (Inner == Str) return false;
+    return switch (@typeInfo(Inner)) {
+        .@"struct" => given == .object,
+        .pointer => |p| p.size == .slice and p.child != u8 and given == .array and
+            given.array.items.len > 0,
+        else => false,
+    };
+}
+
+/// The one thing to say about a body nobody can point inside of.
+///
+/// **A fact rather than a dead end** (ADR 0081). The old answer was
+/// `{"error":"Bad Request","status":400}` — not a worse sentence, *no*
+/// sentence — and a client holding it had no way to tell a depth ceiling from
+/// a parser that gave up. Raising the ceiling is a separate question with a
+/// comptime cost attached; saying which wall was hit is free.
+fn tooDeep() anyerror {
+    return fail.badRequest(
+        "the request body is valid JSON and does not fit this endpoint, but it is nested " ++
+            "deeper than {d} levels — which is as far as nilo follows a body — so it cannot " ++
+            "say which part is wrong. The mistake is somewhere below that.",
+        .{max_body_depth},
+    );
 }
 
 /// `address.street` — what to call a field that is inside something else. At

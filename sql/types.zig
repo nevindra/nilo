@@ -63,6 +63,12 @@ pub const Timestamp = struct {
 
     pub const nilo_column = "timestamptz";
 
+    /// What `jsonStringify` below actually sends, so that a document generated
+    /// from a Row carrying one describes a string rather than the `micros`
+    /// field nobody sees (ADR 0076). Plain data, so no module has to import
+    /// `nilo_http` to say it.
+    pub const nilo_openapi = .{ .type = "string", .format = "date-time" };
+
     /// Now, which this could not answer until Core had a clock (ADR 0045).
     /// A copy rather than a conversion: `nowMicros` counts in the unit this
     /// column stores.
@@ -200,6 +206,12 @@ pub fn AsText(comptime column: []const u8) type {
         text: []const u8,
 
         pub const nilo_column = column;
+
+        /// Text on the wire, and said out loud so a generated client is told
+        /// so (ADR 0076). No `format`: what `AsText("money")` holds is
+        /// whatever Postgres printed, and naming a format would be a claim
+        /// about a column this type deliberately knows nothing about.
+        pub const nilo_openapi = .{ .type = "string" };
 
         /// Kept, because the bytes handed over are the driver's read buffer
         /// and die at the next row (`wire.zig`).

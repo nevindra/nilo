@@ -178,6 +178,36 @@ quietly.
 [`examples/orders`](../../examples/orders/main.zig) does the whole of this on a
 domain with lines, an address and a customer in it.
 
+### Past two levels, write the walk once
+
+Count the walks. A service takes `[]const u8` and a handler has `Str`, so
+something converts on the way **in**. A row that owns its text copies on the way
+in as well. A read hands back a copy in the request arena, so something walks it
+on the way **out**. That is three walks of one shape, and `orders` writes all
+three by hand because at that size hand-written is clearer.
+
+It stops being clearer quickly. A document with an optional `meta`, a list of
+`sections` each holding a list of `lines`, and a list of `tags` is three
+hand-written recursive walks — and three places to forget the field somebody
+adds next month, silently, with the compiler agreeing.
+
+**Past two levels of nesting, write the converter once by reflection**:
+
+```zig
+/// `source` walked into `Target`, borrowing its text or copying it.
+fn into(comptime Target: type, gpa: std.mem.Allocator, source: anytype, own: enum { borrow, own }) !Target
+```
+
+One function over `@typeInfo`, a hundred lines with the comments, and every
+field is covered because it never names one. nilo does not ship it, and that is
+deliberate rather than an omission: a converter that walks *your* types has
+opinions about what "the same shape" means — whether a `?T` that is null is a
+field at all, what happens to a `Str` inside a union — and shipping it means
+owning those opinions in every future version. Yours can just decide.
+
+What this paragraph is for is the *realising*, which is the expensive half. The
+application that went looking for it wrote the fourth `dupe` loop first.
+
 ## Handlers must not block
 
 `nilo.Mutex` is one case of a rule that runs through everything: **many requests

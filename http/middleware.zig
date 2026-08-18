@@ -82,6 +82,30 @@ fn underPrefix(prefix: []const u8, path: []const u8) bool {
     return true;
 }
 
+/// One route saying it is not covered by a middleware its group is.
+///
+/// **Every API with accounts has the same shape**: one prefix, almost all of it
+/// behind a session, and two routes inside it that cannot be — you cannot
+/// require a session to create one. There was nothing that removed a middleware
+/// and nothing that attached one to a single route, so `use(requireOperator)`
+/// on `/v1` guarded `/v1/sign-up` too and sign-up answered 401
+/// ([ADR 0080](../docs/adr/0080-a-route-can-say-it-is-not-covered.md)).
+///
+/// The pattern is **exact** rather than a prefix, and it is the joined one the
+/// route was registered under, produced by the same `joined(prefix, pattern)`
+/// call. That is what keeps the compiler in the loop: the exception is written
+/// where the route is declared, so renaming the route moves it, where a string
+/// skip-list inside the middleware would go on guarding a route that no longer
+/// exists.
+pub const Exemption = struct {
+    pattern: []const u8,
+    middleware: Middleware,
+
+    fn frees(self: Exemption, path: []const u8, middleware: Middleware) bool {
+        return self.middleware == middleware and std.mem.eql(u8, self.pattern, path);
+    }
+};
+
 /// The chain for `path`, in registration order. The caller owns the
 /// result. Resolved once per route at `listen()`; for a request that
 /// matched no route this runs per request, which is fine because that is
@@ -89,22 +113,29 @@ fn underPrefix(prefix: []const u8, path: []const u8) bool {
 pub fn chainFor(
     gpa: std.mem.Allocator,
     scoped: []const Scoped,
+    exemptions: []const Exemption,
     path: []const u8,
 ) ![]const Middleware {
     var n: usize = 0;
     for (scoped) |s| {
-        if (s.covers(path)) n += 1;
+        if (covered(s, exemptions, path)) n += 1;
     }
     if (n == 0) return &.{};
 
     const chain = try gpa.alloc(Middleware, n);
     var i: usize = 0;
     for (scoped) |s| {
-        if (!s.covers(path)) continue;
+        if (!covered(s, exemptions, path)) continue;
         chain[i] = s.middleware;
         i += 1;
     }
     return chain;
+}
+
+fn covered(s: Scoped, exemptions: []const Exemption, path: []const u8) bool {
+    if (!s.covers(path)) return false;
+    for (exemptions) |e| if (e.frees(path, s.middleware)) return false;
+    return true;
 }
 
 const testing = std.testing;
@@ -171,11 +202,11 @@ test "a prefix scopes a middleware to the routes under it" {
         .{ .prefix = "/api", .middleware = markB },
     };
 
-    const on_api = try chainFor(testing.allocator, &scoped, "/api/users/:id");
+    const on_api = try chainFor(testing.allocator, &scoped, &.{}, "/api/users/:id");
     defer testing.allocator.free(on_api);
     try testing.expectEqual(@as(usize, 2), on_api.len);
 
-    const off_api = try chainFor(testing.allocator, &scoped, "/health");
+    const off_api = try chainFor(testing.allocator, &scoped, &.{}, "/health");
     defer testing.allocator.free(off_api);
     try testing.expectEqual(@as(usize, 1), off_api.len);
     try testing.expect(off_api[0] == markA);
@@ -184,18 +215,18 @@ test "a prefix scopes a middleware to the routes under it" {
 test "a prefix only covers whole segments" {
     const scoped = [_]Scoped{.{ .prefix = "/api", .middleware = markA }};
 
-    const inside = try chainFor(testing.allocator, &scoped, "/api/users");
+    const inside = try chainFor(testing.allocator, &scoped, &.{}, "/api/users");
     defer testing.allocator.free(inside);
     try testing.expectEqual(@as(usize, 1), inside.len);
 
     // The group's own path, with nothing under it.
-    const itself = try chainFor(testing.allocator, &scoped, "/api");
+    const itself = try chainFor(testing.allocator, &scoped, &.{}, "/api");
     defer testing.allocator.free(itself);
     try testing.expectEqual(@as(usize, 1), itself.len);
 
     // `startsWith` used to put this middleware on a route that merely began
     // with the same letters. `static.zig` had the right rule all along.
-    const apiary = try chainFor(testing.allocator, &scoped, "/apiary");
+    const apiary = try chainFor(testing.allocator, &scoped, &.{}, "/apiary");
     defer testing.allocator.free(apiary);
     try testing.expectEqual(@as(usize, 0), apiary.len);
 }
@@ -204,22 +235,22 @@ test "a prefix carrying a param covers a pattern and a real path alike" {
     const scoped = [_]Scoped{.{ .prefix = "/orgs/:org", .middleware = markA }};
 
     // What `listen()` asks: the chain for each route, against its pattern.
-    const pattern = try chainFor(testing.allocator, &scoped, "/orgs/:org/members");
+    const pattern = try chainFor(testing.allocator, &scoped, &.{}, "/orgs/:org/members");
     defer testing.allocator.free(pattern);
     try testing.expectEqual(@as(usize, 1), pattern.len);
 
     // What a request that matched no route asks: against the real path.
-    const real = try chainFor(testing.allocator, &scoped, "/orgs/acme/members");
+    const real = try chainFor(testing.allocator, &scoped, &.{}, "/orgs/acme/members");
     defer testing.allocator.free(real);
     try testing.expectEqual(@as(usize, 1), real.len);
 
     // A param matches one segment, not the rest of the path.
-    const elsewhere = try chainFor(testing.allocator, &scoped, "/teams/acme/members");
+    const elsewhere = try chainFor(testing.allocator, &scoped, &.{}, "/teams/acme/members");
     defer testing.allocator.free(elsewhere);
     try testing.expectEqual(@as(usize, 0), elsewhere.len);
 
     // Too short to be under it at all.
-    const short = try chainFor(testing.allocator, &scoped, "/orgs");
+    const short = try chainFor(testing.allocator, &scoped, &.{}, "/orgs");
     defer testing.allocator.free(short);
     try testing.expectEqual(@as(usize, 0), short.len);
 }
@@ -229,7 +260,7 @@ test "registration order is the run order, prefix or not" {
         .{ .prefix = "/api", .middleware = markB },
         .{ .prefix = "", .middleware = markA },
     };
-    const chain = try chainFor(testing.allocator, &scoped, "/api/x");
+    const chain = try chainFor(testing.allocator, &scoped, &.{}, "/api/x");
     defer testing.allocator.free(chain);
     try testing.expect(chain[0] == markB);
     try testing.expect(chain[1] == markA);

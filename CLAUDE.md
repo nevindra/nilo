@@ -51,9 +51,18 @@ lines of converter of its own instead of sharing `http/convert.zig`.
 **The framework's one dependency is [zio](https://github.com/lalinsky/zio)**,
 pinned in `build.zig.zon`. The SQL module adds
 [pg.zig](https://github.com/lalinsky/pg.zig), which brings four of its own
-(buffer, metrics, xsync, tls) and is marked `.lazy = true` — a project that
-serves HTTP and never imports `nilo_sql` does not fetch, build or link any of
-it, and that is the property to keep (ADR 0040).
+(buffer, metrics, xsync, tls), and [zqlite](https://github.com/karlseguin/zqlite.zig),
+which brings the SQLite amalgamation. **A project that serves HTTP and never
+imports `nilo_sql` does not fetch, build or link any of them** — and it is
+`-Dsql`, not `.lazy = true`, that makes the first third of that true.
+`b.lazyDependency` is a *request*: called unconditionally it runs for every
+dependent whatever they import, which is how an app with no database in it
+downloaded 11.1 MB of driver for a year (ADR 0075). A dependent that wants the
+module passes `.sql = true` to `b.dependency("nilo", …)`.
+**`zig build fetch-check -Dnetwork` is what holds that** — it builds
+`bench/dependent/`, which imports `nilo_http` and nothing else, against two cold
+caches and fails on anything but zio landing. Not on `test`, for the reason
+`smoke-tls` is not: it needs the internet.
 
 Three files carry context this one deliberately does not repeat:
 
@@ -106,6 +115,7 @@ zig build refusals     # the framework's 63 compile-error checks — NOT the oth
 zig build refusals-sql # nilo_sql's 44; also run by test-sql
 zig build refusals-config  # nilo_config's 9, and refusals-pw for nilo_pw's 3
 zig build refusals-s3  # nilo_s3's 10; also run by test-s3
+zig build snippets     # the documentation's own marked snippets, which must compile
 zig build smoke-tls -Dnetwork   # a real HTTPS endpoint — NOT part of test
 zig build examples     # build all eight examples
 zig build fuzz -- --iterations 1000000 --seed 0x…   # generated requests at the parser
@@ -353,6 +363,15 @@ another is a check that silently never ran. Leave the `nilo: `
 prefix off the `.says` text — the build step supplies it, which is what makes a
 failure inside the standard library impossible to record as passing. See
 `refusals/README.md` and ADR 0027.
+
+**A published snippet is a program, and a build step compiles it.** Put
+`<!-- compiles -->` above a fenced `zig` block in the README, the reference or
+a guide page and `zig build snippets` extracts it, puts `docs/snippets/types.zig`
+in front of it, and compiles it — `<!-- compiles: body -->` for a block of loose
+statements, which gets `values.zig` and a function around it as well. The block
+in the page is the only copy; there is no file to keep in step. Unlike the
+refusals these **cache**, so marking another one is nearly free. ADR 0083 is the
+account, including the seven mistakes writing it found in one five-line example.
 
 **Tests sit at the bottom of the file they test**, and are named as sentences
 describing the behaviour, not the function: `test "a path param that is not a

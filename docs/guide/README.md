@@ -17,7 +17,7 @@ belongs to is decided by a single question — does it need the event loop?
 | **`nilo_sql`** | Postgres and SQLite: your struct is the table | [Talking to a database](./sql.md) |
 | **`nilo_s3`** | object storage: your bucket is a type | [the reference](../reference.md#nilo_s3) |
 | **`nilo_fetch`** | calling somebody else's HTTP API from a handler | [the reference](../reference.md#nilo_fetch) |
-| **`nilo_config`** | settings out of the environment, into a struct of yours | [the reference](../reference.md#nilo_config) |
+| **`nilo_config`** | settings out of the environment, into a struct of yours | [Settings](./config.md) |
 | **`nilo_pw`** | password hashing: argon2id, stored as PHC | [Sessions](./sessions.md) |
 | **`nilo_id`** | UUIDs, v4 and v7 | [the reference](../reference.md#nilo_id) |
 | **`nilo_core`** | `Str`, the Scope and the clock the rest share | [the reference](../reference.md#scope) |
@@ -65,7 +65,10 @@ const nilo = @import("nilo_http");
     and range requests, and a file too big to hold opened per request.
 14. [Errors](./errors.md) — failing a request from anywhere, what a client is
     told, and request ids for tying a failure to its log line.
-15. [Talking to a database](./sql.md) — `nilo_sql`: your struct is the table,
+15. [Settings](./config.md) — `nilo_config`: the environment read into a struct
+    of yours before anything opens, every bad one named at once, and the whole
+    of a `main` that reads a `.env` on the way past.
+16. [Talking to a database](./sql.md) — `nilo_sql`: your struct is the table,
     the query is a constant, and a misspelled column is a build error. It takes
     a Scope rather than a `Ctx`, so the same query runs with no server in the
     process. Postgres and SQLite, written the same way — and the section on
@@ -73,10 +76,10 @@ const nilo = @import("nilo_http");
 
 ## Shipping it
 
-16. [Testing](./testing.md) — handlers as ordinary functions, and the test
+17. [Testing](./testing.md) — handlers as ordinary functions, and the test
     client for the ones that write their answer.
-17. [OpenAPI](./openapi.md) — an API document written from the signatures.
-18. [Deploying](./deploying.md) — startup errors, panics, graceful shutdown,
+18. [OpenAPI](./openapi.md) — an API document written from the signatures.
+19. [Deploying](./deploying.md) — startup errors, panics, graceful shutdown,
     tuning, and what isn't here yet.
 
 ## Also

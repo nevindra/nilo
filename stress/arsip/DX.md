@@ -14,28 +14,34 @@ sessions and settings from the environment, **M3** the accounts in SQLite.
 **The number is an id, not a rank.** The table is sorted worst first, so a new
 item can land at the top without renumbering the ones below it.
 
-| # | Item | Area | Sev |
-|---|---|---|---|
-| 16 | [The lazy dependency is fetched by everybody, including an HTTP-only app](#16) | build | **critical** |
-| 14 | [A type with its own `jsonStringify` gets a schema that contradicts the wire](#14) | openapi | **critical** |
-| 18 | [`sql.Uuid` does not compile against SQLite, and the error is the driver's](#18) | sql | high |
-| 11 | [Three published examples of the password and id API do not compile](#11) | docs | high |
-| 13 | [There is no way to guard a prefix except two paths in it](#13) | middleware | high |
-| 19 | [There is no phase that is after the pool and before the server](#19) | sql, docs | high |
-| 1 | [Identical generic instantiations get two identical schemas](#1) | openapi | high |
-| 2 | [A service you forgot is a 500 in tests, not a name](#2) | services, testing | high |
-| 3 | [Past eight levels a body error says nothing at all](#3) | convert | high |
-| 15 | [A 422 has two shapes, and only one of them is nilo's](#15) | convert, docs | medium |
-| 17 | [A statement that answers with nothing still has to name a Row](#17) | sql | medium |
-| 20 | [Four small things that are wrong on the page](#20) | docs, build | low |
-| 4 | [A `union(enum)` has a derivable schema and gets `{}`](#4) | openapi | medium |
-| 5 | [`Bound(T)` cannot be built from the testing page](#5) | testing | medium |
-| 6 | [The `Str`→`Text` walk is unaddressed past two levels](#6) | docs | medium |
-| 12 | [Settings are read before the loop, and Zig 0.16 wants a loop to read them](#12) | config, docs | medium |
-| 7 | [An alias does not name a generic instantiation](#7) | openapi docs | low |
-| 8 | [The `zig init` template is not the one the guide edits](#8) | docs | low |
-| 9 | [A mismatched `.optimize` has no warning, but its twin does](#9) | build | low |
-| 10 | [A ReleaseSafe build is a minute and 677 MB](#10) | build | open |
+**Nineteen of the twenty are closed.** The last — item 10, what a ReleaseSafe
+build costs — was filed as "nothing to change yet" and still is. The `Closed by`
+column names where each decision lives; `docs/history.md` has what working
+through the list taught, including the seven further mistakes that compiling the
+guide's own snippets turned up.
+
+| # | Item | Area | Sev | Closed by |
+|---|---|---|---|---|
+| 16 | [The lazy dependency is fetched by everybody, including an HTTP-only app](#16) | build | **critical** | ADR 0075 — `.sql = true`, and `zig build fetch-check` |
+| 14 | [A type with its own `jsonStringify` gets a schema that contradicts the wire](#14) | openapi | **critical** | ADR 0076 — `nilo_openapi`, with a refusal |
+| 18 | [`sql.Uuid` does not compile against SQLite, and the error is the driver's](#18) | sql | high | ADR 0078 — a Uuid binds as what the dialect stores |
+| 11 | [Three published examples of the password and id API do not compile](#11) | docs | high | ADR 0083 — `zig build snippets`; it found four more |
+| 13 | [There is no way to guard a prefix except two paths in it](#13) | middleware | high | ADR 0080 — `g.without(mw)`, and `mounted_at` |
+| 19 | [There is no phase that is after the pool and before the server](#19) | sql, docs | high | ADR 0079 — `app.start(io)` |
+| 1 | [Identical generic instantiations get two identical schemas](#1) | openapi | high | ADR 0077 — one shape, one component |
+| 2 | [A service you forgot is a 500 in tests, not a name](#2) | services, testing | high | ADR 0079 — named per route, when the handler asks |
+| 3 | [Past eight levels a body error says nothing at all](#3) | convert | high | ADR 0081 — the ceiling says so |
+| 15 | [A 422 has two shapes, and only one of them is nilo's](#15) | convert, docs | medium | ADR 0082 — `b.must(…)` |
+| 17 | [A statement that answers with nothing still has to name a Row](#17) | sql | medium | `db.exec` / `tx.exec` |
+| 20 | [Four small things that are wrong on the page](#20) | docs, build | low | all four; the fifth was already right |
+| 4 | [A `union(enum)` has a derivable schema and gets `{}`](#4) | openapi | medium | a `oneOf` written from the tag |
+| 5 | [`Bound(T)` cannot be built from the testing page](#5) | testing | medium | ADR 0082 — `Bound(T).ok(value)` |
+| 6 | [The `Str`→`Text` walk is unaddressed past two levels](#6) | docs | medium | `guide/services.md`, past two levels |
+| 12 | [Settings are read before the loop, and Zig 0.16 wants a loop to read them](#12) | config, docs | medium | `guide/config.md`, and `main`'s own `Io` |
+| 7 | [An alias does not name a generic instantiation](#7) | openapi docs | low | `guide/openapi.md#named-shapes` |
+| 8 | [The `zig init` template is not the one the guide edits](#8) | docs | low | `guide/getting-started.md`, the whole `build.zig` |
+| 9 | [A mismatched `.optimize` has no warning, but its twin does](#9) | build | low | ADR 0084 — read off std, at `listen()` and in a test |
+| 10 | [A ReleaseSafe build is a minute and 677 MB](#10) | build | open | **open** — nothing measured against a nilo example yet |
 
 ---
 

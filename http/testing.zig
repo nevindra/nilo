@@ -26,10 +26,15 @@
 
 const std = @import("std");
 
-const App = @import("app.zig").App;
+const app_mod = @import("app.zig");
+const App = app_mod.App;
 const bulkhead = @import("bulkhead.zig");
 const fail = @import("fail.zig");
 const str_mod = @import("nilo_core");
+
+/// Whether the optimize-mode warning has already been given. One process
+/// builds one nilo, so the answer is the same for every test in it.
+var said_the_mode = false;
 
 pub const Options = struct {
     /// The response buffer. A request whose answer does not fit gets a
@@ -148,6 +153,16 @@ pub const Client = struct {
     peer: bulkhead.Peer = .{},
 
     pub fn init(gpa: std.mem.Allocator, options: Options) !Client {
+        // The one warning `listen()` gives that a test can also earn, and the
+        // place it is worth most: a suite that runs in both optimize modes
+        // and passes neither through to `b.dependency` is the case ADR 0084
+        // was written about. Once per process, because a suite makes one of
+        // these per test and the answer cannot change between them.
+        if (!said_the_mode) {
+            said_the_mode = true;
+            app_mod.warnIfBuiltDifferently();
+        }
+
         return .{
             .gpa = gpa,
             .arena = std.heap.ArenaAllocator.init(gpa),
@@ -220,6 +235,15 @@ pub const Client = struct {
     pub fn send(self: *Client, app: *App, raw_request: []const u8) !Answer {
         // What `listen()` would have done. Idempotent, so calling it once
         // per request costs nothing after the first.
+        //
+        // **`checkServices` is deliberately not here** (ADR 0079). It was, for
+        // an afternoon, and it refused a test that drives an App to fetch
+        // `/openapi.json` and never touches the routes whose services are
+        // missing — which is a fair thing to write and not a mistake. The
+        // complaint it was answering was that nothing named the type; that is
+        // answered where the route actually needs one, in `typed.zig`, which
+        // has no false positive to have. `app.checkServices()` is public for a
+        // test that wants the whole gate.
         try app.resolveChains();
 
         var in = std.Io.Reader.fixed(raw_request);

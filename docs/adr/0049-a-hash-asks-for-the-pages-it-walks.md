@@ -62,7 +62,7 @@ hash: **nothing is held between them**, which is what separates this from the
 pool the table above rules out.
 
 ```zig
-const stored = try c.hashPassword(pw.huge_pages, form.password);
+const stored = try c.hashPassword(pw.huge_pages, form.password.view());
 ```
 
 **`verifyWith` takes the Cost, because the no-account path is timed against

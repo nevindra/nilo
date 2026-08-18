@@ -94,7 +94,58 @@ body, and an annotation saying otherwise would be a second thing to keep in step
 with the code — which is what this whole feature exists to avoid
 ([ADR 0024](../adr/0024-a-failure-mode-belongs-in-the-return-type.md)).
 
-**Shapes.** A type with no JSON shape is `{}` — "anything", which is true.
+**Shapes.** A type with no JSON shape is `{}` — "anything", which is true. An
+**untagged** union is one: nothing in the type says which arm is live. A
+`union(enum)` is not, and gets the `oneOf` `std.json` actually writes.
+
+## One shape, two lifetimes
+
+`Meta(Str)` for the body and `Meta(Text)` for the row is the split nilo asks
+for, and it used to cost a generated client two identical types. It doesn't:
+where a `_Str` and a `_Text` half render the same all the way down, they are one
+component called `Meta`
+([ADR 0077](../adr/0077-a-lifetime-has-no-rendering-in-json.md)). Two shapes
+that merely look alike — `Page_Order` and `Page_User` — keep their own names.
+
+## A type that writes its own JSON
+
+If your type has a `jsonStringify`, `std.json` calls it and never looks at your
+fields — so nilo doesn't either. Reflecting the struct would describe something
+the server doesn't send, which is worse than saying nothing: it broke every
+generated client that read a `nilo_id` value, because a `Uuid` goes out as 36
+characters and its struct is sixteen bytes
+([ADR 0076](../adr/0076-a-type-that-writes-its-own-json-says-so.md)).
+
+So say what you send, beside the function that sends it:
+
+```zig
+const Uuid = struct {
+    bytes: [16]u8,
+
+    pub fn jsonStringify(self: Uuid, jw: anytype) !void {
+        try jw.write(&self.toText());
+    }
+
+    pub const nilo_openapi = .{ .type = "string", .format = "uuid" };
+};
+```
+
+`type` is required and is one of `"string"`, `"integer"`, `"number"`,
+`"boolean"`. `format` is optional and is a hint to a client generator —
+`"uuid"`, `"date-time"`, `"email"`. Two fields is the whole of it; this is a way
+for a custom writer to stop lying, not a second language for describing types.
+
+nilo's own types already do it: `nilo_id`'s `Uuid`, and `nilo_sql`'s
+`Timestamp`, `Decimal`, `Interval` and `Inet`. You need this only for a type of
+your own that writes itself.
+
+**A custom writer that says nothing gets `{}` and a note** saying the writer is
+custom and how to describe it. Visibly silent, rather than confidently wrong.
+
+**An alias is not a name.** `pub const NewDoc = Filing(Str);` reads well in Zig
+and the document still calls the shape `Filing_Str` — the name comes from the
+compiler's name for the instantiation, and a Zig alias creates no new one. Write
+the struct out if the client's type name matters.
 
 **Answers it cannot see.** A handler that takes a `*Ctx` and returns nothing has
 sent its answer itself, somewhere in its body, and no reading of its signature

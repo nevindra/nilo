@@ -17,25 +17,44 @@ That writes nilo into your `build.zig.zon`, pinned to the tag you asked for.
 **Keep the `?ref=`.** Without it `zig fetch` resolves whatever `main` is at that
 moment and writes *that* commit's hash into your lockfile — so two people
 installing a week apart get two different libraries, and neither of them asked
-for a version. Then hand the module to whatever
-imports it, in `build.zig`:
+for a version.
+
+What `zig init` leaves behind is a library-and-executable scaffold built around
+`src/root.zig`, and it is not what you want. **Replace the generated
+`build.zig` with the one below rather than pasting into it, and delete
+`src/root.zig`** — that template is Zig's and nothing here can change it. Keep
+`build.zig.zon`, which is where `zig fetch` just wrote nilo.
+
+Then hand the module to whatever imports it, in `build.zig`:
 
 ```zig
-const nilo = b.dependency("nilo", .{ .target = target, .optimize = optimize });
+const std = @import("std");
 
-const exe = b.addExecutable(.{
-    .name = "my-app",
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "nilo_http", .module = nilo.module("nilo_http") },
-        },
-    }),
-});
-b.installArtifact(exe);
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+
+    const nilo = b.dependency("nilo", .{ .target = target, .optimize = optimize });
+
+    const exe = b.addExecutable(.{
+        .name = "my-app",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "nilo_http", .module = nilo.module("nilo_http") },
+            },
+        }),
+    });
+    b.installArtifact(exe);
+
+    const run = b.addRunArtifact(exe);
+    b.step("run", "Run the server").dependOn(&run.step);
+}
 ```
+
+That is the whole file — `zig build run` after it, and `src/main.zig` next.
 
 The package is `nilo`; the module is `nilo_http`. **The bare name is the
 project's, not any one module's** — `nilo_sql`, `nilo_id` and `nilo_core` sit
@@ -50,7 +69,22 @@ const nilo = @import("nilo_http");
 ```
 
 Pass the same `.optimize` through to the dependency. Building nilo in `Debug`
-under a `ReleaseFast` program is legal and slow, and nothing warns about it.
+under a `ReleaseFast` program is legal and slow, and nilo says so at startup
+rather than leaving you to find it:
+
+```
+nilo was built in Debug and this program in ReleaseSafe, which is legal and
+slow. Pass the mode through: b.dependency("nilo", .{ .target = target,
+.optimize = optimize }) — in the test step too, which is the one that usually
+gets missed.
+```
+
+**The test step is the one that usually gets missed**, which is why the same
+warning comes out of `nilo.testing.Client` and not only out of `listen()`: a
+suite that loops over both optimize modes fetches the dependency in the same
+place, and a ReleaseSafe suite running against a Debug nilo is checking a
+configuration nobody deploys
+([ADR 0084](../adr/0084-a-library-can-tell-what-mode-the-program-was-built-in.md)).
 
 ## A server that answers
 

@@ -501,6 +501,40 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             return fill(Row, null, try self.wireOf(), null, c, sql, null, values);
         }
 
+        /// A statement that answers with **nothing**, and the number of rows
+        /// it changed.
+        ///
+        /// `CREATE TABLE`, `CREATE INDEX`, `PRAGMA`, `VACUUM`, `ANALYZE`, a
+        /// `DELETE` written by hand. `raw` cannot express any of them honestly:
+        /// its first argument is the Row a `SELECT` list fills, and there is no
+        /// shape to describe when nothing is selected — so the only way to say
+        /// "no rows" used to be passing a Row that is not being read, which
+        /// reads like a mistake and was the recommended path by elimination
+        /// (ADR 0078).
+        ///
+        /// **A SQLite application needs this and a Postgres one mostly does
+        /// not**, which is why it arrived with the second Wire: there is no
+        /// server to have run the DDL somewhere else, so creating the table is
+        /// the application's job at startup and nobody else's.
+        ///
+        /// ```zig
+        /// _ = try db.exec(&run,
+        ///     \\CREATE TABLE IF NOT EXISTS accounts (
+        ///     \\  id    INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+        ///     \\  email TEXT NOT NULL UNIQUE COLLATE NOCASE
+        ///     \\)
+        /// , .{});
+        /// ```
+        ///
+        /// This module still did not write the statement, so the column check
+        /// it gives up is the same one `raw` gives up. What it keeps is the
+        /// pool, the Scope and the seven errors.
+        pub fn exec(self: *Self, c: anytype, sql: []const u8, values: anytype) !usize {
+            comptime core.checkScope(@TypeOf(c), "db.exec");
+            const w = try self.wireOf();
+            return w.exec(c.arena(), sql, values, null);
+        }
+
         // -- writing ---------------------------------------------------------
 
         /// Insert one row and give back what the database stored, generated
@@ -1077,6 +1111,13 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 comptime core.checkScope(@TypeOf(c), "tx.raw");
                 return fill(Row, null, self.w, &self.inner, c, sql, null, values);
             }
+
+            /// `db.exec` inside the transaction: a statement that answers with
+            /// nothing, and the rows it changed (ADR 0078).
+            pub fn exec(self: *Tx, c: anytype, sql: []const u8, values: anytype) !usize {
+                comptime core.checkScope(@TypeOf(c), "tx.exec");
+                return self.inner.exec(c.arena(), sql, values, null);
+            }
         };
 
         /// Rows pulled one at a time, each borrowed from the read buffer.
@@ -1159,8 +1200,30 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// The pool, or the error a handler can act on. One place, so that
         /// "the server started but the database was never reachable" reads
         /// the same from every call.
+        ///
+        /// **A pool that was never opened is a different mistake from a
+        /// database that went away**, and they used to be the same silent
+        /// `error.Disconnected` (ADR 0079). The error is still the same value
+        /// — a handler has nothing different to do — but the first one gets a
+        /// line saying which of the two it is and how to fix it, once, because
+        /// there is no way to reach here twice for that reason and have fixed
+        /// it in between.
         fn wireOf(self: *Self) !*W {
             if (self.wire) |*w| return w;
+            // A warning rather than an error, for the reason `listen()`'s
+            // warning about `std_options_debug_io` is one: it is about the
+            // shape of the program rather than about this request, and the
+            // request already fails on its own. `std.log.err` would also
+            // fail the test runner for every test that provokes it, which
+            // is how a diagnostic ends up deleted rather than fixed.
+            std.log.warn(
+                "nilo_sql: {s} has no pool, so this query has nothing to run on. " ++
+                    "The pool is opened by `nilo_start`, which `app.listen()` calls for every " ++
+                    "provided service — outside a server, or before one, `app.start(io)` does " ++
+                    "it, and `db.nilo_start(io)` does it for a `Db` no App holds. " ++
+                    "A `nilo.Run` is an arena and a lifetime; it is not a connection.",
+                .{whoami},
+            );
             return error.Disconnected;
         }
 
@@ -1407,8 +1470,8 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             comptime Row: type,
             options: anytype,
             c: anytype,
-        ) !Values(Row, @TypeOf(options), stmt) {
-            var out: Values(Row, @TypeOf(options), stmt) = undefined;
+        ) !Values(D, Row, @TypeOf(options), stmt) {
+            var out: Values(D, Row, @TypeOf(options), stmt) = undefined;
             inline for (stmt.paths, 0..) |path, i| {
                 out[i] = try forWire(@TypeOf(out[i]), where_mod.valueAt(options, path), c);
             }
@@ -1429,10 +1492,10 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             comptime V: type,
             items: []const V,
             c: anytype,
-        ) !BatchValues(Row, stmt) {
-            var out: BatchValues(Row, stmt) = undefined;
+        ) !BatchValues(D, Row, stmt) {
+            var out: BatchValues(D, Row, stmt) = undefined;
             inline for (stmt.params, 0..) |param, i| {
-                const Column = comptime BatchWrite(row_mod.ColumnType(Row, param.column));
+                const Column = comptime BatchWrite(D, row_mod.ColumnType(Row, param.column));
                 const gathered = try c.arena().alloc(Column, items.len);
                 // By pointer, because two of the conversions below hand back a
                 // slice of the value rather than a copy of it — and what they
@@ -1461,11 +1524,11 @@ fn Maybe(comptime T: type) type {
 /// is `BatchWrite` — two column types travel differently in an array than they
 /// do alone. Sharing the type would have meant a `WireWrite` that answered
 /// differently depending on who was asking, which is worse than two functions.
-fn BatchValues(comptime Row: type, comptime stmt: statement.Statement) type {
+fn BatchValues(comptime D: type, comptime Row: type, comptime stmt: statement.Statement) type {
     return comptime blk: {
         var fields: [stmt.params.len]type = undefined;
         for (stmt.params, 0..) |param, i| {
-            fields[i] = []const BatchWrite(row_mod.ColumnType(Row, param.column));
+            fields[i] = []const BatchWrite(D, row_mod.ColumnType(Row, param.column));
         }
         const frozen = fields;
         break :blk std.meta.Tuple(&frozen);
@@ -1486,7 +1549,7 @@ fn BatchValues(comptime Row: type, comptime stmt: statement.Statement) type {
 ///   is one allocation per row for that column** — the same cost reading one
 ///   already has, and the only place a batch pays per row rather than per
 ///   column.
-fn BatchWrite(comptime F: type) type {
+fn BatchWrite(comptime D: type, comptime F: type) type {
     comptime {
         if (F == types.Uuid) return []const u8;
         if (F == ?types.Uuid) return ?[]const u8;
@@ -1494,7 +1557,7 @@ fn BatchWrite(comptime F: type) type {
         if (@typeInfo(F) == .optional and types.jsonPayload(@typeInfo(F).optional.child) != null) {
             return ?[]const u8;
         }
-        return WireWrite(F);
+        return WireWrite(D, F);
     }
 }
 
@@ -1571,7 +1634,12 @@ const traps_enabled = builtin.mode == .Debug;
 /// rather than with one of nilo's. Binding a count as whatever integer the
 /// caller is holding costs nothing — the driver already narrows to the
 /// column's width and says so when a value will not fit.
-fn Values(comptime Row: type, comptime O: type, comptime stmt: statement.Statement) type {
+fn Values(
+    comptime D: type,
+    comptime Row: type,
+    comptime O: type,
+    comptime stmt: statement.Statement,
+) type {
     return comptime blk: {
         var fields: [stmt.paths.len]type = undefined;
         for (stmt.params, 0..) |param, i| {
@@ -1579,7 +1647,7 @@ fn Values(comptime Row: type, comptime O: type, comptime stmt: statement.Stateme
                 fields[i] = where_mod.ValueAt(O, stmt.paths[i]);
                 continue;
             }
-            const F = WireWrite(row_mod.ColumnType(Row, param.column));
+            const F = WireWrite(D, row_mod.ColumnType(Row, param.column));
             // `.in` is one placeholder holding many values — `= ANY($1)` —
             // so what binds is a list of the column's type rather than one
             // of them. `distinct_from` is the mirror: one value, which may be
@@ -1649,12 +1717,27 @@ fn WireList(comptime F: type) type {
     }
 }
 
-/// Sixteen bytes into a `Uuid`. A column that answered with a different
-/// number of them is not a `uuid`, and saying so beats reading past the end
-/// of the buffer or quietly keeping a prefix.
+/// A column's answer read as a `Uuid`, in either of the two shapes a database
+/// stores one in (ADR 0078): **sixteen bytes**, which is what a Postgres
+/// `uuid` is on the wire, or **thirty-six characters**, which is what a SQLite
+/// TEXT column holds because SQLite has no uuid type.
+///
+/// No dialect is threaded in for this. The two lengths cannot be confused, and
+/// the alternative — a Wire-specific reader — would make the same column read
+/// two ways for no gain. Any other length is not a uuid, and saying so beats
+/// reading past the end of the buffer or quietly keeping a prefix.
 fn uuidOf(raw: []const u8) !types.Uuid {
-    if (raw.len != types.Uuid.byte_len) return error.QueryFailed;
-    return .{ .bytes = raw[0..types.Uuid.byte_len].* };
+    if (raw.len == types.Uuid.byte_len) return .{ .bytes = raw[0..types.Uuid.byte_len].* };
+    if (raw.len == types.Uuid.text_len) return types.Uuid.parse(raw) catch error.QueryFailed;
+    return error.QueryFailed;
+}
+
+/// A `Uuid` as the thirty-six characters SQLite stores, kept where the query
+/// can read them. `arena` rather than a stack buffer: the tuple this feeds is
+/// handed to the driver after this function has returned.
+fn uuidText(value: types.Uuid, c: anytype) ![]const u8 {
+    const text = value.toText();
+    return c.arena().dupe(u8, &text) catch error.QueryFailed;
 }
 
 /// The tag whose name the column held, or a refusal naming the value.
@@ -1777,24 +1860,39 @@ fn assertUnlocked(
 /// requiring it would mean `.email = "a@b.c"` did not compile, which is the
 /// shape everybody writes. `Str` is what text is when it comes *back*.
 ///
-/// A `Uuid` binds as its sixteen bytes **as an array rather than a slice**,
-/// and that is load-bearing: the tuple this builds is what the driver reads
-/// from, so a slice would have to point at something, and the only thing
-/// available to point at is the copy `where.valueAt` just returned. The array
-/// travels inside the tuple and outlives the call, which a pointer into a
-/// temporary would not.
+/// **A `Uuid` binds as whatever its Dialect stores one as** (ADR 0078), which
+/// is the one place in this function the answer is not the same on both Wires.
+///
+/// On Postgres it is the sixteen bytes **as an array rather than a slice**, and
+/// that is load-bearing: the tuple this builds is what the driver reads from,
+/// so a slice would have to point at something, and the only thing available to
+/// point at is the copy `where.valueAt` just returned. The array travels inside
+/// the tuple and outlives the call, which a pointer into a temporary would not.
+///
+/// On SQLite it is the thirty-six characters, kept in the Scope's arena so they
+/// outlive the call the same way. SQLite has no uuid type; the schema check has
+/// always said TEXT for one (`dialect.acceptsSqlite`), and zqlite refuses to
+/// bind a Zig array at all — so the array form was a `@compileError` from three
+/// layers down naming a Zig issue, on the most ordinary column in a modern
+/// schema.
 ///
 /// A `Json(T)` is handed over whole. The driver writes any struct into a
 /// `jsonb` column through `std.json`, which finds the `jsonStringify` on it
 /// and writes the `T` inside rather than the wrapper.
-fn WireWrite(comptime F: type) type {
+fn WireWrite(comptime D: type, comptime F: type) type {
     comptime {
         if (F == core.Str) return []const u8;
         if (F == ?core.Str) return ?[]const u8;
         if (F == types.Timestamp) return i64;
         if (F == ?types.Timestamp) return ?i64;
-        if (F == types.Uuid) return [types.Uuid.byte_len]u8;
-        if (F == ?types.Uuid) return ?[types.Uuid.byte_len]u8;
+        if (F == types.Uuid) return switch (D.uuid_form) {
+            .bytes => [types.Uuid.byte_len]u8,
+            .text => []const u8,
+        };
+        if (F == ?types.Uuid) return switch (D.uuid_form) {
+            .bytes => ?[types.Uuid.byte_len]u8,
+            .text => ?[]const u8,
+        };
         // The text, which the Dialect wrapped in a `::numeric`, `::interval`
         // or whatever the type named, where the placeholder goes.
         if (types.asText(F) != null) return if (@typeInfo(F) == .optional) ?[]const u8 else []const u8;
@@ -1813,10 +1911,26 @@ fn WireWrite(comptime F: type) type {
 /// which is the same conversion `kept` makes coming back.
 fn forWire(comptime To: type, value: anytype, c: anytype) !To {
     const V = @TypeOf(value);
+    // A `Str` is the text a request arrived with, and looking a row up by one
+    // is the most ordinary thing anybody does with it: `.where = .{ .email =
+    // form.email }`. It used to be a type error three layers down naming
+    // `forWire`, so the guide's own sign-in snippet did not compile — which
+    // is how the snippet check found it (ADR 0083). It lives exactly as long
+    // as the statement does, so there is nothing to keep.
+    if (V == core.Str) return value.view();
+    if (V == ?core.Str) return if (value) |text| text.view() else null;
     if (V == types.Timestamp) return value.micros;
     if (V == ?types.Timestamp) return if (value) |t| t.micros else null;
-    if (V == types.Uuid) return value.bytes;
-    if (V == ?types.Uuid) return if (value) |u| u.bytes else null;
+    // Which of the two a `Uuid` becomes is `WireWrite`'s decision, made from
+    // the Dialect; this reads it back off the type it was asked for, which is
+    // how the conversion stays in one place (ADR 0078). The text is kept in the
+    // arena because the tuple this fills is what the driver reads from, and a
+    // pointer into this frame would not outlive the call.
+    if (V == types.Uuid) return if (To == []const u8) try uuidText(value, c) else value.bytes;
+    if (V == ?types.Uuid) {
+        const held = value orelse return null;
+        return if (To == ?[]const u8) try uuidText(held, c) else held.bytes;
+    }
     // A text column writes itself. The arena is here for one that has to
     // build its text rather than hold it; the ones this module ships hold it
     // and never touch the allocator, which is why nothing extra is allocated
@@ -1972,7 +2086,7 @@ test "the parameter tuple is built from the paths the statement worked out" {
 
     // `18` is written as a `comptime_int` and has to reach the database as
     // whatever `age` is, or there is nothing to put on the wire.
-    const Tuple = Values(User, @TypeOf(options), stmt);
+    const Tuple = Values(dialect.Postgres, User, @TypeOf(options), stmt);
     try testing.expectEqual(@as(usize, 1), @typeInfo(Tuple).@"struct".fields.len);
     try testing.expectEqual(i32, @typeInfo(Tuple).@"struct".fields[0].type);
 }
@@ -1988,13 +2102,13 @@ test "a nullable column keeps its optional, because a write may be null" {
     // Comparing: the `?` is harmless, a non-null optional binds the value.
     const found = .{ .where = .{ .nickname = "bo" } };
     const read = comptime statement.select(dialect.Postgres, User, @TypeOf(found));
-    try testing.expectEqual(?[]const u8, @typeInfo(Values(User, @TypeOf(found), read)).@"struct".fields[0].type);
+    try testing.expectEqual(?[]const u8, @typeInfo(Values(dialect.Postgres, User, @TypeOf(found), read)).@"struct".fields[0].type);
 
     // Writing: the `?` is the whole point. `.nickname = null` is how a
     // column is set to NULL, and stripping it would leave nothing to write.
     const written = .{ .nickname = @as(?[]const u8, null) };
     const wrote = comptime statement.insert(dialect.Postgres, User, @TypeOf(written));
-    try testing.expectEqual(?[]const u8, @typeInfo(Values(User, @TypeOf(written), wrote)).@"struct".fields[0].type);
+    try testing.expectEqual(?[]const u8, @typeInfo(Values(dialect.Postgres, User, @TypeOf(written), wrote)).@"struct".fields[0].type);
 }
 
 test "a limit held in a variable binds as a count, not as a column" {
@@ -2030,7 +2144,7 @@ test "a count binds as the integer the caller is holding, whatever it is" {
     _ = &per_page;
     const options = .{ .where = .{ .age = .{ .gt = 18 } }, .limit = per_page };
     const stmt = comptime statement.select(dialect.Postgres, User, @TypeOf(options));
-    const fields = @typeInfo(Values(User, @TypeOf(options), stmt)).@"struct".fields;
+    const fields = @typeInfo(Values(dialect.Postgres, User, @TypeOf(options), stmt)).@"struct".fields;
 
     try testing.expectEqual(@as(usize, 2), fields.len);
     // The condition still binds as its column's type, which is the half that
@@ -2043,14 +2157,14 @@ test "the three types Zig has no word for are taken apart for the wire" {
     // Both directions of the same mapping, which is what makes a column
     // written by one call readable by the next.
     try testing.expectEqual(i64, WireRead(types.Timestamp));
-    try testing.expectEqual(i64, WireWrite(types.Timestamp));
+    try testing.expectEqual(i64, WireWrite(dialect.Postgres, types.Timestamp));
     try testing.expectEqual([]const u8, WireRead(types.Uuid));
-    try testing.expectEqual([types.Uuid.byte_len]u8, WireWrite(types.Uuid));
+    try testing.expectEqual([types.Uuid.byte_len]u8, WireWrite(dialect.Postgres, types.Uuid));
     try testing.expectEqual([]const u8, WireRead(types.Json(struct { a: u8 })));
 
     // And a type the driver already understands is left alone.
     try testing.expectEqual(i32, WireRead(i32));
-    try testing.expectEqual(i32, WireWrite(i32));
+    try testing.expectEqual(i32, WireWrite(dialect.Postgres, i32));
 }
 
 test "a uuid column that is not sixteen bytes is refused rather than trimmed" {
@@ -2484,6 +2598,37 @@ test "find compiles the condition the Row's key already described" {
     try testing.expectEqual(@as(usize, 1), counting.allocations);
 }
 
+test "a condition takes the Str a request arrived with, not only its view" {
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = 1 };
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    // `form.email` is a `Str`, and looking a row up by one is the first thing
+    // anybody does with it. This was a type error from inside `forWire`, and
+    // the guide's own sign-in snippet was written against the API it should
+    // have had — found by compiling the snippet (ADR 0083).
+    const email: nilo.Str = .static("wati@example.com");
+    _ = try db.one(Person, &run, .{ .where = .{ .email = email } });
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"email\", \"nickname\", \"age\" FROM \"people\"" ++
+            " WHERE \"email\" = $1 LIMIT 1",
+        db.wire.?.last_sql,
+    );
+
+    // And through the optional a nullable column takes. A condition refuses
+    // one on purpose — `= NULL` is never true — so this is where it belongs.
+    const maybe: ?nilo.Str = .static("wati");
+    _ = try db.insert(Person, &run, .{ .email = email, .nickname = maybe, .age = @as(i32, 30) });
+    try testing.expectEqualStrings(
+        "INSERT INTO \"people\" (\"email\", \"nickname\", \"age\") VALUES ($1, $2, $3)" ++
+            " RETURNING \"id\", \"email\", \"nickname\", \"age\"",
+        db.wire.?.last_sql,
+    );
+}
+
 test "an order survives the ceiling one puts on the end" {
     // `ORDER BY … LIMIT 1` is the newest row; `LIMIT 1` alone is whichever
     // row Postgres reached first. The clauses have to come out in that order
@@ -2708,7 +2853,7 @@ test "a batch sends one statement, and it does not mention how many rows" {
 
 test "the batch tuple is a slice per column, not a value per row" {
     const stmt = comptime statement.insertMany(dialect.Postgres, Person, Line);
-    const Tuple = BatchValues(Person, stmt);
+    const Tuple = BatchValues(dialect.Postgres, Person, stmt);
     const fields = @typeInfo(Tuple).@"struct".fields;
 
     // Two columns and any number of rows: the tuple's shape is the column
@@ -2722,22 +2867,22 @@ test "the two column types that travel differently in a batch say so" {
     // A `Uuid` alone is the array of its bytes, because a slice would point at
     // a temporary; in a batch it points at the caller's row, which lives for
     // the whole call — and pg.zig has no encoder for an array of `[16]u8`.
-    try testing.expectEqual([types.Uuid.byte_len]u8, WireWrite(types.Uuid));
-    try testing.expectEqual([]const u8, BatchWrite(types.Uuid));
-    try testing.expectEqual(?[]const u8, BatchWrite(?types.Uuid));
+    try testing.expectEqual([types.Uuid.byte_len]u8, WireWrite(dialect.Postgres, types.Uuid));
+    try testing.expectEqual([]const u8, BatchWrite(dialect.Postgres, types.Uuid));
+    try testing.expectEqual(?[]const u8, BatchWrite(dialect.Postgres, ?types.Uuid));
 
     // A `Json(T)` is handed to the driver whole when it is alone and written
     // out here when it is in a batch, which is the one place a batch pays per
     // row rather than per column.
     const Settings = types.Json(struct { theme: []const u8 });
-    try testing.expectEqual(Settings, WireWrite(Settings));
-    try testing.expectEqual([]const u8, BatchWrite(Settings));
-    try testing.expectEqual(?[]const u8, BatchWrite(?Settings));
+    try testing.expectEqual(Settings, WireWrite(dialect.Postgres, Settings));
+    try testing.expectEqual([]const u8, BatchWrite(dialect.Postgres, Settings));
+    try testing.expectEqual(?[]const u8, BatchWrite(dialect.Postgres, ?Settings));
 
     // Everything else is the same both ways.
-    try testing.expectEqual(i64, BatchWrite(i64));
-    try testing.expectEqual(i64, BatchWrite(types.Timestamp));
-    try testing.expectEqual([]const u8, BatchWrite(core.Str));
+    try testing.expectEqual(i64, BatchWrite(dialect.Postgres, i64));
+    try testing.expectEqual(i64, BatchWrite(dialect.Postgres, types.Timestamp));
+    try testing.expectEqual([]const u8, BatchWrite(dialect.Postgres, core.Str));
 }
 
 /// A Row with a list column of each kind: text, which has to be rebuilt as
@@ -2786,12 +2931,12 @@ test "a list column binds as a list of what the driver takes, not of Str" {
     // The mirror of the read: a value on the way out only has to survive the
     // call, so the shape everybody writes — a slice of literals — is the
     // shape the tuple wants.
-    try testing.expectEqual([]const []const u8, WireWrite([]const nilo.Str));
-    try testing.expectEqual([]const ?[]const u8, WireWrite([]const ?nilo.Str));
-    try testing.expectEqual(?[]const []const u8, WireWrite(?[]const nilo.Str));
+    try testing.expectEqual([]const []const u8, WireWrite(dialect.Postgres, []const nilo.Str));
+    try testing.expectEqual([]const ?[]const u8, WireWrite(dialect.Postgres, []const ?nilo.Str));
+    try testing.expectEqual(?[]const []const u8, WireWrite(dialect.Postgres, ?[]const nilo.Str));
     // Everything the driver already decodes is left exactly alone, which is
     // what keeps `keptList` a single allocation for it.
-    try testing.expectEqual([]const i32, WireWrite([]const i32));
+    try testing.expectEqual([]const i32, WireWrite(dialect.Postgres, []const i32));
     try testing.expectEqual([]const i32, WireList([]const i32));
 }
 
@@ -2959,4 +3104,134 @@ test "a bad URL and a database that is down get different sentences" {
     try testing.expect(!isUrlProblem(error.PG));
     try testing.expect(!isUrlProblem(error.OutOfMemory));
     try testing.expect(!isUrlProblem(error.Disconnected));
+}
+
+// -- the SQLite Wire, end to end -----------------------------------------
+//
+// Everything above this line runs against `wire.Fake`, which is the whole
+// point of it: `db.zig` is the same code on both Wires and a fake proves that
+// without a database. **The two things below could not be proved that way**,
+// and both shipped broken because of it (ADR 0078) — a `Uuid` column did not
+// compile against SQLite at all, and there was no call for a statement that
+// answers with nothing. A real in-memory database is what a fake has no
+// opinion about.
+
+const sqlite_mod = @import("sqlite.zig");
+
+/// `.in_fiber` because there is no Engine here to hop to — the same harness
+/// `sqlite.zig`'s own tests use, under `std.Io.Threaded`.
+const SqliteDb = DbOf(sqlite_mod.Wire(.{ .threading = .in_fiber }), dialect.SQLite, "");
+
+const SqliteAccount = struct {
+    pub const nilo_table = .{ .name = "accounts", .key = .id };
+
+    id: i64,
+    public: types.Uuid,
+    email: nilo.Str,
+};
+
+const accounts_ddl =
+    \\CREATE TABLE accounts (
+    \\  id     INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    \\  public TEXT NOT NULL,
+    \\  email  TEXT NOT NULL
+    \\)
+;
+
+test "a uuid column is written and read back on the SQLite Wire" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    var db: SqliteDb = .init(
+        testing.allocator,
+        "file:uuid-round-trip?mode=memory&cache=shared",
+        .{ .size = 2 },
+    );
+    defer db.deinit();
+    try db.nilo_start(threaded.io());
+
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+
+    // `db.exec`, which is the call this used to need a Row for: nothing is
+    // being selected, so there is no shape to describe.
+    _ = try db.exec(&run, accounts_ddl, .{});
+
+    const key = try types.Uuid.parse("01a01077-5ce8-7932-b42b-a05431a5c4c8");
+    const made = try db.insert(SqliteAccount, &run, .{
+        .public = key,
+        .email = "wati@example.dev",
+    });
+    try testing.expectEqualSlices(u8, &key.bytes, &made.public.bytes);
+
+    // Read back *by* the uuid, which is the half that proves the write and
+    // the read agree about the column rather than merely being consistent
+    // with each other.
+    const found = (try db.one(SqliteAccount, &run, .{ .where = .{ .public = key } })).?;
+    try testing.expectEqualSlices(u8, &key.bytes, &found.public.bytes);
+    try testing.expectEqualStrings("wati@example.dev", found.email.view());
+
+    // And it is stored as the thirty-six characters, which is what makes
+    // `sqlite3` show the id and `WHERE public = '…'` typeable — the property
+    // that decided the form.
+    const Text = struct {
+        pub const nilo_table = .{ .name = "accounts", .key = .id };
+        id: i64,
+        public: nilo.Str,
+    };
+    const as_text = try db.raw(Text, &run, "SELECT id, public FROM accounts", .{});
+    try testing.expectEqual(@as(usize, 1), as_text.len);
+    try testing.expectEqualStrings("01a01077-5ce8-7932-b42b-a05431a5c4c8", as_text[0].public.view());
+}
+
+test "the schema check agrees with the wire about a uuid column" {
+    // The two halves used to disagree: `accepts` routes a `Uuid` to TEXT
+    // because it declares a column name, while the wire tried to send sixteen
+    // raw bytes. This is the check that they now say the same thing.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    var db: SqliteDb = .init(
+        testing.allocator,
+        "file:uuid-schema-check?mode=memory&cache=shared",
+        .{ .size = 1 },
+    );
+    defer db.deinit();
+    try db.nilo_start(threaded.io());
+
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    _ = try db.exec(&run, accounts_ddl, .{});
+
+    try testing.expectEqual(@as(usize, 0), try db.checkSchema(&.{SqliteAccount}));
+}
+
+test "db.exec answers with the rows it changed and needs no Row to do it" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    var db: SqliteDb = .init(
+        testing.allocator,
+        "file:exec-counts?mode=memory&cache=shared",
+        .{ .size = 1 },
+    );
+    defer db.deinit();
+    try db.nilo_start(threaded.io());
+
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    _ = try db.exec(&run, accounts_ddl, .{});
+
+    for (0..3) |_| _ = try db.insert(SqliteAccount, &run, .{
+        .public = types.Uuid.nil,
+        .email = "someone@example.dev",
+    });
+    try testing.expectEqual(@as(usize, 3), try db.exec(&run, "DELETE FROM accounts", .{}));
+
+    // And inside a transaction, which is where a migration that has to be all
+    // or nothing puts it.
+    var tx = try db.begin(&run, .{});
+    errdefer tx.rollback();
+    _ = try tx.exec(&run, "CREATE INDEX accounts_email ON accounts(email)", .{});
+    try tx.commit();
 }
