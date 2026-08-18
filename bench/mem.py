@@ -58,6 +58,9 @@ def open_one(host, port, path, timeout):
 
     # Drain the whole response. A connection with bytes still backed up in it
     # is not idle, and would be measured holding buffers it is about to read.
+    # Both framings, because a streamed route has no length to announce and
+    # reading only `Content-Length` would leave a megabyte in the socket and
+    # call the connection idle.
     buf = b""
     while b"\r\n\r\n" not in buf:
         chunk = s.recv(65536)
@@ -66,15 +69,38 @@ def open_one(host, port, path, timeout):
         buf += chunk
 
     head, body = buf.split(b"\r\n\r\n", 1)
-    length = 0
+    length, chunked = 0, False
     for line in head.split(b"\r\n"):
-        if line.lower().startswith(b"content-length:"):
+        low = line.lower()
+        if low.startswith(b"content-length:"):
             length = int(line.split(b":")[1])
-    while len(body) < length:
+        elif low.startswith(b"transfer-encoding:") and b"chunked" in low:
+            chunked = True
+
+    def more():
         chunk = s.recv(65536)
         if not chunk:
             raise SystemExit("the server closed the connection")
-        body += chunk
+        return chunk
+
+    if chunked:
+        # Size line, that many bytes, CRLF, until a zero-sized one. The
+        # trailer is empty here, so the final CRLF ends it.
+        while True:
+            while b"\r\n" not in body:
+                body += more()
+            line, body = body.split(b"\r\n", 1)
+            size = int(line.split(b";")[0], 16)
+            if size == 0:
+                while not body.startswith(b"\r\n"):
+                    body += more()
+                return s
+            while len(body) < size + 2:
+                body += more()
+            body = body[size + 2 :]
+
+    while len(body) < length:
+        body += more()
     return s
 
 

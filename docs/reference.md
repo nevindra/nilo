@@ -529,12 +529,22 @@ semantics are all it is; the HTTP underneath is `nilo_fetch`
 ([ADR 0067](./adr/0067-most-of-an-s3-client-is-not-s3.md),
 [ADR 0072](./adr/0072-an-object-store-is-a-service-that-dials.md)).
 
+<!-- compiles -->
 ```zig
 const s3 = @import("nilo_s3");
 
 // A bucket is a type, and its name is compiled in (ADR 0068).
 const Avatars = s3.Bucket("avatars", .{ .max_bytes = 2 << 20 });
 
+fn avatar(avatars: *Avatars, c: *nilo.Ctx, key: nilo.Str) !void {
+    const object = try avatars.get(c, key.view());
+    return c.send(200, object.content_type.view(), object.bytes.view());
+}
+```
+
+and at startup:
+
+```zig
 var store = try s3.open(gpa, .{
     .endpoint = "https://s3.ap-southeast-1.amazonaws.com",
     .region = "ap-southeast-1",
@@ -548,11 +558,6 @@ defer store.deinit();
 var avatars = try Avatars.open(&store);
 defer avatars.deinit();
 try app.provide(&avatars);
-
-fn avatar(avatars: *Avatars, c: *nilo.Ctx, id: []const u8) !void {
-    const object = try avatars.get(c, id);
-    return c.send(200, object.content_type.view(), object.bytes.view());
-}
 ```
 
 **One Store, many Buckets.** The Store owns the connection pool, the
@@ -615,9 +620,9 @@ credentials are wrong. A skewed clock is read out of the body and said plainly.
 else whose success path is XML — [ADR 0068](./adr/0068-a-bucket-is-a-type-and-a-key-is-not.md)
 is where that line is drawn and why.
 
-[`bench/result/s3.md`](../bench/result/s3.md) is what it costs on ADR 0018's
-four axes, against the same seven routes written in Go and Rust — and it says
-plainly which two axes are not yet measured, and why Bun has no row.
+[`bench/result/s3.md`](../bench/result/s3.md) is what it costs on all four of
+ADR 0018's axes, against the same seven routes written in Go and Rust. It also
+says plainly why Bun has no row.
 
 ## `nilo_id`
 

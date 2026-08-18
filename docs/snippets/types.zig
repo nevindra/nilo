@@ -26,6 +26,8 @@ pub const sql = @import("nilo_sql");
 pub const id = @import("nilo_id");
 pub const pw = @import("nilo_pw");
 pub const config = @import("nilo_config");
+pub const fetch = @import("nilo_fetch");
+pub const s3 = @import("nilo_s3");
 
 pub const Str = nilo.Str;
 pub const Redirect = nilo.Redirect;

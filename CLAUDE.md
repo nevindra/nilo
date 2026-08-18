@@ -109,6 +109,7 @@ zig build test-id      # only nilo_id, the same way
 zig build test-config  # only nilo_config, the same way, plus its refusals
 zig build test-pw      # only nilo_pw, the same way, plus its refusals
 zig build test-fetch   # only nilo_fetch, both modes — a real socket, no Engine
+zig build test-fetch-engine  # an outbound deadline firing against a real port; on `test`
 zig build test-s3      # only nilo_s3, both modes, plus its refusals
 zig build layering     # check that no module imports upward or sideways
 zig build refusals     # the framework's 63 compile-error checks — NOT the others
@@ -195,6 +196,16 @@ zig build test-fetch                    # the same, both optimize modes
 That opens a real socket at both ends on `std.Io.Threaded`, which is std's own.
 **No zio anywhere.** A change that makes `fetch/` need the Engine has put the
 module in the wrong layer.
+
+**`zig build test-fetch-engine` is the one deliberate exception**, and it is a
+root of its own for exactly that reason: `fetch/deadline.zig` names `nilo_http`
+and watches an outbound deadline actually fire against a real server. Putting
+those tests in `fetch/fetch.zig`'s test block would make `zig test
+fetch/fetch.zig` need a server and cost the Fitting layer its entry condition.
+It hangs off `zig build test`, and **it is the first test here that opens a
+real port**, the harness `docs/roadmap.md`'s standing risks have wanted for
+`sendfile` and the WebSocket, which is why two entries there now read
+`Waiting on: ready`.
 
 `nilo_s3` runs on `std.Io.Threaded` too — its canned server and its live tests
 both open real sockets with no Engine anywhere — but it needs the module graph
@@ -412,13 +423,21 @@ in a new `docs/adr/` file, what got built and what was measured goes in
 released change goes in `CHANGELOG.md`.
 
 **The roadmap holds nothing that is built.** It is what is coming, what is
-refused and what nobody has decided — a plan, not a record. The moment something
+refused and what nobody has decided: a plan, not a record. The moment something
 ships, its entry leaves `docs/roadmap.md` entirely: no strikethrough, no
 "**Built**", no account of how it went. What was measured and what was learned
 moves to `docs/history.md`, which is the record; the item is then cut, not
 annotated. A gap only *partly* closed keeps one sentence scoping what is left,
 never a paragraph about the half that landed. The test is that the roadmap can
 be read top to bottom as work outstanding.
+
+**The other six rules live in the roadmap itself**, under
+[How this file is written](docs/roadmap.md#how-this-file-is-written), which is
+the canonical copy rather than a summary of this paragraph. The two that get
+forgotten: every entry opens with its whole claim in bold, and every entry
+closes with a `Waiting on:` line from a fixed list. That closing line is what
+makes a blocker that has quietly stopped being one findable, which this
+repository has needed four times.
 
 **`docs/history.md` stays short, and that is a constraint rather than a wish** —
 it gains an entry every stage forever, so left alone it becomes the longest file

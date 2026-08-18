@@ -1279,6 +1279,46 @@ const FetchCheck = struct {
     }
 };
 
+/// Say out loud that a step asserted nothing.
+///
+/// **`error.SkipZigTest` is invisible through `zig build`.** The test runner
+/// counts a skip, `zig build` prints a run artifact's stdout only when it
+/// fails, so a step whose every test skipped exits 0 having checked nothing
+/// and looks exactly like one that passed. `smoke-tls` was that: three tests,
+/// no output, exit 0, on any machine without `-Dnetwork`.
+///
+/// That is the shape of a gate that has quietly stopped being one, which is
+/// the failure this repository has had four times (`docs/history.md`). So the
+/// step says it, the way `fetch-check` already did.
+const SkipNotice = struct {
+    _step: std.Build.Step,
+    /// When true the real work runs and this prints nothing.
+    running: bool,
+    /// Written as one line, and it names the flag that turns the step on.
+    message: []const u8,
+
+    fn attach(b: *std.Build, to: *std.Build.Step, running: bool, message: []const u8) void {
+        const self = b.allocator.create(SkipNotice) catch @panic("OOM");
+        self.* = .{
+            ._step = .init(.{
+                .id = .custom,
+                .name = "skip notice",
+                .owner = b,
+                .makeFn = make,
+            }),
+            .running = running,
+            .message = message,
+        };
+        to.dependOn(&self._step);
+    }
+
+    fn make(s: *std.Build.Step, _: std.Build.Step.MakeOptions) anyerror!void {
+        const self: *SkipNotice = @fieldParentPtr("_step", s);
+        if (self.running) return;
+        std.debug.print("{s}\n", .{self.message});
+    }
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -1386,7 +1426,7 @@ pub fn build(b: *std.Build) void {
     // not fetch it (ADR 0040); here the HTTP client and the TLS underneath it
     // are `std`'s, so a project that never imports this fetches, builds and
     // links nothing extra at all.
-    _ = b.addModule("nilo_s3", .{
+    const nilo_s3 = b.addModule("nilo_s3", .{
         .root_source_file = b.path("s3/s3.zig"),
         .target = target,
         .optimize = optimize,
@@ -1793,6 +1833,13 @@ pub fn build(b: *std.Build) void {
         "smoke-tls",
         "Call a real HTTPS endpoint — needs -Dnetwork, and is not part of `test`",
     );
+    SkipNotice.attach(
+        b,
+        smoke_tls_step,
+        network,
+        "smoke-tls: skipped, because it calls a real HTTPS endpoint. " ++
+            "`zig build smoke-tls -Dnetwork` runs it.",
+    );
     for (test_modes) |mode| {
         const mode_core = coreFor(b, target, mode);
         const root = b.createModule(.{
@@ -1990,6 +2037,48 @@ pub fn build(b: *std.Build) void {
             .root_module = module,
         });
         size_sql_step.dependOn(&b.addInstallArtifact(exe_size, .{}).step);
+    }
+
+    // The same axis for the object store, which had none until this step
+    // existed: ADR 0018's running total now carries a `nilo_s3` row because
+    // these two programs can be built and subtracted.
+    //
+    // Two programs that differ by where one route's bytes come from, so the
+    // difference between their stripped sizes is what adding object storage
+    // costs. **The delta is deliberately the whole of it** — SigV4 and the
+    // bucket, plus `nilo_fetch`, plus `std.http.Client`, plus TLS and the
+    // certificate bundle — because that is the question an operator asks, and
+    // `bench/result/fetch.md` is what splits the layers inside it.
+    //
+    // `ls -l zig-out/bin/nilo-size-s3-*` is the measurement.
+    const size_s3_step = b.step(
+        "size-s3",
+        "Build the two programs whose stripped sizes price nilo_s3",
+    );
+    for ([_][]const u8{ "s3_none", "s3_get" }) |which| {
+        const wants_s3 = std.mem.eql(u8, which, "s3_get");
+        const module = b.createModule(.{
+            .root_source_file = b.path(b.fmt("bench/size/{s}.zig", .{which})),
+            .target = target,
+            .optimize = .ReleaseFast,
+            // Always stripped, whatever `-Dstrip` says, for the reason
+            // `size-sql` gives: an A/B carrying debug info measures the
+            // debug info.
+            .strip = true,
+            .imports = &.{.{ .name = "nilo_http", .module = bench_http }},
+        });
+        // Named only by the half that stores something. A control that
+        // imports the module and never calls it would be measuring the
+        // linker rather than the claim.
+        if (wants_s3) module.addImport(
+            "nilo_s3",
+            s3For(b, target, .ReleaseFast, bench_core, null),
+        );
+        const exe_size = b.addExecutable(.{
+            .name = b.fmt("nilo-size-{s}", .{which}),
+            .root_module = module,
+        });
+        size_s3_step.dependOn(&b.addInstallArtifact(exe_size, .{}).step);
     }
 
     // What a Fitting costs, against a `std.http.Client` doing the same call
@@ -2272,6 +2361,8 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "nilo_id", .module = nilo_id },
                     .{ .name = "nilo_pw", .module = nilo_pw },
                     .{ .name = "nilo_config", .module = nilo_config },
+                    .{ .name = "nilo_fetch", .module = nilo_fetch },
+                    .{ .name = "nilo_s3", .module = nilo_s3 },
                 },
             });
             const compiled = b.addObject(.{ .name = snippet.name, .root_module = module });

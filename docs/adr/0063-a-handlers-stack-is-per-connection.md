@@ -62,6 +62,40 @@ connection**, to within a rounding error.
   10 requests — the same 500 requests — grew 868 kB; 50 × 100 requests, ten
   times the work, grew 876 kB. It scales with **connections**, not requests.
 
+### Touched, not declared, and a real handler touches far less than it asks for
+
+> Added when `nilo_s3` was measured on the same axis. The table above uses a
+> handler written to dirty a fixed amount of stack, so declared and touched are
+> the same number by construction. A handler doing real work is not like that,
+> and reading the rule as "declared" over-counts badly.
+
+`bench/s3_server.zig` has the pair on purpose. `/o/1m` pulls a megabyte into the
+request arena; `/stream/1m` declares `[64 << 10]u8` on the stack and moves the
+same megabyte through it, holding none of it. Out to 10,000 connections, one
+fresh process each:
+
+| route | per idle connection | over the 4,674 floor |
+|---|---|---|
+| `/o/1k`, 1 KB, arena | 6,731 | +2,057 |
+| `/o/1m`, 1 MB, arena | 8,782 | +4,108 |
+| `/stream/1m`, 1 MB, 64 KiB of stack | 12,876 | +8,202 |
+
+Two things fall out. **The rule holds and picks the winner**: the route that
+holds a whole megabyte is 47% cheaper at rest than the route that holds 64 KiB,
+because the arena is reset at the end of the request and the stack is reset by
+nothing. **And the 64 KiB is not what is paid.** Rebuilt with `[8 << 10]u8` and
+nothing else changed, the same measurement gives 12,875 bytes against 12,876:
+56 KiB off the declared buffer moved the number by one byte. The 8,202 is the
+depth of the streaming call path, not what that path carries.
+
+So "one for one" is one for one in *touched* bytes, which is what the sentence
+says, and the practical consequence is the opposite of what counting
+declarations suggests: **shrinking a handler's buffers is usually the wrong
+lever, and where it waits is usually the right one**, which is
+[ADR 0071](./0071-where-a-connection-waits-is-what-it-costs.md) arriving at the
+same place from the framework's own side. `nilo_fetch` measured its buffers at
+−66 bytes for the same reason ([`bench/result/fetch.md`](../../bench/result/fetch.md)).
+
 ## Why
 
 A connection blocked in `read` is a **suspended fiber**, and a suspended fiber

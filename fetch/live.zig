@@ -43,9 +43,33 @@ const Canned = struct {
 
     /// `Io.net.Server` cannot report the port it was given, so asking for 0
     /// and reading it back is not available — walk a range instead.
+    ///
+    /// **The walk starts at the process id and wraps**, and both halves of
+    /// that matter. A server that closes a connection leaves its local port
+    /// in `TIME-WAIT` for a minute, and a port in `TIME-WAIT` cannot be bound
+    /// again, so a fixed start walks back over the ports the last run just
+    /// finished with. Two hundred ports and a fixed start ran out after three
+    /// consecutive `zig build test-all` runs, and the failure arrives as
+    /// `error.NoFreePort` inside whichever test happened to be next — a
+    /// message pointing at the wrong thing entirely. A thousand ports and a
+    /// different start per process is enough that the two test binaries
+    /// `test-all` runs at once do not tread on each other either.
+    ///
+    /// `reuse_address` would fix the `TIME-WAIT` half in one line and is
+    /// refused: std sets `SO_REUSEPORT` alongside `SO_REUSEADDR`, so two test
+    /// binaries would both bind the same port and the kernel would hand each
+    /// of them some of the connections. Failing to bind is the signal that
+    /// keeps them apart.
     fn open(io: std.Io) !Canned {
-        var candidate: u16 = 39_200;
-        while (candidate < 39_400) : (candidate += 1) {
+        const first: u16 = 39_200;
+        const count: u16 = 1_000;
+        // The thread id rather than the pid, because `getpid` is per-OS and
+        // nothing else in this file is. Either would do: what is wanted is a
+        // number that differs between two runs and between the two binaries.
+        const start: u16 = @intCast(@as(u64, std.Thread.getCurrentId()) % count);
+        var tried: u16 = 0;
+        while (tried < count) : (tried += 1) {
+            const candidate = first + (start + tried) % count;
             const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(candidate) };
             const server = address.listen(io, .{}) catch continue;
             return .{ .server = server, .io = io, .port = candidate };
@@ -113,6 +137,45 @@ const Canned = struct {
         var writer = stream.writer(self.io, &out_buf);
 
         for (0..count) |_| {
+            while (true) {
+                const line = try reader.interface.takeDelimiterInclusive('\n');
+                if (std.mem.trimEnd(u8, line, "\r\n").len == 0) break;
+            }
+            const w = &writer.interface;
+            try w.print("HTTP/1.1 {s}\r\nContent-Length: {d}\r\n\r\n", .{
+                self.status,
+                self.claim_len orelse self.body_len,
+            });
+            try w.splatByteAll('x', self.body_len);
+            try w.flush();
+        }
+    }
+
+    /// A connection answered once and then closed, twice over: exactly what a
+    /// peer reaping an idle keep-alive looks like from the client side.
+    ///
+    /// The client's first call pools a connection this server has already
+    /// hung up on. Its second call takes that dead socket out of the pool,
+    /// gets `HttpConnectionClosing` from `receiveHead` — no bytes, no answer
+    /// — and either retries once on a fresh connection, which is the second
+    /// `accept` here, or hands the caller a failure nobody caused.
+    ///
+    /// Measured against a real MinIO before it was written: 80 seconds idle
+    /// and a `wrk` run answered exactly `max_in_flight` requests non-2xx.
+    fn serveThenReap(self: *Canned) !void {
+        for (0..2) |_| {
+            var stream = try self.server.accept(self.io);
+            defer stream.close(self.io);
+            // Counted here rather than after the answer, so the tally cannot
+            // race the client: a caller holding a response is a caller whose
+            // connection was accepted, and both fibers share one thread.
+            self.accepted += 1;
+
+            var in_buf: [4 << 10]u8 = undefined;
+            var out_buf: [64 << 10]u8 = undefined;
+            var reader = stream.reader(self.io, &in_buf);
+            var writer = stream.writer(self.io, &out_buf);
+
             while (true) {
                 const line = try reader.interface.takeDelimiterInclusive('\n');
                 if (std.mem.trimEnd(u8, line, "\r\n").len == 0) break;
@@ -836,3 +899,41 @@ test "a call on a warm connection allocates once, and it is the body" {
         }
     }.run);
 }
+
+test "a pooled connection the peer already closed costs one retry, not a failure" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+            canned.body_len = 12;
+
+            var client = try started(io, .{});
+            defer client.deinit();
+
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            var buf: [64]u8 = undefined;
+            const url = try canned.url(&buf);
+
+            var served = io.async(Canned.serveThenReap, .{&canned});
+            defer served.cancel(io) catch {};
+
+            // The call that leaves a connection in the pool. The server has
+            // closed it by the time this returns.
+            const first = try client.get(&scope, url, .{});
+            try testing.expectEqual(@as(usize, 12), first.body.view().len);
+
+            // And the one that finds it dead. Without the retry this is
+            // `error.HttpConnectionClosing` reaching a handler as a 500 that
+            // nothing about the request deserved.
+            const second = try client.get(&scope, url, .{});
+            try testing.expectEqual(@as(usize, 12), second.body.view().len);
+
+            // Two connections for two calls, which is the shape of the fix:
+            // the second call did not reuse the corpse, it dialled again.
+            try testing.expectEqual(@as(usize, 2), canned.accepted);
+        }
+    }.run);
+}
+

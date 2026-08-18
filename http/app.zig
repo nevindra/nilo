@@ -1420,14 +1420,41 @@ fn checkRootWiring() void {
 ///
 /// `std` is one module per compilation and it takes the root's optimize mode,
 /// so a constant of std's own says which that was even when read from a module
-/// built at another. `default_level` separates the three that matter;
-/// `ReleaseFast` and `ReleaseSmall` are the same answer to it, which is why
-/// the message names them as a pair rather than guessing.
-const program_mode: ?std.builtin.OptimizeMode = switch (std.log.default_level) {
-    .debug => .Debug,
-    .info => .ReleaseSafe,
-    else => null,
-};
+/// built at another. **It takes two of them**, and the first version of this
+/// shipped with one.
+///
+/// `std.log.default_level` looked like it separated the modes and does not:
+/// in Zig 0.16 `.Debug` is `.debug` and **all three release modes are
+/// `.info`**. Reading `.info` as `ReleaseSafe` therefore answered ReleaseSafe
+/// for a correctly built `ReleaseFast` program, so the warning fired at
+/// exactly the people who had passed the mode through — the opposite of what
+/// it is for. `std.debug.runtime_safety` is the other half: true for `Debug`
+/// and `ReleaseSafe`, false for the other two, and its own doc comment calls
+/// it the optimize mode of the standard library.
+///
+/// `ReleaseFast` and `ReleaseSmall` are still one answer, which is why the
+/// message names them as a pair rather than guessing.
+const program_mode: ?std.builtin.OptimizeMode =
+    modeFrom(std.log.default_level, std.debug.runtime_safety);
+
+/// The derivation, as a function so that **every arm of it can be run from a
+/// suite that only ever builds in two modes**.
+///
+/// `program_mode` is one value per compilation, so the `ReleaseFast` arm could
+/// only ever be *not run* — and that is how it shipped wrong
+/// ([ADR 0033](../docs/adr/0033-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md)).
+fn modeFrom(level: std.log.Level, safety: bool) ?std.builtin.OptimizeMode {
+    return switch (level) {
+        .debug => .Debug,
+        // The level alone cannot tell the three release modes apart, so the
+        // safety flag splits the pair off.
+        .info => if (safety) .ReleaseSafe else null,
+        // No optimize mode produces any other level. A future std that
+        // changes this lands here, and null is the answer that warns nobody
+        // rather than everybody.
+        else => null,
+    };
+}
 
 /// Nilo built in `Debug` under a `ReleaseFast` program: legal, slow, and
 /// silent until now (ADR 0084).
@@ -6987,16 +7014,40 @@ test "the mode nilo reads off std is the one the program was built at" {
     // The suite runs in Debug and ReleaseSafe, so two of the three arms are
     // covered every run.
     switch (@import("builtin").mode) {
-        .Debug => try testing.expectEqual(@as(?std.builtin.OptimizeMode, .Debug), program_mode),
-        .ReleaseSafe => try testing.expectEqual(@as(?std.builtin.OptimizeMode, .ReleaseSafe), program_mode),
+        .Debug => {
+            try testing.expectEqual(std.log.Level.debug, std.log.default_level);
+            try testing.expect(std.debug.runtime_safety);
+            try testing.expectEqual(@as(?std.builtin.OptimizeMode, .Debug), program_mode);
+        },
+        .ReleaseSafe => {
+            try testing.expectEqual(std.log.Level.info, std.log.default_level);
+            try testing.expect(std.debug.runtime_safety);
+            try testing.expectEqual(@as(?std.builtin.OptimizeMode, .ReleaseSafe), program_mode);
+        },
         // ReleaseFast and ReleaseSmall are one answer, which is why the
         // warning names them as a pair rather than picking one.
-        .ReleaseFast, .ReleaseSmall => try testing.expectEqual(
-            @as(?std.builtin.OptimizeMode, null),
-            program_mode,
-        ),
+        .ReleaseFast, .ReleaseSmall => {
+            try testing.expectEqual(std.log.Level.info, std.log.default_level);
+            try testing.expect(!std.debug.runtime_safety);
+            try testing.expectEqual(@as(?std.builtin.OptimizeMode, null), program_mode);
+        },
     }
 
     // And nothing is said here, because the two agree.
     warnIfBuiltDifferently();
+}
+
+test "the arm the suite never builds in is checked anyway" {
+    // The whole point of `modeFrom` being a function. Two of these three
+    // lines cannot be reached by `program_mode` in a suite that runs Debug
+    // and ReleaseSafe, and the unreachable one is the one that was wrong.
+    try testing.expectEqual(@as(?std.builtin.OptimizeMode, .Debug), modeFrom(.debug, true));
+    try testing.expectEqual(@as(?std.builtin.OptimizeMode, .ReleaseSafe), modeFrom(.info, true));
+    try testing.expectEqual(@as(?std.builtin.OptimizeMode, null), modeFrom(.info, false));
+
+    // And the trap itself, stated: `.info` is *every* release mode. A
+    // derivation that reads the level alone answers ReleaseSafe for a
+    // ReleaseFast program, which fires the warning at somebody who did it
+    // right. These two must not agree.
+    try testing.expect(modeFrom(.info, false) != modeFrom(.info, true));
 }

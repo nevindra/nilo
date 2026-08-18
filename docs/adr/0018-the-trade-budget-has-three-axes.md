@@ -10,7 +10,7 @@ The metrics section of `docs/history.md` already separated them; this ADR turns 
 |---|---|---|
 | **Throughput and p99** | DX wins below 10%, as ADR 0001 says | Nowhere yet — no quiet machine |
 | **Allocations per request** | Hard invariant. A DX feature may not add one to a path that did not ask for it | A test: *the request path stays inside its allocation budget* |
-| **Memory per idle connection** | Hard invariant, and **4,669 bytes** as of [ADR 0071](./0071-where-a-connection-waits-is-what-it-costs.md). Every new feature states its cost or has none. **A floor, not a total** — a handler adds every byte of stack it touches ([ADR 0063](./0063-a-handlers-stack-is-per-connection.md)) | Measured across 1,000 held-open connections; four routes in `bench/sql_server.zig` and five in `bench/ws_server.zig` separate the framework's share from the handler's |
+| **Memory per idle connection** | Hard invariant, and **4,669 bytes** as of [ADR 0071](./0071-where-a-connection-waits-is-what-it-costs.md). Every new feature states its cost or has none. **A floor, not a total**, because a handler adds every byte of stack it touches ([ADR 0063](./0063-a-handlers-stack-is-per-connection.md)) | Measured out to 10,000 held-open connections, because a reading whose marginal and average still disagree is a transient; four routes in `bench/sql_server.zig`, five in `bench/ws_server.zig` and four in `bench/s3_server.zig` separate the framework's share from the handler's |
 
 The reason for the split is that the three are not the same kind of number.
 
@@ -19,6 +19,8 @@ The reason for the split is that the three are not the same kind of number.
 **Allocations are not elastic, because they are what p99 is made of.** An allocation added to the request path is not 10% slower on average; it is fine a million times and then it is a `mmap`, and that one request is the tail. p99 is a primary metric precisely so that winning on throughput while stalling the tail does not count, and the way to keep p99 flat is TigerBeetle's: allocate at startup, then stop (ADR 0015). Three is the number, it is what a test enforces, and a fourth needs a reason rather than a benchmark that came out level.
 
 **Memory per connection is not elastic either, because it decides what the server can hold.** At ~21 KB — where this was written — a hundred thousand idle keep-alive connections is 2 GB; at 4,669 it is 467 MB, and the whole of the difference was **where the connection was suspended** rather than what it held (ADR 0071). A feature that adds 4 KB to `Ctx` does not make anything slower; it makes the same box hold a fifth fewer connections, and nobody notices until the box is full. So the rule is not a percentage, it is a disclosure: a feature that costs per-connection memory says how much, in the ADR that introduces it.
+
+**The handler's half of that is now measured on both sides of the trade, and it went the way the pretty answer did not.** Four routes in `bench/s3_server.zig`, one fresh process each, out to 10,000 connections: `/health` 4,674 bytes, `/o/1k` 6,731, `/o/1m` 8,782, `/stream/1m` 12,876. The route that streams a megabyte through 64 KB of stack and never holds it costs **47% more per idle connection** than the one that puts the whole megabyte in the request arena, because the arena is reset at the end of the request and the stack is reset by nothing. That is [ADR 0063](./0063-a-handlers-stack-is-per-connection.md)'s sentence with a number under it, and it is the reason this row says floor rather than total. [`bench/result/s3.md`](../../bench/result/s3.md) has the run and the caveat that goes with it, which is that the ordering reverses for a connection that is working rather than idle.
 
 ## What "low memory" is allowed to mean
 
@@ -65,6 +67,7 @@ Measured stripped, `ReleaseFast`, on the examples in this repository.
 | Four routes in a benchmark, to find out what the memory axis actually measures ([ADR 0063](./0063-a-handlers-stack-is-per-connection.md)) | +0 | +0 |
 | An outbound HTTP client, `nilo_fetch` ([ADR 0070](./0070-a-fitting-borrows-the-loop.md)) | +0 | +0 |
 | Waiting at the connection loop's frame, and a WebSocket loop handed back to it ([ADR 0071](./0071-where-a-connection-waits-is-what-it-costs.md)) | +1,240 B | +1,336 B |
+| An object store as a Service, `nilo_s3` ([ADRs 0067](./0067-most-of-an-s3-client-is-not-s3.md)–[0072](./0072-an-object-store-is-a-service-that-dials.md)) | +0 | +0 |
 | Twenty findings from an application, closed together ([ADRs 0075](./0075-a-lazy-dependency-is-a-request.md)–[0084](./0084-a-library-can-tell-what-mode-the-program-was-built-in.md)) | +11,400 B | +17,272 B |
 
 `nilo_fetch` is +0 on both examples because neither imports it, and that is the
@@ -75,6 +78,18 @@ import it, against the same program calling `std.http.Client` itself, it is
 655,600, and they are the price of dialling out in Zig rather than of this
 module. [`bench/result/fetch.md`](../../bench/result/fetch.md) has the three
 binaries and the rest of the axes.
+
+`nilo_s3` is +0 for the same reason and measured the same way. Two servers with
+one route each, differing only in where the bytes come from
+(`bench/size/s3_none.zig` against `bench/size/s3_get.zig`, `zig build size-s3`):
+1,007,496 bytes against 1,716,072, so **object storage costs +708,576**, which is
+692 KB and 1.70×. Almost none of that is this module. `std.http.Client` and TLS are 655,600
+of it by `fetch.md`'s own split and `nilo_fetch` is 1,688, which leaves roughly
+**51 KB** that is SigV4, the bucket and the rest of `nilo_s3`. The delta is
+quoted whole anyway, because 692 KB is the number an operator's binary grows by
+and the split is what they read next. That a program storing nothing pays none
+of it is checked rather than assumed: `strings` finds 0 occurrences of `aws4`,
+`x-amz` or `s3` in the control.
 
 The second row is one measurement of six changes because they landed together, which is a worse record than the first row and is noted as such. The split it does show is the useful part: `hello` has one route returning text and pays +6 KB, which is the failure-body writer and nothing else — that part is unconditional. The remaining +8 KB on `rest` is the body describer and the schema walker, and those are generated per body type, so they are paid by applications that have bodies.
 

@@ -638,3 +638,99 @@ are re-analysed on every run because the compiler keeps nothing from a failed
 compilation — which is why they are the slow part of `zig build test` and why
 the snippet checks, which are the same shape pointed the other way, cost ~30ms
 each warm. That asymmetry decides which of the two can afford to grow.
+
+## Getting 0.2.0 to a tag
+
+Four things were held open before the release. Closing them turned up three
+bugs, and all three were in code written this cycle.
+
+**The warning about a mismatched build mode fired at the people who got it
+right.** `std` is one module per compilation and takes the root's optimize
+mode, so a constant of std's own can tell a library what the *program* was
+built at, which is [ADR 0084](./adr/0084-a-library-can-tell-what-mode-the-program-was-built-in.md)'s
+whole idea and it is sound. The constant chosen was not.
+`std.log.default_level` is `.debug` for `Debug` and `.info` for **all three**
+release modes, so reading `.info` as ReleaseSafe answered ReleaseSafe for
+every correctly built `ReleaseFast` program. `std.debug.runtime_safety` is the
+other half and splits the pair.
+
+What makes it worth an entry is the test. There was one, it switched on the
+current mode, and its `ReleaseFast` arm was **the one the suite never builds**
+(Debug and ReleaseSafe are what `test-all` runs, and both of those arms
+passed). A guard with an arm that cannot execute is
+[ADR 0033](./adr/0033-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md)
+with the failure moved one level up: not a guard that has only been seen to
+pass, but a guard with a branch that could not be reached at all. The fix was
+to make the derivation a function of its two inputs, so all four modes are
+checkable from a suite that builds in two.
+
+**A decision can be recorded, moved, and lost in the move.** ADR 0067 decided
+that a pooled connection the peer had already closed gets one retry, and
+argued it was correctness rather than policy. ADR 0070 then took the gate, the
+drain and the deadline into `nilo_fetch` under the heading "no retries", which
+is right about somebody else's *service* and swallowed this one, which is
+about a socket. Both documents were correct in isolation and nothing re-read
+the first. **An amendment belongs in the move, not after it.** 0067 carries
+one now.
+
+**And the obvious fix was half a fix, which the measurement caught and the
+reasoning had not.** 32 spurious 500s per run after an idle period; one retry
+took it to 13. When a whole pool goes stale together, a retry draws a second
+corpse about as often as a live socket, because one attempt can only evict the
+connection it was handed. Bounding by the pool's own `free_size` takes it to
+zero. **The count was the clue all along**: exactly 32, deterministic across
+runs and processes, is `std.http.Client.ConnectionPool.free_size`. A
+deterministic number is a name you have not looked up yet.
+
+**Two axes recorded as pending had nothing behind them.** `bench/result/s3.md`
+said binary size had "the two scratch programs written and no number taken".
+The programs did not exist. Writing them took twenty minutes: 708,576 bytes,
+of which roughly 51 KB is the module and the rest is `std.http.Client` and TLS.
+
+**And the memory axis was where the release paid for itself.** Two harness
+bugs first: the baseline was being read on a server that had already served a
+load test, so RSS *fell* as connections were added; and `bench/mem.py` drained
+only `Content-Length`, so on a chunked route it stopped after the head and
+called a socket with a megabyte backed up in it idle. The second one printed
+13,222 B at 500 connections, 45,878 at 5,000 and 26,273 at 10,000. **A
+per-connection cost that rises and then falls is not one**, and that is enough
+to throw a run out without knowing why.
+
+Corrected, the pair of routes `bench/s3_server.zig` carries for this purpose
+finally answered: `/o/1m`, which pulls a whole megabyte into the request
+arena, costs **8,782 bytes** an idle connection; `/stream/1m`, which holds none
+of it and moves it through 64 KiB of stack, costs **12,876**. The frugal-looking
+route is 47% dearer, because the arena is reset at the end of the request and
+the stack is reset by nothing.
+[ADR 0063](./adr/0063-a-handlers-stack-is-per-connection.md) said this in a
+sentence and now has the pair under it.
+
+**The 64 KiB buffer is not what is paid for, either.** Rebuilt at 8 KiB with
+nothing else changed: 12,875 against 12,876. Fifty-six kilobytes off the
+declaration moved one byte, so the cost is the depth of the streaming call path
+rather than what it carries. `nilo_fetch` found the same thing from the other
+end (−66 bytes for its buffers). Twice now the visible allocation was not the
+thing being bought, which makes **"shrink the buffer" the lever to check last
+and "move where it waits" the one to check first.**
+[ADR 0071](./adr/0071-where-a-connection-waits-is-what-it-costs.md) by another
+route.
+
+**Two more, found by running the suite rather than by reading it.** The canned
+server `fetch/live.zig` uses walked a fixed 200-port window, and a server that
+closes a connection leaves its port in `TIME-WAIT` for a minute, so three
+`zig build test-all` runs in a row exhausted it. The failure arrived as
+`error.NoFreePort` inside whichever test was next, which named the wrong thing
+entirely. A thousand ports and a start derived from the thread id survives six
+runs back to back with 221 ports still held. `reuse_address` was the one-line
+version and is refused in a comment: std sets `SO_REUSEPORT` with it, and two
+test binaries silently sharing a port is worse than one failing to bind.
+
+And the snippet checker ([ADR 0083](./adr/0083-the-guide-is-the-source-of-its-own-snippets.md))
+had never seen `nilo_s3` or `nilo_fetch`, which is why a published object-store
+example with two type errors in three lines survived a release cycle. Both
+modules are in its world now, and the object-store example is the first block
+checked in **declaration** mode rather than body mode, so that half of the
+harness has now run at all. Marking it turned up a third thing: the prelude
+exports `id`, so a handler parameter called `id` will not compile there. The
+parameter is `key`, which is what an object store calls it anyway.
+

@@ -113,6 +113,17 @@ the queue when its clock runs out. **The ceiling is `max_in_flight × 59,151`
 bytes and that number goes in the docs**, because a number nobody wrote down is
 a number nobody chose.
 
+> **Amended by [ADR 0070](./0070-a-fitting-borrows-the-loop.md) and
+> [ADR 0072](./0072-an-object-store-is-a-service-that-dials.md).** The gate,
+> the deadline, the bounded drain and the body ceiling are `nilo_fetch`'s now,
+> and `nilo_s3` is a caller of it rather than the owner of them. Nothing a
+> user writes moved: `max_in_flight` and `max_drain` are still options on
+> `s3.open`, passed straight through, which is why this went four ADRs
+> without anybody noticing the text was stale. What survives here unchanged
+> is the *reasoning*: the 59,151 bytes, the ceiling being per process, and
+> why a gate has to exist at all. That argument is about
+> `std.http.Client` rather than about which module holds the semaphore.
+
 ## Retries: only the one that is not a policy
 
 `Request.deinit` decides whether a connection is reusable, and one branch of it
@@ -147,6 +158,26 @@ a fresh TLS handshake.
 closed.** An idle keep-alive connection being reaped is normal, and the first
 write to it fails; not retrying that once turns every idle timeout into a
 spurious error. That is correctness.
+
+> **This was decided here and then not built, for two releases.** ADR 0070
+> gave the policy to `nilo_fetch` under the heading "no retries", which is
+> right about somebody else's *service* and swallowed this one, which is about
+> a socket this side had already stopped using. Nothing noticed, because the
+> failure needs an idle period to appear and every test dialled a server it
+> had just started.
+>
+> What found it was a benchmark: a `wrk` run against `bench/s3_server.zig`
+> after 80 seconds idle answered **exactly 32 requests non-2xx**, warm zero,
+> and 32 is `std.http.Client.ConnectionPool.free_size`. The whole pool reaped,
+> one spurious 500 each.
+>
+> It is built now, in `fetch/fetch.zig` where the connection is, and the shape
+> corrects one word of the paragraph above: **"one retry" is not enough.**
+> When a pool goes stale together, a single retry draws a second corpse as
+> often as a live socket (measured, 32 became 13), because an attempt can
+> only evict the connection it was handed. The bound is the pool's own
+> `free_size`, which is at most one attempt per connection it could be
+> holding, and it takes the same run to **zero**.
 
 **A `503 SlowDown` or a 5xx comes back to the handler as `error.Throttled` or
 `error.Unavailable`.** Backing off is refused here, and the reason is the gate
@@ -218,3 +249,10 @@ Against [ADR 0018](./0018-the-trade-budget-has-three-axes.md)'s four axes.
 - **The 24% measurement is the reusable part of this ADR.** The next module
   that wants to borrow the server's parser should count first. Sharing the
   cheap fifth of a job is not sharing.
+- **A decision recorded here and implemented elsewhere is a decision that can
+  go missing.** The retry above was argued, written down, and then handed to a
+  module whose own ADR refused the category it belonged to. Neither document
+  was wrong on its own. What was missing is that nothing re-read this one when
+  the ownership moved, which is the case for an amendment being part of the
+  move rather than a follow-up, and for `bench/result/` existing, since a
+  benchmark is what eventually noticed.

@@ -405,7 +405,90 @@ pub const Exchange = struct {
 
         self.bound.arm(client.limits, opts.timeout_ms orelse client.settings.timeout_ms);
 
-        self.req = client.inner.request(opts.method, uri, .{
+        // **One retry, and only onto a connection the peer had already
+        // closed.** Not a retry policy: `std.http.Client` pools keep-alive
+        // connections and every server reaps an idle one, so the first call
+        // after a quiet spell takes a socket with a FIN already on it. std
+        // names that case exactly — `HttpConnectionClosing`, documented there
+        // as "the client sent 0 bytes of headers before closing the stream.
+        // This happens when a keep-alive connection is finally closed" — so
+        // **nothing was answered and nothing reached anybody.** Sending it
+        // again on a fresh connection is transport hygiene, which is why
+        // [ADR 0067](../docs/adr/0067-most-of-an-s3-client-is-not-s3.md)
+        // called it correctness while refusing every other retry, and why
+        // [ADR 0070](../docs/adr/0070-a-fitting-borrows-the-loop.md)'s "no
+        // retries" is about somebody else's *service* rather than about a
+        // socket this one had already stopped using.
+        //
+        // Measured before it was written: a `wrk` run against
+        // `bench/s3_server.zig` after 80 seconds idle answered **exactly 32
+        // requests non-2xx**, and the same run against a warm pool answered
+        // zero. 32 is `std.http.Client.ConnectionPool.free_size`, the idle
+        // connections std keeps — the whole pool reaped, one spurious 500
+        // each.
+        //
+        // **That is also why the bound is not one.** A first version retried
+        // once and took the 32 down to 13, because when a whole pool goes
+        // stale together the retry draws a second corpse as easily as a live
+        // socket: each attempt can only evict the one connection it was
+        // handed. So the limit is the pool's own size — at most one attempt
+        // per connection it could be holding — and it follows a caller who
+        // resizes the pool rather than being a number written here.
+        //
+        // It terminates and it is cheap. Every attempt marks its connection
+        // closing, so the corpses strictly run out; a closed socket fails
+        // with no round trip in it; and the deadline armed above is the real
+        // backstop, unchanged by any of this.
+        //
+        // Three bounds, and each closes something:
+        //
+        // - **Only this error.** Anything else is the server answering, and
+        //   an answer is not something to send twice.
+        // - **Only a body still where it was.** A `.stream` body has had its
+        //   reader consumed, so re-sending it would put fewer bytes on the
+        //   wire than the `content-length` promised — worse than the error.
+        // - **Inside the same permit and the same deadline.** Both are taken
+        //   above and neither is re-armed, so a retry cannot double the time
+        //   budget or take a second seat at the gate.
+        const stale_limit = client.inner.connection_pool.free_size;
+        var tries: usize = 0;
+        while (true) : (tries += 1) {
+            self.attempt(client, uri, opts) catch |err| {
+                if (tries < stale_limit and err == error.HttpConnectionClosing and
+                    replayable(opts.body) and !self.bound.fired())
+                {
+                    self.discard();
+                    continue;
+                }
+                return client.blame(&self.bound, err);
+            };
+            break;
+        }
+
+        // Read out now, because `Response.reader` deliberately invalidates
+        // them: std sets the head's slices to `undefined` the moment the body
+        // stream starts, and it is right to — the bytes they point at are
+        // about to be read over. What is kept here is the slices rather than a
+        // copy, so the window handed to the caller is the same window std was
+        // protecting, and it is the header of `Head` that says so.
+        const head: Head = .{
+            .status = self.res.head.status,
+            .content_length = self.res.head.content_length,
+            .content_type = self.res.head.content_type,
+            .bytes = self.res.head.bytes,
+        };
+
+        self.announced = head.content_length;
+        self.reader = self.res.reader(opts.transfer_buffer);
+        return head;
+    }
+
+    /// One send and one head read, with no opinion about what a failure means.
+    ///
+    /// Split out of `begin` so the retry above can run it twice without
+    /// repeating it, and so that `blame` is applied in exactly one place.
+    fn attempt(self: *Exchange, client: *Client, uri: std.Uri, opts: Begin) !void {
+        self.req = try client.inner.request(opts.method, uri, .{
             .extra_headers = opts.headers,
             .redirect_behavior = if (opts.redirect_buffer.len == 0)
                 .unhandled
@@ -416,7 +499,7 @@ pub const Exchange = struct {
                 .authorization = if (opts.authorization) |a| .{ .override = a } else .default,
                 .content_type = if (opts.content_type) |t| .{ .override = t } else .default,
             },
-        }) catch |err| return client.blame(&self.bound, err);
+        });
         self.open = true;
 
         // Ask for the body uncompressed. **Not a default worth inheriting**:
@@ -451,46 +534,46 @@ pub const Exchange = struct {
         self.req.accept_encoding[@intFromEnum(std.http.ContentEncoding.identity)] = true;
 
         switch (opts.body) {
-            .none => self.req.sendBodiless() catch |err| return client.blame(&self.bound, err),
+            .none => try self.req.sendBodiless(),
             .slice => |bytes| {
                 self.req.transfer_encoding = .{ .content_length = bytes.len };
-                var w = self.req.sendBody(&.{}) catch |err| return client.blame(&self.bound, err);
-                w.writer.writeAll(bytes) catch |err| return client.blame(&self.bound, err);
-                w.end() catch |err| return client.blame(&self.bound, err);
+                var w = try self.req.sendBody(&.{});
+                try w.writer.writeAll(bytes);
+                try w.end();
             },
             .stream => |src| {
                 self.req.transfer_encoding = .{ .content_length = src.len };
-                var w = self.req.sendBody(&.{}) catch |err| return client.blame(&self.bound, err);
+                var w = try self.req.sendBody(&.{});
                 // Exactly the length that was announced, and nothing else. A
                 // source that runs out early fails here rather than sending a
                 // body that disagrees with the head describing it.
-                src.reader.streamExact64(&w.writer, src.len) catch |err| {
-                    return client.blame(&self.bound, err);
-                };
-                w.end() catch |err| return client.blame(&self.bound, err);
+                try src.reader.streamExact64(&w.writer, src.len);
+                try w.end();
             },
         }
 
-        self.res = self.req.receiveHead(opts.redirect_buffer) catch |err| {
-            return client.blame(&self.bound, err);
-        };
+        self.res = try self.req.receiveHead(opts.redirect_buffer);
+    }
 
-        // Read out now, because `Response.reader` deliberately invalidates
-        // them: std sets the head's slices to `undefined` the moment the body
-        // stream starts, and it is right to — the bytes they point at are
-        // about to be read over. What is kept here is the slices rather than a
-        // copy, so the window handed to the caller is the same window std was
-        // protecting, and it is the header of `Head` that says so.
-        const head: Head = .{
-            .status = self.res.head.status,
-            .content_length = self.res.head.content_length,
-            .content_type = self.res.head.content_type,
-            .bytes = self.res.head.bytes,
+    /// Whether this call may go out a second time.
+    ///
+    /// Only the bodies whose bytes are still where the caller left them.
+    fn replayable(body: Body) bool {
+        return switch (body) {
+            .none, .slice => true,
+            .stream => false,
         };
+    }
 
-        self.announced = head.content_length;
-        self.reader = self.res.reader(opts.transfer_buffer);
-        return head;
+    /// Put a dead connection beyond reuse and forget the attempt on it.
+    ///
+    /// `closing` is what stops std returning it to the pool, and without it
+    /// the retry would draw the same corpse again.
+    fn discard(self: *Exchange) void {
+        if (!self.open) return;
+        if (self.req.connection) |conn| conn.closing = true;
+        self.req.deinit();
+        self.open = false;
     }
 
     /// The whole body, in the Scope's memory, up to `max` bytes.
@@ -719,6 +802,20 @@ test "a failure this call's own clock caused is a timeout, whatever it is called
         Client.Error.ConnectionRefused,
         client.blame(&theirs, error.ConnectionRefused),
     );
+}
+
+test "a streamed body is not replayed, because its reader is spent" {
+    // The bound that keeps the retry honest. `live.zig` proves the retry
+    // happens against a server that hangs up; this proves the one case it
+    // must not happen in. Re-sending a `.stream` body would put fewer bytes
+    // on the wire than the `content-length` announced, which is a corrupted
+    // request rather than a recovered one
+    // ([ADR 0067](../docs/adr/0067-most-of-an-s3-client-is-not-s3.md)).
+    try testing.expect(Exchange.replayable(.none));
+    try testing.expect(Exchange.replayable(.{ .slice = "x" }));
+
+    var empty: std.Io.Reader = .fixed("");
+    try testing.expect(!Exchange.replayable(.{ .stream = .{ .reader = &empty, .len = 0 } }));
 }
 
 test {

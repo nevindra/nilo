@@ -13,14 +13,16 @@ point. You import the modules you use, and Zig never compiles the rest.
 
 **It's built for people and for coding agents at the same time**, which turns
 out to be one job rather than two. One rule covers the whole argument list.
-Nothing depends on the order you wrote it in. And 115 error messages are held in
+Nothing depends on the order you wrote it in. And 129 error messages are held in
 place by a build step, so a mistake comes back as a sentence while your code is
 still compiling instead of as a 500 at runtime. That helps you, and it helps
 whatever is writing code next to you.
 [More on that below](#this-is-also-why-agents-do-well-here).
 
-> **0.2.0** · needs **Zig 0.16** · it used to be called `zfast`, and that rename
-> is the only breaking change in this release ([CHANGELOG](./CHANGELOG.md)).
+> **0.2.0** · needs **Zig 0.16** · it used to be called `zfast`. Five things
+> break coming from 0.1.0, and
+> [Upgrading](./CHANGELOG.md#upgrading-from-010) is all of them, with the fix
+> next to each.
 
 ## A route is just a function
 

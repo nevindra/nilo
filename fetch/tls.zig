@@ -27,12 +27,18 @@
 //! zig build smoke-tls -Dnetwork
 //! ```
 //!
-//! Without `-Dnetwork` every test here skips and says so. That is a deliberate
-//! silent pass and the reason it is tolerable is that **this step is not part
-//! of `test` or `test-all`** — nothing that gates a change can be quietly
-//! green because a machine had no route out. It is run before a release and
-//! after anything touches `send`, and `bench/result/fetch.md` records what it
-//! found.
+//! Without `-Dnetwork` every test here returns `error.SkipZigTest`, and the
+//! step prints one line saying it skipped. **That line is the feature.**
+//! `error.SkipZigTest` is invisible through `zig build` — the runner counts
+//! the skip and `zig build` prints a run artifact's output only when it fails
+//! — so for one release this step exited 0 on any machine without the flag,
+//! having asserted nothing, and looked exactly like a pass. `SkipNotice` in
+//! `build.zig` is what says it now.
+//!
+//! Skipping at all is tolerable only because **this step is not part of `test`
+//! or `test-all`** — nothing that gates a change can be quietly green because
+//! a machine had no route out. It is run before a release and after anything
+//! touches `send`, and `bench/result/fetch.md` records what it found.
 //!
 //! The endpoints are two of the most stable on the web and neither is anyone's
 //! production service: `example.com`, which IANA maintains for exactly this,
