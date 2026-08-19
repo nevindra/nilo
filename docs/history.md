@@ -782,3 +782,102 @@ feature is two declarations rather than one. The alternative was a JSON parser
 in this repository, with the unicode escapes and number edges that come with
 one. Same trade the header of `json.zig` already made for floats, arriving on
 the other side of the same file.
+
+## Four gaps in `http/`, and the two habits that hid them
+
+A scan of `http/` across bugs, consolidation and DX turned up 23 things. Five
+were taken. What is worth keeping is not the fixes, which are in
+[ADR 0086](./adr/0086-a-response-header-cannot-forge-a-second-one.md),
+[ADR 0087](./adr/0087-a-body-framed-twice-is-refused.md) and the two
+applications of [ADR 0081](./adr/0081-a-ceiling-that-is-reached-is-said-out-loud.md).
+It is how four of them stayed hidden while the repository looked straight at
+them.
+
+**A differential test only finds what its two halves disagree about.**
+`fuzz.zig` has held a hand-written reference parser against the fast one since
+it was written, and the doc comment on the comparison names request smuggling as
+the thing it is for. It never caught any of the four framing bugs, because the
+reference parser was written from the same reading of the spec as the parser it
+checks: `parseInt` on both sides, `indexOfIgnoreCase(value, "chunked")` on
+both sides. Two implementations of one misunderstanding agree perfectly. The
+rewrite deliberately took the other route through the coding list, forwards
+where `http1` goes backwards, and that is the only version of this test worth
+having.
+
+**A hazard guarded in two places and missed in a third is not an oversight
+about the hazard.** `Ctx.requestId` refused `\r` and `\n` in a client's request
+id, with a comment saying a newline "splits the response". `Cookie.check`
+refused the same bytes. `Ctx.setHeader`, the one an application actually calls,
+did not. Nobody had failed to understand the danger; the danger was handled
+wherever somebody happened to be looking. That is what a choke point is for, and
+"where else does this byte reach the wire" is the question that finds the third
+place.
+
+**The one lifetime with no trap behind it was the one whose doc was wrong.**
+`Message.data`'s comment said the bytes were "the caller's memory and lives
+exactly as long as the caller decides". `receive` takes no buffer: the slice
+points into a page borrowed from the executor's free list, handed back when the
+connection falls quiet. `docs/reference.md` had it right, "the buffer is the
+executor's, lent for one message", so the two copies had disagreed for as long
+as both existed, and the wrong one was the one a reader hits from the code.
+Every other borrowed thing in `http/` has a Debug-mode trap under it (ADR 0004);
+this one had a sentence, and the sentence was backwards.
+
+**A SIMD helper that is fast where it was written is not fast where it is
+reused.** The header check was first written with `scan.positionsOf` and cost
+9ns of a 192ns request. `positionsOf` falls to a scalar tail below one 32-byte
+block, so three delimiters over a 27-byte header name is three passes of 27
+iterations. One branchless pass over a 256-byte table is 3ns.
+[`bench/result/http.md`](../bench/result/http.md) has the run; the general form
+is that `scan.zig`'s header names three callers and all three have long inputs.
+
+**And one correction worth the line it costs.** `Content-Length: 05` went on the
+refuse list beside `+5` and `1_0`, on the strength of "leading zeroes" sounding
+like the same class of thing. It is two digits, so it is legal, and every parser
+in the chain reads it as 5. The test caught it before the commit did.
+
+## A flaky test that was a fair coin
+
+`a pooled connection the peer already closed costs one retry, not a failure`
+failed about one `zig build test-all` run in three and passed three of three
+under `zig build test-fetch`. Everything about that shape says "the test is
+racy under load, stabilise the test". It was not racy. It was a fair coin, and
+one side of it was a bug in `fetch/`
+([ADR 0088](./adr/0088-a-reaped-connection-arrives-two-ways.md)).
+
+**Take the error before believing the diagnosis.** The failure was reproduced
+by making the race deterministic rather than by running the suite more times:
+one delay in the canned server, one `catch` that printed the error name, and
+what came back was `ReadFailed` from `ECONNRESET` rather than the
+`HttpConnectionClosing` the retry was bounded to. Two minutes, and it turned
+"flaky under load" into a named defect. Seventy-two parallel runs of the test
+binary beforehand had produced zero failures and would have gone on producing
+zero, because the load that matters was not CPU.
+
+**A generic error is where information goes to die, and the fix is usually
+downstream of somebody else's honest decision.** `std.http.receiveHead` splits
+`EndOfStream` by how much of the head arrived (`HttpConnectionClosing` at zero
+bytes, `HttpRequestTruncated` past it) and deliberately does not split
+`ReadFailed`, because a read can fail for reasons that have nothing to do with
+reaping. std keeps both pieces needed to make that split, in `Reader.err` and
+in what the reader still holds buffered; it just does not join them up, and it
+is not std's job to. Reaching for those two fields is what closed this.
+
+**A test that cannot fail is not covering the thing it names.** The first
+`serveThenReset` waited for the client's second request through the connection's
+ordinary 4 KB reader, which pulled the whole request into user space and left
+the receive queue empty, so `close` sent a FIN and the test passed through the
+branch it was written to avoid. It went on passing with its own branch switched
+off. What proved it was switching the branch off on purpose and requiring a
+failure, which is worth doing for any test written to cover a specific line.
+
+**And the port ranges two files picked did not agree.** Soaking `test-all` ten
+times running turned up a second failure with a completely different cause:
+`s3/canned.zig` walked 200 ports from a fixed 39,600, inside `fetch/live.zig`'s
+39,200–40,199, so `fetch` rolled over s3's whole window and s3 ran out with
+`error.NoFreePort` from the sixth run on. `fetch/live.zig` had already learned
+both halves of this and written them down in its own `open`; nothing carried
+the lesson across the repository, because nothing could. `std.Io.net.Server`
+still has no way to read back the port it was given, which was re-checked
+rather than believed, so binding zero is not available and two files picking
+loopback ports remains an agreement held by two comments pointing at each other.

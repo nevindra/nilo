@@ -7,6 +7,97 @@ What was measured and what was got wrong on the way is in
 
 ## Unreleased
 
+### A reaped connection is retried whichever way the peer dropped it
+
+`fetch` retries a call once when the pooled connection it was handed had
+already been reaped by the peer. It only recognised half of what that looks
+like ([ADR 0088](./docs/adr/0088-a-reaped-connection-arrives-two-ways.md)).
+
+If the peer's close lands first, the socket carries a FIN and `std.http` says
+`HttpConnectionClosing`. If your request lands first, the peer closes a socket
+with an unread request in it, the kernel sends an RST instead, and `std.http`
+says `ReadFailed`. Same reaped connection, same nothing answered, and only the
+first was retried. Which one you get is a race nobody runs.
+
+**What to change:** nothing. A call that used to fail on a coin toss against a
+service that reaps idle connections now retries, under the same bounds as
+before: only a replayable body, only inside the same permit and deadline, and
+at most one attempt per connection the pool could hold. A reset partway through
+a response head is still a failure, because something did come back.
+
+### A response header can no longer forge a second one
+
+`Ctx.setHeader` refuses a value carrying `\r`, `\n` or `\0` with
+`error.BadHeaderValue`, and a name that is empty or carries any of those or
+`:`, a space or a tab with `error.BadHeaderName`
+([ADR 0086](./docs/adr/0086-a-response-header-cannot-forge-a-second-one.md)).
+
+Until now the value went to the wire exactly as handed over, so a header built
+out of request data did not stay inside its header. It ended the header block
+and wrote the rest of the response itself. The path is the one `Redirect.to`
+takes: a shortening service that stores a URL somebody submitted, and a
+`Location` that sets a cookie no line in the application sets.
+
+**What to change:** nothing, unless a header value of yours legitimately holds
+one of those bytes, which no header value does. `Redirect`, `Response.headers`,
+`FileBody.headers` and `cors` all go through `setHeader` and are covered by it.
+A handler that lets the error out sends a 500.
+
+Checked in every optimize mode, not only `Debug`. It costs 3 to 8ns of a 192ns
+request, and nothing at all on a response that sets no header
+([`bench/result/http.md`](./bench/result/http.md)).
+
+### A request whose body is framed twice is refused
+
+Four ways a `Content-Length` could disagree with the reverse proxy in front of
+nilo, all now `400`
+([ADR 0087](./docs/adr/0087-a-body-framed-twice-is-refused.md)):
+
+- a value that is not plain digits (`+5` used to read as 5, `1_0` as 10, `-0`
+  as 0)
+- a repeated `Content-Length` with a different value (the same value is fine)
+- `Content-Length` beside `Transfer-Encoding: chunked`, in either order
+- a second `Transfer-Encoding` line once chunked has been seen
+
+`chunked` is also read as the last coding in the list rather than as a substring
+anywhere in it, so `xchunked` is no longer taken for chunked framing.
+
+**What to change:** nothing. Every request refused here is one a proxy in front
+would very likely have refused already.
+
+### `Vary` is repeated rather than replaced
+
+`Ctx.setHeader("Vary", …)` twice now sends two `Vary` lines instead of the
+second replacing the first. That is what RFC 9110 §5.3 says a recipient joins
+with a comma, so `Vary: Origin` plus `Vary: Accept-Encoding` is
+`Vary: Origin, Accept-Encoding`.
+
+**What this fixes:** a compressed static file served behind `cors.with(.{
+.origin = … })` sent only `Vary: Accept-Encoding`. A shared cache reading that
+is entitled to hand one origin's response to another. `cors.permissive` was
+never affected, so this bit the careful configuration and not the loose one.
+
+### Two ceilings that were reached in silence now say so
+
+Both are [ADR 0081](./docs/adr/0081-a-ceiling-that-is-reached-is-said-out-loud.md)
+applied where it had not been.
+
+A multipart form with more than `form.max_parts` (256) parts is a `400` naming
+the ceiling. It used to read the first 256 and walk past the rest, which a
+handler cannot tell apart from fields the browser never sent.
+
+A `422` from `Bound(T)` that runs out of `fail.max_message` ends with
+`; and N more` instead of stopping mid-word.
+
+### `Message.data`'s documented lifetime was backwards
+
+Documentation only, and worth reading if you hold a WebSocket message past the
+`receive` that produced it. The type said the bytes were "the caller's memory
+and lives exactly as long as the caller decides". They are borrowed from the
+executor's free list and the loan ends at the next `receive`, sooner if the
+connection falls quiet, at which point another connection may be filling the
+same pages. `docs/reference.md` always had this right. Copy before you keep.
+
 ### A type can say how its JSON is spelled
 
 `std.json` writes a union one way — `{"metrics":{…}}`, one object with one key.

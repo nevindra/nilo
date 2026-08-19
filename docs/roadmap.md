@@ -67,7 +67,7 @@ other module's.
 | [`nilo_config`](#nilo_config-settings) | needs no loop | reading a name the field is not called |
 | [`nilo_pw`](#nilo_pw-hashing-a-password) | needs no loop | a Cost floor that weighs the wrong half, and a patch `std` should have |
 | [`nilo_fetch`](#nilo_fetch-calling-somebody-elses-api) | borrows the loop | 16,495 bytes of stack per idle connection, and nothing measured through TLS |
-| [`nilo_http`](#nilo_http-the-server) | owns the loop | the biggest list: compression, counters, and a megabyte that costs 2.2× axum |
+| [`nilo_http`](#nilo_http-the-server) | owns the loop | the biggest list: a weak `If-Range`, a kilobyte of logger on a live frame, compression, counters |
 | [`nilo_sql`](#nilo_sql-postgres-and-sqlite) | borrows the loop | which way a SQLite statement should run, and where migrations live |
 | [`nilo_s3`](#nilo_s3-object-storage) | borrows the loop | nothing measured through TLS, and no `LIST`, `COPY` or multipart |
 
@@ -381,7 +381,367 @@ connection is memory that has not been budgeted.
 **Waiting on: a number.** The per-connection cost has to be priced against the
 4,669 bytes an idle connection holds today.
 
+**3. CORS that can name more than one origin.** `cors.Options.origin` is a
+single compile-time string, so an application with a production front end and a
+staging one cannot use the middleware at all and writes its own. The shape that
+fits is `origins: []const []const u8`, compared against the request's `Origin`
+header with one comptime-unrolled `eqlIgnoreCase` per entry, echoing back the
+one that matched. Nothing is formatted and nothing is allocated: every candidate
+is already a literal, and the value that goes out is one of them. A list of one
+behaves exactly as today, and `"*"` stays the way to say "anyone".
+
+The axis is throughput, and it is paid only by a request that carries an
+`Origin` header: N compares against short literals, where N is what the
+application wrote. Nothing per connection, nothing per request that is not
+cross-origin.
+
+The `Vary` gap below points here, because the two are the same header being
+made to work.
+
+**Waiting on: ready.**
+
+**4. An expiry the sealed session enforces itself.** `max_age` today is a cookie
+attribute, which is the client's to honour. A cookie copied out of a browser
+stays valid until the secret changes, and `session.open` has nothing to check it
+against: the plaintext is a version byte, a four-byte shape fingerprint and the
+fields (`session.plainSize`). Eight bytes of `nowMillis()` in front of the
+fields, and a `max_age_ms` compared in `open`, buy an expiry the server decides,
+with no store and no sweep.
+
+The cost is eight to twelve more base64 characters in the cookie, depending on
+where `plainSize(T)` lands against a multiple of three, plus one clock read per
+`seal` and one comparison per `open`. No allocation, and nothing per connection.
+Cookies written by the old build stop opening for free: `open` already refuses
+anything whose length is not `plainSize(T) + overhead`, and
+`session.cookieSize` already reports the total, so the ceiling check keeps
+working unchanged.
+
+This is not revocation. A cookie inside its window is still valid, which is what
+"Signing out everywhere" under **Not decided** is about.
+
+**Waiting on: ready.**
+
 ### Known gaps
+
+**`If-Range` accepts a weak validator, which is the one comparison the RFC says
+must be strong.** `static.etagMatches` strips a `W/` prefix and honours `*`.
+Both are right for `If-None-Match` and neither is right for `If-Range`: RFC 9110
+§13.1.5 asks for strong comparison there, and a weak tag means "close enough to
+reuse, not byte for byte the same", which is exactly the claim a resumed
+download must not act on. `static.etagForSpilled`'s own doc states that rule as
+the reason nilo's tags are strong, so the design knows it and the shared
+comparison does not.
+
+nilo only ever writes strong tags, so reaching it takes a client that wraps a
+tag it was given in `W/`. Latent rather than live, and one function away from
+being impossible.
+
+There is a narrower second half. `sendfile.send` guards its `If-Range` with
+`contents.etag.len > 0` and says why: `etagMatches` would otherwise let a bare
+`*` stand in for a comparison that never happened. `App.serveHeldFile` has no
+such guard. Unreachable today, because `static.load` gives every held file a
+tag, but the two arms of one feature disagree while `serveHeldFile`'s own doc
+claims there is exactly one copy of each rule.
+
+A second entry point, `etagMatchesStrong`, used by both `If-Range` callers. A
+cold header, no allocation, nothing per connection.
+
+**Waiting on: ready.**
+
+**`Expect: 100-continue` is never answered, so curl waits a second before
+sending an upload.** Nothing under `http/` reads the header. A client that sends
+it and waits gets no interim response, so it falls back on its own timer:
+curl's is one second, and it is one second on every upload past its threshold.
+RFC 9110 §10.1.1 also allows answering the *final* status without reading the
+body at all, which is the better half of the feature and is what turns a
+rejected 20 MB upload into a 413 that costs nothing to send.
+
+The write is 25 bytes and the read is one more arm in `applyHeaderAt`'s switch
+on name length. No allocation, nothing per connection, and nothing at all for a
+request that does not send the header.
+
+**Waiting on: ready.**
+
+**A `Room`'s roster lock is held across the whole broadcast, and the field says
+it is not.** `Room.roster`'s doc says it guards taking and giving up a seat and
+is "not held while posting". `Room.handOut` takes it and holds it for the whole
+loop over the roll, so `join` and `leave` queue behind every broadcast.
+
+What is there is correct, and the doc is the half that is wrong, but it cannot
+simply be rewritten to match. `Room.leave`'s own comment ("a `say` already past
+the roster may be pushing into this ring right now") is written for the design
+the doc describes, and `takeSeat` does not drain a seat's ring before handing it
+out. Release the roster before the loop and a post landing between `leave`'s
+drain and the next `takeSeat` is delivered to whoever sits down next, because
+the era check passes.
+
+So there are two ways out and they are not the same size. Correcting the doc is
+a paragraph. Making the code match it means draining in `takeSeat` too, and then
+showing the contention was real.
+
+**Waiting on: a harness.** Nothing measures a Room at all. `bench/ws_server.zig`
+runs the chat loop from `examples/chat/` with the room deliberately taken out,
+so every WebSocket number in [`bench/result/http.md`](../bench/result/http.md)
+is a socket that joined nothing.
+
+**A checkbox does not bind to a `bool`.** `convert.boolFrom` accepts `"true"`
+and `"false"` and nothing else. A ticked HTML checkbox sends `on` by default and
+an unticked one sends nothing at all, so `newsletter: bool = false` inside a
+`Form(T)` is a 400 the first time somebody ticks it. A `bool` is one of the
+types `form.zig`'s own compile error offers as an example of what a form may
+hold.
+
+The absent half already works, because a default is what "absent" means
+everywhere in nilo. Only the present half is wrong.
+
+The fix has to know which slot it is in or it is a different bug: `on` is not a
+JSON boolean, and a body sending one should still be refused, so widening
+`boolFrom` for everybody trades one wrong answer for another. `bound.Slot`
+already carries the difference between `body`, `form` and `query` for the
+wording of a message, so it is the place to carry it for the parsing too.
+
+Comptime work, no allocation, and only on a form field whose type is `bool`.
+
+**Waiting on: ready.**
+
+**The logger puts a kilobyte on a frame that is live while the handler waits.**
+`logger.with`'s inner `log` declares `var buf: [1024]u8` and is a plain `fn`, so
+it is a candidate for inlining into `run`, whose frame is live across
+`next.run(c)`.
+[ADR 0071](./adr/0071-where-a-connection-waits-is-what-it-costs.md) §3 is the
+rule this breaks, in its own words: a format string costs stack whether or not
+it is ever printed, and four `std.log.warn` sites nobody hits were most of
+`handleConnection`'s 4,184 bytes. The remedy there was `noinline` on seven
+functions and nothing else.
+
+A WebSocket is not affected: the socket loop runs from `App.handleConnection`
+after the request has unwound (ADR 0071 §4). What is affected is anything that
+suspends *inside* the handler, which is a database call, an outbound call, and
+an SSE stream, and a stream suspends there for as long as it lives. ADR 0063
+measured an ordinary database route at 17,022 bytes
+([`bench/result/http.md`](../bench/result/http.md)).
+
+**Waiting on: a number.** `noinline fn log` is a one-word change. Whether it
+moves `python3 bench/mem.py` against a route holding a stream is what nobody
+has run.
+
+**Ten doc comments came unstuck from what they describe, and two of them name
+things that are gone.** A doc block that loses its blank line runs into the next
+one, and both land on the following declaration. It has happened ten times:
+`App.findStatic`'s doc sits on `StaticHit`, `App.drain`'s on `checkRootWiring`,
+`App.sameService`'s on `rebase`, `Ctx.body`'s on `aboutToRead`, `Ctx.events`'s
+on `upgrade`, `bulkhead.dontNeed`'s on `releaseScratchPages`,
+`bulkhead.Deadlines`'s on `Woken`, `zio.releaseIdleStack`'s on `margin`, and
+twice more inside `websocket.Socket`. Every time, the function that was
+described now has no doc and the one that inherited it has two.
+
+The largest is the worst. `releaseIdleStack`'s doc is the whole account of ADR
+0071's arithmetic, including the three properties that keep its `madvise` off a
+neighbouring fiber's live stack, and it is filed under a constant.
+
+Two also name identifiers that no longer exist. `websocket.zig` says
+`App.waitOrRelease`, which ADR 0071 renamed to `waitForRequest`, and it says the
+scratch slot points at `Ctx._ws_scratch`, which is not a field `Ctx` has. The
+slot is on the handover value in `App.handleConnection`.
+
+Nothing on any axis. It is a morning of reading, and the reason it is here
+rather than done is that nothing catches the next one.
+
+**Waiting on: ready.**
+
+**Four files print nilo's own file names in their compile errors.** `names.zig`
+exists because a message saying `str.Str` sends a reader looking for a `str`
+module they never imported, when their import line says `nilo`. Three files ask
+it: `session.zig`, `resolve.zig` and `service.zig`. Four do not, and between
+them they carry twenty-five `@typeName` calls inside `@compileError` text.
+`jsonmark.zig` has fourteen, `websocket.zig` eight, `typed.zig` two and
+`openapi.zig` one. So a WebSocket loop whose first argument is wrong is told it
+should be `*nilo.Socket` and that what it has is a `*ctx.Ctx`.
+
+The table itself is hand-kept and has fallen behind `http.zig`'s exports:
+`Bound`, `Session`, `FileBody`, `Dir`, `Stream`, `Events`, `Body`, `Socket`,
+`Room`, `Limits` and `Gate` are all missing from `names.ours`. Its own doc says
+a missing type is meant to be noticed in `refusals/`, and none of these was.
+
+Comptime only, on a path that never reaches a binary. `refusals/` is where the
+rule could stop being a paragraph
+([ADR 0027](./adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)).
+
+**Waiting on: ready.**
+
+**The two arms of static-file serving live in two files, and the rule they share
+lives in a third.** `App.serveHeldFile` answers a file read at startup,
+`sendfile.send` answers one that spilled, and `static.etagMatches` and
+`range.parse` are what they have in common. `serveHeldFile` carries a twenty-line
+doc explaining which lines are shared and which cannot be, which is the sign
+that the seam is in the wrong place: it is the only part of `app.zig` that is
+about static files rather than about serving requests, and it is where both
+`If-Range` gaps above diverged.
+
+`app.zig` is 7,053 lines, of which 1,878 are code and 5,175 are tests, so the
+file is smaller than it looks. The code half still holds the App builder, route
+registration, groups, `listen`, the connection loop, the request path, static
+file serving and failure assembly. Lifting the static arm out next to
+`sendfile.zig` is the one cut with an obvious line. `headerValue(c, name)` is
+copied into both files as it stands, four lines each.
+
+**Waiting on: a caller.** Nothing is wrong today, and moving code that works has
+to be worth the diff. The next change to either `If-Range` arm is the caller.
+
+**A service is found by scanning the registry on every request that wants one.**
+`service.Registry.get` walks `entries` comparing type names, with a pointer
+compare first and a content compare behind it, once per service argument per
+request. Which services a route needs is settled while compiling and `listen`
+already checks every one of them, so this is work repeated at request time that
+a startup pass could turn into an index.
+
+It may well be nothing. An app with four services and a handler taking one is
+four pointer compares. It is written down because it is on the request path and
+because `zig build profile` is exactly the harness for the question.
+
+**Waiting on: a number.**
+
+**`Router.add` and `Router.conflicting` disagree about a segment that is only a
+colon.** `add` calls a segment a param when it starts with `:`
+(`part.len > 0`), so `/a/:` registers a param with an empty name. `conflicting`
+calls it a param only when something follows the colon (`part.len > 1`), so it
+reads the same segment as the literal `":"`. Registering `/a/:` twice therefore
+reports no conflict and leaves two routes matching the same requests, one of
+them unreachable.
+
+Degenerate, and nobody writes it on purpose. What earns it a line is that these
+are two copies of one classification, and the copy deciding what a route *is*
+has already drifted from the copy deciding whether two routes *collide*. One
+function used by both is the fix.
+
+`add` also asserts `std.mem.count(u8, pattern, ":") <= max_params`, which counts
+a colon anywhere, so a literal segment containing one spends the param budget.
+An assert, so it is a Debug panic and unchecked in `ReleaseFast`.
+
+**Waiting on: ready.**
+
+**`websocket.counted` and `room.sizeOf` are the same nine lines, comments
+included.** Both take a writer function and a value, run it into a
+`std.Io.Writer.Discarding` over a 256-byte scratch buffer, and hand back the
+byte count. They differ in their return type (`u64` against `usize`) and in
+nothing else, down to the wording of both comments. One copy belongs somewhere
+both can reach, which inside `http/` is anywhere.
+
+Nothing on any axis: the same code once instead of twice.
+
+**Waiting on: ready.**
+
+**"About 9 KB a connection" is quoted in three files and the number is 4,669.**
+`zio.zig`'s capacity warning tells an operator that "each connection costs about
+9 KB", and `docs/guide/deploying.md` says it twice, once calling it "the number
+this project keeps repeating", and tells the reader to multiply
+`max_connections` by it. `docs/guide/websocket.md` says it a third time. ADR
+0071 took the figure to **4,669 bytes** for HTTP and **5,183** for an idle
+WebSocket ([`bench/result/http.md`](../bench/result/http.md)), and the CHANGELOG
+and `CLAUDE.md` were updated. These five lines were not.
+
+Nobody is hurt by over-provisioning, which is why it survived. What makes it
+worth an entry rather than a fix in passing is that this is the third time:
+`connect_on_init` was documented in three files and had never worked
+([ADR 0062](./adr/0062-a-pool-that-dialled-itself-whatever-it-was-told.md)), and
+8,767 was repeated in ten files across two rounds
+([ADR 0063](./adr/0063-a-handlers-stack-is-per-connection.md),
+[ADR 0071](./adr/0071-where-a-connection-waits-is-what-it-costs.md)). A number
+in a log line is the copy nobody greps for, because it is prose in a string
+literal rather than a figure in a table.
+
+**Waiting on: ready.** The five lines are the fix. Whether a published number
+can be made to have one home is the larger question, and nobody has drawn it.
+
+**An internally tagged union is read four times, and the module says the marker
+costs nothing per request.** `jsonmark.zig`'s header says "Nothing per request
+and nothing per connection: the marker is read while compiling", and on the
+write side that is true and measured. On the read side `Reader.parse` calls
+`skipValue` to find the span, `fromSpan` scans it for the discriminator,
+`parseFromSliceLeaky` parses it for the variant's fields, and `refuseUnknown`
+scans it a fourth time because `ignore_unknown_fields` had to be turned on to
+get past the tag. `ctx.json` parses with default options, so the fourth pass is
+not optional. Two of the four build a `std.json.Scanner` with an allocator.
+
+The comment in `parse` says the second look "costs a scan and nothing else",
+which is the honest description of one of the three extra passes.
+
+It is per tagged value, not per body, so a small object is nothing and an array
+of a thousand is four times the parse of every element. Nobody has measured
+either.
+
+**Waiting on: a number.** `bench/result/http.md` has the write side (258ns down
+to 93ns on a 374-byte alert rule) and nothing at all for the read side.
+
+**Nothing checks that two renamed names collide.** `rename_all` maps field names
+to wire names one at a time, and `.lowercase` joins the words rather than
+keeping the underscore, so `not_found` and `notfound` both become `notfound`.
+Two variants sharing a wire name means the writer emits a duplicate key and
+`fromSpan` returns whichever the `inline for` reaches first.
+
+`checkTag` already refuses the neighbouring mistake, and its comment is the
+argument for this one: "a variant whose own struct already has a field by the
+tag's name emits that key twice, and which one a reader takes is its business."
+The same sentence applies here word for word.
+
+A comptime `O(n²)` compare over the names a type already produced. Free, on a
+path that never reaches a binary, and it wants a `refusals/` file
+([ADR 0027](./adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)).
+
+**Waiting on: ready.**
+
+**A multipart part that names its file only with `filename*` becomes a text
+field.** `parseMultipart` decides a part is a file by asking `parameterOf` for
+`filename`, and `parameterOf` compares the key exactly, so `filename*` does not
+match. `form.zig` says the encoding is deliberately not read and gives the
+reason: "the plain `filename` is always sent alongside it". That is true of
+browsers and is not true of every HTTP library.
+
+What happens when it is not true is the part with a wrong answer. The part is
+not refused and is not read as a file; it is bound as a *text* field whose value
+is the raw bytes of the upload, and the `Upload` field the endpoint asked for is
+reported missing. So the 400 names the wrong thing.
+
+Refusing a part that has `filename*` and no `filename` is a sentence rather than
+a decoder, and it is the same call ADR 0081 makes about a ceiling: nilo need not
+read the encoding, it only has to stop pretending the part was something else.
+
+**Waiting on: ready.**
+
+**`Socket.print` runs the format twice and never checks that the two agree.**
+The frame's length is written from the counting pass and the bytes come from the
+writing pass, so two passes that disagree put a length on the wire that is a lie
+and the connection desynchronises. The doc names the hazard and hands it to the
+caller: "the arguments are therefore read twice: pass values, not a window onto
+memory another fiber is writing."
+
+`Room.print` has the same two passes and asserts between them
+(`std.debug.assert(into.end == post.len)`), because it writes into a buffer it
+can measure. `Socket.print` and `Socket.json` write straight to the connection
+and assert nothing, so the one place the mistake is unrecoverable is the one
+place it is unchecked.
+
+Counting the bytes `_out` actually took and asserting they match is a `Debug`
+and `ReleaseSafe` check, which is where the suite runs and is not where anybody
+deploys. Zero cost in `ReleaseFast`.
+
+**Waiting on: ready.**
+
+**`pw.verify` takes a `Ctx` it does not use.** The first line of `verifyWith` is
+`_ = c;`. Hashing needs a `Ctx` because the salt comes from `Ctx.entropy`
+([ADR 0046](./adr/0046-entropy-belongs-to-the-loop.md));
+verifying reads the salt out of the stored string and needs nothing. So the
+parameter is there for symmetry, and what it costs is that a password cannot be
+checked outside a request: a CLI that resets an account, a migration that
+re-hashes, a background job, and a test that wants neither an App nor a fake Ctx
+all have to go through `nilo_pw` directly and lose the Gate.
+
+Dropping the parameter is a breaking change to a signature that shipped, which
+is why it is here rather than done. The other shape is a free function beside
+it, which is a second name for one job.
+
+**Waiting on: a caller** who wants to verify a password without a request in
+flight.
 
 **There are no counters.** Correlation is covered, with request ids and JSON
 log lines ([Errors and logging](./guide/errors.md)), but metrics are not: how
@@ -567,6 +927,20 @@ that has to hold its place across reads.
 **What would settle it: somebody designing it.** Until then the answer is
 `c.bodyStream()`, which holds nothing and makes the framing the handler's
 problem.
+
+**`Last-Modified` and `If-Modified-Since`, beside the ETag.** nilo answers
+`If-None-Match` and `If-Range` and nothing else, so a client that only sends
+`If-Modified-Since` is handed the whole file every time. A spilled file already
+knows its modification time, because that is half of what its ETag is made of;
+a held file would need a `stat` at load that `static.load` does not do.
+
+The cost is small and the risk is not the cost. Two validators mean two answers
+that have to agree, and a 304 issued on a date while the ETag says otherwise is
+the sort of disagreement nobody finds for a year.
+
+**What would settle it: a client that sends one.** An ETag is what every browser
+and CDN made this century sends, and a second validator for a case nobody has
+produced is a second thing to keep in step.
 
 ---
 
@@ -1059,6 +1433,24 @@ server on a real port and assert on what comes back over it. So the fix is no
 longer a harness to invent, only a case to write in that shape.
 
 **Waiting on: ready.** It is still not written.
+
+**Two test files pick loopback ports and nothing makes their ranges agree.**
+`fetch/live.zig` walks 39,200-40,199 and `s3/canned.zig` walks 40,200-41,199,
+each from a start derived from the thread id so a rerun does not walk back over
+the ports its own `TIME-WAIT` still holds. They used to overlap, s3 taking 200
+ports from a fixed 39,600 inside `fetch`'s thousand, and ten consecutive `zig
+build test-all` runs failed from the sixth on with `error.NoFreePort` in
+whichever s3 test came next. Eight consecutive runs are clean now and the
+in-range count falls between them, so the pool sustains itself.
+
+What holds it is a comment in each file naming the other, and a third file
+wanting a port has nothing to consult and no way to fail loudly. Binding zero
+and reading the port back would end the whole class, and it is not available:
+`std.Io.net.Server` cannot report the port it was given, re-checked against Zig
+0.16 rather than believed. `docs/history.md` has the run.
+
+**Waiting on: a design** that makes it a rule rather than two comments, or an
+upstream way to read a bound port.
 
 **A fail function in spawned work is safe only because of where a threadlocal
 gets written.** `bulkhead.slot()` falls back to a threadlocal when a fiber has
