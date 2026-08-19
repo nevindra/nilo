@@ -59,11 +59,12 @@ pub const marker = "nilo_bound";
 
 /// Which of the three places a binding was read from.
 ///
-/// It settles two things and nothing else: what a field is called in a
-/// message — `?page`, `"email"` — and how "it was not sent" is worded. Those
-/// differ between the slots today, and a binding that reworded them would be
-/// a second dialect inside one application.
-pub const Slot = enum { body, form, query };
+/// It settles what a field is called in a message — `?page`, `"email"` — how
+/// "it was not sent" is worded, and one thing about parsing: a form takes `on`
+/// for a `bool` and nothing else does. Declared in `convert.zig` so that the
+/// parsing half can reach it, and named here because this is where a caller
+/// meets it.
+pub const Slot = convert.Slot;
 
 /// What became of one field. The engine fills an array of these, sized while
 /// compiling; nothing here is allocated.
@@ -538,7 +539,7 @@ fn sayerFor(
                     .{f.kind},
                 ),
                 else => if (comptime canFail(F))
-                    try convert.sayWhy(innerOf(F), f.given, labelFor(slot, name), w)
+                    try convert.sayWhy(innerOf(F), slot, f.given, labelFor(slot, name), w)
                 else
                     unreachable,
             }

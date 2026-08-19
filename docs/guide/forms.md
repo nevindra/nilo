@@ -8,7 +8,7 @@ An HTML form is not JSON. A browser posts
 const SignIn = struct {
     email: nilo.Str,
     password: nilo.Str,
-    remember: nilo.Str = .static(""),   // an unticked checkbox is not sent at all
+    remember: bool = false,   // an unticked checkbox is not sent at all
 };
 
 fn signIn(incoming: nilo.Form(SignIn)) !nilo.Redirect(303) {
@@ -28,10 +28,30 @@ type says what its text has to become, and a default is what "not sent" means.
 | `sort: enum { newest, oldest }` | one of those words, or a 400 listing them |
 | `nickname: ?Str = null` | optional: absent is null |
 | `limit: u32 = 20` | absent means the default |
+| `remember: bool = false` | a checkbox — see below |
 | `avatar: Upload` | a file — see below |
 
 The messages are the ones a query param gets, because it is the same code:
 `"age" has to be a whole number, not "soon"`.
+
+## A checkbox is a `bool`
+
+A ticked checkbox posts `on`. An unticked one posts **nothing at all** — the
+name does not appear in the body — so both halves need the default:
+
+```zig
+newsletter: bool = false,
+```
+
+Ticked gives `true`, unticked leaves the default, and that is the whole of it.
+`true` and `false` are taken as well, for a client that is not a browser.
+
+**Only a form reads `on` this way.** The same field in a `Query(T)` or a JSON
+body is `true` or `false` and nothing else, because `on` is a fact about HTML
+rather than about booleans — a JSON client sending `"on"` has a bug, and hearing
+about it is more use than having it guessed at. `off` is not accepted anywhere:
+no browser sends it, and an unticked box is an absent field rather than a
+present false one.
 
 ## Which encoding arrived is not your problem
 

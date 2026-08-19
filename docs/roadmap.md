@@ -464,26 +464,6 @@ runs the chat loop from `examples/chat/` with the room deliberately taken out,
 so every WebSocket number in [`bench/result/http.md`](../bench/result/http.md)
 is a socket that joined nothing.
 
-**A checkbox does not bind to a `bool`.** `convert.boolFrom` accepts `"true"`
-and `"false"` and nothing else. A ticked HTML checkbox sends `on` by default and
-an unticked one sends nothing at all, so `newsletter: bool = false` inside a
-`Form(T)` is a 400 the first time somebody ticks it. A `bool` is one of the
-types `form.zig`'s own compile error offers as an example of what a form may
-hold.
-
-The absent half already works, because a default is what "absent" means
-everywhere in nilo. Only the present half is wrong.
-
-The fix has to know which slot it is in or it is a different bug: `on` is not a
-JSON boolean, and a body sending one should still be refused, so widening
-`boolFrom` for everybody trades one wrong answer for another. `bound.Slot`
-already carries the difference between `body`, `form` and `query` for the
-wording of a message, so it is the place to carry it for the parsing too.
-
-Comptime work, no allocation, and only on a form field whose type is `bool`.
-
-**Waiting on: ready.**
-
 **The logger puts a kilobyte on a frame that is live while the handler waits.**
 `logger.with`'s inner `log` declares `var buf: [1024]u8` and is a plain `fn`, so
 it is a candidate for inlining into `run`, whose frame is live across

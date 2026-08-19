@@ -172,6 +172,24 @@ is `std.json`'s call, and nothing can add a declaration to a type you wrote.
   itself is never quoted back in the message. Costs nothing on any of the four
   axes, binary size included — the ADR has the four measurements.
 
+- **A checkbox did not bind to a `bool`.** A ticked HTML checkbox posts `on`,
+  and `bool` took `true` and `false` and nothing else — so `newsletter: bool =
+  false` inside a `Form(T)` was a 400 the first time somebody ticked the box,
+  while the unticked half worked because an absent field takes its default. A
+  form now reads `on` as well
+  ([ADR 0092](./docs/adr/0092-a-checkbox-is-a-bool-in-a-form-and-nowhere-else.md)),
+  and a form field that fits none of the three says so: `"newsletter" has to be
+  true, false or on, not "maybe"`.
+
+  **Only a form.** The same field in a `Query(T)` or a JSON body still takes
+  `true` and `false` alone, because `on` is a fact about HTML rather than about
+  booleans. `off` is accepted nowhere — no browser sends it. Costs 0 bytes of
+  binary, with the four example binaries coming out byte-identical, because the
+  slot is settled while compiling.
+
+  `docs/guide/forms.md` and `examples/forms` both worked around this with a
+  `Str` and now say `bool`.
+
 - **"About 9 KB a connection" was still quoted in six places, and the number is
   4,669.** ADR 0071 took an idle connection to 4,669 bytes and an idle WebSocket
   to 5,183; `zio.zig`'s capacity warning, `docs/guide/deploying.md`,

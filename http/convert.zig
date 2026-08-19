@@ -50,6 +50,19 @@ pub const Reason = enum {
     wrong_kind,
 };
 
+/// Which of the three places a value arrived from.
+///
+/// Re-exported as `bound.Slot`, which is the name to write; it lives here for
+/// `Outcome`'s reason, since `bound.zig` imports this file and not the other
+/// way round.
+///
+/// It used to settle only how a field is named in a message — `?page`,
+/// `"email"` — and it now settles one thing about parsing as well: **an HTML
+/// form spells a boolean differently from anywhere else.** A ticked checkbox
+/// sends `on`, and a JSON body sending `on` is still wrong, so the difference
+/// has to be carried rather than widened away.
+pub const Slot = enum { body, form, query };
+
 /// What became of one field of a struct being filled from a request.
 ///
 /// Lives here rather than beside `Bound` so that the two places which fill a
@@ -95,7 +108,7 @@ pub fn convertible(comptime T: type) bool {
 /// struct's worth of outcomes one `[N]?Reason` array. A union carrying each
 /// field's own type would need a different shape per field, which is exactly
 /// what a binding cannot hold.
-pub fn tryConvert(comptime P: type, s: Str, out: *P) ?Reason {
+pub fn tryConvert(comptime P: type, comptime slot: Slot, s: Str, out: *P) ?Reason {
     if (P == Str) {
         out.* = s;
         return null;
@@ -105,7 +118,7 @@ pub fn tryConvert(comptime P: type, s: Str, out: *P) ?Reason {
     switch (@typeInfo(P)) {
         .int => out.* = std.fmt.parseInt(P, text, 10) catch return .not_a_number,
         .float => out.* = std.fmt.parseFloat(P, text) catch return .not_a_number,
-        .bool => out.* = boolFrom(text) orelse return .not_true_or_false,
+        .bool => out.* = boolFrom(text, slot) orelse return .not_true_or_false,
         .@"enum" => out.* = std.meta.stringToEnum(P, text) orelse return .not_a_choice,
         else => comptime unreachable,
     }
@@ -131,12 +144,24 @@ pub fn reasonFor(comptime P: type) Reason {
 /// through here too, so the two cannot word the same mistake differently —
 /// which is a real risk, because they are read side by side in the same
 /// application.
-pub fn sayWhy(comptime P: type, arrived: Str, comptime label: []const u8, w: *std.Io.Writer) !void {
+pub fn sayWhy(
+    comptime P: type,
+    comptime slot: Slot,
+    arrived: Str,
+    comptime label: []const u8,
+    w: *std.Io.Writer,
+) !void {
     const text = arrived.view();
     switch (@typeInfo(P)) {
         .int => try w.print(label ++ " has to be a whole number, not \"{s}\"", .{text}),
         .float => try w.print(label ++ " has to be a number, not \"{s}\"", .{text}),
-        .bool => try w.print(label ++ " has to be true or false, not \"{s}\"", .{text}),
+        // A form is offered `on` as well, because that is what its own
+        // checkboxes send and somebody hand-writing the field should be told
+        // the same list the browser is held to.
+        .bool => try w.print(
+            label ++ (if (slot == .form) " has to be true, false or on, not \"{s}\"" else " has to be true or false, not \"{s}\""),
+            .{text},
+        ),
         .@"enum" => try w.print(
             label ++ " is not one of the known choices ({s}): \"{s}\"",
             .{ comptime enumChoices(P), text },
@@ -154,14 +179,14 @@ pub fn sayWhy(comptime P: type, arrived: Str, comptime label: []const u8, w: *st
 /// `label` is how it is named back to the client — `:id` for a path param,
 /// `?page` for a query one, `"email"` for a form field — so the same message
 /// serves all three.
-pub fn convert(comptime P: type, s: Str, comptime label: []const u8) !P {
+pub fn convert(comptime P: type, comptime slot: Slot, s: Str, comptime label: []const u8) !P {
     // Text is text. Answered before anything below, because nothing below
     // has a sentence to write about a `Str` and asking it for one is a
     // compile error by design.
     if (P == Str) return s;
 
     var out: P = undefined;
-    if (tryConvert(P, s, &out) == null) return out;
+    if (tryConvert(P, slot, s, &out) == null) return out;
 
     // Worded into a stack buffer and handed on as one `{s}`, rather than
     // formatted straight into the Failure, so that `sayWhy` stays the only
@@ -171,13 +196,27 @@ pub fn convert(comptime P: type, s: Str, comptime label: []const u8) !P {
     // that matters (ADR 0025).
     var buf: [fail.max_message]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    sayWhy(P, s, label, &w) catch {};
+    sayWhy(P, slot, s, label, &w) catch {};
     return fail.badRequest("{s}", .{buf[0..w.end]});
 }
 
-fn boolFrom(text: []const u8) ?bool {
+/// `true` and `false` everywhere, and `on` in a form as well.
+///
+/// **A ticked HTML checkbox sends `on`, and an unticked one sends nothing at
+/// all.** The absent half already worked, because a field that did not arrive
+/// takes its default and that is what "unticked" means; only the present half
+/// was a 400 the first time somebody ticked the box.
+///
+/// Widening this for every slot was the shape rejected: `on` is not a JSON
+/// boolean, and a body that sends one is a client with a bug that should hear
+/// about it. The slot is what keeps one wrong answer from being traded for
+/// another. `off` is deliberately *not* here — no browser sends it, and
+/// guessing at what a hand-written client might mean is how a parser starts
+/// accepting things nobody specified.
+fn boolFrom(text: []const u8, comptime slot: Slot) ?bool {
     if (std.mem.eql(u8, text, "true")) return true;
     if (std.mem.eql(u8, text, "false")) return false;
+    if (slot == .form and std.mem.eql(u8, text, "on")) return true;
     return null;
 }
 
@@ -215,13 +254,13 @@ test "the types request text can become" {
 }
 
 test "text that fits becomes the value" {
-    try testing.expectEqual(@as(u32, 42), try convert(u32, given("42"), "?page"));
-    try testing.expectEqual(@as(f64, 1.5), try convert(f64, given("1.5"), "?ratio"));
-    try testing.expectEqual(true, try convert(bool, given("true"), "?on"));
-    try testing.expectEqualStrings("hi", (try convert(Str, given("hi"), "?q")).view());
+    try testing.expectEqual(@as(u32, 42), try convert(u32, .query, given("42"), "?page"));
+    try testing.expectEqual(@as(f64, 1.5), try convert(f64, .query, given("1.5"), "?ratio"));
+    try testing.expectEqual(true, try convert(bool, .query, given("true"), "?on"));
+    try testing.expectEqualStrings("hi", (try convert(Str, .query, given("hi"), "?q")).view());
 
     const Sort = enum { newest, oldest };
-    try testing.expectEqual(Sort.oldest, try convert(Sort, given("oldest"), "?sort"));
+    try testing.expectEqual(Sort.oldest, try convert(Sort, .query, given("oldest"), "?sort"));
 }
 
 test "text that does not fit fails with the label in it" {
@@ -230,14 +269,14 @@ test "text that does not fit fails with the label in it" {
     const previous = bulkhead.setFallbackSlot(&in_flight);
     defer _ = bulkhead.setFallbackSlot(previous);
 
-    try testing.expectError(error.Failed, convert(u32, given("soon"), "?page"));
+    try testing.expectError(error.Failed, convert(u32, .query, given("soon"), "?page"));
     try testing.expectEqualStrings(
         "?page has to be a whole number, not \"soon\"",
         in_flight.failure.message(),
     );
 
     const Sort = enum { newest, oldest };
-    try testing.expectError(error.Failed, convert(Sort, given("sideways"), "\"sort\""));
+    try testing.expectError(error.Failed, convert(Sort, .query, given("sideways"), "\"sort\""));
     try testing.expectEqualStrings(
         "\"sort\" is not one of the known choices (newest, oldest): \"sideways\"",
         in_flight.failure.message(),
@@ -251,20 +290,62 @@ test "text that does not fit says why, and leaves failing to the caller" {
     defer _ = bulkhead.setFallbackSlot(previous);
 
     var n: u32 = undefined;
-    try testing.expectEqual(Reason.not_a_number, tryConvert(u32, given("soon"), &n).?);
-    try testing.expectEqual(@as(?Reason, null), tryConvert(u32, given("42"), &n));
+    try testing.expectEqual(Reason.not_a_number, tryConvert(u32, .query, given("soon"), &n).?);
+    try testing.expectEqual(@as(?Reason, null), tryConvert(u32, .query, given("42"), &n));
     try testing.expectEqual(@as(u32, 42), n);
 
     var b: bool = undefined;
-    try testing.expectEqual(Reason.not_true_or_false, tryConvert(bool, given("yes"), &b).?);
+    try testing.expectEqual(Reason.not_true_or_false, tryConvert(bool, .query, given("yes"), &b).?);
 
     const Sort = enum { newest, oldest };
     var sort: Sort = undefined;
-    try testing.expectEqual(Reason.not_a_choice, tryConvert(Sort, given("sideways"), &sort).?);
+    try testing.expectEqual(Reason.not_a_choice, tryConvert(Sort, .query, given("sideways"), &sort).?);
 
     // A Str is text already, so there is nothing that can fail.
     var s: Str = undefined;
-    try testing.expectEqual(@as(?Reason, null), tryConvert(Str, given("anything"), &s));
+    try testing.expectEqual(@as(?Reason, null), tryConvert(Str, .query, given("anything"), &s));
+}
+
+test "a ticked checkbox binds to a bool, and only out of a form" {
+    const previous = bulkhead.setFallbackSlot(null);
+    defer _ = bulkhead.setFallbackSlot(previous);
+
+    var b: bool = undefined;
+
+    // The whole bug: `on` is what a browser sends for a ticked box.
+    try testing.expectEqual(@as(?Reason, null), tryConvert(bool, .form, given("on"), &b));
+    try testing.expectEqual(true, b);
+
+    // And nowhere else, because `on` is not a JSON boolean and a client
+    // sending one has a bug worth hearing about.
+    try testing.expectEqual(Reason.not_true_or_false, tryConvert(bool, .body, given("on"), &b).?);
+    try testing.expectEqual(Reason.not_true_or_false, tryConvert(bool, .query, given("on"), &b).?);
+
+    // `true` and `false` still work in every slot, so nothing was traded away.
+    inline for (.{ Slot.body, Slot.form, Slot.query }) |slot| {
+        try testing.expectEqual(@as(?Reason, null), tryConvert(bool, slot, given("true"), &b));
+        try testing.expectEqual(true, b);
+        try testing.expectEqual(@as(?Reason, null), tryConvert(bool, slot, given("false"), &b));
+        try testing.expectEqual(false, b);
+    }
+
+    // `off` is not accepted anywhere: no browser sends it, and a value nobody
+    // specified is not one to guess at. An unticked box sends nothing at all,
+    // which is a default rather than a conversion.
+    try testing.expectEqual(Reason.not_true_or_false, tryConvert(bool, .form, given("off"), &b).?);
+    try testing.expectEqual(Reason.not_true_or_false, tryConvert(bool, .form, given("ON"), &b).?);
+    try testing.expectEqual(Reason.not_true_or_false, tryConvert(bool, .form, given("1"), &b).?);
+}
+
+test "a form says which three words it takes, and the other slots say two" {
+    try testing.expectEqualStrings(
+        "\"news\" has to be true, false or on, not \"maybe\"",
+        said(bool, .form, "maybe", "\"news\""),
+    );
+    try testing.expectEqualStrings(
+        "?on has to be true or false, not \"maybe\"",
+        said(bool, .query, "maybe", "?on"),
+    );
 }
 
 test "the reason a type fails with is settled by the type" {
@@ -275,12 +356,17 @@ test "the reason a type fails with is settled by the type" {
 }
 
 /// What `sayWhy` writes, for comparing against what `convert` failed with.
-fn said(comptime P: type, text: []const u8, comptime label: []const u8) []const u8 {
+fn said(
+    comptime P: type,
+    comptime slot: Slot,
+    text: []const u8,
+    comptime label: []const u8,
+) []const u8 {
     const buf = struct {
         var bytes: [fail.max_message]u8 = undefined;
     };
     var w = std.Io.Writer.fixed(&buf.bytes);
-    sayWhy(P, given(text), label, &w) catch unreachable;
+    sayWhy(P, slot, given(text), label, &w) catch unreachable;
     return buf.bytes[0..w.end];
 }
 
@@ -295,17 +381,17 @@ test "the sentence is the same whether it is failed with or handed back" {
     // wordings for one mistake is the thing somebody files a bug about.
     const Sort = enum { newest, oldest };
 
-    try testing.expectError(error.Failed, convert(u32, given("soon"), "?page"));
-    try testing.expectEqualStrings(said(u32, "soon", "?page"), in_flight.failure.message());
+    try testing.expectError(error.Failed, convert(u32, .query, given("soon"), "?page"));
+    try testing.expectEqualStrings(said(u32, .query, "soon", "?page"), in_flight.failure.message());
 
-    try testing.expectError(error.Failed, convert(f64, given("soon"), "?ratio"));
-    try testing.expectEqualStrings(said(f64, "soon", "?ratio"), in_flight.failure.message());
+    try testing.expectError(error.Failed, convert(f64, .query, given("soon"), "?ratio"));
+    try testing.expectEqualStrings(said(f64, .query, "soon", "?ratio"), in_flight.failure.message());
 
-    try testing.expectError(error.Failed, convert(bool, given("yes"), "?on"));
-    try testing.expectEqualStrings(said(bool, "yes", "?on"), in_flight.failure.message());
+    try testing.expectError(error.Failed, convert(bool, .query, given("yes"), "?on"));
+    try testing.expectEqualStrings(said(bool, .query, "yes", "?on"), in_flight.failure.message());
 
-    try testing.expectError(error.Failed, convert(Sort, given("sideways"), "\"sort\""));
-    try testing.expectEqualStrings(said(Sort, "sideways", "\"sort\""), in_flight.failure.message());
+    try testing.expectError(error.Failed, convert(Sort, .query, given("sideways"), "\"sort\""));
+    try testing.expectEqualStrings(said(Sort, .query, "sideways", "\"sort\""), in_flight.failure.message());
 }
 
 test "a message with braces in it survives being handed on" {
@@ -316,7 +402,7 @@ test "a message with braces in it survives being handed on" {
     const previous = bulkhead.setFallbackSlot(&in_flight);
     defer _ = bulkhead.setFallbackSlot(previous);
 
-    try testing.expectError(error.Failed, convert(u32, given("{d}"), "?page"));
+    try testing.expectError(error.Failed, convert(u32, .query, given("{d}"), "?page"));
     try testing.expectEqualStrings(
         "?page has to be a whole number, not \"{d}\"",
         in_flight.failure.message(),

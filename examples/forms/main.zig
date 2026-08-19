@@ -145,10 +145,12 @@ fn authenticate(c: *nilo.Ctx, sessions: *Sessions, arena: std.mem.Allocator) !Si
 const SignIn = struct {
     email: Str,
     password: Str,
-    /// An unticked checkbox is not sent at all, so the default is the
-    /// answer — and a ticked one arrives as `remember=on` rather than as
-    /// `true`, which is why this is a `Str` and not a `bool`.
-    remember: Str = .static(""),
+    /// A ticked checkbox arrives as `remember=on` and an unticked one is not
+    /// sent at all, so the default is the answer for one half and `on` for
+    /// the other. Both are a `bool` here: a form is the one slot that reads
+    /// `on`, because it is the only one a browser writes
+    /// (ADR 0092).
+    remember: bool = false,
 };
 
 /// A form in, a cookie out, and a 303 back to the page.
@@ -176,7 +178,7 @@ fn signIn(
             token,
             // "Remember me" is the difference between a cookie that outlives
             // the browser window and one that does not.
-            if (incoming.value.remember.len() > 0) "; Max-Age=1209600" else "",
+            if (incoming.value.remember) "; Max-Age=1209600" else "",
         },
     );
     return .with("/", .of(&.{.{ .name = "Set-Cookie", .value = cookie }}));
@@ -425,7 +427,7 @@ test "remember me is the difference between a session cookie and a lasting one" 
     const answer = try signIn(&sessions, arena.allocator(), .{ .value = .{
         .email = .static("wati@example.dev"),
         .password = .static("hunter2"),
-        .remember = .static("on"), // what a ticked checkbox actually sends
+        .remember = true, // what `remember=on` off a ticked checkbox becomes
     } });
     try testing.expect(std.mem.indexOf(u8, answer.headers.view()[0].value, "Max-Age=1209600") != null);
 }

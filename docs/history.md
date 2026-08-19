@@ -881,6 +881,36 @@ still has no way to read back the port it was given, which was re-checked
 rather than believed, so binding zero is not available and two files picking
 loopback ports remains an agreement held by two comments pointing at each other.
 
+## A workaround written into the guide, twice, instead of a bug report
+
+A ticked checkbox posts `on`, `bool` took only `true` and `false`, and so a
+`bool` in a `Form(T)` was a 400 the first time anybody ticked a box
+([ADR 0092](./adr/0092-a-checkbox-is-a-bool-in-a-form-and-nowhere-else.md)).
+What is worth keeping is not the fix, which is one `mem.eql` behind a comptime
+slot.
+
+**Both places that met the gap wrote around it and explained why.**
+`docs/guide/forms.md`'s opening example declared `remember: nilo.Str =
+.static("")`, and `examples/forms` declared the same field with a doc comment
+saying *"a ticked one arrives as `remember=on` rather than as `true`, which is
+why this is a `Str` and not a `bool`"*. That comment is a correct and complete
+bug report. It sat in the repository, in an example that is built and tested by
+`zig build test`, describing a defect in the type system's own promise — and it
+read as a design note because it explained itself.
+
+**A workaround that documents its reason stops looking like a workaround.** The
+question that finds these is not "is this code wrong" — it is *"why is this
+field not the type it obviously is?"* Every `Str` standing where a `bool`,
+a `u32` or an enum belongs is either a conversion nilo does not do or one it
+does badly, and the comment next to it usually says which.
+
+**And the binary measurement was taken wrong first.** The working tree held two
+unrelated changes, and the +64/+32/+32/+64 that came back was the other one's
+log-message string. `CLAUDE.md` already says to build the before rather than
+quote it; the half it did not say is that the *after* has to be the change on
+its own. Committing the first change and re-measuring from the new `HEAD` took
+one minute and turned a wrong number into byte-identical binaries.
+
 ## A family that was named, priced and never given a door
 
 [ADR 0029](./adr/0029-a-spawned-fiber-belongs-to-the-server.md) is careful

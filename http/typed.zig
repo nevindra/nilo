@@ -915,7 +915,10 @@ fn paramValue(comptime P: type, c: *const Ctx, comptime name: []const u8) !P {
     // rather than a panic.
     const s = c.param(name) orelse
         return fail.internal("path param :{s} was not filled in by the router", .{name});
-    return convert(P, s, ":" ++ name);
+    // `.query` rather than a slot of its own: a path param and a query value
+    // are both URL text and parse identically. `form` is the only slot that
+    // differs, and a path param is never one.
+    return convert(P, .query, s, ":" ++ name);
 }
 
 /// Read the query string into `T`. A field that is absent falls back to its
@@ -930,7 +933,7 @@ fn queryValue(comptime T: type, c: *const Ctx) !T {
                 .optional => |o| o.child,
                 else => f.type,
             };
-            @field(out, f.name) = try convert(Inner, s, label);
+            @field(out, f.name) = try convert(Inner, .query, s, label);
         } else if (f.defaultValue()) |default| {
             @field(out, f.name) = default;
         } else if (@typeInfo(f.type) == .optional) {
@@ -963,7 +966,7 @@ fn queryValueCollecting(
         if (c.query(f.name)) |s| {
             outcomes[i].given = s;
             var converted: Inner = undefined;
-            if (converting.tryConvert(Inner, s, &converted)) |reason| {
+            if (converting.tryConvert(Inner, .query, s, &converted)) |reason| {
                 outcomes[i].reason = reason;
                 if (f.defaultValue()) |default| @field(out, f.name) = default;
             } else {

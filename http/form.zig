@@ -265,7 +265,7 @@ fn fill(comptime T: type, fields: Fields, lifetime: *const str_mod.Lifetime) !T 
                 return fail.badRequest("the form is missing the file " ++ label, .{});
             }
         } else if (fields.find(f.name)) |raw| {
-            @field(out, f.name) = try convert.convert(Inner, Str.fromRequest(raw, lifetime), label);
+            @field(out, f.name) = try convert.convert(Inner, .form, Str.fromRequest(raw, lifetime), label);
         } else if (f.defaultValue()) |default| {
             @field(out, f.name) = default;
         } else if (@typeInfo(f.type) == .optional) {
@@ -324,7 +324,7 @@ fn fillCollecting(
             outcomes[i].given = arrived;
 
             var converted: Inner = undefined;
-            if (convert.tryConvert(Inner, arrived, &converted)) |reason| {
+            if (convert.tryConvert(Inner, .form, arrived, &converted)) |reason| {
                 outcomes[i].reason = reason;
                 if (f.defaultValue()) |default| @field(out, f.name) = default;
             } else {
@@ -672,6 +672,43 @@ test "a urlencoded form fills a struct, defaults and all" {
     try testing.expectEqualStrings("hunter2", filled.password.view());
     try testing.expectEqual(true, filled.newsletter);
     try testing.expect(filled.referrer == null);
+}
+
+test "a ticked checkbox arrives as `on`, and an unticked one does not arrive" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // Exactly what a browser posts for `<input type="checkbox" name="newsletter">`:
+    // the name and `on` when it is ticked, and the field absent when it is not.
+    const ticked = try read(
+        SignUp,
+        arena.allocator(),
+        "application/x-www-form-urlencoded",
+        "email=wati%40example.dev&password=hunter2&newsletter=on",
+    );
+    try testing.expectEqual(true, ticked.newsletter);
+
+    // The unticked half was never broken — an absent field takes its default,
+    // which is what "unticked" means — and it is here so the pair is one test.
+    const unticked = try read(
+        SignUp,
+        arena.allocator(),
+        "application/x-www-form-urlencoded",
+        "email=wati%40example.dev&password=hunter2",
+    );
+    try testing.expectEqual(false, unticked.newsletter);
+}
+
+test "a form field that is neither true, false nor on says all three" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try expectFails(
+        SignUp,
+        arena.allocator(),
+        "application/x-www-form-urlencoded",
+        "email=a%40b.dev&password=hunter2&newsletter=maybe",
+        "\"newsletter\" has to be true, false or on, not \"maybe\"",
+    );
 }
 
 test "a urlencoded form reads a plus as a space, the way a browser writes one" {
