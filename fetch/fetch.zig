@@ -442,8 +442,14 @@ pub const Exchange = struct {
         //
         // Three bounds, and each closes something:
         //
-        // - **Only this error.** Anything else is the server answering, and
-        //   an answer is not something to send twice.
+        // - **Only a reaped connection.** Anything else is the server
+        //   answering, and an answer is not something to send twice. Which
+        //   error that is, is `nothingCameBack`'s question rather than a name
+        //   written here: a reaped connection arrives as a FIN or as an RST
+        //   depending on a race nobody runs, and reading only the first spelling
+        //   is what
+        //   [ADR 0088](../docs/adr/0088-a-reaped-connection-arrives-two-ways.md)
+        //   fixed.
         // - **Only a body still where it was.** A `.stream` body has had its
         //   reader consumed, so re-sending it would put fewer bytes on the
         //   wire than the `content-length` promised — worse than the error.
@@ -454,7 +460,7 @@ pub const Exchange = struct {
         var tries: usize = 0;
         while (true) : (tries += 1) {
             self.attempt(client, uri, opts) catch |err| {
-                if (tries < stale_limit and err == error.HttpConnectionClosing and
+                if (tries < stale_limit and self.nothingCameBack(err) and
                     replayable(opts.body) and !self.bound.fired())
                 {
                     self.discard();
@@ -553,6 +559,60 @@ pub const Exchange = struct {
         }
 
         self.res = try self.req.receiveHead(opts.redirect_buffer);
+    }
+
+    /// Whether this attempt ended with **not one byte of a response**, which
+    /// is the only condition under which sending it again is transport
+    /// hygiene rather than a retry policy.
+    ///
+    /// A reaped keep-alive connection comes back two ways, and which one is a
+    /// race the client does not run. If the peer's `close` lands before this
+    /// end writes, the socket carries a FIN, `receiveHead` reads zero bytes
+    /// and std says so exactly: `HttpConnectionClosing`, documented there as
+    /// "the client sent 0 bytes of headers before closing the stream. This
+    /// happens when a keep-alive connection is finally closed."
+    ///
+    /// **If this end writes first, the peer closes a socket with an unread
+    /// request sitting in it, and a close with unread data is an RST rather
+    /// than a FIN.** Same reaped connection, same nothing answered, and
+    /// `receiveHead` reports `ReadFailed` instead. That is not std being
+    /// careless. Look at `receiveHead` and the asymmetry is on purpose: it
+    /// splits `EndOfStream` by how much of the head had arrived, giving
+    /// `HttpConnectionClosing` at zero and `HttpRequestTruncated` past it, and
+    /// has no such split for `ReadFailed`, because a read that failed can
+    /// fail for reasons that have nothing to do with reaping.
+    ///
+    /// So the split is made here, out of the two things std does keep: the
+    /// real errno, which `Io.net.Stream.Reader` parks in `err` on its way to
+    /// `ReadFailed`, and how much of the head had arrived, which is whatever
+    /// the connection's reader still holds. Zero buffered and
+    /// `ConnectionResetByPeer` is the same claim `HttpConnectionClosing`
+    /// makes, arrived at the long way.
+    ///
+    /// It is also more than a tidy symmetry. A server that had read the
+    /// request would have an empty receive queue and its `close` would send a
+    /// FIN; the RST is the kernel saying the request was still sitting there
+    /// unread. **The evidence that nothing was processed is stronger in this
+    /// branch than in the one that was already trusted.**
+    ///
+    /// Nothing else is added. A reset partway through a head is
+    /// `ReadFailed` with bytes buffered and stays a failure, because
+    /// something did come back and re-sending would be a retry policy. So is
+    /// a write that fails with `WriteFailed`: some of the request may have
+    /// reached the far side, and no test here reproduces it.
+    fn nothingCameBack(self: *Exchange, err: anyerror) bool {
+        if (err == error.HttpConnectionClosing) return true;
+        if (err != error.ReadFailed) return false;
+        // `open` is the one thing that says `req` was assigned at all. A
+        // failure inside `client.inner.request` leaves it `undefined`, and
+        // reaching into it for a connection would be reading a pointer that
+        // was never written. `discard` guards on the same flag for the same
+        // reason.
+        if (!self.open) return false;
+        const conn = self.req.connection orelse return false;
+        if (conn.stream_reader.interface.bufferedLen() != 0) return false;
+        const why = conn.stream_reader.err orelse return false;
+        return why == error.ConnectionResetByPeer;
     }
 
     /// Whether this call may go out a second time.

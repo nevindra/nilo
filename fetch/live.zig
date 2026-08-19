@@ -55,6 +55,13 @@ const Canned = struct {
     /// different start per process is enough that the two test binaries
     /// `test-all` runs at once do not tread on each other either.
     ///
+    /// **39,200–40,199 is this file's, and `s3/canned.zig` has 40,200–41,199.**
+    /// They used to overlap, s3 taking 200 ports from a fixed 39,600 inside
+    /// this range, so a thousand ports walked from here rolled over all two
+    /// hundred of them and s3 ran out first. Ten consecutive `zig build
+    /// test-all` runs failed from the sixth on, in whichever s3 test came
+    /// next. Nothing but these two comments keeps the ranges apart.
+    ///
     /// `reuse_address` would fix the `TIME-WAIT` half in one line and is
     /// refused: std sets `SO_REUSEPORT` alongside `SO_REUSEADDR`, so two test
     /// binaries would both bind the same port and the kernel would hand each
@@ -188,6 +195,86 @@ const Canned = struct {
             try w.splatByteAll('x', self.body_len);
             try w.flush();
         }
+    }
+
+    /// The same reaping as `serveThenReap`, arrived at the other way round:
+    /// the peer closes a connection that has an **unread** request sitting in
+    /// it, so the kernel sends an RST rather than a FIN and the client sees
+    /// `ReadFailed` where the other spelling gives `HttpConnectionClosing`.
+    ///
+    /// Which of the two a real client meets is a race it does not run, so both
+    /// belong in the suite. This one used to arrive by accident: `serveThenReap`
+    /// produced it whenever the machine was loaded enough for the client's
+    /// second request to beat the server's `close`, which under `zig build
+    /// test-all` was about one run in three, and it failed because
+    /// `Exchange.nothingCameBack` did not exist yet.
+    ///
+    /// **The one unread byte is what makes it deterministic, and a timer would
+    /// not have been.** Reading exactly one byte of the second request proves
+    /// the request arrived, and leaves the rest of it in the receive queue,
+    /// which is the condition the kernel turns into an RST. A `sleep` long
+    /// enough to lose the race on this machine is a `sleep` that silently
+    /// stops losing it on a slower one, and the test would go on passing
+    /// through the FIN branch while claiming to cover this one.
+    fn serveThenReset(self: *Canned) !void {
+        {
+            var stream = try self.server.accept(self.io);
+            defer stream.close(self.io);
+            self.accepted += 1;
+
+            var in_buf: [4 << 10]u8 = undefined;
+            var out_buf: [64 << 10]u8 = undefined;
+            var reader = stream.reader(self.io, &in_buf);
+            var writer = stream.writer(self.io, &out_buf);
+
+            while (true) {
+                const line = try reader.interface.takeDelimiterInclusive('\n');
+                if (std.mem.trimEnd(u8, line, "\r\n").len == 0) break;
+            }
+            const w = &writer.interface;
+            try w.print("HTTP/1.1 {s}\r\nContent-Length: {d}\r\n\r\n", .{
+                self.status,
+                self.claim_len orelse self.body_len,
+            });
+            try w.splatByteAll('x', self.body_len);
+            try w.flush();
+
+            // Blocks until the client comes back on this connection, which is
+            // the point: everything after the byte stays unread, and `close`
+            // on a socket with unread data is an RST.
+            //
+            // **A reader of one byte, and the size is the whole mechanism.**
+            // Taking the byte through `in_buf` above reads as much as has
+            // arrived, which is the entire second request, and a receive queue
+            // that has been drained into user space closes with a FIN like any
+            // other. Written that way this test passed with the branch it
+            // exists for switched off. One byte of buffer is one byte off the
+            // socket.
+            var held_buf: [1]u8 = undefined;
+            var held = stream.reader(self.io, &held_buf);
+            _ = try held.interface.takeByte();
+        }
+
+        var stream = try self.server.accept(self.io);
+        defer stream.close(self.io);
+        self.accepted += 1;
+
+        var in_buf: [4 << 10]u8 = undefined;
+        var out_buf: [64 << 10]u8 = undefined;
+        var reader = stream.reader(self.io, &in_buf);
+        var writer = stream.writer(self.io, &out_buf);
+
+        while (true) {
+            const line = try reader.interface.takeDelimiterInclusive('\n');
+            if (std.mem.trimEnd(u8, line, "\r\n").len == 0) break;
+        }
+        const w = &writer.interface;
+        try w.print("HTTP/1.1 {s}\r\nContent-Length: {d}\r\n\r\n", .{
+            self.status,
+            self.claim_len orelse self.body_len,
+        });
+        try w.splatByteAll('x', self.body_len);
+        try w.flush();
     }
 
     /// `count` **requests**, however many connections they arrive on, and a
@@ -932,6 +1019,42 @@ test "a pooled connection the peer already closed costs one retry, not a failure
 
             // Two connections for two calls, which is the shape of the fix:
             // the second call did not reuse the corpse, it dialled again.
+            try testing.expectEqual(@as(usize, 2), canned.accepted);
+        }
+    }.run);
+}
+
+test "a pooled connection the peer reset costs one retry too" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+            canned.body_len = 12;
+
+            var client = try started(io, .{});
+            defer client.deinit();
+
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            var buf: [64]u8 = undefined;
+            const url = try canned.url(&buf);
+
+            var served = io.async(Canned.serveThenReset, .{&canned});
+            defer served.cancel(io) catch {};
+
+            const first = try client.get(&scope, url, .{});
+            try testing.expectEqual(@as(usize, 12), first.body.view().len);
+
+            // The same reaped connection as the test above, closed the other
+            // way round: this request reaches the socket before the peer lets
+            // go of it, so what comes back is an RST and `receiveHead` reports
+            // `ReadFailed` rather than `HttpConnectionClosing`. Nothing was
+            // answered either way, which is what `Exchange.nothingCameBack`
+            // is for.
+            const second = try client.get(&scope, url, .{});
+            try testing.expectEqual(@as(usize, 12), second.body.view().len);
+
             try testing.expectEqual(@as(usize, 2), canned.accepted);
         }
     }.run);
