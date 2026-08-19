@@ -453,3 +453,38 @@ while writing, not later.
 
 Templates, TLS, HTTP/2 and gRPC are not gaps — they are decisions (README "What
 it won't do", ADR 0028). Do not add them; propose a change to the ADR instead.
+
+<!-- devrun:begin -->
+## Running this project's services
+
+`devrun` runs every service in `process-compose.yaml` at once and keeps
+each one's output in a plain file under `.devrun/logs/latest/`. Prefer it over
+running a single dev server in the background: with one server you only
+see that server's output, and the error is usually in another one.
+
+```console
+$ devrun up --detach      # start everything; returns once all are ready
+$ devrun errors           # did anything break, and the log under it
+$ devrun logs --since 2m  # every service's output, merged by time
+$ devrun down             # stop everything
+```
+
+With no `process-compose.yaml`, supervise one command instead. The same
+`logs`, `errors` and `down` work against it.
+
+```console
+$ devrun run --detach --ready-log "listening on" pnpm dev
+```
+
+`devrun run` exits with the command's own exit status. Its words pass
+through untouched, so devrun's flags go before the command.
+
+`devrun up --detach` exits non-zero if a service fails to come up, and
+`devrun errors` exits non-zero while anything is broken, so both can be
+branched on without reading their output.
+
+Useful flags on `logs` and `errors`: `--grep 'panic|ERROR'`, `--tail N`,
+`--since 30s`, `--json`, and `--raw` to defeat the trimming. Output is
+bounded by default and says at the end what it left out. Run `devrun`
+with no arguments for the rest.
+<!-- devrun:end -->
