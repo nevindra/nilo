@@ -7,13 +7,17 @@ What was measured and what was got wrong on the way is in
 
 ## Unreleased
 
-### Work that is not a request has somewhere to start
+**Additive only — nothing here breaks a 0.2.0 program**, so the next tag is a
+minor one. Needs Zig 0.16, as 0.2.0 does.
 
-`nilo.spawn` has been the way to run something that is not a request since
-[ADR 0029](./docs/adr/0029-a-spawned-fiber-belongs-to-the-server.md), and there
-was nowhere to call it from: `listen()` does not return, so the only reachable
-place was inside a handler. `app.spawn` registers the same fiber before the
-server and starts it once there is one
+### Added
+
+#### `app.spawn(f, args)` — somewhere to start work that is not a request
+
+`nilo.spawn` needs a running server and `listen()` never returns, so a ticker
+or a batching exporter was reachable only from inside a request handler.
+`app.spawn` registers the same fiber before the server and starts it once there
+is one, after the port is taken and before the first connection is accepted
 ([ADR 0086](./docs/adr/0086-work-that-is-not-a-request-belongs-to-the-server.md)):
 
 ```zig
@@ -31,26 +35,22 @@ fn flushEvery(exporter: *Exporter) void {
 }
 ```
 
-It is owned by the server exactly as a connection is: counted while it runs,
-cut off when the shutdown grace period ends. Nothing to change in an existing
-program — `nilo.spawn` is unchanged and stays the right call from inside a
-handler.
+The fiber is owned by the server exactly as a connection is: counted while it
+runs, cut off when the shutdown grace period ends. It is registered on the App
+rather than declared on a Service because a Service's `nilo_start` runs in the
+phase after the pool and before the socket, and a program that migrates before
+it serves runs that phase with no server in it at all
+([ADR 0079](./docs/adr/0079-there-is-a-phase-before-the-server.md)) — so work
+spawned there would answer `error.NoServer` and never be asked again.
+`app.spawn` does not care which of the two startup orders you used.
 
-Registered on the App rather than declared on a Service on purpose. A Service's
-`nilo_start` runs in the phase after the pool and before the socket, and a
-program that migrates before it serves runs that phase with no server in it at
-all ([ADR 0079](./docs/adr/0079-there-is-a-phase-before-the-server.md)) — so
-work spawned there would answer `error.NoServer` and never be asked again.
-`app.spawn` does not care which of the two orders you used.
+`nilo.spawn` is unchanged and stays the right call from inside a handler.
 
-New: [Work that is not a request](./docs/guide/background.md) in the guide, and
-`zig build run-scheduled`.
-
-### A type can say how its JSON is spelled
+#### `nilo_json` — a type can say how its JSON is spelled
 
 `std.json` writes a union one way — `{"metrics":{…}}`, one object with one key.
 Most REST APIs use the other one, and there was no way to ask for it short of a
-hand-written `jsonStringify` and `jsonParse` per type. Now there is
+hand-written `jsonStringify` and `jsonParse` per type
 ([ADR 0085](./docs/adr/0085-a-type-says-how-its-json-is-spelled.md)):
 
 ```zig
@@ -76,33 +76,35 @@ The second line is only needed for a type that *arrives* in a request. Sending
 needs nothing, because nilo makes that call and reads the marker itself; reading
 is `std.json`'s call, and nothing can add a declaration to a type you wrote.
 
-A `union(enum)` as a request body used to be a compile error, on the grounds
-that nothing in the type said which arm arrived. `.tag` is the type saying it,
-so that shape now works.
+#### Smaller
 
-The generated API description follows whichever encoding the type asked for, so
-a client generated from it reads what the server actually sends. A tagged union
-is `oneOf` with `discriminator`; an untagged union is still `{}`.
+- **`union(enum)` as a request body**, which used to be a compile error on the
+  grounds that nothing in the type said which arm arrived. `.tag` is the type
+  saying it.
+- **Twelve refusals** covering the ways of writing the marker wrong, taking the
+  framework's table from 63 to 75 and the five tables from 129 to 141. The one
+  worth knowing is a `.tag` whose name a variant already uses as a field: the
+  only mistake here that would corrupt the wire rather than fail.
+- **[Work that is not a request](./docs/guide/background.md)** in the guide, and
+  a ninth example — `zig build run-scheduled`.
 
-### Responses carrying a union got two to three times faster
+### Changed
 
-Not a new feature and nothing to change. `covers` decides while compiling which
-types nilo's own JSON writer may touch, it is answered for the **whole** value,
-and it did not recognise a `union(enum)` at all — so one union field anywhere
-sent the entire response to `std.json`, every string in it included.
+- **The generated API description follows whichever encoding the type asked
+  for**, so a client generated from it reads what the server actually sends. A
+  tagged union is `oneOf` with `discriminator`; an untagged union is still `{}`.
 
-On a 374-byte payload with a union in it that is **2.8× to 3.2×**, and 3.4× to
-3.5× on a 104-byte one. The bytes are unchanged: an unmarked union is still
-written externally tagged, and the tests hold nilo's output against `std.json`'s
-value by value. [`bench/result/http.md`](./bench/result/http.md) has the run and
-the controls.
+### Fixed
 
-### Also
-
-Twelve new refusals cover the ways of writing the marker wrong, taking the
-framework's table from 63 to 75 and the five tables from 129 to 141. The one
-worth knowing is a `.tag` whose name a variant already uses as a field: that is
-the only mistake here that would corrupt the wire rather than fail.
+- **Responses carrying a union were two to three times slower than they had to
+  be.** `covers` decides while compiling which types nilo's own JSON writer may
+  touch, and it is answered for the **whole** value — it did not recognise a
+  `union(enum)` at all, so one union field anywhere sent the entire response to
+  `std.json`, every string in it included. On a 374-byte payload with a union in
+  it that is **2.8× to 3.2×**, and 3.4× to 3.5× on a 104-byte one. The bytes are
+  unchanged, and the tests hold nilo's output against `std.json`'s value by
+  value. [`bench/result/http.md`](./bench/result/http.md) has the run and the
+  controls.
 
 ## 0.2.0
 
