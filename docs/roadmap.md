@@ -629,23 +629,6 @@ either.
 **Waiting on: a number.** `bench/result/http.md` has the write side (258ns down
 to 93ns on a 374-byte alert rule) and nothing at all for the read side.
 
-**Nothing checks that two renamed names collide.** `rename_all` maps field names
-to wire names one at a time, and `.lowercase` joins the words rather than
-keeping the underscore, so `not_found` and `notfound` both become `notfound`.
-Two variants sharing a wire name means the writer emits a duplicate key and
-`fromSpan` returns whichever the `inline for` reaches first.
-
-`checkTag` already refuses the neighbouring mistake, and its comment is the
-argument for this one: "a variant whose own struct already has a field by the
-tag's name emits that key twice, and which one a reader takes is its business."
-The same sentence applies here word for word.
-
-A comptime `O(n²)` compare over the names a type already produced. Free, on a
-path that never reaches a binary, and it wants a `refusals/` file
-([ADR 0027](./adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)).
-
-**Waiting on: ready.**
-
 **A multipart part that names its file only with `filename*` becomes a text
 field.** `parseMultipart` decides a part is a file by asking `parameterOf` for
 `filename`, and `parameterOf` compares the key exactly, so `filename*` does not

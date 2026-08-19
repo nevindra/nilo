@@ -172,6 +172,20 @@ is `std.json`'s call, and nothing can add a declaration to a type you wrote.
   itself is never quoted back in the message. Costs nothing on any of the four
   axes, binary size included — the ADR has the four measurements.
 
+- **A `rename_all` that put two names on one was accepted silently.**
+  `.lowercase` and `.UPPERCASE` join the words rather than keeping the
+  underscore, so an enum with `not_found` and `notfound` sent both as
+  `"notfound"` — and a reader took whichever variant the `inline for` reached
+  first, which is declaration order. Reordering two variants would have quietly
+  changed which one a request parsed into. It is now a compile error naming
+  both names and saying which cases keep them apart
+  ([ADR 0093](./docs/adr/0093-two-renamed-names-that-collide-are-refused.md)).
+
+  Nothing to change unless you had the bug. `.lowercase` and `.UPPERCASE` are
+  unchanged for every type whose names stay distinct under them. Two refusals
+  cover it, taking the framework's table from 75 to 77 and the five tables from
+  141 to 143.
+
 - **A checkbox did not bind to a `bool`.** A ticked HTML checkbox posts `on`,
   and `bool` took `true` and `false` and nothing else — so `newsletter: bool =
   false` inside a `Form(T)` was a 400 the first time somebody ticked the box,

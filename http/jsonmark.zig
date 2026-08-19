@@ -139,6 +139,7 @@ pub fn of(comptime T: type) ?Mark {
         );
 
         if (mark.tag) |key| checkTag(T, key);
+        if (mark.rename_all) |c| checkRenames(T, c);
         return mark;
     }
 }
@@ -209,6 +210,49 @@ fn checkTag(comptime T: type, comptime key: []const u8) void {
                         arm.name ++ "` already has a field called `" ++ f.name ++ "`, so that key would " ++
                         "be written twice and a reader would pick one of them.\n" ++
                         "  Rename the tag, or rename the field.",
+                );
+            }
+        }
+    }
+}
+
+/// A `rename_all` maps one name at a time, and two names can land on one.
+///
+/// `.lowercase` and `.UPPERCASE` join the words rather than keeping the
+/// underscore, so `not_found` and `notfound` both come out `notfound`. The
+/// argument is `checkTag`'s, word for word: **this is a mistake that corrupts
+/// the wire rather than failing.** A writer emits the same key or value twice
+/// and `fromSpan` returns whichever variant the `inline for` reaches first —
+/// which is declaration order, and nothing anywhere says so.
+///
+/// `O(n²)` over the names the type already produces, all of it while
+/// compiling, on a path that never reaches a binary. A union of eight variants
+/// is 28 comparisons of short literals, once.
+fn checkRenames(comptime T: type, comptime c: Case) void {
+    comptime {
+        const fields = switch (@typeInfo(T)) {
+            .@"enum" => |e| e.fields,
+            .@"union" => |u| u.fields,
+            // `rename_all` only ever renames a variant or an enum value —
+            // a payload struct's own fields are left alone — so on anything
+            // else there is nothing here that could collide.
+            else => return,
+        };
+        const m = Mark{ .rename_all = c };
+        const what = if (@typeInfo(T) == .@"enum") "value" else "variant";
+        for (fields, 0..) |a, i| {
+            const spelled = wire(a.name, m);
+            for (fields[i + 1 ..]) |b| {
+                if (!std.mem.eql(u8, spelled, wire(b.name, m))) continue;
+                @compileError(
+                    "nilo: `" ++ @typeName(T) ++ "` asks for `.rename_all = ." ++ @tagName(c) ++
+                        "`, and its " ++ what ++ "s `" ++ a.name ++ "` and `" ++ b.name ++
+                        "` both come out as \"" ++ spelled ++ "\".\n" ++
+                        "  Two of them under one name on the wire is not a spelling problem: a reader " ++
+                        "takes whichever it meets first, which is declaration order, and nothing says so.\n" ++
+                        "  Rename one of them, or choose a case that keeps them apart — " ++
+                        "`.SCREAMING_SNAKE_CASE` and `.kebab-case` both keep the underscore, " ++
+                        "and `.lowercase` and `.UPPERCASE` are the two that drop it.",
                 );
             }
         }
@@ -549,6 +593,50 @@ test "a tagged union may rename its arms as well as tag them" {
     const names = comptime wireNames(Channel);
     try testing.expectEqualStrings("web-hook", names[0]);
     try testing.expectEqualStrings("discord-dm", names[1]);
+}
+
+test "the case that would collide two names is the only one refused" {
+    // The pair `refusals/json_rename_all_collides_on_an_enum.zig` refuses:
+    // `.lowercase` drops the underscore, so these two land on one name. Here
+    // the same two names are checked under every case that keeps them apart,
+    // because a check that refuses too much is the failure mode a comptime
+    // rule cannot be argued with about.
+    const Kept = enum {
+        pub const nilo_json = .{ .rename_all = .SCREAMING_SNAKE_CASE };
+        not_found,
+        notfound,
+    };
+    const kept = comptime wireNames(Kept);
+    try testing.expectEqualStrings("NOT_FOUND", kept[0]);
+    try testing.expectEqualStrings("NOTFOUND", kept[1]);
+
+    const Kebab = enum {
+        pub const nilo_json = .{ .rename_all = .@"kebab-case" };
+        not_found,
+        notfound,
+    };
+    const kebab = comptime wireNames(Kebab);
+    try testing.expectEqualStrings("not-found", kebab[0]);
+    try testing.expectEqualStrings("notfound", kebab[1]);
+
+    // camelCase drops the underscore too, and still keeps these two apart
+    // because it shouts the letter after it.
+    const Camel = enum {
+        pub const nilo_json = .{ .rename_all = .camelCase };
+        not_found,
+        notfound,
+    };
+    const camel = comptime wireNames(Camel);
+    try testing.expectEqualStrings("notFound", camel[0]);
+    try testing.expectEqualStrings("notfound", camel[1]);
+
+    // And a single value cannot collide with anything, which is the edge the
+    // `i + 1 ..` slice has to get right.
+    const One = enum {
+        pub const nilo_json = .{ .rename_all = .lowercase };
+        not_found,
+    };
+    try testing.expectEqualStrings("notfound", comptime wireNames(One)[0]);
 }
 
 test "an enum's choices come out renamed" {

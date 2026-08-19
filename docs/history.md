@@ -881,6 +881,27 @@ still has no way to read back the port it was given, which was re-checked
 rather than believed, so binding zero is not available and two files picking
 loopback ports remains an agreement held by two comments pointing at each other.
 
+## The comment that was already the argument for the next check
+
+`rename_all` mapped names one at a time and nothing looked at the set, so
+`.lowercase` turned `not_found` and `notfound` into one name and a reader took
+whichever variant declaration order put first
+([ADR 0093](./adr/0093-two-renamed-names-that-collide-are-refused.md)).
+
+**The reasoning for the fix was already written, one function away, about a
+different bug.** `checkTag` refuses a variant whose own struct has a field by
+the tag's name, and its comment says why: *"emits that key twice, and which one
+a reader takes is its business."* That sentence describes the rename collision
+exactly, and it had been sitting beside the code that needed it.
+
+The habit worth keeping is narrow and cheap: **when a check refuses one way of
+corrupting the wire, read its comment and ask what else the sentence is true
+of.** A comment that explains a hazard in general terms and is attached to one
+specific case is a list of unwritten checks. This is the second time in this
+file that the repository knew something in one place and not in the neighbouring
+one — the first was a header value refused in two files and not the third — and
+both were found by reading the justification rather than the code.
+
 ## A workaround written into the guide, twice, instead of a bug report
 
 A ticked checkbox posts `on`, `bool` took only `true` and `false`, and so a

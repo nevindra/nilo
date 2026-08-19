@@ -537,6 +537,14 @@ const refusals = [_]Refusal{
         .says = "`json_reader_with_no_marker.Condition` asks for nilo's JSON reader and has no `nilo_json`, so there is nothing for the reader to do differently from `std.json`.",
     },
     .{
+        .name = "json_rename_all_collides_on_an_enum",
+        .says = "`json_rename_all_collides_on_an_enum.Severity` asks for `.rename_all = .lowercase`, and its values `not_found` and `notfound` both come out as \"notfound\".",
+    },
+    .{
+        .name = "json_rename_all_collides_on_a_union",
+        .says = "`json_rename_all_collides_on_a_union.Channel` asks for `.rename_all = .UPPERCASE`, and its variants `web_hook` and `webhook` both come out as \"WEBHOOK\".",
+    },
+    .{
         .name = "json_rename_all_is_already_zig",
         .says = "`json_rename_all_is_already_zig.Severity` asks for `.rename_all = .snake_case`, which is what a Zig field name already is, so it would change nothing.",
     },

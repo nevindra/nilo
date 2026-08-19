@@ -38,7 +38,7 @@ with a vibe.
 zig build test         # the loop: the suite in Debug, plus the refusals
 zig build test-all     # the above plus the same suite in ReleaseSafe. This is what CI runs
 zig build layering     # check that no module imports upward or sideways
-zig build refusals     # the framework's 75 compile-error checks — NOT the others
+zig build refusals     # the framework's 77 compile-error checks — NOT the others
 zig build refusals-sql # nilo_sql's 44; refusals-config, -pw and -s3 for the rest
 zig build snippets     # the documentation's marked snippets, which must compile
 zig build examples     # build all nine examples
