@@ -189,15 +189,67 @@ pub fn isReservedHeader(name: []const u8) bool {
 /// Headers a response may legitimately carry more than one of, and so the
 /// ones `Ctx.setHeader` must not treat as a replacement.
 ///
-/// There is exactly one, and it is not a matter of taste: RFC 6265 §3 says a
-/// server sending two cookies has to send two `Set-Cookie` lines, and that
-/// they may not be folded into one comma-separated value the way every other
-/// repeatable header may. So "last one wins" — which is right for `Vary` or
-/// a cache directive, where a second call is somebody changing their mind —
-/// would mean setting a session cookie and a preference cookie silently
-/// delivered only the second.
+/// There are two, for two different reasons.
+///
+/// **`Set-Cookie`, because folding is forbidden.** RFC 6265 §3 says a server
+/// sending two cookies has to send two `Set-Cookie` lines, and that they may
+/// not be folded into one comma-separated value the way every other repeatable
+/// header may. (A cookie's `Expires` attribute contains a comma. That is how it
+/// came to be true.) So "last one wins" would mean setting a session cookie and
+/// a preference cookie silently delivered only the second.
+///
+/// **`Vary`, because two layers each name their own axis** (ADR 0089). Last one
+/// wins is right when a second call is somebody *changing their mind*, and that
+/// is what it looks like from inside one function. It is not what happens here:
+/// the CORS middleware says `Vary: Origin` because the response depends on the
+/// origin, and then a gzipped static file says `Vary: Accept-Encoding` because
+/// it also depends on that — two independent facts about one response, and
+/// replacing threw the first away. Unlike `Set-Cookie`, `Vary` is a list field
+/// (RFC 9110 §12.5.5), so two lines and one comma-separated line mean the same
+/// thing to every cache; two lines is the one that costs no allocation.
 pub fn repeats(name: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(name, "set-cookie");
+    return std.ascii.eqlIgnoreCase(name, "set-cookie") or
+        std.ascii.eqlIgnoreCase(name, "vary");
+}
+
+/// Whether a name can be written as a header field name at all — RFC 9110
+/// §5.1's `token`, which is the same grammar a cookie name has.
+///
+/// Duplicated from `cookie.zig`'s `isTokenByte` rather than shared, and that
+/// is deliberate: `cookie.zig` imports nothing but `std`, and reaching here
+/// for six lines of switch would pull `bulkhead.zig` in behind it. Two copies
+/// of a grammar that has not changed since 1999 is the cheaper of the two.
+pub fn headerNameOk(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |ch| switch (ch) {
+        'a'...'z', 'A'...'Z', '0'...'9' => {},
+        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => {},
+        else => return false,
+    };
+    return true;
+}
+
+/// Whether a value can be written as a header field value — RFC 9110 §5.5's
+/// `field-value`: printable ASCII, space and horizontal tab, plus `obs-text`.
+///
+/// **What this exists to refuse is CR and LF** (ADR 0087). A response header
+/// is terminated by `\r\n` and there is no escaping in this grammar, so a
+/// value carrying one does not produce a broken header — it produces a
+/// *second header*, and a value carrying two produces a second **response**.
+/// That is the same shape `cookie.check` refuses a `;` for, one layer up.
+///
+/// `obs-text` — everything from 0x80 — is allowed rather than refused. It is
+/// deprecated and it is also what a UTF-8 filename in a `Content-Disposition`
+/// is made of, and it cannot terminate a line, which is the only thing being
+/// defended here. NUL and DEL cannot appear either: neither splits a
+/// response, but neither belongs on a wire and both are a sign the value came
+/// from somewhere it should not have.
+pub fn headerValueOk(value: []const u8) bool {
+    for (value) |ch| {
+        if (ch == ' ' or ch == '\t') continue;
+        if (ch < 0x21 or ch == 0x7F) return false;
+    }
+    return true;
 }
 
 /// Iterate every header in a head (the request line is skipped), for
@@ -1041,14 +1093,61 @@ test "the framework's own headers are reserved" {
     try testing.expect(!isReservedHeader("Vary"));
 }
 
-test "Set-Cookie is the one header a response may carry twice" {
+test "the two headers a response may carry more than one of" {
+    // Folding is forbidden for this one, so two cookies are two lines.
     try testing.expect(repeats("Set-Cookie"));
     try testing.expect(repeats("set-cookie"));
-    try testing.expect(!repeats("Vary"));
+    // Folding is allowed for this one, and two layers each name their own
+    // axis — so replacing threw one of them away (ADR 0089).
+    try testing.expect(repeats("Vary"));
+    try testing.expect(repeats("vary"));
+
+    // Everything else is somebody changing their mind, and the second call
+    // replaces the first.
     try testing.expect(!repeats("Location"));
-    // And it is not a header the framework writes itself, so it goes through
-    // `setHeader` like any other.
+    try testing.expect(!repeats("ETag"));
+    try testing.expect(!repeats("Cache-Control"));
+
+    // And neither of the two is a header the framework writes itself, so both
+    // go through `setHeader` like any other.
     try testing.expect(!isReservedHeader("Set-Cookie"));
+    try testing.expect(!isReservedHeader("Vary"));
+}
+
+test "a header name is a token, and nothing else is one" {
+    try testing.expect(headerNameOk("X-Request-Id"));
+    try testing.expect(headerNameOk("ETag"));
+    try testing.expect(headerNameOk("!#$%&'*+-.^_`|~"));
+
+    // The two that would end the name early and start something else.
+    try testing.expect(!headerNameOk("X-Bad: injected"));
+    try testing.expect(!headerNameOk("X-Bad\r\nX-Other"));
+    // A space is what separates a name from nothing at all — there is no
+    // whitespace allowed before the colon (RFC 9112 §5.1), and a header line
+    // with one is how a smuggled field gets past a lax parser.
+    try testing.expect(!headerNameOk("X Bad"));
+    try testing.expect(!headerNameOk(""));
+}
+
+test "a header value refuses the two bytes that would start a second header" {
+    try testing.expect(headerValueOk("text/html; charset=utf-8"));
+    try testing.expect(headerValueOk("W/\"abc-123\""));
+    // Space and horizontal tab are the two whitespace bytes a value may hold.
+    try testing.expect(headerValueOk("one, two\tthree"));
+    try testing.expect(headerValueOk(""));
+    // obs-text: deprecated, allowed, and what a UTF-8 filename is made of.
+    try testing.expect(headerValueOk("attachment; filename=\"café.pdf\""));
+
+    // The whole reason the function exists. One of these ends the header and
+    // starts another; two of them end the head and start a response body.
+    try testing.expect(!headerValueOk("/welcome\r\nX-Injected: 1"));
+    try testing.expect(!headerValueOk("/welcome\nX-Injected: 1"));
+    try testing.expect(!headerValueOk("/welcome\r"));
+    try testing.expect(!headerValueOk("a\r\n\r\nHTTP/1.1 200 OK"));
+    // Neither of these splits anything. Both mean the value came from
+    // somewhere it should not have.
+    try testing.expect(!headerValueOk("a\x00b"));
+    try testing.expect(!headerValueOk("a\x7Fb"));
 }
 
 test "the redirect statuses all have a phrase, and it is written from the constant" {

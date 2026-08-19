@@ -3249,8 +3249,11 @@ test "extra response headers are written after the framework's own" {
 }
 
 fn reservedHeader(c: *Ctx) anyerror!void {
-    try testing.expectError(error.ReservedHeader, c.setHeader("Content-Length", "999"));
-    try testing.expectError(error.ReservedHeader, c.setHeader("connection", "close"));
+    // A refusal from `putHeader` is a fail function, so it arrives as
+    // `error.Failed` with a sentence attached rather than as a bare error
+    // name the client would see as "internal server error" (ADR 0087).
+    try testing.expectError(error.Failed, c.setHeader("Content-Length", "999"));
+    try testing.expectError(error.Failed, c.setHeader("connection", "close"));
     // Setting the same header twice replaces it rather than sending both.
     try c.setHeader("X-Once", "first");
     try c.setHeader("x-once", "second");
@@ -3268,6 +3271,73 @@ test "framework-owned headers are refused, repeats replace" {
     try testing.expect(std.mem.indexOf(u8, result.response, "x-once: second") != null);
     try testing.expect(std.mem.indexOf(u8, result.response, "first") == null);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, result.response, "Content-Length:"));
+}
+
+/// The shape the guide's own `Redirect` example has: a destination that came
+/// out of a database, handed straight to a header.
+fn splittingRedirect(c: *Ctx) anyerror!void {
+    try c.redirect(302, "/welcome\r\nX-Injected: yes\r\n\r\nHTTP/1.1 200 OK");
+}
+
+test "a header value carrying a newline is refused, not written" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/go", splittingRedirect);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /go HTTP/1.1\r\n\r\n");
+
+    // The forged header never reaches the wire, and neither does the second
+    // status line behind it.
+    try testing.expect(std.mem.indexOf(u8, result.response, "X-Injected") == null);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, result.response, "HTTP/1.1"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "Location:") == null);
+
+    // And it is a 500 that says why, rather than a 302 that quietly dropped
+    // the header the handler asked for.
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 500 "));
+    try testing.expect(try Harness.saysFailure(result.response, "carriage return or a newline"));
+}
+
+fn splittingCookieHeader(c: *Ctx) anyerror!void {
+    // `Set-Cookie` through `setHeader` rather than `setCookie` — the route a
+    // `Response`'s or a `Redirect`'s `.headers` takes, which never reaches
+    // `cookie.check` and so was the one way past it (ADR 0087).
+    try c.setHeader("Set-Cookie", "session=abc\r\nX-Injected: yes");
+    try c.sendText(200, "ok");
+}
+
+test "a Set-Cookie set as a plain header is checked like every other one" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/c", splittingCookieHeader);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /c HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, result.response, "X-Injected") == null);
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 500 "));
+}
+
+fn brokenHeaderName(c: *Ctx) anyerror!void {
+    try testing.expectError(error.Failed, c.setHeader("X-Bad: injected", "1"));
+    try testing.expectError(error.Failed, c.setHeader("X-Bad\r\nX-Other", "1"));
+    // A value may hold a space and a tab; it is the control bytes that go.
+    try c.setHeader("X-Fine", "one, two\ttext");
+    try c.sendText(200, "ok");
+}
+
+test "a header name that is not a token is refused, and an ordinary value still passes" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/n", brokenHeaderName);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /n HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, result.response, "X-Fine: one, two\ttext\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, result.response, "X-Bad") == null);
 }
 
 fn tagOuter(c: *Ctx, next: mw.Next) anyerror!void {
@@ -3694,6 +3764,109 @@ test "static files: routes win, a prefix scopes, and middleware still wraps" {
     try testing.expect(std.mem.startsWith(u8, outside.response, "HTTP/1.1 404"));
 }
 
+test "two layers each naming a Vary axis both survive onto the response" {
+    // A gzipped file behind a CORS with a named origin: the middleware says
+    // the answer depends on the Origin, the file says it depends on
+    // Accept-Encoding, and both are true of the same response (ADR 0089).
+    // `Vary` used to replace, so whichever ran second was the only one left —
+    // and the handler always runs after the middleware, so it was always
+    // `Vary: Origin` that went.
+    var files = try TmpFiles.init(testing.allocator, &.{
+        .{ "app.css", "body { color: rebeccapurple; }\n" ** 64 },
+    });
+    defer files.deinit(testing.allocator);
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(cors.with(.{ .origin = "https://example.dev" }));
+    try app.static("/assets", files.path);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const asked = h.send(
+        &app,
+        "GET /assets/app.css HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n",
+    );
+    try testing.expect(std.mem.indexOf(u8, asked.response, "Content-Encoding: gzip\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, asked.response, "Vary: Origin\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, asked.response, "Vary: Accept-Encoding\r\n") != null);
+}
+
+test "a gzipped file behind a named-origin CORS still allocates nothing" {
+    // The path the second `Vary` was added to, put against ADR 0018's hard
+    // invariant rather than reasoned about. Seven response headers now — CORS
+    // two, the file five — and `inline_headers` is six, so this is the test
+    // that says whether the extra one spills to the arena.
+    var files = try TmpFiles.init(testing.allocator, &.{
+        .{ "app.css", "body { color: rebeccapurple; }\n" ** 64 },
+    });
+    defer files.deinit(testing.allocator);
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(cors.with(.{ .origin = "https://example.dev" }));
+    try app.static("/assets", files.path);
+    try app.resolveChains();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var counting = budget.Counting{ .child = arena.allocator() };
+    var lifetime = str_mod.Lifetime{};
+    var in_flight = fail.InFlight{};
+    var buf: [8192]u8 = undefined;
+
+    const request = "GET /assets/app.css HTTP/1.1\r\nHost: example.dev\r\n" ++
+        "Accept-Encoding: gzip\r\nConnection: keep-alive\r\n\r\n";
+
+    const send = struct {
+        fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
+            var in = std.Io.Reader.fixed(request);
+            var out = std.Io.Writer.fixed(b);
+            _ = a.handleRequest(gpa, l, f, &in, &out, .off, .off, .{});
+            l.end();
+        }
+    }.once;
+
+    for (0..3) |_| {
+        send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+        _ = arena.reset(.{ .retain_with_limit = arena_keep });
+    }
+    counting.reset();
+    send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+
+    // Zero, not one: a file is served from memory and its headers all belong
+    // to something that outlives the request, so there is nothing to copy.
+    // The seventh header would have spilled — the exact-duplicate check in
+    // `putHeader` is not what saves it, since these seven are all different;
+    // `inline_headers` moving from six to seven is (ADR 0089).
+    try testing.expectEqual(@as(usize, 0), counting.allocs);
+    try testing.expectEqual(@as(usize, 0), counting.resizes);
+}
+
+fn twiceTheSameAxis(c: *Ctx) anyerror!void {
+    try c.setStaticHeader("Vary", "Origin");
+    try c.setStaticHeader("Vary", "Accept-Language");
+    // The same axis again, from a second layer that also depends on it. One
+    // fact, said twice — not a third `Vary` line.
+    try c.setStaticHeader("Vary", "Origin");
+    try c.sendText(200, "ok");
+}
+
+test "a repeated header naming what is already there is not said twice" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/v", twiceTheSameAxis);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /v HTTP/1.1\r\n\r\n");
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, result.response, "Vary: "));
+    try testing.expect(std.mem.indexOf(u8, result.response, "Vary: Origin\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, result.response, "Vary: Accept-Language\r\n") != null);
+}
+
 test "static files: HEAD gives the head, POST is not answered with the file" {
     var files = try TmpFiles.init(testing.allocator, &.{.{ "logo.svg", "<svg/>" }});
     defer files.deinit(testing.allocator);
@@ -3774,18 +3947,27 @@ test "the request path stays inside its allocation budget" {
     try testing.expectEqual(@as(usize, 0), counting.resizes);
 }
 
-test "a fifth response header spills to the arena, and all five go out in order" {
-    // The other side of holding four inline: the fifth has to join them rather
-    // than replace them, and the response has to carry one list.
+/// One more header than the Ctx holds inline, so the spill to the arena is
+/// actually reached. Counted off `inline_headers` rather than written out:
+/// this test was named for a *fifth* header and spelled six of them, from back
+/// when four were held inline — so by the time it was read again it had been
+/// asserting nothing about spilling for two changes to that constant
+/// (ADR 0033, and ADR 0089 for the change that made it worth noticing).
+const spilling_headers = ctx_mod.inline_headers + 1;
+
+test "one header more than the Ctx holds inline spills, and all of them go out in order" {
     var app = App.init(testing.allocator);
     defer app.deinit();
     try app.get("/many", struct {
         fn run(c: *Ctx) anyerror!void {
-            inline for (.{ "A", "B", "C", "D", "E", "F" }) |name| {
-                try c.setStaticHeader("X-" ++ name, name);
+            inline for (0..spilling_headers) |i| {
+                const name = std.fmt.comptimePrint("{d}", .{i});
+                try c.setStaticHeader("X-N" ++ name, name);
             }
-            // And one that repeats an inline entry, which must replace it.
-            try c.setStaticHeader("x-b", "again");
+            // And one that repeats an entry already held, which must replace
+            // it rather than join it — the rule every header but the two in
+            // `http1.repeats` follows.
+            try c.setStaticHeader("x-n1", "again");
             try c.sendText(200, "ok");
         }
     }.run);
@@ -3795,12 +3977,16 @@ test "a fifth response header spills to the arena, and all five go out in order"
     defer h.deinit();
     const sent = h.send(&app, "GET /many HTTP/1.1\r\n\r\n");
 
-    for ([_][]const u8{ "X-A: A", "X-C: C", "X-D: D", "X-E: E", "X-F: F" }) |line| {
-        try testing.expect(std.mem.indexOf(u8, sent.response, line) != null);
+    // Every one of them survived the move into the spill list, in one piece.
+    inline for (0..spilling_headers) |i| {
+        const name = std.fmt.comptimePrint("{d}", .{i});
+        if (i != 1) {
+            try testing.expect(std.mem.indexOf(u8, sent.response, "X-N" ++ name ++ ": " ++ name) != null);
+        }
     }
     // Replaced, not duplicated.
-    try testing.expect(std.mem.indexOf(u8, sent.response, "x-b: again") != null);
-    try testing.expect(std.mem.indexOf(u8, sent.response, "X-B: B") == null);
+    try testing.expect(std.mem.indexOf(u8, sent.response, "x-n1: again") != null);
+    try testing.expect(std.mem.indexOf(u8, sent.response, "X-N1: 1") == null);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sent.response, "again"));
 }
 

@@ -7,8 +7,15 @@ What was measured and what was got wrong on the way is in
 
 ## Unreleased
 
-**Additive only — nothing here breaks a 0.2.0 program**, so the next tag is a
-minor one. Needs Zig 0.16, as 0.2.0 does.
+**No source change is needed to move a 0.2.0 program to this**, so the next tag
+is a minor one. Needs Zig 0.16, as 0.2.0 does.
+
+**Two things behave differently at run time, and both are in Fixed below.**
+Sessions now carry an expiry, so everybody holding one is signed out on the
+deploy that picks this up, and a session cookie that used to last indefinitely
+now lasts a day unless `max_age` says otherwise. And a response header value
+holding a control byte is refused rather than written, which is a 500 on a
+handler that was writing a header it should not have been able to.
 
 ### Added
 
@@ -95,6 +102,74 @@ is `std.json`'s call, and nothing can add a declaration to a type you wrote.
   tagged union is `oneOf` with `discriminator`; an untagged union is still `{}`.
 
 ### Fixed
+
+- **A gzipped static file behind a named-origin CORS lost its `Vary: Origin`.**
+  `setHeader` replaced, on the grounds that setting a header twice is somebody
+  changing their mind — which is true inside one function and not true of
+  `Vary`, where the CORS middleware and the static-file handler each name a
+  different axis of the same response. Middleware runs first, so it was always
+  CORS's that went.
+
+  `Vary` now repeats rather than replaces, and the response carries both lines
+  ([ADR 0089](./docs/adr/0089-two-layers-can-each-name-a-vary-axis.md)). Two
+  lines rather than one comma-joined value because joining means building a
+  string, and that would put an allocation on the static-file path. An exact
+  duplicate — same name and same value — is still dropped, so two middlewares
+  that both depend on the origin do not produce two identical lines.
+
+  `inline_headers` went from six to seven with it: the shape above sets seven
+  headers, and the seventh was spilling to the arena. That is measured — the new
+  budget test failed with `expected 0, found 1` before the constant moved, and
+  asserts zero allocations after. The 32 bytes sit on a frame that is unwound
+  before the connection waits, so an idle connection should be unchanged at
+  4,669 bytes; that half is reasoned rather than measured, because the memory
+  harness is Linux-only, and it is on the roadmap as such.
+
+- **A session never expired, whatever `max_age` said.** The only thing bounding
+  one was `Max-Age` on the cookie, which is an instruction to a *browser* — so a
+  copy of the cookie taken out of a proxy log or a backup went on opening
+  forever, and the only way to stop it was rotating the secret, which signs out
+  everybody. The guide meanwhile offered `.max_age = 30 * 24 * 60 * 60` under
+  *Staying signed in* and said three paragraphs later that a copied cookie still
+  opens; both sentences were true and they described different behaviour.
+
+  The seal now carries the moment it stops opening, under the AEAD tag where a
+  client cannot reach it
+  ([ADR 0088](./docs/adr/0088-an-expiry-a-client-can-ignore-is-not-one.md)).
+  `max_age` sets the cookie attribute and the sealed expiry from one number.
+  Leaving it null is still a session cookie and now also seals
+  `nilo.session.default_max_age` — **24 hours** — because null cannot safely
+  mean forever. An expired session reads as `null`, like every other unreadable
+  cookie.
+
+  **Two things to know before deploying.** The plaintext layout moved, so every
+  session already out there is ignored and those people sign in again — the same
+  thing adding a field to the session struct has always done. And a session
+  cookie that was living indefinitely now stops at a day; if you were relying on
+  that, say `.max_age`. `nilo.session.openAt(T, cookie, key, when)` is public so
+  a test can reach the boundary without a wall clock. Costs one 15ns clock read
+  on a request that carries a session cookie, nothing on one that does not, and
+  12 bytes on the wire.
+
+- **A response header value was never checked, so a handler could split its own
+  response.** A header is `name: value\r\n` and there is no escaping in that
+  grammar, so a value carrying a newline does not make a broken header — it
+  makes a **second** one, and two of them end the head and start a second
+  response. Every path that sets a response header now goes through one check
+  ([ADR 0087](./docs/adr/0087-a-header-value-cannot-end-its-own-line.md)): the
+  name has to be a token, and the value may not hold a control byte. Two
+  narrower versions of this check already existed — `c.setCookie` refuses a `;`,
+  and `c.requestId` refuses a forged `X-Request-Id` — and neither covered
+  `c.setHeader`, a `Response`'s `.headers`, or a `Redirect`'s. The shape most
+  likely to have been reached is the one in the guide, where a `Redirect`'s
+  destination comes out of a database.
+
+  A refused header is now a 500 naming the header and the rule it broke, where
+  the reserved-header refusal used to reach the client as `"internal server
+  error"`. `error.ReservedHeader` is gone with it; it was never a documented
+  name, and setting `Content-Length` is refused exactly as before. The value
+  itself is never quoted back in the message. Costs nothing on any of the four
+  axes, binary size included — the ADR has the four measurements.
 
 - **Responses carrying a union were two to three times slower than they had to
   be.** `covers` decides while compiling which types nilo's own JSON writer may

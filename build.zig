@@ -658,7 +658,7 @@ const refusals = [_]Refusal{
     },
     .{
         .name = "session_too_big_for_a_cookie",
-        .says = "a `Session(session_too_big_for_a_cookie.Signed)` would be 5528 bytes in the cookie, and the most that fits is 3800.",
+        .says = "a `Session(session_too_big_for_a_cookie.Signed)` would be 5540 bytes in the cookie, and the most that fits is 3800.",
     },
     .{
         .name = "session_with_no_fields",

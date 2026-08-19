@@ -39,8 +39,16 @@ pub fn Redirect(comptime status: u16) type {
         pub const nilo_redirect = status;
 
         /// Where the client is being sent. A path (`/welcome`) or a whole
-        /// URL; nilo passes it through untouched, because what counts as a
-        /// sensible destination is the application's business.
+        /// URL; **which** destination is sensible is the application's
+        /// business, and nilo does not judge it.
+        ///
+        /// What nilo does check is that it is one header value: a `Location`
+        /// carrying a newline would end the header early and start a second
+        /// one, and that is refused with a 500 rather than written
+        /// ([ADR 0087](../docs/adr/0087-a-header-value-cannot-end-its-own-line.md)).
+        /// Worth knowing here in particular, because the shape this type is
+        /// for — a short link read out of a database — is the one where the
+        /// destination did not come from you.
         location: []const u8,
 
         /// Headers to send with the redirect — a `Set-Cookie`, usually,

@@ -307,9 +307,15 @@ plus a per-arm `allOf` for a tagged one. See
 | `c.upgradeWith(loop, state, .{ .protocol = "chat.v1" })` | the same, naming a subprotocol |
 
 `Content-Type`, `Content-Length`, `Transfer-Encoding` and `Connection` are
-refused by `setHeader`. Set headers before sending. Setting the same header
-twice replaces it — except `Set-Cookie`, which a response may carry more than
-one of.
+refused by `setHeader`. So is a name that is not a token, and a value holding a
+control byte — a newline in one would start a second header, and two would start
+a second response ([ADR 0087](./adr/0087-a-header-value-cannot-end-its-own-line.md)).
+All three are a 500 naming the header. Set headers before sending. Setting the
+same header twice replaces it — except `Set-Cookie` and `Vary`, which a response
+may carry more than one of. `Set-Cookie` because two cookies cannot be folded
+into one line; `Vary` because two layers each name their own axis, and replacing
+threw one away ([ADR 0089](./adr/0089-two-layers-can-each-name-a-vary-axis.md)).
+Setting either with a name and value already present adds nothing.
 
 `sendFile` also takes `size` (null asks the file), `etag` and `cache_control`,
 and answers a `Range`, an `If-Range`, an `If-None-Match` and a `HEAD` from them.
@@ -353,8 +359,15 @@ those. Not slices. See [Sessions](./guide/sessions.md).
 session cookie), `secure` (`true`), `same_site` (`.lax`). No `http_only`: it
 is always on.
 
-Every way a cookie can be unreadable — tampered, truncated, sealed under
-another secret, written by a build with a different shape of `T` — is the
+`max_age` sets the cookie attribute **and** an expiry sealed inside the cookie,
+where the client cannot reach it — `Max-Age` alone is advice a copied cookie
+does not take. Null seals `nilo.session.default_max_age`, 24 hours
+([ADR 0088](./adr/0088-an-expiry-a-client-can-ignore-is-not-one.md)).
+`nilo.session.openAt(T, cookie, key, when)` opens one against a time you name,
+for a test that wants the boundary without a wall clock.
+
+Every way a cookie can be unreadable — tampered, truncated, expired, sealed
+under another secret, written by a build with a different shape of `T` — is the
 same answer, `null`. The secret comes from
 `listen(.{ .session_secret = … })` and must be exactly 32 bytes; a handler
 asking for a session with none set answers 500.

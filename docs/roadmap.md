@@ -526,6 +526,21 @@ hundreds of them.
 build profile` is the harness for the day they do, and two attempts that lost
 are written up in [`history.md`](./history.md) so they are not repeated.
 
+**`inline_headers` went from six to seven and nobody has re-run the
+per-connection figure.** Holding a seventh response header on the `Ctx` is 32
+bytes on `serveRequest`'s frame, which is `noinline` and unwound before the
+connection waits ([ADR 0089](./adr/0089-two-layers-can-each-name-a-vary-axis.md)),
+so the reasoning says an idle connection is untouched at 4,669 bytes flat. The
+reasoning is all there is: `bench/mem.py` reads `ss` and `/proc/<pid>/VmRSS` and
+the change was made on Darwin, where neither exists.
+
+ADR 0063 is the reason this is written down rather than assumed. A per-connection
+claim reasoned from the shape of the code, and repeated in six files, was half
+wrong for two milestones.
+
+**Waiting on: a machine.** One Linux box and `python3 bench/mem.py --port 8787
+--path /health` against `zig build run-hello` settles it in a minute.
+
 **A 404 or a 405 with middleware registered costs one allocation.** Routes and
 static files have their chains resolved at `listen()`, so neither pays for the
 middleware in front of it. The set of paths that are neither is every string

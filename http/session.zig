@@ -23,6 +23,14 @@
 //! holds ([ADR 0018](../docs/adr/0018-the-trade-budget-has-three-axes.md)).
 //! A request that does not ask for a session runs the code it ran before.
 //!
+//! **No sweep is not no expiry.** The seal carries the moment it stops
+//! opening, and `open` refuses it after that
+//! ([ADR 0088](../docs/adr/0088-an-expiry-a-client-can-ignore-is-not-one.md)).
+//! It has to be inside the seal: the cookie's own `Max-Age` is advice to a
+//! browser, and a copy of the cookie taken off the wire does not take advice.
+//! `Options.max_age` sets both, and `default_max_age` is the ceiling when
+//! nobody sets either.
+//!
 //! The cipher comes from `std.crypto`, so this costs no dependency and does
 //! not reopen [ADR 0028](../docs/adr/0028-tls-is-terminated-in-front.md)'s
 //! refusal of one-person crypto. The shape is jetzig's; it is the one design
@@ -47,6 +55,7 @@ const cookie_mod = @import("cookie.zig");
 const ctx_mod = @import("ctx.zig");
 const fail = @import("fail.zig");
 const names = @import("names.zig");
+const core = @import("nilo_core");
 
 const Ctx = ctx_mod.Ctx;
 const Cipher = std.crypto.aead.chacha_poly.XChaCha20Poly1305;
@@ -86,7 +95,28 @@ pub const max_cookie_bytes = 3800;
 
 /// The format the plaintext is in, so a future change to the layout can be
 /// told from a cookie written before it.
-const format_version: u8 = 1;
+///
+/// **2 since the seal carries its own expiry** (ADR 0088). The size check in
+/// `open` would already refuse a version-1 cookie, because the plaintext grew
+/// by eight bytes — this is the guard that says *why* rather than the one that
+/// happens to catch it.
+const format_version: u8 = 2;
+
+/// How long a session is good for when `Options.max_age` does not say.
+///
+/// **`Max-Age` is advice to a browser and the seal is the only thing that
+/// binds** (ADR 0088). A session cookie — `max_age = null` — asks the browser
+/// to forget it when the window closes, and a browser will; a copy of the
+/// cookie taken off the wire or out of a backup will not, and before the seal
+/// carried an expiry that copy opened forever.
+///
+/// So there is a ceiling whether or not anybody set one, and 24 hours is it:
+/// long enough that nobody working a normal day is signed out under them,
+/// short enough that a leaked cookie is a problem with an end. It is a
+/// **ceiling on a copy rather than a target** — an application that wants a
+/// session to last a month says `.max_age = 30 * 24 * 60 * 60`, and gets it
+/// in the cookie and in the seal from one number.
+pub const default_max_age: i64 = 24 * 60 * 60;
 
 /// Where the sealed bytes start once the nonce is out of the way.
 const overhead = Cipher.nonce_length + Cipher.tag_length;
@@ -100,12 +130,21 @@ pub const Error = error{
 
 // ---- what a session may hold ----
 
-/// The plaintext size of `T`: a version byte, the shape fingerprint, and the
-/// fields. Settled while compiling, which is what makes the cookie ceiling
-/// checkable at all.
+/// The plaintext size of `T`: a version byte, the shape fingerprint, the
+/// expiry, and the fields. Settled while compiling, which is what makes the
+/// cookie ceiling checkable at all.
+///
+/// The expiry is eight bytes of the 3,800 a cookie has (ADR 0088) — seconds
+/// rather than milliseconds because a session measured to the millisecond is
+/// a session nobody asked for, and seconds is what `Max-Age` counts anyway.
 pub fn plainSize(comptime T: type) usize {
-    return 1 + 4 + sizeOf(T);
+    return 1 + 4 + 8 + sizeOf(T);
 }
+
+/// Where the fields start, once the header is out of the way. Named because
+/// three functions index past it and three copies of `13` is how a format
+/// drifts.
+const header_size = 1 + 4 + 8;
 
 /// How long the cookie value will be once sealed and base64'd.
 pub fn cookieSize(comptime T: type) usize {
@@ -308,16 +347,28 @@ fn decode(comptime T: type, in: []const u8) Unreadable!Decoded(T) {
 
 // ---- sealing ----
 
-/// `value` as a cookie value: version, shape, fields, encrypted under a fresh
-/// random nonce, then base64.
+/// `value` as a cookie value: version, shape, expiry, fields, encrypted under
+/// a fresh random nonce, then base64.
+///
+/// `expires_at` is **seconds since the epoch, absolute** rather than a
+/// duration, and that is what keeps this function pure: the clock is read by
+/// `Session.setWith`, one layer up, so every arm of the expiry rule can be run
+/// from a test that names its own times instead of one that waits
+/// ([ADR 0033](../docs/adr/0033-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md)).
+/// An expiry check that could only be seen to pass would be exactly the guard
+/// that ADR is about.
 ///
 /// The buffer is the caller's, so this allocates nothing. `Sealed(T)` is the
 /// exact array to hand it.
-pub fn seal(comptime T: type, value: T, key: Key, out: []u8) ![]const u8 {
+pub fn seal(comptime T: type, value: T, expires_at: i64, key: Key, out: []u8) ![]const u8 {
     var plain: [plainSize(T)]u8 = undefined;
     plain[0] = format_version;
     std.mem.writeInt(u32, plain[1..5], comptime fingerprint(T), .little);
-    _ = encode(T, value, plain[5..]);
+    // Inside the seal, so it is covered by the tag: an expiry a client could
+    // edit is not an expiry. This is the whole reason it does not live in the
+    // cookie's own `Max-Age`, which is the client's to ignore.
+    std.mem.writeInt(i64, plain[5..13], expires_at, .little);
+    _ = encode(T, value, plain[header_size..]);
 
     var raw: [plainSize(T) + overhead]u8 = undefined;
     const nonce = raw[0..Cipher.nonce_length];
@@ -347,6 +398,20 @@ pub fn seal(comptime T: type, value: T, key: Key, out: []u8) ![]const u8 {
 /// session. Turning them into distinct errors would only invite a handler to
 /// treat one of them as "nearly signed in".
 pub fn open(comptime T: type, text: []const u8, key: Key) ?T {
+    return openAt(T, text, key, nowSeconds());
+}
+
+/// `open`, against a time the caller names rather than the clock.
+///
+/// **The pure half, and it is here so the expiry can be seen to fail.** A
+/// check that can only be exercised by waiting a day is a check that will only
+/// ever be seen to pass, which is the shape
+/// [ADR 0033](../docs/adr/0033-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md)
+/// exists to refuse. Every arm below is reached by a test naming two numbers.
+///
+/// It is also what a test of an application's own can use to stand a session
+/// at any age it likes without moving the machine's clock.
+pub fn openAt(comptime T: type, text: []const u8, key: Key, now: i64) ?T {
     const sealed_len = std.base64.standard.Decoder.calcSizeForSlice(text) catch return null;
     if (sealed_len != plainSize(T) + overhead) return null;
 
@@ -361,9 +426,24 @@ pub fn open(comptime T: type, text: []const u8, key: Key) ?T {
 
     if (plain[0] != format_version) return null;
     if (std.mem.readInt(u32, plain[1..5], .little) != comptime fingerprint(T)) return null;
+    // Read after the tag has been verified, so this is a number the server
+    // wrote rather than one a client chose. An expired session is `null` for
+    // the reason every other failure here is: the application has one thing to
+    // do about all of them, and "nearly signed in" is not a state worth
+    // offering it.
+    if (std.mem.readInt(i64, plain[5..13], .little) <= now) return null;
 
-    const got = decode(T, plain[5..]) catch return null;
+    const got = decode(T, plain[header_size..]) catch return null;
     return got.value;
+}
+
+/// Seconds since the epoch — what an expiry is counted in.
+///
+/// `nilo_core`'s clock, which is a read from a page the kernel keeps mapped
+/// and needs no event loop (ADR 0045). Read once per request that carries a
+/// session cookie, and not at all by one that does not.
+fn nowSeconds() i64 {
+    return @divFloor(core.nowMillis(), std.time.ms_per_s);
 }
 
 /// A buffer big enough for the cookie value of a `T`. Handed to `seal`.
@@ -476,8 +556,12 @@ pub fn Session(comptime T: type) type {
                     "`.session_secret = my_secret` — {d} bytes, the same on every instance.",
                 .{key_len},
             );
+            // One number fills both halves: the browser is asked to forget the
+            // cookie at `max_age`, and the seal stops opening at the same
+            // moment whether the browser obliged or not (ADR 0088).
+            const lives_for = options.max_age orelse default_max_age;
             var buf: Sealed(T) = undefined;
-            const text = try seal(T, value, key.*, &buf);
+            const text = try seal(T, value, nowSeconds() + lives_for, key.*, &buf);
             try c.setCookie(.{
                 .name = cookie_name,
                 .value = text,
@@ -518,8 +602,14 @@ pub fn Session(comptime T: type) type {
 pub const Options = struct {
     path: []const u8 = "/",
     domain: []const u8 = "",
-    /// Null is a session cookie — gone when the browser closes, which is what
-    /// a sign-in usually wants. Set it to keep somebody signed in.
+    /// How long the session lives, in seconds — **in the cookie and inside
+    /// the seal** (ADR 0088). Set it to keep somebody signed in past the
+    /// browser closing.
+    ///
+    /// Null is a session cookie: the browser is asked to forget it at the end
+    /// of the window, and the seal stops opening after `default_max_age`. Null
+    /// does not mean "forever" and never safely could — `Max-Age` is advice a
+    /// copy of the cookie does not take.
     max_age: ?i64 = null,
     secure: bool = true,
     same_site: cookie_mod.SameSite = .lax,
@@ -537,6 +627,11 @@ const testing = std.testing;
 const key_a: Key = @splat(0xA5);
 const key_b: Key = @splat(0x5A);
 
+/// An expiry far enough out that a test about something else never trips over
+/// it: 2100-01-01. The tests that are about the expiry name their own times
+/// (`openAt`), which is the point of that function existing.
+const far_future: i64 = 4_102_444_800;
+
 const Signed = struct {
     user: u32,
     admin: bool = false,
@@ -544,16 +639,83 @@ const Signed = struct {
 
 test "what is sealed comes back" {
     var buf: Sealed(Signed) = undefined;
-    const text = try seal(Signed, .{ .user = 7, .admin = true }, key_a, &buf);
+    const text = try seal(Signed, .{ .user = 7, .admin = true }, far_future, key_a, &buf);
 
     const back = open(Signed, text, key_a).?;
     try testing.expectEqual(@as(u32, 7), back.user);
     try testing.expect(back.admin);
 }
 
+test "a session stops opening the moment its expiry passes" {
+    const signed_at: i64 = 1_800_000_000;
+    const good_for: i64 = 60 * 60;
+
+    var buf: Sealed(Signed) = undefined;
+    const text = try seal(Signed, .{ .user = 7 }, signed_at + good_for, key_a, &buf);
+
+    // The whole hour it was given, right up to the last second of it.
+    try testing.expectEqual(@as(u32, 7), openAt(Signed, text, key_a, signed_at).?.user);
+    try testing.expectEqual(
+        @as(u32, 7),
+        openAt(Signed, text, key_a, signed_at + good_for - 1).?.user,
+    );
+
+    // And nothing after it. **This is the arm that could not be reached
+    // before**: an expiry only a wall clock could pass is a guard that would
+    // never be seen to fail (ADR 0033).
+    try testing.expect(openAt(Signed, text, key_a, signed_at + good_for) == null);
+    try testing.expect(openAt(Signed, text, key_a, signed_at + good_for + 1) == null);
+    try testing.expect(openAt(Signed, text, key_a, signed_at + 10 * good_for) == null);
+}
+
+test "an expiry is inside the seal, so editing the cookie cannot move it" {
+    const now: i64 = 1_800_000_000;
+    var buf: Sealed(Signed) = undefined;
+    const text = try seal(Signed, .{ .user = 7 }, now - 1, key_a, &buf);
+
+    // Expired. Every single-byte edit of the cookie is either the same
+    // expired session or nothing at all — never a live one, because the
+    // expiry is covered by the tag rather than sitting beside it.
+    try testing.expect(openAt(Signed, text, key_a, now) == null);
+    for (0..text.len) |i| {
+        var tampered: Sealed(Signed) = undefined;
+        @memcpy(&tampered, text);
+        tampered[i] = if (tampered[i] == 'A') 'B' else 'A';
+        try testing.expect(openAt(Signed, &tampered, key_a, now) == null);
+    }
+}
+
+test "a cookie written before the expiry existed is ignored, not misread" {
+    // Version 1's plaintext was `[version][fingerprint][fields]` with no
+    // expiry, so it is eight bytes shorter. A cookie in somebody's browser
+    // across the upgrade has to come back as "no session" rather than as a
+    // session whose first eight field bytes are read as a date.
+    const v1_plain_size = 1 + 4 + @sizeOf(u32) + 1;
+    try testing.expectEqual(v1_plain_size + 8, plainSize(Signed));
+
+    var raw: [v1_plain_size + overhead]u8 = undefined;
+    var plain: [v1_plain_size]u8 = undefined;
+    plain[0] = 1;
+    std.mem.writeInt(u32, plain[1..5], comptime fingerprint(Signed), .little);
+    _ = encode(Signed, .{ .user = 7 }, plain[5..]);
+
+    const nonce = raw[0..Cipher.nonce_length];
+    @memset(nonce, 0);
+    const body = raw[Cipher.nonce_length..][0..plain.len];
+    const tag = raw[Cipher.nonce_length + plain.len ..][0..Cipher.tag_length];
+    Cipher.encrypt(body, tag, &plain, "", nonce.*, key_a);
+
+    var text: [std.base64.standard.Encoder.calcSize(raw.len)]u8 = undefined;
+    const encoded = std.base64.standard.Encoder.encode(&text, &raw);
+
+    // Refused on its length before the cipher is even asked, which is why the
+    // forged tag above does not matter.
+    try testing.expect(open(Signed, encoded, key_a) == null);
+}
+
 test "the cookie value is something a cookie may hold" {
     var buf: Sealed(Signed) = undefined;
-    const text = try seal(Signed, .{ .user = 1 }, key_a, &buf);
+    const text = try seal(Signed, .{ .user = 1 }, far_future, key_a, &buf);
 
     // Base64's alphabet is inside RFC 6265's `cookie-octet`, but that is the
     // sort of thing that is true until somebody changes the encoding.
@@ -562,13 +724,13 @@ test "the cookie value is something a cookie may hold" {
 
 test "a different secret does not open it" {
     var buf: Sealed(Signed) = undefined;
-    const text = try seal(Signed, .{ .user = 7 }, key_a, &buf);
+    const text = try seal(Signed, .{ .user = 7 }, far_future, key_a, &buf);
     try testing.expect(open(Signed, text, key_b) == null);
 }
 
 test "a changed byte does not open it" {
     var buf: Sealed(Signed) = undefined;
-    const text = try seal(Signed, .{ .user = 7 }, key_a, &buf);
+    const text = try seal(Signed, .{ .user = 7 }, far_future, key_a, &buf);
 
     // Every position, not a chosen one: this is the property the tag exists
     // for, and testing one byte would pass with half a cipher.
@@ -599,7 +761,7 @@ test "a session written to a different shape is ignored rather than misread" {
     const After = struct { user: u32, tenant: u32 };
 
     var buf: Sealed(Before) = undefined;
-    const text = try seal(Before, .{ .user = 7 }, key_a, &buf);
+    const text = try seal(Before, .{ .user = 7 }, far_future, key_a, &buf);
 
     try testing.expect(open(After, text, key_a) == null);
     // And the same shape by another name still reads, because the name is
@@ -615,7 +777,7 @@ test "reordering two fields of the same type is a different shape" {
     const Other = struct { tenant: u32, user: u32 };
 
     var buf: Sealed(One) = undefined;
-    const text = try seal(One, .{ .user = 7, .tenant = 9 }, key_a, &buf);
+    const text = try seal(One, .{ .user = 7, .tenant = 9 }, far_future, key_a, &buf);
     try testing.expect(open(Other, text, key_a) == null);
 }
 
@@ -646,7 +808,7 @@ test "every kind of field a session may hold survives the round trip" {
     };
 
     var buf: Sealed(Everything) = undefined;
-    const back = open(Everything, try seal(Everything, sent, key_a, &buf), key_a).?;
+    const back = open(Everything, try seal(Everything, sent, far_future, key_a, &buf), key_a).?;
 
     try testing.expectEqual(sent.n8, back.n8);
     try testing.expectEqual(sent.n64, back.n64);
@@ -667,19 +829,24 @@ test "an absent optional carries no information about what was there" {
     const Holder = struct { maybe: ?u64 };
     var a: Sealed(Holder) = undefined;
     var b: Sealed(Holder) = undefined;
-    const with = try seal(Holder, .{ .maybe = 12345 }, key_a, &a);
-    const without = try seal(Holder, .{ .maybe = null }, key_a, &b);
+    const with = try seal(Holder, .{ .maybe = 12345 }, far_future, key_a, &a);
+    const without = try seal(Holder, .{ .maybe = null }, far_future, key_a, &b);
     try testing.expectEqual(with.len, without.len);
 }
 
 test "the size is worked out at compile time and matches what is written" {
     var buf: Sealed(Signed) = undefined;
-    const text = try seal(Signed, .{ .user = 1 }, key_a, &buf);
+    const text = try seal(Signed, .{ .user = 1 }, far_future, key_a, &buf);
     try testing.expectEqual(cookieSize(Signed), text.len);
 
-    // 1 version + 4 shape + 4 user + 1 admin
-    try testing.expectEqual(@as(usize, 10), plainSize(Signed));
+    // 1 version + 4 shape + 8 expiry + 4 user + 1 admin
+    try testing.expectEqual(@as(usize, 18), plainSize(Signed));
     try testing.expectEqual(@as(usize, 5), sizeOf(Signed));
+    // The header the fields sit behind, spelled out here as well so that
+    // moving one of the three without the other is a failing test rather than
+    // a cookie format that reads its own expiry out of a user id.
+    try testing.expectEqual(@as(usize, 13), header_size);
+    try testing.expectEqual(plainSize(Signed), header_size + sizeOf(Signed));
 }
 
 test "a secret has to be the cipher's key length" {
@@ -692,8 +859,8 @@ test "a secret has to be the cipher's key length" {
 test "two seals of the same value differ, because the nonce does" {
     var a: Sealed(Signed) = undefined;
     var b: Sealed(Signed) = undefined;
-    const first = try seal(Signed, .{ .user = 7 }, key_a, &a);
-    const second = try seal(Signed, .{ .user = 7 }, key_a, &b);
+    const first = try seal(Signed, .{ .user = 7 }, far_future, key_a, &a);
+    const second = try seal(Signed, .{ .user = 7 }, far_future, key_a, &b);
     try testing.expect(!std.mem.eql(u8, first, second));
     // And both still open.
     try testing.expectEqual(@as(u32, 7), open(Signed, first, key_a).?.user);
@@ -798,7 +965,7 @@ test "a cookie sealed under another secret is no session rather than an error" {
     try app.get("/who", whoHandler);
 
     var buf: Sealed(Signed2) = undefined;
-    const forged = try seal(Signed2, .{ .user = 1, .admin = true }, key_b, &buf);
+    const forged = try seal(Signed2, .{ .user = 1, .admin = true }, far_future, key_b, &buf);
 
     var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
@@ -896,7 +1063,7 @@ test "the session is not readable by whoever is holding it" {
     // client can see that it has a session and not what is in it.
     const Secretive = struct { user: u32, salary: u64 };
     var buf: Sealed(Secretive) = undefined;
-    const text = try seal(Secretive, .{ .user = 7, .salary = 123456789 }, key_a, &buf);
+    const text = try seal(Secretive, .{ .user = 7, .salary = 123456789 }, far_future, key_a, &buf);
 
     var plain: [8]u8 = undefined;
     std.mem.writeInt(u64, &plain, 123456789, .little);

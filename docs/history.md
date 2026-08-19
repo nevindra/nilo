@@ -858,3 +858,111 @@ with the other twenty-two.
 
 **A machine you have not run on is a set of constants you have not tested.**
 The page size was the one that bit here; it will not be the last.
+
+## The right decision, taken twice, in two places too narrow to help
+
+Response header values were never checked for a newline, so a handler could
+split its own response ([ADR 0087](./adr/0087-a-header-value-cannot-end-its-own-line.md)).
+The interesting part is not that the check was missing. It is that **nilo had
+already made this exact decision twice, correctly, and both times scoped it to
+the caller in front of it.**
+
+`cookie.check` refuses a `;` in a cookie value, and says why in its comment:
+*"That is response splitting with extra steps, and it is refused here rather
+than escaped."* `Ctx.requestId` refuses a forged `X-Request-Id`, and says why in
+its comment: *"a newline forges a line of its own, and in a response header it
+splits the response."* Two comments, in two files, naming the attack — with
+`putHeader` sitting under both of them checking only whether the name was one of
+the framework's own.
+
+So the reviewer's question is not "is this input validated?" — twice, the answer
+was visibly yes. It is **"is it validated where every caller goes through, or
+where this caller does?"** `Set-Cookie` is the proof that the distinction was
+load-bearing rather than tidy: `c.setCookie` validates, and a `Set-Cookie`
+written through a `Response`'s `.headers` — which is the documented way a
+sign-in answers — reached the wire without ever meeting `cookie.check`. The hole
+was in the feature that had the check.
+
+The fix is one choke point, which is `aboutToRead`'s shape from
+[ADR 0004](./adr/0004-str-is-request-scoped-with-a-debug-lifetime-check.md): the
+place every path already goes through is where a rule survives the next caller
+being added. There were five, and the one that would have forgotten —
+`Response.headers` — arrived a year after `setHeader`.
+
+**Four binary measurements to establish it cost nothing** — 0 bytes on `hello`,
+`rest`, `orders` and `forms`, with the checksums differing to prove the build
+happened. A refusal on a path nothing hot reaches is the cheapest kind of
+correctness there is, and the reason to measure was to be able to say so.
+
+## Two sentences on one page, describing different behaviour
+
+A session carried no expiry: the seal held a version, a shape fingerprint and
+the fields, and nothing about time ([ADR 0088](./adr/0088-an-expiry-a-client-can-ignore-is-not-one.md)).
+What bounded a session was `Max-Age` on the cookie, which a browser obeys and a
+copy of the cookie does not.
+
+**The documentation had already caught it and nobody read the two halves
+together.** `docs/guide/sessions.md` offers `.max_age = 30 * 24 * 60 * 60` under
+*Staying signed in*, and three paragraphs later, under *What it cannot do*, says
+*"a cookie somebody copied still opens"*. Put side by side those describe
+different systems: one where the copy dies in thirty days and one where it never
+does. Both sentences were written deliberately, both were accurate about the
+half they were describing, and the contradiction sat between them.
+
+That is a different failure from the four this file already records. Those were
+premises nobody re-tested — a number, a manifest, a blocker. **This one was two
+statements that were each true and could not both be.** No amount of
+re-measuring finds it, because there is nothing to measure; it is found by
+reading one page end to end and asking whether it agrees with itself.
+
+The fix needed no store and no sweep, which is the part worth remembering: the
+reason it had not been done was never cost. `expires_at` is eight bytes inside a
+plaintext that was already fixed-size, and the expiry a server writes is a
+number the server already has. What it needed was noticing.
+
+**And the check needed `openAt` before it needed the check.** An expiry only a
+wall clock can pass is a guard that will only ever be seen to pass, which is
+[ADR 0033](./adr/0033-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md)
+exactly. Splitting the pure half out — `openAt(T, text, key, now)`, with `open`
+reading the clock and calling it — turns "wait a day" into three lines naming
+three numbers, and is the same shape `modeFrom` has in `app.zig` for the same
+reason. Where a guard is *hard to reach*, reaching it is the design problem, not
+an afterthought.
+
+## A rule written from inside one function
+
+`Ctx.setHeader` replaced, and `http1.repeats` listed the exceptions. There was
+one, `Set-Cookie`, and the comment arguing for it named `Vary` in passing as an
+obvious case where replacing is right: *"which is right for `Vary` or a cache
+directive, where a second call is somebody changing their mind"*.
+
+**The counter-example was already in the repository, two files away**
+([ADR 0089](./adr/0089-two-layers-can-each-name-a-vary-axis.md)). `cors.zig` sets
+`Vary: Origin`; `app.zig` sets `Vary: Accept-Encoding` on a gzipped file. Both
+have a comment explaining that a shared cache goes wrong without theirs.
+Middleware runs before the handler, always, so CORS's was written and then
+overwritten on every such response.
+
+The lesson is about where the sentence was written from. *"A second call is
+somebody changing their mind"* is true — of one author, in one function, calling
+`setHeader` twice. It is false of a stack, where two layers that have never
+heard of each other each state something independently true about the same
+response. **A rule about an API is a rule about all of its callers, and the
+callers to check are the ones in other files.**
+
+Two things about the fix are worth more than the fix.
+
+**The cheap correct answer was the one that fit the budget.** Joining the values
+with a comma is tidier on the wire and needs a third string; two header lines
+mean the same thing to every cache (`Vary` is a list field, unlike `Set-Cookie`)
+and cost two entries in a list that already existed. The RFC distinction — which
+field may be folded and which may not — is what made the free option available.
+
+**Raising `inline_headers` was found by a test, not by arithmetic.** The fixed
+shape sets seven headers and six were held on the `Ctx`, so the first version of
+this change quietly added an arena allocation to the exact path it was fixing.
+The budget test was written before the constant moved and failed with `expected
+0, found 1`. Writing the measurement first is what turned a plausible change
+into a checked one — and the other half of the same cost, memory per idle
+connection, could not be measured on the machine at hand and went to the roadmap
+as a number owed rather than into the ADR as a claim.
