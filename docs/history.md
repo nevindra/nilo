@@ -782,3 +782,79 @@ feature is two declarations rather than one. The alternative was a JSON parser
 in this repository, with the unicode escapes and number edges that come with
 one. Same trade the header of `json.zig` already made for floats, arriving on
 the other side of the same file.
+
+## A family that was named, priced and never given a door
+
+[ADR 0029](./adr/0029-a-spawned-fiber-belongs-to-the-server.md) is careful
+work. It measured the fiber it was about to ship, priced the one it refused at
+8,673 bytes a connection, chased a zio crash to a standalone reproduction, and
+opened by naming what `spawn` was *for*: "a metrics exporter that batches
+before it sends, a job that runs every minute". Then it shipped the fiber and
+no way to start one.
+
+`listen()` does not return. `nilo.spawn` needs a running server and answers
+`error.NoServer` otherwise, correctly. Between those two sentences there is no
+line of a program where a ticker can be started, and nothing noticed for a
+year: no example spawned anything, and the two mentions in the whole
+repository were a table row and a five-line snippet in the reference, neither
+of which is executed. **The feature was reachable only from inside a request
+handler**, which is the one place nobody wanted it.
+
+What makes it worth writing down is the second half, because the obvious fix
+was four lines and was wrong. `serve` set the fiber group *after* it called
+the startup hook, so moving one line up lets a Service start its own work from
+`nilo_start` — and every example in this repository would have proved it. The
+case it misses is the one the guide publishes:
+[ADR 0079](./adr/0079-there-is-a-phase-before-the-server.md)'s
+`app.start(io)` → `migrate` → `listen()`, where the services are finished in a
+phase with **no server in it at all** — the `Io` belongs to the caller — and
+`startServices` is idempotent, so `listen()` never asks again. A ticker started
+from `nilo_start` under that order gets `error.NoServer` and is never retried.
+
+So the seam was wrong rather than the ordering: `nilo_start` is the phase after
+the pool and before the socket, and this work needs the phase after the socket.
+[ADR 0086](./adr/0086-work-that-is-not-a-request-belongs-to-the-server.md)
+registers it on the App instead, where neither order can skip it.
+
+Two habits caught it and both are already written down here. **A conclusion of
+"blocked on somebody else" gets one more hour than it feels like it needs** —
+this was the same shape one layer over: a feature recorded as *shipped*, whose
+only evidence was a table row. And a check that has only ever been seen to pass
+([ADR 0033](./adr/0033-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md))
+has a sibling: **a feature that has only ever been seen to compile.** The fix
+here is the same one — `http/live.zig` is the framework suite's first test to
+stand a real server up, because a registration nothing has been seen to *run*
+is not evidence that anything runs.
+
+## Two tests that could not fail, on a machine nobody had run them on
+
+Adding `app.spawn` meant running the suite on Apple silicon, and two tests that
+had passed everywhere else came apart. Neither was about the change.
+
+**16 KiB pages.** `http/scratch.zig` asked for a 4096-byte buffer and an
+8192-byte one and asserted the free list emptied between them, because the
+sizes differ. `take` rounds up to `std.heap.page_size_min`, which is 4 KiB on
+x86-64 Linux and **16 KiB here** — so both requests were one page, the list was
+never asked to hold two sizes, and the test had been asserting nothing for as
+long as it existed. It is written in pages now, which is what the test one line
+below it had always done.
+
+**A wait with no bound, in the file `CLAUDE.md` already names.** `fetch/deadline.zig`
+scans 39,500–39,699 for a port and gives up by returning — without setting the
+flag the test then waits on, forever. Six copies of that binary at once was
+enough: 10 minutes of wall against 6 seconds of CPU, which is the exact reading
+`CLAUDE.md` says to take before believing a suite is slow, in the exact file it
+says held a deadlock for a fortnight. **The second one was found by the
+procedure written down after the first.**
+
+Both are the same shape and it is [ADR 0033](./adr/0033-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md)'s
+with a wider brim: a check that cannot fail and a check that has only been seen
+to pass look identical — and so does one that hangs instead of failing, because
+a suite that never finishes reports nothing at all. The fix was to make the
+failure reachable and then reach it: with all 200 ports held, the old binary
+runs until it is killed and the new one prints
+`FAIL (NoFreePortForTheQuietEndpoint)` in a tenth of a second and carries on
+with the other twenty-two.
+
+**A machine you have not run on is a set of constants you have not tested.**
+The page size was the one that bit here; it will not be the last.

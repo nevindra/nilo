@@ -53,6 +53,7 @@ pub const panic = nilo.panic;                     // optional: name the request 
 | `App.init(gpa)` | a new App. The allocator is for the App's furniture, not for requests |
 | `app.deinit()` | |
 | `app.provide(&thing)` | register a service, looked up later by its pointer type |
+| `app.spawn(f, args)` | work that is not a request, started once the server is up ([ADR 0086](./adr/0086-work-that-is-not-a-request-belongs-to-the-server.md)) |
 | `app.use(mw)` | middleware, everywhere |
 | `app.useOn(prefix, mw)` | middleware, under a path prefix |
 | `app.without(mw)` | the same App with `mw` off for the routes registered through what comes back — how a sign-up route sits inside a guarded prefix ([ADR 0080](./adr/0080-a-route-can-say-it-is-not-covered.md)) |
@@ -63,7 +64,7 @@ pub const panic = nilo.panic;                     // optional: name the request 
 | `app.staticWith(url_prefix, dir_path, options)` | the same, with [options](#static-options) |
 | `app.docs(options)` | serve an [OpenAPI document](./guide/openapi.md) |
 | `app.listen(options)` | run until stopped. Stops the process on a startup error |
-| `app.start(io)` | everything `listen()` does before it accepts anything — services checked, chains resolved, pools opened, schemas checked. For a migration, a script or a test; `listen()` does not repeat it ([ADR 0079](./adr/0079-there-is-a-phase-before-the-server.md)) |
+| `app.start(io)` | everything `listen()` does before it accepts anything — services checked, chains resolved, pools opened, schemas checked. For a migration, a script or a test; `listen()` does not repeat it ([ADR 0079](./adr/0079-there-is-a-phase-before-the-server.md)). What it does *not* start is `spawn`, which needs a server |
 | `app.shutdown()` | stop, from any thread or from inside a handler |
 | `app.tryListen / tryRoute / tryStatic / tryStaticWith` | the same calls, error returned rather than reported |
 | `app.checkServices()` | `error.MissingService` if a route needs one nobody provided |
@@ -1047,7 +1048,8 @@ failure, whatever the endpoint returns when it works.
 | `nilo.blocking(f, args)` | run a blocking call off the event loop |
 | `nilo.Gate` | `.open(n)`, then `try enter()`, `leave()` — a lock that lets `n` through |
 | `nilo.sleep(ms)` | wait without parking the thread |
-| `nilo.spawn(f, args)` | run something that is not a request |
+| `nilo.spawn(f, args)` | run something that is not a request, now — `error.NoServer` if nothing is listening |
+| `app.spawn(f, args)` | the same fiber, registered before the server and started once it is up ([the guide](./guide/background.md)) |
 | `nilo.randomSecure(&buf)` | fill a buffer you already hold, off the event loop |
 | `nilo.monotonicNanos()` | a clock reading, for durations |
 
@@ -1096,6 +1098,21 @@ into a response. Copy what you borrow, and log instead of failing.
 ```zig
 try nilo.spawn(flushMetrics, .{&exporter});
 ```
+
+**From `main` there is no such moment**, because `listen()` does not return.
+`app.spawn` registers the same work before the server and starts it once there
+is one — after the port is taken, before the first connection is accepted, and
+whichever of ADR 0079's two startup orders the program used
+([ADR 0086](./adr/0086-work-that-is-not-a-request-belongs-to-the-server.md),
+[the guide](./guide/background.md)):
+
+```zig
+try app.spawn(flushEvery, .{&exporter});
+try app.listen(.{});
+```
+
+The work is a loop around a wait that can say stop: `nilo.sleep` fails with
+`error.Canceled` when the grace period ends, and that is the only way out.
 
 Sending to a WebSocket somebody else's connection is holding does not need
 this — see [`Room`](#room). It needs no fiber of its own, which is the whole

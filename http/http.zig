@@ -623,4 +623,7 @@ test {
     _ = @import("logger.zig");
     _ = @import("cors.zig");
     _ = @import("app.zig");
+    // Last, and the only one here that stands a real server up. Nothing else
+    // in this suite opens a socket at all (ADR 0086).
+    _ = @import("live.zig");
 }

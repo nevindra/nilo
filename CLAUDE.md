@@ -118,7 +118,7 @@ zig build refusals-config  # nilo_config's 9, and refusals-pw for nilo_pw's 3
 zig build refusals-s3  # nilo_s3's 10; also run by test-s3
 zig build snippets     # the documentation's own marked snippets, which must compile
 zig build smoke-tls -Dnetwork   # a real HTTPS endpoint — NOT part of test
-zig build examples     # build all eight examples
+zig build examples     # build all nine examples
 zig build fuzz -- --iterations 1000000 --seed 0x…   # generated requests at the parser
 zig build bench-sql    # what a prepared statement is worth: SQLite always, Postgres if reachable
 zig build bench-sql-server  # a server reading Postgres per request, for wrk/oha
@@ -131,7 +131,7 @@ python3 bench/s3_setup.py                # the bucket and objects both of the ab
 python3 bench/compare-s3/drive.py        # nilo_s3 against Go, Rust and Bun — needs MinIO
 zig build run          # the benchmark server (bench/main.zig): GET /users/:id, ~1 KB JSON
 zig build profile      # where the time inside one request goes
-zig build run-{hello,rest,orders,forms,spa,stream,chat,outbound}  # run one example
+zig build run-{hello,rest,orders,forms,spa,stream,chat,scheduled,outbound}  # run one example
 ./bench/bench.sh       # wrk/oha against an already-running ReleaseFast server
 ```
 
@@ -152,10 +152,15 @@ step; without those, the `failed command:` lines are noise.
 **And take a stuck build's CPU time before believing it is slow.** Because the
 refusals are a documented slow path, "the suite takes a while" is always an
 available explanation and it is the perfect hiding place for a deadlock —
-`fetch/live.zig` held one for a fortnight. `ps -o etime,cputime -C zig` settles
-it in one command: seven minutes of wall against two seconds of CPU is not a
-slow build, and the tests worth suspecting first are the ones that open a real
-socket at both ends (`test-fetch`, `test-s3`).
+`fetch/live.zig` held one for a fortnight, and `fetch/deadline.zig` held a
+second one found by this very procedure — a port scan that gave up by
+returning, leaving the test waiting on a flag nothing would ever set.
+`ps -o etime,cputime -C zig` settles it in one command: seven minutes of wall
+against two seconds of CPU is not a slow build, and the tests worth suspecting
+first are the ones that open a real socket at both ends — `test-fetch`,
+`test-s3`, and now `test` itself, since `http/live.zig` stands a server up.
+**A wait on a flag needs a bound and the giving-up path needs to set
+something**, or the failure arrives as a suite that never finishes.
 
 ### Running one test
 

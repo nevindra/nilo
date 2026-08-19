@@ -568,6 +568,22 @@ that has to hold its place across reads.
 `c.bodyStream()`, which holds nothing and makes the framing the handler's
 problem.
 
+**A schedule, rather than a loop around a sleep.** `app.spawn` starts work that
+is not a request and `nilo.sleep` paces it
+([ADR 0086](./adr/0086-work-that-is-not-a-request-belongs-to-the-server.md)),
+which covers "every so often" and nothing else. Wall-clock times, "at 03:00 on
+Sundays", and what happens when one run overruns the next are all arithmetic
+the caller writes today.
+
+Each of those is a policy with no answer that is right for everybody: whether a
+missed run is dropped or caught up, whether two may overlap, whether the first
+is at zero or at the interval. A type that made the caller state them would be
+a schedule worth having; an `every(ms, f)` that picked them quietly would not,
+which is why ADR 0086 refused that shape rather than deferring it.
+
+**What would settle it: somebody who has written the loop twice** and can say
+which of those policies they had to pick, and what they picked.
+
 ---
 
 ## `nilo_sql`: Postgres and SQLite

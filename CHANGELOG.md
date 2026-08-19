@@ -7,6 +7,45 @@ What was measured and what was got wrong on the way is in
 
 ## Unreleased
 
+### Work that is not a request has somewhere to start
+
+`nilo.spawn` has been the way to run something that is not a request since
+[ADR 0029](./docs/adr/0029-a-spawned-fiber-belongs-to-the-server.md), and there
+was nowhere to call it from: `listen()` does not return, so the only reachable
+place was inside a handler. `app.spawn` registers the same fiber before the
+server and starts it once there is one
+([ADR 0086](./docs/adr/0086-work-that-is-not-a-request-belongs-to-the-server.md)):
+
+```zig
+try app.provide(&exporter);
+try app.spawn(flushEvery, .{&exporter});
+try app.listen(.{ .port = 8080 });
+```
+
+```zig
+fn flushEvery(exporter: *Exporter) void {
+    while (true) {
+        nilo.sleep(60_000) catch return;   // Canceled — the server is going
+        exporter.flush() catch |err| std.log.err("flush: {t}", .{err});
+    }
+}
+```
+
+It is owned by the server exactly as a connection is: counted while it runs,
+cut off when the shutdown grace period ends. Nothing to change in an existing
+program — `nilo.spawn` is unchanged and stays the right call from inside a
+handler.
+
+Registered on the App rather than declared on a Service on purpose. A Service's
+`nilo_start` runs in the phase after the pool and before the socket, and a
+program that migrates before it serves runs that phase with no server in it at
+all ([ADR 0079](./docs/adr/0079-there-is-a-phase-before-the-server.md)) — so
+work spawned there would answer `error.NoServer` and never be asked again.
+`app.spawn` does not care which of the two orders you used.
+
+New: [Work that is not a request](./docs/guide/background.md) in the guide, and
+`zig build run-scheduled`.
+
 ### A type can say how its JSON is spelled
 
 `std.json` writes a union one way — `{"metrics":{…}}`, one object with one key.

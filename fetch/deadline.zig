@@ -62,6 +62,16 @@ const testing = std.testing;
 const Quiet = struct {
     port: u16 = 0,
     ready: std.atomic.Value(bool) = .init(false),
+    /// Set instead of `ready` when the scan below found no free port.
+    ///
+    /// **Without this the test hung rather than failed.** The scan gave up by
+    /// returning, `ready` stayed false, and the loop waiting on it had no
+    /// bound — so a run that could not get a port sat there for as long as
+    /// anybody let it, burning no CPU, which is the shape `CLAUDE.md` warns
+    /// is the perfect hiding place for a deadlock. Reproduced by running this
+    /// binary six times at once: 200 ports is not many when the range is
+    /// shared with every other copy and with everything in TIME_WAIT.
+    no_port: std.atomic.Value(bool) = .init(false),
     done: std.atomic.Value(bool) = .init(false),
 
     fn run(self: *Quiet) void {
@@ -73,7 +83,10 @@ const Quiet = struct {
         var server: std.Io.net.Server = while (candidate < 39_700) : (candidate += 1) {
             const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(candidate) };
             break address.listen(io, .{}) catch continue;
-        } else return;
+        } else {
+            self.no_port.store(true, .release);
+            return;
+        };
         defer server.socket.close(io);
 
         self.port = candidate;
@@ -140,12 +153,17 @@ test "an endpoint that never answers is given up on, and says which clock did it
         quiet_thread.join();
     }
 
-    // The listener has to be up before a URL can name it.
+    // The listener has to be up before a URL can name it — and the wait is
+    // bounded, because the two ways it can never come up are both real: no
+    // free port in the range, and a thread that has not been scheduled yet.
+    // Five seconds of 1ms sleeps, then a failure that says which.
     var waiting: std.Io.Threaded = .init(gpa, .{});
     defer waiting.deinit();
-    while (!quiet.ready.load(.acquire)) {
+    for (0..5_000) |_| {
+        if (quiet.ready.load(.acquire)) break;
+        if (quiet.no_port.load(.acquire)) return error.NoFreePortForTheQuietEndpoint;
         try std.Io.sleep(waiting.io(), .fromMilliseconds(1), .awake);
-    }
+    } else return error.QuietEndpointNeverCameUp;
 
     var url_buf: [64]u8 = undefined;
     quiet_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/", .{quiet.port});

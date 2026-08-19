@@ -111,6 +111,7 @@ const examples = [_]Example{
     .{ .name = "spa", .about = "A single-page app's files plus a JSON API" },
     .{ .name = "stream", .about = "A streamed report and a stream of events" },
     .{ .name = "chat", .about = "A WebSocket, from the handshake to the last frame" },
+    .{ .name = "scheduled", .about = "Work that is not a request, and a shutdown that reaches it" },
     .{
         .name = "outbound",
         .about = "Calling somebody else's API from inside a request",

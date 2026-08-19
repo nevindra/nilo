@@ -73,13 +73,16 @@ const nilo = @import("nilo_http");
     a Scope rather than a `Ctx`, so the same query runs with no server in the
     process. Postgres and SQLite, written the same way — and the section on
     SQLite says which five things it refuses and why.
+17. [Work that is not a request](./background.md) — a summary written every
+    minute or a queue drained every few seconds: a fiber of your own, owned by
+    the server, and the shutdown that reaches it.
 
 ## Shipping it
 
-17. [Testing](./testing.md) — handlers as ordinary functions, and the test
+18. [Testing](./testing.md) — handlers as ordinary functions, and the test
     client for the ones that write their answer.
-18. [OpenAPI](./openapi.md) — an API document written from the signatures.
-19. [Deploying](./deploying.md) — startup errors, panics, graceful shutdown,
+19. [OpenAPI](./openapi.md) — an API document written from the signatures.
+20. [Deploying](./deploying.md) — startup errors, panics, graceful shutdown,
     tuning, and what isn't here yet.
 
 ## Also

@@ -137,6 +137,27 @@ pub const App = struct {
     /// does both, so this is what stops a pool being opened twice
     /// (ADR 0079).
     services_started: bool = false,
+    /// Work that is not a request, registered before the server exists and
+    /// started once it does (ADR 0086). Empty for almost every App.
+    background: std.ArrayList(Background) = .empty,
+    /// Whether the list above has been started. Separate from
+    /// `services_started` on purpose: that one is skipped when `start()` ran
+    /// first, and skipping this one would mean a program that migrates
+    /// before it serves silently runs nothing in the background.
+    background_started: bool = false,
+
+    /// One registration from `spawn`, with the function and its arguments
+    /// erased so the App can hold a list of them.
+    ///
+    /// The arguments are kept in an allocation of the App's rather than in
+    /// the list, because their type differs per entry and the list holds one
+    /// kind of thing. It is startup memory — one allocation per registered
+    /// function, none per connection and none per request.
+    const Background = struct {
+        args: *anyopaque,
+        start: *const fn (args: *anyopaque) anyerror!void,
+        free: *const fn (gpa: std.mem.Allocator, args: *anyopaque) void,
+    };
 
     /// Where this is mounted, which for an App is nowhere — the empty prefix.
     ///
@@ -158,6 +179,8 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        for (self.background.items) |b| b.free(self.gpa, b.args);
+        self.background.deinit(self.gpa);
         self.freeChains();
         if (self.docs_set) |*set| set.deinit();
         self.operations.deinit(self.gpa);
@@ -318,6 +341,67 @@ pub const App = struct {
     /// happens before `listen()`.
     pub fn provide(self: *App, ptr: anytype) !void {
         try self.services.add(ptr);
+    }
+
+    /// Run `func` in a fiber of its own, once the server is up.
+    ///
+    /// The same fiber `nilo.spawn` starts, started for you at the one moment
+    /// it can be: `nilo.spawn` is "now" and needs a running server, this is
+    /// "when there is one" and is registered beside the routes (ADR 0086).
+    ///
+    /// ```zig
+    /// try app.provide(&exporter);
+    /// try app.spawn(flushEvery, .{&exporter});
+    /// try app.listen(.{ .port = 8080 });
+    /// ```
+    ///
+    /// It is owned by the server exactly as a connection is: counted while
+    /// it runs, and cut off when the shutdown grace period ends. So the
+    /// shape of one of these is a loop around a wait that says when to stop:
+    ///
+    /// ```zig
+    /// fn flushEvery(exporter: *Exporter) void {
+    ///     while (true) {
+    ///         nilo.sleep(60_000) catch return;   // Canceled — the server is going
+    ///         exporter.flush() catch |err| std.log.err("flush: {t}", .{err});
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// **Why this is not a `nilo_start`.** A Service's `nilo_start` runs in
+    /// the phase after the pool and before the socket (ADR 0079), and a
+    /// program that migrates before it serves runs that phase with no server
+    /// at all — `app.start(io)` takes an `Io` of the caller's own. So work
+    /// spawned there would answer `error.NoServer` in exactly the shape the
+    /// guide recommends, and never start. Registered here it does not care
+    /// which of the two orders the program used.
+    ///
+    /// `func` may not fail: there is no request to answer and nobody to
+    /// answer it, so an error has nowhere to go. Log instead. The two things
+    /// that must not travel in are the two `nilo.spawn` names — a `Str`,
+    /// which points into a request arena, and a fail function, which has no
+    /// request to fail.
+    pub fn spawn(self: *App, comptime func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void {
+        const Args = @TypeOf(args);
+        const held = try self.gpa.create(Args);
+        errdefer self.gpa.destroy(held);
+        held.* = args;
+
+        try self.background.append(self.gpa, .{
+            .args = @as(*anyopaque, @ptrCast(held)),
+            .start = &struct {
+                fn f(erased: *anyopaque) anyerror!void {
+                    const a: *Args = @ptrCast(@alignCast(erased));
+                    return bulkhead.spawn(func, a.*);
+                }
+            }.f,
+            .free = &struct {
+                fn f(gpa: std.mem.Allocator, erased: *anyopaque) void {
+                    const a: *Args = @ptrCast(@alignCast(erased));
+                    gpa.destroy(a);
+                }
+            }.f,
+        });
     }
 
     pub fn get(self: *App, comptime pattern: []const u8, comptime handler: anytype) !void {
@@ -644,7 +728,7 @@ pub const App = struct {
                 return error.SessionSecretWrongLength;
             };
         }
-        try bulkhead.serve(self.gpa, options_, &self.stop, self, startServices, handleConnection);
+        try bulkhead.serve(self.gpa, options_, &self.stop, self, serverStarting, handleConnection);
     }
 
     /// Everything `listen()` does **before it accepts anything**, for a
@@ -672,6 +756,12 @@ pub const App = struct {
     ///
     /// Idempotent: `listen()` calls the same code and skips it if this has
     /// already run, so the two orders above and below cost the same.
+    ///
+    /// **What this does not start is what `spawn` registered.** There is no
+    /// server here — the `Io` is the caller's own, and a fiber owned by a
+    /// server that does not exist has nothing to count it and nothing to cut
+    /// it off. `listen()` starts that, whichever of the two ran first
+    /// (ADR 0086).
     pub fn start(self: *App, io: std.Io) !void {
         try self.checkServices();
         try self.resolveChains();
@@ -694,6 +784,33 @@ pub const App = struct {
         if (self.services_started) return;
         self.services_started = true;
         try self.services.start(io, limits);
+    }
+
+    /// Everything that has to happen once, inside `listen()`, after the port
+    /// is taken and before anything is accepted. The hook the Engine is
+    /// handed (ADR 0040), which is two steps rather than one (ADR 0086).
+    ///
+    /// The order is the only one available: work registered by `spawn` may
+    /// use a service, so the services are finished first. And the two guards
+    /// are separate because they are skipped under different conditions —
+    /// `startServices` is skipped when `app.start(io)` already ran, and
+    /// skipping the background with it is exactly the bug this exists to
+    /// close.
+    fn serverStarting(self: *App, io: std.Io, limits: bulkhead.Limits) anyerror!void {
+        try self.startServices(io, limits);
+        try self.startBackground();
+    }
+
+    /// Start what `spawn` registered, into the group the Engine has by now.
+    ///
+    /// The first failure stops the rest, for the reason `Registry.start` has:
+    /// a server that could not start the work it was told to start should say
+    /// so at startup rather than serve requests while quietly doing none of
+    /// it.
+    fn startBackground(self: *App) !void {
+        if (self.background_started) return;
+        self.background_started = true;
+        for (self.background.items) |b| try b.start(b.args);
     }
 
     /// Say how many routes the document cannot describe, at the one moment
