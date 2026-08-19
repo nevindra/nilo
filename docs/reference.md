@@ -102,7 +102,7 @@ prefix that requires one. Its type is `nilo.GroupOf("/api", &.{mw})`.
 | `idle_timeout_ms` | `75_000` — a connection between requests |
 | `body_timeout_ms` | `30_000` — any one read of a body |
 | `write_timeout_ms` | `30_000` — any one write to the client |
-| `max_connections` | `10_000` — held at once, about 9 KB each. `0` = no limit |
+| `max_connections` | `10_000` — held at once, 4,669 bytes each when idle. `0` = no limit |
 | `max_body` | `1024 * 1024` — the most `c.body()` reads into the arena |
 | `trusted_hops` | `0` — how many proxies stand in front, for `c.clientIp()` |
 | `session_secret` | `null` — 32 bytes, for `Session(T)`. The same on every instance |

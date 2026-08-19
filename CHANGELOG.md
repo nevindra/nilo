@@ -172,6 +172,24 @@ is `std.json`'s call, and nothing can add a declaration to a type you wrote.
   itself is never quoted back in the message. Costs nothing on any of the four
   axes, binary size included — the ADR has the four measurements.
 
+- **"About 9 KB a connection" was still quoted in six places, and the number is
+  4,669.** ADR 0071 took an idle connection to 4,669 bytes and an idle WebSocket
+  to 5,183; `zio.zig`'s capacity warning, `docs/guide/deploying.md`,
+  `docs/guide/websocket.md`, `docs/reference.md` and `http/bulkhead.zig` were
+  not updated with it, and `deploying.md` also still carried an older ~21 KB
+  from two rounds before that. The log line an operator reads at the connection
+  limit now says `an idle connection costs 4,669 bytes, plus whatever stack the
+  handler touches` — the second half because 4,669 is a floor and not a total
+  ([ADR 0063](./docs/adr/0063-a-handlers-stack-is-per-connection.md)), which
+  none of the six said.
+
+  The premise underneath had gone stale too: `deploying.md` told you to turn
+  `read_buffer` and `write_buffer` down for a server holding many connections
+  open, and since ADR 0071 an idle connection gives both buffers back, so they
+  no longer affect what it holds. And `docs/guide/streaming.md`'s ~21 KB per
+  open stream is a v1 figure that predates both findings — it now says so
+  rather than quoting a number, and the measurement is on the roadmap.
+
 - **A request whose body was framed twice was read rather than refused.** Four
   ways a `Content-Length` could disagree with the reverse proxy in front of
   nilo, all now a `400`

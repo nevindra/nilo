@@ -17,7 +17,7 @@ One entry was worse than a deferral. "Router: path params, query params" sat in 
 
 p99 is counted so that winning on throughput while stalling the tail does not count. [ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md) turned that separation into the rule: throughput may slip 10% for DX, while allocations per request and memory per idle connection are hard invariants. Published figures are in [`bench/result/http.md`](../bench/result/http.md) and [`comparison.md`](./comparison.md).
 
-Two numbers never needed a quiet machine. **Allocations per request is 1** — the JSON body and nothing else; it was 6, then 3. **Memory per idle connection** was first recorded at ~21 KB, then 16,961 on the real machine, and is 8,767 flat since a keep-alive connection stopped holding every buffer page it had ever touched until close.
+Two numbers never needed a quiet machine. **Allocations per request is 1** — the JSON body and nothing else; it was 6, then 3. **Memory per idle connection** was first recorded at ~21 KB, then 16,961 on the real machine, then 8,767 flat once a keep-alive connection stopped holding every buffer page it had ever touched until close, and is **4,669** since the waiting moved to the shallowest frame a connection has ([ADR 0071](./adr/0071-where-a-connection-waits-is-what-it-costs.md)).
 
 ### Where the time inside a request goes
 

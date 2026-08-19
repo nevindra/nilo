@@ -63,10 +63,12 @@ try app.listen(.{
 `address` is an address to bind to, not a host name — nothing is resolved, so
 which interface you land on is never a lookup's decision.
 
-The two buffers are most of what an idle connection costs, so turn them down for
-a server holding a lot of connections open and up for one sending large
-responses. Measured on a 2-core Linux box across 1,000 held-open connections:
-**~21 KB per idle connection** with the defaults, **~17 KB** at 2 KB each.
+The two buffers are what a connection costs **while it is being served**, not
+while it waits: a connection that has gone quiet gives both of them back, along
+with its stack pages, and waits at the shallowest frame it ever has
+([ADR 0071](../adr/0071-where-a-connection-waits-is-what-it-costs.md)). So size
+them for the responses you send rather than for the connections you hold —
+**an idle connection is 4,669 bytes whatever these two say.**
 
 `threads = 1` makes handlers stop running at the same time, which removes the
 reason for `nilo.Mutex` — and also removes the reason to have a machine with
@@ -93,7 +95,7 @@ in a 408. An idle keep-alive connection that has asked for nothing is closed
 without a status — there is nothing to answer.
 
 `idle_timeout_ms` is the knob whose real units are memory: an idle connection
-costs about 21 KB, so a server with many visitors and few of them active wants
+costs 4,669 bytes, so a server with many visitors and few of them active wants
 this lower than the default.
 
 A WebSocket has no read limit once the handshake is done — a chat tab with
@@ -104,8 +106,15 @@ server finds out the client is gone.
 
 `max_connections` is the most this process holds at one time. Ten thousand by
 default, and the arithmetic behind that number is the one measurement this
-project keeps repeating: **a connection costs about 9 KB before it has asked for
-anything**, so the default is around 88 MB of connections and no more.
+project keeps repeating: **an idle connection costs 4,669 bytes before it has
+asked for anything**, so the default is around 45 MB of connections and no more.
+
+That figure is a **floor, not a total**. A suspended fiber holds its stack at
+its high-water mark, so a handler adds every byte of stack it ever touched, for
+the life of the connection — an ordinary database route measures 17,022
+([ADR 0063](../adr/0063-a-handlers-stack-is-per-connection.md)). Budget from
+4,669 only for connections that are idle between requests; budget from what
+your own handlers measure for the ones in flight.
 
 That is the whole reason it exists. A server with no cap does not fail at a
 number somebody chose — it keeps accepting until the machine runs out, and what
@@ -131,13 +140,14 @@ The log says so once a minute for as long as it lasts, with a running total:
 ```
 warning: nilo is holding its limit of 10000 connections, so new ones are being
 closed unanswered (417 so far). Raise `.max_connections` in listen() if the
-machine has the memory — each connection costs about 9 KB — or put fewer of them
-on this process.
+machine has the memory — an idle connection costs 4,669 bytes, plus whatever
+stack the handler touches — or put fewer of them on this process.
 ```
 
 It counts connections, not requests. One connection makes many requests in a
 row, and a WebSocket is one connection for as long as the tab is open — a chat
-server holding open tabs wants this raised, and multiplied by 9 KB first.
+server holding open tabs wants this raised, and multiplied by 5,183 first, which
+is what an idle WebSocket costs.
 `.max_connections = 0` turns it off, which is what nilo did before this
 existed.
 

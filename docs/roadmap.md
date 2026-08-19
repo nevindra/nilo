@@ -611,27 +611,23 @@ Nothing on any axis: the same code once instead of twice.
 
 **Waiting on: ready.**
 
-**"About 9 KB a connection" is quoted in three files and the number is 4,669.**
-`zio.zig`'s capacity warning tells an operator that "each connection costs about
-9 KB", and `docs/guide/deploying.md` says it twice, once calling it "the number
-this project keeps repeating", and tells the reader to multiply
-`max_connections` by it. `docs/guide/websocket.md` says it a third time. ADR
-0071 took the figure to **4,669 bytes** for HTTP and **5,183** for an idle
-WebSocket ([`bench/result/http.md`](../bench/result/http.md)), and the CHANGELOG
-and `CLAUDE.md` were updated. These five lines were not.
+**What an open stream costs has not been measured since v1.**
+`docs/guide/streaming.md` quoted **~21 KB** a stream and told the reader to plan
+ten thousand of them around it. That figure predates both
+[ADR 0063](./adr/0063-a-handlers-stack-is-per-connection.md), which found a
+handler holds its stack at its high-water mark, and
+[ADR 0071](./adr/0071-where-a-connection-waits-is-what-it-costs.md), which took
+an idle connection to 4,669. A stream is neither: it is a handler that has not
+returned, so it holds its buffers *and* its stack, and neither of the two
+findings tells you what the total is. The guide now says that instead of
+quoting the number, which is the honest state and not the useful one.
 
-Nobody is hurt by over-provisioning, which is why it survived. What makes it
-worth an entry rather than a fix in passing is that this is the third time:
-`connect_on_init` was documented in three files and had never worked
-([ADR 0062](./adr/0062-a-pool-that-dialled-itself-whatever-it-was-told.md)), and
-8,767 was repeated in ten files across two rounds
-([ADR 0063](./adr/0063-a-handlers-stack-is-per-connection.md),
-[ADR 0071](./adr/0071-where-a-connection-waits-is-what-it-costs.md)). A number
-in a log line is the copy nobody greps for, because it is prose in a string
-literal rather than a figure in a table.
+`bench/mem.py` is the harness and `examples/stream` is a server that holds one,
+so this is a run rather than a design. What it wants beside it is a control —
+the same server holding an ordinary keep-alive connection — for the reason
+`bench/sql_server.zig`'s fourth route exists.
 
-**Waiting on: ready.** The five lines are the fix. Whether a published number
-can be made to have one home is the larger question, and nobody has drawn it.
+**Waiting on: ready.**
 
 **An internally tagged union is read four times, and the module says the marker
 costs nothing per request.** `jsonmark.zig`'s header says "Nothing per request

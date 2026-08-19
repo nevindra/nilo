@@ -93,9 +93,18 @@ write fails, and the error unwinds the handler.
 
 ## What it costs to hold one open
 
-One fiber each, which v1 measured at **~21 KB**: 10,000 open streams is about
-210 MB, before anything of yours. That is the number to plan around, and turning
-`read_buffer` and `write_buffer` down in `listen()` takes it to ~17 KB.
+One fiber each, and **it is not the 4,669 bytes an idle connection costs.** A
+stream is a handler that has not returned, so it holds its buffers — an idle
+connection gives those back, a streaming one is using them — and it holds its
+stack at the high-water mark of everything the handler has touched
+([ADR 0063](../adr/0063-a-handlers-stack-is-per-connection.md)). Turning
+`read_buffer` and `write_buffer` down in `listen()` comes straight off it, which
+it does not for an idle connection.
+
+**The total has not been measured since v1, which put it at ~21 KB.** That
+figure predates both the stack finding and the release-while-idle work, so treat
+it as an order of magnitude and not a number: measure your own handler with
+`python3 bench/mem.py` before planning ten thousand of them.
 
 A client that opens a stream and then stops reading is cut off by
 `write_timeout_ms`, which bounds one write rather than the whole response — so a

@@ -250,7 +250,7 @@ design rather than a switch.
 One number worth knowing before a chat server meets its users: an open socket is
 an open connection, and `max_connections` bounds those at 10,000 by default. A
 tab that is connected and silent still counts. Raise it — and multiply by the
-9 KB a connection costs — before that is the limit you find out about
+5,183 bytes an idle WebSocket costs — before that is the limit you find out about
 ([Deploying](./deploying.md#how-many-connections-at-once)).
 
 `zig build run-chat` is a working one, browser page included.

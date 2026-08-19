@@ -196,7 +196,8 @@ pub const Options = struct {
     /// before it is closed.
     ///
     /// This is the number that decides how much memory idle clients hold —
-    /// about 21 KB each with the default buffers — so a server with many
+    /// 4,669 bytes each, whatever the buffers are set to, because a connection
+    /// that has gone quiet gives them back (ADR 0071) — so a server with many
     /// visitors and few of them active wants it lower than a server with a
     /// handful of chatty ones. Above what browsers hold a connection for on
     /// their own (Chrome and Firefox let go at around a minute), so in

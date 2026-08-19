@@ -456,7 +456,9 @@ pub const Woken = enum {
 ///
 /// ADR 0029 measured the alternative and rejected it: a second fiber per
 /// connection to do the writing, 8,673 bytes each, against a whole-connection
-/// budget of 8,767. It named this shape as the right one and recorded it as
+/// budget that was 8,767 at the time and is 4,669 since ADR 0071 — so the
+/// alternative reads worse now than it did then, not better. It named this
+/// shape as the right one and recorded it as
 /// unreachable, because zio exported no way to park on a completion. It does
 /// — `zio.CompletionQueue` is public in the pinned v0.17.0 — and
 /// `spike/completion_queue/` holds the cancel path and the re-arm to 630 runs
@@ -862,8 +864,9 @@ pub fn serve(
                 std.log.warn(
                     "nilo is holding its limit of {d} connections, so new ones are being closed " ++
                         "unanswered ({d} so far). Raise `.max_connections` in listen() if the " ++
-                        "machine has the memory — each connection costs about 9 KB — or put " ++
-                        "fewer of them on this process.",
+                        "machine has the memory — an idle connection costs 4,669 bytes, plus " ++
+                        "whatever stack the handler touches — or put fewer of them on this " ++
+                        "process.",
                     .{ capacity.max, capacity.refused.load(.monotonic) },
                 );
             }
