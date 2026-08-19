@@ -272,6 +272,11 @@ false when the stop begins, and a loop that checks it lets the deploy finish
 instead of sitting out the whole grace period. See
 [Streaming](./streaming.md#ending-on-purpose-and-otherwise).
 
+Work that is not a request cooperates through the same grace period, and finds
+out a different way: `nilo.sleep` fails with `error.Canceled` when it ends, and
+`catch return` is the whole of what a ticker owes the deploy. See
+[Work that is not a request](./background.md).
+
 `app.shutdown()` is safe from any thread and from inside a handler, so an admin
 endpoint that stops the server is an ordinary handler. The App is a service like
 any other, so hand it to itself first:

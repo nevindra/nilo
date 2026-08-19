@@ -7,102 +7,58 @@ What was measured and what was got wrong on the way is in
 
 ## Unreleased
 
-### A reaped connection is retried whichever way the peer dropped it
+**No source change is needed to move a 0.2.0 program to this**, so the next tag
+is a minor one. Needs Zig 0.16, as 0.2.0 does.
 
-`fetch` retries a call once when the pooled connection it was handed had
-already been reaped by the peer. It only recognised half of what that looks
-like ([ADR 0088](./docs/adr/0088-a-reaped-connection-arrives-two-ways.md)).
+**Three things behave differently at run time, and all three are in Fixed
+below.** Sessions now carry an expiry, so everybody holding one is signed out on
+the deploy that picks this up, and a session cookie that used to last
+indefinitely now lasts a day unless `max_age` says otherwise. A response header
+value holding a control byte is refused rather than written, which is a 500 on a
+handler that was writing a header it should not have been able to. And a request
+whose body is framed two ways at once is a 400 rather than a guess.
 
-If the peer's close lands first, the socket carries a FIN and `std.http` says
-`HttpConnectionClosing`. If your request lands first, the peer closes a socket
-with an unread request in it, the kernel sends an RST instead, and `std.http`
-says `ReadFailed`. Same reaped connection, same nothing answered, and only the
-first was retried. Which one you get is a race nobody runs.
+### Added
 
-**What to change:** nothing. A call that used to fail on a coin toss against a
-service that reaps idle connections now retries, under the same bounds as
-before: only a replayable body, only inside the same permit and deadline, and
-at most one attempt per connection the pool could hold. A reset partway through
-a response head is still a failure, because something did come back.
+#### `app.spawn(f, args)` — somewhere to start work that is not a request
 
-### A response header can no longer forge a second one
+`nilo.spawn` needs a running server and `listen()` never returns, so a ticker
+or a batching exporter was reachable only from inside a request handler.
+`app.spawn` registers the same fiber before the server and starts it once there
+is one, after the port is taken and before the first connection is accepted
+([ADR 0086](./docs/adr/0086-work-that-is-not-a-request-belongs-to-the-server.md)):
 
-`Ctx.setHeader` refuses a value carrying `\r`, `\n` or `\0` with
-`error.BadHeaderValue`, and a name that is empty or carries any of those or
-`:`, a space or a tab with `error.BadHeaderName`
-([ADR 0086](./docs/adr/0086-a-response-header-cannot-forge-a-second-one.md)).
+```zig
+try app.provide(&exporter);
+try app.spawn(flushEvery, .{&exporter});
+try app.listen(.{ .port = 8080 });
+```
 
-Until now the value went to the wire exactly as handed over, so a header built
-out of request data did not stay inside its header. It ended the header block
-and wrote the rest of the response itself. The path is the one `Redirect.to`
-takes: a shortening service that stores a URL somebody submitted, and a
-`Location` that sets a cookie no line in the application sets.
+```zig
+fn flushEvery(exporter: *Exporter) void {
+    while (true) {
+        nilo.sleep(60_000) catch return;   // Canceled — the server is going
+        exporter.flush() catch |err| std.log.err("flush: {t}", .{err});
+    }
+}
+```
 
-**What to change:** nothing, unless a header value of yours legitimately holds
-one of those bytes, which no header value does. `Redirect`, `Response.headers`,
-`FileBody.headers` and `cors` all go through `setHeader` and are covered by it.
-A handler that lets the error out sends a 500.
+The fiber is owned by the server exactly as a connection is: counted while it
+runs, cut off when the shutdown grace period ends. It is registered on the App
+rather than declared on a Service because a Service's `nilo_start` runs in the
+phase after the pool and before the socket, and a program that migrates before
+it serves runs that phase with no server in it at all
+([ADR 0079](./docs/adr/0079-there-is-a-phase-before-the-server.md)) — so work
+spawned there would answer `error.NoServer` and never be asked again.
+`app.spawn` does not care which of the two startup orders you used.
 
-Checked in every optimize mode, not only `Debug`. It costs 3 to 8ns of a 192ns
-request, and nothing at all on a response that sets no header
-([`bench/result/http.md`](./bench/result/http.md)).
+`nilo.spawn` is unchanged and stays the right call from inside a handler.
 
-### A request whose body is framed twice is refused
-
-Four ways a `Content-Length` could disagree with the reverse proxy in front of
-nilo, all now `400`
-([ADR 0087](./docs/adr/0087-a-body-framed-twice-is-refused.md)):
-
-- a value that is not plain digits (`+5` used to read as 5, `1_0` as 10, `-0`
-  as 0)
-- a repeated `Content-Length` with a different value (the same value is fine)
-- `Content-Length` beside `Transfer-Encoding: chunked`, in either order
-- a second `Transfer-Encoding` line once chunked has been seen
-
-`chunked` is also read as the last coding in the list rather than as a substring
-anywhere in it, so `xchunked` is no longer taken for chunked framing.
-
-**What to change:** nothing. Every request refused here is one a proxy in front
-would very likely have refused already.
-
-### `Vary` is repeated rather than replaced
-
-`Ctx.setHeader("Vary", …)` twice now sends two `Vary` lines instead of the
-second replacing the first. That is what RFC 9110 §5.3 says a recipient joins
-with a comma, so `Vary: Origin` plus `Vary: Accept-Encoding` is
-`Vary: Origin, Accept-Encoding`.
-
-**What this fixes:** a compressed static file served behind `cors.with(.{
-.origin = … })` sent only `Vary: Accept-Encoding`. A shared cache reading that
-is entitled to hand one origin's response to another. `cors.permissive` was
-never affected, so this bit the careful configuration and not the loose one.
-
-### Two ceilings that were reached in silence now say so
-
-Both are [ADR 0081](./docs/adr/0081-a-ceiling-that-is-reached-is-said-out-loud.md)
-applied where it had not been.
-
-A multipart form with more than `form.max_parts` (256) parts is a `400` naming
-the ceiling. It used to read the first 256 and walk past the rest, which a
-handler cannot tell apart from fields the browser never sent.
-
-A `422` from `Bound(T)` that runs out of `fail.max_message` ends with
-`; and N more` instead of stopping mid-word.
-
-### `Message.data`'s documented lifetime was backwards
-
-Documentation only, and worth reading if you hold a WebSocket message past the
-`receive` that produced it. The type said the bytes were "the caller's memory
-and lives exactly as long as the caller decides". They are borrowed from the
-executor's free list and the loan ends at the next `receive`, sooner if the
-connection falls quiet, at which point another connection may be filling the
-same pages. `docs/reference.md` always had this right. Copy before you keep.
-
-### A type can say how its JSON is spelled
+#### `nilo_json` — a type can say how its JSON is spelled
 
 `std.json` writes a union one way — `{"metrics":{…}}`, one object with one key.
 Most REST APIs use the other one, and there was no way to ask for it short of a
-hand-written `jsonStringify` and `jsonParse` per type. Now there is
+hand-written `jsonStringify` and `jsonParse` per type
 ([ADR 0085](./docs/adr/0085-a-type-says-how-its-json-is-spelled.md)):
 
 ```zig
@@ -128,33 +84,146 @@ The second line is only needed for a type that *arrives* in a request. Sending
 needs nothing, because nilo makes that call and reads the marker itself; reading
 is `std.json`'s call, and nothing can add a declaration to a type you wrote.
 
-A `union(enum)` as a request body used to be a compile error, on the grounds
-that nothing in the type said which arm arrived. `.tag` is the type saying it,
-so that shape now works.
+#### Smaller
 
-The generated API description follows whichever encoding the type asked for, so
-a client generated from it reads what the server actually sends. A tagged union
-is `oneOf` with `discriminator`; an untagged union is still `{}`.
+- **`union(enum)` as a request body**, which used to be a compile error on the
+  grounds that nothing in the type said which arm arrived. `.tag` is the type
+  saying it.
+- **Twelve refusals** covering the ways of writing the marker wrong, taking the
+  framework's table from 63 to 75 and the five tables from 129 to 141. The one
+  worth knowing is a `.tag` whose name a variant already uses as a field: the
+  only mistake here that would corrupt the wire rather than fail.
+- **[Work that is not a request](./docs/guide/background.md)** in the guide, and
+  a ninth example — `zig build run-scheduled`.
 
-### Responses carrying a union got two to three times faster
+### Changed
 
-Not a new feature and nothing to change. `covers` decides while compiling which
-types nilo's own JSON writer may touch, it is answered for the **whole** value,
-and it did not recognise a `union(enum)` at all — so one union field anywhere
-sent the entire response to `std.json`, every string in it included.
+- **The generated API description follows whichever encoding the type asked
+  for**, so a client generated from it reads what the server actually sends. A
+  tagged union is `oneOf` with `discriminator`; an untagged union is still `{}`.
 
-On a 374-byte payload with a union in it that is **2.8× to 3.2×**, and 3.4× to
-3.5× on a 104-byte one. The bytes are unchanged: an unmarked union is still
-written externally tagged, and the tests hold nilo's output against `std.json`'s
-value by value. [`bench/result/http.md`](./bench/result/http.md) has the run and
-the controls.
+### Fixed
 
-### Also
+- **A gzipped static file behind a named-origin CORS lost its `Vary: Origin`.**
+  `setHeader` replaced, on the grounds that setting a header twice is somebody
+  changing their mind — which is true inside one function and not true of
+  `Vary`, where the CORS middleware and the static-file handler each name a
+  different axis of the same response. Middleware runs first, so it was always
+  CORS's that went.
 
-Twelve new refusals cover the ways of writing the marker wrong, taking the
-framework's table from 63 to 75 and the five tables from 129 to 141. The one
-worth knowing is a `.tag` whose name a variant already uses as a field: that is
-the only mistake here that would corrupt the wire rather than fail.
+  `Vary` now repeats rather than replaces, and the response carries both lines
+  ([ADR 0089](./docs/adr/0089-two-layers-can-each-name-a-vary-axis.md)). Two
+  lines rather than one comma-joined value because joining means building a
+  string, and that would put an allocation on the static-file path. An exact
+  duplicate — same name and same value — is still dropped, so two middlewares
+  that both depend on the origin do not produce two identical lines.
+
+  `inline_headers` went from six to seven with it: the shape above sets seven
+  headers, and the seventh was spilling to the arena. That is measured — the new
+  budget test failed with `expected 0, found 1` before the constant moved, and
+  asserts zero allocations after. The 32 bytes sit on a frame that is unwound
+  before the connection waits, so an idle connection should be unchanged at
+  4,669 bytes; that half is reasoned rather than measured, because the memory
+  harness is Linux-only, and it is on the roadmap as such.
+
+- **A session never expired, whatever `max_age` said.** The only thing bounding
+  one was `Max-Age` on the cookie, which is an instruction to a *browser* — so a
+  copy of the cookie taken out of a proxy log or a backup went on opening
+  forever, and the only way to stop it was rotating the secret, which signs out
+  everybody. The guide meanwhile offered `.max_age = 30 * 24 * 60 * 60` under
+  *Staying signed in* and said three paragraphs later that a copied cookie still
+  opens; both sentences were true and they described different behaviour.
+
+  The seal now carries the moment it stops opening, under the AEAD tag where a
+  client cannot reach it
+  ([ADR 0088](./docs/adr/0088-an-expiry-a-client-can-ignore-is-not-one.md)).
+  `max_age` sets the cookie attribute and the sealed expiry from one number.
+  Leaving it null is still a session cookie and now also seals
+  `nilo.session.default_max_age` — **24 hours** — because null cannot safely
+  mean forever. An expired session reads as `null`, like every other unreadable
+  cookie.
+
+  **Two things to know before deploying.** The plaintext layout moved, so every
+  session already out there is ignored and those people sign in again — the same
+  thing adding a field to the session struct has always done. And a session
+  cookie that was living indefinitely now stops at a day; if you were relying on
+  that, say `.max_age`. `nilo.session.openAt(T, cookie, key, when)` is public so
+  a test can reach the boundary without a wall clock. Costs one 15ns clock read
+  on a request that carries a session cookie, nothing on one that does not, and
+  12 bytes on the wire.
+
+- **A response header value was never checked, so a handler could split its own
+  response.** A header is `name: value\r\n` and there is no escaping in that
+  grammar, so a value carrying a newline does not make a broken header — it
+  makes a **second** one, and two of them end the head and start a second
+  response. Every path that sets a response header now goes through one check
+  ([ADR 0087](./docs/adr/0087-a-header-value-cannot-end-its-own-line.md)): the
+  name has to be a token, and the value may not hold a control byte. Two
+  narrower versions of this check already existed — `c.setCookie` refuses a `;`,
+  and `c.requestId` refuses a forged `X-Request-Id` — and neither covered
+  `c.setHeader`, a `Response`'s `.headers`, or a `Redirect`'s. The shape most
+  likely to have been reached is the one in the guide, where a `Redirect`'s
+  destination comes out of a database.
+
+  A refused header is now a 500 naming the header and the rule it broke, where
+  the reserved-header refusal used to reach the client as `"internal server
+  error"`. `error.ReservedHeader` is gone with it; it was never a documented
+  name, and setting `Content-Length` is refused exactly as before. The value
+  itself is never quoted back in the message. Costs nothing on any of the four
+  axes, binary size included — the ADR has the four measurements.
+
+- **A request whose body was framed twice was read rather than refused.** Four
+  ways a `Content-Length` could disagree with the reverse proxy in front of
+  nilo, all now a `400`
+  ([ADR 0090](./docs/adr/0090-a-body-framed-twice-is-refused.md)): a value that
+  is not plain digits (`+5` used to read as 5, `1_0` as 10, `-0` as 0), a
+  repeated `Content-Length` with a different value (the same value is fine),
+  `Content-Length` beside `Transfer-Encoding: chunked` in either order, and a
+  second `Transfer-Encoding` line once chunked has been seen. `chunked` is also
+  read as the last coding in the list rather than as a substring anywhere in it,
+  so `xchunked` is no longer taken for chunked framing.
+
+  Nothing to change: every request refused here is one a proxy in front would
+  very likely have refused already.
+
+- **`fetch` retried a reaped connection only when the peer's close landed
+  first.** If your request lands first instead, the peer closes a socket with an
+  unread request in it, the kernel sends an RST rather than a FIN, and
+  `std.http` reports `ReadFailed` where the retry was bounded to
+  `HttpConnectionClosing`
+  ([ADR 0091](./docs/adr/0091-a-reaped-connection-arrives-two-ways.md)). Same
+  reaped connection, same nothing answered, and which one you got was a race
+  nobody runs. A call against a service that reaps idle connections now retries
+  under the same bounds as before: only a replayable body, only inside the same
+  permit and deadline, at most one attempt per connection the pool could hold. A
+  reset partway through a response head is still a failure, because something
+  did come back.
+
+- **Two ceilings were reached in silence**, both
+  [ADR 0081](./docs/adr/0081-a-ceiling-that-is-reached-is-said-out-loud.md)
+  applied where it had not been. A multipart form with more than
+  `form.max_parts` (256) parts is a `400` naming the ceiling, where it used to
+  read the first 256 and walk past the rest — which a handler cannot tell apart
+  from fields the browser never sent. And a `422` from `Bound(T)` that runs out
+  of `fail.max_message` ends with `; and N more` instead of stopping mid-word.
+
+- **`Message.data`'s documented lifetime was backwards.** Documentation only,
+  and worth reading if you hold a WebSocket message past the `receive` that
+  produced it. The type said the bytes were "the caller's memory and lives
+  exactly as long as the caller decides". They are borrowed from the executor's
+  free list and the loan ends at the next `receive`, sooner if the connection
+  falls quiet, at which point another connection may be filling the same pages.
+  `docs/reference.md` always had this right. Copy before you keep.
+
+- **Responses carrying a union were two to three times slower than they had to
+  be.** `covers` decides while compiling which types nilo's own JSON writer may
+  touch, and it is answered for the **whole** value — it did not recognise a
+  `union(enum)` at all, so one union field anywhere sent the entire response to
+  `std.json`, every string in it included. On a 374-byte payload with a union in
+  it that is **2.8× to 3.2×**, and 3.4× to 3.5× on a 104-byte one. The bytes are
+  unchanged, and the tests hold nilo's output against `std.json`'s value by
+  value. [`bench/result/http.md`](./bench/result/http.md) has the run and the
+  controls.
 
 ## 0.2.0
 

@@ -171,17 +171,25 @@ test "the budget is bytes, so a bigger ceiling keeps fewer of them" {
 test "a different size empties the list rather than handing back the wrong length" {
     defer drain();
 
-    const small = try take(4096);
+    // In pages rather than in bytes, because `take` rounds up to
+    // `page_size_min` and that is **16 KiB on Apple silicon** against 4 KiB
+    // on x86-64 Linux. Written as 4096 and 8192 this asked for two sizes
+    // that are the same size there — so it did not fail because the list is
+    // broken, it failed because it was never testing two sizes at all.
+    const one_page = std.heap.page_size_min;
+    const two_pages = 2 * one_page;
+
+    const small = try take(one_page);
     give(small);
-    try std.testing.expectEqual(@as(usize, 4096), spare);
+    try std.testing.expectEqual(one_page, spare);
 
-    const big = try take(8192);
+    const big = try take(two_pages);
     give(big);
-    try std.testing.expectEqual(@as(usize, 8192), spare);
-    try std.testing.expectEqual(@as(usize, 8192), sized);
+    try std.testing.expectEqual(two_pages, spare);
+    try std.testing.expectEqual(two_pages, sized);
 
-    const back = try take(8192);
-    try std.testing.expectEqual(@as(usize, 8192), back.len);
+    const back = try take(two_pages);
+    try std.testing.expectEqual(two_pages, back.len);
     give(back);
 }
 

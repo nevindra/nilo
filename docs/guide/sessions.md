@@ -113,15 +113,34 @@ which is what a sign-in usually wants. To outlive that, say for how long:
 try s.setWith(.{ .user = id }, .{ .max_age = 30 * 24 * 60 * 60 });   // 30 days
 ```
 
+**That one number sets two things**, and the second is the one that counts.
+`Max-Age` is an instruction to the browser, and a browser obeys it; a copy of
+the cookie — out of a proxy log, a `curl -v` pasted into a ticket, a backup —
+obeys nothing. So the same thirty days is sealed *inside* the cookie, where the
+client cannot reach it, and after thirty days it stops opening for anybody
+([ADR 0088](../adr/0088-an-expiry-a-client-can-ignore-is-not-one.md)).
+
+A session cookie has a ceiling too, for exactly that reason: leaving `max_age`
+unset asks the browser to forget the cookie at the end of the window, and seals
+`nilo.session.default_max_age` — **24 hours** — for the copy that does not. Null
+does not mean forever and never safely could.
+
 `setWith` also takes `path`, `domain`, `secure` and `same_site`. It does not
 take `http_only`: a session a script can read is a session an injected script
 can send somewhere.
 
+Testing what happens at the boundary needs no clock and no waiting.
+`nilo.session.openAt(T, cookie, key, when)` opens a cookie against a time you
+name, which is how nilo's own tests reach the second before an expiry, the
+second of it, and the second after.
+
 ## What it cannot do
 
-**A session cannot be revoked.** A sealed cookie is valid until it expires, so
-there is no "sign out everywhere" in the mechanism. `s.clear()` deletes the
-cookie in *this* browser; a cookie somebody copied still opens.
+**A session cannot be revoked early.** A sealed cookie is valid until the
+expiry sealed into it, and nothing can cut that short, because there is no row
+to go and mark. `s.clear()` deletes the cookie in *this* browser; a cookie
+somebody copied goes on opening until its expiry — which is the reason the
+expiry exists, and the reason it is not optional.
 
 If you need revocation, put a number in the session and check it:
 

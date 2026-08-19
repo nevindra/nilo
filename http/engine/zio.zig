@@ -736,6 +736,27 @@ pub fn serve(
     const server = maybe_server orelse return why.toError();
     defer server.close();
 
+    var group: zio.Group = .init;
+    // Whatever is still running when the grace period is over is cut off
+    // here. By then it has had its chance.
+    defer group.cancel();
+
+    // Registered after the cancel above, so it runs before it: nothing can
+    // be spawned into a group that is already winding up (ADR 0029).
+    //
+    // **Above `ready` rather than below it** (ADR 0086). `ready` is where
+    // the App starts the work that is not a request, and a group that does
+    // not exist yet is `error.NoServer` — which is the answer `spawn` gives
+    // a unit test, arriving at startup where it means something else
+    // entirely. Nothing between here and there accepts a connection, so
+    // moving it up costs nothing and changes no ordering: `background` is
+    // still cleared before the cancel, and the cancel is still inside the
+    // Runtime's lifetime. What it does change is a `ready` that fails —
+    // that now cancels whatever it had already started, which is what
+    // "the server did not start" has to mean.
+    background.store(&group, .release);
+    defer background.store(null, .release);
+
     // After the port is taken, before anything is accepted, and before the
     // line below says the server is up — because until this returns it is
     // not. A pool that cannot reach its database explains itself and comes
@@ -809,16 +830,6 @@ pub fn serve(
             handler(st, &reader.interface, &writer.interface, &clocks, &wake, peer);
         }
     };
-
-    var group: zio.Group = .init;
-    // Whatever is still running when the grace period is over is cut off
-    // here. By then it has had its chance.
-    defer group.cancel();
-
-    // Registered after the cancel above, so it runs before it: nothing can
-    // be spawned into a group that is already winding up (ADR 0029).
-    background.store(&group, .release);
-    defer background.store(null, .release);
 
     if (options.stop_on_signal) installStopSignals(stop);
     defer if (options.stop_on_signal) restoreStopSignals();

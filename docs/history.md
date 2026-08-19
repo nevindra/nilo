@@ -783,15 +783,20 @@ in this repository, with the unicode escapes and number edges that come with
 one. Same trade the header of `json.zig` already made for floats, arriving on
 the other side of the same file.
 
-## Four gaps in `http/`, and the two habits that hid them
+## Four gaps in `http/`, and the habits that hid them
 
 A scan of `http/` across bugs, consolidation and DX turned up 23 things. Five
 were taken. What is worth keeping is not the fixes, which are in
-[ADR 0086](./adr/0086-a-response-header-cannot-forge-a-second-one.md),
-[ADR 0087](./adr/0087-a-body-framed-twice-is-refused.md) and the two
+[ADR 0090](./adr/0090-a-body-framed-twice-is-refused.md) and the two
 applications of [ADR 0081](./adr/0081-a-ceiling-that-is-reached-is-said-out-loud.md).
 It is how four of them stayed hidden while the repository looked straight at
 them.
+
+The fifth, a response header that could split its own response, was found
+independently on `main` at the same time and is written up under *The right
+decision, taken twice, in two places too narrow to help* below. Two scans
+reaching the same bug from opposite ends is the strongest evidence in this file
+that the choke-point question is worth asking out loud.
 
 **A differential test only finds what its two halves disagree about.**
 `fuzz.zig` has held a hand-written reference parser against the fast one since
@@ -803,15 +808,6 @@ both sides. Two implementations of one misunderstanding agree perfectly. The
 rewrite deliberately took the other route through the coding list, forwards
 where `http1` goes backwards, and that is the only version of this test worth
 having.
-
-**A hazard guarded in two places and missed in a third is not an oversight
-about the hazard.** `Ctx.requestId` refused `\r` and `\n` in a client's request
-id, with a comment saying a newline "splits the response". `Cookie.check`
-refused the same bytes. `Ctx.setHeader`, the one an application actually calls,
-did not. Nobody had failed to understand the danger; the danger was handled
-wherever somebody happened to be looking. That is what a choke point is for, and
-"where else does this byte reach the wire" is the question that finds the third
-place.
 
 **The one lifetime with no trap behind it was the one whose doc was wrong.**
 `Message.data`'s comment said the bytes were "the caller's memory and lives
@@ -830,6 +826,9 @@ block, so three delimiters over a 27-byte header name is three passes of 27
 iterations. One branchless pass over a 256-byte table is 3ns.
 [`bench/result/http.md`](../bench/result/http.md) has the run; the general form
 is that `scan.zig`'s header names three callers and all three have long inputs.
+The table itself did not ship — the predicate that merged is the RFC grammar
+from ADR 0087, a plain per-byte loop — and the lesson outlived the code that
+taught it, which is the only reason this paragraph is still here.
 
 **And one correction worth the line it costs.** `Content-Length: 05` went on the
 refuse list beside `+5` and `1_0`, on the strength of "leading zeroes" sounding
@@ -843,7 +842,7 @@ failed about one `zig build test-all` run in three and passed three of three
 under `zig build test-fetch`. Everything about that shape says "the test is
 racy under load, stabilise the test". It was not racy. It was a fair coin, and
 one side of it was a bug in `fetch/`
-([ADR 0088](./adr/0088-a-reaped-connection-arrives-two-ways.md)).
+([ADR 0091](./adr/0091-a-reaped-connection-arrives-two-ways.md)).
 
 **Take the error before believing the diagnosis.** The failure was reproduced
 by making the race deterministic rather than by running the suite more times:
@@ -881,3 +880,187 @@ the lesson across the repository, because nothing could. `std.Io.net.Server`
 still has no way to read back the port it was given, which was re-checked
 rather than believed, so binding zero is not available and two files picking
 loopback ports remains an agreement held by two comments pointing at each other.
+
+## A family that was named, priced and never given a door
+
+[ADR 0029](./adr/0029-a-spawned-fiber-belongs-to-the-server.md) is careful
+work. It measured the fiber it was about to ship, priced the one it refused at
+8,673 bytes a connection, chased a zio crash to a standalone reproduction, and
+opened by naming what `spawn` was *for*: "a metrics exporter that batches
+before it sends, a job that runs every minute". Then it shipped the fiber and
+no way to start one.
+
+`listen()` does not return. `nilo.spawn` needs a running server and answers
+`error.NoServer` otherwise, correctly. Between those two sentences there is no
+line of a program where a ticker can be started, and nothing noticed for a
+year: no example spawned anything, and the two mentions in the whole
+repository were a table row and a five-line snippet in the reference, neither
+of which is executed. **The feature was reachable only from inside a request
+handler**, which is the one place nobody wanted it.
+
+What makes it worth writing down is the second half, because the obvious fix
+was four lines and was wrong. `serve` set the fiber group *after* it called
+the startup hook, so moving one line up lets a Service start its own work from
+`nilo_start` — and every example in this repository would have proved it. The
+case it misses is the one the guide publishes:
+[ADR 0079](./adr/0079-there-is-a-phase-before-the-server.md)'s
+`app.start(io)` → `migrate` → `listen()`, where the services are finished in a
+phase with **no server in it at all** — the `Io` belongs to the caller — and
+`startServices` is idempotent, so `listen()` never asks again. A ticker started
+from `nilo_start` under that order gets `error.NoServer` and is never retried.
+
+So the seam was wrong rather than the ordering: `nilo_start` is the phase after
+the pool and before the socket, and this work needs the phase after the socket.
+[ADR 0086](./adr/0086-work-that-is-not-a-request-belongs-to-the-server.md)
+registers it on the App instead, where neither order can skip it.
+
+Two habits caught it and both are already written down here. **A conclusion of
+"blocked on somebody else" gets one more hour than it feels like it needs** —
+this was the same shape one layer over: a feature recorded as *shipped*, whose
+only evidence was a table row. And a check that has only ever been seen to pass
+([ADR 0033](./adr/0033-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md))
+has a sibling: **a feature that has only ever been seen to compile.** The fix
+here is the same one — `http/live.zig` is the framework suite's first test to
+stand a real server up, because a registration nothing has been seen to *run*
+is not evidence that anything runs.
+
+## Two tests that could not fail, on a machine nobody had run them on
+
+Adding `app.spawn` meant running the suite on Apple silicon, and two tests that
+had passed everywhere else came apart. Neither was about the change.
+
+**16 KiB pages.** `http/scratch.zig` asked for a 4096-byte buffer and an
+8192-byte one and asserted the free list emptied between them, because the
+sizes differ. `take` rounds up to `std.heap.page_size_min`, which is 4 KiB on
+x86-64 Linux and **16 KiB here** — so both requests were one page, the list was
+never asked to hold two sizes, and the test had been asserting nothing for as
+long as it existed. It is written in pages now, which is what the test one line
+below it had always done.
+
+**A wait with no bound, in the file `CLAUDE.md` already names.** `fetch/deadline.zig`
+scans 39,500–39,699 for a port and gives up by returning — without setting the
+flag the test then waits on, forever. Six copies of that binary at once was
+enough: 10 minutes of wall against 6 seconds of CPU, which is the exact reading
+`CLAUDE.md` says to take before believing a suite is slow, in the exact file it
+says held a deadlock for a fortnight. **The second one was found by the
+procedure written down after the first.**
+
+Both are the same shape and it is [ADR 0033](./adr/0033-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md)'s
+with a wider brim: a check that cannot fail and a check that has only been seen
+to pass look identical — and so does one that hangs instead of failing, because
+a suite that never finishes reports nothing at all. The fix was to make the
+failure reachable and then reach it: with all 200 ports held, the old binary
+runs until it is killed and the new one prints
+`FAIL (NoFreePortForTheQuietEndpoint)` in a tenth of a second and carries on
+with the other twenty-two.
+
+**A machine you have not run on is a set of constants you have not tested.**
+The page size was the one that bit here; it will not be the last.
+
+## The right decision, taken twice, in two places too narrow to help
+
+Response header values were never checked for a newline, so a handler could
+split its own response ([ADR 0087](./adr/0087-a-header-value-cannot-end-its-own-line.md)).
+The interesting part is not that the check was missing. It is that **nilo had
+already made this exact decision twice, correctly, and both times scoped it to
+the caller in front of it.**
+
+`cookie.check` refuses a `;` in a cookie value, and says why in its comment:
+*"That is response splitting with extra steps, and it is refused here rather
+than escaped."* `Ctx.requestId` refuses a forged `X-Request-Id`, and says why in
+its comment: *"a newline forges a line of its own, and in a response header it
+splits the response."* Two comments, in two files, naming the attack — with
+`putHeader` sitting under both of them checking only whether the name was one of
+the framework's own.
+
+So the reviewer's question is not "is this input validated?" — twice, the answer
+was visibly yes. It is **"is it validated where every caller goes through, or
+where this caller does?"** `Set-Cookie` is the proof that the distinction was
+load-bearing rather than tidy: `c.setCookie` validates, and a `Set-Cookie`
+written through a `Response`'s `.headers` — which is the documented way a
+sign-in answers — reached the wire without ever meeting `cookie.check`. The hole
+was in the feature that had the check.
+
+The fix is one choke point, which is `aboutToRead`'s shape from
+[ADR 0004](./adr/0004-request-arena-and-the-str-type.md): the
+place every path already goes through is where a rule survives the next caller
+being added. There were five, and the one that would have forgotten —
+`Response.headers` — arrived a year after `setHeader`.
+
+**Four binary measurements to establish it cost nothing** — 0 bytes on `hello`,
+`rest`, `orders` and `forms`, with the checksums differing to prove the build
+happened. A refusal on a path nothing hot reaches is the cheapest kind of
+correctness there is, and the reason to measure was to be able to say so.
+
+## Two sentences on one page, describing different behaviour
+
+A session carried no expiry: the seal held a version, a shape fingerprint and
+the fields, and nothing about time ([ADR 0088](./adr/0088-an-expiry-a-client-can-ignore-is-not-one.md)).
+What bounded a session was `Max-Age` on the cookie, which a browser obeys and a
+copy of the cookie does not.
+
+**The documentation had already caught it and nobody read the two halves
+together.** `docs/guide/sessions.md` offers `.max_age = 30 * 24 * 60 * 60` under
+*Staying signed in*, and three paragraphs later, under *What it cannot do*, says
+*"a cookie somebody copied still opens"*. Put side by side those describe
+different systems: one where the copy dies in thirty days and one where it never
+does. Both sentences were written deliberately, both were accurate about the
+half they were describing, and the contradiction sat between them.
+
+That is a different failure from the four this file already records. Those were
+premises nobody re-tested — a number, a manifest, a blocker. **This one was two
+statements that were each true and could not both be.** No amount of
+re-measuring finds it, because there is nothing to measure; it is found by
+reading one page end to end and asking whether it agrees with itself.
+
+The fix needed no store and no sweep, which is the part worth remembering: the
+reason it had not been done was never cost. `expires_at` is eight bytes inside a
+plaintext that was already fixed-size, and the expiry a server writes is a
+number the server already has. What it needed was noticing.
+
+**And the check needed `openAt` before it needed the check.** An expiry only a
+wall clock can pass is a guard that will only ever be seen to pass, which is
+[ADR 0033](./adr/0033-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md)
+exactly. Splitting the pure half out — `openAt(T, text, key, now)`, with `open`
+reading the clock and calling it — turns "wait a day" into three lines naming
+three numbers, and is the same shape `modeFrom` has in `app.zig` for the same
+reason. Where a guard is *hard to reach*, reaching it is the design problem, not
+an afterthought.
+
+## A rule written from inside one function
+
+`Ctx.setHeader` replaced, and `http1.repeats` listed the exceptions. There was
+one, `Set-Cookie`, and the comment arguing for it named `Vary` in passing as an
+obvious case where replacing is right: *"which is right for `Vary` or a cache
+directive, where a second call is somebody changing their mind"*.
+
+**The counter-example was already in the repository, two files away**
+([ADR 0089](./adr/0089-two-layers-can-each-name-a-vary-axis.md)). `cors.zig` sets
+`Vary: Origin`; `app.zig` sets `Vary: Accept-Encoding` on a gzipped file. Both
+have a comment explaining that a shared cache goes wrong without theirs.
+Middleware runs before the handler, always, so CORS's was written and then
+overwritten on every such response.
+
+The lesson is about where the sentence was written from. *"A second call is
+somebody changing their mind"* is true — of one author, in one function, calling
+`setHeader` twice. It is false of a stack, where two layers that have never
+heard of each other each state something independently true about the same
+response. **A rule about an API is a rule about all of its callers, and the
+callers to check are the ones in other files.**
+
+Two things about the fix are worth more than the fix.
+
+**The cheap correct answer was the one that fit the budget.** Joining the values
+with a comma is tidier on the wire and needs a third string; two header lines
+mean the same thing to every cache (`Vary` is a list field, unlike `Set-Cookie`)
+and cost two entries in a list that already existed. The RFC distinction — which
+field may be folded and which may not — is what made the free option available.
+
+**Raising `inline_headers` was found by a test, not by arithmetic.** The fixed
+shape sets seven headers and six were held on the `Ctx`, so the first version of
+this change quietly added an arena allocation to the exact path it was fixing.
+The budget test was written before the constant moved and failed with `expected
+0, found 1`. Writing the measurement first is what turned a plausible change
+into a checked one — and the other half of the same cost, memory per idle
+connection, could not be measured on the machine at hand and went to the roadmap
+as a number owed rather than into the ADR as a claim.

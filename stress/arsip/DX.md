@@ -393,7 +393,7 @@ tests at once.
 
 Registering the open routes first does not help and is worth saying out loud:
 chains are resolved in `listen()`, so mounting order carries no meaning
-([ADR 0009](../../docs/adr/0009-middleware-is-an-onion-with-one-hole.md)). It
+([ADR 0009](../../docs/adr/0009-middleware-is-an-onion-of-ctx-functions.md)). It
 looks like it should work, which is the expensive part.
 
 The three ways out, all bad in different ways:
@@ -442,7 +442,7 @@ second thing built after the first CRUD route.
 
 **What happens.** `nilo_id`'s `Uuid` carries a `jsonStringify`, and that is the
 whole reason `nilo_http` needs no knowledge of `nilo_id`
-([ADR 0046](../../docs/adr/0046-randomness-is-an-argument.md)) — a `Uuid` in a
+([ADR 0046](../../docs/adr/0046-entropy-belongs-to-the-loop.md)) — a `Uuid` in a
 response comes out as text and the HTTP module never learns the type exists. It
 works. Over the wire:
 

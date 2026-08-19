@@ -53,6 +53,7 @@ pub const panic = nilo.panic;                     // optional: name the request 
 | `App.init(gpa)` | a new App. The allocator is for the App's furniture, not for requests |
 | `app.deinit()` | |
 | `app.provide(&thing)` | register a service, looked up later by its pointer type |
+| `app.spawn(f, args)` | work that is not a request, started once the server is up ([ADR 0086](./adr/0086-work-that-is-not-a-request-belongs-to-the-server.md)) |
 | `app.use(mw)` | middleware, everywhere |
 | `app.useOn(prefix, mw)` | middleware, under a path prefix |
 | `app.without(mw)` | the same App with `mw` off for the routes registered through what comes back — how a sign-up route sits inside a guarded prefix ([ADR 0080](./adr/0080-a-route-can-say-it-is-not-covered.md)) |
@@ -63,7 +64,7 @@ pub const panic = nilo.panic;                     // optional: name the request 
 | `app.staticWith(url_prefix, dir_path, options)` | the same, with [options](#static-options) |
 | `app.docs(options)` | serve an [OpenAPI document](./guide/openapi.md) |
 | `app.listen(options)` | run until stopped. Stops the process on a startup error |
-| `app.start(io)` | everything `listen()` does before it accepts anything — services checked, chains resolved, pools opened, schemas checked. For a migration, a script or a test; `listen()` does not repeat it ([ADR 0079](./adr/0079-there-is-a-phase-before-the-server.md)) |
+| `app.start(io)` | everything `listen()` does before it accepts anything — services checked, chains resolved, pools opened, schemas checked. For a migration, a script or a test; `listen()` does not repeat it ([ADR 0079](./adr/0079-there-is-a-phase-before-the-server.md)). What it does *not* start is `spawn`, which needs a server |
 | `app.shutdown()` | stop, from any thread or from inside a handler |
 | `app.tryListen / tryRoute / tryStatic / tryStaticWith` | the same calls, error returned rather than reported |
 | `app.checkServices()` | `error.MissingService` if a route needs one nobody provided |
@@ -306,16 +307,15 @@ plus a per-arm `allOf` for a tagged one. See
 | `c.upgradeWith(loop, state, .{ .protocol = "chat.v1" })` | the same, naming a subprotocol |
 
 `Content-Type`, `Content-Length`, `Transfer-Encoding` and `Connection` are
-refused by `setHeader`. Set headers before sending. Setting the same header
-twice replaces it, except `Set-Cookie` and `Vary`, which a response may carry
-more than one of.
-
-A value carrying `\r`, `\n` or `\0` is `error.BadHeaderValue`, and a name that
-is empty or carries any of those or `:`, a space or a tab is
-`error.BadHeaderName`. Those bytes end the header line rather than sitting in
-it, so a header built out of request data would otherwise write the rest of the
-response itself
-([ADR 0086](./adr/0086-a-response-header-cannot-forge-a-second-one.md)).
+refused by `setHeader`. So is a name that is not a token, and a value holding a
+control byte — a newline in one would start a second header, and two would start
+a second response ([ADR 0087](./adr/0087-a-header-value-cannot-end-its-own-line.md)).
+All three are a 500 naming the header. Set headers before sending. Setting the
+same header twice replaces it — except `Set-Cookie` and `Vary`, which a response
+may carry more than one of. `Set-Cookie` because two cookies cannot be folded
+into one line; `Vary` because two layers each name their own axis, and replacing
+threw one away ([ADR 0089](./adr/0089-two-layers-can-each-name-a-vary-axis.md)).
+Setting either with a name and value already present adds nothing.
 
 `sendFile` also takes `size` (null asks the file), `etag` and `cache_control`,
 and answers a `Range`, an `If-Range`, an `If-None-Match` and a `HEAD` from them.
@@ -359,8 +359,15 @@ those. Not slices. See [Sessions](./guide/sessions.md).
 session cookie), `secure` (`true`), `same_site` (`.lax`). No `http_only`: it
 is always on.
 
-Every way a cookie can be unreadable — tampered, truncated, sealed under
-another secret, written by a build with a different shape of `T` — is the
+`max_age` sets the cookie attribute **and** an expiry sealed inside the cookie,
+where the client cannot reach it — `Max-Age` alone is advice a copied cookie
+does not take. Null seals `nilo.session.default_max_age`, 24 hours
+([ADR 0088](./adr/0088-an-expiry-a-client-can-ignore-is-not-one.md)).
+`nilo.session.openAt(T, cookie, key, when)` opens one against a time you name,
+for a test that wants the boundary without a wall clock.
+
+Every way a cookie can be unreadable — tampered, truncated, expired, sealed
+under another secret, written by a build with a different shape of `T` — is the
 same answer, `null`. The secret comes from
 `listen(.{ .session_secret = … })` and must be exactly 32 bytes; a handler
 asking for a session with none set answers 500.
@@ -1054,7 +1061,8 @@ failure, whatever the endpoint returns when it works.
 | `nilo.blocking(f, args)` | run a blocking call off the event loop |
 | `nilo.Gate` | `.open(n)`, then `try enter()`, `leave()` — a lock that lets `n` through |
 | `nilo.sleep(ms)` | wait without parking the thread |
-| `nilo.spawn(f, args)` | run something that is not a request |
+| `nilo.spawn(f, args)` | run something that is not a request, now — `error.NoServer` if nothing is listening |
+| `app.spawn(f, args)` | the same fiber, registered before the server and started once it is up ([the guide](./guide/background.md)) |
 | `nilo.randomSecure(&buf)` | fill a buffer you already hold, off the event loop |
 | `nilo.monotonicNanos()` | a clock reading, for durations |
 
@@ -1103,6 +1111,21 @@ into a response. Copy what you borrow, and log instead of failing.
 ```zig
 try nilo.spawn(flushMetrics, .{&exporter});
 ```
+
+**From `main` there is no such moment**, because `listen()` does not return.
+`app.spawn` registers the same work before the server and starts it once there
+is one — after the port is taken, before the first connection is accepted, and
+whichever of ADR 0079's two startup orders the program used
+([ADR 0086](./adr/0086-work-that-is-not-a-request-belongs-to-the-server.md),
+[the guide](./guide/background.md)):
+
+```zig
+try app.spawn(flushEvery, .{&exporter});
+try app.listen(.{});
+```
+
+The work is a loop around a wait that can say stop: `nilo.sleep` fails with
+`error.Canceled` when the grace period ends, and that is the only way out.
 
 Sending to a WebSocket somebody else's connection is holding does not need
 this — see [`Room`](#room). It needs no fiber of its own, which is the whole

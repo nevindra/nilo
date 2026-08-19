@@ -41,7 +41,7 @@ zig build layering     # check that no module imports upward or sideways
 zig build refusals     # the framework's 75 compile-error checks — NOT the others
 zig build refusals-sql # nilo_sql's 44; refusals-config, -pw and -s3 for the rest
 zig build snippets     # the documentation's marked snippets, which must compile
-zig build examples     # build all eight examples
+zig build examples     # build all nine examples
 
 zig build test-core    # only nilo_core, both modes. No engine, no module graph
 zig build test-id      # only nilo_id, the same way

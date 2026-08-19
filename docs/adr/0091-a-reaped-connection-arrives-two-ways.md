@@ -1,4 +1,4 @@
-# 0088 — a reaped connection arrives two ways
+# 0091 — a reaped connection arrives two ways
 
 **Status:** accepted
 **Amends:** [ADR 0067](./0067-most-of-an-s3-client-is-not-s3.md)

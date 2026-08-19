@@ -448,7 +448,7 @@ pub const Exchange = struct {
         //   written here: a reaped connection arrives as a FIN or as an RST
         //   depending on a race nobody runs, and reading only the first spelling
         //   is what
-        //   [ADR 0088](../docs/adr/0088-a-reaped-connection-arrives-two-ways.md)
+        //   [ADR 0091](../docs/adr/0091-a-reaped-connection-arrives-two-ways.md)
         //   fixed.
         // - **Only a body still where it was.** A `.stream` body has had its
         //   reader consumed, so re-sending it would put fewer bytes on the

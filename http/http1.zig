@@ -195,93 +195,81 @@ pub fn isReservedHeader(name: []const u8) bool {
 /// Headers a response may legitimately carry more than one of, and so the
 /// ones `Ctx.setHeader` must not treat as a replacement.
 ///
-/// There are two, and neither is a matter of taste.
+/// There are two, for two different reasons.
 ///
-/// RFC 6265 §3 says a server sending two cookies has to send two
-/// `Set-Cookie` lines, and that they may not be folded into one
-/// comma-separated value the way every other repeatable header may. So "last
-/// one wins" would mean setting a session cookie and a preference cookie
-/// silently delivered only the second.
+/// **`Set-Cookie`, because folding is forbidden.** RFC 6265 §3 says a server
+/// sending two cookies has to send two `Set-Cookie` lines, and that they may
+/// not be folded into one comma-separated value the way every other repeatable
+/// header may. (A cookie's `Expires` attribute contains a comma. That is how it
+/// came to be true.) So "last one wins" would mean setting a session cookie and
+/// a preference cookie silently delivered only the second.
 ///
-/// `Vary` is the other, and it is the one that bit. RFC 9110 §12.5.5 makes it
-/// the list of request headers a response was selected by, and two layers
-/// each name a different entry: `cors.with` sets `Vary: Origin` before the
-/// handler runs, then a compressed static file sets `Vary: Accept-Encoding`
-/// and, as a replacement, dropped the `Origin` on the floor. A shared cache
-/// reading the result is then entitled to hand one origin's response to
-/// another. Repeating is not a workaround for that: RFC 9110 §5.3 says a
-/// recipient joins repeated field lines with commas, so `Vary: Origin` plus
-/// `Vary: Accept-Encoding` *is* `Vary: Origin, Accept-Encoding`.
+/// **`Vary`, because two layers each name their own axis** (ADR 0089). Last one
+/// wins is right when a second call is somebody *changing their mind*, and that
+/// is what it looks like from inside one function. It is not what happens here:
+/// the CORS middleware says `Vary: Origin` because the response depends on the
+/// origin, and then a gzipped static file says `Vary: Accept-Encoding` because
+/// it also depends on that — two independent facts about one response, and
+/// replacing threw the first away. A shared cache reading the result is then
+/// entitled to hand one origin's response to another. Unlike `Set-Cookie`,
+/// `Vary` is a list field (RFC 9110 §12.5.5), and RFC 9110 §5.3 has a
+/// recipient join repeated field lines with commas — so `Vary: Origin` plus
+/// `Vary: Accept-Encoding` *is* `Vary: Origin, Accept-Encoding`, and two lines
+/// is the spelling that costs no allocation.
 pub fn repeats(name: []const u8) bool {
     return std.ascii.eqlIgnoreCase(name, "set-cookie") or
         std.ascii.eqlIgnoreCase(name, "vary");
 }
 
-/// Bytes that must never reach a response header value, and one reason each.
+/// Whether a name can be written as a header field name at all — RFC 9110
+/// §5.1's `token`, which is the same grammar a cookie name has.
 ///
-/// `\r` and `\n` end a header line, so a value carrying either stops being a
-/// value and starts being the rest of the response. The shape it takes is a
-/// `Location` built out of request data. `?next=/x%0d%0aSet-Cookie:%20admin=1`
-/// sets a cookie the application never wrote, and there is no line in the
-/// application where that cookie is set. `\0` is here for the hop after nilo:
-/// it ends the string for anything downstream written in C, which makes "the
-/// header nilo sent" and "the header the proxy read" two different headers.
-///
-/// nilo has refused these bytes in two places for a while (`Ctx.requestId`
-/// for an id a client sent, `Cookie.check` for a cookie value), and the thing
-/// left unguarded was the API an application actually writes. This is that
-/// gap closed at the one point every response header goes through.
-///
-/// Checked in every optimize mode rather than in `Debug` and `ReleaseSafe`
-/// only. The argument is `password.zig`'s: a protection that has to be
-/// remembered is one that gets forgotten, and this one is not the caller's to
-/// remember.
-///
-/// It is a table and not `scan.positionsOf`, and that is a measurement rather
-/// than a preference. `positionsOf` is fast on a request head and wrong here:
-/// under one block it falls to its scalar tail, so three delimiters over a
-/// 27-byte header name is three passes of 27 iterations. Written that way the
-/// check cost 9ns of a 198ns request; as one branchless pass it costs 2ns.
-/// See [`bench/result/http.md`](../bench/result/http.md).
-pub fn breaksTheLine(value: []const u8) bool {
-    return holds(value, ends_the_line);
+/// Duplicated from `cookie.zig`'s `isTokenByte` rather than shared, and that
+/// is deliberate: `cookie.zig` imports nothing but `std`, and reaching here
+/// for six lines of switch would pull `bulkhead.zig` in behind it. Two copies
+/// of a grammar that has not changed since 1999 is the cheaper of the two.
+pub fn headerNameOk(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |ch| switch (ch) {
+        'a'...'z', 'A'...'Z', '0'...'9' => {},
+        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => {},
+        else => return false,
+    };
+    return true;
 }
 
-/// Whether a header **name** carries a byte that would forge a header.
+/// Whether a value can be written as a header field value — RFC 9110 §5.5's
+/// `field-value`: printable ASCII, space and horizontal tab, plus `obs-text`.
 ///
-/// Not RFC 9110 §5.6.2's `token`, which is stricter, and the difference is
-/// deliberate. A name like `X-A(B)` is not a legal token and cannot do any
-/// harm: it goes out as one header line and the recipient reads it as one
-/// header line. What forges a second header is `:`, a space or a tab (which
-/// end the name early) and the three that end the line. Those are the six
-/// checked, because those are the six with a consequence.
-pub fn forgesAHeader(name: []const u8) bool {
-    return name.len == 0 or holds(name, ends_the_line | ends_the_name);
+/// **What this exists to refuse is CR and LF** (ADR 0087). A response header
+/// is terminated by `\r\n` and there is no escaping in this grammar, so a
+/// value carrying one does not produce a broken header — it produces a
+/// *second header*, and a value carrying two produces a second **response**.
+/// That is the same shape `cookie.check` refuses a `;` for, one layer up.
+///
+/// `obs-text` — everything from 0x80 — is allowed rather than refused. It is
+/// deprecated and it is also what a UTF-8 filename in a `Content-Disposition`
+/// is made of, and it cannot terminate a line, which is the only thing being
+/// defended here.
+///
+/// NUL and DEL cannot appear either, and NUL is the one with a consequence
+/// past this hop: it ends the string for anything downstream written in C,
+/// which makes "the header nilo sent" and "the header the proxy read" two
+/// different headers.
+///
+/// The shape all of this takes in an application is a `Location` built out of
+/// request data. `?next=/x%0d%0aSet-Cookie:%20admin=1` sets a cookie the
+/// application never wrote, and there is no line in the application where that
+/// cookie is set. nilo refused these bytes in two places already —
+/// `Ctx.requestId` for an id a client sent, `Cookie.check` for a cookie value
+/// — and what was left unguarded was the API an application actually writes.
+pub fn headerValueOk(value: []const u8) bool {
+    for (value) |ch| {
+        if (ch == ' ' or ch == '\t') continue;
+        if (ch < 0x21 or ch == 0x7F) return false;
+    }
+    return true;
 }
-
-const ends_the_line: u8 = 1;
-const ends_the_name: u8 = 2;
-
-/// One table load and one `or` per byte, and the answer read once at the end.
-/// Branchless on purpose: a per-byte `if` on a header name that is nearly
-/// always fine is a branch that predicts perfectly and still costs the
-/// dependency chain.
-fn holds(text: []const u8, comptime mask: u8) bool {
-    var seen: u8 = 0;
-    for (text) |c| seen |= bad_byte[c];
-    return seen & mask != 0;
-}
-
-const bad_byte = blk: {
-    var table: [256]u8 = @splat(0);
-    table['\r'] = ends_the_line;
-    table['\n'] = ends_the_line;
-    table[0] = ends_the_line;
-    table[':'] = ends_the_name;
-    table[' '] = ends_the_name;
-    table['\t'] = ends_the_name;
-    break :blk table;
-};
 
 /// Iterate every header in a head (the request line is skipped), for
 /// layers that need all the headers, not just the ones the parser uses.
@@ -1268,21 +1256,21 @@ test "extra headers go out after the framework's own" {
 }
 
 test "a value that would end the header line early is spotted at every offset" {
-    // At every offset either side of a block boundary, because the scan is
-    // block-at-a-time and a byte in the tail is the one that gets missed.
+    // Every offset of every length, because a check that reads all but the
+    // last byte passes every example written by hand.
     var buf: [80]u8 = undefined;
-    for ([_]u8{ '\r', '\n', 0 }) |bad| {
+    for ([_]u8{ '\r', '\n', 0, 0x7F }) |bad| {
         for (1..buf.len) |len| {
             for (0..len) |at| {
                 @memset(buf[0..len], 'x');
-                try testing.expect(!breaksTheLine(buf[0..len]));
+                try testing.expect(headerValueOk(buf[0..len]));
                 buf[at] = bad;
-                try testing.expect(breaksTheLine(buf[0..len]));
+                try testing.expect(!headerValueOk(buf[0..len]));
             }
         }
     }
 
-    // And the values an ordinary response actually carries are not.
+    // And the values an ordinary response actually carries are fine.
     for ([_][]const u8{
         "",
         "https://example.dev/welcome",
@@ -1292,21 +1280,21 @@ test "a value that would end the header line early is spotted at every offset" {
         "bytes 0-99/1000",
         "session=abc; Path=/; HttpOnly; SameSite=Lax",
         "text/plain; charset=utf-8",
-    }) |value| try testing.expect(!breaksTheLine(value));
+    }) |value| try testing.expect(headerValueOk(value));
 }
 
-test "a header name that would forge a second header is refused" {
+test "the header names an ordinary response carries are all tokens" {
     for ([_][]const u8{
         "Vary",
         "X-Request-Id",
         "Access-Control-Allow-Origin",
         "ETag",
         "x_custom",
-        // Not a legal token, and harmless: it cannot end its own line.
-        "X-(A)",
-    }) |name| try testing.expect(!forgesAHeader(name));
+    }) |name| try testing.expect(headerNameOk(name));
 
-    // The empty name, and the six bytes that end the name or the line.
+    // The empty name, the bytes that end the name early, and the ones that
+    // end the line. `X-(A)` cannot forge anything — parentheses are refused
+    // because the grammar refuses them, not because they are dangerous.
     for ([_][]const u8{
         "",
         "X-A: b",
@@ -1315,7 +1303,8 @@ test "a header name that would forge a second header is refused" {
         "X-A\r\nY",
         "X-A\n",
         "X-A\x00",
-    }) |name| try testing.expect(forgesAHeader(name));
+        "X-(A)",
+    }) |name| try testing.expect(!headerNameOk(name));
 }
 
 test "the framework's own headers are reserved" {
@@ -1325,17 +1314,61 @@ test "the framework's own headers are reserved" {
     try testing.expect(!isReservedHeader("Vary"));
 }
 
-test "Set-Cookie and Vary are the two headers a response may carry twice" {
+test "the two headers a response may carry more than one of" {
+    // Folding is forbidden for this one, so two cookies are two lines.
     try testing.expect(repeats("Set-Cookie"));
     try testing.expect(repeats("set-cookie"));
+    // Folding is allowed for this one, and two layers each name their own
+    // axis — so replacing threw one of them away (ADR 0089).
     try testing.expect(repeats("Vary"));
-    try testing.expect(repeats("VARY"));
+    try testing.expect(repeats("vary"));
+
+    // Everything else is somebody changing their mind, and the second call
+    // replaces the first.
     try testing.expect(!repeats("Location"));
+    try testing.expect(!repeats("ETag"));
     try testing.expect(!repeats("Cache-Control"));
-    // And neither is a header the framework writes itself, so both go through
-    // `setHeader` like any other.
+
+    // And neither of the two is a header the framework writes itself, so both
+    // go through `setHeader` like any other.
     try testing.expect(!isReservedHeader("Set-Cookie"));
     try testing.expect(!isReservedHeader("Vary"));
+}
+
+test "a header name is a token, and nothing else is one" {
+    try testing.expect(headerNameOk("X-Request-Id"));
+    try testing.expect(headerNameOk("ETag"));
+    try testing.expect(headerNameOk("!#$%&'*+-.^_`|~"));
+
+    // The two that would end the name early and start something else.
+    try testing.expect(!headerNameOk("X-Bad: injected"));
+    try testing.expect(!headerNameOk("X-Bad\r\nX-Other"));
+    // A space is what separates a name from nothing at all — there is no
+    // whitespace allowed before the colon (RFC 9112 §5.1), and a header line
+    // with one is how a smuggled field gets past a lax parser.
+    try testing.expect(!headerNameOk("X Bad"));
+    try testing.expect(!headerNameOk(""));
+}
+
+test "a header value refuses the two bytes that would start a second header" {
+    try testing.expect(headerValueOk("text/html; charset=utf-8"));
+    try testing.expect(headerValueOk("W/\"abc-123\""));
+    // Space and horizontal tab are the two whitespace bytes a value may hold.
+    try testing.expect(headerValueOk("one, two\tthree"));
+    try testing.expect(headerValueOk(""));
+    // obs-text: deprecated, allowed, and what a UTF-8 filename is made of.
+    try testing.expect(headerValueOk("attachment; filename=\"café.pdf\""));
+
+    // The whole reason the function exists. One of these ends the header and
+    // starts another; two of them end the head and start a response body.
+    try testing.expect(!headerValueOk("/welcome\r\nX-Injected: 1"));
+    try testing.expect(!headerValueOk("/welcome\nX-Injected: 1"));
+    try testing.expect(!headerValueOk("/welcome\r"));
+    try testing.expect(!headerValueOk("a\r\n\r\nHTTP/1.1 200 OK"));
+    // Neither of these splits anything. Both mean the value came from
+    // somewhere it should not have.
+    try testing.expect(!headerValueOk("a\x00b"));
+    try testing.expect(!headerValueOk("a\x7Fb"));
 }
 
 test "the redirect statuses all have a phrase, and it is written from the constant" {

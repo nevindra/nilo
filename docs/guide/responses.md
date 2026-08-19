@@ -34,6 +34,22 @@ there is nothing left to change afterwards.
 framework's to write, and setting them is refused — a response carrying two of
 any of those is malformed. Pass the content type to `send` instead.
 
+**`Set-Cookie` and `Vary` are the two that add rather than replace.** Two
+cookies are two lines because they cannot be folded into one; two `Vary` lines
+happen because the CORS middleware and a gzipped static file each name a
+different axis of the same response, and replacing lost one of them
+([ADR 0089](../adr/0089-two-layers-can-each-name-a-vary-axis.md)). Setting
+either with a name and value already there adds nothing.
+
+**A value may not hold a control byte, and a name has to be a token.** A header
+is `name: value\r\n` with no escaping in it, so a value carrying a newline does
+not make a broken header — it makes a second one, and two of them start a second
+response. Both are refused with a 500 naming the header
+([ADR 0087](../adr/0087-a-header-value-cannot-end-its-own-line.md)). This is
+worth knowing about for the values that did not come from you: a `Location` read
+out of a database, a filename off an upload. Percent-encode those, or strip
+them.
+
 For a handler that returns a value, the same headers are set through
 `.headers`, which is copied rather than borrowed:
 

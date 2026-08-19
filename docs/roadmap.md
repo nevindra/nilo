@@ -395,29 +395,9 @@ The axis is throughput, and it is paid only by a request that carries an
 application wrote. Nothing per connection, nothing per request that is not
 cross-origin.
 
-The `Vary` gap below points here, because the two are the same header being
-made to work.
-
-**Waiting on: ready.**
-
-**4. An expiry the sealed session enforces itself.** `max_age` today is a cookie
-attribute, which is the client's to honour. A cookie copied out of a browser
-stays valid until the secret changes, and `session.open` has nothing to check it
-against: the plaintext is a version byte, a four-byte shape fingerprint and the
-fields (`session.plainSize`). Eight bytes of `nowMillis()` in front of the
-fields, and a `max_age_ms` compared in `open`, buy an expiry the server decides,
-with no store and no sweep.
-
-The cost is eight to twelve more base64 characters in the cookie, depending on
-where `plainSize(T)` lands against a multiple of three, plus one clock read per
-`seal` and one comparison per `open`. No allocation, and nothing per connection.
-Cookies written by the old build stop opening for free: `open` already refuses
-anything whose length is not `plainSize(T) + overhead`, and
-`session.cookieSize` already reports the total, so the ceiling check keeps
-working unchanged.
-
-This is not revocation. A cookie inside its window is still valid, which is what
-"Signing out everywhere" under **Not decided** is about.
+`Vary: Origin` is already repeated rather than replaced
+([ADR 0089](./adr/0089-two-layers-can-each-name-a-vary-axis.md)), so the caching
+half of this is done and what is left is the matching.
 
 **Waiting on: ready.**
 
@@ -886,6 +866,21 @@ hundreds of them.
 build profile` is the harness for the day they do, and two attempts that lost
 are written up in [`history.md`](./history.md) so they are not repeated.
 
+**`inline_headers` went from six to seven and nobody has re-run the
+per-connection figure.** Holding a seventh response header on the `Ctx` is 32
+bytes on `serveRequest`'s frame, which is `noinline` and unwound before the
+connection waits ([ADR 0089](./adr/0089-two-layers-can-each-name-a-vary-axis.md)),
+so the reasoning says an idle connection is untouched at 4,669 bytes flat. The
+reasoning is all there is: `bench/mem.py` reads `ss` and `/proc/<pid>/VmRSS` and
+the change was made on Darwin, where neither exists.
+
+ADR 0063 is the reason this is written down rather than assumed. A per-connection
+claim reasoned from the shape of the code, and repeated in six files, was half
+wrong for two milestones.
+
+**Waiting on: a machine.** One Linux box and `python3 bench/mem.py --port 8787
+--path /health` against `zig build run-hello` settles it in a minute.
+
 **A 404 or a 405 with middleware registered costs one allocation.** Routes and
 static files have their chains resolved at `listen()`, so neither pays for the
 middleware in front of it. The set of paths that are neither is every string
@@ -941,6 +936,22 @@ the sort of disagreement nobody finds for a year.
 **What would settle it: a client that sends one.** An ETag is what every browser
 and CDN made this century sends, and a second validator for a case nobody has
 produced is a second thing to keep in step.
+
+**A schedule, rather than a loop around a sleep.** `app.spawn` starts work that
+is not a request and `nilo.sleep` paces it
+([ADR 0086](./adr/0086-work-that-is-not-a-request-belongs-to-the-server.md)),
+which covers "every so often" and nothing else. Wall-clock times, "at 03:00 on
+Sundays", and what happens when one run overruns the next are all arithmetic
+the caller writes today.
+
+Each of those is a policy with no answer that is right for everybody: whether a
+missed run is dropped or caught up, whether two may overlap, whether the first
+is at zero or at the interval. A type that made the caller state them would be
+a schedule worth having; an `every(ms, f)` that picked them quietly would not,
+which is why ADR 0086 refused that shape rather than deferring it.
+
+**What would settle it: somebody who has written the loop twice** and can say
+which of those policies they had to pick, and what they picked.
 
 ---
 

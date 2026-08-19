@@ -237,10 +237,19 @@ writer rather than the exact bytes the framework ships.
 ### What checking every response header costs
 
 Run to settle one question:
-[ADR 0086](../../docs/adr/0086-a-response-header-cannot-forge-a-second-one.md)
-refuses a response header value carrying `\r`, `\n` or `\0`, and the open choice
+[ADR 0087](../../docs/adr/0087-a-header-value-cannot-end-its-own-line.md)
+refuses a response header value that can end its own line, and the open choice
 was whether to do it in every optimize mode or only in `Debug` and
 `ReleaseSafe`. Same harness, same box, commit `a1537a6` as the baseline.
+
+**Measured against a table-driven predicate that did not ship.** This run was
+taken on the branch that refused only the six bytes with a consequence; what
+merged is ADR 0087's `token` and `field-value` rules, which are a per-byte loop
+rather than a table lookup. The numbers below are what *having a guard on every
+`setHeader`* costs, and that is the question they were run to answer. What the
+shipped predicate costs on its own has not been measured separately — it is a
+loop over the same bytes with no table load, so it is expected to land inside
+this spread, and "expected" is doing real work in that sentence.
 
 Three trees, built and run interleaved (HEAD, HEAD plus the four other fixes in
 this batch, and that plus the guard), so a machine that drifts drifts through
@@ -275,7 +284,8 @@ loop, so three delimiters over a 27-byte header name is three passes of 27
 iterations rather than one vector compare. Header names and header values are
 nearly always under a block. Replacing it with one branchless pass over a
 256-byte table, one load and one `or` per byte with the answer read once at the
-end, is where the other 6ns went.
+end, is where the other 6ns went. The table is not what shipped, but the lesson
+survives the predicate: whatever the rule is, it wants one pass over the bytes.
 
 The general form of that: **a SIMD helper that was fast where it was written is
 not automatically fast where it is reused.** `scan.zig`'s own header says it

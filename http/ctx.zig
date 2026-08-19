@@ -46,18 +46,27 @@ pub const json_hint = 512;
 
 /// How many response headers a request holds without reaching for the arena.
 ///
-/// Six covers what the built-in middleware set puts on one response: CORS
-/// one to three, and a static file up to five — `ETag`, `Cache-Control`,
-/// `Accept-Ranges`, and, once a file has a gzipped copy beside it,
-/// `Vary` and `Content-Encoding`. It was four until gzip added those two,
-/// and four would have meant every compressed asset spilling to the arena
-/// for one header over.
+/// Seven covers the shape most applications deploy: a CORS naming an origin
+/// (`Access-Control-Allow-Origin` and `Vary: Origin`) in front of a gzipped
+/// static file (`ETag`, `Cache-Control`, `Accept-Ranges`, `Vary:
+/// Accept-Encoding`, `Content-Encoding`). It was four until gzip added two,
+/// six until `Vary` stopped replacing itself (ADR 0089), and each of those
+/// moves was made because a test measured the spill rather than because the
+/// arithmetic looked tight — `test "a gzipped file behind a named-origin CORS
+/// still allocates nothing"` is the one that holds this number.
 ///
-/// Each slot is two slices on a Ctx that already lives on the fiber's
-/// stack, so the two extra cost 64 bytes of a stack that is two pages and
-/// nothing at all in allocations — which is the invariant they are here to
-/// keep (ADR 0018).
-const inline_headers = 6;
+/// **A CORS with `credentials` or `expose` set still spills**, as it did
+/// before: those add two more and the count is nine. That is one arena
+/// allocation on a response that has already decided to carry nine headers,
+/// and raising the number to cover it would cost every request the stack
+/// instead.
+///
+/// Each slot is two slices on a Ctx that lives on the fiber's stack — and on a
+/// frame that is unwound before the connection waits for its next request
+/// (ADR 0071), so this is not memory an idle connection holds. Which is why
+/// the trade runs this way at all: 32 bytes of a transient frame against an
+/// allocation on the path nearly every app serves (ADR 0018).
+pub const inline_headers = 7;
 
 /// One resolved value, kept for the rest of the request that asked for it.
 ///
@@ -790,24 +799,63 @@ pub const Ctx = struct {
         return self._extra_inline[0..self._extra_n];
     }
 
+    /// Every response header goes through here — `setHeader`,
+    /// `setStaticHeader`, `setCookie`, a `Response`'s or a `Redirect`'s
+    /// `.headers`, and the built-in middleware. **One choke point on purpose**,
+    /// for `aboutToRead`'s reason: a new way to set a header gets the checks
+    /// below without anybody remembering to give it one (ADR 0087).
+    ///
+    /// All three refusals are a mistake in the server rather than in the
+    /// request, so all three are `fail.internal` — a 500 that says which
+    /// header and why, the way `setCookie` has always answered a `;` in a
+    /// cookie value. A bare error here would arrive as "internal server
+    /// error" and send somebody looking through their handler for it.
     fn putHeader(self: *Ctx, entry: http1.Header) !void {
-        if (http1.isReservedHeader(entry.name)) return error.ReservedHeader;
-        // The one point every response header goes through, which is why the
-        // check is here and not at each of the half-dozen callers
-        // (`http1.breaksTheLine`).
-        if (http1.forgesAHeader(entry.name)) return error.BadHeaderName;
-        if (http1.breaksTheLine(entry.value)) return error.BadHeaderValue;
+        if (http1.isReservedHeader(entry.name)) return fail.internal(
+            "\"{s}\" is a header nilo writes itself, so setting it would send the response two " ++
+                "of them — which is malformed, and for Content-Length is a request-smuggling " ++
+                "bug. The content type is chosen through `send`; the other three are the " ++
+                "framing and are not yours to set.",
+            .{entry.name},
+        );
+        if (!http1.headerNameOk(entry.name)) return fail.internal(
+            "\"{s}\" is not a name a header can have — a field name is letters, digits, and " ++
+                "any of !#$%&'*+-.^_`|~",
+            .{entry.name},
+        );
+        // The value is **not** quoted into the message. It is the half most
+        // likely to have come from a request, a row or a filename, and a
+        // response that echoed it back would hand the sender a way to read
+        // what the check caught.
+        if (!http1.headerValueOk(entry.value)) return fail.internal(
+            "the value of the header \"{s}\" holds a character a header value cannot: a control " ++
+                "byte, most often a carriage return or a newline. Either one ends the header " ++
+                "early and starts a second one nobody wrote, and two of them start a second " ++
+                "response — so this is refused rather than escaped, because there is no " ++
+                "escaping in this grammar to do it with. Percent-encode the value, or strip it.",
+            .{entry.name},
+        );
         // Setting a header twice is somebody changing their mind, so the
-        // second call replaces the first. The exceptions are the two headers
-        // where a second call is another layer adding to the first rather
-        // than overruling it: two cookies are two `Set-Cookie` lines, and two
-        // `Vary` lines are one comma-joined list (`http1.repeats`).
+        // second call replaces the first — except for the two a response may
+        // legitimately carry more than one of (`http1.repeats`).
         if (!http1.repeats(entry.name)) {
             for (self.extraHeadersMutable()) |*h| {
                 if (std.ascii.eqlIgnoreCase(h.name, entry.name)) {
                     h.* = entry; // last one wins, rather than sending both
                     return;
                 }
+            }
+        } else {
+            // A repeating header naming something already named is nothing —
+            // not a second fact, just the same one twice. Dropping it keeps
+            // `Vary: Origin, Vary: Origin` off a response when two middlewares
+            // both depend on the origin, and keeps the count inside the six
+            // held on the Ctx, which is where the allocation budget lives
+            // (ADR 0089). Never reached by `Set-Cookie` in practice: two
+            // cookies that agree on name *and* value are one cookie.
+            for (self.extraHeaders()) |h| {
+                if (std.ascii.eqlIgnoreCase(h.name, entry.name) and
+                    std.mem.eql(u8, h.value, entry.value)) return;
             }
         }
 
