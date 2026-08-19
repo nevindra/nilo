@@ -178,7 +178,7 @@ pub const Uuid = struct {
     /// What the line above sends, said in a form that needs no import.
     ///
     /// `jsonStringify` is the whole reason `nilo_http` needs no knowledge of
-    /// this module ([ADR 0046](../docs/adr/0046-randomness-is-an-argument.md)):
+    /// this module ([ADR 0046](../docs/adr/0046-entropy-belongs-to-the-loop.md)):
     /// a `Uuid` in a response comes out as text and the HTTP module never
     /// learns the type exists. The API description had the other half of that
     /// and it was wrong — it reflected `bytes: [16]u8` and told every

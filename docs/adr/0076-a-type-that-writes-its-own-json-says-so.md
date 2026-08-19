@@ -6,7 +6,7 @@
 ## Context
 
 `nilo_id`'s `Uuid` carries a `jsonStringify`, and that is the whole reason
-`nilo_http` needs no knowledge of `nilo_id` ([ADR 0046](./0046-randomness-is-an-argument.md)):
+`nilo_http` needs no knowledge of `nilo_id` ([ADR 0046](./0046-entropy-belongs-to-the-loop.md)):
 a `Uuid` in a response comes out as text and the HTTP module never learns the
 type exists. Over the wire, from a running server:
 

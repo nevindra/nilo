@@ -101,7 +101,7 @@ pub const Object = struct {
 ///
 /// `tag` is null for the one `std.json` writes — an object with a single key,
 /// the arm's name — and is the discriminator's own key when the type said so
-/// with `nilo_json` ([ADR 0085](./adr/0085-a-type-says-how-its-json-is-spelled.md)).
+/// with `nilo_json` ([ADR 0085](../docs/adr/0085-a-type-says-how-its-json-is-spelled.md)).
 /// The two are different documents, not a different rendering of one: the first
 /// nests the arm under its name, the second puts the name beside the arm's own
 /// fields, and a generated client cannot read one from the other.
