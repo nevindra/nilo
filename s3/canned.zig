@@ -103,9 +103,30 @@ const Canned = struct {
     expected: [64]u8 = undefined,
     got: [64]u8 = undefined,
 
+    /// A port nobody else in the suite is using, walked from a different place
+    /// each run.
+    ///
+    /// Both halves were learned the expensive way in `fetch/live.zig`, whose
+    /// own `open` carries the long version. A server that closes a connection
+    /// leaves its local port in `TIME-WAIT` for a minute, so a **fixed** start
+    /// walks straight back over the ports the previous run just finished with,
+    /// and a **narrow** range runs out. This was 200 ports from a fixed 39,600
+    /// and it failed on the sixth of ten consecutive `zig build test-all` runs
+    /// with `error.NoFreePort`, in whichever s3 test happened to be next.
+    ///
+    /// The range also has to be **disjoint from `fetch/live.zig`'s**, which it
+    /// was not: 39,600–39,799 sat inside 39,200–40,199, so `fetch`'s thousand
+    /// ports rolled over `s3`'s two hundred and starved them first. Two files
+    /// picking loopback ports is two files that have to agree, and the only
+    /// thing holding that agreement is these two comments pointing at each
+    /// other.
     fn open(io: std.Io) !Canned {
-        var candidate: u16 = 39_600;
-        while (candidate < 39_800) : (candidate += 1) {
+        const first: u16 = 40_200;
+        const count: u16 = 1_000;
+        const start: u16 = @intCast(@as(u64, std.Thread.getCurrentId()) % count);
+        var tried: u16 = 0;
+        while (tried < count) : (tried += 1) {
+            const candidate = first + (start + tried) % count;
             const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(candidate) };
             const server = address.listen(io, .{}) catch continue;
             return .{ .server = server, .io = io, .port = candidate };
