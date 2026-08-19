@@ -307,8 +307,15 @@ plus a per-arm `allOf` for a tagged one. See
 
 `Content-Type`, `Content-Length`, `Transfer-Encoding` and `Connection` are
 refused by `setHeader`. Set headers before sending. Setting the same header
-twice replaces it — except `Set-Cookie`, which a response may carry more than
-one of.
+twice replaces it, except `Set-Cookie` and `Vary`, which a response may carry
+more than one of.
+
+A value carrying `\r`, `\n` or `\0` is `error.BadHeaderValue`, and a name that
+is empty or carries any of those or `:`, a space or a tab is
+`error.BadHeaderName`. Those bytes end the header line rather than sitting in
+it, so a header built out of request data would otherwise write the rest of the
+response itself
+([ADR 0086](./adr/0086-a-response-header-cannot-forge-a-second-one.md)).
 
 `sendFile` also takes `size` (null asks the file), `etag` and `cache_control`,
 and answers a `Range`, an `If-Range`, an `If-None-Match` and a `HEAD` from them.

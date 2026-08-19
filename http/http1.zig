@@ -48,6 +48,12 @@ pub const Request = struct {
     keep_alive: bool = true,
     content_length: u64 = 0,
     chunked: bool = false,
+    /// Whether a `Content-Length` was actually sent, which `content_length`
+    /// alone cannot say: an absent header and `Content-Length: 0` both leave
+    /// it zero, and the two are not the same request. Only the framing checks
+    /// in `applyHeaderAt` read it. Free in memory: it lands in padding the
+    /// struct already had.
+    has_content_length: bool = false,
     /// Whether `Connection` mentions an upgrade — so this connection may stop
     /// being HTTP and start being read by something else (ADR 0022).
     ///
@@ -189,16 +195,93 @@ pub fn isReservedHeader(name: []const u8) bool {
 /// Headers a response may legitimately carry more than one of, and so the
 /// ones `Ctx.setHeader` must not treat as a replacement.
 ///
-/// There is exactly one, and it is not a matter of taste: RFC 6265 §3 says a
-/// server sending two cookies has to send two `Set-Cookie` lines, and that
-/// they may not be folded into one comma-separated value the way every other
-/// repeatable header may. So "last one wins" — which is right for `Vary` or
-/// a cache directive, where a second call is somebody changing their mind —
-/// would mean setting a session cookie and a preference cookie silently
-/// delivered only the second.
+/// There are two, and neither is a matter of taste.
+///
+/// RFC 6265 §3 says a server sending two cookies has to send two
+/// `Set-Cookie` lines, and that they may not be folded into one
+/// comma-separated value the way every other repeatable header may. So "last
+/// one wins" would mean setting a session cookie and a preference cookie
+/// silently delivered only the second.
+///
+/// `Vary` is the other, and it is the one that bit. RFC 9110 §12.5.5 makes it
+/// the list of request headers a response was selected by, and two layers
+/// each name a different entry: `cors.with` sets `Vary: Origin` before the
+/// handler runs, then a compressed static file sets `Vary: Accept-Encoding`
+/// and, as a replacement, dropped the `Origin` on the floor. A shared cache
+/// reading the result is then entitled to hand one origin's response to
+/// another. Repeating is not a workaround for that: RFC 9110 §5.3 says a
+/// recipient joins repeated field lines with commas, so `Vary: Origin` plus
+/// `Vary: Accept-Encoding` *is* `Vary: Origin, Accept-Encoding`.
 pub fn repeats(name: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(name, "set-cookie");
+    return std.ascii.eqlIgnoreCase(name, "set-cookie") or
+        std.ascii.eqlIgnoreCase(name, "vary");
 }
+
+/// Bytes that must never reach a response header value, and one reason each.
+///
+/// `\r` and `\n` end a header line, so a value carrying either stops being a
+/// value and starts being the rest of the response. The shape it takes is a
+/// `Location` built out of request data. `?next=/x%0d%0aSet-Cookie:%20admin=1`
+/// sets a cookie the application never wrote, and there is no line in the
+/// application where that cookie is set. `\0` is here for the hop after nilo:
+/// it ends the string for anything downstream written in C, which makes "the
+/// header nilo sent" and "the header the proxy read" two different headers.
+///
+/// nilo has refused these bytes in two places for a while (`Ctx.requestId`
+/// for an id a client sent, `Cookie.check` for a cookie value), and the thing
+/// left unguarded was the API an application actually writes. This is that
+/// gap closed at the one point every response header goes through.
+///
+/// Checked in every optimize mode rather than in `Debug` and `ReleaseSafe`
+/// only. The argument is `password.zig`'s: a protection that has to be
+/// remembered is one that gets forgotten, and this one is not the caller's to
+/// remember.
+///
+/// It is a table and not `scan.positionsOf`, and that is a measurement rather
+/// than a preference. `positionsOf` is fast on a request head and wrong here:
+/// under one block it falls to its scalar tail, so three delimiters over a
+/// 27-byte header name is three passes of 27 iterations. Written that way the
+/// check cost 9ns of a 198ns request; as one branchless pass it costs 2ns.
+/// See [`bench/result/http.md`](../bench/result/http.md).
+pub fn breaksTheLine(value: []const u8) bool {
+    return holds(value, ends_the_line);
+}
+
+/// Whether a header **name** carries a byte that would forge a header.
+///
+/// Not RFC 9110 §5.6.2's `token`, which is stricter, and the difference is
+/// deliberate. A name like `X-A(B)` is not a legal token and cannot do any
+/// harm: it goes out as one header line and the recipient reads it as one
+/// header line. What forges a second header is `:`, a space or a tab (which
+/// end the name early) and the three that end the line. Those are the six
+/// checked, because those are the six with a consequence.
+pub fn forgesAHeader(name: []const u8) bool {
+    return name.len == 0 or holds(name, ends_the_line | ends_the_name);
+}
+
+const ends_the_line: u8 = 1;
+const ends_the_name: u8 = 2;
+
+/// One table load and one `or` per byte, and the answer read once at the end.
+/// Branchless on purpose: a per-byte `if` on a header name that is nearly
+/// always fine is a branch that predicts perfectly and still costs the
+/// dependency chain.
+fn holds(text: []const u8, comptime mask: u8) bool {
+    var seen: u8 = 0;
+    for (text) |c| seen |= bad_byte[c];
+    return seen & mask != 0;
+}
+
+const bad_byte = blk: {
+    var table: [256]u8 = @splat(0);
+    table['\r'] = ends_the_line;
+    table['\n'] = ends_the_line;
+    table[0] = ends_the_line;
+    table[':'] = ends_the_name;
+    table[' '] = ends_the_name;
+    table['\t'] = ends_the_name;
+    break :blk table;
+};
 
 /// Iterate every header in a head (the request line is skipped), for
 /// layers that need all the headers, not just the ones the parser uses.
@@ -443,12 +526,26 @@ fn applyHeaderAt(buf: []const u8, from: usize, colon: usize, end: usize, r: *Req
         },
         "content-length".len => {
             if (!std.ascii.eqlIgnoreCase(name, "content-length")) return;
-            r.content_length = std.fmt.parseInt(u64, headerValue(buf, colon, end), 10) catch
-                return error.BadHeader;
+            // A body framed two ways is a body the proxy in front and nilo
+            // can measure differently, and the difference is where a
+            // smuggled request travels (RFC 9112 §6.3). Both shapes of that
+            // are refused here rather than resolved.
+            if (r.chunked) return error.BadHeader;
+            const n = digitsOnly(headerValue(buf, colon, end)) orelse return error.BadHeader;
+            if (r.has_content_length and n != r.content_length) return error.BadHeader;
+            r.content_length = n;
+            r.has_content_length = true;
         },
         "transfer-encoding".len => {
             if (!std.ascii.eqlIgnoreCase(name, "transfer-encoding")) return;
-            if (std.ascii.indexOfIgnoreCase(headerValue(buf, colon, end), "chunked") != null) r.chunked = true;
+            // A second `Transfer-Encoding` line continues the first one's
+            // list (RFC 9110 §5.3), so a `chunked` already seen is no longer
+            // the last coding, which RFC 9112 §6.1 requires it to be.
+            if (r.chunked) return error.BadHeader;
+            if (saysChunked(headerValue(buf, colon, end))) {
+                if (r.has_content_length) return error.BadHeader;
+                r.chunked = true;
+            }
         },
         else => {},
     }
@@ -456,6 +553,36 @@ fn applyHeaderAt(buf: []const u8, from: usize, colon: usize, end: usize, r: *Req
 
 fn headerValue(buf: []const u8, colon: usize, end: usize) []const u8 {
     return std.mem.trim(u8, buf[colon + 1 .. end], " \t");
+}
+
+/// A digits-only number. `std.fmt.parseInt` accepts `+5`, `-0` and `1_0`, and
+/// a `Content-Length` is none of those: RFC 9112 §6.2 says the value is
+/// `1*DIGIT` and nothing else. What makes that matter rather than merely
+/// being wrong is that the proxy in front (ADR 0028) very likely refuses the
+/// same bytes, so accepting them is nilo agreeing to read a request nobody
+/// else agreed to.
+///
+/// A leading zero is *not* in that list. `05` is two digits and so is legal
+/// ABNF, every parser reads it as 5, and refusing it would turn a request
+/// everyone agrees about into a 400.
+///
+/// `range.zig` carries the same four lines for the same reason, and they stay
+/// separate on purpose: `range.zig` has to keep running under a plain `zig
+/// test http/range.zig`, which importing this file would cost it.
+fn digitsOnly(text: []const u8) ?u64 {
+    if (text.len == 0) return null;
+    for (text) |c| if (!std.ascii.isDigit(c)) return null;
+    return std.fmt.parseInt(u64, text, 10) catch null;
+}
+
+/// Whether `Transfer-Encoding` says chunked, which RFC 9112 §6.1 allows only
+/// as the **last** coding in the list. Looking for the word anywhere in the
+/// value would take `xchunked` and `chunked-x` for it, and a front end that
+/// reads those as a coding it does not know while nilo reads them as framing
+/// is the same disagreement by another spelling.
+fn saysChunked(value: []const u8) bool {
+    const from = if (std.mem.lastIndexOfScalar(u8, value, ',')) |c| c + 1 else 0;
+    return std.ascii.eqlIgnoreCase(std.mem.trim(u8, value[from..], " \t"), "chunked");
 }
 
 pub fn statusPhrase(status: u16) []const u8 {
@@ -891,16 +1018,114 @@ test "the headers that matter are read at any position in a long head" {
         defer gpa.free(filler);
         @memset(filler, 'y');
 
-        const head = try std.mem.concat(gpa, u8, &.{
+        // The two framings take a turn each at the same offsets rather than
+        // sharing one head, because a head carrying both is now refused.
+        const sized = try std.mem.concat(gpa, u8, &.{
             "POST / HTTP/1.1\r\nX-Pad: ", filler,
-            "\r\nContent-Length: 1234\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n",
+            "\r\nContent-Length: 1234\r\nConnection: close\r\n\r\n",
         });
-        defer gpa.free(head);
+        defer gpa.free(sized);
 
         var r = Request{};
-        try parseHead(head, &r);
+        try parseHead(sized, &r);
         try testing.expectEqual(@as(u64, 1234), r.content_length);
+        try testing.expect(r.has_content_length);
         try testing.expect(!r.keep_alive);
+        try testing.expect(!r.chunked);
+
+        const streamed = try std.mem.concat(gpa, u8, &.{
+            "POST / HTTP/1.1\r\nX-Pad: ", filler,
+            "\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+        });
+        defer gpa.free(streamed);
+
+        var r2 = Request{};
+        try parseHead(streamed, &r2);
+        try testing.expect(r2.chunked);
+        try testing.expect(!r2.keep_alive);
+    }
+}
+
+test "a Content-Length that is not plain digits is refused" {
+    // Every one of these is a number `std.fmt.parseInt` is happy to read and
+    // RFC 9112 §6.2 is not, and the proxy in front is very likely to agree
+    // with the RFC. `+5` came back as 5, `1_0` as 10 and `-0` as 0.
+    for ([_][]const u8{ "+5", "-0", "-5", "1_0", " ", "0x10", "5 5", "٥" }) |value| {
+        var r = Request{};
+        var buf: [128]u8 = undefined;
+        const head = try std.fmt.bufPrint(
+            &buf,
+            "POST / HTTP/1.1\r\nContent-Length: {s}\r\n\r\n",
+            .{value},
+        );
+        try testing.expectError(error.BadHeader, parseHead(head, &r));
+    }
+
+    // A leading zero is two digits, so it is legal and stays legal.
+    for ([_]struct { []const u8, u64 }{ .{ "0", 0 }, .{ "05", 5 }, .{ "42", 42 } }) |case| {
+        var r = Request{};
+        var buf: [128]u8 = undefined;
+        const head = try std.fmt.bufPrint(
+            &buf,
+            "POST / HTTP/1.1\r\nContent-Length: {s}\r\n\r\n",
+            .{case[0]},
+        );
+        try parseHead(head, &r);
+        try testing.expectEqual(case[1], r.content_length);
+        try testing.expect(r.has_content_length);
+    }
+}
+
+test "a body framed twice is refused rather than framed either way" {
+    // RFC 9112 §6.3. Whichever of the two nilo picked, a front end that
+    // picked the other would have let a second request through inside this
+    // one's body.
+    const both_ways = [_][]const u8{
+        "POST / HTTP/1.1\r\nContent-Length: 6\r\nTransfer-Encoding: chunked\r\n\r\n",
+        "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 6\r\n\r\n",
+        // Two lengths that disagree, in either order.
+        "POST / HTTP/1.1\r\nContent-Length: 6\r\nContent-Length: 7\r\n\r\n",
+        "POST / HTTP/1.1\r\nContent-Length: 7\r\nContent-Length: 6\r\n\r\n",
+        // Two `Transfer-Encoding` lines are one list, so the first `chunked`
+        // was not the last coding.
+        "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: gzip\r\n\r\n",
+    };
+    for (both_ways) |head| {
+        var r = Request{};
+        try testing.expectError(error.BadHeader, parseHead(head, &r));
+    }
+
+    // Repeating the *same* length is allowed: RFC 9110 §5.3 lets a recipient
+    // treat it as the one value it agrees on.
+    var same = Request{};
+    try parseHead("POST / HTTP/1.1\r\nContent-Length: 6\r\nContent-Length: 6\r\n\r\n", &same);
+    try testing.expectEqual(@as(u64, 6), same.content_length);
+}
+
+test "chunked has to be the last coding, and has to be spelled that way" {
+    // `xchunked` is not `chunked`. A substring search took it for one, which
+    // is a front end reading an unknown coding while nilo reads framing.
+    for ([_][]const u8{ "xchunked", "chunked-x", "chunked, gzip", "gzip" }) |value| {
+        var r = Request{};
+        var buf: [128]u8 = undefined;
+        const head = try std.fmt.bufPrint(
+            &buf,
+            "POST / HTTP/1.1\r\nTransfer-Encoding: {s}\r\n\r\n",
+            .{value},
+        );
+        try parseHead(head, &r);
+        try testing.expect(!r.chunked);
+    }
+
+    for ([_][]const u8{ "chunked", "CHUNKED", "gzip, chunked", "gzip ,  chunked " }) |value| {
+        var r = Request{};
+        var buf: [128]u8 = undefined;
+        const head = try std.fmt.bufPrint(
+            &buf,
+            "POST / HTTP/1.1\r\nTransfer-Encoding: {s}\r\n\r\n",
+            .{value},
+        );
+        try parseHead(head, &r);
         try testing.expect(r.chunked);
     }
 }
@@ -936,9 +1161,16 @@ test "the fused parser agrees with a plain line-by-line one" {
         "GET / HTTP/1.1\r\nCookie: a=1; b=2\r\nConnection: close\r\n\r\n",
         "GET / HTTP/1.1\r\nX: a:b:c\r\nConnection: close\r\n\r\n",
         "GET / HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 3\r\n\r\n",
+        "POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",
+        "POST / HTTP/1.1\r\nTransfer-Encoding: xchunked\r\n\r\n",
+        "POST / HTTP/1.1\r\nContent-Length: 6\r\nContent-Length: 6\r\n\r\n",
         // Malformed, so both have to refuse it.
         "GET / HTTP/1.1\r\nBroken\r\n\r\n",
         "GET / HTTP/1.1\r\nHost: x\r\nBroken\r\n\r\n",
+        "POST / HTTP/1.1\r\nContent-Length: +5\r\n\r\n",
+        "POST / HTTP/1.1\r\nContent-Length: 6\r\nTransfer-Encoding: chunked\r\n\r\n",
+        "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 6\r\n\r\n",
+        "POST / HTTP/1.1\r\nContent-Length: 6\r\nContent-Length: 7\r\n\r\n",
         // No blank line at all, which only a caller parsing a fragment does.
         "GET / HTTP/1.1\r\nHost: x\r\n",
         "GET / HTTP/1.1",
@@ -957,6 +1189,7 @@ test "the fused parser agrees with a plain line-by-line one" {
             try testing.expectEqual(theirs.minor_version, mine.minor_version);
             try testing.expectEqual(theirs.keep_alive, mine.keep_alive);
             try testing.expectEqual(theirs.content_length, mine.content_length);
+            try testing.expectEqual(theirs.has_content_length, mine.has_content_length);
             try testing.expectEqual(theirs.chunked, mine.chunked);
         } else |expected| {
             try testing.expectError(expected, my_err);
@@ -1034,6 +1267,57 @@ test "extra headers go out after the framework's own" {
     );
 }
 
+test "a value that would end the header line early is spotted at every offset" {
+    // At every offset either side of a block boundary, because the scan is
+    // block-at-a-time and a byte in the tail is the one that gets missed.
+    var buf: [80]u8 = undefined;
+    for ([_]u8{ '\r', '\n', 0 }) |bad| {
+        for (1..buf.len) |len| {
+            for (0..len) |at| {
+                @memset(buf[0..len], 'x');
+                try testing.expect(!breaksTheLine(buf[0..len]));
+                buf[at] = bad;
+                try testing.expect(breaksTheLine(buf[0..len]));
+            }
+        }
+    }
+
+    // And the values an ordinary response actually carries are not.
+    for ([_][]const u8{
+        "",
+        "https://example.dev/welcome",
+        "Origin",
+        "gzip",
+        "public, max-age=31536000, immutable",
+        "bytes 0-99/1000",
+        "session=abc; Path=/; HttpOnly; SameSite=Lax",
+        "text/plain; charset=utf-8",
+    }) |value| try testing.expect(!breaksTheLine(value));
+}
+
+test "a header name that would forge a second header is refused" {
+    for ([_][]const u8{
+        "Vary",
+        "X-Request-Id",
+        "Access-Control-Allow-Origin",
+        "ETag",
+        "x_custom",
+        // Not a legal token, and harmless: it cannot end its own line.
+        "X-(A)",
+    }) |name| try testing.expect(!forgesAHeader(name));
+
+    // The empty name, and the six bytes that end the name or the line.
+    for ([_][]const u8{
+        "",
+        "X-A: b",
+        "X A",
+        "X-A\t",
+        "X-A\r\nY",
+        "X-A\n",
+        "X-A\x00",
+    }) |name| try testing.expect(forgesAHeader(name));
+}
+
 test "the framework's own headers are reserved" {
     try testing.expect(isReservedHeader("Content-Length"));
     try testing.expect(isReservedHeader("content-type"));
@@ -1041,14 +1325,17 @@ test "the framework's own headers are reserved" {
     try testing.expect(!isReservedHeader("Vary"));
 }
 
-test "Set-Cookie is the one header a response may carry twice" {
+test "Set-Cookie and Vary are the two headers a response may carry twice" {
     try testing.expect(repeats("Set-Cookie"));
     try testing.expect(repeats("set-cookie"));
-    try testing.expect(!repeats("Vary"));
+    try testing.expect(repeats("Vary"));
+    try testing.expect(repeats("VARY"));
     try testing.expect(!repeats("Location"));
-    // And it is not a header the framework writes itself, so it goes through
+    try testing.expect(!repeats("Cache-Control"));
+    // And neither is a header the framework writes itself, so both go through
     // `setHeader` like any other.
     try testing.expect(!isReservedHeader("Set-Cookie"));
+    try testing.expect(!isReservedHeader("Vary"));
 }
 
 test "the redirect statuses all have a phrase, and it is written from the constant" {

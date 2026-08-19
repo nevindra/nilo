@@ -165,9 +165,25 @@ fn refApplyHeader(line: []const u8, r: *http1.Request) http1.ParseError!void {
             r.upgrade = true;
         }
     } else if (std.ascii.eqlIgnoreCase(name, "content-length")) {
-        r.content_length = std.fmt.parseInt(u64, value, 10) catch return error.BadHeader;
+        if (r.chunked) return error.BadHeader;
+        if (value.len == 0) return error.BadHeader;
+        for (value) |c| if (!std.ascii.isDigit(c)) return error.BadHeader;
+        const n = std.fmt.parseInt(u64, value, 10) catch return error.BadHeader;
+        if (r.has_content_length and n != r.content_length) return error.BadHeader;
+        r.content_length = n;
+        r.has_content_length = true;
     } else if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
-        if (std.ascii.indexOfIgnoreCase(value, "chunked") != null) r.chunked = true;
+        if (r.chunked) return error.BadHeader;
+        // The obvious way round: split forwards and keep whatever came last,
+        // where `http1` takes the last comma and reads from there. Two
+        // spellings of "the final coding", which is the pair worth having.
+        var codings = std.mem.splitScalar(u8, value, ',');
+        var last: []const u8 = "";
+        while (codings.next()) |coding| last = std.mem.trim(u8, coding, " \t");
+        if (std.ascii.eqlIgnoreCase(last, "chunked")) {
+            if (r.has_content_length) return error.BadHeader;
+            r.chunked = true;
+        }
     }
 }
 
@@ -204,6 +220,7 @@ fn parsedTheSameAsTheObviousWay(head: []const u8) !void {
     try testing.expectEqual(slow.minor_version, fast.minor_version);
     try testing.expectEqual(slow.keep_alive, fast.keep_alive);
     try testing.expectEqual(slow.content_length, fast.content_length);
+    try testing.expectEqual(slow.has_content_length, fast.has_content_length);
     try testing.expectEqual(slow.chunked, fast.chunked);
     try testing.expectEqual(slow.upgrade, fast.upgrade);
 

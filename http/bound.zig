@@ -372,21 +372,50 @@ pub fn Bound(comptime W: type) type {
         /// differently from one of nilo's.
         fn sayAll(n: usize, it: *Failures) fail_mod.Error {
             var buf: [fail_mod.max_message]u8 = undefined;
-            var w = std.Io.Writer.fixed(&buf);
+
+            // The tail is written out of room kept back for it, so a sentence
+            // that runs out of buffer can still say how much of itself is
+            // missing (ADR 0081). It used to stop on the first write that did
+            // not fit, which ends a 422 mid-word and leaves the reader to
+            // guess whether the list was finished. `fields.len` is the most
+            // failures there can be, so the widest tail is known here.
+            const tail_room = comptime std.fmt.comptimePrint(
+                "; and {d} more",
+                .{fields.len},
+            ).len;
+            var w = std.Io.Writer.fixed(buf[0 .. buf.len - tail_room]);
 
             // Counted only when there is more than one. A single failure
             // reads exactly as it did before any of this existed, which is
             // the most common case and the one already worth reading.
             if (n > 1) w.print("{d} fields did not fit: ", .{n}) catch {};
 
-            var first = true;
+            var said: usize = 0;
+            var ran_out = false;
             while (it.next()) |f| {
-                if (!first) w.writeAll("; ") catch break;
-                first = false;
-                f.say(&w) catch break;
+                // Where this one starts, so a half-written field name can be
+                // taken back out rather than left hanging.
+                const mark = w.end;
+                if (said > 0) w.writeAll("; ") catch {
+                    ran_out = true;
+                    break;
+                };
+                f.say(&w) catch {
+                    w.end = mark;
+                    ran_out = true;
+                    break;
+                };
+                said += 1;
             }
 
-            return fail_mod.status(422, "{s}", .{buf[0..w.end]});
+            var out = std.Io.Writer.fixed(&buf);
+            out.end = w.end;
+            if (ran_out) out.print("{s}and {d} more", .{
+                @as([]const u8, if (said == 0) "" else "; "),
+                n - said,
+            }) catch {};
+
+            return fail_mod.status(422, "{s}", .{buf[0..out.end]});
         }
 
         fn indexOf(comptime name: []const u8) usize {
@@ -709,6 +738,52 @@ test "more than one failure is counted, and every one is named" {
             "\"age\" has to be a whole number, not \"soon\"",
         in_flight.failure.message(),
     );
+}
+
+/// Twelve fields, so twelve "the form is missing …" sentences do not fit in
+/// `fail.max_message` and the 422 has to stop somewhere.
+const Wide = struct {
+    alpha: Str,
+    bravo: Str,
+    charlie: Str,
+    delta: Str,
+    echo: Str,
+    foxtrot: Str,
+    golf: Str,
+    hotel: Str,
+    india: Str,
+    juliett: Str,
+    kilo: Str,
+    lima: Str,
+};
+
+test "a 422 with more failures than fit says how many it could not name" {
+    var in_flight = fail_mod.InFlight{};
+    in_flight.startRequest("POST", "/sign-up");
+    const previous = bulkhead.setFallbackSlot(&in_flight);
+    defer _ = bulkhead.setFallbackSlot(previous);
+
+    const value: Wide = undefined;
+    const b: Bound(form_mod.Form(Wide)) = .from(value, @splat(.{ .reason = .missing }));
+
+    try testing.expectError(error.Failed, asUnion(b.fail()));
+    const said = in_flight.failure.message();
+
+    try testing.expect(said.len <= fail_mod.max_message);
+    try testing.expect(std.mem.startsWith(u8, said, "12 fields did not fit: "));
+
+    // It used to stop on the first write that would not fit, which ends the
+    // sentence mid-word and leaves the reader with no way to tell a finished
+    // list from a cut one (ADR 0081). Now the tail says what is missing, and
+    // the count in it adds up with the ones that were named.
+    const cut = std.mem.lastIndexOf(u8, said, "; and ").?;
+    const dropped = try std.fmt.parseInt(usize, said[cut + "; and ".len .. said.len - " more".len], 10);
+    try testing.expect(dropped > 0);
+    try testing.expectEqual(@as(usize, 12), dropped + std.mem.count(u8, said[0..cut], "the form is missing"));
+
+    // And every field it did name, it named whole.
+    var named = std.mem.splitSequence(u8, said["12 fields did not fit: ".len..cut], "; ");
+    while (named.next()) |one| try testing.expect(std.mem.endsWith(u8, one, "\" (text)"));
 }
 
 test "the text that arrived is readable whether or not it converted" {

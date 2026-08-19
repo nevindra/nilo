@@ -225,9 +225,22 @@ fn num(comptime n: usize) []const u8 {
 
 pub const Kind = enum { text, binary };
 
-/// One message, whole. `data` points into the buffer handed to `receive`,
-/// so it is the caller's memory and lives exactly as long as the caller
-/// decides.
+/// One message, whole.
+///
+/// **`data` is borrowed, and the loan ends at the next `receive`.** It points
+/// into this socket's message buffer, which the socket does not own either:
+/// `takeScratch` borrows it from the executor's free list and `giveScratch`
+/// hands it straight back when the connection falls quiet (`park`) or ends.
+/// So a slice kept past one turn of the loop is not merely stale, it is
+/// memory another connection may already be filling with somebody else's
+/// message.
+///
+/// Nothing traps that. A `Str` that outlives its request is caught in Debug
+/// and ReleaseSafe (ADR 0004) and this is not, which makes it the one
+/// borrowed thing here a reader has to take on trust. A handler that wants a
+/// message after the next `receive` copies it somewhere of its own first.
+/// `room.say` and `socket.send` both finish with the bytes before they
+/// return, which is why the ordinary echo loop never has to.
 pub const Message = struct {
     kind: Kind,
     data: []u8,

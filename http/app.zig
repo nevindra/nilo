@@ -3131,6 +3131,36 @@ test "extra response headers are written after the framework's own" {
     );
 }
 
+fn injectedHeader(c: *Ctx) anyerror!void {
+    // The shape `redirect.zig`'s own headline example takes: a `Location`
+    // built from data somebody else supplied. Unrefused, the `\r\n` ends the
+    // header block and everything after it is a header the application never
+    // wrote.
+    const from_the_database = "/welcome\r\nSet-Cookie: admin=1";
+    try testing.expectError(error.BadHeaderValue, c.redirect(302, from_the_database));
+    try testing.expectError(error.BadHeaderValue, c.setHeader("X-Note", from_the_database));
+    try testing.expectError(error.BadHeaderValue, c.setHeader("X-Note", "a\x00b"));
+    try testing.expectError(error.BadHeaderName, c.setHeader("X-Note: forged", "b"));
+    try testing.expectError(error.BadHeaderName, c.setHeader("", "b"));
+
+    // Nothing was kept from any of them, so the response is the one the
+    // handler goes on to send and no half-written header is left behind.
+    try testing.expectEqual(@as(usize, 0), c.extraHeaders().len);
+    try c.redirect(302, "/welcome");
+}
+
+test "a header value carrying a line break cannot write the rest of the response" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/go", injectedHeader);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /go HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, result.response, "Set-Cookie") == null);
+    try testing.expect(std.mem.indexOf(u8, result.response, "Location: /welcome\r\n") != null);
+}
+
 fn reservedHeader(c: *Ctx) anyerror!void {
     try testing.expectError(error.ReservedHeader, c.setHeader("Content-Length", "999"));
     try testing.expectError(error.ReservedHeader, c.setHeader("connection", "close"));
@@ -5881,6 +5911,32 @@ test "a client that says nothing gets the file as it is, and still gets Vary" {
     // including the ones that could have had the small one.
     try testing.expect(std.mem.indexOf(u8, answer.response, "Vary: Accept-Encoding") != null);
     try testing.expect(std.mem.endsWith(u8, answer.response, test_css));
+}
+
+test "a CORS Vary and a compression Vary are both sent, not one over the other" {
+    // The two layers each name a different header the response was chosen
+    // by, and `setHeader` used to treat the second as somebody changing
+    // their mind about the first. A shared cache that stored this with only
+    // `Accept-Encoding` on it would hand one origin's response to another
+    // (`http1.repeats`).
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(cors.with(.{ .origin = "https://example.com" }));
+    try app.static_sets.append(testing.allocator, try static_mod.fromMemory(testing.allocator, &.{.{
+        .url = "/app.css",
+        .bytes = test_css,
+        .content_type = "text/css",
+    }}));
+    try app.resolveChains();
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const answer = h.send(&app, "GET /app.css HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, answer.response, "Vary: Origin") != null);
+    try testing.expect(std.mem.indexOf(u8, answer.response, "Vary: Accept-Encoding") != null);
+    try testing.expect(std.mem.indexOf(u8, answer.response, "Content-Encoding: gzip") != null);
 }
 
 test "a client that refuses gzip with q=0 is not sent gzip" {

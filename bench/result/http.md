@@ -234,6 +234,64 @@ is for. Its one weakness is that it copies `writeString` and `nextEscape` out of
 `http/json.zig` rather than importing them, so it measures the shape of the
 writer rather than the exact bytes the framework ships.
 
+### What checking every response header costs
+
+Run to settle one question:
+[ADR 0086](../../docs/adr/0086-a-response-header-cannot-forge-a-second-one.md)
+refuses a response header value carrying `\r`, `\n` or `\0`, and the open choice
+was whether to do it in every optimize mode or only in `Debug` and
+`ReleaseSafe`. Same harness, same box, commit `a1537a6` as the baseline.
+
+Three trees, built and run interleaved (HEAD, HEAD plus the four other fixes in
+this batch, and that plus the guard), so a machine that drifts drifts through
+all three:
+
+| | mean of 8 | spread | against the tree above |
+|---|---|---|---|
+| `a1537a6` | 191.5ns | 184–197 | |
+| + `Vary`, `Content-Length`, the two ceilings | 192.75ns | 188–199 | **+1.25ns, sign flips 4 of 8, so unchanged** |
+| + the header guard | 200.9ns | 194–208 | **+8.1ns, sign flips 1 of 8** |
+
+**The four other fixes are not measurable and the guard is, at about 4%.** Take
+the second figure as a band rather than a number: an earlier six pairs of the
+same two trees put the guard at +0.2ns with the sign flipping three times, and
+the same binary came back anywhere from 184 to 213ns across sixteen runs. What
+every batch agrees on is single-digit nanoseconds, and never a win. **3 to 8ns
+on a 192ns request is the honest quote.**
+
+Two things about what that is measured *through*. It is `zig build profile`,
+which is in process with no socket in the way, so the guard is a larger fraction
+here than in anything served over a network. The section above puts nilo's own
+work at about 4% of a served request, which makes this about 0.15% of one. And
+it is per `setHeader` call rather than per request: the profile harness installs
+`cors.permissive`, so every response sets one header. A response that sets none
+pays nothing at all.
+
+**The first version of the check cost 9ns rather than 3, and the reason is the
+part worth keeping.** It used `scan.positionsOf`, which was the wrong tool by a
+factor of three. `positionsOf` is built for the request head, where there are
+whole 32-byte blocks to stand on; below one block it falls to a scalar tail
+loop, so three delimiters over a 27-byte header name is three passes of 27
+iterations rather than one vector compare. Header names and header values are
+nearly always under a block. Replacing it with one branchless pass over a
+256-byte table, one load and one `or` per byte with the answer read once at the
+end, is where the other 6ns went.
+
+The general form of that: **a SIMD helper that was fast where it was written is
+not automatically fast where it is reused.** `scan.zig`'s own header says it
+exists for the head, the query string and JSON strings, all of which are long. A
+fourth caller with short inputs was a different problem wearing the same shape.
+
+Reproduce with:
+
+```
+git archive HEAD | tar -x -C /tmp/base    # build the before, do not quote it
+for i in $(seq 8); do
+  (cd /tmp/base && zig build profile | head -1)
+  zig build profile | head -1
+done
+```
+
 ## Correctness under load
 
 Not a speed measurement. [ADR 0007](../../docs/adr/0007-failure-box-bound-to-the-fiber.md)

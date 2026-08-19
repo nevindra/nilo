@@ -751,6 +751,14 @@ pub const Ctx = struct {
     /// — is refused: a response carrying two of those is malformed, and in
     /// the case of Content-Length it is a request-smuggling bug.
     /// Content-Type is chosen through `send` instead.
+    ///
+    /// **A value carrying `\r`, `\n` or `\0` is refused too**, with
+    /// `error.BadHeaderValue`, and a name that is not a token with
+    /// `error.BadHeaderName`. Those bytes end the header line rather than
+    /// sitting in it, so a value built from request data would otherwise
+    /// write the rest of the response itself. See `http1.breaksTheLine` for
+    /// the shape of it. A handler that lets the error out sends a 500, which
+    /// is the right answer: the response it meant to send cannot be written.
     pub fn setHeader(self: *Ctx, name: []const u8, value: []const u8) !void {
         return self.putHeader(.{
             .name = try self._arena.dupe(u8, name),
@@ -784,11 +792,16 @@ pub const Ctx = struct {
 
     fn putHeader(self: *Ctx, entry: http1.Header) !void {
         if (http1.isReservedHeader(entry.name)) return error.ReservedHeader;
+        // The one point every response header goes through, which is why the
+        // check is here and not at each of the half-dozen callers
+        // (`http1.breaksTheLine`).
+        if (http1.forgesAHeader(entry.name)) return error.BadHeaderName;
+        if (http1.breaksTheLine(entry.value)) return error.BadHeaderValue;
         // Setting a header twice is somebody changing their mind, so the
-        // second call replaces the first — except for the one header a
-        // response is *required* to send more than one of. Two cookies are
-        // two `Set-Cookie` lines and cannot be folded into one
-        // (`http1.repeats`).
+        // second call replaces the first. The exceptions are the two headers
+        // where a second call is another layer adding to the first rather
+        // than overruling it: two cookies are two `Set-Cookie` lines, and two
+        // `Vary` lines are one comma-joined list (`http1.repeats`).
         if (!http1.repeats(entry.name)) {
             for (self.extraHeadersMutable()) |*h| {
                 if (std.ascii.eqlIgnoreCase(h.name, entry.name)) {

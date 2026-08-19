@@ -423,6 +423,22 @@ pub fn holdsAFile(comptime T: type) bool {
 /// half a megabyte of arena for a request carrying no data at all.
 pub const max_parts = 256;
 
+/// The wall said out loud rather than walked past
+/// ([ADR 0081](../docs/adr/0081-a-ceiling-that-is-reached-is-said-out-loud.md)).
+///
+/// Reading 256 parts of a 300-part form and stopping would hand the handler a
+/// form whose other 44 fields look exactly like fields the browser never
+/// sent, and nothing downstream can tell those two apart: `Form(T)` would
+/// report them missing, and a `Bound(Form(T))` would report them missing in a
+/// 422 the user is then asked to act on. A refusal that names the ceiling is
+/// the only answer that is true.
+fn tooManyParts() fail.Error {
+    return fail.badRequest(
+        "this form has more parts than nilo reads from one, which is {d}",
+        .{max_parts},
+    );
+}
+
 fn parseMultipart(arena: std.mem.Allocator, boundary: []const u8, body: []const u8) !Fields {
     // `--boundary` at the start of the body, and `\r\n--boundary` everywhere
     // after it. Built once, in the arena, rather than compared piece by
@@ -487,7 +503,7 @@ fn parseMultipart(arena: std.mem.Allocator, boundary: []const u8, body: []const 
         // that is a browser saying "the field was there and nothing was
         // chosen", and it must not become a text field called `avatar`.
         if (parameterOf(disposition, "filename")) |filename| {
-            if (n_files == files.len) continue;
+            if (n_files == files.len) return tooManyParts();
             files[n_files] = .{
                 .name = name,
                 .filename = filename,
@@ -496,7 +512,7 @@ fn parseMultipart(arena: std.mem.Allocator, boundary: []const u8, body: []const 
             };
             n_files += 1;
         } else {
-            if (n_text == text.len) continue;
+            if (n_text == text.len) return tooManyParts();
             text[n_text] = .{ .name = name, .value = data };
             n_text += 1;
         }
@@ -895,25 +911,57 @@ test "an unquoted parameter is read too, and one parameter does not eat the next
     try testing.expectEqualStrings("real", parameterOf("form-data; filename=\"name=fake\"; name=real", "name").?);
 }
 
+fn formOfParts(gpa: std.mem.Allocator, n: usize) !std.ArrayList(u8) {
+    var body: std.ArrayList(u8) = .empty;
+    errdefer body.deinit(gpa);
+    for (0..n) |i| {
+        try body.print(
+            gpa,
+            "--niloBoundary\r\nContent-Disposition: form-data; name=\"f{d}\"\r\n\r\nv\r\n",
+            .{i},
+        );
+    }
+    try body.appendSlice(gpa, "--niloBoundary--\r\n");
+    return body;
+}
+
 test "the number of parts one form may hold is bounded" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // Right up to the wall and no refusal: the bound is on what a client may
+    // make nilo allocate, not on what an ordinary form may say.
+    var body = try formOfParts(testing.allocator, max_parts);
+    defer body.deinit(testing.allocator);
+
+    const fields = try parse(arena.allocator(), kindOf(multipart_type), body.items);
+    try testing.expectEqual(@as(usize, max_parts), fields.text.len);
+    try testing.expectEqualStrings("f0", fields.text[0].name);
+}
+
+test "a form past that bound is refused rather than quietly cut short" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
     // A body made of nothing but boundaries: the arrays are sized from the
     // count, and this is what stops that count being the client's to choose.
-    var body: std.ArrayList(u8) = .empty;
+    // It used to bind the first 256 and walk past the rest, which a handler
+    // reads as 256 fields sent and the others left blank (ADR 0081).
+    var body = try formOfParts(testing.allocator, max_parts * 2);
     defer body.deinit(testing.allocator);
-    for (0..max_parts * 2) |i| {
-        try body.print(
-            testing.allocator,
-            "--niloBoundary\r\nContent-Disposition: form-data; name=\"f{d}\"\r\n\r\nv\r\n",
-            .{i},
-        );
-    }
-    try body.appendSlice(testing.allocator, "--niloBoundary--\r\n");
 
-    const fields = try parse(arena.allocator(), kindOf(multipart_type), body.items);
-    try testing.expectEqual(@as(usize, max_parts), fields.text.len);
-    // The ones that did fit are the ones that arrived first.
-    try testing.expectEqualStrings("f0", fields.text[0].name);
+    const bulkhead = @import("bulkhead.zig");
+    var in_flight = fail.InFlight{};
+    in_flight.startRequest("POST", "/form");
+    const previous = bulkhead.setFallbackSlot(&in_flight);
+    defer _ = bulkhead.setFallbackSlot(previous);
+
+    try testing.expectError(
+        error.Failed,
+        parse(arena.allocator(), kindOf(multipart_type), body.items),
+    );
+    try testing.expectEqualStrings(
+        "this form has more parts than nilo reads from one, which is 256",
+        in_flight.failure.message(),
+    );
 }
