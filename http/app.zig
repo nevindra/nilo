@@ -1236,9 +1236,6 @@ pub const App = struct {
         served.keep_alive = false;
     }
 
-    /// The static file `path` names, if any set holds one. Only GET and
-    /// HEAD: a POST to a `.css` is a mistake, and answering it with the
-    /// stylesheet would hide that.
     /// A file and the middleware in front of it, both settled before the
     /// socket opened.
     const StaticHit = struct {
@@ -1246,6 +1243,9 @@ pub const App = struct {
         chain: []const mw.Middleware,
     };
 
+    /// The static file `path` names, if any set holds one. Only GET and
+    /// HEAD: a POST to a `.css` is a mistake, and answering it with the
+    /// stylesheet would hide that.
     fn findStatic(self: *const App, method: http1.Method, path: []const u8) ?StaticHit {
         if (method != .GET and method != .HEAD) return null;
         // Asked before the loaded directories, not after. A single-page app
@@ -1507,11 +1507,6 @@ fn joined(comptime prefix: []const u8, comptime pattern: []const u8) []const u8 
     }
 }
 
-/// Step over a body the handler never read, and say whether the
-/// connection is still usable afterwards. A body that cannot be stepped
-/// over — a chunked one whose sizes do not add up — leaves the stream at
-/// an unknown byte, so the connection has to go; the response, though, is
-/// still owed and still sent.
 /// Two lines belong in a nilo root source file, and forgetting either one
 /// fails quietly — the sort of quiet that costs an afternoon. Without
 /// `std_options_debug_io`, `std.log` writes to stderr the blocking way and
@@ -1606,7 +1601,6 @@ pub fn warnIfBuiltDifferently() void {
     );
 }
 
-/// Two requirements naming the same service, whatever route each came from.
 /// The same bytes as `slice`, pointed at `to` instead of at `from` — for
 /// moving a slice of a buffer onto a copy of that buffer.
 fn rebase(from: []const u8, to: []const u8, slice: []const u8) []const u8 {
@@ -1614,6 +1608,7 @@ fn rebase(from: []const u8, to: []const u8, slice: []const u8) []const u8 {
     return to[offset..][0..slice.len];
 }
 
+/// Two requirements naming the same service, whatever route each came from.
 fn sameService(a: service_mod.Requirement, b: service_mod.Requirement) bool {
     return a.needs_mutable == b.needs_mutable and std.mem.eql(u8, a.type_name, b.type_name);
 }
@@ -1638,9 +1633,21 @@ const RouteList = struct {
     }
 };
 
+/// Step over a body the handler never read, and say whether the
+/// connection is still usable afterwards. A body that cannot be stepped
+/// over — a chunked one whose sizes do not add up — leaves the stream at
+/// an unknown byte, so the connection has to go; the response, though, is
+/// still owed and still sent.
 fn drain(c: *Ctx, in: *std.Io.Reader, r: *const http1.Request) bool {
     if (!c.keepAlive() or c._stream_desynced) return false;
     if (c._body != null) return true;
+    // The client said `Expect: 100-continue` and nothing here ever answered
+    // it, so the body is still on its side and discarding one would be waiting
+    // for bytes nobody is going to send until their own timer fires
+    // (ADR 0094). The final status has gone out, which is the whole of what
+    // RFC 9110 §10.1.1 asks for; what this connection cannot do is carry
+    // another request, because the one it has is unfinished.
+    if (r.expect_continue and !c._continued) return false;
     // Reading here as well as in the handler, so the clock goes on here as
     // well (ADR 0023). Without it these reads would inherit whatever limit
     // was last set — the header deadline, which by now has passed — and a
@@ -1833,9 +1840,12 @@ fn serveHeldFile(c: *Ctx, file: *const static_mod.File) anyerror!void {
     const total = sending.bytes.len;
     // `If-Range` means "only give me the part if the file is still the one I
     // started with". A client resuming a download sends the ETag it had;
-    // anything else and the safe answer is all of it.
+    // anything else and the safe answer is all of it. Strong comparison, which
+    // is `etagMatchesStrong` and not the `etagMatches` above — the two arms of
+    // static-file serving used to disagree about this, with `sendfile.send`
+    // carrying half the rule as a guard of its own (ADR 0094).
     const still_the_same = if (c.header("If-Range")) |sent|
-        static_mod.etagMatches(sent.view(), sending.etag)
+        static_mod.etagMatchesStrong(sent.view(), sending.etag)
     else
         true;
 
@@ -3639,6 +3649,108 @@ test "a chunked body reaches the handler and keep-alive survives it" {
     );
     try testing.expect(std.mem.endsWith(u8, result.response, "hello world"));
     try testing.expect(result.keep_alive);
+}
+
+test "Expect: 100-continue is answered the moment the body is about to be read" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/echo", echoBody);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(
+        &app,
+        "POST /echo HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\nhello",
+    );
+    // The interim first, whole and on its own, then the answer. A client that
+    // gets neither waits on its own timer — curl's is a second, on every
+    // upload past its threshold, which is what this costs when it is missing.
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 "));
+    try testing.expect(std.mem.endsWith(u8, result.response, "hello"));
+    try testing.expect(result.keep_alive);
+}
+
+test "a chunked body expecting a continue gets one too" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/echo", echoBody);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(
+        &app,
+        "POST /echo HTTP/1.1\r\nExpect: 100-continue\r\nTransfer-Encoding: chunked\r\n\r\n" ++
+            "5\r\nhello\r\n0\r\n\r\n",
+    );
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 100 Continue\r\n\r\n"));
+    try testing.expect(std.mem.endsWith(u8, result.response, "hello"));
+}
+
+test "a request that is refused before the body gets its status and no continue" {
+    // The other half of RFC 9110 §10.1.1, and the half that is worth more: a
+    // client holding back 20 MB is told no without sending a byte of it.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/echo", echoBody);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    // Nothing routes here, so nothing ever asks for the body.
+    const missing = h.send(
+        &app,
+        "POST /nowhere HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n",
+    );
+    try testing.expect(std.mem.startsWith(u8, missing.response, "HTTP/1.1 404 Not Found\r\n"));
+    try testing.expect(std.mem.indexOf(u8, missing.response, "100 Continue") == null);
+    // And the connection cannot carry another request, because this one still
+    // has a body on the client's side that nobody is going to read.
+    try testing.expect(!missing.keep_alive);
+
+    // A body over the ceiling is refused by `Ctx.body` before it reads, so
+    // the 413 goes out with the upload still unsent.
+    const too_big = h.send(
+        &app,
+        "POST /echo HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 99999999\r\n\r\n",
+    );
+    try testing.expect(std.mem.startsWith(u8, too_big.response, "HTTP/1.1 413 "));
+    try testing.expect(std.mem.indexOf(u8, too_big.response, "100 Continue") == null);
+    try testing.expect(!too_big.keep_alive);
+}
+
+test "a continue is not sent to a client that could not use one" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/echo", echoBody);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    // HTTP/1.0 has no interim responses at all (RFC 9110 §15.2).
+    const old = h.send(
+        &app,
+        "POST /echo HTTP/1.0\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\nhello",
+    );
+    try testing.expect(std.mem.indexOf(u8, old.response, "100 Continue") == null);
+    try testing.expect(std.mem.endsWith(u8, old.response, "hello"));
+
+    // A body framed as empty is a client holding nothing back, whatever it
+    // said it expected.
+    const empty = h.send(
+        &app,
+        "POST /echo HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 0\r\n\r\n",
+    );
+    try testing.expect(std.mem.indexOf(u8, empty.response, "100 Continue") == null);
+    try testing.expect(empty.keep_alive);
+
+    // And the ordinary request, which is every request: no header, no interim,
+    // nothing changed.
+    const plain = h.send(
+        &app,
+        "POST /echo HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello",
+    );
+    try testing.expect(std.mem.startsWith(u8, plain.response, "HTTP/1.1 200 "));
+    try testing.expect(plain.keep_alive);
 }
 
 test "a chunked body nobody read is still stepped over" {

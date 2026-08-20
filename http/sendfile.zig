@@ -96,12 +96,14 @@ pub fn send(c: *Ctx, contents: Contents) !void {
 
     // `If-Range` means "only give me the part if this is still the file I
     // started with". A client resuming a download sends the tag it was given;
-    // anything else, and the safe answer is all of it. A file with no tag at
-    // all has nothing to be compared with, so it takes the safe answer too —
-    // `etagMatches` would otherwise let a bare `*` stand in for a comparison
-    // that never happened.
+    // anything else, and the safe answer is all of it. The comparison is the
+    // strong one RFC 9110 §13.1.5 asks for, which is a different function from
+    // the `If-None-Match` above and not the same rule spelled twice
+    // (ADR 0094) — a `W/` tag and a bare `*` both mean "close enough", and
+    // close enough is not what a client stapling these bytes onto a prefix it
+    // already holds is entitled to. A file with no tag matches nothing.
     const still_the_same = if (c.header("If-Range")) |sent|
-        contents.etag.len > 0 and static_mod.etagMatches(sent.view(), contents.etag)
+        static_mod.etagMatchesStrong(sent.view(), contents.etag)
     else
         true;
 

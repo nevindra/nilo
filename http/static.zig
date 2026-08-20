@@ -861,6 +861,9 @@ fn etagForSpilled(gpa: std.mem.Allocator, mtime_ns: i96, size: u64) ![]const u8 
 /// Whether an `If-None-Match` header matches `etag`. Handles the `*`
 /// wildcard, a comma-separated list, and the `W/` weak marker — all three
 /// turn up in the wild and none of them is worth a 200 with a full body.
+///
+/// **Not for `If-Range`**, which needs `etagMatchesStrong` below. The two
+/// comparisons are different on purpose and RFC 9110 says which goes where.
 pub fn etagMatches(if_none_match: []const u8, etag: []const u8) bool {
     var candidates = std.mem.splitScalar(u8, if_none_match, ',');
     while (candidates.next()) |raw| {
@@ -870,6 +873,35 @@ pub fn etagMatches(if_none_match: []const u8, etag: []const u8) bool {
         if (std.mem.eql(u8, candidate, etag)) return true;
     }
     return false;
+}
+
+/// Whether an `If-Range` header matches `etag`, by the **strong** comparison
+/// RFC 9110 §13.1.5 requires there (ADR 0094).
+///
+/// Three differences from `etagMatches`, and each of them is the difference
+/// between resuming a download and corrupting one.
+///
+/// **A `W/` tag never matches.** A weak validator means "close enough to reuse,
+/// not byte for byte the same", and byte for byte is exactly the claim a
+/// resumed download acts on: the client is about to staple these bytes onto the
+/// prefix it already has. nilo only ever writes strong tags
+/// (`etagForSpilled` says why), so reaching this takes a client that wraps a tag
+/// it was given — but the rule belongs in the comparison rather than in the
+/// luck of who is calling it.
+///
+/// **`*` never matches.** It means "any current representation", which is a
+/// useful thing to say about a conditional request and says nothing at all
+/// about whether this is the same file. Honouring it lets a bare `*` stand in
+/// for a comparison that never happened.
+///
+/// **A single tag, not a list.** `If-Range` carries one validator (RFC 9110
+/// §13.1.5), where `If-None-Match` carries a list.
+///
+/// An empty `etag` matches nothing, so a file with no tag takes the safe
+/// answer without its caller having to remember to check.
+pub fn etagMatchesStrong(if_range: []const u8, etag: []const u8) bool {
+    if (etag.len == 0) return false;
+    return std.mem.eql(u8, std.mem.trim(u8, if_range, " \t"), etag);
 }
 
 /// The Content-Type for a file name. An extension nobody listed becomes
@@ -933,6 +965,25 @@ test "If-None-Match: wildcards, lists and weak tags all count as a match" {
     try testing.expect(etagMatches("\"other\", \"abc\"", "\"abc\""));
     try testing.expect(!etagMatches("\"other\"", "\"abc\""));
     try testing.expect(!etagMatches("", "\"abc\""));
+}
+
+test "If-Range: only the same tag, spelled the same way, resumes a download" {
+    try testing.expect(etagMatchesStrong("\"abc\"", "\"abc\""));
+    try testing.expect(etagMatchesStrong("  \"abc\" ", "\"abc\""));
+
+    // The three `If-None-Match` accepts and `If-Range` must not. Each of them
+    // is a client being handed bytes to staple onto a prefix of a file that
+    // may have moved on underneath it.
+    try testing.expect(!etagMatchesStrong("W/\"abc\"", "\"abc\""));
+    try testing.expect(!etagMatchesStrong("*", "\"abc\""));
+    try testing.expect(!etagMatchesStrong("\"other\", \"abc\"", "\"abc\""));
+
+    try testing.expect(!etagMatchesStrong("\"other\"", "\"abc\""));
+    try testing.expect(!etagMatchesStrong("", "\"abc\""));
+    // A file with no tag has nothing to compare, so nothing matches it — not
+    // even the empty header, and not `*`.
+    try testing.expect(!etagMatchesStrong("*", ""));
+    try testing.expect(!etagMatchesStrong("", ""));
 }
 
 test "a prefix only covers whole segments" {
@@ -1415,6 +1466,39 @@ test "a held file and a spilled one answer a conditional range the same way" {
         try testing.expectEqual(@as(u16, 200), stale.status);
         try testing.expectEqualStrings(alphabet, stale.body);
         try testing.expect(stale.header("Content-Range") == null);
+
+        // `If-Range` is the one comparison RFC 9110 §13.1.5 says must be
+        // strong, and these are the two shapes `If-None-Match`'s comparison
+        // accepts (ADR 0094). Both get the whole file rather than a range,
+        // because "close enough to reuse" is not "the same bytes you already
+        // hold the front of". The weak one carries this file's real tag, so
+        // only the `W/` decides it.
+        const weak = try client.send(&app, try std.fmt.bufPrint(
+            &request_buf,
+            "GET /a.bin HTTP/1.1\r\nRange: bytes=20-\r\nIf-Range: W/{s}\r\n\r\n",
+            .{etag},
+        ));
+        try testing.expectEqual(@as(u16, 200), weak.status);
+        try testing.expectEqualStrings(alphabet, weak.body);
+        try testing.expect(weak.header("Content-Range") == null);
+
+        const wildcard = try client.send(
+            &app,
+            "GET /a.bin HTTP/1.1\r\nRange: bytes=20-\r\nIf-Range: *\r\n\r\n",
+        );
+        try testing.expectEqual(@as(u16, 200), wildcard.status);
+        try testing.expectEqualStrings(alphabet, wildcard.body);
+        try testing.expect(wildcard.header("Content-Range") == null);
+
+        // And the tag still works when it is the only thing in the header, so
+        // the strong comparison did not simply refuse everything.
+        const still_resumes = try client.send(&app, try std.fmt.bufPrint(
+            &request_buf,
+            "GET /a.bin HTTP/1.1\r\nRange: bytes=24-\r\nIf-Range: {s}\r\n\r\n",
+            .{etag},
+        ));
+        try testing.expectEqual(@as(u16, 206), still_resumes.status);
+        try testing.expectEqualStrings("yz", still_resumes.body);
 
         // Past the end says how big it really is, on both sides.
         const past = try client.send(&app, "GET /a.bin HTTP/1.1\r\nRange: bytes=99-\r\n\r\n");

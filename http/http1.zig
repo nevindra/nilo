@@ -61,6 +61,15 @@ pub const Request = struct {
     /// `Upgrade: websocket`: what this answers is "might this connection be
     /// read from again", and the only wrong answer is a false negative.
     upgrade: bool = false,
+    /// Whether the client said `Expect: 100-continue` and is holding its body
+    /// back until the server answers (ADR 0094). `Ctx` sends the interim
+    /// response at the moment it commits to reading, and `App` reads this to
+    /// know that a body it never asked for is still on the client's side.
+    ///
+    /// The only expectation this recognises. RFC 9110 §10.1.1 allows a 417 for
+    /// any other, and nilo ignores them instead: an expectation nobody defined
+    /// is one no client sends.
+    expect_continue: bool = false,
 };
 
 /// Whether anything is going to read from the connection again while this
@@ -426,11 +435,15 @@ pub fn parseHead(head: []const u8, r: *Request) ParseError!void {
                 // colon at all — found by `fuzz.zig`, which had nilo
                 // ignoring it and every reference parser refusing it.
                 if (colon <= line_start or colon >= end) return error.BadHeader;
-                // Two of the three headers that matter begin with `c` and one
-                // with `t`, so one compare throws out Host, Accept,
-                // User-Agent and the rest before their name is even measured.
+                // Four headers matter and they begin with three letters, so one
+                // compare throws out Host, Accept, User-Agent and the rest
+                // before their name is even measured. `e` is here for `Expect`
+                // and is the cheapest of the three to have added: a set of
+                // three bytes compiles to the same range test and mask as a set
+                // of two, and the header it lets through is one almost nothing
+                // sends.
                 switch (head[line_start] | 0x20) {
-                    'c', 't' => try applyHeaderAt(head, line_start, colon, end, r),
+                    'c', 'e', 't' => try applyHeaderAt(head, line_start, colon, end, r),
                     else => {},
                 }
             }
@@ -497,6 +510,19 @@ fn applyHeaderAt(buf: []const u8, from: usize, colon: usize, end: usize, r: *Req
     const name = buf[from..colon];
 
     switch (name.len) {
+        "expect".len => {
+            // `Cookie` is the same length and reaches here too, so this arm is
+            // on the path of most requests. It costs one `eqlIgnoreCase` that
+            // fails on its first byte.
+            if (!std.ascii.eqlIgnoreCase(name, "expect")) return;
+            // The value is a comma-separated list, and `100-continue` is the
+            // only member anybody has ever defined. Matching the whole value
+            // rather than searching it keeps a header carrying some future
+            // expectation from being read as this one.
+            if (std.ascii.eqlIgnoreCase(headerValue(buf, colon, end), "100-continue")) {
+                r.expect_continue = true;
+            }
+        },
         "connection".len => {
             if (!std.ascii.eqlIgnoreCase(name, "connection")) return;
             const value = headerValue(buf, colon, end);
@@ -1116,6 +1142,64 @@ test "chunked has to be the last coding, and has to be spelled that way" {
         try parseHead(head, &r);
         try testing.expect(r.chunked);
     }
+}
+
+test "Expect: 100-continue is read, and no other expectation is" {
+    for ([_][]const u8{ "100-continue", "100-Continue", "  100-continue  " }) |value| {
+        var r = Request{};
+        var buf: [128]u8 = undefined;
+        const head = try std.fmt.bufPrint(
+            &buf,
+            "POST / HTTP/1.1\r\nExpect: {s}\r\nContent-Length: 3\r\n\r\n",
+            .{value},
+        );
+        try parseHead(head, &r);
+        try testing.expect(r.expect_continue);
+    }
+
+    // Anything else is an expectation nobody defined, and reading one of these
+    // as 100-continue would have nilo answer a question the client never
+    // asked. A substring search would take all four.
+    for ([_][]const u8{ "100-continue-ish", "x100-continue", "100-continue, other", "" }) |value| {
+        var r = Request{};
+        var buf: [128]u8 = undefined;
+        const head = try std.fmt.bufPrint(
+            &buf,
+            "POST / HTTP/1.1\r\nExpect: {s}\r\nContent-Length: 3\r\n\r\n",
+            .{value},
+        );
+        try parseHead(head, &r);
+        try testing.expect(!r.expect_continue);
+    }
+}
+
+test "Expect is found wherever it falls, and Cookie is not mistaken for it" {
+    // `Expect` is the only header nilo reads that starts with neither `c` nor
+    // `t`, so the first-byte filter in `parseHead` had to grow a third letter.
+    // Padding walks it past the block boundaries that filter runs against.
+    const gpa = testing.allocator;
+    for ([_]usize{ 0, 1, 15, 31, 32, 33, 63, 100 }) |pad| {
+        const filler = try gpa.alloc(u8, pad);
+        defer gpa.free(filler);
+        @memset(filler, 'y');
+
+        const head = try std.mem.concat(gpa, u8, &.{
+            "POST / HTTP/1.1\r\nX-Pad: ",         filler,
+            "\r\nExpect: 100-continue\r\nCookie: session=abc\r\nContent-Length: 9\r\n\r\n",
+        });
+        defer gpa.free(head);
+
+        var r = Request{};
+        try parseHead(head, &r);
+        try testing.expect(r.expect_continue);
+        try testing.expectEqual(@as(u64, 9), r.content_length);
+    }
+
+    // `Cookie` is exactly as long as `Expect`, so it lands in the same arm of
+    // the length switch and has to fall out of it.
+    var only_cookie = Request{};
+    try parseHead("POST / HTTP/1.1\r\nCookie: expect=100-continue\r\n\r\n", &only_cookie);
+    try testing.expect(!only_cookie.expect_continue);
 }
 
 test "the fused parser agrees with a plain line-by-line one" {

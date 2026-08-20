@@ -166,6 +166,11 @@ pub const Ctx = struct {
     /// connection.
     _stream_desynced: bool = false,
     _sent: bool = false,
+    /// Set once `100 Continue` has gone out, so it goes out at most once even
+    /// though two body paths can each be the first to read (ADR 0094). App
+    /// reads it with `Request.expect_continue` to tell a body the client is
+    /// still holding from one it has already sent.
+    _continued: bool = false,
     /// Set between `stream()` and the stream's `finish()`, which clears it.
     /// App reads it to find a body nobody ended (ADR 0020).
     _stream: ?stream_mod.Open = null,
@@ -558,9 +563,6 @@ pub const Ctx = struct {
         return Str.fromRequest(self._peer.address(), self._lifetime);
     }
 
-    /// The whole request body, read once into the request arena. Chunked
-    /// and Content-Length look the same from here — the handler asks for
-    /// the body, not for the way it arrived.
     /// Called by everything that is about to read from the connection.
     ///
     /// The head normally still lives in the connection's read buffer, because
@@ -582,6 +584,37 @@ pub const Ctx = struct {
         self._deadlines.armBody();
     }
 
+    /// `aboutToRead`, for the two paths that read the **request body** rather
+    /// than the connection.
+    ///
+    /// The difference is `Expect: 100-continue`, which is a statement about a
+    /// body and not about a socket: a client that sends it holds the body back
+    /// until the server answers, and a server that never answers leaves it
+    /// waiting on its own timer — one second, in curl's case, on every upload
+    /// past its threshold (ADR 0094). The handshake path keeps plain
+    /// `aboutToRead`, because a WebSocket is about to read frames and has
+    /// already decided to write a 101.
+    ///
+    /// Sending it here rather than when the head is parsed is what buys the
+    /// other half of RFC 9110 §10.1.1 for nothing: a request refused before it
+    /// reaches this line — a body over `max_body`, a 404, a 405, a handler that
+    /// never asks — is answered with its final status and the body is never
+    /// sent at all.
+    fn aboutToReadBody(self: *Ctx) !void {
+        self.aboutToRead();
+        if (!self._request.expect_continue or self._continued) return;
+        // An HTTP/1.0 client cannot be sent an interim response (RFC 9110
+        // §15.2), and one that has already been answered is past the point
+        // where a 100 would mean anything.
+        if (self._request.minor_version == 0 or self._sent) return;
+        self._continued = true;
+        try self._out.writeAll("HTTP/1.1 100 Continue\r\n\r\n");
+        try self._out.flush();
+    }
+
+    /// The whole request body, read once into the request arena. Chunked
+    /// and Content-Length look the same from here — the handler asks for
+    /// the body, not for the way it arrived.
     pub fn body(self: *Ctx) !Str {
         if (self._body == null) {
             // Waiting for a client to finish sending is not the handler
@@ -592,7 +625,7 @@ pub const Ctx = struct {
             defer watchdog.waited(self._watch, w);
 
             if (self._request.chunked) {
-                self.aboutToRead();
+                try self.aboutToReadBody();
                 self._body = http1.readChunkedBody(self._in, self._arena, self._limits.max_body) catch |err| {
                     // The chunk sizes and the stream have come apart, so
                     // where this body ends is now a guess. Reading on and
@@ -604,8 +637,10 @@ pub const Ctx = struct {
                 };
             } else {
                 if (self._request.content_length > self._limits.max_body) return error.BodyTooLarge;
-                // A body of nothing reads nothing, so it is not a read.
-                if (self._request.content_length > 0) self.aboutToRead();
+                // A body of nothing reads nothing, so it is not a read — and a
+                // client that framed one as empty is not holding anything back,
+                // whatever it expected.
+                if (self._request.content_length > 0) try self.aboutToReadBody();
                 const b = try self._arena.alloc(u8, @intCast(self._request.content_length));
                 try self._in.readSliceAll(b);
                 self._body = b;
@@ -646,7 +681,7 @@ pub const Ctx = struct {
         if (!self._request.chunked and self._request.content_length > options.max_bytes) {
             return error.BodyTooLarge;
         }
-        if (self._request.chunked or self._request.content_length > 0) self.aboutToRead();
+        if (self._request.chunked or self._request.content_length > 0) try self.aboutToReadBody();
 
         self._took_over = true;
         self._incoming = .start(self._request, options.max_bytes);
@@ -1107,20 +1142,6 @@ pub const Ctx = struct {
         return .init(buffer, self._out, self._stopping, &self._stream);
     }
 
-    /// Start a stream of server-sent events — a `text/event-stream` a
-    /// browser reads with `new EventSource(url)`.
-    ///
-    /// ```zig
-    /// var events = try c.events();
-    /// while (events.live()) try events.send(.{ .name = "tick", .data = "." });
-    /// try events.close();
-    /// ```
-    ///
-    /// The two headers past the content type are what keep an event stream
-    /// working through the things between the handler and the browser:
-    /// `Cache-Control: no-cache` so nothing stores it, and
-    /// `X-Accel-Buffering: no` so an nginx in front does not hold the events
-    /// back waiting for a buffer to fill.
     /// Turn this request into a WebSocket connection (ADR 0022, ADR 0071).
     ///
     /// ```zig
@@ -1262,6 +1283,20 @@ pub const Ctx = struct {
         };
     }
 
+    /// Start a stream of server-sent events — a `text/event-stream` a
+    /// browser reads with `new EventSource(url)`.
+    ///
+    /// ```zig
+    /// var events = try c.events();
+    /// while (events.live()) try events.send(.{ .name = "tick", .data = "." });
+    /// try events.close();
+    /// ```
+    ///
+    /// The two headers past the content type are what keep an event stream
+    /// working through the things between the handler and the browser:
+    /// `Cache-Control: no-cache` so nothing stores it, and
+    /// `X-Accel-Buffering: no` so an nginx in front does not hold the events
+    /// back waiting for a buffer to fill.
     pub fn events(self: *Ctx) !stream_mod.Events {
         try self.setStaticHeader("Cache-Control", "no-cache");
         try self.setStaticHeader("X-Accel-Buffering", "no");

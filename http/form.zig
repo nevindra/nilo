@@ -499,6 +499,29 @@ fn parseMultipart(arena: std.mem.Allocator, boundary: []const u8, body: []const 
         const disposition = headerIn(head, "content-disposition") orelse continue;
         const name = parameterOf(disposition, "name") orelse continue;
 
+        // A part that names its file **only** with `filename*` is refused
+        // rather than read (ADR 0094). `parameterOf` compares the key exactly,
+        // so `filename*` does not match `filename` — which was right, and the
+        // fallthrough was not: the part became a *text* field whose value is
+        // the raw bytes of the upload, and the `Upload` the endpoint asked for
+        // was then reported missing. So the 400 named the wrong thing, and the
+        // one thing a caller could not do was find out what happened.
+        //
+        // The doc on `parameterOf` says the plain `filename` is always sent
+        // alongside, and that is true of browsers and not of every HTTP
+        // library. Refusing is the same call ADR 0081 makes about a ceiling:
+        // nilo need not read RFC 6266's encoding, it only has to stop
+        // pretending the part was something else.
+        if (parameterOf(disposition, "filename") == null and
+            parameterOf(disposition, "filename*") != null)
+        {
+            return fail.badRequest(
+                "the \"{s}\" part of this form names its file only with `filename*`, and nilo " ++
+                    "reads `filename` — send both, as a browser does",
+                .{name},
+            );
+        }
+
         // A part with a filename is a file even when the file is empty:
         // that is a browser saying "the field was there and nothing was
         // chosen", and it must not become a text field called `avatar`.
@@ -859,6 +882,44 @@ test "a part with no content type of its own gets the one the spec says to assum
     }));
     try testing.expectEqualStrings("application/octet-stream", filled.f.content_type.view());
     try testing.expectEqualStrings("hi", filled.f.bytes.view());
+}
+
+test "a part that names its file only with filename* is refused, not read as text" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // What used to happen: `filename*` does not match `filename`, so the part
+    // fell through to the text arm and `avatar` became a text field holding
+    // the raw PNG. The 400 then said the *file* was missing, which is the one
+    // thing that was not wrong with the request.
+    try expectFails(
+        WithAvatar,
+        arena.allocator(),
+        multipart_type,
+        comptime multipart(&.{
+            "Content-Disposition: form-data; name=\"email\"\r\n\r\nx@y.z",
+            "Content-Disposition: form-data; name=\"avatar\"; filename*=UTF-8''caf%C3%A9.png\r\n" ++
+                "Content-Type: image/png\r\n\r\nPNGDATA",
+        }),
+        "the \"avatar\" part of this form names its file only with `filename*`, and nilo " ++
+            "reads `filename` — send both, as a browser does",
+    );
+}
+
+test "a part sending both filename and filename* is read from the plain one" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // What every browser sends, and the reason the encoded form was never
+    // read in the first place. Nothing here changes for it.
+    const filled = try read(WithAvatar, arena.allocator(), multipart_type, comptime multipart(&.{
+        "Content-Disposition: form-data; name=\"email\"\r\n\r\nx@y.z",
+        "Content-Disposition: form-data; name=\"avatar\"; filename=\"cafe.png\"; " ++
+            "filename*=UTF-8''caf%C3%A9.png\r\n" ++
+            "Content-Type: image/png\r\n\r\nPNGDATA",
+    }));
+    try testing.expectEqualStrings("cafe.png", filled.avatar.filename.view());
+    try testing.expectEqualStrings("PNGDATA", filled.avatar.bytes.view());
 }
 
 test "an optional file that was not sent is null" {

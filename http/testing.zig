@@ -66,6 +66,14 @@ pub const Answer = struct {
     keep_alive: bool,
     /// Whether the body arrived in chunks, which is what a stream does.
     chunked: bool,
+    /// The interim response that came before the final one, without its blank
+    /// line — `HTTP/1.1 100 Continue` — or null if there was none.
+    ///
+    /// A real client reads one and keeps waiting, which is what the fields
+    /// above do too: `status` is the final status whether or not an interim
+    /// arrived. This is here so a test can assert the interim was sent, and so
+    /// that one arriving cannot be mistaken for the answer (ADR 0094).
+    interim: ?[]const u8 = null,
 
     /// The value of a response header, or null if it is not there.
     pub fn header(self: Answer, name: []const u8) ?[]const u8 {
@@ -271,8 +279,24 @@ pub const Client = struct {
 };
 
 fn parse(raw: []const u8, keep_alive: bool) !Answer {
-    const split = std.mem.indexOf(u8, raw, "\r\n\r\n") orelse return error.NoHead;
-    const head = raw[0..split];
+    // A 100 is a response that is not the answer: the client reads it, drops
+    // it and goes on waiting (RFC 9110 §15.2). Doing that here rather than in
+    // every caller is what keeps `answer.status` meaning the same thing before
+    // and after a request carried `Expect: 100-continue`.
+    //
+    // 100 by name rather than 1xx, because the other one nilo sends is a 101
+    // and that *is* the answer — the connection stops being HTTP under it.
+    var rest = raw;
+    var interim: ?[]const u8 = null;
+    if (std.mem.startsWith(u8, rest, "HTTP/1.1 100 ")) {
+        const ends = std.mem.indexOf(u8, rest, "\r\n\r\n") orelse return error.NoHead;
+        interim = rest[0..ends];
+        rest = rest[ends + 4 ..];
+    }
+
+    const split = std.mem.indexOf(u8, rest, "\r\n\r\n") orelse return error.NoHead;
+    const raw_final = rest;
+    const head = rest[0..split];
     const first_line_end = std.mem.indexOf(u8, head, "\r\n") orelse head.len;
     const line = head[0..first_line_end];
 
@@ -282,12 +306,15 @@ fn parse(raw: []const u8, keep_alive: bool) !Answer {
     const status = std.fmt.parseInt(u16, line[after_version..digits_end], 10) catch return error.BadStatusLine;
 
     var answer = Answer{
+        // `raw` is everything that went on the wire, interim included, because
+        // a test asking for the raw bytes is asking what the client saw.
         .raw = raw,
         .head = head,
-        .body = raw[split + 4 ..],
+        .body = raw_final[split + 4 ..],
         .status = status,
         .keep_alive = keep_alive,
         .chunked = false,
+        .interim = interim,
     };
     if (answer.header("Transfer-Encoding")) |te| {
         answer.chunked = std.ascii.indexOfIgnoreCase(te, "chunked") != null;
