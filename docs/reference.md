@@ -95,6 +95,7 @@ prefix that requires one. Its type is `nilo.GroupOf("/api", &.{mw})`.
 | `threads` | `0` (one per core) |
 | `read_buffer` | `8 * 1024` — also the ceiling on a request head |
 | `write_buffer` | `4 * 1024` |
+| `arena_keep` | `16 * 1024` — of a connection's request arena, kept between requests |
 | `reuse_address` | `true` |
 | `stop_on_signal` | `true` — Ctrl-C and SIGTERM |
 | `shutdown_grace_ms` | `10_000` |
@@ -107,6 +108,16 @@ prefix that requires one. Its type is `nilo.GroupOf("/api", &.{mw})`.
 | `trusted_hops` | `0` — how many proxies stand in front, for `c.clientIp()` |
 | `session_secret` | `null` — 32 bytes, for `Session(T)`. The same on every instance |
 | `block_warning_ms` | `250` — say so when a handler holds its thread. `0` = off |
+
+**`arena_keep` is the one in that table with a cliff under it.** A response
+larger than it does not fit in what the arena retains, so the block goes back to
+the operating system after every request and the next one faults it in a page at
+a time — 257 minor faults for a megabyte, with the kernel zeroing each page. A
+server that assembles large responses in `c.arena()` should set this just past
+the largest of them, and no higher: the memory is held **per connection**, so a
+megabyte here across ten thousand connections is ten gigabytes
+([ADR 0096](./adr/0096-a-response-larger-than-the-arena-keep-is-a-page-fault-per-page.md)).
+Leaving it alone is right for a server whose responses fit in 16 KiB.
 
 Each of the four deadlines bounds one wait for the network, not a request, so a
 long upload or an hour-long stream is not hurried by any of them. `0` turns one

@@ -31,11 +31,21 @@ const websocket = @import("websocket.zig");
 
 const Ctx = ctx_mod.Ctx;
 
-/// How much of a connection's request arena survives between requests.
+/// How much of a connection's request arena survives between requests, when
+/// `listen()` was not told otherwise.
+///
 /// Big enough that an ordinary request never allocates twice on the same
 /// connection, small enough that one large upload does not leave that
 /// connection sitting on the memory for good.
-const arena_keep = 16 * 1024;
+///
+/// **A response larger than this is a page fault per 4 KiB, every request.**
+/// The arena hands the block back on reset, so the next request takes fresh
+/// pages and the kernel zeroes every one of them. Measured on a route
+/// answering a megabyte: 257 minor faults a request, and raising this past
+/// the response took the same route from 7,908 req/s to 11,069
+/// ([ADR 0096](../docs/adr/0096-a-response-larger-than-the-arena-keep-is-a-page-fault-per-page.md)).
+/// That is why it is a `listen()` option and not only this constant.
+const default_arena_keep = 16 * 1024;
 
 /// The three answers that go out before there is a Ctx to assemble one with.
 /// They carry the same JSON shape every other failure does (ADR 0025), so a
@@ -127,6 +137,11 @@ pub const App = struct {
     /// socket, copied out once when the server starts. Defaults stand for
     /// an App a test drives directly, which never calls `listen()`.
     limits: Limits = .{},
+    /// How much of a connection's request arena survives between requests,
+    /// from `listen(.{ .arena_keep = … })`. Held here rather than read from
+    /// `limits` because it is the connection loop's, not a request's, and
+    /// `Limits` is Core's and is shared with modules that have no arena.
+    arena_keep: usize = default_arena_keep,
     /// The key session cookies are sealed with, from
     /// `listen(.{ .session_secret = … })` and checked there. Null for an App
     /// with no sessions, and for one a test drives directly — a test that
@@ -708,6 +723,9 @@ pub const App = struct {
             .trusted_hops = options_.trusted_hops,
             .block_warning_ms = options_.block_warning_ms,
         };
+        // Read once per request by the connection loop rather than by a
+        // request, which is why it is a field of its own (ADR 0096).
+        self.arena_keep = options_.arena_keep;
         // Not on the App, because there is one memory controller per process
         // rather than one per App: two Apps hashing eight each would be
         // sixteen, which is the number the measurement in ADR 0048 says not
@@ -902,8 +920,13 @@ pub const App = struct {
             // megabyte for as long as it stays open, and a few thousand
             // idle keep-alive connections that each once saw a big request
             // add up to memory nobody can account for.
+            //
+            // Which way that trade goes is the caller's, because the answer
+            // depends on how big their responses are and how many connections
+            // they hold: below this figure the block is reused, above it the
+            // pages are handed back and faulted in again next time (ADR 0096).
             lifetime.end();
-            _ = arena.reset(.{ .retain_with_limit = arena_keep });
+            _ = arena.reset(.{ .retain_with_limit = self.arena_keep });
             if (!served.keep_alive) return;
         }
     }
@@ -3975,7 +3998,7 @@ test "a gzipped file behind a named-origin CORS still allocates nothing" {
 
     for (0..3) |_| {
         send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
-        _ = arena.reset(.{ .retain_with_limit = arena_keep });
+        _ = arena.reset(.{ .retain_with_limit = default_arena_keep });
     }
     counting.reset();
     send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
@@ -3987,6 +4010,74 @@ test "a gzipped file behind a named-origin CORS still allocates nothing" {
     // `inline_headers` moving from six to seven is (ADR 0089).
     try testing.expectEqual(@as(usize, 0), counting.allocs);
     try testing.expectEqual(@as(usize, 0), counting.resizes);
+}
+
+/// Assembles a response larger than the default `arena_keep`, which is the
+/// only thing the two tests below need of it.
+fn sixtyFourKilobytes(c: *Ctx) anyerror!void {
+    const bytes = try c.arena().alloc(u8, 64 * 1024);
+    @memset(bytes, 'x');
+    return c.send(200, "application/octet-stream", bytes);
+}
+
+/// What the two tests below share: run `count` requests down one connection,
+/// resetting the arena between them the way the connection loop does, and
+/// report how many times the arena had to go to the allocator underneath it.
+///
+/// The counting allocator wraps the **gpa**, not the arena, because the
+/// question is what the arena asks the operating system for. Wrapping the
+/// arena would count what a request asks the arena for, which is the other
+/// budget and is already held elsewhere in this file.
+fn arenaAllocationsAcross(keep: usize, count: usize) !usize {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/big", sixtyFourKilobytes);
+    try app.resolveChains();
+
+    var counting = budget.Counting{ .child = testing.allocator };
+    var arena = std.heap.ArenaAllocator.init(counting.allocator());
+    defer arena.deinit();
+
+    var lifetime = str_mod.Lifetime{};
+    var in_flight = fail.InFlight{};
+    var buf: [96 * 1024]u8 = undefined;
+    const request = "GET /big HTTP/1.1\r\nHost: e.dev\r\nConnection: keep-alive\r\n\r\n";
+
+    // The first request is what warms the arena; the count that matters is
+    // what the ones after it cost.
+    var in = std.Io.Reader.fixed(request);
+    var out = std.Io.Writer.fixed(&buf);
+    _ = app.handleRequest(arena.allocator(), &lifetime, &in_flight, &in, &out, .off, .off, .{});
+    lifetime.end();
+    _ = arena.reset(.{ .retain_with_limit = keep });
+
+    counting.reset();
+    for (0..count) |_| {
+        var in_n = std.Io.Reader.fixed(request);
+        var out_n = std.Io.Writer.fixed(&buf);
+        _ = app.handleRequest(arena.allocator(), &lifetime, &in_flight, &in_n, &out_n, .off, .off, .{});
+        lifetime.end();
+        _ = arena.reset(.{ .retain_with_limit = keep });
+    }
+    return counting.allocs;
+}
+
+test "a response bigger than arena_keep makes the connection take fresh pages every request" {
+    // The finding behind the option (ADR 0096). At the default the 64 KiB
+    // body does not fit in what is retained, so the arena gives the block
+    // back after every request and asks for it again on the next one. On a
+    // megabyte that showed up as 257 minor faults a request.
+    const allocs = try arenaAllocationsAcross(default_arena_keep, 8);
+    try testing.expect(allocs >= 8);
+}
+
+test "an arena_keep past the response leaves the connection allocating nothing" {
+    // The same eight requests with the option set past the body: the block is
+    // retained, so the arena never goes back to the allocator. This is the
+    // whole of what `listen(.{ .arena_keep = … })` buys, and it is bought with
+    // memory held per connection rather than per thread.
+    const allocs = try arenaAllocationsAcross(128 * 1024, 8);
+    try testing.expectEqual(@as(usize, 0), allocs);
 }
 
 fn twiceTheSameAxis(c: *Ctx) anyerror!void {
@@ -4068,7 +4159,7 @@ test "the request path stays inside its allocation budget" {
     // request, not of the path being measured.
     for (0..3) |_| {
         send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
-        _ = arena.reset(.{ .retain_with_limit = arena_keep });
+        _ = arena.reset(.{ .retain_with_limit = default_arena_keep });
     }
 
     counting.reset();
@@ -4307,7 +4398,7 @@ test "two requests on one trickling connection do not borrow each other's head" 
         ));
         try testing.expect(std.mem.endsWith(u8, out.buffered(), want));
         lifetime.end();
-        _ = arena.reset(.{ .retain_with_limit = arena_keep });
+        _ = arena.reset(.{ .retain_with_limit = default_arena_keep });
     }
 }
 
@@ -5395,7 +5486,7 @@ test "a route that resolves nothing still costs what it always did" {
 
     for (0..3) |_| {
         send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
-        _ = arena.reset(.{ .retain_with_limit = arena_keep });
+        _ = arena.reset(.{ .retain_with_limit = default_arena_keep });
     }
     counting.reset();
     send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
@@ -5563,7 +5654,7 @@ test "a stream allocates once, however many pieces it writes" {
 
     for (0..3) |_| {
         send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
-        _ = arena.reset(.{ .retain_with_limit = arena_keep });
+        _ = arena.reset(.{ .retain_with_limit = default_arena_keep });
     }
     counting.reset();
     send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
@@ -5774,7 +5865,7 @@ test "a body read in pieces allocates nothing" {
 
     for (0..3) |_| {
         send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
-        _ = arena.reset(.{ .retain_with_limit = arena_keep });
+        _ = arena.reset(.{ .retain_with_limit = default_arena_keep });
     }
     counting.reset();
     send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
@@ -6004,7 +6095,7 @@ test "a WebSocket allocates nothing per message, however many it carries" {
 
     for (0..3) |_| {
         send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
-        _ = arena.reset(.{ .retain_with_limit = arena_keep });
+        _ = arena.reset(.{ .retain_with_limit = default_arena_keep });
     }
     counting.reset();
     send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
@@ -6510,7 +6601,7 @@ test "serving a gzipped static file allocates nothing, middleware included" {
 
     for (0..3) |_| {
         send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
-        _ = arena.reset(.{ .retain_with_limit = arena_keep });
+        _ = arena.reset(.{ .retain_with_limit = default_arena_keep });
     }
 
     counting.reset();
@@ -6621,7 +6712,7 @@ test "reading a cookie allocates nothing" {
         var warm_out = std.Io.Writer.fixed(&buf);
         _ = app.handleRequest(counting.allocator(), &lifetime, &in_flight, &warm_in, &warm_out, .off, .off, .{});
         lifetime.end();
-        _ = arena.reset(.{ .retain_with_limit = arena_keep });
+        _ = arena.reset(.{ .retain_with_limit = default_arena_keep });
     }
 
     counting.reset();

@@ -177,6 +177,27 @@ pub const Options = struct {
     /// connections open and up for one serving large responses.
     write_buffer: usize = 4 * 1024,
 
+    /// Bytes of a connection's request arena that survive between requests.
+    ///
+    /// The arena is reset after every request keeping this much, so anything a
+    /// request allocates **beyond** this figure is handed back to the operating
+    /// system and taken again next time — which is a page fault, and a page the
+    /// kernel zeroes, for every 4 KiB of it. On a route answering a megabyte
+    /// that is 257 minor faults a request, and lifting this past the response
+    /// took the same route from 7,908 req/s to 11,069
+    /// ([ADR 0096](../docs/adr/0096-a-response-larger-than-the-arena-keep-is-a-page-fault-per-page.md)).
+    ///
+    /// The default is small because the memory is **per connection**, not per
+    /// thread: raising it to a megabyte on a server holding ten thousand
+    /// connections is ten gigabytes, and every connection that once served a
+    /// big response keeps its block for as long as it stays open. Raise it to
+    /// just past the largest response a route assembles in the arena, and only
+    /// on a server whose connection count you know.
+    ///
+    /// Leaving it alone is the right answer for a server whose responses fit
+    /// in it, which is most of them.
+    arena_keep: usize = 16 * 1024,
+
     // ---- deadlines (ADR 0023) ----
     //
     // Zero turns any one of these off. All four off is what nilo did

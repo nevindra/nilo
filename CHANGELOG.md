@@ -28,6 +28,24 @@ field full of upload bytes.
 
 ### Added
 
+#### `listen(.{ .arena_keep = … })` — for a server whose responses are large
+
+A response bigger than what the request arena keeps between requests was **a
+page fault per 4 KiB, every request**: the arena hands the block back on reset
+and the next request takes fresh pages the kernel has to zero. On a route
+answering a megabyte that is 257 minor faults a request, and setting the option
+past the response took it from 7,908 req/s to 11,069
+([ADR 0096](./docs/adr/0096-a-response-larger-than-the-arena-keep-is-a-page-fault-per-page.md)).
+
+```zig
+try app.listen(.{ .port = 8080, .arena_keep = 1 << 20 });
+```
+
+**The default is unchanged at 16 KiB and no existing server moves**, because
+the memory is held per connection: a megabyte of keep across ten thousand
+connections is ten gigabytes. Set it just past the largest response a route
+assembles in the arena, and only where the connection count is known.
+
 #### `app.spawn(f, args)` — somewhere to start work that is not a request
 
 `nilo.spawn` needs a running server and `listen()` never returns, so a ticker
