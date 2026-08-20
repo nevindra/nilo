@@ -403,45 +403,6 @@ half of this is done and what is left is the matching.
 
 ### Known gaps
 
-**`If-Range` accepts a weak validator, which is the one comparison the RFC says
-must be strong.** `static.etagMatches` strips a `W/` prefix and honours `*`.
-Both are right for `If-None-Match` and neither is right for `If-Range`: RFC 9110
-§13.1.5 asks for strong comparison there, and a weak tag means "close enough to
-reuse, not byte for byte the same", which is exactly the claim a resumed
-download must not act on. `static.etagForSpilled`'s own doc states that rule as
-the reason nilo's tags are strong, so the design knows it and the shared
-comparison does not.
-
-nilo only ever writes strong tags, so reaching it takes a client that wraps a
-tag it was given in `W/`. Latent rather than live, and one function away from
-being impossible.
-
-There is a narrower second half. `sendfile.send` guards its `If-Range` with
-`contents.etag.len > 0` and says why: `etagMatches` would otherwise let a bare
-`*` stand in for a comparison that never happened. `App.serveHeldFile` has no
-such guard. Unreachable today, because `static.load` gives every held file a
-tag, but the two arms of one feature disagree while `serveHeldFile`'s own doc
-claims there is exactly one copy of each rule.
-
-A second entry point, `etagMatchesStrong`, used by both `If-Range` callers. A
-cold header, no allocation, nothing per connection.
-
-**Waiting on: ready.**
-
-**`Expect: 100-continue` is never answered, so curl waits a second before
-sending an upload.** Nothing under `http/` reads the header. A client that sends
-it and waits gets no interim response, so it falls back on its own timer:
-curl's is one second, and it is one second on every upload past its threshold.
-RFC 9110 §10.1.1 also allows answering the *final* status without reading the
-body at all, which is the better half of the feature and is what turns a
-rejected 20 MB upload into a 413 that costs nothing to send.
-
-The write is 25 bytes and the read is one more arm in `applyHeaderAt`'s switch
-on name length. No allocation, nothing per connection, and nothing at all for a
-request that does not send the header.
-
-**Waiting on: ready.**
-
 **A `Room`'s roster lock is held across the whole broadcast, and the field says
 it is not.** `Room.roster`'s doc says it guards taking and giving up a seat and
 is "not held while posting". `Room.handOut` takes it and holds it for the whole
@@ -484,50 +445,6 @@ measured an ordinary database route at 17,022 bytes
 **Waiting on: a number.** `noinline fn log` is a one-word change. Whether it
 moves `python3 bench/mem.py` against a route holding a stream is what nobody
 has run.
-
-**Ten doc comments came unstuck from what they describe, and two of them name
-things that are gone.** A doc block that loses its blank line runs into the next
-one, and both land on the following declaration. It has happened ten times:
-`App.findStatic`'s doc sits on `StaticHit`, `App.drain`'s on `checkRootWiring`,
-`App.sameService`'s on `rebase`, `Ctx.body`'s on `aboutToRead`, `Ctx.events`'s
-on `upgrade`, `bulkhead.dontNeed`'s on `releaseScratchPages`,
-`bulkhead.Deadlines`'s on `Woken`, `zio.releaseIdleStack`'s on `margin`, and
-twice more inside `websocket.Socket`. Every time, the function that was
-described now has no doc and the one that inherited it has two.
-
-The largest is the worst. `releaseIdleStack`'s doc is the whole account of ADR
-0071's arithmetic, including the three properties that keep its `madvise` off a
-neighbouring fiber's live stack, and it is filed under a constant.
-
-Two also name identifiers that no longer exist. `websocket.zig` says
-`App.waitOrRelease`, which ADR 0071 renamed to `waitForRequest`, and it says the
-scratch slot points at `Ctx._ws_scratch`, which is not a field `Ctx` has. The
-slot is on the handover value in `App.handleConnection`.
-
-Nothing on any axis. It is a morning of reading, and the reason it is here
-rather than done is that nothing catches the next one.
-
-**Waiting on: ready.**
-
-**Four files print nilo's own file names in their compile errors.** `names.zig`
-exists because a message saying `str.Str` sends a reader looking for a `str`
-module they never imported, when their import line says `nilo`. Three files ask
-it: `session.zig`, `resolve.zig` and `service.zig`. Four do not, and between
-them they carry twenty-five `@typeName` calls inside `@compileError` text.
-`jsonmark.zig` has fourteen, `websocket.zig` eight, `typed.zig` two and
-`openapi.zig` one. So a WebSocket loop whose first argument is wrong is told it
-should be `*nilo.Socket` and that what it has is a `*ctx.Ctx`.
-
-The table itself is hand-kept and has fallen behind `http.zig`'s exports:
-`Bound`, `Session`, `FileBody`, `Dir`, `Stream`, `Events`, `Body`, `Socket`,
-`Room`, `Limits` and `Gate` are all missing from `names.ours`. Its own doc says
-a missing type is meant to be noticed in `refusals/`, and none of these was.
-
-Comptime only, on a path that never reaches a binary. `refusals/` is where the
-rule could stop being a paragraph
-([ADR 0027](./adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)).
-
-**Waiting on: ready.**
 
 **The two arms of static-file serving live in two files, and the rule they share
 lives in a third.** `App.serveHeldFile` answers a file read at startup,
@@ -628,24 +545,6 @@ either.
 
 **Waiting on: a number.** `bench/result/http.md` has the write side (258ns down
 to 93ns on a 374-byte alert rule) and nothing at all for the read side.
-
-**A multipart part that names its file only with `filename*` becomes a text
-field.** `parseMultipart` decides a part is a file by asking `parameterOf` for
-`filename`, and `parameterOf` compares the key exactly, so `filename*` does not
-match. `form.zig` says the encoding is deliberately not read and gives the
-reason: "the plain `filename` is always sent alongside it". That is true of
-browsers and is not true of every HTTP library.
-
-What happens when it is not true is the part with a wrong answer. The part is
-not refused and is not read as a file; it is bound as a *text* field whose value
-is the raw bytes of the upload, and the `Upload` field the endpoint asked for is
-reported missing. So the 400 names the wrong thing.
-
-Refusing a part that has `filename*` and no `filename` is a sentence rather than
-a decoder, and it is the same call ADR 0081 makes about a ceiling: nilo need not
-read the encoding, it only has to stop pretending the part was something else.
-
-**Waiting on: ready.**
 
 **`Socket.print` runs the format twice and never checks that the two agree.**
 The frame's length is written from the counting pass and the bytes come from the
@@ -824,21 +723,6 @@ hundreds of them.
 **Waiting on: a number.** The numbers no longer point at it urgently. `zig
 build profile` is the harness for the day they do, and two attempts that lost
 are written up in [`history.md`](./history.md) so they are not repeated.
-
-**`inline_headers` went from six to seven and nobody has re-run the
-per-connection figure.** Holding a seventh response header on the `Ctx` is 32
-bytes on `serveRequest`'s frame, which is `noinline` and unwound before the
-connection waits ([ADR 0089](./adr/0089-two-layers-can-each-name-a-vary-axis.md)),
-so the reasoning says an idle connection is untouched at 4,669 bytes flat. The
-reasoning is all there is: `bench/mem.py` reads `ss` and `/proc/<pid>/VmRSS` and
-the change was made on Darwin, where neither exists.
-
-ADR 0063 is the reason this is written down rather than assumed. A per-connection
-claim reasoned from the shape of the code, and repeated in six files, was half
-wrong for two milestones.
-
-**Waiting on: a machine.** One Linux box and `python3 bench/mem.py --port 8787
---path /health` against `zig build run-hello` settles it in a minute.
 
 **A 404 or a 405 with middleware registered costs one allocation.** Routes and
 static files have their chains resolved at `listen()`, so neither pays for the

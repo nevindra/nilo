@@ -1115,3 +1115,104 @@ The budget test was written before the constant moved and failed with `expected
 into a checked one — and the other half of the same cost, memory per idle
 connection, could not be measured on the machine at hand and went to the roadmap
 as a number owed rather than into the ADR as a claim.
+
+## The number was owed, and the instruction for paying it named the wrong binary
+
+The debt above was paid on a Linux box: four interleaved runs of `bench/mem.py`,
+two per side, `d04d1a2` against a `git archive` rebuild of `v0.2.0`. **The
+seventh inline header costs an idle connection nothing** and the spread across
+all four runs is one byte, so ADR 0089's reasoning holds and the roadmap entry
+is gone ([`bench/result/http.md`](../bench/result/http.md)).
+
+The finding is the other half. The roadmap said to settle it with
+`bench/mem.py --port 8787 --path /health` against **`zig build run-hello`**, and
+that reads **4,810 bytes**, not the 4,669 published in thirteen places. Nothing
+had regressed. `run-hello` is `examples/hello` and every published figure was
+taken on `bench/main.zig`, which read 4,674 on the same afternoon — two programs
+136 bytes apart whose names differ by one character.
+
+**A per-connection figure belongs to a binary, not to a framework.** The floor is
+a band of roughly 4,670 to 4,810 depending on which program carries it, and the
+constant that gets quoted is the benchmark server's end of it. Nothing said so
+anywhere, and `bench/result/http.md` had already been bitten by the same pair on
+the binary-size axis — it carries a paragraph warning that `nilo-hello` is
+`bench/main.zig` and not `examples/hello`. That warning was one axis short.
+
+The near miss is what earns this a section. Somebody paying a documented debt,
+running the exact command the roadmap gave them, would have read 4,810 against a
+published 4,669 and reported a 141-byte regression introduced by a change that
+costs nothing. **An instruction for reproducing a number is part of the number**,
+and it decays the same way — the command was written from the shape of the claim
+rather than from the run that produced it.
+
+## Three headers that were read and answered with something else
+
+`Expect: 100-continue`, `If-Range` and a multipart `filename*` were each known to
+the parser and each given an adjacent answer rather than the defined one — a
+second on every curl upload, the weak-validator comparison on the one header RFC
+9110 says must be strong, and an upload bound as a text field with the 400 naming
+the wrong thing
+([ADR 0094](./adr/0094-a-header-is-answered-as-asked-or-refused.md)).
+
+The lesson that is not in the ADR is about **where the fix goes**. The obvious
+place to answer `100 Continue` is where the header is parsed, and that throws the
+feature's better half away: answer at the parse and the client sends its body, so
+a 413 for an oversized upload arrives *after* the 20 MB. Answering where nilo
+commits to reading instead makes "refuse without reading" fall out for free,
+because every refusal already happens above that line. **The cheap version and
+the right version were the same size, and only one of them was on the roadmap.**
+
+The roadmap's own one-line description of the work — "one more arm in
+`applyHeaderAt`'s switch on name length" — was half of it. `parseHead` filters on
+the *first byte* before it measures a name, and it passed only `c` and `t`;
+`Expect` begins with neither, so the new arm would have been dead code. **A plan
+written from reading one function names the change that function needs.**
+
+## A number that grows with a table has to name the table
+
+`http/names.zig`'s rewrite table had fallen fifteen types behind the exports, and
+its own doc said `refusals/` was where that would be noticed. Nothing had noticed
+([ADR 0095](./adr/0095-the-name-table-is-checked-against-the-exports.md)) — a
+refusal proves one message is right and says nothing about the ones nobody
+thought to write one for. The replacement is a test that walks the exports.
+
+Filling the table in then broke three files that had not changed a character.
+`textOf` set its branch quota as `64 * (name.len + 1) + 4_000`, with a comment
+approving of itself: *"The quota tracks the input rather than being a number that
+happened to be enough once."* Every row scans the whole name, so the cost is
+length times rows, and the table went from 20 rows to 35. The failure surfaced
+inside `std.mem` with nothing naming `names.zig`. **The comment was right about
+the trap and wrong about the second variable**, which is the same mistake as the
+paragraph it sat above.
+
+## The third deadlock in one struct, and a benchmark is what reached it
+
+`zig build test` sat at **ten minutes of wall clock against zero seconds of
+CPU**. `ps -o etime,cputime -C zig`, which `CLAUDE.md` names as the one command
+that settles this, took one run; `pstree` found two test binaries parked in
+`futex_do_wait`.
+
+`fetch/deadline.zig`'s `Quiet` endpoint has a `done` flag, and `done` bounds the
+sleep loop at the bottom of `run`. It does not bound the `accept` above it, and
+nothing in the file ever connects to `Quiet` directly — the test's request goes
+to the *nilo* server, which is what then dials it. So any failure before that
+request left `run` parked in `accept` with `done` set and nobody to read it, and
+the teardown's `join` waited for a thread that was never coming back. **The suite
+hung instead of reporting the failure that caused it**, which is strictly worse
+than the failure. The fix is a self-connect in the teardown; before/after with a
+deliberate early failure is 2 minutes and no output against 27 seconds and a
+named error.
+
+Two things are worth more than the fix.
+
+**This is the third deadlock in that struct and it is six lines below the
+second.** The `no_port` field exists because the port scan gave up by returning
+and left a wait with no bound — the field's doc says so in those words. The same
+reading did not continue down the function.
+
+**What reached it was `bench/mem.py`.** Five runs of 10,000 keep-alive
+connections leave the ephemeral range full of TIME_WAIT, so the nilo server under
+test could not bind and the test failed early for the first time in its life.
+The memory run three sections up and this hang are the same afternoon:
+**a benchmark is a machine state, not just a number**, and it is the cheapest way
+this repository has found to make a rare failure path ordinary.

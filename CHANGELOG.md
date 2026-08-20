@@ -10,13 +10,21 @@ What was measured and what was got wrong on the way is in
 **No source change is needed to move a 0.2.0 program to this**, so the next tag
 is a minor one. Needs Zig 0.16, as 0.2.0 does.
 
-**Three things behave differently at run time, and all three are in Fixed
-below.** Sessions now carry an expiry, so everybody holding one is signed out on
-the deploy that picks this up, and a session cookie that used to last
-indefinitely now lasts a day unless `max_age` says otherwise. A response header
-value holding a control byte is refused rather than written, which is a 500 on a
-handler that was writing a header it should not have been able to. And a request
-whose body is framed two ways at once is a 400 rather than a guess.
+**Six things behave differently at run time, and all six are in Fixed below.**
+Sessions now carry an expiry, so everybody holding one is signed out on the
+deploy that picks this up, and a session cookie that used to last indefinitely
+now lasts a day unless `max_age` says otherwise. A response header value holding
+a control byte is refused rather than written, which is a 500 on a handler that
+was writing a header it should not have been able to. A request whose body is
+framed two ways at once is a 400 rather than a guess.
+
+The other three are new answers to headers nilo already read. A client sending
+`Expect: 100-continue` now gets one, and stops waiting out its own timer; a
+request refused before its body is read gets the refusal without the body. An
+`If-Range` carrying a weak tag or a `*` now gets the whole file rather than a
+range, which is a bigger download in place of a possibly corrupt one. And a
+multipart part naming its file only with `filename*` is a 400 rather than a text
+field full of upload bytes.
 
 ### Added
 
@@ -104,6 +112,64 @@ is `std.json`'s call, and nothing can add a declaration to a type you wrote.
 
 ### Fixed
 
+- **`Expect: 100-continue` was never answered, so curl waited a second before
+  every upload.** Nothing under `http/` read the header. A client that sends it
+  holds its body back until the server says something; curl's fallback timer is
+  one second, and it was paid on every upload past its threshold.
+
+  nilo now answers `100 Continue` at the moment it commits to reading the body
+  ([ADR 0094](./docs/adr/0094-a-header-is-answered-as-asked-or-refused.md)) —
+  which is what buys the better half of RFC 9110 §10.1.1 for nothing. **A request
+  refused before that line is answered with its final status and the body is
+  never sent at all**: a body over `max_body`, a 404, a 405, or a handler that
+  never asks. A rejected 20 MB upload now costs the bytes of the 413.
+
+  Nothing sends an interim response to an HTTP/1.0 client, to a request already
+  answered, or where `Content-Length: 0` says the client is holding nothing back.
+  A connection whose body was never collected answers and then closes, because
+  the request is unfinished. `100-continue` is the only expectation read; any
+  other is ignored rather than met with a 417.
+
+- **`If-Range` accepted a weak validator, which is the one comparison the RFC
+  says must be strong.** `static.etagMatches` strips a `W/` prefix and honours
+  `*` — right for `If-None-Match`, wrong for `If-Range`, where RFC 9110 §13.1.5
+  asks for strong comparison. A weak tag means "close enough to reuse", and a
+  resumed download staples the bytes it gets onto a prefix it already holds.
+
+  `If-Range` now uses `etagMatchesStrong`: no `W/`, no `*`, one tag rather than a
+  list. `If-None-Match` is unchanged. A second, narrower half went with it —
+  `sendfile.send` guarded against a bare `*` standing in for a comparison that
+  never happened and `App.serveHeldFile` did not, while `serveHeldFile`'s doc
+  claimed there was exactly one copy of each rule. There is now.
+
+  **Reachable only from a client that wraps a tag it was given in `W/`**, since
+  nilo writes strong tags. Latent rather than live, and the failure mode is a
+  corrupt file.
+
+- **A multipart part naming its file only with `filename*` was read as a text
+  field.** `parameterOf` compares the key exactly, so `filename*` never matched
+  `filename` and the part fell through to the text arm — holding the raw bytes of
+  the upload, while the `Upload` the endpoint asked for was reported missing. So
+  the 400 named the wrong thing.
+
+  It is now a 400 naming the part. nilo still does not read RFC 6266's encoding;
+  it stops pretending the part was something else, which is the call ADR 0081
+  makes about a ceiling. Browsers send both `filename` and `filename*` and are
+  unaffected.
+
+- **Fifteen types printed a nilo file name in nilo's own compile errors.**
+  `http/names.zig` rewrites `str.Str` to `nilo.Str` so a message names the module
+  the reader imported, and its table had fallen fifteen types behind `http.zig`'s
+  exports — `Socket`, `Room`, `Stream`, `Session`, `Bound` and ten more. A
+  WebSocket loop with the wrong first argument was told it should be
+  `*nilo.Socket` and that what it had was a `*ctx.Ctx`.
+
+  The table is filled in, and `jsonmark.zig` and `websocket.zig` now ask it
+  rather than calling `@typeName` directly. **What holds it is a test that walks
+  the module's exports** rather than the paragraph that was supposed to
+  ([ADR 0095](./docs/adr/0095-the-name-table-is-checked-against-the-exports.md)):
+  a type added to `http.zig` and forgotten fails the suite the day it lands.
+
 - **A gzipped static file behind a named-origin CORS lost its `Vary: Origin`.**
   `setHeader` replaced, on the grounds that setting a header twice is somebody
   changing their mind — which is true inside one function and not true of
@@ -122,9 +188,10 @@ is `std.json`'s call, and nothing can add a declaration to a type you wrote.
   headers, and the seventh was spilling to the arena. That is measured — the new
   budget test failed with `expected 0, found 1` before the constant moved, and
   asserts zero allocations after. The 32 bytes sit on a frame that is unwound
-  before the connection waits, so an idle connection should be unchanged at
-  4,669 bytes; that half is reasoned rather than measured, because the memory
-  harness is Linux-only, and it is on the roadmap as such.
+  before the connection waits, so an idle connection is unchanged: four
+  interleaved runs, two per side, put this release and 0.2.0 at the same figure
+  with a one-byte spread across the four
+  ([`bench/result/http.md`](./bench/result/http.md)).
 
 - **A session never expired, whatever `max_age` said.** The only thing bounding
   one was `Max-Age` on the cookie, which is an instruction to a *browser* — so a

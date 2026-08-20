@@ -428,6 +428,59 @@ retains up to `arena_keep` and so holds a page on any connection that has served
 something. That is a deliberate trade for not reallocating per request, and it
 is the next thing to look at rather than a defect.
 
+### The seventh inline header costs nothing, and the figure is per binary
+
+[ADR 0089](../../docs/adr/0089-two-layers-can-each-name-a-vary-axis.md) took
+`inline_headers` from six to seven so a gzipped static file behind a named-origin
+CORS could carry both `Vary` axes without spilling to the arena. The 32 bytes sit
+on `serveRequest`'s frame, which is `noinline` and unwound before the connection
+waits, so the reasoning said an idle connection was untouched. **The reasoning was
+all there was**: `bench/mem.py` reads `ss` and `/proc/<pid>/VmRSS`, both Linux,
+and the change was made on Darwin. ADR 0063 is why that was not left alone — a
+per-connection claim reasoned from the shape of the code, and repeated in six
+files, was half wrong for two milestones.
+
+Method: `examples/hello` on `/health`, out to 10,000 connections, `d04d1a2`
+against a `git archive` rebuild of `v0.2.0` into a scratch directory. Four runs,
+two per side, started alternately so a machine that drifts drifts under both.
+
+| idle connections | `v0.2.0` | `d04d1a2` |
+|---|---|---|
+| 500 | 5,005 / 4,989 B | 5,005 / 4,981 B |
+| 1,000 | 4,907 / 4,903 B | 4,899 / 4,891 B |
+| 2,000 | 4,850 / 4,844 B | 4,850 / 4,848 B |
+| 5,000 | 4,819 / 4,820 B | 4,821 / 4,819 B |
+| 10,000 | **4,810 / 4,809 B** | **4,810 / 4,810 B** |
+
+**Unchanged, and the spread across all four runs is one byte.** Marginal at the
+last step is 4,798–4,803 against an average of 4,810, so the reading has
+converged and the difference between the two sides is smaller than the noise on
+either. The seventh header costs an idle connection nothing, which is what
+ADR 0089 argued and what nothing had checked.
+
+**The other half of this run is the one to remember.** 4,810 is not 4,669, and
+the gap is not a regression — it is a different program. The published figure
+belongs to the benchmark server, and the same harness against it on the same
+afternoon reads inside the band it always has:
+
+| server | binary | 10,000 idle connections |
+|---|---|---|
+| `zig build run` | `nilo-hello` (`bench/main.zig`) | 4,674 B (marginal 4,673) |
+| `zig build run-hello` | `example-hello` (`examples/hello`) | 4,810 B (marginal 4,800) |
+
+136 bytes apart, on two programs whose names are one character different. This is
+the memory axis of the trap the binary-size table already names further down: **a
+row in the ADR 0018 table means `bench/main.zig`, and `run-hello` is a different
+answer to the same question.** The roadmap's own reproduce line said `run-hello`,
+so the next person to settle the `inline_headers` question would have read 4,810,
+compared it against 4,669 and found a regression that is not there. That line now
+names the benchmark server.
+
+`bench/result/s3.md` reads 4,670 at 10,000 for a third binary again, so the
+framework's floor is a band of roughly 4,670 to 4,810 depending on which program
+carries it, not a single constant. What every published number has in common is
+that it was taken on `bench/main.zig` or something built the same way.
+
 ## Memory per idle WebSocket
 
 Asked because [gws](https://github.com/lxzan/gws) claims a low memory footprint

@@ -102,17 +102,24 @@ and zero resizes.
 **Throughput: one extra comparison per repeating header set**, over a list of at
 most seven that is already in L1 because it was just written.
 
-**Memory per idle connection: reasoned to be unchanged, and *not* measured
-here.** The 32 bytes are two slices on the `Ctx`, which lives in
-`serveRequest`'s frame — `noinline`, and unwound before the connection loop
-waits for the next request, which is the whole shape
-[ADR 0071](./0071-where-a-connection-waits-is-what-it-costs.md) established. An
-idle connection is suspended in `waitForRequest`, several frames above it, and
-`releaseIdlePages` hands the touched pages back when it goes quiet.
+**Memory per idle connection: unchanged, and now measured.** The 32 bytes are
+two slices on the `Ctx`, which lives in `serveRequest`'s frame — `noinline`, and
+unwound before the connection loop waits for the next request, which is the
+whole shape [ADR 0071](./0071-where-a-connection-waits-is-what-it-costs.md)
+established. An idle connection is suspended in `waitForRequest`, several frames
+above it, and `releaseIdlePages` hands the touched pages back when it goes quiet.
 
-**That is an argument, not a number, and the distinction is this repository's
-own.** `bench/mem.py` reads `ss` and `/proc/<pid>/VmRSS`, both Linux, and this
-was developed on Darwin, so the harness could not be run. The figure to beat is
-4,669 bytes flat. It is on the roadmap under `nilo_http` as **Waiting on: a
-machine**, because a 32-byte change to a frame that is unwound before the wait
-is exactly the kind of reasoning ADR 0063 was written after getting wrong.
+That was the argument when this was written, and it was left as one: `bench/mem.py`
+reads `ss` and `/proc/<pid>/VmRSS`, both Linux, and this was developed on Darwin.
+Four interleaved runs on a Linux box since, two per side, put both sides at
+**4,810 bytes** at 10,000 connections with a one-byte spread across the four —
+smaller than the noise on either side, so the seventh header costs nothing. The
+run is in [`bench/result/http.md`](../../bench/result/http.md), and it also found
+that 4,810 and the published 4,669 are two different binaries rather than a
+regression.
+
+**The distinction between an argument and a number is this repository's own**, and
+it is why the gap was carried on the roadmap instead of claimed here: a 32-byte
+change to a frame that is unwound before the wait is exactly the kind of
+reasoning ADR 0063 was written after getting wrong. It happened to be right this
+time.

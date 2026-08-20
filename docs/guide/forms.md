@@ -105,6 +105,13 @@ browser will happily send if asked to. Store the bytes under a name of your
 own; treat this one as a label to show somebody. `content_type` is likewise the
 client's claim, not a fact — sniff the bytes if it matters.
 
+nilo reads the plain `filename` and not RFC 6266's `filename*=UTF-8''…`, which
+is the encoded form a browser sends *alongside* it for a name that is not
+Latin-1. A part carrying **only** the encoded one is a 400 naming the part
+([ADR 0094](../adr/0094-a-header-is-answered-as-asked-or-refused.md)) — refused
+rather than read as a text field full of upload bytes, which is what it used to
+become. No browser sends that shape; a hand-rolled HTTP client can.
+
 ### How big a form can be
 
 The whole body is read into the request arena, bounded by `listen()`'s

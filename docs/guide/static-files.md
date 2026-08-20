@@ -123,6 +123,13 @@ correctness: resuming a download of a file that has since changed would staple
 two halves of two different files together, so a stale ETag gets the whole file
 instead.
 
+The comparison is **strong**, which is stricter than the one `If-None-Match`
+gets: a tag wrapped in `W/` and a bare `*` both get the whole file rather than a
+range. A weak validator promises the representation is equivalent, not that it is
+the same bytes, and the same bytes is exactly what a client stapling this onto a
+prefix it already holds needs
+([ADR 0094](../adr/0094-a-header-is-answered-as-asked-or-refused.md)).
+
 A request that asks for a range gets the **uncompressed** file, whatever it said
 about `Accept-Encoding`. A range is an offset into a representation, and the
 gzipped copy has different offsets — so answering one from the other would hand

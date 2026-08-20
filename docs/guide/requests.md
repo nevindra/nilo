@@ -214,6 +214,15 @@ chunked body announces no size and "however much they send" is a client's
 decision about your memory. A `Content-Length` past the ceiling is refused before
 a byte is read.
 
+**A client that asks first is told first.** Something sending
+`Expect: 100-continue` — curl does, past 1 KB of body — waits for the server
+before it sends anything. nilo answers `100 Continue` at the moment it commits to
+reading, so a request refused before that gets its final status and **never
+receives the body at all**: over the ceiling, no such route, wrong method, or a
+handler that simply never asks for it
+([ADR 0094](../adr/0094-a-header-is-answered-as-asked-or-refused.md)). There is
+nothing to switch on and nothing to write.
+
 | | |
 |---|---|
 | `incoming.read(&buf)` | the next piece, or `null` at the end |

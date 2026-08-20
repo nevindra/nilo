@@ -1199,6 +1199,7 @@ marker gets `{}` and a description saying so.
 | `client.request(&app, method, path, body)` | |
 | `client.send(&app, raw_request)` | the whole request, written out |
 | `answer.status` / `.head` / `.body` / `.raw` / `.chunked` / `.keep_alive` | |
+| `answer.interim` | `?[]const u8` — the `100 Continue` that came first, or null. `.status` is the final one either way |
 | `answer.header(name)` | case-insensitive, the first of that name |
 | `answer.headerAt(name, n)` / `.headerCount(name)` | for the ones a response repeats |
 | `answer.setCookie(name)` | the whole `Set-Cookie` line that sets it |
