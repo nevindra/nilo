@@ -610,20 +610,25 @@ as it is writing.
 a stream, and what it does to SSE, which is the one thing that must never be
 buffered. A proxy in front does this today and does it well.
 
-**Writing a megabyte costs 2.2× what axum charges for it, and nobody has
-looked.** On a route that allocates a megabyte, fills it and writes it, with no
-database and no object store anywhere near it, axum answers 18,160 req/s and
-nilo 8,215 on the same three cores
-([`bench/result/s3.md`](../bench/result/s3.md)). It turned up as a *control* in
-the object-store comparison, which is the only reason it was seen.
+**A megabyte assembled in the request arena costs a per-thread block cache
+nobody has built.** `listen(.{ .arena_keep = … })` closed the page-fault half
+of this: a response bigger than the keep was 257 minor faults a request, and
+setting the option past it is worth +40%
+([ADR 0096](./adr/0096-a-response-larger-than-the-arena-keep-is-a-page-fault-per-page.md)).
+What the option does not fix is that the memory is retained **per connection**,
+so sixty-four connections holding a megabyte each is a 76.6 MB working set
+against axum's 23.2 MB on a chip with 32 MB of L3. Moving the buffer to one per
+thread, changing nothing else, is worth 10,229 req/s to 14,365. The shape is an
+arena whose large nodes come from a per-thread free list rather than from the
+gpa, and it would need no option at all.
 
-The first hypothesis to kill is the arena. Allocating a megabyte per request
-from an arena that resets keeping `arena_keep` bytes means fresh pages and 256
-page faults every time, where a general allocator hands back the same warm
-block. Raising `arena_keep` past a megabyte on that route is a one-line
-experiment.
+The rest of that gap is `@memset`, which is Zig's rather than nilo's, and on the
+write path itself nilo already answers **22,018 req/s to axum's 17,209**
+([`bench/result/s3.md`](../bench/result/s3.md)).
 
-**Waiting on: ready.** Unrun, so the 2.2× is the only fact here.
+**Waiting on: a design.** It changes where request memory lives, which is
+[ADR 0004](./adr/0004-a-str-belongs-to-its-request.md)'s territory, and nobody
+has drawn one.
 
 **A spilled static file that changes on disk serves a stale length.** A file
 over the threshold has its size, mtime and ETag recorded at load and its bytes

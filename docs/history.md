@@ -1216,3 +1216,38 @@ test could not bind and the test failed early for the first time in its life.
 The memory run three sections up and this hang are the same afternoon:
 **a benchmark is a machine state, not just a number**, and it is the cheapest way
 this repository has found to make a rare failure path ordinary.
+
+## The control was doing work the route it was subtracted from never did
+
+`bench/result/s3.md` ranked "axum answers a megabyte 2.2× faster than nilo, and
+it is nilo's own write path" as the biggest gap in the table, and the roadmap
+carried it as **nobody has looked**. Somebody looked.
+[ADR 0096](./adr/0096-a-response-larger-than-the-arena-keep-is-a-page-fault-per-page.md)
+is the decision; four things are worth keeping here.
+
+**It was not the write path, and the file said it was.** On the same `send` over
+the same socket with nothing assembled per request, nilo answers 22,018 req/s to
+axum's 17,209. `sys` time per request is within 1% of axum's on every variant
+measured. The whole difference was user time in the *handler* — an `@memset`
+that costs 2.01 s per 20 GiB where glibc's `memset` costs 0.75 and a hand-written
+`rep stosb` costs 0.66. **A lever named in a results file is a hypothesis with a
+number attached, and it inherits the confidence of the number rather than of the
+hypothesis.**
+
+**One constant was 40% of it.** `arena_keep` is 16 KiB, so a megabyte did not
+fit in what the arena retains and every request faulted 257 pages back in. It is
+a `listen()` option now, with the default unchanged, because the memory is per
+connection and that is ADR 0018's hard axis.
+
+**The published before did not reproduce: 8,215 became 7,908 on the same box.**
+Measuring against the published figure would have claimed 4% that was the
+machine. This is the fourth time that rule has paid here.
+
+**And it explains a row the file had already refused.** The 1 MB CPU subtraction
+came out negative and was recorded as void with no cause given. The cause is
+that the floor route costs more user CPU than the store route it is subtracted
+from, because filling a megabyte is dearer than receiving one. **A control that
+is "the same work minus X" has to be checked for a plus as well as a minus** —
+`/warm/1m` was the store route minus S3 *plus* a fill, and at a megabyte the
+addition was the larger of the two. A negative result is the check working; the
+cause was one layer below where the check could see.

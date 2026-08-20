@@ -116,6 +116,70 @@ fn warm1m(c: *nilo.Ctx) !void {
     return c.send(200, octets, bytes);
 }
 
+/// The control that separates the write path from the arena. Same megabyte,
+/// same `send`, but the bytes exist before the server does: no allocation and
+/// no `@memset` per request. `/warm/1m` minus this is what assembling the body
+/// costs; this on its own is what putting a megabyte on the wire costs.
+const static_1m: [1 << 20]u8 = @splat(filler);
+
+/// Two more controls, to split `/warm/1m`'s cost into its parts.
+/// `/alloc/1m` allocates the megabyte and never writes to it, so it prices the
+/// arena on its own. `/warmc/1m` is `/warm/1m` with libc's `memset` in place of
+/// `@memset`, which is the only line between them.
+extern "c" fn memset(dest: ?*anyopaque, c: c_int, n: usize) ?*anyopaque;
+
+/// The same megabyte filled per request, but into one buffer per *thread*
+/// instead of one per connection. Six buffers against sixty-four, so the
+/// working set is 6 MB rather than 64 and stays inside this chip's 32 MB of
+/// L3. Only a measurement: two fibers on one thread share the buffer, so what
+/// goes out can be another request's bytes. It exists to price where the
+/// memory is, and nothing else.
+threadlocal var per_thread_1m: [1 << 20]u8 = undefined;
+
+/// `/warm/1m` with `rep stosb` in place of `@memset`, and nothing else changed.
+/// `@memset` lowers to a vector store loop; glibc's `memset` dispatches to the
+/// microcoded fill this instruction is. On this box, filling a megabyte:
+/// `@memset` 100 us, glibc 37 us, `rep stosb` 33 us. The difference is not
+/// nilo's to fix and it is most of what `/warm/1m` measures, which is why this
+/// route exists beside it.
+fn repStosb(dest: [*]u8, value: u8, n: usize) void {
+    asm volatile ("rep stosb"
+        :
+        : [ptr] "{rdi}" (dest),
+          [val] "{al}" (value),
+          [len] "{rcx}" (n),
+        : .{ .rdi = true, .rcx = true, .memory = true });
+}
+
+/// Both at once: the fill that does not go through `@memset`, into a buffer
+/// belonging to the thread rather than to the connection. Six megabytes live
+/// instead of sixty-four, so what the kernel copies out is still in L3.
+fn tlss1m(c: *nilo.Ctx) !void {
+    repStosb(&per_thread_1m, filler, per_thread_1m.len);
+    return c.send(200, octets, &per_thread_1m);
+}
+
+fn warms1m(c: *nilo.Ctx) !void {
+    const bytes = try c.arena().alloc(u8, 1 << 20);
+    repStosb(bytes.ptr, filler, bytes.len);
+    return c.send(200, octets, bytes);
+}
+
+fn tls1m(c: *nilo.Ctx) !void {
+    @memset(&per_thread_1m, filler);
+    return c.send(200, octets, &per_thread_1m);
+}
+
+fn warmc1m(c: *nilo.Ctx) !void {
+    const bytes = try c.arena().alloc(u8, 1 << 20);
+    _ = memset(bytes.ptr, filler, bytes.len);
+    return c.send(200, octets, bytes);
+}
+
+fn static1m(c: *nilo.Ctx) !void {
+    return c.send(200, octets, &static_1m);
+}
+
 // ------------------------------------------------------------------ the store
 
 fn get1k(files: *Files, c: *nilo.Ctx) !void {
@@ -227,6 +291,11 @@ pub fn main(init: std.process.Init) !void {
     try app.get("/health", health);
     try app.get("/warm/1k", warm1k);
     try app.get("/warm/1m", warm1m);
+    try app.get("/static/1m", static1m);
+    try app.get("/warmc/1m", warmc1m);
+    try app.get("/tls/1m", tls1m);
+    try app.get("/warms/1m", warms1m);
+    try app.get("/tlss/1m", tlss1m);
     try app.get("/o/1k", get1k);
     try app.get("/o/64k", get64k);
     try app.get("/o/1m", get1m);
@@ -239,5 +308,25 @@ pub fn main(init: std.process.Init) !void {
     // somebody else's routes and reports the difference as non-2xx.
     //
     // No logger. A line per request would measure the logger.
-    try app.listen(.{ .port = 8792 });
+    const port: u16 = if (init.minimal.environ.getPosix("PORT")) |text|
+        std.fmt.parseInt(u16, text, 10) catch 8792
+    else
+        8792;
+    // Both read from the environment so two builds can be stood up side by
+    // side on one machine and a load generator pointed at them alternately,
+    // which is the only way to measure a change here without charging the
+    // machine's drift to whichever ran second.
+    const write_buffer: usize = if (init.minimal.environ.getPosix("WRITE_BUFFER")) |text|
+        std.fmt.parseInt(usize, text, 10) catch 4096
+    else
+        4096;
+    const arena_keep: usize = if (init.minimal.environ.getPosix("ARENA_KEEP")) |text|
+        std.fmt.parseInt(usize, text, 10) catch 16 * 1024
+    else
+        16 * 1024;
+    try app.listen(.{
+        .port = port,
+        .write_buffer = write_buffer,
+        .arena_keep = arena_keep,
+    });
 }
