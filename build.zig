@@ -722,7 +722,7 @@ const refusals = [_]Refusal{
     },
     .{
         .name = "ws_loop_not_a_socket",
-        .says = "a WebSocket loop's first argument is *nilo.Socket, not *ctx.Ctx",
+        .says = "a WebSocket loop's first argument is *nilo.Socket, not *nilo.Ctx",
     },
     .{
         .name = "ws_loop_wrong_arity",
@@ -730,7 +730,7 @@ const refusals = [_]Refusal{
     },
     .{
         .name = "ws_state_mismatch",
-        .says = "upgrade was given state of type u32, and the loop's second argument is str.Str",
+        .says = "upgrade was given state of type u32, and the loop's second argument is nilo.Str",
     },
     .{
         .name = "ws_state_too_big",

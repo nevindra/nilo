@@ -575,6 +575,27 @@ pub const Wake = struct {
     }
 };
 
+/// Bytes below this call's own frame that are never released.
+///
+/// **A page of margin is not the same thing as a page of safety, and getting
+/// that backwards made this function do nothing for a year of its short life.**
+/// The first version left four *pages*, reasoning that more slack is safer. It
+/// is not: the whole point is to release the pages a returned call chain
+/// touched, and on this framework that chain is four to six kilobytes deep — so
+/// a sixteen-kilobyte margin reached past every page there was to give back and
+/// the call was a syscall that freed nothing. Measured: an idle keep-alive
+/// connection was 8,634 bytes with the release wired in and 8,634 without it.
+///
+/// What actually has to be true is narrower. `madvise` may not zero anything
+/// the return path still reads, which is this frame, and the red zone the ABI
+/// lets a leaf function write below the stack pointer — 128 bytes on x86-64.
+/// Subtracting `stack_margin` *before* rounding down to a page boundary makes the
+/// page holding both of them fall outside the range at every alignment: the
+/// floor is at most `frame - stack_margin`, which is below `frame - 128`. Everything
+/// under it is stack that has not been used yet and faults back in as zeroes,
+/// which is what a fresh frame wants anyway.
+const stack_margin = 512;
+
 /// Hand back the pages of the *running* fiber's stack that are below its
 /// current frame.
 ///
@@ -604,34 +625,13 @@ pub const Wake = struct {
 ///     describing the stack under our feet, and nothing happens.
 ///  3. **The page this call is standing on is never in the range**, so the
 ///     `madvise` call's own frames are never inside what it is releasing.
-///     `margin` is what makes that true at every alignment; see its doc.
+///     `stack_margin` is what makes that true at every alignment; see its doc.
 ///
 /// `MADV_DONTNEED` rather than the `MADV_FREE` that `coro.stackRecycle` uses:
 /// `FREE` is lazy and leaves the pages in `VmRSS` until the machine is under
 /// pressure, which is exactly the number this exists to move. `DONTNEED` does
 /// not decommit — the mapping stays read-write and the pages fault back in as
 /// zeroes, which is all a dead frame needs to be.
-/// Bytes below this call's own frame that are never released.
-///
-/// **A page of margin is not the same thing as a page of safety, and getting
-/// that backwards made this function do nothing for a year of its short life.**
-/// The first version left four *pages*, reasoning that more slack is safer. It
-/// is not: the whole point is to release the pages a returned call chain
-/// touched, and on this framework that chain is four to six kilobytes deep — so
-/// a sixteen-kilobyte margin reached past every page there was to give back and
-/// the call was a syscall that freed nothing. Measured: an idle keep-alive
-/// connection was 8,634 bytes with the release wired in and 8,634 without it.
-///
-/// What actually has to be true is narrower. `madvise` may not zero anything
-/// the return path still reads, which is this frame, and the red zone the ABI
-/// lets a leaf function write below the stack pointer — 128 bytes on x86-64.
-/// Subtracting `margin` *before* rounding down to a page boundary makes the
-/// page holding both of them fall outside the range at every alignment: the
-/// floor is at most `frame - margin`, which is below `frame - 128`. Everything
-/// under it is stack that has not been used yet and faults back in as zeroes,
-/// which is what a fresh frame wants anyway.
-const stack_margin = 512;
-
 pub fn releaseIdleStack() void {
     if (builtin.os.tag == .windows) return;
     const running = zio.coro.Coroutine.getCurrent() orelse return;

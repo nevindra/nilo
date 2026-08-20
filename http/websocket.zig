@@ -40,6 +40,7 @@ const std = @import("std");
 const bulkhead = @import("bulkhead.zig");
 const http1 = @import("http1.zig");
 const json_mod = @import("json.zig");
+const names = @import("names.zig");
 const room_mod = @import("room.zig");
 const scratch_mod = @import("scratch.zig");
 
@@ -184,7 +185,7 @@ pub fn checkLoop(comptime loop: anytype, comptime State: type) void {
     const info = switch (@typeInfo(Loop)) {
         .@"fn" => |f| f,
         else => @compileError("nilo: a WebSocket route runs a function on the socket, and " ++
-            @typeName(Loop) ++ " is not one"),
+            names.of(Loop) ++ " is not one"),
     };
     const wants: usize = if (State == void) 1 else 2;
     if (info.params.len != wants) {
@@ -195,27 +196,27 @@ pub fn checkLoop(comptime loop: anytype, comptime State: type) void {
         @compileError("nilo: a WebSocket loop takes " ++ (if (State == void)
             "*Socket and nothing else, because upgrade was given no state"
         else
-            "*Socket and the state passed to upgrade (" ++ @typeName(State) ++ ")") ++
+            "*Socket and the state passed to upgrade (" ++ names.of(State) ++ ")") ++
             "; this one takes " ++ num(info.params.len) ++ " argument" ++
             (if (info.params.len == 1) "" else "s"));
     }
     if (info.params[0].type != *Socket) {
         @compileError("nilo: a WebSocket loop's first argument is *nilo.Socket, not " ++
-            @typeName(info.params[0].type orelse anyopaque));
+            names.of(info.params[0].type orelse anyopaque));
     }
     if (State != void and info.params[1].type != State) {
-        @compileError("nilo: upgrade was given state of type " ++ @typeName(State) ++
+        @compileError("nilo: upgrade was given state of type " ++ names.of(State) ++
             ", and the loop's second argument is " ++
-            @typeName(info.params[1].type orelse anyopaque));
+            names.of(info.params[1].type orelse anyopaque));
     }
     if (@sizeOf(State) > state_max) {
         @compileError("nilo: a WebSocket loop may carry " ++ num(state_max) ++
-            " bytes of state and " ++ @typeName(State) ++ " is " ++ num(@sizeOf(State)) ++
+            " bytes of state and " ++ names.of(State) ++ " is " ++ num(@sizeOf(State)) ++
             "; put it in the request arena and carry a pointer to it");
     }
     if (@alignOf(State) > state_align) {
         @compileError("nilo: a WebSocket loop's state is aligned to " ++ num(state_align) ++
-            " bytes and " ++ @typeName(State) ++ " needs " ++ num(@alignOf(State)));
+            " bytes and " ++ names.of(State) ++ " needs " ++ num(@alignOf(State)));
     }
 }
 
@@ -349,10 +350,11 @@ pub const Socket = struct {
 
     /// Where this connection's message buffer is parked between messages.
     ///
-    /// Points at the Ctx's slot on a real server, so that a handler which
-    /// leaves its loop without a word still gives the buffer back — see
-    /// `Ctx._ws_scratch`. Null for a Socket a test built by hand, which falls
-    /// back to `_own_scratch` and hands it back when `receive` runs out.
+    /// Points at `Handover.scratch` on a real server, so that a handler which
+    /// leaves its loop without a word still gives the buffer back — the
+    /// connection loop owns that struct and holds the `defer`. Null for a
+    /// Socket a test built by hand, which falls back to `_own_scratch` and
+    /// hands it back when `receive` runs out.
     _scratch: ?*?[]align(std.heap.page_size_min) u8 = null,
     _own_scratch: ?[]align(std.heap.page_size_min) u8 = null,
     /// The message ceiling: the size of the buffer taken from the free list.
@@ -817,21 +819,6 @@ pub const Socket = struct {
     /// sentences always does.
     const idle_peek_ms = 200;
 
-    /// Park until there is something to do, handing the connection's buffer
-    /// pages back if it goes quiet first.
-    ///
-    /// `App.waitOrRelease` does exactly this between two requests, and stops
-    /// the moment a handler upgrades: a socket never goes back round that loop
-    /// (ADR 0022). So the twelve kilobytes an idle keep-alive connection hands
-    /// back were held for the whole life of every WebSocket, which is a thing
-    /// nobody had measured — `bench/ws_server.zig` and `bench/ws_idle.py` now
-    /// do, and the entry is in `bench/result/http.md`.
-    ///
-    /// The short wait first is the whole design, and it is the HTTP side's
-    /// lesson rather than a new one: releasing on every park took the
-    /// keep-alive path from 1.31M req/s to 626k, because `MADV_DONTNEED` in a
-    /// process with eight threads shoots TLB entries down on all of them. A
-    /// socket with a conversation on it answers inside 200ms and never pays.
     /// Where this socket's buffer is parked. The Ctx's slot on a real server,
     /// its own field for a Socket a test built by hand — resolved on every
     /// call rather than once, because a `Socket` is handed to the handler by
@@ -842,6 +829,7 @@ pub const Socket = struct {
 
     /// This socket's message buffer, taken from the executor's free list the
     /// first time a message needs one.
+    ///
     /// The slot holds the whole allocation, which the free list rounds up to a
     /// page; what comes back is exactly `_max_message` of it, so the ceiling a
     /// caller was promised is the ceiling a caller gets. A buffer that was
@@ -866,6 +854,21 @@ pub const Socket = struct {
         }
     }
 
+    /// Park until there is something to do, handing the connection's buffer
+    /// pages back if it goes quiet first.
+    ///
+    /// `App.waitForRequest` does exactly this between two requests, and stops
+    /// the moment a handler upgrades: a socket never goes back round that loop
+    /// (ADR 0022). So the twelve kilobytes an idle keep-alive connection hands
+    /// back were held for the whole life of every WebSocket, which is a thing
+    /// nobody had measured — `bench/ws_server.zig` and `bench/ws_idle.py` now
+    /// do, and the entry is in `bench/result/http.md`.
+    ///
+    /// The short wait first is the whole design, and it is the HTTP side's
+    /// lesson rather than a new one: releasing on every park took the
+    /// keep-alive path from 1.31M req/s to 626k, because `MADV_DONTNEED` in a
+    /// process with eight threads shoots TLB entries down on all of them. A
+    /// socket with a conversation on it answers inside 200ms and never pays.
     fn park(self: *Socket, may_give_buffer: bool) bulkhead.Woken {
         // A ping limit shorter than the peek is left alone rather than
         // reordered: the peek is supposed to be a prefix of the wait, not

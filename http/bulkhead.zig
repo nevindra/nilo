@@ -731,16 +731,6 @@ pub fn releaseIdlePages(in: *std.Io.Reader, out: *std.Io.Writer) void {
     dontNeed(out.buffer);
 }
 
-/// `MADV_DONTNEED` over whatever whole pages the slice covers.
-///
-/// Aligned inward rather than outward: a partial page at either end may be
-/// shared with somebody else's allocation, and zeroing that would be a bug of
-/// the worst kind — silent, rare, and in another module. The engine allocates
-/// these buffers page-aligned so that in practice nothing is trimmed.
-///
-/// Nothing happens off POSIX. Windows has `DiscardVirtualMemory` for the same
-/// job and it is not wired up here, so a Windows build keeps the pages and the
-/// old numbers — which is the behaviour that shipped, not a new fault.
 /// Hand back the pages behind a buffer that is not the connection's.
 ///
 /// A WebSocket's message ceiling is a buffer the *handler* declared, usually on
@@ -765,6 +755,16 @@ pub fn releaseScratchPages(buf: []u8) void {
     dontNeed(buf);
 }
 
+/// `MADV_DONTNEED` over whatever whole pages the slice covers.
+///
+/// Aligned inward rather than outward: a partial page at either end may be
+/// shared with somebody else's allocation, and zeroing that would be a bug of
+/// the worst kind — silent, rare, and in another module. The engine allocates
+/// these buffers page-aligned so that in practice nothing is trimmed.
+///
+/// Nothing happens off POSIX. Windows has `DiscardVirtualMemory` for the same
+/// job and it is not wired up here, so a Windows build keeps the pages and the
+/// old numbers — which is the behaviour that shipped, not a new fault.
 fn dontNeed(buf: []u8) void {
     if (builtin.os.tag == .windows) return;
     if (buf.len == 0) return;
@@ -798,15 +798,6 @@ pub const Limit = union(enum) {
     by_ns: u64,
 };
 
-/// One connection's time limits, and the way to apply them.
-///
-/// Passed by value into everything that reads or writes: two pointers and
-/// four numbers, copied rather than reached for through the App, because
-/// the limits belong to a connection and the App is shared by all of them.
-///
-/// `.off` is a complete working instance that does nothing. That is what a
-/// test driving `App` directly gets, and what a server with every limit set
-/// to zero ends up with, so "no deadlines" needs no branch anywhere.
 /// What ended a `Waker.wait` — the Engine's `Woken`, re-declared here so the
 /// layers above never name the Engine.
 pub const Woken = enum { readable, posted, timed_out, closed };
@@ -897,6 +888,15 @@ pub const Waker = struct {
     }
 };
 
+/// One connection's time limits, and the way to apply them.
+///
+/// Passed by value into everything that reads or writes: two pointers and
+/// four numbers, copied rather than reached for through the App, because
+/// the limits belong to a connection and the App is shared by all of them.
+///
+/// `.off` is a complete working instance that does nothing. That is what a
+/// test driving `App` directly gets, and what a server with every limit set
+/// to zero ends up with, so "no deadlines" needs no branch anywhere.
 pub const Deadlines = struct {
     target: ?*anyopaque = null,
     vtable: *const VTable = &noop,

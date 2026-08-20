@@ -580,6 +580,57 @@ test "a fail function inside blocking reaches the request that made the call" {
     try std.testing.expect(bulkhead.slot() == @as(*anyopaque, @ptrCast(&in_flight)));
 }
 
+test "every type this module exports is named the way the import line names it" {
+    // `names.ours` is hand-kept, and it had fallen eleven types behind these
+    // exports — `Bound`, `Session`, `FileBody`, `Dir`, `Stream`, `Events`,
+    // `Body`, `Socket`, `Room`, `Limits` and `Gate`. Its own doc said a missing
+    // type would be noticed in `refusals/` and not one of them was, because a
+    // refusal only covers the message somebody thought to write a refusal for.
+    //
+    // This is the rule instead of the paragraph (ADR 0095). It walks what the
+    // module actually exports rather than a second list, so a type added to
+    // `http.zig` and forgotten here fails the suite the day it lands.
+    //
+    // **Non-generic types only.** `Response(T)`, `Session(T)`, `Bound(T)` and
+    // the rest are functions until somebody applies them, so there is nothing
+    // to take a `@typeName` of. Their *base* names are in the table because a
+    // generic is listed without its parentheses; what cannot be checked here is
+    // that they still are.
+    const names = @import("names.zig");
+    // Exports that are somebody else's type rather than one of nilo's, where
+    // rewriting the name would be a lie. `panic` is `std.debug.FullPanic`, and
+    // `@typeName` spells it `debug.FullPanic(…)` with no `std.` in front, so
+    // the prefix test below cannot see it for what it is.
+    const not_ours_to_name = [_][]const u8{"panic"};
+    // `names.textOf` sets a quota of its own per call, and this walks every
+    // export in the module, so the outer budget has to cover the lot.
+    @setEvalBranchQuota(200_000);
+    inline for (comptime std.meta.declarations(@This())) |decl| {
+        // Re-raised every iteration: `names.textOf` sets a quota sized for the
+        // one name it was given, so without this the walk runs out on whichever
+        // export happens to come after a short one.
+        @setEvalBranchQuota(200_000);
+        const value = @field(@This(), decl.name);
+        if (@TypeOf(value) != type) continue;
+        if (comptime for (not_ours_to_name) |skip| {
+            if (std.mem.eql(u8, skip, decl.name)) break true;
+        } else false) continue;
+        // An error set, an enum of somebody else's, a std type re-exported
+        // under our name: only what `@typeName` spells with a nilo file in
+        // front of it is this table's business.
+        const spelled = @typeName(value);
+        if (comptime std.mem.indexOfScalar(u8, spelled, '.') == null) continue;
+        if (comptime std.mem.startsWith(u8, spelled, "std.")) continue;
+        if (comptime !names.covers(spelled)) {
+            @compileError(
+                "nilo: `nilo." ++ decl.name ++ "` prints as `" ++ spelled ++
+                    "` in a compile error, which names a file the reader never imported.\n" ++
+                    "  Add a row to `ours` in http/names.zig.",
+            );
+        }
+    }
+}
+
 test {
     // Core is not listed here. It is a module of its own now, with a step of
     // its own (ADR 0041) — running it from inside the framework's suite would
