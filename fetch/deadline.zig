@@ -74,6 +74,36 @@ const Quiet = struct {
     no_port: std.atomic.Value(bool) = .init(false),
     done: std.atomic.Value(bool) = .init(false),
 
+    /// Connect once, so `run`'s `accept` returns and the thread can be joined.
+    ///
+    /// **This is the third deadlock in this struct and it is six lines below
+    /// the second.** `done` bounds the sleep loop at the *bottom* of `run`. It
+    /// does not bound the `accept` above it, and nothing in this file ever
+    /// connects here directly — the test's own request goes to the nilo server,
+    /// which is what then dials this one. So any failure before that request
+    /// leaves `run` parked in `accept` with `done` set and nobody left to read
+    /// it, and the `join` in the teardown waits for a thread that is never
+    /// coming back. The suite hangs instead of reporting the failure that
+    /// caused it, which is strictly worse than the failure.
+    ///
+    /// Reached for real by running `bench/mem.py` first: 50,000 loopback
+    /// connections leave the ephemeral range full of TIME_WAIT, the nilo server
+    /// below could not bind, and `zig build test` sat at ten minutes of wall
+    /// clock against **zero** of CPU — the one command `CLAUDE.md` says settles
+    /// that, `ps -o etime,cputime -C zig`, is what found it.
+    ///
+    /// A self-connect rather than a deadline on the `accept`, because the
+    /// teardown already knows the port and this needs no clock to be right.
+    fn knock(self: *Quiet) void {
+        if (!self.ready.load(.acquire)) return;
+        var threaded: std.Io.Threaded = .init(std.heap.smp_allocator, .{});
+        defer threaded.deinit();
+        const io = threaded.io();
+        const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(self.port) };
+        var stream = address.connect(io, .{ .mode = .stream }) catch return;
+        stream.close(io);
+    }
+
     fn run(self: *Quiet) void {
         var threaded: std.Io.Threaded = .init(std.heap.smp_allocator, .{});
         defer threaded.deinit();
@@ -149,7 +179,10 @@ test "an endpoint that never answers is given up on, and says which clock did it
     var quiet: Quiet = .{};
     const quiet_thread = try std.Thread.spawn(.{}, Quiet.run, .{&quiet});
     defer {
+        // `done` first, so that once `knock` frees the `accept` the loop below
+        // it reads a flag that is already set and the thread goes.
         quiet.done.store(true, .release);
+        quiet.knock();
         quiet_thread.join();
     }
 
