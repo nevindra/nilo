@@ -87,7 +87,20 @@ pub fn with(comptime options: Options) mw.Middleware {
             log(c, c._status, microsSince(started), null);
         }
 
-        fn log(c: *Ctx, status: u16, took: u64, err_name: ?[]const u8) void {
+        /// `noinline` for the reason
+        /// [ADR 0071](../docs/adr/0071-where-a-connection-waits-is-what-it-costs.md)
+        /// §3 gives, and this is the same mistake it found in
+        /// `handleConnection`: the `max_line` buffer below is a local, `run`
+        /// above is live across `next.run(c)`, and a frame that is live while a
+        /// handler waits is memory every connection holds for as long as it
+        /// waits. Inlined, this puts a kilobyte there whether or not a line is
+        /// ever printed.
+        ///
+        /// What waits inside a handler is a database call, an outbound call and
+        /// an SSE stream — and a stream waits there for as long as it lives. A
+        /// WebSocket is unaffected, because its loop runs from
+        /// `App.handleConnection` after the request has unwound (§4).
+        noinline fn log(c: *Ctx, status: u16, took: u64, err_name: ?[]const u8) void {
             const slow = options.slow_micros > 0 and took > options.slow_micros;
             const level: std.log.Level = if (slow) .warn else options.level;
 
