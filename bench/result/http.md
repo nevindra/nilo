@@ -756,6 +756,115 @@ handing it back and forth costs when it never goes quiet.
 that matches nilo and the one kindest to gws's memory number. A deployment that
 turns it on is a different comparison in both directions.
 
+## Memory per open stream
+
+The row of the same axis that had never been taken. `docs/guide/streaming.md`
+quoted **~21 KB a stream** from v1 and told the reader to plan ten thousand of
+them around it; that figure predates
+[ADR 0063](../../docs/adr/0063-a-handlers-stack-is-per-connection.md), which
+found a handler holds its stack at its high-water mark, and
+[ADR 0071](../../docs/adr/0071-where-a-connection-waits-is-what-it-costs.md),
+which took an idle connection to 4,669. The guide dropped the number rather than
+keep quoting one nothing stood behind, which was honest and not useful.
+
+Machine and kernel as above, on commit `c890923`. `bench/stream_server.zig` and
+`python3 bench/mem.py --port 8790 --path … --hold`. **`--hold` is why this could
+not be run before**: `mem.py` drains a response before calling a connection
+idle, and a stream being held open has no end to drain to, so the harness read
+the head and then waited for a body that was never coming. It now stops at the
+head for a route it is told is held, which is a handler still suspended rather
+than a connection between requests — and those are different numbers.
+
+One freshly started server per row, because RSS does not come back down: a row
+taken after another row's ten thousand connections is measured against a
+baseline full of memory the allocator is about to hand out again, and reads far
+too low. The first attempt at this table did exactly that and put a held stream
+at 4,852 B.
+
+| route | what is open | per connection at 10,000 |
+|---|---|---|
+| `/health` | keep-alive, nothing suspended | **4,674 B** |
+| `/stream` | a held stream, `logger.standard` in front | **21,058 B** |
+| `/stream/quiet` | the same, exempt from the logger (ADR 0080) | **21,057 B** |
+| `/stream/deep` | the same, 32 KiB of handler stack touched first | **53,825 B** |
+
+Marginal met average at every step from 500 up, so all four are converged rather
+than a transient.
+
+**A held stream costs 21,058 bytes, and the number the guide used to quote was
+right.** 4.5× an idle connection, and the gap is what a suspended handler holds
+that a parked connection loop does not: its own frame, its stack at high water,
+and the response buffer it has not finished with.
+
+**`/stream/deep` is ADR 0063 again, to the byte.** 53,825 − 21,058 = 32,767,
+which is the 32 KiB the handler touched, charged one for one and never given
+back, because the frame holding it is live for as long as the stream is. The
+arena is cheaper than the stack, on this path as on the others.
+
+### What the logger costs a held stream: nothing, and the fix was already free
+
+`roadmap.md` carried **"the logger puts a kilobyte on a frame that is live while
+the handler waits"**, waiting on a number. `logger.with`'s inner `log` declares
+`var buf: [1024]u8` and was a plain `fn`, so it was a candidate for inlining
+into `run`, whose frame is live across `next.run(c)` — which is exactly the
+mistake ADR 0071 §3 found in `handleConnection`, where four unreachable
+`std.log.warn` sites were most of 4,184 bytes.
+
+The number says it was not happening. `/stream` against `/stream/quiet` is
+**21,058 against 21,057 bytes**: the whole middleware, buffer and all, is inside
+the noise of one byte.
+
+And building it both ways says why. `noinline fn log` against `fn log`, both
+`ReleaseFast`, produced **byte-identical binaries** — LLVM was already not
+inlining it. Three interleaved pairs of the full measurement agree: 21,058 /
+21,057, 21,058 / 21,058, 21,057 / 21,057.
+
+**The `noinline` is kept anyway, as a pin rather than a fix.** It costs nothing
+today, provably, and ADR 0071 already put the same keyword on seven functions
+for the same reason: what the optimiser chooses is not a guarantee, and a
+kilobyte reappearing on a live frame is not the kind of regression anybody would
+notice.
+
+## The WebSocket against Autobahn
+
+`roadmap.md` carried **"nothing runs the Autobahn suite against the
+WebSocket"**, and by
+[ADR 0033](../../docs/adr/0033-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md)'s
+reading that made every close-code and UTF-8 rule in
+[ADR 0052](../../docs/adr/0052-a-message-is-copied-once-and-framed-once.md) a
+guard only ever seen to pass: the framing tests were all written from RFC 6455
+by whoever wrote the framing.
+
+`wstest` is now run against `bench/autobahn/server.zig`, from the container the
+suite ships in. `bash bench/autobahn/run.sh`, commit `c890923`, 12 seconds for
+the whole suite.
+
+| verdict | cases |
+|---|---|
+| OK | **294** |
+| NON-STRICT | 4 |
+| INFORMATIONAL | 3 |
+| **FAILED** | **0** |
+| **UNIMPLEMENTED** | **0** |
+
+301 cases, families 1 through 10. Cases 12.x and 13.x are excluded because they
+are `permessage-deflate`, which nilo does not negotiate and which is a roadmap
+item with a per-connection cost nobody has priced.
+
+**The four NON-STRICT results are all 6.4.x, and they are one decision.** Those
+cases want a server to fail *as soon as* invalid UTF-8 appears in a fragmented
+text message; nilo validates a text message when it is whole and answers 1007.
+Autobahn records the close code as correct (`close=OK`, `1007`) and the timing
+as not its preference, which is what NON-STRICT means. Failing earlier would
+mean carrying a resumable UTF-8 decoder across frames, and the RFC allows both.
+
+The three INFORMATIONAL are the 9.x timings, which the suite reports rather than
+judges.
+
+**This is a run, not a build step.** It needs Docker, so it is off `zig build
+test` for the same reason `smoke-tls` is off it, and `bench/autobahn/README.md`
+says how to run it.
+
 ## Binary size
 
 The fourth axis of [ADR 0018](../../docs/adr/0018-the-trade-budget-has-three-axes.md),

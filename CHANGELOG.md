@@ -121,6 +121,17 @@ is `std.json`'s call, and nothing can add a declaration to a type you wrote.
   only mistake here that would corrupt the wire rather than fail.
 - **[Work that is not a request](./docs/guide/background.md)** in the guide, and
   a ninth example — `zig build run-scheduled`.
+- **The WebSocket has been run against Autobahn**, the suite every
+  implementation of RFC 6455 is measured by: **294 OK, 4 NON-STRICT, 0 FAILED**
+  of 301 cases. `bash bench/autobahn/run.sh` is the run and
+  [`bench/result/http.md`](./bench/result/http.md) is what it said. Nothing in
+  the framework changed; what changed is that the framing rules have now been
+  seen by something that did not write them.
+- **What a held-open stream costs, measured**: 21,058 bytes, against 4,674 for
+  an idle connection, plus your handler's stack byte for byte. The
+  [streaming guide](./docs/guide/streaming.md) carries the number again instead
+  of a warning that it was unmeasured. `bench/stream_server.zig` and
+  `python3 bench/mem.py --hold`.
 
 ### Changed
 
@@ -129,6 +140,24 @@ is `std.json`'s call, and nothing can add a declaration to a type you wrote.
   tagged union is `oneOf` with `discriminator`; an untagged union is still `{}`.
 
 ### Fixed
+
+- **`socket.print` and `socket.json` could put a length on the wire that their
+  bytes did not match, and nothing noticed.** Both run the format twice — once
+  to count, once to write — and the doc has always said to pass values rather
+  than a window onto memory another fiber is writing. Nothing enforced it, and a
+  WebSocket frame whose length is wrong by one leaves the reader at the wrong
+  offset for the life of the connection.
+
+  The two passes are now held to each other. A disagreement **closes the
+  connection with 1011 and returns `error.WriteFailed`** rather than sending the
+  frame, and usually the frame is still in the write buffer and never leaves at
+  all. A close rather than an assert, because an assert in `ReleaseSafe` takes
+  the whole process down for one bad connection
+  ([ADR 0097](./docs/adr/0097-a-frame-that-lies-about-its-length-is-not-sent.md)).
+
+  Costs a subtraction and a compare per call, in every optimize mode. `send` is
+  untouched. A message larger than the connection's write buffer is still
+  unchecked, and ADR 0097 says why.
 
 - **`Expect: 100-continue` was never answered, so curl waited a second before
   every upload.** Nothing under `http/` read the header. A client that sends it

@@ -101,10 +101,17 @@ stack at the high-water mark of everything the handler has touched
 `read_buffer` and `write_buffer` down in `listen()` comes straight off it, which
 it does not for an idle connection.
 
-**The total has not been measured since v1, which put it at ~21 KB.** That
-figure predates both the stack finding and the release-while-idle work, so treat
-it as an order of magnitude and not a number: measure your own handler with
-`python3 bench/mem.py` before planning ten thousand of them.
+**A held stream measures 21,058 bytes**, against 4,674 for an idle keep-alive
+connection on the same server and the same run
+([`bench/result/http.md`](../../bench/result/http.md)). Ten thousand of them is
+about 210 MB, and that is the floor rather than the total.
+
+**Your handler's stack is added to it, one byte for one.** The same table has a
+handler that touches 32 KiB before its first wait, and it measures 53,825 —
+32,767 bytes more, which is the 32 KiB, held for as long as the stream is
+because the frame holding it never unwinds. So measure your own handler with
+`python3 bench/mem.py --port … --path … --hold` before planning ten thousand,
+and keep what a streaming handler puts on its stack small.
 
 A client that opens a stream and then stops reading is cut off by
 `write_timeout_ms`, which bounds one write rather than the whole response — so a

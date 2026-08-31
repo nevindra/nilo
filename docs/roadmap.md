@@ -67,7 +67,7 @@ other module's.
 | [`nilo_config`](#nilo_config-settings) | needs no loop | reading a name the field is not called |
 | [`nilo_pw`](#nilo_pw-hashing-a-password) | needs no loop | a Cost floor that weighs the wrong half, and a patch `std` should have |
 | [`nilo_fetch`](#nilo_fetch-calling-somebody-elses-api) | borrows the loop | 16,495 bytes of stack per idle connection, and nothing measured through TLS |
-| [`nilo_http`](#nilo_http-the-server) | owns the loop | the biggest list: a weak `If-Range`, a kilobyte of logger on a live frame, compression, counters |
+| [`nilo_http`](#nilo_http-the-server) | owns the loop | the biggest list, and one of them is serious: a SIGTERM the server does not come back from |
 | [`nilo_sql`](#nilo_sql-postgres-and-sqlite) | borrows the loop | which way a SQLite statement should run, and where migrations live |
 | [`nilo_s3`](#nilo_s3-object-storage) | borrows the loop | nothing measured through TLS, and no `LIST`, `COPY` or multipart |
 
@@ -403,6 +403,34 @@ half of this is done and what is left is the matching.
 
 ### Known gaps
 
+**A server that has served WebSockets does not come back from a SIGTERM, three
+times in four.** The process never exits and one executor thread spins at 100%
+for as long as anybody lets it. A deploy that sends SIGTERM gets a container
+that will not stop and a core that never goes idle, which is the worst shape a
+bug in this file has.
+
+`python3 bench/shutdown.py --cmd ./zig-out/bin/nilo-bench-ws-server --port 8789
+--path /ws/small` is the reproduction, and it is six ordinary connections:
+handshake, one message echoed, the close handshake, socket closed. Framework
+defaults, nothing exotic. **6 of 10 runs hang. The control in the same script,
+`--http`, is 0 of 10** — so it is the WebSocket path and not the accept loop.
+
+Where it is not is already known. The server's last log line is `nilo stopped`,
+which `drain` writes when `Stop.in_flight` reaches zero, so nilo's own shutdown
+ran to completion and every connection was accounted for. What is left after
+that line is `defer group.cancel()` and `defer rt.deinit()`, both zio's, and the
+spinning thread is in userspace with no syscall outstanding. That points
+upstream, and **that is the reading this file says to distrust**: three of the
+four blockers this repository has been wrong about were somebody else's code.
+Nothing has re-tested it against a zio newer than the pinned v0.17.0.
+
+Found by the Autobahn run, which left a server at five cores of nothing for
+thirteen minutes — `ps -o etime,cputime`, the one command `CLAUDE.md` says
+settles a stuck process, is what caught it.
+
+**Waiting on: ready.** It needs somebody's afternoon and a newer zio to try
+first.
+
 **A `Room`'s roster lock is held across the whole broadcast, and the field says
 it is not.** `Room.roster`'s doc says it guards taking and giving up a seat and
 is "not held while posting". `Room.handOut` takes it and holds it for the whole
@@ -424,27 +452,6 @@ showing the contention was real.
 runs the chat loop from `examples/chat/` with the room deliberately taken out,
 so every WebSocket number in [`bench/result/http.md`](../bench/result/http.md)
 is a socket that joined nothing.
-
-**The logger puts a kilobyte on a frame that is live while the handler waits.**
-`logger.with`'s inner `log` declares `var buf: [1024]u8` and is a plain `fn`, so
-it is a candidate for inlining into `run`, whose frame is live across
-`next.run(c)`.
-[ADR 0071](./adr/0071-where-a-connection-waits-is-what-it-costs.md) §3 is the
-rule this breaks, in its own words: a format string costs stack whether or not
-it is ever printed, and four `std.log.warn` sites nobody hits were most of
-`handleConnection`'s 4,184 bytes. The remedy there was `noinline` on seven
-functions and nothing else.
-
-A WebSocket is not affected: the socket loop runs from `App.handleConnection`
-after the request has unwound (ADR 0071 §4). What is affected is anything that
-suspends *inside* the handler, which is a database call, an outbound call, and
-an SSE stream, and a stream suspends there for as long as it lives. ADR 0063
-measured an ordinary database route at 17,022 bytes
-([`bench/result/http.md`](../bench/result/http.md)).
-
-**Waiting on: a number.** `noinline fn log` is a one-word change. Whether it
-moves `python3 bench/mem.py` against a route holding a stream is what nobody
-has run.
 
 **The two arms of static-file serving live in two files, and the rule they share
 lives in a third.** `App.serveHeldFile` answers a file read at startup,
@@ -508,24 +515,6 @@ Nothing on any axis: the same code once instead of twice.
 
 **Waiting on: ready.**
 
-**What an open stream costs has not been measured since v1.**
-`docs/guide/streaming.md` quoted **~21 KB** a stream and told the reader to plan
-ten thousand of them around it. That figure predates both
-[ADR 0063](./adr/0063-a-handlers-stack-is-per-connection.md), which found a
-handler holds its stack at its high-water mark, and
-[ADR 0071](./adr/0071-where-a-connection-waits-is-what-it-costs.md), which took
-an idle connection to 4,669. A stream is neither: it is a handler that has not
-returned, so it holds its buffers *and* its stack, and neither of the two
-findings tells you what the total is. The guide now says that instead of
-quoting the number, which is the honest state and not the useful one.
-
-`bench/mem.py` is the harness and `examples/stream` is a server that holds one,
-so this is a run rather than a design. What it wants beside it is a control —
-the same server holding an ordinary keep-alive connection — for the reason
-`bench/sql_server.zig`'s fourth route exists.
-
-**Waiting on: ready.**
-
 **An internally tagged union is read four times, and the module says the marker
 costs nothing per request.** `jsonmark.zig`'s header says "Nothing per request
 and nothing per connection: the marker is read while compiling", and on the
@@ -546,24 +535,16 @@ either.
 **Waiting on: a number.** `bench/result/http.md` has the write side (258ns down
 to 93ns on a 374-byte alert rule) and nothing at all for the read side.
 
-**`Socket.print` runs the format twice and never checks that the two agree.**
-The frame's length is written from the counting pass and the bytes come from the
-writing pass, so two passes that disagree put a length on the wire that is a lie
-and the connection desynchronises. The doc names the hazard and hands it to the
-caller: "the arguments are therefore read twice: pass values, not a window onto
-memory another fiber is writing."
+**A `print` or `json` message bigger than the write buffer is still unchecked.**
+[ADR 0097](./adr/0097-a-frame-that-lies-about-its-length-is-not-sent.md) holds
+the two passes to each other by reading `Writer.end`, which is exact only while
+nothing drains. Past the write buffer a drain moves it and there is nothing left
+to compare against, so a large formatted message can still put a length on the
+wire that its bytes do not match.
 
-`Room.print` has the same two passes and asserts between them
-(`std.debug.assert(into.end == post.len)`), because it writes into a buffer it
-can measure. `Socket.print` and `Socket.json` write straight to the connection
-and assert nothing, so the one place the mistake is unrecoverable is the one
-place it is unchecked.
-
-Counting the bytes `_out` actually took and asserting they match is a `Debug`
-and `ReleaseSafe` check, which is where the suite runs and is not where anybody
-deploys. Zero cost in `ReleaseFast`.
-
-**Waiting on: ready.**
+**Waiting on: accepted.** The two calls are for the small structured messages a
+WebSocket carries, and the alternatives — a wrapper writer on every byte, or a
+third pass over the arguments — both cost more than the shape they would guard.
 
 **`pw.verify` takes a `Ctx` it does not use.** The first line of `verifyWith` is
 `_ = c;`. Hashing needs a `Ctx` because the salt comes from `Ctx.entropy`
@@ -693,20 +674,6 @@ stream ends. Time to first byte is a different number and wants a different
 feature.
 
 **Waiting on: a caller** who needs time to first byte.
-
-**Nothing runs the Autobahn suite against the WebSocket.** `wstest` is the
-thing every implementation of RFC 6455 is measured by, and nilo's framing tests
-are all its own, written from the RFC rather than from a failing report. By
-[ADR 0033](./adr/0033-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md)'s
-reading that makes the close-code and UTF-8 rules
-([ADR 0052](./adr/0052-a-message-is-copied-once-and-framed-once.md)) guards
-that have only ever been seen to pass.
-
-**Waiting on: ready.** This used to want a harness that listens on a port and
-drives a client at it, and **that harness now exists**: `fetch/deadline.zig`
-and `zig build test-fetch-engine` stand a real server on a real socket and
-assert on what comes back over it. What is left is writing the WebSocket and
-`sendfile` cases into that shape.
 
 **What a 60 KiB WebSocket message costs a busy server is unmeasured.** Every
 WebSocket throughput figure in `bench/result/http.md` is a 64-byte payload,
@@ -849,8 +816,9 @@ along: it reads `conn.err` to tell an aborted transaction from a dead
 connection ([ADR 0047](./adr/0047-a-deadline-needs-a-connection-you-hold.md)),
 and only the first half of that has a test.
 
-**Waiting on: a harness**, the same one `nilo_http`'s Autobahn gap wants, and
-it now exists. `zig build test-fetch-engine` opens a real port.
+**Waiting on: a harness**, and it exists twice over now:
+`zig build test-fetch-engine` and `http/live.zig` both stand a server on a real
+port and drive a real socket at it. What is left is writing the case.
 
 **A query outside a transaction still has no deadline.** `tx.deadline(ms)`
 covers the operation that holds a connection
@@ -1282,31 +1250,21 @@ the case that trap cannot watch.
 
 ### Open
 
-**A file response's bytes leave by a route the tests never take.** Every test
-runs through `testing.Client`, whose writer is `std.Io.Writer.fixed` and
-carries no `sendFile` in its vtable, so the suite takes std's read and drain
-fallback. The right bytes, by the route a platform without `sendfile` uses. The
-splice chain the feature exists for needs a real socket, and **the suite now
-opens one**: `fetch/deadline.zig` and `zig build test-fetch-engine` stand a
-server on a real port and assert on what comes back over it. So the fix is no
-longer a harness to invent, only a case to write in that shape.
+**Three test files pick loopback ports and nothing makes their ranges agree.**
+`fetch/live.zig` walks 39,200-40,199, `s3/canned.zig` walks 40,200-41,199 and
+`http/live.zig` walks 41,200-42,199, each from a start derived from the thread
+id so a rerun does not walk back over the ports its own `TIME-WAIT` still holds.
+Two of them used to overlap, s3 taking 200 ports from a fixed 39,600 inside
+`fetch`'s thousand, and ten consecutive `zig build test-all` runs failed from
+the sixth on with `error.NoFreePort` in whichever s3 test came next.
 
-**Waiting on: ready.** It is still not written.
-
-**Two test files pick loopback ports and nothing makes their ranges agree.**
-`fetch/live.zig` walks 39,200-40,199 and `s3/canned.zig` walks 40,200-41,199,
-each from a start derived from the thread id so a rerun does not walk back over
-the ports its own `TIME-WAIT` still holds. They used to overlap, s3 taking 200
-ports from a fixed 39,600 inside `fetch`'s thousand, and ten consecutive `zig
-build test-all` runs failed from the sixth on with `error.NoFreePort` in
-whichever s3 test came next. Eight consecutive runs are clean now and the
-in-range count falls between them, so the pool sustains itself.
-
-What holds it is a comment in each file naming the other, and a third file
-wanting a port has nothing to consult and no way to fail loudly. Binding zero
-and reading the port back would end the whole class, and it is not available:
-`std.Io.net.Server` cannot report the port it was given, re-checked against Zig
-0.16 rather than believed. `docs/history.md` has the run.
+What holds it is a comment in each file naming the others, and **the third file
+arriving is the evidence that the comment is the wrong mechanism**: nothing
+checked the new range, nothing could have failed loudly if it had collided, and
+the only reason it does not is that somebody read three files first. Binding
+zero and reading the port back would end the whole class, and it is not
+available: `std.Io.net.Server` cannot report the port it was given, re-checked
+against Zig 0.16 rather than believed. `docs/history.md` has the run.
 
 **Waiting on: a design** that makes it a rule rather than two comments, or an
 upstream way to read a bound port.

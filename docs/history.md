@@ -1251,3 +1251,94 @@ is "the same work minus X" has to be checked for a plus as well as a minus** —
 `/warm/1m` was the store route minus S3 *plus* a fill, and at a megabyte the
 addition was the larger of the two. A negative result is the check working; the
 cause was one layer below where the check could see.
+
+## The suite passed, and somebody else's suite found the thing it could not
+
+The WebSocket had never been run against
+[Autobahn](https://github.com/crossbario/autobahn-testsuite), which
+[`roadmap.md`](./roadmap.md) had carried as a gap on
+[ADR 0033](./adr/0033-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md)'s
+reading: every framing test under `http/` was written from RFC 6455 by whoever
+wrote the framing, so the close-code and UTF-8 rules had only ever been seen to
+pass. `bench/autobahn/` is the run and
+[`bench/result/http.md`](../bench/result/http.md) has it: **294 OK, 4 NON-STRICT,
+0 FAILED** of 301 cases, the four being 6.4.x, which want a fail-fast on invalid
+UTF-8 mid-message where nilo validates the message whole and closes with the
+right code anyway.
+
+So the framing was right, and that is not the lesson.
+
+**The lesson is what the suite left behind.** When it finished, the server was
+holding five cores at 100% and would not exit. `ps -o etime,cputime` — the same
+one command as the entry above — said 66 minutes of CPU against 13 of wall.
+Bisecting it down took a `--http` control and a Docker-free reproduction, and the
+answer is in [`bench/shutdown.py`](../bench/shutdown.py): **six ordinary
+WebSocket connections, then a SIGTERM, and three runs in four never come back.**
+Framework defaults. The control, the same script doing plain requests, is 0 in
+10.
+
+Three things this cost, and all three are about how the failure was reached
+rather than about the bug.
+
+**No test could have found it, and no test was ever going to.** Every WebSocket
+test in the repository drives frames through in-memory buffers, and this needs a
+real process, a real signal and several connections in sequence. It took a
+conformance suite that nobody wrote for this, run for an unrelated reason.
+**A harness borrowed from outside finds what the local one is shaped not to
+see** — and here it was not even the harness's verdict that found it, it was the
+machine the harness left behind.
+
+**The bisect by case family said 3, 4, 7 and 10 were clean, and they were not.**
+Nine families, five hung, four did not, and the pattern looked like a property of
+what those families send. It is a race: the same family hangs or does not
+between runs. **A flaky failure bisected once produces a clean-looking table and
+a wrong theory**, and the only thing that caught it was re-running the "clean"
+side.
+
+**It is upstream, and that is the sentence this file exists to distrust.** The
+server's last log line is `nilo stopped`, which `drain` writes once
+`Stop.in_flight` is zero, so nilo's own shutdown completed; what is left is
+`group.cancel()` and `rt.deinit()`. Three of the four blockers this repository
+has been wrong about were somebody else's code that already did the thing. Zio
+is pinned at v0.17.0 and nothing has tried a newer one.
+
+## The number nobody had taken was the number that had been there all along
+
+Two entries in [`roadmap.md`](./roadmap.md) waited on the same measurement and
+came back with opposite answers, and neither answer was a fix.
+
+**A held stream costs 21,058 bytes**, against 4,674 for an idle keep-alive
+connection on the same server and the same run, and 53,825 for the same stream
+with 32 KiB touched on the handler's stack first — 32,767 bytes more, which is
+[ADR 0063](./adr/0063-a-handlers-stack-is-per-connection.md) charged one for
+one. `docs/guide/streaming.md` used to quote **~21 KB** from v1 and had the
+figure removed for predating both the stack finding and the release-while-idle
+work. **It was right.** Removing it was still correct — a number nothing stands
+behind decays into a claim whether or not it happens to be true — but the file
+was more useful wrong-and-checkable than silent, and it was silent for two
+stages.
+
+**The logger's kilobyte was not there.** `logger.with`'s inner `log` declares
+`var buf: [1024]u8` and was a plain `fn`, so it read as a candidate for inlining
+into `run`, whose frame is live across `next.run(c)` — exactly the mistake
+[ADR 0071](./adr/0071-where-a-connection-waits-is-what-it-costs.md) §3 found in
+`handleConnection`. Building it both ways produced **byte-identical binaries**:
+LLVM was already not inlining it. A route with the logger in front and one
+exempt from it measure 21,058 and 21,057 bytes.
+
+**A reading of the source that names the right rule can still be about nothing.**
+The rule was ADR 0071's own, the shape matched it, and the conclusion was still
+wrong — which is the argument for `Waiting on: a number` being a real state
+rather than a polite way of saying somebody should get around to it. The
+`noinline` is kept as a pin: free today, provably, and what an optimiser chooses
+is not a guarantee.
+
+**And the harness was what was missing, not the machine.** `bench/mem.py` drains
+a response before calling a connection idle, and a stream being held open has no
+end to drain to, so the tool read the head and then waited for a body that was
+never coming. That is why the run had not happened; `--hold` is nine lines. The
+first table taken with it was wrong in the other direction — 4,852 bytes a
+stream — because all four rows ran against one server and RSS does not come back
+down, so every row after the first was measured against a baseline full of
+memory the allocator was about to hand out again. **One fresh server per row**,
+and marginal met average at every step from 500 up.

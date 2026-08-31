@@ -125,7 +125,11 @@ zig build bench-sql-server  # a server reading Postgres per request, for wrk/oha
 zig build bench-fetch-server # what an outbound call costs, with its controls
 zig build bench-s3-server  # a server reading an object store per request, with its controls
 zig build bench-ws-server  # a server of idle WebSockets, for what one costs
+zig build bench-stream-server  # a server of held-open streams, for what one costs
+zig build autobahn-server  # the echo server `bash bench/autobahn/run.sh` drives wstest at
 python3 bench/mem.py --port … --path …   # memory per idle connection, any server
+python3 bench/mem.py --port … --path … --hold   # the same for a stream nobody closes
+python3 bench/shutdown.py --cmd … --port …  # does SIGTERM come back? After WebSockets, 3 in 4 it does not
 python3 bench/ws_idle.py both            # the same axis for WebSockets, nilo and gws
 python3 bench/s3_setup.py                # the bucket and objects both of the above want
 python3 bench/compare-s3/drive.py        # nilo_s3 against Go, Rust and Bun — needs MinIO
