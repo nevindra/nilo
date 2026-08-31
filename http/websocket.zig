@@ -541,26 +541,31 @@ pub const Socket = struct {
     /// is allocated either way.
     ///
     /// The arguments are therefore read twice: pass values, not a window onto
-    /// memory another fiber is writing.
+    /// memory another fiber is writing. **If they disagree the connection is
+    /// closed rather than desynchronised** — `Framed` below is that check, and
+    /// ADR 0097 is why it is a close and not an assert.
     pub fn print(self: *Socket, comptime fmt: []const u8, args: anytype) Error!void {
         if (self._closed) return;
-        try self.beginText(counted(struct {
+        const promise = try self.beginCounted(counted(struct {
             fn run(w: *std.Io.Writer, a: anytype) std.Io.Writer.Error!void {
                 return w.print(fmt, a);
             }
         }.run, args));
         self._out.print(fmt, args) catch return error.WriteFailed;
+        try self.keptTo(promise);
         self._out.flush() catch return error.WriteFailed;
     }
 
     /// Serialise `value` as JSON into one text message — which is what a
     /// WebSocket carrying structured data almost always is.
     ///
-    /// Two passes, for the reason `print` gives, and no allocation in either.
+    /// Two passes, for the reason `print` gives, and the same check between
+    /// them.
     pub fn json(self: *Socket, value: anytype) Error!void {
         if (self._closed) return;
-        try self.beginText(counted(json_mod.write, value));
+        const promise = try self.beginCounted(counted(json_mod.write, value));
         json_mod.write(self._out, value) catch return error.WriteFailed;
+        try self.keptTo(promise);
         self._out.flush() catch return error.WriteFailed;
     }
 
@@ -926,6 +931,36 @@ pub const Socket = struct {
         self._out.writeAll(writeHeader(&head, .text, len)) catch return error.WriteFailed;
     }
 
+    /// The same header, plus what `keptTo` needs to hold the writing pass to it.
+    fn beginCounted(self: *Socket, len: u64) Error!Framed {
+        const from = self._out.end;
+        try self.beginText(len);
+        const at = self._out.end;
+        return .{
+            .from = from,
+            .at = at,
+            .len = len,
+            .bounded = len <= self._out.buffer.len - at,
+        };
+    }
+
+    /// Whether the writing pass wrote the bytes the counting pass promised, and
+    /// what to do when it did not (ADR 0097).
+    fn keptTo(self: *Socket, promise: Framed) Error!void {
+        if (!promise.broken(self._out)) return;
+
+        // Two passes that disagree put a length on the wire that is a lie, and
+        // a WebSocket has no way to resynchronise from one: every frame after
+        // this one is read at the wrong offset for the life of the connection.
+        // So the connection ends here, in a way the other end can read.
+        //
+        // Usually the bad frame is still in the write buffer, whole and
+        // unflushed, and then it never leaves the building at all.
+        if (promise.recallable(self._out)) self._out.end = promise.from;
+        self.closeWith(.internal) catch {};
+        return error.WriteFailed;
+    }
+
     fn closeWith(self: *Socket, code: Close) Error!void {
         return self.close(code, "");
     }
@@ -940,6 +975,54 @@ pub const Socket = struct {
     fn tooBig(self: *Socket) Error {
         self.closeWith(.too_big) catch {};
         return error.MessageTooBig;
+    }
+};
+
+/// A frame whose length went out before its bytes did, and what it takes to
+/// check that the two agree ([ADR 0097](../docs/adr/0097-a-frame-that-lies-about-its-length-is-not-sent.md)).
+///
+/// `print` and `json` state a length from a counting pass and then write the
+/// payload in a second pass. If the two disagree, the length on the wire is a
+/// lie and the connection desynchronises for good — the one mistake in this
+/// file that cannot be recovered from, and until ADR 0097 the one place that
+/// checked nothing. `Room.print` has the same two passes and has asserted
+/// between them since the day it was written, because it writes into a buffer
+/// it can measure.
+///
+/// The check is a subtraction and a compare, in every optimize mode, and it
+/// needs neither a wrapper writer nor a third pass over the arguments. That is
+/// what `at` buys: while the payload still fits in what is left of the
+/// connection's write buffer nothing can drain, and while nothing drains
+/// `Writer.end` is an exact count of what the second pass wrote.
+///
+/// **A message bigger than the write buffer is not checked**, because a drain
+/// moves `end` and leaves nothing to compare against. `print` and `json` are
+/// for the small structured messages a WebSocket carries — `send` takes bytes
+/// somebody already has and needs none of this — so that is the uncommon shape
+/// rather than the common one. It is a gap in the guard rather than a gap in
+/// the framing, and it is written down instead of being papered over.
+const Framed = struct {
+    /// Where the write buffer stood before the header, so a frame that turns
+    /// out to be a lie can be taken back off it instead of flushed.
+    from: usize,
+    /// Where the payload starts.
+    at: usize,
+    /// What the counting pass said the payload would be.
+    len: u64,
+    /// Whether `len` still fitted in the write buffer once the header was in.
+    /// When it did, a drain is itself evidence: the second pass wrote more than
+    /// it promised.
+    bounded: bool,
+
+    fn broken(self: Framed, out: *const std.Io.Writer) bool {
+        if (!self.bounded) return false;
+        if (out.end < self.at) return true;
+        return out.end - self.at != self.len;
+    }
+
+    /// Whether the frame is still whole in the buffer, and so can be un-written.
+    fn recallable(self: Framed, out: *const std.Io.Writer) bool {
+        return out.end >= self.at;
     }
 };
 
@@ -1783,6 +1866,47 @@ test "a formatted message needs no buffer of the handler's own" {
     try testing.expectEqual(@as(u8, 126), rest[1]);
     try testing.expectEqual(@as(u16, 300), std.mem.readInt(u16, rest[2..4], .big));
     try testing.expectEqualStrings("z" ** 300, rest[4..]);
+}
+
+/// A value that formats differently the second time it is asked — which is
+/// exactly the mistake `Socket.print`'s doc warns about, and until ADR 0097 the
+/// one nothing here could tell had happened.
+const Shifting = struct {
+    asked: *usize,
+
+    pub fn format(self: Shifting, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        self.asked.* += 1;
+        // Four bytes when it is counted, six when it is written.
+        try w.writeAll(if (self.asked.* == 1) "abcd" else "abcdef");
+    }
+};
+
+test "a format that disagrees with itself closes the connection instead of lying about a length" {
+    var peer: Peer = .{};
+    defer peer.deinit();
+    var socket = peer.socket();
+
+    var asked: usize = 0;
+    try testing.expectError(
+        error.WriteFailed,
+        socket.print("{f}", .{Shifting{ .asked = &asked }}),
+    );
+    try testing.expectEqual(@as(usize, 2), asked);
+
+    // Not one byte of the message left the building: the frame was still in
+    // the write buffer, so what is on the wire is a close frame and nothing
+    // in front of it.
+    const sent = peer.sent();
+    try testing.expectEqual(@as(usize, 4), sent.len);
+    try testing.expectEqual(@as(u8, 0x88), sent[0]); // FIN + close
+    try testing.expectEqual(@as(u8, 2), sent[1]);
+    try testing.expectEqual(@as(u16, 1011), std.mem.readInt(u16, sent[2..4], .big));
+    try testing.expect(!socket.live());
+
+    // `json` is not tested separately because there is nothing separate to
+    // test: both callers count with `counted`, take the header from
+    // `beginCounted` and are held to it by `keptTo`, and those three are the
+    // whole of the check.
 }
 
 test "a value goes out as one JSON text message" {
