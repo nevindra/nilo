@@ -5,3 +5,4 @@ zig-out/
 zig-pkg/
 .claude/
 __pycache__/
+bench/autobahn/reports/

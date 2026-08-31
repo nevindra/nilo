@@ -2205,6 +2205,43 @@ pub fn build(b: *std.Build) void {
     b.step("bench-ws-server", "A server of idle WebSockets, for measuring what one costs")
         .dependOn(&b.addInstallArtifact(bench_ws_server, .{}).step);
 
+    // What an open stream costs, which is the one row of ADR 0018's third axis
+    // nobody has taken since v1. Installed rather than run: `bench/mem.py
+    // --hold` starts it, holds thousands of streams open against it and reads
+    // `VmRSS`, the same arrangement `bench-ws-server` has.
+    const bench_stream_server_module = b.createModule(.{
+        .root_source_file = b.path("bench/stream_server.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .strip = stripMeasured(strip, .ReleaseFast),
+        .imports = &.{.{ .name = "nilo_http", .module = bench_http }},
+    });
+    const bench_stream_server = b.addExecutable(.{
+        .name = "nilo-bench-stream-server",
+        .root_module = bench_stream_server_module,
+    });
+    b.step("bench-stream-server", "A server of held-open streams, for what one costs")
+        .dependOn(&b.addInstallArtifact(bench_stream_server, .{}).step);
+
+    // The server `wstest` is driven at, which is a conformance run rather than
+    // a measurement and is here because `bench/` is where a harness needing
+    // something external already lives. Installed rather than run, because the
+    // thing that runs it is a container: `bash bench/autobahn/run.sh`, the same
+    // arrangement `bench/compare-s3/drive.py` has with MinIO.
+    const autobahn_server_module = b.createModule(.{
+        .root_source_file = b.path("bench/autobahn/server.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .strip = stripMeasured(strip, .ReleaseFast),
+        .imports = &.{.{ .name = "nilo_http", .module = bench_http }},
+    });
+    const autobahn_server = b.addExecutable(.{
+        .name = "nilo-autobahn-server",
+        .root_module = autobahn_server_module,
+    });
+    b.step("autobahn-server", "The echo server the Autobahn suite is run against")
+        .dependOn(&b.addInstallArtifact(autobahn_server, .{}).step);
+
     // Each mode needs its own copy of everything the module imports, down to
     // zio: a module carries the optimize mode it was created with, and this
     // module's tests drive a whole request through `nilo.testing.Client`.

@@ -15,6 +15,7 @@ compounds does not, and no total will say which you have.
 
     python3 bench/mem.py --port 8787 --path /health
     python3 bench/mem.py --port 8789 --path /call --steps 200,500,1000
+    python3 bench/mem.py --port 8790 --path /stream --hold
 
 The server is found by port rather than named, so this works against any of
 them — `nilo-hello`, `nilo-bench-sql-server`, `nilo-bench-fetch-server`, or
@@ -48,8 +49,17 @@ def rss_kb(pid):
     raise SystemExit(f"process {pid} went away")
 
 
-def open_one(host, port, path, timeout):
-    """One keep-alive connection with one request already served on it."""
+def open_one(host, port, path, timeout, hold=False):
+    """One keep-alive connection with one request already served on it.
+
+    `hold` is for a response that has no end to drain to: an event stream the
+    server is holding open. The head and whatever arrived with it are read and
+    then the connection is left alone, which is a handler still suspended
+    rather than a connection between requests — and those are different
+    numbers, because a suspended handler holds its stack as well as its
+    buffers (ADR 0063). Draining is what the ordinary path does to make sure
+    nothing is backed up; here there is nothing to back up yet.
+    """
     s = socket.create_connection((host, port), timeout=timeout)
     s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     s.sendall(
@@ -67,6 +77,9 @@ def open_one(host, port, path, timeout):
         if not chunk:
             raise SystemExit("the server closed the connection")
         buf += chunk
+
+    if hold:
+        return s
 
     head, body = buf.split(b"\r\n\r\n", 1)
     length, chunked = 0, False
@@ -111,6 +124,11 @@ def main():
     p.add_argument("--path", default="/health")
     p.add_argument("--steps", default="500,1000,2000,5000,10000")
     p.add_argument("--settle", type=float, default=2.0, help="seconds before each read")
+    p.add_argument(
+        "--hold",
+        action="store_true",
+        help="read the head and stop, for a response the server is holding open",
+    )
     p.add_argument("--timeout", type=float, default=10.0)
     args = p.parse_args()
 
@@ -127,7 +145,9 @@ def main():
     try:
         for want in steps:
             while len(held) < want:
-                held.append(open_one(args.host, args.port, args.path, args.timeout))
+                held.append(
+                    open_one(args.host, args.port, args.path, args.timeout, args.hold)
+                )
             time.sleep(args.settle)
             now = rss_kb(pid)
             per = (now - base) * 1024 / len(held)
