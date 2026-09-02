@@ -7,8 +7,10 @@ What was measured and what was got wrong on the way is in
 
 ## Unreleased
 
-**No source change is needed to move a 0.2.0 program to this**, so the next tag
-is a minor one. Needs Zig 0.16, as 0.2.0 does.
+**One source change is needed to move a 0.2.0 program to this**, and only one:
+`cors.Options.origin` is now `origins` and takes a list. If you never called
+`cors.with` — `cors.permissive` is unchanged — there is nothing to do. Needs
+Zig 0.16, as 0.2.0 does.
 
 **If you serve WebSockets, take this one for the shutdown fix alone.** A server
 that had served any usually did not come back from a SIGTERM, which is a deploy
@@ -139,6 +141,37 @@ is `std.json`'s call, and nothing can add a declaration to a type you wrote.
   `python3 bench/mem.py --hold`.
 
 ### Changed
+
+- **`cors.Options.origin` is now `origins`, and takes a list.** The one
+  breaking change in this release. A single compile-time string meant an
+  application with a production front end and a staging one could not use the
+  middleware at all and wrote its own.
+
+  ```zig
+  try app.use(nilo.cors.with(.{
+      .origins = &.{ "https://app.example.com", "https://staging.example.com" },
+      .credentials = true,
+  }));
+  ```
+
+  `Access-Control-Allow-Origin` carries one value, so the request's `Origin` is
+  compared against the list and the one that matched is what goes out
+  ([ADR 0099](./docs/adr/0099-one-allow-origin-header-means-the-list-is-matched-not-formatted.md)).
+  The compare is unrolled while compiling: one `mem.eql` per entry against a
+  literal, nothing allocated. `cors.permissive` is unchanged, and an
+  application on `&.{"*"}` does not compile the matching branch at all.
+
+  **Two things behave differently for a named origin.** It is now sent only to
+  a request whose `Origin` matched — the single string went out on every
+  response, including requests that never asked — and an origin you did not
+  name gets an ordinary response with no allow header on it, which is the
+  browser's refusal to make rather than the server's. `Vary: Origin` goes out
+  either way, so a cache cannot hand one origin's answer to another.
+
+  Three new build-time refusals go with it: an empty list, `*` beside a name it
+  already covers, and an origin with a capital letter in it — a browser
+  lowercases the scheme and host before sending them, so that one could never
+  have matched.
 
 - **The generated API description follows whichever encoding the type asked
   for**, so a client generated from it reads what the server actually sends. A

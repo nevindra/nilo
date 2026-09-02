@@ -461,8 +461,20 @@ const refusals = [_]Refusal{
         .says = "the segment \"id:id\" of route \"/users/id:id\" has a `:` in the middle of it, so it is matched as literal text.",
     },
     .{
+        .name = "cors_any_origin_beside_a_named_one",
+        .says = "cors was given \"*\" alongside 1 named origin(s), and \"*\" already allows every one of them.",
+    },
+    .{
         .name = "cors_credentials_with_any_origin",
         .says = "cors credentials cannot be combined with origin \"*\" — browsers reject it.",
+    },
+    .{
+        .name = "cors_no_origins_at_all",
+        .says = "cors was given no origins at all, so every cross-origin request would be refused.",
+    },
+    .{
+        .name = "cors_origin_with_a_capital_letter",
+        .says = "the cors origin \"https://Example.com\" has a capital letter in it, and a browser sends its origin lowercased.",
     },
     .{
         .name = "filebody_as_an_argument",

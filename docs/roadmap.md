@@ -381,26 +381,6 @@ connection is memory that has not been budgeted.
 **Waiting on: a number.** The per-connection cost has to be priced against the
 4,669 bytes an idle connection holds today.
 
-**3. CORS that can name more than one origin.** `cors.Options.origin` is a
-single compile-time string, so an application with a production front end and a
-staging one cannot use the middleware at all and writes its own. The shape that
-fits is `origins: []const []const u8`, compared against the request's `Origin`
-header with one comptime-unrolled `eqlIgnoreCase` per entry, echoing back the
-one that matched. Nothing is formatted and nothing is allocated: every candidate
-is already a literal, and the value that goes out is one of them. A list of one
-behaves exactly as today, and `"*"` stays the way to say "anyone".
-
-The axis is throughput, and it is paid only by a request that carries an
-`Origin` header: N compares against short literals, where N is what the
-application wrote. Nothing per connection, nothing per request that is not
-cross-origin.
-
-`Vary: Origin` is already repeated rather than replaced
-([ADR 0089](./adr/0089-two-layers-can-each-name-a-vary-axis.md)), so the caching
-half of this is done and what is left is the matching.
-
-**Waiting on: ready.**
-
 ### Known gaps
 
 **A `Room`'s roster lock is held across the whole broadcast, and the field says

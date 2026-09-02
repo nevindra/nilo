@@ -5,5 +5,5 @@ const nilo = @import("nilo_http");
 
 export fn refusal() void {
     var app: nilo.App = undefined;
-    app.use(nilo.cors.with(.{ .origin = "*", .credentials = true })) catch {};
+    app.use(nilo.cors.with(.{ .origins = &.{"*"}, .credentials = true })) catch {};
 }

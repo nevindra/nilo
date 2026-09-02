@@ -41,6 +41,11 @@ actually vary by request and the missing `Vary: Origin` misleads no cache. It
 stops being luck the moment CORS learns more than one origin, and it was never
 true for a user middleware setting a `Vary` of its own.
 
+> That moment came:
+> [ADR 0099](./0099-one-allow-origin-header-means-the-list-is-matched-not-formatted.md)
+> made the header depend on the request, and `origin` is `origins` now. This
+> decision is what let that one ship with its caching half already done.
+
 ## Decision
 
 **`Vary` joins `Set-Cookie` in `http1.repeats`, and the response carries two

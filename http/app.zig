@@ -3612,16 +3612,142 @@ test "headers middleware set survive onto a failure response" {
 test "CORS with a named origin also sends Vary" {
     var app = App.init(testing.allocator);
     defer app.deinit();
-    try app.use(cors.with(.{ .origin = "https://example.com", .credentials = true }));
+    try app.use(cors.with(.{ .origins = &.{"https://example.com"}, .credentials = true }));
     try app.get("/x", plainOk);
 
     var h = Harness.init();
     defer h.deinit();
     try h.ready(&app);
-    const result = h.send(&app, "GET /x HTTP/1.1\r\n\r\n");
+    const result = h.send(
+        &app,
+        "GET /x HTTP/1.1\r\nOrigin: https://example.com\r\n\r\n",
+    );
     try testing.expect(std.mem.indexOf(u8, result.response, "Access-Control-Allow-Origin: https://example.com") != null);
     try testing.expect(std.mem.indexOf(u8, result.response, "Vary: Origin") != null);
     try testing.expect(std.mem.indexOf(u8, result.response, "Access-Control-Allow-Credentials: true") != null);
+}
+
+test "two named origins each get told about themselves and nobody else" {
+    // The whole point of the list: `Access-Control-Allow-Origin` carries one
+    // value, so a server answering two front ends has to send back the one
+    // that asked.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(cors.with(.{
+        .origins = &.{ "https://app.example.com", "https://staging.example.com" },
+        .credentials = true,
+    }));
+    try app.get("/x", plainOk);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    for ([_][]const u8{ "https://app.example.com", "https://staging.example.com" }) |origin| {
+        var buf: [128]u8 = undefined;
+        const request = try std.fmt.bufPrint(
+            &buf,
+            "GET /x HTTP/1.1\r\nOrigin: {s}\r\n\r\n",
+            .{origin},
+        );
+        const answer = h.send(&app, request);
+
+        var expected: [128]u8 = undefined;
+        const line = try std.fmt.bufPrint(
+            &expected,
+            "Access-Control-Allow-Origin: {s}\r\n",
+            .{origin},
+        );
+        try testing.expect(std.mem.indexOf(u8, answer.response, line) != null);
+        try testing.expect(std.mem.indexOf(u8, answer.response, "Vary: Origin") != null);
+    }
+}
+
+test "an origin nobody named is answered, and the browser is what refuses it" {
+    // Not a 403: the response goes out as usual and simply does not carry the
+    // header that would let the page read it. Deciding here would mean a
+    // server that answers differently to a `curl` and a browser, which is not
+    // what CORS is.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(cors.with(.{ .origins = &.{"https://app.example.com"} }));
+    try app.get("/x", plainOk);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const answer = h.send(
+        &app,
+        "GET /x HTTP/1.1\r\nOrigin: https://evil.example.com\r\n\r\n",
+    );
+    try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 200"));
+    try testing.expect(std.mem.indexOf(u8, answer.response, "Access-Control-Allow-Origin") == null);
+    // Still said, so a shared cache cannot store this refusal and hand it to
+    // the origin that would have been allowed.
+    try testing.expect(std.mem.indexOf(u8, answer.response, "Vary: Origin") != null);
+}
+
+test "a request with no Origin is not cross-origin and gets no allow header" {
+    // Where the named list stopped behaving like the single string it
+    // replaced: that sent the header to everybody, including a same-origin
+    // request that never asked. A browser ignores it either way, and sending
+    // one origin's name to a request from somewhere else was never right.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(cors.with(.{ .origins = &.{"https://app.example.com"} }));
+    try app.get("/x", plainOk);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const answer = h.send(&app, "GET /x HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, answer.response, "Access-Control-Allow-Origin") == null);
+    try testing.expect(std.mem.indexOf(u8, answer.response, "Vary: Origin") != null);
+}
+
+test "a preflight from a named origin is answered 204 with the methods" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(cors.with(.{
+        .origins = &.{ "https://a.example.com", "https://b.example.com" },
+        .max_age = 600,
+    }));
+    try app.get("/x", plainOk);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const answer = h.send(
+        &app,
+        "OPTIONS /x HTTP/1.1\r\nOrigin: https://b.example.com\r\n" ++
+            "Access-Control-Request-Method: GET\r\n\r\n",
+    );
+    try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 204"));
+    try testing.expect(std.mem.indexOf(u8, answer.response, "Access-Control-Allow-Origin: https://b.example.com") != null);
+    try testing.expect(std.mem.indexOf(u8, answer.response, "Access-Control-Allow-Methods:") != null);
+    try testing.expect(std.mem.indexOf(u8, answer.response, "Access-Control-Max-Age: 600") != null);
+}
+
+test "\"*\" still answers anyone, and says nothing about Vary" {
+    // The default, and the one shape that does not read the request at all.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(cors.permissive);
+    try app.get("/x", plainOk);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const answer = h.send(
+        &app,
+        "GET /x HTTP/1.1\r\nOrigin: https://anywhere.example.com\r\n\r\n",
+    );
+    try testing.expect(std.mem.indexOf(u8, answer.response, "Access-Control-Allow-Origin: *") != null);
+    try testing.expect(std.mem.indexOf(u8, answer.response, "Vary: Origin") == null);
 }
 
 // ---- stage 5: percent-decoding, chunked bodies, static files ----
@@ -3945,7 +4071,7 @@ test "two layers each naming a Vary axis both survive onto the response" {
 
     var app = App.init(testing.allocator);
     defer app.deinit();
-    try app.use(cors.with(.{ .origin = "https://example.dev" }));
+    try app.use(cors.with(.{ .origins = &.{"https://example.dev"} }));
     try app.static("/assets", files.path);
 
     var h = Harness.init();
@@ -3973,7 +4099,7 @@ test "a gzipped file behind a named-origin CORS still allocates nothing" {
 
     var app = App.init(testing.allocator);
     defer app.deinit();
-    try app.use(cors.with(.{ .origin = "https://example.dev" }));
+    try app.use(cors.with(.{ .origins = &.{"https://example.dev"} }));
     try app.static("/assets", files.path);
     try app.resolveChains();
 
@@ -6429,7 +6555,7 @@ test "a CORS Vary and a compression Vary are both sent, not one over the other" 
     // (`http1.repeats`).
     var app = App.init(testing.allocator);
     defer app.deinit();
-    try app.use(cors.with(.{ .origin = "https://example.com" }));
+    try app.use(cors.with(.{ .origins = &.{"https://example.com"} }));
     try app.static_sets.append(testing.allocator, try static_mod.fromMemory(testing.allocator, &.{.{
         .url = "/app.css",
         .bytes = test_css,

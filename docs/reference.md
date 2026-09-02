@@ -1150,10 +1150,16 @@ nilo.logger.with(.{ .level = .info, .slow_micros = 0,   // slower than this → 
                      .format = .text,                    // or .json, one object per line
                      .request_id = false })              // X-Request-Id out, and on the line
 
-nilo.cors.permissive                                    // origin "*", no credentials
-nilo.cors.with(.{ .origin = …, .methods = …, .headers = …,
+nilo.cors.permissive                                    // origins &.{"*"}, no credentials
+nilo.cors.with(.{ .origins = &.{…}, .methods = …, .headers = …,
                    .expose = …, .credentials = false, .max_age = 0 })
 ```
+
+`origins` is a list because `Access-Control-Allow-Origin` carries one value:
+the request's `Origin` is compared against each entry and the one that matched
+is what goes out. Lowercase, and refused at build time otherwise. `&.{"*"}`
+answers anyone and reads no header at all; anything else also sends
+`Vary: Origin`, whether or not it matched.
 
 ## Static options
 

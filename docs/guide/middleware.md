@@ -86,10 +86,28 @@ try app.use(nilo.cors.permissive);
 requests at a level of your choosing and anything slower than `slow_micros` at
 `.warn`, so slow requests stand out without a second tool.
 
-`cors.with(.{ .origin = "https://app.example.com", .credentials = true })` —
-also `methods`, `headers`, `expose`, `max_age`. `permissive` is `origin: "*"`
-with no credentials, which is reasonable for a public API and wrong for one
-behind a cookie.
+`cors.with(.{ .origins = &.{"https://app.example.com"}, .credentials = true })`
+— also `methods`, `headers`, `expose`, `max_age`. `permissive` is
+`origins: &.{"*"}` with no credentials, which is reasonable for a public API
+and wrong for one behind a cookie.
+
+**Name as many origins as you serve.** A production front end and a staging one
+is the ordinary case, and `Access-Control-Allow-Origin` carries one value, so
+nilo compares the request's `Origin` against your list and sends back the one
+that matched:
+
+```zig
+try app.use(nilo.cors.with(.{
+    .origins = &.{ "https://app.example.com", "https://staging.example.com" },
+    .credentials = true,
+}));
+```
+
+The compare is unrolled while compiling, so it is one `mem.eql` per entry
+against a literal and nothing is allocated. An origin you did not name gets an
+ordinary response with no `Access-Control-Allow-Origin` on it, and the browser
+is what refuses it. Write them lowercase — a browser does, and nilo refuses a
+capital letter at build time rather than letting it silently never match.
 
 ## Resolved values
 
