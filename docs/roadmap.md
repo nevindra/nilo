@@ -485,17 +485,6 @@ because `zig build profile` is exactly the harness for the question.
 
 **Waiting on: a number.**
 
-**`websocket.counted` and `room.sizeOf` are the same nine lines, comments
-included.** Both take a writer function and a value, run it into a
-`std.Io.Writer.Discarding` over a 256-byte scratch buffer, and hand back the
-byte count. They differ in their return type (`u64` against `usize`) and in
-nothing else, down to the wording of both comments. One copy belongs somewhere
-both can reach, which inside `http/` is anywhere.
-
-Nothing on any axis: the same code once instead of twice.
-
-**Waiting on: ready.**
-
 **An internally tagged union is read four times, and the module says the marker
 costs nothing per request.** `jsonmark.zig`'s header says "Nothing per request
 and nothing per connection: the marker is read while compiling", and on the

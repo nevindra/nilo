@@ -524,14 +524,14 @@ pub const Room = struct {
 /// How many bytes something would take, without writing any of them. What
 /// `print` and `json` size a post with, so neither invents a buffer nor
 /// guesses at one.
+///
+/// One line over `websocket.counted`, which is the same counting a Socket's
+/// own `print` and `json` do. It used to be a second copy of those nine
+/// lines, comments included, differing only in this cast: a post's length is
+/// what gets allocated, so a Room wants a `usize` where a frame header wants
+/// the `u64` it puts on the wire.
 fn sizeOf(comptime write: anytype, value: anytype) usize {
-    // Big enough that a short message is one call into the counter rather
-    // than one per piece of the format, and small enough to be free.
-    var scratch: [256]u8 = undefined;
-    var counter: std.Io.Writer.Discarding = .init(&scratch);
-    // A counter has nowhere to fail: its drain throws the bytes away.
-    write(&counter.writer, value) catch unreachable;
-    return @intCast(counter.fullCount());
+    return @intCast(websocket.counted(write, value));
 }
 
 // ---- tests ----

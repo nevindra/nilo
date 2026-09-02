@@ -1029,7 +1029,12 @@ const Framed = struct {
 /// How many bytes something would be, without writing any of them. The
 /// counting half of `print` and `json`, kept in one place so both pay the
 /// same well-understood price and neither invents a buffer.
-fn counted(
+///
+/// `Room.print` and `Room.json` count the same way for the same reason — a
+/// frame states its length before its bytes — so they call this rather than
+/// keeping a second copy of it. `u64` is the length a frame header carries;
+/// a Room casts it down to the `usize` its allocation wants.
+pub fn counted(
     comptime write: anytype,
     value: anytype,
 ) u64 {
