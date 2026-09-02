@@ -1342,3 +1342,32 @@ stream — because all four rows ran against one server and RSS does not come ba
 down, so every row after the first was measured against a baseline full of
 memory the allocator was about to hand out again. **One fresh server per row**,
 and marginal met average at every step from 500 up.
+
+## A gap written down from reading two functions described a third one wrong
+
+`roadmap.md` carried `Router.add` and `Router.conflicting` classifying a segment
+that is only a colon differently — `add` at `part.len > 0` and `conflicting` at
+`part.len > 1` — and said the consequence was that registering `/a/:` twice
+"reports no conflict and leaves two routes matching the same requests, one of
+them unreachable". **The drift was real and the consequence was not.** `add`
+runs its own `Route.sameShape` check over the routes already registered, so the
+second one is refused whatever `conflicting` said; and `validatePattern` refuses
+a `:` with no name after it while compiling, so nothing but a direct caller of
+`Router` could reach the pattern at all. What the disagreement actually cost was
+the error message: `App.tryRoute` skipped the one that names both patterns and
+let `add` answer with a bare `error.DuplicateRoute`.
+
+**The reachable bug was the line the entry mentioned last.** `add` asserted
+`std.mem.count(u8, pattern, ":") <= max_params`, and a `*` carries no colon
+while `fill` writes it into `Match.params` like any other capture — so eight
+params beside a catch-all is nine captures, and the assert that exists to stop
+`fill` running off the end of an eight-slot array read it as eight. Counting the
+segments that are not literals is the same three lines and counts what is
+actually captured.
+
+**Two functions were read and the third was assumed.** Both halves of this were
+written down from `add` and `conflicting`; neither `sameShape`, which sits inside
+`add`, nor `validatePattern`, which every `App` route goes through first, was
+opened. **A consequence is a claim like any other**, and this file's own rule
+about numbers applies to it: it decays the moment nothing re-derives it, and a
+consequence decays quietly because nothing fails when it is wrong.

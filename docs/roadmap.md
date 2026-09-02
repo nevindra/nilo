@@ -485,25 +485,6 @@ because `zig build profile` is exactly the harness for the question.
 
 **Waiting on: a number.**
 
-**`Router.add` and `Router.conflicting` disagree about a segment that is only a
-colon.** `add` calls a segment a param when it starts with `:`
-(`part.len > 0`), so `/a/:` registers a param with an empty name. `conflicting`
-calls it a param only when something follows the colon (`part.len > 1`), so it
-reads the same segment as the literal `":"`. Registering `/a/:` twice therefore
-reports no conflict and leaves two routes matching the same requests, one of
-them unreachable.
-
-Degenerate, and nobody writes it on purpose. What earns it a line is that these
-are two copies of one classification, and the copy deciding what a route *is*
-has already drifted from the copy deciding whether two routes *collide*. One
-function used by both is the fix.
-
-`add` also asserts `std.mem.count(u8, pattern, ":") <= max_params`, which counts
-a colon anywhere, so a literal segment containing one spends the param budget.
-An assert, so it is a Debug panic and unchecked in `ReleaseFast`.
-
-**Waiting on: ready.**
-
 **`websocket.counted` and `room.sizeOf` are the same nine lines, comments
 included.** Both take a writer function and a value, run it into a
 `std.Io.Writer.Discarding` over a 256-byte scratch buffer, and hand back the

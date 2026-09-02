@@ -56,6 +56,25 @@ pub const Segment = struct {
     kind: Kind,
 
     pub const Kind = enum { literal, param, wildcard };
+
+    /// What one piece of a pattern is, decided in the one place both
+    /// callers read.
+    ///
+    /// `add` settles what a route *is* and `conflicting` settles whether
+    /// two routes *collide*, and each used to classify a segment itself.
+    /// The two copies had already drifted over a segment that is only a
+    /// colon: `add` called `/a/:` a param with an empty name, `conflicting`
+    /// called it the literal `":"` and so found no collision. What that
+    /// cost was the error message rather than the route — `add` refuses a
+    /// duplicate on its own — and `validatePattern` refuses the pattern
+    /// while compiling anyway. What earned the fix is that one
+    /// classification was living in two places, and the copy deciding what
+    /// a route is had drifted from the copy deciding whether two collide.
+    pub fn of(part: []const u8) Segment {
+        if (std.mem.eql(u8, part, wildcard)) return .{ .text = wildcard, .kind = .wildcard };
+        if (part.len > 0 and part[0] == ':') return .{ .text = part[1..], .kind = .param };
+        return .{ .text = part, .kind = .literal };
+    }
 };
 
 pub const Route = struct {
@@ -164,7 +183,6 @@ pub const Router = struct {
     /// rather than the user's error message.
     pub fn add(self: *Router, method: http1.Method, pattern: []const u8, handler: CtxHandler) !void {
         std.debug.assert(pattern.len > 0 and pattern[0] == '/');
-        std.debug.assert(std.mem.count(u8, pattern, ":") <= max_params);
 
         var buf: [max_segments][]const u8 = undefined;
         const parts = split(trimSlashes(pattern), &buf) orelse {
@@ -176,15 +194,7 @@ pub const Router = struct {
 
         const segments = try self.gpa.alloc(Segment, parts.len);
         errdefer self.gpa.free(segments);
-        for (segments, parts) |*seg, part| {
-            if (std.mem.eql(u8, part, wildcard)) {
-                seg.* = .{ .text = wildcard, .kind = .wildcard };
-            } else if (part.len > 0 and part[0] == ':') {
-                seg.* = .{ .text = part[1..], .kind = .param };
-            } else {
-                seg.* = .{ .text = part, .kind = .literal };
-            }
-        }
+        for (segments, parts) |*seg, part| seg.* = .of(part);
 
         // A second route matching exactly the same paths is dead code, and
         // silently dropping it is how an afternoon disappears. Param names
@@ -196,10 +206,19 @@ pub const Router = struct {
         }
 
         const tail_is_wildcard = segments.len > 0 and segments[segments.len - 1].kind == .wildcard;
-        var literal_only = true;
+
+        // Every segment that is not a literal fills a slot in
+        // `Match.params`, a `*` included — `fill` writes it under the name
+        // "*". Counting the colons in the pattern instead missed the `*`
+        // entirely, so eight params beside a catch-all is nine captures and
+        // passed an assert whose whole job is to stop `fill` running off the
+        // end of an eight-slot array. `validatePattern` says this to the
+        // user while compiling; here it is the invariant behind that.
+        var captures: usize = 0;
         for (segments) |seg| {
-            if (seg.kind != .literal) literal_only = false;
+            if (seg.kind != .literal) captures += 1;
         }
+        std.debug.assert(captures <= max_params);
 
         const starts_literal = segments.len > 0 and segments[0].kind == .literal;
 
@@ -210,7 +229,7 @@ pub const Router = struct {
             .segments = segments,
             .score = Route.specificity(segments),
             .wildcard_tail = tail_is_wildcard,
-            .all_literal = literal_only,
+            .all_literal = captures == 0,
             .first_literal = starts_literal,
             .first_key = if (starts_literal) Route.firstKey(segments[0].text) else 0,
         });
@@ -224,20 +243,18 @@ pub const Router = struct {
         var buf: [max_segments][]const u8 = undefined;
         const parts = split(trimSlashes(pattern), &buf) orelse return null;
 
+        // Classified the way `add` would classify it, and compared the way
+        // `add` compares — so the two cannot answer differently about the
+        // same pair of patterns. Registration only, never a request, so the
+        // stack this takes is the App being built rather than a connection
+        // holding it.
+        var seg_buf: [max_segments]Segment = undefined;
+        const segments = seg_buf[0..parts.len];
+        for (segments, parts) |*seg, part| seg.* = .of(part);
+
         for (self.routes.items) |existing| {
             if (existing.method != method) continue;
-            if (existing.segments.len != parts.len) continue;
-            const same = for (existing.segments, parts) |seg, part| {
-                const kind: Segment.Kind = if (std.mem.eql(u8, part, wildcard))
-                    .wildcard
-                else if (part.len > 1 and part[0] == ':')
-                    .param
-                else
-                    .literal;
-                if (seg.kind != kind) break false;
-                if (kind == .literal and !std.mem.eql(u8, seg.text, part)) break false;
-            } else true;
-            if (same) return existing.pattern;
+            if (Route.sameShape(existing.segments, segments)) return existing.pattern;
         }
         return null;
     }
@@ -840,4 +857,37 @@ test "the key tells apart the words a route table actually holds" {
         }
     }
     try testing.expectEqual(@as(usize, 0), collisions);
+}
+
+test "add and conflicting read a segment that is only a colon the same way" {
+    var r = Router.init(testing.allocator);
+    defer r.deinit();
+    try r.add(.GET, "/a/:", testHandler);
+
+    // `add` has always called this a param with an empty name. `conflicting`
+    // called it the literal ":" and so found no collision, which left
+    // `App.tryRoute` skipping the message that names both patterns and
+    // letting `add`'s own check answer with a bare error instead. No second
+    // route was ever registered, and `validatePattern` refuses the pattern
+    // outright, so nothing reached this but a direct caller — what earned
+    // the fix is one classification living in two places.
+    try testing.expectEqualStrings("/a/:", r.conflicting(.GET, "/a/:").?);
+    try testing.expectError(error.DuplicateRoute, r.add(.GET, "/a/:", otherHandler));
+}
+
+test "a catch-all fills a param slot, so the budget has to count it" {
+    var r = Router.init(testing.allocator);
+    defer r.deinit();
+
+    // Seven names and a `*` is eight captures, which is `max_params`
+    // exactly. The assert `add` used to make counted the colons in the
+    // pattern, so it read this as seven — and would have let a ninth
+    // capture through to write past the end of `Match.params`.
+    try r.add(.GET, "/:a/:b/:c/:d/:e/:f/:g/*", testHandler);
+
+    const m = r.match(.GET, "/1/2/3/4/5/6/7/rest/of/it") orelse
+        return error.TestExpectedMatch;
+    try testing.expectEqual(@as(usize, max_params), m.n_params);
+    try testing.expectEqualStrings(wildcard, m.params[max_params - 1].name);
+    try testing.expectEqualStrings("rest/of/it", m.params[max_params - 1].value);
 }
