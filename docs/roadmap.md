@@ -34,6 +34,7 @@ have the work that nothing is blocking.
 |---|---|
 | **ready** | nothing is in the way. It needs somebody's afternoon |
 | **a caller** | the design is known and nobody has needed it yet. Bring the use case, not the patch |
+| **a design** | the mechanism is known and the policy is not. What is missing is a decision somebody has to make, not code |
 | **a number** | somebody has to measure before this can be decided |
 | **a machine** | a benchmark box rather than a shared vCPU |
 | **a harness** | a test shape the suite does not have |
@@ -67,8 +68,8 @@ other module's.
 | [`nilo_config`](#nilo_config-settings) | needs no loop | reading a name the field is not called |
 | [`nilo_pw`](#nilo_pw-hashing-a-password) | needs no loop | a Cost floor that weighs the wrong half, and a patch `std` should have |
 | [`nilo_fetch`](#nilo_fetch-calling-somebody-elses-api) | borrows the loop | 16,495 bytes of stack per idle connection, and nothing measured through TLS |
-| [`nilo_http`](#nilo_http-the-server) | owns the loop | the biggest list, and most of it is waiting on a number or a design |
-| [`nilo_sql`](#nilo_sql-postgres-and-sqlite) | borrows the loop | which way a SQLite statement should run, and where migrations live |
+| [`nilo_http`](#nilo_http-the-server) | owns the loop | no rate limiting at all, four ways to answer a request nobody else would, a response body that contradicts its own document, and a long tail |
+| [`nilo_sql`](#nilo_sql-postgres-and-sqlite) | borrows the loop | a schema check that refuses the most ordinary SQLite table there is, four things the SQLite half cannot do that three documents say it can, and where migrations live |
 | [`nilo_s3`](#nilo_s3-object-storage) | borrows the loop | nothing measured through TLS, and no `LIST`, `COPY` or multipart |
 
 Everything that is about the repository rather than one module stays whole at
@@ -358,30 +359,296 @@ number**, which is the same test every other feature here has had to pass.
 
 ## `nilo_http`: the server
 
+The longest list here, and it is really two. The first five **Known gaps** are
+things a stranger on the internet can do to a server that is running exactly as
+written; everything under them is work nilo has not done well enough yet. Both
+are gaps and only one group is urgent.
+
 ### Next
 
-**1. Reloading without a restart: static files, then the server.** A
-development annoyance rather than a design hole, because a deploy restarts
-anyway. The static half is a watch option on `staticWith`, re-reading a
-directory that has changed. The other half is the whole process and cannot live
-inside `App`, because a running binary cannot rebuild itself, so it belongs in
-the build alongside `zig build run`. jetzig's dev server sums the modification
-times of its source tree and rebuilds when the sum moves, which is about as
-much machinery as this deserves. The part to be careful about is that neither
-half can end up in a release binary.
+**1. Nothing refuses a client that asks too often.** There is no rate limiting
+anywhere in nilo — not a middleware, not an option, not a type. `fail.tooManyRequests`
+exists and returns 429, and **nothing in the framework ever calls it**.
+`Ctx.clientIp()` and `listen(.{ .trusted_hops = … })` were built for the three
+readers [ADR 0028](./adr/0028-tls-is-terminated-in-front.md) names — rate limits,
+audit logs, blocklists — and the first of those three has no caller. What stands
+in for it today is `.max_connections`, and that counts sockets **per process
+rather than per address** (`Capacity` in `http/engine/zio.zig`), so one client
+opening ten thousand connections closes the door on everybody else and the log
+line blames the machine.
+
+The shape has to pass [ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md)
+before it is worth writing, and that rules out how every other framework does it:
+a map keyed by an address string means a hash and an allocation on the path of
+every request it guards. What fits is the shape `app.metrics` already proved — a
+**fixed table sized once at `listen()`**, indexed by a hash of `clientIp()`, with
+the window and the ceiling settled while compiling, registered like CORS is
+(`app.use(…with(.{ … }))`) so a route that is not guarded pays nothing.
+
+Three questions decide it and none is answered:
+
+- **What a full table does.** A fixed number of slots means two clients can land
+  on one, and "your neighbour used your allowance" is a worse failure than no
+  limiting at all. Eviction, or slots-per-shard, or a counter that decays.
+- **Fixed window or sliding.** A fixed window lets twice the ceiling through
+  across a boundary; a sliding one costs more state per slot.
+- **What it is called.** [CONTEXT.md](../CONTEXT.md) already refuses *limiter*
+  and *throttle* under the Gate's entry, so this needs a noun of its own before
+  it has an API.
+
+**Waiting on: a design.** The mechanism is ordinary; the three answers above are
+what makes it shippable rather than a default that guesses.
+
+**2. Reloading without a restart: static files, then the server.** A development
+annoyance rather than a design hole, because a deploy restarts anyway. The static
+half is a watch option on `staticWith`, re-reading a directory that has changed.
+The other half is the whole process and cannot live inside `App`, because a
+running binary cannot rebuild itself, so it belongs in the build alongside `zig
+build run`. jetzig's dev server sums the modification times of its source tree
+and rebuilds when the sum moves, which is about as much machinery as this
+deserves. The part to be careful about is that neither half can end up in a
+release binary.
 
 The static half stopped being purely a convenience when files began spilling to
 disk. See the stale-length gap below, which this is the fix for.
 
 **Waiting on: ready.**
 
-**2. `permessage-deflate`.** Negotiated in the handshake, and a compressor per
+**3. A repeated name cannot bind to a list.** `convert.convertible` accepts a
+`Str`, a number, a `bool`, an enum and optionals of those, and nothing else — so
+`?tag=a&tag=b` into `tags: []const Str`, and a `<select multiple>` or a checkbox
+group into a `Form(T)`, are both a compile error naming the field. `parseQuery`
+and `parseMultipart` already keep every occurrence in order and `Fields.find`
+deliberately returns the first, so the data is there and only the binding is
+missing. It costs a slice per list field out of the request arena, on requests
+that ask for one.
+
+**Waiting on: a design** for where the slice lives when the same struct is also
+what `Bound(Query(T))` hands back — an `Outcome` is one reason per field, and a
+list can fail at element three.
+
+**4. A `Ctx` cannot read the headers it was not asked for by name.**
+`c.header("X")` is the whole surface. `http1.HeaderIterator` walks the head and
+is `pub`, and `http.zig` does not export `http1`, so a middleware that wants to
+see every header — a signing proxy, a tracing header of somebody else's shape, a
+`Forwarded` reader — has to reach into `c._head`, which is an underscore field
+and therefore nilo's. It is also the only way to read a header a request sent
+twice, since `header` answers with the first.
+
+**Waiting on: ready.** An iterator over the head is a wrapper and no new state.
+
+**5. The test client cannot send a header, keep a cookie, or open a socket.**
+`testing.Client` has `get`, `post`, `postWith` and `request`, and every one of
+them writes `Host: test` and nothing else — so a test of a route behind
+`Authorization`, behind CORS, or behind a session has to hand-assemble the raw
+request text and call `send`. There is no cookie jar either, so a sign-in
+followed by a request as that user means copying the `Set-Cookie` out of one
+`Answer` and pasting it into the next request by hand, which is what
+`examples/forms` does. And a WebSocket route cannot be driven at all: `Client`
+has no way to hand the App a reader that answers frames.
+
+That is the one place in the framework where the ordinary thing is harder than
+the raw thing, which is the opposite of what the rest of it sells.
+
+**Waiting on: ready.** Headers and a jar are additive; the socket half is a
+design of its own and can wait for its own entry.
+
+**6. `permessage-deflate`.** Negotiated in the handshake, and a compressor per
 connection is memory that has not been budgeted.
 
 **Waiting on: a number.** The per-connection cost has to be priced against the
 4,669 bytes an idle connection holds today.
 
 ### Known gaps
+
+**A `Transfer-Encoding` whose last coding is not `chunked` is served as a request
+with no body.** `applyHeaderAt` reads the header, asks `saysChunked`, and when
+the answer is no it does *nothing at all* — no error, no framing, and
+`content_length` stays zero. So `Transfer-Encoding: gzip` with no
+`Content-Length`, and `Transfer-Encoding: chunked, gzip`, are both answered
+immediately, and the bytes the client sent as a body are still in the read buffer
+when the connection loop goes round for the next request. RFC 9112 §6.1 says a
+server that cannot decode the final coding **must** answer 400, and the proxy in
+front ([ADR 0028](./adr/0028-tls-is-terminated-in-front.md)) is entitled to a
+different reading — which is the definition of the smuggling case
+[ADR 0090](./adr/0090-a-body-framed-twice-is-refused.md) was written to close.
+
+ADR 0090 closed four ways for the two parsers to disagree and this is the fifth,
+missed for the reason the ADR itself gives about differential testing: `fuzz.zig`
+carries `Transfer-Encoding: chunked, identity` in its corpus and the reference
+parser reads it the same wrong way, so the two agree and the test passes.
+
+**Waiting on: ready.** One arm in `applyHeaderAt`, one line in the reference
+parser, one corpus entry.
+
+**A request with no `Host`, or with two different ones, is served.** Nothing in
+`http1.zig` looks at `Host` — the parser's four-header switch does not include
+it, and neither does `App`. RFC 9112 §3.2 requires a 400 for an HTTP/1.1 request
+that carries no `Host` and for one that carries more than one, and both are
+refused by the front end nilo assumes is there. So this is the same class as the
+entry above: nilo agreeing to answer a request nobody else agreed to, and a
+`Host` a handler reads back into a `Location` or a link is text no layer has
+checked.
+
+**Waiting on: ready.** It is a fifth arm on the length switch the parser already
+has, and `has_content_length` is the worked example of the extra bool fitting in
+padding that was already there.
+
+**A WebSocket handshake never looks at `Origin`, so a cross-site page can open
+one.** `Ctx.handshake` checks the method, `Upgrade`, `Connection`,
+`Sec-WebSocket-Version` and `Sec-WebSocket-Key`, and stops. A browser does not
+apply CORS to a WebSocket and sends no preflight, so the CORS middleware in front
+of the route sets headers nobody enforces and the socket opens anyway —
+**carrying the session cookie**, because the handshake is an ordinary GET. An
+application that puts `Session(T)` and `c.upgrade` on the same server is
+therefore open to a page on another origin reading and writing that user's socket
+for as long as the tab is open.
+
+This is worse than the CORS story it looks like, because there is no browser step
+that refuses it: the whole check has to be the server's.
+
+**Waiting on: a design.** The mechanism is four lines — compare `Origin` against
+a list. What is not settled is where the list comes from, since
+`websocket.Options` is per-call while `cors.with` is per-App, and a default of
+"refuse everything cross-origin" would break a socket served from a different
+host to the page, which is an ordinary deployment.
+
+**`c.body()` takes the announced `Content-Length` out of the arena before it
+reads a byte.** `const b = try self._arena.alloc(u8, content_length)` runs after
+the `max_body` check and before `readSliceAll`, so a request that says
+`Content-Length: 1048576` and then sends one byte a minute holds a megabyte of
+this connection's arena for as long as it keeps trickling. `body_timeout_ms` is
+30 seconds **per read**, not for the body, and that is deliberate
+([ADR 0023](./adr/0023-a-deadline-belongs-to-an-operation-not-to-a-request.md)) —
+so a client answering inside every window never trips it. Times the default
+`.max_connections` of 10,000 that is ten gigabytes a server will commit on the
+strength of a number a stranger typed.
+
+`c.bodyStream()` has none of this: it allocates nothing and the handler's buffer
+is the ceiling. So the ingredients are already here, and what is missing is
+`body()` growing what it holds as the bytes turn up rather than trusting the
+header — which costs a reallocation on large bodies and nothing on small ones,
+against an arena that is reset per request anyway.
+
+**Waiting on: a number.** Two of them: what the growth costs a body that arrives
+normally, and what the current shape actually holds under a slow-loris, which
+nothing has measured.
+
+**A single-page app answers 200 with `index.html` for an asset that is not
+there.** `static.Set.find` falls through to `self.fallback` for every path under
+the prefix once the lookup and the index have missed, so `staticWith(.{
+.spa_fallback = "index.html" })` turns a stale build hash, a typo'd import and a
+deleted file into a 200 carrying `text/html`. A browser fetching `app.abc123.js`
+gets HTML and reports a syntax error on line 1; a `fetch()` gets HTML and reports
+a JSON parse error. Neither names the missing file.
+
+The fix is the rule every SPA server ends up with — fall back only for a request
+that could be a navigation, which is a path with no file extension, or an
+`Accept` that prefers `text/html`. `App.findStatic` already asks the docs set
+first for the same class of reason.
+
+**Waiting on: a design.** Which of the two tests to use, and whether an app can
+turn it off, given that the current behaviour is what shipped.
+
+**A CORS origin list is settled while compiling, so it cannot come from the
+environment.** `cors.with` takes `comptime Options` and unrolls the compare over
+the literals, which is what makes a named origin cost no allocation
+([ADR 0099](./adr/0099-one-allow-origin-header-means-the-list-is-matched-not-formatted.md)).
+The consequence is that the same binary cannot serve staging and production,
+because the front end's address is a fact about the deployment and every other
+deployment fact in nilo arrives through `nilo_config` at run time. Today the
+answer is to recompile, or to write the middleware yourself.
+
+**Waiting on: a design** that keeps the comptime path for an app that names its
+origins in code, since that path is the measured one, while letting a runtime
+list in beside it.
+
+**A number in a path param, a query value or a form field accepts `+5` and
+`1_0`.** `convert.tryConvert` calls `std.fmt.parseInt(P, text, 10)`, which reads
+a leading sign and Zig's own digit separators — so `/users/+7` is user 7 and
+`?page=1_0` is page ten. This is exactly what
+[ADR 0090](./adr/0090-a-body-framed-twice-is-refused.md) refused for
+`Content-Length`, and `range.zig` carries four lines of `digitsOnly` for the same
+reason; the one place a *user's* number arrives never got the rule. Nothing is
+smuggled by it, but two clients disagreeing about which page they asked for is
+the same shape of bug one layer up, and a `u32` param that silently accepts an
+underscore is a difference between what a caller wrote and what the server read.
+
+**Waiting on: ready.** `digitsOnly` exists twice already; the question is only
+whether a signed field should still take its sign, which it should.
+
+**An absolute-form request target matches no route.** `GET
+http://example.com/users/7 HTTP/1.1` is legal — RFC 9112 §3.2.2 says a server
+**must** accept it, and a client talking to what it believes is a proxy sends
+it — and `parseRequestLine` hands the whole thing to the router as a path, which
+splits it into `http:`, ``, `example.com`, `users`, `7` and matches nothing. The
+answer is a 404 on a route that plainly exists.
+
+Nobody has hit it, because a browser sends origin-form and the proxy in front
+rewrites. It is here because it is four lines and because the shape of the
+mistake — reading a target without deciding what form it is in — is the one the
+two entries at the top of this list are also about.
+
+**Waiting on: a caller**, and a cheap one to answer if it ever turns up.
+
+**A `[:0]const u8` goes out as a JSON array of numbers, and the API description
+says it is a string.** `json.zig` recognises `Str`, `[]const u8` and `[]u8` by
+exact type and nothing else, so a sentinel-terminated slice falls through to the
+`.pointer` arm, `covers(u8)` says yes, and the generated writer emits a list of
+byte values. Run against the module's own contract:
+
+```
+covers(struct { name: [:0]const u8 }) = true
+nilo : {"name":[104,101,108,108,111]}
+std  : {"name":"hello"}
+```
+
+That contract is the file's whole justification — "the output is byte-for-byte
+what `std.json` would have written… the speed is only allowed to exist because
+the bytes are identical" — and `expectSame` never asks about this shape, so the
+suite passes.
+
+**The document and the response disagree, which is the worse half.**
+`openapi.schemaWithin` reads the same type as `p.child == u8` and writes
+`type: string`, correctly. So a generated client is told to expect a string and
+receives an array. That is exactly the failure
+[ADR 0076](./adr/0076-a-type-that-writes-its-own-json-says-so.md)
+was written about — a `Uuid` documented as an object and sent as a string —
+running the other way round. `typed.contentTypeFor` misses it a third time and
+labels the response `application/json` where a `[]const u8` would have been
+`text/plain`.
+
+`[:0]const u8` is not exotic: it is what `@tagName` returns, what
+`allocPrintSentinel` returns, and what any field crossing a C boundary is
+spelled as.
+
+**Waiting on: ready.** Three files read the same question and one of them has
+the answer already; the fix is `p.child == u8` in `json.zig` and in
+`contentTypeFor`, and a test that walks a type nobody thought of rather than one
+somebody wrote down.
+
+**A type that holds a list of itself cannot reach a response at all.**
+`json.covers` recurses through `.pointer` with no depth limit, so an ordinary
+JSON tree — a comment with replies, a category with children — never terminates:
+
+```
+http/json.zig:94:52: error: evaluation exceeded 1000 backwards branches
+        .pointer => |p| p.size == .slice and covers(p.child),
+http/json.zig:94:52: note: use @setEvalBranchQuota() to raise the branch limit
+```
+
+The message is in nilo's file and its advice is wrong — raising the quota buys
+more recursion, not an answer. `std.json` writes the value fine, because its
+recursion is over a value at run time rather than over a type while compiling,
+so the fallback path this fell off is the one that works.
+
+`openapi.schemaWithin` takes the same walk and caps it — `max_depth = 8`, then
+`.unknown` — for the same reason and eight levels earlier
+([ADR 0081](./adr/0081-a-ceiling-that-is-reached-is-said-out-loud.md)). `covers`
+has no such line.
+
+**Waiting on: ready.** A depth argument that answers false at the ceiling sends
+the value to `std.json`, which is the correct answer rather than a degraded one.
 
 **A `Room`'s roster lock is held across the whole broadcast, and the field says
 it is not.** `Room.roster`'s doc says it guards taking and giving up a seat and
@@ -405,6 +672,34 @@ runs the chat loop from `examples/chat/` with the room deliberately taken out,
 so every WebSocket number in [`bench/result/http.md`](../bench/result/http.md)
 is a socket that joined nothing.
 
+**A connection cancelled while leaving a Room keeps its seat and its bell.**
+`Room.leave` takes two locks and gives up on both the same way — `roster.lock()
+catch return` and `seat.lock.lock() catch return` — and the error they return is
+`Canceled`, which is what a fiber gets when the server is shutting down. Both
+paths return before `seat.taken = false`, so the seat is never released and
+`seat.waker` still points into the `Socket` of a handler that is on its way out.
+A later `say` walks the roll, finds that seat still on the taken half, pushes a
+post into its ring and rings a bell whose fiber has ended.
+
+The window is narrow and worth stating exactly: `zio.Mutex.lock` tries
+uncontended first and only then checks cancellation, so this needs a broadcast
+in flight at the moment the connection is cancelled. It is not the ordinary
+shutdown.
+
+**A cleanup path should not be cancellable**, which is the shape the fix takes:
+`zio.Mutex.lockUncancelable` is in the pinned v0.17.0 and is written for exactly
+this — "cancellation requests are ignored during the lock acquisition". The
+Bulkhead does not expose it, so this is one method on `nilo.Mutex` and two lines
+in `leave`.
+
+While there: `Room.missed` reads `seat.dropped` with no lock, and `put` writes
+it under the seat's. Nothing tears on a 64-bit load, but it is the one field in
+this file read outside the lock that guards it.
+
+**Waiting on: ready.** The call exists upstream and is one file over, which is
+the check [ADR 0063](./adr/0063-a-handlers-stack-is-per-connection.md) taught
+this repository to run before writing down a blocker.
+
 **The two arms of static-file serving live in two files, and the rule they share
 lives in a third.** `App.serveHeldFile` answers a file read at startup,
 `sendfile.send` answers one that spilled, and `static.etagMatches` and
@@ -414,7 +709,7 @@ that the seam is in the wrong place: it is the only part of `app.zig` that is
 about static files rather than about serving requests, and it is where both
 `If-Range` gaps above diverged.
 
-`app.zig` is 7,053 lines, of which 1,878 are code and 5,175 are tests, so the
+`app.zig` is 8,027 lines, of which 2,250 are code and the rest are tests, so the
 file is smaller than it looks. The code half still holds the App builder, route
 registration, groups, `listen`, the connection loop, the request path, static
 file serving and failure assembly. Lifting the static arm out next to
@@ -446,9 +741,6 @@ write side that is true and measured. On the read side `Reader.parse` calls
 scans it a fourth time because `ignore_unknown_fields` had to be turned on to
 get past the tag. `ctx.json` parses with default options, so the fourth pass is
 not optional. Two of the four build a `std.json.Scanner` with an allocator.
-
-The comment in `parse` says the second look "costs a scan and nothing else",
-which is the honest description of one of the three extra passes.
 
 It is per tagged value, not per body, so a small object is nothing and an array
 of a thousand is four times the parse of every element. Nobody has measured
@@ -551,7 +843,7 @@ that has moved on.
 Both are the same instruction as before, that changing a file means restarting.
 But a held file could not fail this way and a spilled one can.
 
-**Waiting on: Next 1**, the watch option, which is why this is not an item of
+**Waiting on: Next 2**, the watch option, which is why this is not an item of
 its own.
 
 **The API description is silent about authentication.** A handler taking a
@@ -613,6 +905,67 @@ thread is the right size or a guess that happened to work.
 **Waiting on: ready.** `bench/compare/wsload/` takes a `-payload`, so the run is
 there. The interpretation is what is missing.
 
+**The blocking detector is switched off for exactly the handlers that hold a
+thread longest.** `watchdog.finish` takes an `excused` flag, and a request that
+took the connection over — a WebSocket, a stream, a body reader — passes it. The
+reasoning is sound: those handlers hold their fiber legitimately, for as long as
+they like, and most of that time is socket I/O the watch does not account for.
+The consequence is that a `std.fs` call or a synchronous driver inside a
+WebSocket loop is never reported, and a WebSocket loop is where it costs the
+most — a stalled fiber there holds its executor against every other socket that
+executor is serving, for the life of the connection rather than for one request.
+
+`watchdog.zig`'s own header states this ("a stated gap, not an oversight") and
+nowhere else does, which is why it is here: a gap recorded only in the file that
+has it is a gap nobody planning work will find.
+
+The machinery is not missing. `Socket.receive` already parks, and `waiting`/
+`waited` is exactly the bracket that would tell a per-message watch which part
+of the loop was the socket and which was the handler.
+
+**Waiting on: a design** for what a message-scoped watch starts and stops at,
+given that `receive` also drains a Room before it reads.
+
+**A type of the reader's own can be renamed into nilo's in nilo's own error
+messages.** `names.zig` rewrites a type name by searching for an unqualified
+`module.Type` substring, so the table matches on the reader's file name as
+readily as on nilo's:
+
+```
+room.Room   -> nilo.Room
+body.Body   -> nilo.Body
+models.Room -> models.Room
+```
+
+An application with `src/session.zig` holding a `pub const Session`, or
+`src/room.zig` holding a `Room`, is told by a nilo compile error that its type
+is `nilo.Session` — and sent looking for a type it never imported. That is
+word-for-word the failure this file exists to prevent, described in its own
+header ("a true sentence about a source tree the reader does not have"), running
+the other way round.
+
+`session`, `room`, `body`, `stream`, `form`, `cookie` and `app` are all ordinary
+names for a file in an application that uses this framework, which is what makes
+the collision worth fixing rather than noting.
+
+**Waiting on: a design.** Matching the whole `@typeName` prefix rather than a
+substring is the obvious answer and it is not free: the table exists because a
+nilo type appears *inside* a generic's name — `typed.Response(str.Str)` has to
+rewrite both — so the rule has to keep matching mid-string while stopping short
+of somebody else's file.
+
+**Every number in this module was measured on one x86-64 machine.** `scan.lanes`
+is 32 because `std.simd.suggestVectorLength(u8)` reports 32 on x86-64 with AVX2,
+and it is a constant rather than a query; `json.zig` hard-codes the same 32 for
+its escape scan. On aarch64 a 32-lane compare is two NEON registers, which is
+probably still ahead of the scalar loop it replaced and has never been run. The
+head-parsing figures (183ns → 51ns, 303ns → 163ns) and the JSON figures
+(1038ns → 126ns) are all from the same box.
+
+**Waiting on: a machine.** Nothing suggests a problem; there is simply no second
+architecture in [`bench/result/`](../bench/result/), so "portable" is an
+assumption rather than a reading.
+
 **The router is still a linear scan.** Indexing the first segment took 44% off
 a hundred-route app and moved
 [ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md)'s 10% bar out
@@ -632,6 +985,32 @@ there is, so there is nothing to precompute for.
 number of `use` calls.
 
 ### Not decided
+
+**Whether nilo ships the response headers a browser reads as policy.**
+`X-Content-Type-Options`, `Referrer-Policy`, `X-Frame-Options` and a
+`Content-Security-Policy` are four constant headers, so a middleware setting
+them would be `cors.zig`'s shape exactly — comptime options, `setStaticHeader`,
+nothing per request. The argument against is that
+[ADR 0028](./adr/0028-tls-is-terminated-in-front.md) puts a proxy in front and
+the proxy is where an operator already writes these, and a framework that sets
+half of them invites the belief that it set all of them. HSTS is genuinely the
+proxy's, because nilo does not speak TLS and cannot know whether the client did.
+
+**What would settle it: an application that got one of them wrong**, or an
+argument that a CSP belongs with the handlers that decide what a page loads
+rather than with the deployment.
+
+**Whether a request carries a CSRF token nilo knows about.** A session cookie
+defaults to `SameSite=Lax`, which is what stops a cross-site form POST from
+carrying it, and that covers the case almost everybody has. What it does not
+cover is a `SameSite=None` cookie, a `GET` that changes something, and a browser
+old enough not to enforce Lax. Every framework that has this ends up with a
+token in the session, a hidden field in the form and a comparison in a
+middleware, and all three would fit here — `Session(T)` already carries fixed
+`[N]u8` fields, and `Form(T)` already reads a hidden input.
+
+**What would settle it: somebody who has to turn `SameSite` off**, since Lax is
+what makes the feature unnecessary for everybody else.
 
 **Rotating the session secret.** Changing the secret today signs everybody out
 at once, which is correct and blunt. Doing better means a second key to decrypt
@@ -724,7 +1103,424 @@ is the smaller of the two jobs.
 have been ([§9](../bench/result/sql.md),
 [`spike/sqlite_facts`](../spike/sqlite_facts/)). This is the one that cannot.
 
+**2. An update cannot change a column using its own value.** `.set` binds
+values, so `SET "views" = "views" + 1` has no spelling and an atomic counter is
+`db.exec` with the SQL written out. Read-modify-write is the alternative, which
+is two round trips and wrong under load unless it is wrapped in a transaction
+with `.lock = .update` — so the shape everybody reaches for first is the one
+that races. What fits is the shape a condition already has: a value that is a
+struct of operators rather than a value, `.set = .{ .views = .{ .plus = 1 } }`,
+with the column name written into the fragment and the operand bound. It is one
+more branch in `updating` in `sql/statement.zig` and it keeps the statement a
+constant.
+
+**Waiting on: a design** for which operators are in it. `plus`/`minus` on a
+number is obvious; concatenation, `coalesce` and array append are each a
+dialect disagreement, and a set of one operator is not worth a mechanism.
+
+**3. Nothing shows the statements a request sent.** `logger.zig` writes one
+line per request and there is no way to see the SQL underneath it — not in
+Debug, not behind an option, not on a slow query. Every other framework has
+this because it is the first thing anybody reaches for when a page is slow, and
+here it is cheaper than anywhere else: the text is a comptime constant, the
+plan name is already derived from it (`statement.planName`), and the parameter
+tuple is already built. So a hook on `Wire.run`/`Wire.exec` costs a branch on a
+null function pointer per statement.
+
+**Waiting on: a design** for what it is given. The values are the interesting
+half and printing them puts credentials and personal data in a log, which is
+the thing [ADR 0025](./adr/0025-every-failure-answers-with-the-same-json-body.md)
+is careful about one layer up.
+
+**4. Compile every `Db` call against the SQLite Wire.** `sql.Sqlite` has one
+caller in the repository and it is `bench/sql.zig`, which calls `db.find` on a
+Row of `i64`, `Str` and `i32` and nothing else — and which is not on
+`zig build test`. `sql/live.zig` is Postgres only, and `sql/sqlite.zig` drives
+`run`, `exec` and `begin` on the Wire rather than through `db.zig`. A method on
+a generic struct is analysed only where it is called, so the SQLite arms of
+`WireWrite`, `forWire` and `Values` have never been compiled at all.
+
+That is not one gap among the several below, it is the reason for four of them:
+`.in`, a `Json` column, an enum column and a `Timestamp` are each a write path
+nothing has ever asked the compiler about. `db.zig`'s own `touchEverything` is
+the shape — one handler naming every call — over
+`sql.Sqlite(.{ .threading = .in_fiber })` on a shared in-memory database, which
+`sql/sqlite.zig`'s tests already know how to open.
+
+**Waiting on: ready.** The four below are what it finds on the first run, and
+nothing says they are the last of them.
+
 ### Known gaps
+
+**`id INTEGER PRIMARY KEY` fails the schema check on SQLite, so a correct table
+stops the server starting.** SQLite reports `notnull = 0` in `pragma_table_info`
+for an `INTEGER PRIMARY KEY`, because that column is an alias for the rowid
+rather than a constraint — and `dialect.SQLite.introspect` reads anything that is
+not `notnull = 1` as nullable. `schema.compare` then reports `unexpected_null`
+against a Row whose `id` is `i64`, and `schema_mismatch_is_fatal` defaults to
+**true**, so `nilo_start` returns `error.SchemaMismatch`. Run against the two
+spellings side by side:
+
+```
+INTEGER PRIMARY KEY            -> 1 problem(s)
+INTEGER PRIMARY KEY NOT NULL   -> 0 problem(s)
+nilo_sql: nilo: Event.id is not optional, but events.id may be null
+```
+
+The first spelling is what every SQLite tutorial, every migration tool and the
+SQLite documentation itself writes. `dialect.zig` twice calls a check that fails
+on a correct schema "the fastest way to teach somebody to switch it off", and
+this is one. It survived because `sql/db.zig`'s own SQLite fixture is
+`id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL` — the redundant `NOT NULL` walks
+around the bug, so the suite's one SQLite schema-check test passes.
+
+A non-integer primary key is a different case and the current answer is right
+there: SQLite really does allow NULLs in a `TEXT PRIMARY KEY`, which is its own
+long-standing quirk.
+
+**Waiting on: ready.** `pragma_table_info` carries a `pk` column; a column with
+`pk = 1` whose declared type has INTEGER affinity, on a table that is not
+`WITHOUT ROWID`, is the rowid and cannot be null.
+
+**`.in` and `.not_in` do not compile on SQLite, and three places say they do.**
+`dialect.SQLite.list_form` is `.json_each` and `where.zig` writes
+`"id" IN (SELECT value FROM json_each(?1))` for it — and **nothing anywhere
+turns the list into the JSON text that statement reads.** `WireWrite` in
+`sql/db.zig` maps a list column to a native Zig slice whatever the Dialect is;
+it branches on `D.uuid_form` and on nothing else. zqlite binds a slice whose
+element is not `u8` by refusing to compile:
+
+```
+zig-pkg/zqlite-…/src/conn.zig:430:9: error: cannot bind value of type []const i64
+referenced by: _bind__anon → bind__anon → … → db.select
+```
+
+That is a compile error four frames inside somebody else's driver, on the
+operator every real schema uses, and it is the failure this module refuses
+everywhere else. The claim that it works is in `sql/dialect.zig`'s header, in
+[ADR 0061](./adr/0061-the-second-dialect-is-the-test-of-the-seam.md), and in the
+five-row table of *what SQLite will not do* in
+[the guide](./guide/sql.md#what-sqlite-will-not-do), which does not list it.
+It survived because the only tests are over the SQL *text*
+(`sql/statement.zig`), `sql/live.zig` has no SQLite arm at all, and no example
+or benchmark binds one.
+
+Two ways out, and they are different sizes. Write the JSON — one branch in
+`forWire` keyed on the Dialect, into the request arena, at one allocation per
+`.in` on SQLite. Or make it a Refusal and correct the three documents, which is
+what `.lock`, `insertMany` and `tx.deadline` already do.
+
+**Waiting on: ready**, either way. What is not acceptable is the third state it
+is in now, which is a promise with a driver's compile error behind it.
+
+**A `Json` column and an enum column cannot be written on SQLite either, for the
+same reason `.in` cannot.** `WireWrite` in `sql/db.zig` hands the driver the
+`Json(T)` wrapper struct and the Zig enum itself, and zqlite's `_bind` takes an
+integer, a float, a bool, a `[]const u8` and its own `Blob` — everything else is
+`cannot bind value of type …` from inside the driver. Both columns *read*
+correctly, because `WireRead` maps them to `[]const u8` and the text path works,
+so a Row carrying one compiles for `db.select` and stops compiling at
+`db.insert`. `acceptsSqlite` answers `TEXT` for both, so the startup check says
+they are fine.
+
+They are the rest of the hole `.in` is in: the SQLite write path has only ever
+been compiled for scalars and text, which is what Next 4 is for.
+
+**Waiting on: ready.** A branch keyed on the Dialect — the document written into
+the request arena, the tag taken with `@tagName` — which is the mirror of what
+`uuid_form` already does for a `Uuid`
+([ADR 0078](./adr/0078-a-uuid-is-whatever-the-database-stores.md)).
+
+**The SQLite pool wakes one waiter for two different questions.**
+`sqlite.Wire.release` ends with `free.signal(io)`, and `takeWriter` and
+`takeReader` both wait on that one `std.Io.Condition` while testing different
+predicates. So a reader coming back can wake the fiber that is waiting for the
+*writer*, which re-tests `conns[0].busy`, finds it still true and waits again —
+and the fiber that wanted a reader is never woken at all, though the connection
+it asked for is sitting free. It sleeps until some later release happens to pick
+it, which under a load that both reads and writes is a request that stalls with
+nothing in the log and nothing holding it.
+
+This is separate from the missing `timeout_ms` below: a deadline would turn the
+stall into a `TimedOut` rather than stop it happening.
+
+**Waiting on: ready.** `broadcast` instead of `signal` is one word; a condition
+per predicate is two more fields and is the version that does not wake
+everybody to send most of them back to sleep.
+
+**A NULL in a column the Row says is not optional is an error on Postgres and a
+zero on SQLite.** pg.zig's safe row refuses it and `postgres.read` turns that
+into `QueryFailed`. `sqlite.read` tests `columnType(col) == .null` only inside
+the branch it takes for an optional field, so a non-optional `i64` reads `0` and
+a non-optional text reads `""` — zqlite's `text` answers the empty string
+whenever `sqlite3_column_bytes` is zero, which is what a NULL gives it. The
+startup check catches the case where the table declares the column nullable, and
+cannot catch a view, which answers `UNKNOWN` and is skipped by design
+([ADR 0056](./adr/0056-a-view-is-a-table-that-cannot-say-what-is-not-null.md)).
+
+A wrong answer that looks like a right one is what the same function already
+refuses for an integer too wide for its field, in a test that says so.
+
+**Waiting on: ready.** The null test moves out of the optional branch and
+answers `QueryFailed` for a field that cannot hold one.
+
+**A `Timestamp` is written to SQLite as an integer and checked against a TEXT
+column.** `WireWrite` answers `i64` whatever the Dialect is, and `acceptsSqlite`
+routes every type carrying a declared column name to `TEXT`, `VARCHAR` or
+`CLOB`. So `created_at INTEGER` — the column that matches what is actually
+bound, and the one anybody would write — fails the startup check, while the
+column that passes it stores microseconds as digits in a text column, where
+`ORDER BY` sorts them as text and no SQLite date function reads them as a time.
+
+`bench/sql.zig` already works around it by declaring its column `i64` rather
+than `sql.Timestamp`, and says so in a comment: the symptom recorded and the
+cause left alone. `Uuid` had exactly this disagreement and `uuid_form` closed
+it; this is the second row that table needs.
+
+**Waiting on: a design** — a `time_form` beside `uuid_form`, or an
+`acceptsSqlite` that answers `INTEGER` for the one declared column type this
+module does not send as text.
+
+**A `Streamed` closed twice releases its connection twice outside Debug.**
+`Streamed.close` in `sql/db.zig` guards re-entry inside `if (traps_enabled)`,
+and `traps_enabled` is `builtin.mode == .Debug` — so in ReleaseSafe the guard
+is compiled out and the `w.drain(&self.rows)` under it runs both times. On the
+Postgres Wire that is `result.deinit()` twice and `conn.release()` twice, which
+hands the pool a connection it is already holding. The field's own doc names
+the case ("`close` being called twice through two copies would take the count
+below zero") and only counts it.
+
+`rows.close()` early plus the `defer rows.close()` the doc comment recommends
+on the line above is exactly two calls, so this is reachable from the shape the
+API teaches. The SQLite Wire's own `Rows.closed` is an unconditional `bool` and
+does not have it, which is what makes this look like an oversight rather than a
+trade.
+
+**Waiting on: ready.** The `closed` flag becomes a plain `bool` and the guard
+moves outside the `if`; the *counter* stays Debug-only, which is the part that
+was meant to be.
+
+**`db.raw` reads by position and nothing checks how many columns came back.**
+`fill` walks the Row's fields and asks the Wire for column `i` of each, and
+pg.zig's `Row.get` is `const value = self.values[col]` with no bound on `col`
+(`zig-pkg/pg-…/src/result.zig:266`). A `SELECT` list shorter than the Row —
+a column dropped from a hand-written join, a `RETURNING` that lost a field — is
+therefore an out-of-range index rather than an error: a panic in ReleaseSafe,
+which takes the whole process down for one request, and undefined in
+ReleaseFast. This is the mode of failure
+[ADR 0008](./adr/0008-no-recover-middleware.md) says nilo cannot recover from,
+and the module already refuses to let the driver panic in two other places —
+`enumOf` for a tag the Zig enum lacks, and `arrayFits` for an array shape
+pg.zig asserts on.
+
+`db.raw` gives up the *compile-time* column check and nothing else, which is
+what its doc says; it should not also give up being answerable.
+
+**Waiting on: ready.** `pg.Result` carries `number_of_columns`, so this is one
+comparison per statement against `columnsOf(Row).len`, in `fill`, with a
+message naming both numbers.
+
+**A Row column of a type no Dialect knows fails in pg.zig's words, not nilo's.**
+`dialect.accepts` answers `null` for any struct it does not recognise, and
+`schema.Expectation.accepted` reads an empty list as *accept anything* — so
+such a column passes the startup check, and the first read reaches pg.zig:
+
+```
+zig-pkg/pg-…/src/types.zig:1580:21: error: cannot decode value of type pg_only.User__struct_3276
+referenced by: get__anon → read__anon: sql/postgres.zig:456
+```
+
+The type name is a mangled anonymous struct and the file is a dependency the
+reader did not write. `dialect.listAccepts` already carries a comment saying
+this exact failure "is what a Row reading an array used to get" and that
+catching it is why arrays are judged — the same fix was never applied to the
+scalar case, which is the one a first-time reader hits by writing a plain struct
+field.
+
+**Waiting on: ready.** `assertStreamable` is the shape: a comptime walk over the
+Row's fields at the top of `fill`, refusing a type that is neither a Dialect's
+nor one of the protocols in `types.zig`, naming the field and the four ways to
+make it readable (`AsText`, `Json`, an enum with `nilo_column`, or leaving it
+out of the Row).
+
+**`Db.Opts.timeout_ms` does nothing on SQLite, and a fiber that asks for the
+writer twice parks forever.** `sqlite.Wire.open` reads `open_opts.size` and
+ignores the rest; `connect_on_init` is documented as meaningless there and
+`timeout_ms` is not, so the option a caller sets to bound a queue is silently
+dropped. `takeWriter` then waits on a `std.Io.Condition` with no deadline at
+all. There is one writer, so a handler holding a `Tx` that calls `db.exec` —
+`db`, not `tx`, which is a one-character mistake — waits on a connection it is
+itself holding, with nothing to time it out and nothing in the log. On Postgres
+the same code takes a second pool connection and merely runs outside the
+transaction.
+
+**Waiting on: a design.** Honouring `timeout_ms` in the two `take` calls is the
+small half. The self-deadlock wants either a `Locked` when the asking fiber is
+already the writer, which means knowing which fiber holds it, or a Refusal that
+cannot be written — and neither is obviously right.
+
+**The batch Refusal on SQLite blames the column type, and a batch update calls
+itself an insert.** `noArrayForm` in `sql/statement.zig` is reached from both
+`insertMany` and `updateMany` and its first line always says "a batch insert".
+Its third branch is the one SQLite always takes, and it is wrong about why:
+
+```
+error: nilo: a batch insert into sqlite_only.User cannot send `id`, which it reads as i64.
+  The sqlite dialect has no column type for it, so there is no array of it to send either.
+  `dialect.accepts` is the list of what it knows.
+```
+
+`acceptsSqlite(i64)` answers `INTEGER, INT, BIGINT, NUMERIC`, so the sentence is
+false and the reader it sends to `dialect.accepts` will find it is false. The
+true reason is the one the guide and ADR 0061 give — SQLite has no `unnest` and
+no array parameter, so a batch is not available at all there — and the message
+never says it. Error messages are a feature here with a build step behind them
+([ADR 0027](./adr/0027-the-rule-about-error-messages-is-held-by-a-build-step.md)),
+and `sql/refusals/` has no file for this path.
+
+**Waiting on: ready.** A fourth branch keyed on the Dialect having no `arrayOf`
+at all, a `what` argument so the verb matches the call, and two rows in
+`sql_refusals`.
+
+**A `[]const Str` cannot be written back into the column it came out of.**
+`db.select` fills a `[]const Str` list column by walking the slice a second time
+to attach the lifetime marker — that is `keptList`'s stated cost — and there is
+no way back. `forWire` handles a scalar `Str` and falls off the end for a slice
+of them:
+
+```
+sql/db.zig:1945:12: error: expected type '…![]const []const u8', found '[]const str.Str'
+  note: pointer type child 'str.Str' cannot cast into pointer type child '[]const u8'
+```
+
+So reading a row, changing one field and inserting it again does not compile for
+a list-of-text column, and the message is Zig's, pointing inside `db.zig`. That
+is the same shape as the scalar `Str` case the snippet check found and
+[ADR 0083](./adr/0083-the-guide-is-the-source-of-its-own-snippets.md) fixed —
+`.where = .{ .email = form.email }` used to fail here too. The list half was
+missed because no snippet writes one.
+
+**Waiting on: ready.** It is one allocation in `forWire`, the mirror of the one
+`keptList` already pays, and a marked snippet in the guide's *Lists* section so
+it cannot silently break again.
+
+**The schema check is opt-in, and forgetting it is silent.** `db.checking(&.{ … })`
+takes the Row list by hand and nothing warns when it is never called or when a
+Row is left out of it — the check simply does not run for that Row, and the
+disagreement it would have caught arrives as a 500 on the first request that
+reads the column. Zig cannot enumerate the Rows a program declares, so there is
+nothing to derive the list from; what there *is* is the fact that a `Db` with
+`check == null` is a decision nobody wrote down.
+
+**Waiting on: a design.** A warning at `nilo_start` for a `Db` nobody called
+`checking` on is one line and is also noise for a program that meant it; an
+explicit `db.checking(&.{})` to say so is a second way to spell nothing.
+
+**A key is one column, so a composite key has no `find` and no batch update.**
+`row.keyOf` answers a single name, `statement.find` writes one `=` against it,
+and `updateMany` joins on it. A table keyed by `(tenant_id, id)` — which is what
+every multi-tenant schema is — reaches `db.one` with the condition written out
+and has no batch update at all. `.key = .{ .tenant_id, .id }` is the spelling
+the rest of the module already uses for a tuple of columns, since
+`conflictColumns` reads exactly that shape for an upsert target.
+
+**Waiting on: a caller.** The `find` half is small; `updateMany` joining on two
+columns is a second `AND` in the fragment and nothing else.
+
+**An upsert cannot name a constraint or a partial index.** `ON CONFLICT` takes
+only a column tuple, so a unique constraint by name
+(`ON CONFLICT ON CONSTRAINT users_email_key`) and a partial unique index
+(`ON CONFLICT (email) WHERE deleted_at IS NULL`) are both out of reach, and so
+is a `DO UPDATE … WHERE`, which is how an upsert refuses to write a row that is
+already newer. Postgres refuses the statement at run time when the target has no
+matching index, which the doc on `insertOrIgnore` already says — so today the
+answer for all three is `db.raw`, and `db.raw` cannot express `RETURNING` into a
+Row plus a conflict target without giving up the column check.
+
+**Waiting on: a caller.** A constraint name is a string this module would have
+to take on trust, which is the one place it takes nothing on trust, so the
+design question is real rather than clerical.
+
+**`like` hands `%` and `_` escaping to the caller and nothing says so.**
+`.email = .{ .like = text }` puts the caller's text in the parameter, so a
+user-supplied search term containing `%` matches far more than it should and one
+containing `_` matches a character it should not. Nothing is smuggled — it is a
+bound parameter — but a search box wired straight to `.like` is wrong in a way
+that only shows up on the input nobody tried. Every caller ends up writing the
+same escape.
+
+**Waiting on: a design.** The fix everybody wants is `contains`, `starts_with`
+and `ends_with`, which build the pattern *and* escape it — and that means an
+allocation per condition in a module whose whole claim is that a statement costs
+none, plus an `ESCAPE` clause the two Dialects spell the same way but SQLite
+applies differently to `LIKE` on a `BLOB`.
+
+**`selectFor` and its six siblings are Postgres-only.** `sql.selectFor(Row,
+Options)` and the rest hard-code `dialect.Postgres`, so a program on
+`sql.Sqlite` cannot ask what SQL its own query compiles to — which is the one
+call in the module that exists purely so a reader can see the constant ADR 0039
+is about. `statement.select(D, Row, O)` takes the Dialect and is the module's
+own spelling; only the re-export in `sql.zig` fixes it.
+
+**Waiting on: ready.** Either a Dialect parameter on each, or `sql.dialect` and
+`sql.statement` being enough now that both are already exported.
+
+**Nothing reports how the pool is doing.** `app.metrics` counts requests,
+statuses and durations
+([ADR 0100](./adr/0100-the-route-table-is-the-registry.md)); a `Db` counts
+nothing. Connections in use, how long a caller waited for one, statements run,
+and how many the pool threw away are all questions an operator asks first when a
+service slows down, and the last of them is already reachable —
+`postgres.dirtyConnections()` parses it out of pg.zig's own metrics text and is
+marked test-facing because nothing else reveals it.
+
+**Waiting on: a design** that does not become a second metrics registry.
+`app.metrics` is the shape and a `Db` is a Service, which knows nothing about an
+App — so where the numbers meet is the question, not how to count them.
+
+**A connection URL carrying an ordinary parameter stops the server.**
+`postgres.dialOpts` understands `sslmode` and `tcp_user_timeout` and refuses
+everything else — `sslmode=prefer`, `allow` and `verify-ca` included. The
+refusal is right about the risk, since an `sslmode` nobody read is a plaintext
+connection whose URL says otherwise, and wrong about how often it fires: the URL
+a managed Postgres hands out carries `channel_binding`, `application_name`,
+`options` or a pooler's own parameter, so pasting one in is a server that will
+not start. What the operator gets is `UnsupportedConnectionParam` and no list of
+what *is* understood, and `nilo_start`'s message then sends them to re-read a
+URL that is correct.
+
+**Waiting on: a design** — which parameters are safe to drop, which are worth
+carrying, and whether the refusal names the two it knows.
+
+**There is no binary column.** `Postgres.accepts` answers `text`, `varchar`,
+`bpchar`, `char` and `name` for a `[]const u8`, and nothing anywhere answers
+`bytea`, so a Row cannot read one. SQLite is the same the other way round:
+`acceptsSqlite` already lists `BLOB` for a byte slice, and nothing can write one
+there, because `WireWrite` sends a `[]const u8` as text and zqlite needs its
+`Blob` wrapper to do anything else. A file hash, a sealed token, a signature, an
+encoded document — the most ordinary column this module cannot name.
+`sql.AsText("bytea")` reaches it through Postgres's hex text and costs a
+conversion each way, and nothing anywhere says so.
+
+**Waiting on: a design.** The `nilo_column`/`nilo_read`/`nilo_write` protocol
+([ADR 0055](./adr/0055-a-column-type-can-come-from-outside-this-module.md)) is
+text on the wire by definition, so bytes want a second protocol beside it rather
+than another instance of it.
+
+**A `SELECT` has four options and a listing page wants three more.** No
+`DISTINCT`. No `NULLS FIRST`/`NULLS LAST` on an order term, which is what a
+nullable sort column needs before it can be paginated at all — the two dialects
+disagree by default, Postgres putting NULLs last ascending and SQLite putting
+them first, so a Row that sorts on one is already not portable. And no keyset
+form, so a deep page is `OFFSET` and the database counts past every row it is
+not going to answer with, which is the one pagination shape that gets slower as
+the table grows.
+
+The first two are a widening of `.order`, which today takes a direction and
+nothing else. The third is a condition the caller can write by hand once the
+sort is stable, so what is missing there is the guide saying so.
+
+**Waiting on: a caller.**
 
 **The SQLite half has no live test against contention.** The Wire's own tests
 run one process, so the case the reader and writer split exists for has a
@@ -814,6 +1610,57 @@ request that reads such a row.
 
 **Waiting on: ready.** It means asking the database which values the type has,
 which is a second introspection query and a Dialect that can spell it.
+
+**`sqlite_master` in the introspection query is not schema-qualified.**
+`columnsOf` in `sql/sqlite.zig` rewrites `pragma_table_info` to
+`"archive".pragma_table_info` when a Row names a schema, and leaves the
+`LEFT JOIN sqlite_master` beside it alone — so a Row over a table in an attached
+database asks `main.sqlite_master` whether that name is a view. It finds
+nothing, `m.type` is null, and the `UNKNOWN` answer that exists so a view's
+columns are not all reported as nullable
+([ADR 0056](./adr/0056-a-view-is-a-table-that-cannot-say-what-is-not-null.md))
+is unreachable there. A Row over a view in an attached database gets exactly the
+failure ADR 0056 was written to remove.
+
+**Waiting on: ready.** The same rewrite `columnsOf` already does, applied to the
+second relation in the query.
+
+**pg.zig spends a whole round trip it does not need on every prepared
+statement.** `conn.zig:243` writes a standalone `Sync` on the cache-hit path and
+waits for `ReadyForQuery` before it sends Bind and Execute, where pgx and
+tokio-postgres send one. It is ~2.6 µs, and
+[`bench/result/sql.md`](../bench/result/sql.md) §8 says it is **the whole of
+nilo's single-row deficit against Rust**. This is not the pipelining
+[ADR 0059](./adr/0059-a-round-trip-is-not-the-cost-worth-chasing.md) refused —
+that argument was about the round trip being mostly kernel and only amortisable
+in bulk, and this is one message that does not have to be sent at all.
+
+**Waiting on: upstream (pg.zig)**, and it is a local change there rather than a
+protocol rewrite. The note at the [top of this file](#how-to-read-this) about
+distrusting an upstream blocker applies: nobody has opened the file since the
+measurement.
+
+**Every library in the ten-way comparison was measured on one connection.**
+[`bench/result/sql.md`](../bench/result/sql.md) §8 ranks ten clients across
+eleven operations, and §2 of the same file is the standing warning that a
+per-operation figure taken unloaded understates what a pool sees by two to three
+times — because a pool connection is a serial queue. So the ordering in §8 is
+the ordering of an unloaded round trip, and nothing says whether it survives the
+shape a service actually runs in.
+
+**Waiting on: a machine.** The harness exists; what it needs is a box where the
+generator, the database and ten candidates are not sharing eight cores with each
+other.
+
+**Row locks and contention between writers have correctness tests and no
+benchmark.** `live.zig` proves `.update_nowait` refuses a held row and
+`.update_skip_locked` steps over one, and §8's write half is insert, batch,
+update, delete and a transaction **on one connection**. What a contended row
+costs — how long a writer queues, what `serializable` retries are worth, where
+`FOR UPDATE SKIP LOCKED` stops scaling as a work queue — is unmeasured on both
+Wires.
+
+**Waiting on: a machine**, and the same one the entry above wants.
 
 ### Not decided
 
