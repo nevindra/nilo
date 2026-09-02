@@ -10,6 +10,11 @@ What was measured and what was got wrong on the way is in
 **No source change is needed to move a 0.2.0 program to this**, so the next tag
 is a minor one. Needs Zig 0.16, as 0.2.0 does.
 
+**If you serve WebSockets, take this one for the shutdown fix alone.** A server
+that had served any usually did not come back from a SIGTERM, which is a deploy
+that hangs and a core that spins. Nothing to change on your side; it is the
+first entry in Fixed.
+
 **Six things behave differently at run time, and all six are in Fixed below.**
 Sessions now carry an expiry, so everybody holding one is signed out on the
 deploy that picks this up, and a session cookie that used to last indefinitely
@@ -140,6 +145,23 @@ is `std.json`'s call, and nothing can add a declaration to a type you wrote.
   tagged union is `oneOf` with `discriminator`; an untagged union is still `{}`.
 
 ### Fixed
+
+- **A server that had served WebSockets usually did not come back from a
+  SIGTERM.** The process never exited and one executor thread spun at 100% for
+  as long as anybody let it, so a deploy got a container that would not stop and
+  a core that never went idle. Nothing was wrong with plain request serving:
+  only a WebSocket reaches the code that caused it.
+
+  The Engine's `Wake` handed two completions to the event loop every time a
+  connection parked and never took them back, so when the connection's fiber
+  returned, the loop was left writing into a frame that had been handed on. It
+  gives them back now, and the fiber does not return until the loop has let go
+  ([ADR 0098](./docs/adr/0098-a-completion-the-loop-holds-outlives-the-frame-that-submitted-it.md)).
+
+  `python3 bench/shutdown.py` at 24 connections a run: **23 of 25 SIGTERMs hung
+  before, 0 of 25 after.** Nothing per connection, nothing on any message path —
+  the call happens once, on a connection that is already closing, and only if it
+  ever parked.
 
 - **`socket.print` and `socket.json` could put a length on the wire that their
   bytes did not match, and nothing noticed.** Both run the format twice — once

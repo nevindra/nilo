@@ -865,6 +865,58 @@ judges.
 test` for the same reason `smoke-tls` is off it, and `bench/autobahn/README.md`
 says how to run it.
 
+## Coming back from a SIGTERM
+
+**On a different machine from every other number in this file.** Two cores
+rather than eight, so the absolute hang rate here says nothing about the rate on
+the box above — a race resolves differently on two executors than on eight.
+What the run is for is the pair, and both sides of the pair were taken here,
+minutes apart, with the same binary target.
+
+| | CPU | Cores | Memory | Kernel |
+|---|---|---|---|---|
+| this run | Intel Xeon Platinum 8255C @ 2.50GHz | 2 | 7 GiB | 6.8.0-110-generic |
+| everything else in this file | AMD Ryzen 7 9700X | 8 | 30 GiB | 7.0.0-29-generic |
+
+`python3 bench/shutdown.py --cmd ./zig-out/bin/nilo-bench-ws-server --port 8789
+--path /ws/small`, ReleaseFast either way (`bench-ws-server` pins the optimize
+mode, so there is nothing to pass). The before side is **built from a `git
+archive` of `1eecf12` into a scratch directory**, not quoted: the published
+figure was 6 of 10 at six connections, on the other machine, and a fix measured
+against it would have been comparing two different boxes.
+
+| connections a run | runs | before (`1eecf12`) | after (`Wake.deinit`) |
+|---|---|---|---|
+| 6 | 10 / 20 | **4 hung** | **0 hung** |
+| 24 | 25 | **23 hung** | **0 hung** |
+| 24, `--http` control | 15 | — | **0 hung** |
+
+Every hang reads the same: `1.0 cores, 2 threads left`, one executor spinning in
+userspace with no syscall outstanding, for as long as anybody lets it.
+
+The after column was taken twice: once on the fix as first written, and once on
+a rebuild of the tree that shipped, after the guard test and the comments went
+in — 15 more runs at 24 connections, also 0. Same code, but the second run is
+about the binary that exists rather than the one the number was taken on.
+
+**The Autobahn suite is the other half of the check**, because it is what found
+this in the first place — a server left at five cores of nothing for thirteen
+minutes after the run finished. Re-run here: **294 OK, 4 NON-STRICT, 0 FAILED**
+of 301, identical to the table above, and this time the script's last line is
+`info: nilo stopped` and no process is left behind.
+
+What it changed:
+[ADR 0098](../../docs/adr/0098-a-completion-the-loop-holds-outlives-the-frame-that-submitted-it.md).
+`Wake` submitted two completions to zio's loop and never gave them back, so the
+loop wrote through `c.group.owner` into a fiber frame that had been handed on.
+The roadmap had it filed as upstream and it was never upstream — the answer was
+in the last test of zio's own `completion_queue.zig`.
+
+**Can this be pushed further?** There is nothing to push: it is a bug, not a
+number. What is worth doing is running `bench/shutdown.py` on the eight-core box
+as well, because the before figure there is a different rate and nobody has
+taken the after.
+
 ## Binary size
 
 The fourth axis of [ADR 0018](../../docs/adr/0018-the-trade-budget-has-three-axes.md),

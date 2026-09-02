@@ -568,6 +568,39 @@ pub const Wake = struct {
         }
     }
 
+    /// Give the loop back every completion this queue still holds, and do
+    /// not return until it has let go of them.
+    ///
+    /// **Not optional, and not a tidy-up.** A `Wake` lives in the connection
+    /// fiber's frame, so when the fiber returns, `cq`, `wake.c` and `poll.c`
+    /// go with it — while `getCurrentExecutor().loop` is still holding
+    /// pointers to all three, put there by `submit`. `wake.c` is submitted
+    /// for as long as `armed`, and `poll.c` for as long as `poll_armed`, so
+    /// on the ordinary way out of a WebSocket both are still in the loop's
+    /// hands. What the loop does with them next is write a completion
+    /// through `c.group.owner` into a frame that has been handed back.
+    ///
+    /// That is where the SIGTERM nobody came back from was: an executor
+    /// thread at 100% with no syscall outstanding, and no plain HTTP
+    /// connection ever affected because nothing but a WebSocket arms either
+    /// half. `bench/shutdown.py` at 24 connections a run puts it at **23 of
+    /// 25 without this call and 0 of 25 with it**. zio's own
+    /// `CompletionQueue` test cancels after a timeout for exactly this
+    /// reason — the queue owns pointers the loop is using, and the owner has
+    /// to say when it is done with them.
+    ///
+    /// Nothing to do for a connection that never waited, which is every
+    /// ordinary request: a branch, no lock and no syscall.
+    pub fn deinit(self: *Wake) void {
+        if (!self.armed and !self.poll_armed) return;
+        // `cancel` drains with cancellation disabled, so this finishes even
+        // when the fiber is being cancelled — which is the case that matters,
+        // since that is what shutdown does to a WebSocket that is still up.
+        self.cq.cancel();
+        self.armed = false;
+        self.poll_armed = false;
+    }
+
     /// Wake the fiber holding this connection. Thread-safe, and the only call
     /// another fiber makes on a `Wake` it does not own.
     pub fn post(self: *Wake) void {
@@ -823,6 +856,12 @@ pub fn serve(
             // ordinary request never touches it; it is armed on the first
             // `wait`, which only a WebSocket reaches.
             var wake = Wake.init(stream.socket.handle);
+            // Registered after the two buffers and after `stream.close`, so
+            // it unwinds before all three: the loop has to be done with the
+            // completions before the frame holding them goes, and the poll
+            // is on this socket's handle, so it has to be given back before
+            // the handle is closed.
+            defer wake.deinit();
 
             // `accept` already returned who this is, so this costs no
             // syscall — only the formatting, once per connection.
@@ -1206,4 +1245,45 @@ test "a Peer given as text keeps it, and refuses what cannot be an address" {
 
     const too_long = "a" ** (Peer.max_text + 1);
     try testing.expectError(error.AddressTooLong, Peer.from(too_long));
+}
+
+test "a Wake that parked hands its completions back before its frame goes" {
+    // The guard for ADR 0098. A `Wake` lives in the connection fiber's frame
+    // and the loop keeps a pointer to every completion submitted to it, so a
+    // frame that returns with either half still submitted leaves the loop
+    // writing into memory that has been handed on. What that cost was a
+    // SIGTERM the server did not come back from, three runs in four.
+    //
+    // `Runtime.init` makes this thread an executor, which is what lets a test
+    // submit at all — the same shape zio's own `completion_queue.zig` tests
+    // use. Port 0, so the kernel picks one and this joins no range of its own
+    // (see roadmap, "Three test files pick loopback ports").
+    var rt = try zio.Runtime.init(testing.allocator, .{ .executors = .exact(1) });
+    defer rt.deinit();
+
+    const addr = try zio.net.IpAddress.parseIp("127.0.0.1", 0);
+    const listener = try addr.listen(.{});
+    defer listener.close();
+
+    var wake = Wake.init(listener.socket.handle);
+    try testing.expect(wake.cq.isEmpty());
+
+    // Nobody connects, so the socket never becomes readable: this parks and
+    // times out with both halves submitted, which is exactly the state an
+    // ordinary WebSocket is in when its client goes away.
+    try testing.expectEqual(Woken.timed_out, wake.wait(5));
+    try testing.expect(wake.armed);
+    try testing.expect(wake.poll_armed);
+    try testing.expect(!wake.cq.isEmpty());
+
+    // The line the whole ADR is about. Without it the two assertions below
+    // fail and the loop is left holding this frame.
+    wake.deinit();
+    try testing.expect(wake.cq.isEmpty());
+    try testing.expect(!wake.cq.hasPending());
+
+    // Safe twice, because a fiber cancelled mid-wait has already had zio
+    // cancel and drain the queue underneath it.
+    wake.deinit();
+    try testing.expect(wake.cq.isEmpty());
 }

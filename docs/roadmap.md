@@ -67,7 +67,7 @@ other module's.
 | [`nilo_config`](#nilo_config-settings) | needs no loop | reading a name the field is not called |
 | [`nilo_pw`](#nilo_pw-hashing-a-password) | needs no loop | a Cost floor that weighs the wrong half, and a patch `std` should have |
 | [`nilo_fetch`](#nilo_fetch-calling-somebody-elses-api) | borrows the loop | 16,495 bytes of stack per idle connection, and nothing measured through TLS |
-| [`nilo_http`](#nilo_http-the-server) | owns the loop | the biggest list, and one of them is serious: a SIGTERM the server does not come back from |
+| [`nilo_http`](#nilo_http-the-server) | owns the loop | the biggest list, and most of it is waiting on a number or a design |
 | [`nilo_sql`](#nilo_sql-postgres-and-sqlite) | borrows the loop | which way a SQLite statement should run, and where migrations live |
 | [`nilo_s3`](#nilo_s3-object-storage) | borrows the loop | nothing measured through TLS, and no `LIST`, `COPY` or multipart |
 
@@ -402,34 +402,6 @@ half of this is done and what is left is the matching.
 **Waiting on: ready.**
 
 ### Known gaps
-
-**A server that has served WebSockets does not come back from a SIGTERM, three
-times in four.** The process never exits and one executor thread spins at 100%
-for as long as anybody lets it. A deploy that sends SIGTERM gets a container
-that will not stop and a core that never goes idle, which is the worst shape a
-bug in this file has.
-
-`python3 bench/shutdown.py --cmd ./zig-out/bin/nilo-bench-ws-server --port 8789
---path /ws/small` is the reproduction, and it is six ordinary connections:
-handshake, one message echoed, the close handshake, socket closed. Framework
-defaults, nothing exotic. **6 of 10 runs hang. The control in the same script,
-`--http`, is 0 of 10** — so it is the WebSocket path and not the accept loop.
-
-Where it is not is already known. The server's last log line is `nilo stopped`,
-which `drain` writes when `Stop.in_flight` reaches zero, so nilo's own shutdown
-ran to completion and every connection was accounted for. What is left after
-that line is `defer group.cancel()` and `defer rt.deinit()`, both zio's, and the
-spinning thread is in userspace with no syscall outstanding. That points
-upstream, and **that is the reading this file says to distrust**: three of the
-four blockers this repository has been wrong about were somebody else's code.
-Nothing has re-tested it against a zio newer than the pinned v0.17.0.
-
-Found by the Autobahn run, which left a server at five cores of nothing for
-thirteen minutes — `ps -o etime,cputime`, the one command `CLAUDE.md` says
-settles a stuck process, is what caught it.
-
-**Waiting on: ready.** It needs somebody's afternoon and a newer zio to try
-first.
 
 **A `Room`'s roster lock is held across the whole broadcast, and the field says
 it is not.** `Room.roster`'s doc says it guards taking and giving up a seat and
@@ -1250,6 +1222,24 @@ an unrelated request, which is
 route.
 
 **Waiting on: a design** that makes it a rule rather than a comment.
+
+**Nothing checks that a completion handed to the loop is given back before its
+frame goes.** `Wake` submitted two and never did, and the cost was a server that
+would not come back from a SIGTERM three runs in four
+([ADR 0098](./adr/0098-a-completion-the-loop-holds-outlives-the-frame-that-submitted-it.md)).
+What makes it a standing risk rather than a closed bug is that the fix is one
+`defer` and the next `submit` anybody writes is under no obligation to match it.
+
+The failure gives nothing away at the place it happens: the loop writes into
+memory that has been handed on, and what arrives is a spinning thread somewhere
+else entirely, after a shutdown that has already logged success. Only the Engine
+may name zio, so the whole surface is one file — but one file is what the
+threadlocal entry above says too.
+
+**Waiting on: a design** that makes it a rule rather than a `defer` somebody has
+to remember. This particular one is guarded — a test in the Engine parks a
+`Wake` and checks the queue is empty after `deinit` — but the guard names
+`Wake`, and the next `submit` will not be in `Wake`.
 
 **`zio.BroadcastChannel` aborts, or in `ReleaseFast` deadlocks, when a fiber
 parked in `receive` is cancelled.** Not used here, reported upstream with a

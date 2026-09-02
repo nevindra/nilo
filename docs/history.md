@@ -1295,12 +1295,18 @@ between runs. **A flaky failure bisected once produces a clean-looking table and
 a wrong theory**, and the only thing that caught it was re-running the "clean"
 side.
 
-**It is upstream, and that is the sentence this file exists to distrust.** The
+**It was not upstream, and this file said so before anybody looked.** The
 server's last log line is `nilo stopped`, which `drain` writes once
-`Stop.in_flight` is zero, so nilo's own shutdown completed; what is left is
-`group.cancel()` and `rt.deinit()`. Three of the four blockers this repository
-has been wrong about were somebody else's code that already did the thing. Zio
-is pinned at v0.17.0 and nothing has tried a newer one.
+`Stop.in_flight` is zero, so nilo's own shutdown completed and what was left was
+`group.cancel()` and `rt.deinit()` — every visible symptom downstream of nilo's
+last line of code. It was nilo's: `Wake` submitted two completions to the loop
+and never gave them back, so the loop wrote into a fiber frame that had been
+handed on. No newer zio was ever tried; the answer was in the last test of
+`completion_queue.zig`, which calls `cancel()` after a timeout and says nothing
+in prose. **A dependency's tests are part of its documentation.**
+[ADR 0098](./adr/0098-a-completion-the-loop-holds-outlives-the-frame-that-submitted-it.md)
+is the decision. That makes five blockers this repository has been wrong about,
+four of them somebody else's code.
 
 ## The number nobody had taken was the number that had been there all along
 
