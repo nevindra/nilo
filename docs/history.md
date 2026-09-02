@@ -1377,3 +1377,39 @@ written down from `add` and `conflicting`; neither `sameShape`, which sits insid
 opened. **A consequence is a claim like any other**, and this file's own rule
 about numbers applies to it: it decays the moment nothing re-derives it, and a
 consequence decays quietly because nothing fails when it is wrong.
+
+## Half the cost of a feature was a float printer nobody asked for
+
+Metrics shipped ([ADR 0100](./adr/0100-the-route-table-is-the-registry.md)), and
+the design question the roadmap had left open — *can any of it be had without an
+allocation per request* — turned out to be answered by something the router had
+from the first week. **The set of routes is closed at `listen()` and already
+numbered**, so a counter is an array index the request is holding anyway rather
+than a key somebody hashes. That is the whole reason `/users/1` and `/users/2`
+cannot make two series, and it is why counting a request allocates nothing.
+
+**Two of the four measurements moved a decision, and both went against the first
+draft.**
+
+The first was the binary. `le="0.0001"` was being printed with `{d}` on an
+`f64`, which links Zig's shortest-round-trip float formatter: the feature
+measured **37,112 bytes**, and writing the six decimal places out with integer
+division took it to **17,416**. More than half the cost of metrics was a float
+printer, linked for a page that is read every fifteen seconds. **Reach for
+`{d}` on a float and something large arrives with it** — worth knowing before
+the next feature formats a number.
+
+The second was the throughput, and it moved a decision by refusing to say
+anything. Four interleaved pairs came back at −2.2%, +2.0%, −5.1% and +2.3%:
+the sign changes twice, the spread is seven points wide, and the means differ by
+0.8% inside it. Sharded per-thread counters were the obvious next step and are
+**not built**, because nothing has measured a reason to build them — and the
+run that would settle it is named in the roadmap rather than left implied.
+
+**The refusal needed a hole in it, and the review found it.** "No registry" was
+right — a name per increment is a hash and a lock on the request path — but it
+is only sound if a counter the application already owns can be published.
+Without that, an app with an `orders_placed` of its own runs a second metrics
+server, and nilo's page is not incomplete, it is a decoy. `app.expose` is the
+answer and it costs nothing per request: **a refusal is only as good as the
+thing it leaves you able to do instead.**

@@ -28,6 +28,7 @@ const session_mod = @import("session.zig");
 const password_mod = @import("password.zig");
 const scratch = @import("scratch.zig");
 const websocket = @import("websocket.zig");
+const metrics_mod = @import("metrics.zig");
 
 const Ctx = ctx_mod.Ctx;
 
@@ -112,6 +113,18 @@ pub const App = struct {
     /// `docs()` asked for one (ADR 0017).
     operations: std.ArrayList(openapi.Operation) = .empty,
     docs_options: ?openapi.Options = null,
+    /// Every counter in the process, or null on a server that never called
+    /// `metrics()` — which is what makes the whole feature one branch on the
+    /// request path (ADR 0100). Sized when the chains are resolved, because
+    /// that is the moment the route count stops moving.
+    ///
+    /// Held by value rather than allocated so that `metrics()` can hand a
+    /// pointer to it straight to the service registry, which is how the
+    /// readout handler reaches it without `Ctx` growing a field.
+    metrics_table: ?metrics_mod.Table = null,
+    /// Numbers the application owns and asked nilo to publish, from
+    /// `expose()`. Empty for almost every App, and read only by a scrape.
+    exposed: std.ArrayList(metrics_mod.Exposed) = .empty,
     /// The generated document and its reader page, held the way a loaded
     /// directory is so that ETags and 304s arrive without a second code
     /// path. Null until `listen()` builds it.
@@ -199,6 +212,8 @@ pub const App = struct {
         self.freeChains();
         if (self.docs_set) |*set| set.deinit();
         self.operations.deinit(self.gpa);
+        if (self.metrics_table) |*t| t.free(self.gpa);
+        self.exposed.deinit(self.gpa);
         for (self.static_sets.items) |*s| s.deinit();
         self.static_sets.deinit(self.gpa);
         self.static_chains.deinit(self.gpa);
@@ -534,6 +549,77 @@ pub const App = struct {
         self.docs_options = opts;
     }
 
+    /// Count every request, and serve the numbers at `/metrics` in the format
+    /// Prometheus scrapes (ADR 0100).
+    ///
+    /// ```zig
+    /// try app.metrics(.{});
+    /// try app.metrics(.{ .path = "/internal/metrics" });
+    /// ```
+    ///
+    /// What gets counted is the three things a log line cannot answer: how
+    /// many requests each route answered, at what status class, and how long
+    /// they took. **Per route, not per path** — `/users/1` and `/users/2` are
+    /// both `/users/:id`, because the counter is the route's index in the
+    /// table rather than a string somebody hashed, and a crawler cannot make
+    /// a series.
+    ///
+    /// The page is an **ordinary route**, so it takes whatever middleware sits
+    /// in front of its path and appears in the route table like any other.
+    /// nilo puts no authentication on it: what protects it is where you mount
+    /// it and what you `use` there.
+    ///
+    /// Called before or after the routes, either way — the table is sized when
+    /// `listen()` resolves them, which is the same order-independence `use`
+    /// and `get` have (ADR 0009).
+    pub fn metrics(self: *App, comptime opts: metrics_mod.Options) !void {
+        comptime metrics_mod.check(opts);
+        if (self.metrics_table != null) return error.MetricsAlreadyEnabled;
+
+        self.metrics_table = .{ .boundaries = opts.buckets };
+        // The readout reaches the table the way every handler reaches
+        // anything long-lived: as a service, asked for by type. That is what
+        // keeps this whole feature out of `Ctx` — a request that is not the
+        // scrape never touches it.
+        try self.services.add(&self.metrics_table.?);
+        try self.get(opts.path, metrics_mod.readout);
+    }
+
+    /// Publish a number of the application's own on the metrics page.
+    ///
+    /// ```zig
+    /// var orders_placed: std.atomic.Value(u64) = .init(0);
+    /// try app.expose("orders_placed", .counter, &orders_placed);
+    /// ```
+    ///
+    /// **This is what stands in for a registry, and the difference is where
+    /// the naming is paid.** A registry would take a name per increment,
+    /// which means a hash and a lock on the path of a request. Here you own
+    /// the counter and increment it yourself — `_ = orders_placed.fetchAdd(1,
+    /// .monotonic)` — and nilo only reads it, once per scrape. Nothing about
+    /// this touches a request that is not the scrape (ADR 0100).
+    ///
+    /// The number has to be a `std.atomic.Value(u64)`, because handlers run
+    /// on several threads at once and a plain `u64` counted from all of them
+    /// loses increments silently. A refusal says so while compiling.
+    pub fn expose(
+        self: *App,
+        comptime name: []const u8,
+        comptime kind: metrics_mod.Kind,
+        number: anytype,
+    ) !void {
+        comptime metrics_mod.checkExposed(name, @TypeOf(number));
+        for (self.exposed.items) |e| {
+            if (std.mem.eql(u8, e.name, name)) return error.MetricAlreadyExposed;
+        }
+        try self.exposed.append(self.gpa, .{ .name = name, .kind = kind, .value = number });
+        // The table holds a slice of this list, and appending to a list moves
+        // it. Re-pointed here rather than only at `resolveChains`, because a
+        // caller that has already resolved — `start()` before `listen()`, or a
+        // test — would otherwise leave the table reading freed memory.
+        if (self.metrics_table) |*t| t.exposed = self.exposed.items;
+    }
+
     /// The first requirement that is not met, or null if every handler got
     /// what it asked for.
     pub fn missingService(self: *const App) ?service_mod.Requirement {
@@ -608,6 +694,24 @@ pub const App = struct {
         for (self.static_sets.items) |*set| {
             self.static_chains.appendAssumeCapacity(try self.chainsFor(set));
         }
+        try self.sizeMetrics();
+    }
+
+    /// Give the counters their memory and their labels, here rather than at
+    /// `metrics()`, because the route count is still moving when that is
+    /// called and has stopped moving by the time this runs.
+    ///
+    /// Run again from scratch if the chains are resolved twice, which is what
+    /// a test that registers more routes and resolves again does.
+    fn sizeMetrics(self: *App) !void {
+        const table = if (self.metrics_table) |*t| t else return;
+        try table.size(self.gpa, self.router.routes.items.len);
+        for (self.router.routes.items, 0..) |r, i| {
+            table.nameRoute(i, @tagName(r.method), r.pattern);
+        }
+        table.exposed = self.exposed.items;
+        // The App counts this already, to know what a stop has to wait for.
+        table.in_flight = &self.stop.in_flight;
     }
 
     /// The chain for every file in `set`, in the set's own order, so a
@@ -1047,6 +1151,11 @@ pub const App = struct {
         peer: bulkhead.Peer,
     ) Served {
         var handover: ?websocket.Handover = null;
+        // Started here rather than after the head is read, so that a request
+        // whose head never arrived is timed from the same instant as one that
+        // was answered. On a server that never called `metrics()` this is a
+        // null pointer and no clock read at all (ADR 0100).
+        var record = metrics_mod.Record.begin(if (self.metrics_table) |*t| t else null);
         const failure = &in_flight.failure;
         in_flight.startRequest("", "");
         // On a real server the fiber slot is already installed and wins;
@@ -1066,8 +1175,12 @@ pub const App = struct {
                 // idle without asking for anything is just closed.
                 error.ReadFailed => if (deadlines.timedOut() and in.buffered().len > 0) {
                     sendFinal(out, RESPONSE_408);
+                    record.finish(408);
                 },
-                error.HeadTooLong => sendFinal(out, RESPONSE_431),
+                error.HeadTooLong => {
+                    sendFinal(out, RESPONSE_431);
+                    record.finish(431);
+                },
             }
             return .{ .keep_alive = false };
         };
@@ -1081,6 +1194,7 @@ pub const App = struct {
         var r = http1.Request{};
         http1.parseHead(raw_head, &r) catch {
             sendFinal(out, RESPONSE_400);
+            record.finish(400);
             return .{ .keep_alive = false };
         };
 
@@ -1153,6 +1267,13 @@ pub const App = struct {
             ._handover = &handover,
         };
 
+        // Every way out of here from this point on — a clean answer, a
+        // failure, a stream abandoned, a socket handed over — goes past this,
+        // which is the reason the counting is not a middleware. The status a
+        // request really had is only settled here, and a second place working
+        // it out again is a second place to get it wrong (ADR 0100).
+        defer record.finish(c._status);
+
         // A request that matched no route still runs the middleware: a
         // logger that cannot see 404s and a CORS that cannot answer a
         // preflight for an unknown path are both useless exactly when you
@@ -1173,6 +1294,7 @@ pub const App = struct {
             c._params = params;
             chain = match.chain;
             terminal = match.handler;
+            record.at(metrics_mod.fixed_slots + match.index);
         } else if (self.findStatic(c.method, path)) |found| {
             // Resolved at `listen()` with the routes' chains, so an asset
             // served with a logger or a CORS in front of it allocates
@@ -1182,6 +1304,7 @@ pub const App = struct {
             c._static_file = found.file;
             terminal = serveStaticFile;
             chain = found.chain;
+            record.at(metrics_mod.static_file);
         } else {
             // Nothing is precomputed for a path that is neither a route nor
             // a file, because the set of them is every string there is. So
@@ -1201,6 +1324,13 @@ pub const App = struct {
                 c._allowed = allowed;
                 terminal = methodNotAllowedHandler;
             }
+            // Told apart rather than merged, because a spike against one
+            // unnamed slot could be a scanner, a deploy that dropped a route
+            // or a form posting to a GET, and those are three afternoons.
+            record.at(if (allowed.count() > 0)
+                metrics_mod.method_not_allowed
+            else
+                metrics_mod.unmatched);
         }
 
         // The one mistake the compiler cannot catch and everybody else pays
@@ -4306,6 +4436,160 @@ test "the request path stays inside its allocation budget" {
     //     in the `Ctx` itself; the arena only hears about a seventh.
     try testing.expectEqual(@as(usize, 1), counting.allocs);
     try testing.expectEqual(@as(usize, 0), counting.resizes);
+}
+
+test "a request is counted against its route, not the path it arrived on" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/users/:id", testGetUser);
+    try app.metrics(.{});
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    _ = h.send(&app, "GET /users/7 HTTP/1.1\r\nHost: x\r\n\r\n");
+    _ = h.send(&app, "GET /users/9 HTTP/1.1\r\nHost: x\r\n\r\n");
+    const page = h.send(&app, "GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n").response;
+
+    // Two paths, one series — which is the whole reason the counter is the
+    // route's index rather than something keyed by the path (ADR 0100).
+    try testing.expect(std.mem.indexOf(
+        u8,
+        page,
+        "nilo_requests_total{method=\"GET\",route=\"/users/:id\",status=\"2xx\"} 2",
+    ) != null);
+    try testing.expect(std.mem.indexOf(u8, page, "/users/7") == null);
+    try testing.expect(std.mem.indexOf(u8, page, "text/plain; version=0.0.4") != null);
+    // The scrape before this one had not happened yet, so the page describes
+    // itself as having answered nothing.
+    try testing.expect(std.mem.indexOf(u8, page, "route=\"/metrics\"") == null);
+}
+
+test "a path that is no route and a method that is not allowed are counted apart" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/users/:id", testGetUser);
+    try app.metrics(.{});
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    _ = h.send(&app, "GET /nothing/here HTTP/1.1\r\nHost: x\r\n\r\n");
+    _ = h.send(&app, "DELETE /users/7 HTTP/1.1\r\nHost: x\r\n\r\n");
+    const page = h.send(&app, "GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n").response;
+
+    try testing.expect(std.mem.indexOf(
+        u8,
+        page,
+        "nilo_requests_total{method=\"\",route=\"<unmatched>\",status=\"4xx\"} 1",
+    ) != null);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        page,
+        "nilo_requests_total{method=\"\",route=\"<method not allowed>\",status=\"4xx\"} 1",
+    ) != null);
+    // And the exact codes are there, which is the question the class cannot
+    // answer: a 404 and a 405 are both 4xx.
+    try testing.expect(std.mem.indexOf(u8, page, "nilo_responses_total{code=\"404\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, page, "nilo_responses_total{code=\"405\"} 1") != null);
+}
+
+test "counting a request adds nothing to the allocation budget" {
+    var db = Db{ .rows = &.{.{ .id = 7, .name = "wati" }} };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    try app.get("/users/:id", getUser);
+    try app.use(cors.permissive);
+    try app.metrics(.{});
+    try app.resolveChains();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var counting = budget.Counting{ .child = arena.allocator() };
+    var lifetime = str_mod.Lifetime{};
+    var in_flight = fail.InFlight{};
+    var buf: [4096]u8 = undefined;
+
+    const request = "GET /users/7 HTTP/1.1\r\nHost: example.dev\r\nUser-Agent: wrk\r\n" ++
+        "Accept: */*\r\nAccept-Encoding: gzip\r\nConnection: keep-alive\r\n\r\n";
+
+    const send = struct {
+        fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
+            var in = std.Io.Reader.fixed(request);
+            var out = std.Io.Writer.fixed(b);
+            _ = a.handleRequest(gpa, l, f, &in, &out, .off, .off, .{});
+            l.end();
+        }
+    }.once;
+
+    for (0..3) |_| {
+        send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+        _ = arena.reset(.{ .retain_with_limit = default_arena_keep });
+    }
+
+    counting.reset();
+    send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+
+    // The same one as with metrics off, and it is still the JSON body. This
+    // is the claim ADR 0100 is built on: the table is sized once when the
+    // routes are resolved, so a counted request touches memory that already
+    // exists (ADR 0018).
+    try testing.expectEqual(@as(usize, 1), counting.allocs);
+    try testing.expectEqual(@as(usize, 0), counting.resizes);
+}
+
+test "a number the application owns goes out on the page" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    var orders_placed: metrics_mod.Counter = .init(0);
+    // Registered before `metrics()`, to show the order does not matter.
+    try app.expose("orders_placed", .counter, &orders_placed);
+    try app.metrics(.{});
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    _ = orders_placed.fetchAdd(3, .monotonic);
+    const page = h.send(&app, "GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n").response;
+
+    try testing.expect(std.mem.indexOf(u8, page, "# TYPE orders_placed counter") != null);
+    try testing.expect(std.mem.indexOf(u8, page, "orders_placed 3") != null);
+    try testing.expectError(error.MetricAlreadyExposed, app.expose("orders_placed", .counter, &orders_placed));
+}
+
+test "a number exposed after the routes were resolved is still on the page" {
+    // The table holds a slice of the App's list, and appending to a list
+    // moves it. Nothing in an ordinary `main` reaches this — `listen()`
+    // resolves the routes itself — but `start()` before `listen()` does, and
+    // so does any test, and what it would read is freed memory.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.metrics(.{});
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    var first: metrics_mod.Counter = .init(1);
+    var second: metrics_mod.Counter = .init(2);
+    try app.expose("first", .counter, &first);
+    try app.expose("second", .gauge, &second);
+
+    const page = h.send(&app, "GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n").response;
+    try testing.expect(std.mem.indexOf(u8, page, "first 1") != null);
+    try testing.expect(std.mem.indexOf(u8, page, "# TYPE second gauge") != null);
+    try testing.expect(std.mem.indexOf(u8, page, "second 2") != null);
+}
+
+test "metrics cannot be switched on twice" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.metrics(.{});
+    try testing.expectError(error.MetricsAlreadyEnabled, app.metrics(.{ .path = "/other" }));
 }
 
 /// One more header than the Ctx holds inline, so the spill to the arena is

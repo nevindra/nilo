@@ -158,6 +158,14 @@ _Avoid_: extension, module, add-on, middleware bundle
 The OpenAPI document nilo writes from the handler signatures. Not maintained alongside the code — read off the same argument list the compile-time engine reads, and built once when the server starts. It promises what the signature settles and nothing else.
 _Avoid_: schema, spec file, swagger, annotations
 
+**Metrics page**:
+What `app.metrics` puts on `/metrics`: requests, status classes, a latency histogram and exact status codes, in the text format Prometheus scrapes. An ordinary route, counted per **route** rather than per path, because a counter is the route's index in the table rather than a key somebody hashed.
+_Avoid_: telemetry, instrumentation, observability endpoint, stats
+
+**Exposed number**:
+A `std.atomic.Value(u64)` the application owns and `app.expose` publishes on the metrics page. nilo names it once at startup and reads it once per scrape; incrementing it is the application's. There is no registry to add a name to at run time — that is the point, and it is why nothing here costs a request anything.
+_Avoid_: custom metric, registry entry, user counter, instrument
+
 **Blocking**:
 Waiting on the operating system from inside a handler — a database driver, a file, a call out to another service. Many requests share one OS thread, so doing it directly stops all of them; `nilo.blocking` hands the call to a pool of real threads instead, and only the one request waits.
 _Avoid_: offload, thread pool, async, await

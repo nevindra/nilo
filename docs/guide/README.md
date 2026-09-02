@@ -82,7 +82,9 @@ const nilo = @import("nilo_http");
 18. [Testing](./testing.md) — handlers as ordinary functions, and the test
     client for the ones that write their answer.
 19. [OpenAPI](./openapi.md) — an API document written from the signatures.
-20. [Deploying](./deploying.md) — startup errors, panics, graceful shutdown,
+20. [Metrics](./metrics.md) — how many requests, at what statuses, how long;
+    a Prometheus page in one call, and a counter of your own on it.
+21. [Deploying](./deploying.md) — startup errors, panics, graceful shutdown,
     tuning, and what isn't here yet.
 
 ## Also

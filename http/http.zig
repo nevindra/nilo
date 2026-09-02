@@ -467,6 +467,7 @@ pub const monotonicNanos = @import("bulkhead.zig").monotonicNanos;
 /// Built-in middleware.
 pub const logger = @import("logger.zig");
 pub const cors = @import("cors.zig");
+pub const metrics = @import("metrics.zig");
 
 /// Static files, held in memory (ADR 0010). Used through `app.static()`;
 /// the module itself is here for its `Options`.
@@ -673,6 +674,7 @@ test {
     _ = @import("ctx.zig");
     _ = @import("logger.zig");
     _ = @import("cors.zig");
+    _ = @import("metrics.zig");
     _ = @import("app.zig");
     // Last, and the only one here that stands a real server up. Nothing else
     // in this suite opens a socket at all (ADR 0086).

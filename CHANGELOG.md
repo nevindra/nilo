@@ -35,6 +35,32 @@ field full of upload bytes.
 
 ### Added
 
+#### Metrics — `app.metrics(.{})`
+
+Counters, which nilo has never had. One call puts a Prometheus page on
+`/metrics`: how many requests each route answered, at what status class, how
+long they took, which exact codes the service is returning, and how many
+requests are in flight.
+
+**Counted per route, not per path.** `/users/1` and `/users/2` are both
+`/users/:id`, because the counter is the route's index in the table rather than
+a string somebody hashed — so a crawler cannot make you a million series, and a
+counted request still allocates nothing. The budget test that holds
+[ADR 0018](./docs/adr/0018-the-trade-budget-has-three-axes.md)'s hard invariant
+runs a second time with metrics on and still reads one allocation.
+
+`app.expose("orders_placed", .counter, &orders_placed)` publishes a
+`std.atomic.Value(u64)` of your own on the same page. There is no registry you
+can add a name to at run time, deliberately: you own the counter and increment
+it, nilo reads it once per scrape.
+
+Four interleaved benchmark pairs put the throughput cost inside the noise — the
+sign changed twice — so it is reported as unchanged rather than as a figure. An
+application that never calls `metrics()` pays 1,984 bytes of binary; one that
+does pays 17,416 more.
+[Metrics](./docs/guide/metrics.md),
+[ADR 0100](./docs/adr/0100-the-route-table-is-the-registry.md).
+
 #### `listen(.{ .arena_keep = … })` — for a server whose responses are large
 
 A response bigger than what the request arena keeps between requests was **a

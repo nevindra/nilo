@@ -585,6 +585,26 @@ const refusals = [_]Refusal{
         .says = "`json_variant_carries_no_fields.Condition`'s variant `metrics` carries a f64, and an internally tagged union writes the variant's fields beside the tag — so the variant has to have fields.",
     },
     .{
+        .name = "metrics_buckets_out_of_order",
+        .says = "app.metrics was given the latency bucket 100µs after 1000µs, and the boundaries have to climb.",
+    },
+    .{
+        .name = "metrics_exposed_is_not_atomic",
+        .says = "app.expose(\"hits\", …) was given a *u64, and a number that handlers on several threads count on has to be an atomic one.",
+    },
+    .{
+        .name = "metrics_exposed_name_is_nilos",
+        .says = "the exposed metric \"nilo_requests_total\" starts with `nilo_`, which is what nilo's own metrics are called.",
+    },
+    .{
+        .name = "metrics_no_buckets_at_all",
+        .says = "app.metrics was given no latency buckets, so nothing would be timed.",
+    },
+    .{
+        .name = "metrics_path_is_a_pattern",
+        .says = "the metrics path \"/metrics/:name\" has a `:` in it, which makes it a pattern rather than one address.",
+    },
+    .{
         .name = "param_is_a_many_pointer",
         .says = "argument 1 of the handler for route \"/greet/:name\" is a [*]const u8, which cannot be matched.",
     },

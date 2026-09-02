@@ -12,3 +12,8 @@ pub var c: *nilo.Ctx = undefined;
 pub var db: *sql.Db = undefined;
 pub var form: SignIn = undefined;
 pub var gpa: std.mem.Allocator = undefined;
+
+// The App a snippet about assembling one says without building one — the
+// `app.metrics(.{})` of the metrics page, and anything else registered on the
+// way to `listen()`.
+pub var app: nilo.App = undefined;

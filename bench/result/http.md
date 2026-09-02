@@ -917,6 +917,48 @@ number. What is worth doing is running `bench/shutdown.py` on the eight-core box
 as well, because the before figure there is a different rate and nobody has
 taken the after.
 
+## What counting a request costs
+
+**Same machine as the SIGTERM run above** — two cores, not the eight the rest of
+this file was taken on. Both sides were taken here, minutes apart, interleaved.
+
+`bench/main.zig` built twice in `ReleaseFast`, identical but for one line —
+`try app.metrics(.{});` — and driven with `wrk -t1 -c50 -d10s` at
+`/users/7`. Four pairs, alternating, server restarted between every run.
+
+| pair | off (req/s) | on (req/s) | delta | off p99 | on p99 |
+|---|---|---|---|---|---|
+| 1 | 44,638 | 43,643 | **−2.2%** | 3.56ms | 4.29ms |
+| 2 | 44,805 | 45,679 | **+2.0%** | 3.50ms | 3.46ms |
+| 3 | 45,327 | 42,997 | **−5.1%** | 3.47ms | 3.72ms |
+| 4 | 44,590 | 45,605 | **+2.3%** | 3.53ms | 3.45ms |
+| mean | 44,840 | 44,481 | −0.8% | 3.52ms | 3.73ms |
+
+**The sign changes twice and the spread is seven points wide, so the answer is
+unchanged.** Anyone reading a single pair off this table would publish either a
+2% win or a 5% loss, and both would be noise — which is the whole reason the
+rule about interleaving exists.
+
+Two things this run does **not** settle, and both are the kind of gap that gets
+quoted as a result if nobody writes them down:
+
+- **Contention is understated here.** Two cores means two executor threads
+  hitting one counter; eight would hit it harder, and `wrk` at a single route is
+  the worst case for a single cache line. A per-thread shard is the fix if it
+  ever shows up, and nothing has measured it.
+- **The client shares the box.** 44,000 req/s against the 1.42M this file
+  records elsewhere is the machine and the co-located load generator, not the
+  server.
+
+What it changed:
+[ADR 0100](../../docs/adr/0100-the-route-table-is-the-registry.md) — metrics
+ship counting plain atomics rather than a sharded table, on the strength of this
+being inside the noise.
+
+**Can this be pushed further?** Not from here. What would settle it is the same
+pair on the eight-core box, and the lever if it goes the other way is already
+named: shard per executor, pad to 64 bytes, sum at scrape time.
+
 ## Binary size
 
 The fourth axis of [ADR 0018](../../docs/adr/0018-the-trade-budget-has-three-axes.md),

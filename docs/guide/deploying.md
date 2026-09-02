@@ -352,6 +352,18 @@ Two things go with this decision and are worth knowing before you need them:
 the handshake — and therefore **nilo cannot be a gRPC server**, since gRPC is
 HTTP/2. Neither follows from "no TLS" on its own, which is why both are here.
 
+## Knowing whether it is working
+
+`app.metrics(.{})` puts a Prometheus page on `/metrics`: requests per route,
+status classes, a latency histogram, exact status codes for the process, and
+requests in flight. It is an ordinary route, so where you mount it and what you
+`use` in front of it is what protects it — nilo puts no authentication on it.
+See [Metrics](./metrics.md).
+
+That is the *service* half. The *request* half — a request id you can tie a log
+line to — is in [Errors](./errors.md), and the two answer different questions:
+metrics tell you something is wrong, a request id tells you which request.
+
 ## What isn't here yet
 
 `permessage-deflate`, and compression of a handler's response (files are

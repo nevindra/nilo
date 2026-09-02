@@ -63,6 +63,8 @@ pub const panic = nilo.panic;                     // optional: name the request 
 | `app.static(url_prefix, dir_path)` | a directory, read into memory at startup |
 | `app.staticWith(url_prefix, dir_path, options)` | the same, with [options](#static-options) |
 | `app.docs(options)` | serve an [OpenAPI document](./guide/openapi.md) |
+| `app.metrics(options)` | count every request and serve the numbers at `/metrics`, Prometheus format ([Metrics](./guide/metrics.md), [ADR 0100](./adr/0100-the-route-table-is-the-registry.md)) |
+| `app.expose(name, kind, &atomic)` | publish a `std.atomic.Value(u64)` of your own on that page. `kind` is `.counter` or `.gauge` |
 | `app.listen(options)` | run until stopped. Stops the process on a startup error |
 | `app.start(io)` | everything `listen()` does before it accepts anything — services checked, chains resolved, pools opened, schemas checked. For a migration, a script or a test; `listen()` does not repeat it ([ADR 0079](./adr/0079-there-is-a-phase-before-the-server.md)). What it does *not* start is `spawn`, which needs a server |
 | `app.shutdown()` | stop, from any thread or from inside a handler |
@@ -126,6 +128,25 @@ off. See [Deploying](./guide/deploying.md#deadlines).
 Past `max_connections` a connection is accepted and closed at once — no request
 read, no status sent
 ([why](./guide/deploying.md#how-many-connections-at-once)).
+
+### `metrics` options
+
+`app.metrics(.{ … })`, all `comptime`.
+
+| | Default |
+|---|---|
+| `path` | `"/metrics"` — an ordinary route, so middleware in front of it applies |
+| `buckets` | `100, 500, 1_000, 5_000, 10_000, 50_000, 100_000, 1_000_000` — latency boundaries in microseconds, climbing. Reported as seconds |
+
+What goes on the page: `nilo_requests_total{method,route,status}` by status
+class, `nilo_request_duration_seconds` as a histogram, `nilo_responses_total`
+by exact code for the whole process, `nilo_requests_in_flight`, and anything
+`app.expose` was given.
+
+Counted per **route**, not per path — `/users/1` and `/users/2` are both
+`/users/:id`. Four slots are not routes: `<unmatched>`, `<method not allowed>`,
+`<static file>` and `<unparsed>`. A route that has answered nothing has no
+series at all. See [Metrics](./guide/metrics.md).
 
 ## Handler arguments
 

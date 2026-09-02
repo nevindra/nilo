@@ -69,6 +69,7 @@ Measured stripped, `ReleaseFast`, on the examples in this repository.
 | Waiting at the connection loop's frame, and a WebSocket loop handed back to it ([ADR 0071](./0071-where-a-connection-waits-is-what-it-costs.md)) | +1,240 B | +1,336 B |
 | An object store as a Service, `nilo_s3` ([ADRs 0067](./0067-most-of-an-s3-client-is-not-s3.md)–[0072](./0072-an-object-store-is-a-service-that-dials.md)) | +0 | +0 |
 | Twenty findings from an application, closed together ([ADRs 0075](./0075-a-lazy-dependency-is-a-request.md)–[0084](./0084-a-library-can-tell-what-mode-the-program-was-built-in.md)) | +11,400 B | +17,272 B |
+| Counters ([ADR 0100](./0100-the-route-table-is-the-registry.md)) | +1,984 B | +1,984 B |
 
 `nilo_fetch` is +0 on both examples because neither imports it, and that is the
 whole of the row rather than an accident: a module nothing names is never
@@ -90,6 +91,15 @@ quoted whole anyway, because 692 KB is the number an operator's binary grows by
 and the split is what they read next. That a program storing nothing pays none
 of it is checked rather than assumed: `strings` finds 0 occurrences of `aws4`,
 `x-amz` or `s3` in the control.
+
+The counters row is the same figure on both examples, and on `bench/main.zig`
+as well, because **neither example calls `app.metrics`**: what they pay is the
+`Record` on `serveRequest`'s frame and the `observe` it can reach, which the
+linker cannot drop because the call is behind a runtime null check rather than a
+comptime one. An application that *does* call it pays **17,416 more** — measured
+as two builds of `bench/main.zig` differing by one line. That figure was 37,112
+until `{d}` on an `f64` was taken out of the `le` labels;
+[`bench/result/http.md`](../../bench/result/http.md) has the split.
 
 The second row is one measurement of six changes because they landed together, which is a worse record than the first row and is noted as such. The split it does show is the useful part: `hello` has one route returning text and pays +6 KB, which is the failure-body writer and nothing else — that part is unconditional. The remaining +8 KB on `rest` is the body describer and the schema walker, and those are generated per body type, so they are paid by applications that have bodies.
 

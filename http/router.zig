@@ -43,6 +43,11 @@ pub const Match = struct {
     chain: []const Middleware = &.{},
     params: [max_params]Param = undefined,
     n_params: usize = 0,
+    /// Where this route sits in `routes`, which is what metrics count
+    /// against — an index the scan is already holding rather than the
+    /// pattern, so counting a request needs no string and no hash
+    /// (ADR 0100).
+    index: usize = 0,
 };
 
 /// The name a `*` catch-all is captured under, so `c.param("*")` reaches
@@ -334,7 +339,7 @@ pub const Router = struct {
         // length check above has already thrown those out.
         const want_first = if (parts.len > 0) Route.firstKey(parts[0]) else 0;
 
-        for (self.routes.items) |*route| {
+        for (self.routes.items, 0..) |*route, i| {
             // Two integer compares throw out nearly every route before any
             // text is looked at.
             if (route.method != method) continue;
@@ -361,7 +366,7 @@ pub const Router = struct {
                 if (!matches(route, parts)) continue;
             }
 
-            result = .{ .handler = route.handler, .chain = route.chain };
+            result = .{ .handler = route.handler, .chain = route.chain, .index = i };
             if (!fill(route, trimmed, parts, &result)) continue;
             have = true;
             best_score = route.score;

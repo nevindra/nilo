@@ -484,13 +484,18 @@ it, which is a second name for one job.
 **Waiting on: a caller** who wants to verify a password without a request in
 flight.
 
-**There are no counters.** Correlation is covered, with request ids and JSON
-log lines ([Errors and logging](./guide/errors.md)), but metrics are not: how
-many requests, at what statuses, how long. That is a much larger surface than a
-log line. Where the numbers live, who reads them out, whether there is a
-registry, and whether any of it can be had without an allocation per request.
+**Bytes sent and connections are not counted, and neither is sharded.**
+`app.metrics` counts requests, statuses and durations
+([ADR 0100](./adr/0100-the-route-table-is-the-registry.md)); it does not count
+response bytes, which is one more atomic on the write path that nothing has
+measured, and it does not count sockets, which belong at the accept layer rather
+than in `serveRequest`. The counters are also plain shared atomics: four
+interleaved pairs put the cost inside the noise on a two-core box, which is the
+weakest possible place to look for cache-line contention. If eight threads on
+one hot route turn out to cost something, the fix is already named — shard per
+executor, pad to 64 bytes, sum at scrape time.
 
-**Waiting on: a design.** Nobody has drawn one.
+**Waiting on: a number**, from the same pair run on the eight-core box.
 
 **A response body is never compressed, and only a held file is.** Static files
 under the spill threshold are gzipped once while the App is built, which is the
@@ -530,7 +535,7 @@ write path itself nilo already answers **22,018 req/s to axum's 17,209**
 ([`bench/result/s3.md`](../bench/result/s3.md)).
 
 **Waiting on: a design.** It changes where request memory lives, which is
-[ADR 0004](./adr/0004-a-str-belongs-to-its-request.md)'s territory, and nobody
+[ADR 0004](./adr/0004-request-arena-and-the-str-type.md)'s territory, and nobody
 has drawn one.
 
 **A spilled static file that changes on disk serves a stale length.** A file
