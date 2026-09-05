@@ -26,14 +26,25 @@
 //! in the statement, which keeps the text a constant. **The prediction
 //! survived a year because nobody wrote the Dialect** (ADR 0061).
 //!
-//! **Two Dialects ship and one of them has a Wire.** `SQLite` below is the
-//! SQL half only, written to answer whether this seam is in the right place
-//! rather than because anything can run it yet — a Dialect is comptime and
+//! **Two Dialects ship and both now have a Wire.** `SQLite` below began as
+//! the SQL half only, written to answer whether this seam is in the right
+//! place rather than because anything could run it — a Dialect is comptime and
 //! touches no I/O, so it can be finished and tested with no dependency, no
-//! database and no event loop. Twelve of the thirteen declarations fitted
-//! with nothing changed outside it; the thirteenth is why `ListForm` has
-//! four values instead of three
+//! database and no event loop. Twelve of its thirteen declarations fitted with
+//! nothing changed outside it; the thirteenth is why `ListForm` has four
+//! values instead of three
 //! ([ADR 0061](../docs/adr/0061-the-second-dialect-is-the-test-of-the-seam.md)).
+//!
+//! **The three declarations after those thirteen each arrived the same way**,
+//! and it is worth knowing what that way is before adding a fourteenth.
+//! `uuid_form`, `json_form` and `enum_form` all name a column type the two
+//! databases store differently, and all three were found by *compiling a write*
+//! rather than by reading this file: the read half had mapped every one of them
+//! to `[]const u8` while the write half handed the driver a Zig value it could
+//! not bind. Twice that was a `@compileError` from inside zqlite naming a Zig
+//! issue ([ADR 0078](../docs/adr/0078-a-uuid-is-whatever-the-database-stores.md),
+//! [ADR 0119](../docs/adr/0119-the-sqlite-write-path-is-compiled.md)).
+//! A `Timestamp` is the one still outstanding.
 
 const std = @import("std");
 const core = @import("nilo_core");
@@ -103,12 +114,36 @@ pub const UuidForm = enum {
     text,
 };
 
+/// How a database stores a value whose Zig type is not one a driver binds on
+/// its own — a `Json(T)` document, and an enum's tag.
+///
+/// The same question `UuidForm` asks, about the other two column types the two
+/// Wires disagree about, and it is here for the same reason: it was answered
+/// only for the *read* side. `WireRead` has always mapped both to `[]const u8`,
+/// so a Row carrying one compiled for `db.select` and stopped compiling at
+/// `db.insert`, four frames inside zqlite (ADR 0119).
+pub const ValueForm = enum {
+    /// The database has the type and the driver has an encoder for it: a
+    /// Postgres `jsonb` written through `std.json`, or a Postgres enum.
+    native,
+    /// The bytes, as text — the document written out, or `@tagName`. What
+    /// SQLite gets, because SQLite has neither type, and what `acceptsSqlite`
+    /// has always said it wants for both.
+    text,
+};
+
 pub const Postgres = struct {
     pub const name = "postgres";
 
     /// Sixteen bytes. `uuid` is a real column type here and the driver has an
     /// encoder for it.
     pub const uuid_form: UuidForm = .bytes;
+
+    /// Both native. `jsonb` is a column type and pg.zig writes any struct into
+    /// one through `std.json`; an enum is a column type too, and pg.zig binds
+    /// the Zig enum by taking its tag name.
+    pub const json_form: ValueForm = .native;
+    pub const enum_form: ValueForm = .native;
 
     /// Numbered from one, and numbered by the walker rather than counted
     /// here, so a condition that writes two parameters cannot lose track.
@@ -455,6 +490,17 @@ pub const SQLite = struct {
     /// also means `sqlite3` shows the id and `WHERE public = '…'` is typeable.
     pub const uuid_form: UuidForm = .text;
 
+    /// Text, both of them, and the two rows `uuid_form` should have been
+    /// followed by (ADR 0119). SQLite has no `jsonb` and no enum type, so
+    /// `acceptsSqlite` has always routed both columns to TEXT — while the
+    /// write half handed zqlite the `Json(T)` wrapper struct and the Zig enum
+    /// itself, neither of which its `_bind` takes. That is a compile error
+    /// from inside somebody else's driver on two ordinary columns, and it
+    /// survived because nothing in this repository had ever compiled a `Db`
+    /// write against this Wire.
+    pub const json_form: ValueForm = .text;
+    pub const enum_form: ValueForm = .text;
+
     /// `?1`, numbered, and numbered rather than bare `?` for the same reason
     /// Postgres numbers: the walker counts, and a condition that writes two
     /// parameters must not lose track of which is which.
@@ -574,11 +620,46 @@ pub const SQLite = struct {
     /// with three answers. `notnull` is 0 or 1 and a SQLite view answers 0
     /// for every column exactly as a Postgres view does, so `UNKNOWN` is
     /// reached the same way (ADR 0056) — through `sqlite_master.type`.
+    ///
+    /// **The third branch is the rowid, and it is here because without it a
+    /// correct table stopped the server** (ADR 0115). `id INTEGER PRIMARY KEY`
+    /// is an *alias for the rowid* rather than a constraint, so SQLite reports
+    /// `notnull = 0` for it — meaning "there is no NOT NULL clause here",
+    /// not "this may be null", because a rowid never is. Reading that 0 as
+    /// nullable made `schema.compare` report `unexpected_null` against a Row
+    /// whose `id` is an `i64`, and with `schema_mismatch_is_fatal` at its
+    /// default that is `error.SchemaMismatch` on the table every SQLite
+    /// tutorial, every migration tool and SQLite's own documentation writes.
+    ///
+    /// The conditions are SQLite's own rule for the alias, and each is
+    /// load-bearing:
+    ///
+    /// - `pk = 1` **and exactly one** primary-key column in the table. A
+    ///   rowid table's composite key may hold a NULL in any of its columns —
+    ///   that is the long-standing quirk — so `PRIMARY KEY (tenant_id, id)`
+    ///   has to keep answering `YES`.
+    /// - the declared type is exactly `INTEGER`. Not affinity: `INT PRIMARY
+    ///   KEY` and `BIGINT PRIMARY KEY` have INTEGER affinity and are *not*
+    ///   aliases, and really do accept a NULL.
+    /// - not a view, which the branch above has already answered.
+    ///
+    /// One case is left over and left alone: `PRIMARY KEY (id DESC)` over an
+    /// INTEGER column is not an alias either, and this answers `NO` for it.
+    /// That is a check that fails to fire rather than one that fires wrongly,
+    /// which is the direction this whole branch exists to move.
+    ///
+    /// **`pragma_table_info` is named twice from here on**, which is a fact
+    /// `sqlite.Wire.columnsOf` has to know: it qualifies the name with the
+    /// schema, and qualifying only the first would ask two databases one
+    /// question.
     pub const introspect =
         \\SELECT i.name,
         \\       upper(i.type),
         \\       CASE WHEN m.type = 'view' THEN 'UNKNOWN'
         \\            WHEN i."notnull" = 1 THEN 'NO'
+        \\            WHEN i.pk = 1 AND upper(i.type) = 'INTEGER'
+        \\                 AND (SELECT count(*) FROM pragma_table_info(?1) k
+        \\                      WHERE k.pk > 0) = 1 THEN 'NO'
         \\            ELSE 'YES' END
         \\FROM pragma_table_info(?1) i
         \\LEFT JOIN sqlite_master m ON m.name = ?1
@@ -647,10 +728,10 @@ pub const SQLite = struct {
 pub fn assertDialect(comptime D: type) void {
     comptime {
         const owed = [_][]const u8{
-            "name",   "placeholder", "quote",     "list_form",
-            "limit",  "offset",      "accepts",   "introspect",
-            "readAs", "bindAs",      "arrayOf",   "qualify",
-            "lock",   "uuid_form",
+            "name",      "placeholder", "quote",     "list_form",
+            "limit",     "offset",      "accepts",   "introspect",
+            "readAs",    "bindAs",      "arrayOf",   "qualify",
+            "lock",      "uuid_form",   "json_form", "enum_form",
         };
         for (owed) |decl| {
             if (!@hasDecl(D, decl)) @compileError(
@@ -760,6 +841,30 @@ test "postgres takes a list as one value, so a statement stays a constant" {
 
 test "postgres satisfies the contract this module asks of a Dialect" {
     comptime assertDialect(Postgres);
+}
+
+test "sqlite satisfies it too, which is what makes the seam a seam" {
+    comptime assertDialect(SQLite);
+}
+
+test "the three column types the two databases store differently each say so" {
+    // One declaration per disagreement, and the list is the answer to "what
+    // does a driver refuse to bind on its own" rather than a style choice.
+    // Every one of these was found by compiling a *write* — the read half had
+    // mapped all three to `[]const u8` while the write half handed the driver
+    // a Zig value (ADR 0078, ADR 0119).
+    try testing.expectEqual(UuidForm.bytes, Postgres.uuid_form);
+    try testing.expectEqual(ValueForm.native, Postgres.json_form);
+    try testing.expectEqual(ValueForm.native, Postgres.enum_form);
+
+    try testing.expectEqual(UuidForm.text, SQLite.uuid_form);
+    try testing.expectEqual(ValueForm.text, SQLite.json_form);
+    try testing.expectEqual(ValueForm.text, SQLite.enum_form);
+
+    // And the two forms agree with the schema check, which is the half that
+    // was already true and the half the write side used to contradict.
+    try testing.expectEqualStrings("TEXT", SQLite.accepts(types.Json(struct { a: u8 })).?[0]);
+    try testing.expectEqualStrings("TEXT", SQLite.accepts(enum { a, b }).?[0]);
 }
 
 test "a numeric column is asked for as text, and everything else as itself" {

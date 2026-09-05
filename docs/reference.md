@@ -1434,6 +1434,16 @@ column — which is what the schema check has always asked for, and what makes
 `sqlite3` show the id and `WHERE public = '…'` typeable. Postgres still sends
 sixteen bytes. Your Row says `public: sql.Uuid` either way.
 
+**Nor are `.in`, a `sql.Json(T)` column or an enum column**, though until
+[ADR 0119](./adr/0119-the-sqlite-write-path-is-compiled.md) all three behaved as
+if they were: each read correctly and failed to *compile* on the way in, from
+inside the driver. SQLite has neither a `jsonb` nor an enum type, so a document
+and a tag both bind as text, and `.in` binds its whole list as one JSON array
+that `json_each` takes apart — which is what keeps the statement a constant on
+a database with no array parameter. `.in` is the only one of the three that
+costs anything: **one arena allocation per condition, on SQLite alone**,
+because the array has to be written where Postgres sends a native one.
+
 So **code that batches is not portable between the two dialects**, and that is
 the seam refusing rather than lying. The schema check is weaker too, by exactly
 as much as SQLite is: a column's declared type is free text and what is

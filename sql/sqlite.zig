@@ -38,6 +38,11 @@ const std = @import("std");
 const zqlite = @import("zqlite");
 
 const wire = @import("wire.zig");
+/// Only the tests reach for this, and only for `SQLite.introspect` — the
+/// query `columnsOf` is handed at run time. A Wire is not allowed to have an
+/// opinion about a Dialect anywhere else, which is what keeps the seam a seam
+/// (ADR 0061).
+const dialect = @import("dialect.zig");
 
 /// The SQLite that is compiled in, as its own version string — `3.53.0`.
 ///
@@ -186,7 +191,26 @@ pub fn Wire(comptime opts_in: Options) type {
         /// Index 0 is the writer. Everything after it is a read-only reader.
         conns: []Conn,
         lock: std.Io.Mutex = .init,
-        free: std.Io.Condition = .init,
+        /// **One queue per question, and that is the fix rather than a
+        /// tidying** (ADR 0116). These used to be a single `Condition` that
+        /// `takeWriter` and `takeReader` both waited on while testing
+        /// different predicates, woken with `signal`. So a reader coming back
+        /// could wake the fiber that wanted the *writer*, which re-tested
+        /// `conns[0].busy`, found it still true and waited again — and the
+        /// fiber that asked for a reader was never woken at all, though the
+        /// connection it wanted was sitting free. Under a load that both reads
+        /// and writes that is a request which stalls with nothing in the log
+        /// and nothing holding it.
+        ///
+        /// **`broadcast` rather than `signal` within a queue**, which is the
+        /// second half. This Wire's wait is cancellable on purpose — a fiber
+        /// whose request is gone gives its turn up rather than holding it — and
+        /// a `signal` consumed by a waiter that then answers `TimedOut` is a
+        /// wakeup nobody else receives. Waking everybody queued for the one
+        /// thing that just became free costs a re-test of one `bool` each, on
+        /// a path that is by definition already waiting.
+        free_writer: std.Io.Condition = .init,
+        free_reader: std.Io.Condition = .init,
 
         /// One connection and the statements kept prepared on it.
         ///
@@ -467,7 +491,7 @@ pub fn Wire(comptime opts_in: Options) type {
         fn takeWriter(self: *Self) wire.Error!usize {
             self.lock.lock(self.io) catch return error.TimedOut;
             defer self.lock.unlock(self.io);
-            while (self.conns[0].busy) self.free.wait(self.io, &self.lock) catch
+            while (self.conns[0].busy) self.free_writer.wait(self.io, &self.lock) catch
                 return error.TimedOut;
             self.conns[0].busy = true;
             return 0;
@@ -483,18 +507,22 @@ pub fn Wire(comptime opts_in: Options) type {
                     conn.busy = true;
                     return i;
                 }
-                self.free.wait(self.io, &self.lock) catch return error.TimedOut;
+                self.free_reader.wait(self.io, &self.lock) catch return error.TimedOut;
             }
         }
 
         /// Uncancelable, and it has to be: this runs from `Rows.close` and
         /// from a `defer` on the way out of a failing transaction, where
         /// giving up would leak a connection for the life of the process.
+        /// **Which queue is woken is decided by which connection came back**,
+        /// and the two cannot serve each other: there is exactly one writer,
+        /// so a returning reader can satisfy nobody in `takeWriter`, and a
+        /// returning writer can satisfy nobody in `takeReader`.
         fn release(self: *Self, at: usize) void {
             self.lock.lockUncancelable(self.io);
             self.conns[at].busy = false;
             self.lock.unlock(self.io);
-            self.free.signal(self.io);
+            if (at == 0) self.free_writer.broadcast(self.io) else self.free_reader.broadcast(self.io);
         }
 
         /// Which connection a statement belongs on.
@@ -645,7 +673,39 @@ pub fn Wire(comptime opts_in: Options) type {
             const optional = @typeInfo(T) == .optional;
             const Inner = if (optional) @typeInfo(T).optional.child else T;
 
-            if (optional and stmt.columnType(col) == .null) return null;
+            // **Asked for every column rather than only the optional ones,
+            // and that is the fix** (ADR 0118). The test used to live inside
+            // `if (optional)`, so a NULL arriving in a column the Row says is
+            // not optional fell straight through to the reads below — where
+            // `stmt.int` answers 0 and `stmt.text` answers the empty string,
+            // because zqlite's `text` returns `""` whenever
+            // `sqlite3_column_bytes` is zero. A wrong answer that looks like a
+            // right one, which is what the cast below already refuses for an
+            // integer too wide for its field.
+            //
+            // The startup check catches this when the table declares the
+            // column nullable. It cannot catch a view, which answers `UNKNOWN`
+            // and is skipped by design (ADR 0056), and it does not run at all
+            // for a `Db` nobody called `checking` on.
+            //
+            // What it costs is one `sqlite3_column_type` — a couple of loads,
+            // no allocation — per non-optional column per row. The optional
+            // ones were already paying it.
+            if (stmt.columnType(col) == .null) {
+                if (optional) return null;
+                // `warn` rather than `err` for the reason `db.wireOf`'s is
+                // one: `std.log.err` fails the test runner for every test
+                // that provokes it, which is how a diagnostic ends up deleted
+                // rather than fixed. The error is what the caller acts on.
+                std.log.warn(
+                    "nilo_sql: column {d} came back NULL and the Row reads it as {s}, " ++
+                        "which cannot hold one. Make the field optional, or make the " ++
+                        "column NOT NULL. A view is the case the startup check cannot " ++
+                        "see (ADR 0056).",
+                    .{ col, @typeName(Inner) },
+                );
+                return error.QueryFailed;
+            }
 
             return switch (@typeInfo(Inner)) {
                 .bool => stmt.boolean(col),
@@ -736,6 +796,16 @@ pub fn Wire(comptime opts_in: Options) type {
         /// before this file existed. SQLite's `pragma_table_info` is a
         /// table-valued function and a schema qualifies the *function's* name,
         /// where Postgres puts it in a `WHERE` and binds it.
+        ///
+        /// **Every occurrence, not the first.** `dialect.SQLite.introspect`
+        /// names `pragma_table_info` twice since ADR 0115 — once in the `FROM`
+        /// and once in the subquery that counts a table's primary-key columns
+        /// — and the rewrite this used to do qualified whichever came first in
+        /// the text. That would have asked the attached database for the
+        /// columns and `main` for the key, which is one question answered by
+        /// two databases: a table absent from `main` would report no primary
+        /// key at all, and every `INTEGER PRIMARY KEY` in an attached schema
+        /// would go back to being reported as nullable.
         pub fn columnsOf(
             self: *Self,
             arena: std.mem.Allocator,
@@ -743,13 +813,28 @@ pub fn Wire(comptime opts_in: Options) type {
             schema: ?[]const u8,
             table: []const u8,
         ) wire.Error![]const wire.Column {
-            var buf: [512]u8 = undefined;
+            // Twice the query, plus a qualifier at each occurrence. The query
+            // is a comptime constant of this module's own and the schema comes
+            // from a Row's `nilo_table`, so nothing here is the client's — but
+            // `bufPrint` still answers `QueryFailed` rather than truncating.
+            var buf: [1024]u8 = undefined;
             const text = if (schema) |db_name| blk: {
-                const at = std.mem.indexOf(u8, query, "pragma_table_info") orelse
+                const fn_name = "pragma_table_info";
+                var written: usize = 0;
+                var rest = query;
+                var qualified = false;
+                while (std.mem.indexOf(u8, rest, fn_name)) |at| {
+                    const piece = std.fmt.bufPrint(buf[written..], "{s}\"{s}\".{s}", .{
+                        rest[0..at], db_name, fn_name,
+                    }) catch return error.QueryFailed;
+                    written += piece.len;
+                    rest = rest[at + fn_name.len ..];
+                    qualified = true;
+                }
+                if (!qualified) return error.QueryFailed;
+                const tail = std.fmt.bufPrint(buf[written..], "{s}", .{rest}) catch
                     return error.QueryFailed;
-                break :blk std.fmt.bufPrint(&buf, "{s}\"{s}\".{s}", .{
-                    query[0..at], db_name, query[at..],
-                }) catch return error.QueryFailed;
+                break :blk buf[0 .. written + tail.len];
             } else query;
 
             var rows = try self.run(arena, text, .{table}, null);
@@ -857,6 +942,27 @@ fn withIo(comptime body: fn (std.Io) anyerror!void) !void {
     try body(threaded.io());
 }
 
+/// The same, with room for **two** tasks to be parked at once.
+///
+/// **`std.Io.Threaded`'s default `async_limit` is one less than the number of
+/// logical cores, and past that limit `io.async` runs the task inline on the
+/// caller's thread** rather than queueing it — that is documented behaviour
+/// and not a fallback for an error. On a two-core box the limit is one, so a
+/// test that wants two fibers waiting at the same time deadlocks in a way that
+/// looks exactly like the bug it is testing for: the second `async` never
+/// returns, and the thread that would have released a connection is the one
+/// blocked inside it.
+///
+/// Every other `io.async` in this repository — `s3/canned.zig`,
+/// `fetch/live.zig` — spawns exactly one task beside the main thread, which is
+/// why nothing had met this before. Anything that wants a second one has to
+/// ask for the room.
+fn withIoPair(comptime body: fn (std.Io) anyerror!void) !void {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .async_limit = .limited(2) });
+    defer threaded.deinit();
+    try body(threaded.io());
+}
+
 /// A pool on a database that lives in memory and is shared between its
 /// connections — the form check 2 of `spike/sqlite_facts` confirmed is one
 /// database rather than several.
@@ -937,14 +1043,24 @@ test "a NULL reads as null, and an integer too wide for the field is refused not
             defer w.close();
             const gpa = testing.allocator;
 
-            _ = try w.exec(gpa, "CREATE TABLE t(a INTEGER, b INTEGER)", .{}, null);
-            _ = try w.exec(gpa, "INSERT INTO t(a, b) VALUES (NULL, 70000)", .{}, null);
+            _ = try w.exec(gpa, "CREATE TABLE t(a INTEGER, b INTEGER, s TEXT)", .{}, null);
+            _ = try w.exec(gpa, "INSERT INTO t(a, b, s) VALUES (NULL, 70000, NULL)", .{}, null);
 
-            var rows = try w.run(gpa, "SELECT a, b FROM t", .{}, null);
+            var rows = try w.run(gpa, "SELECT a, b, s FROM t", .{}, null);
             defer rows.close();
             try testing.expect(try w.next(&rows));
 
             try testing.expectEqual(@as(?i64, null), try w.read(&rows, ?i64, 0));
+
+            // And the same NULL read into a field that cannot hold one is an
+            // error rather than a zero (ADR 0118). It used to be `0` for the
+            // integer and `""` for the text, because the null test only ran
+            // for an optional field — the same class of wrong-answer-that-
+            // looks-right as the truncation below, arriving from the other
+            // side. Postgres refuses both; this is where SQLite caught up.
+            try testing.expectError(error.QueryFailed, w.read(&rows, i64, 0));
+            try testing.expectError(error.QueryFailed, w.read(&rows, []const u8, 2));
+            try testing.expectEqual(@as(?[]const u8, null), try w.read(&rows, ?[]const u8, 2));
             // SQLite has one integer type, so a field too narrow for the value
             // is the one class of mismatch its schema check cannot catch
             // beforehand (ADR 0061). It has to be an error rather than a
@@ -952,6 +1068,132 @@ test "a NULL reads as null, and an integer too wide for the field is refused not
             // like a right one.
             try testing.expectError(error.QueryFailed, w.read(&rows, i16, 1));
             try testing.expectEqual(@as(i32, 70_000), try w.read(&rows, i32, 1));
+        }
+    }.run);
+}
+
+test "a returning reader wakes the fiber that wanted a reader, not the one that wanted the writer" {
+    // **If this test ever hangs, the pool has lost a wakeup** — that is the
+    // failure it exists to catch, and the diagnosis is `ps -o etime,cputime`
+    // showing minutes of wall against no CPU. Before ADR 0116 both `take`
+    // calls waited on one `Condition` while testing different predicates, so
+    // `release` waking one fiber could wake the one that could not proceed.
+    //
+    // `withIoPair` rather than `withIo`, and that is not a detail: see its
+    // doc. Two parked fibers need two threads to have been asked for.
+    try withIoPair(struct {
+        fn takeOne(w: *TestWire, want_writer: bool, out: *usize) void {
+            out.* = (if (want_writer) w.takeWriter() else w.takeReader()) catch 99;
+        }
+
+        fn run(io: std.Io) !void {
+            // One writer and two readers, so both queues can hold somebody.
+            var w = try openTest(io, "file:pool-wakeups?mode=memory&cache=shared", 3);
+            defer w.close();
+
+            // Every connection taken, so anybody asking now has to park.
+            try testing.expectEqual(@as(usize, 0), try w.takeWriter());
+            try testing.expectEqual(@as(usize, 1), try w.takeReader());
+            try testing.expectEqual(@as(usize, 2), try w.takeReader());
+
+            var writer_at: usize = 99;
+            var reader_at: usize = 99;
+            var wants_writer = io.async(takeOne, .{ &w, true, &writer_at });
+            var wants_reader = io.async(takeOne, .{ &w, false, &reader_at });
+
+            // Give a *reader* back, and nothing else. The fiber queued for the
+            // writer cannot use it and must not be the one woken.
+            w.release(1);
+            wants_reader.await(io);
+            try testing.expectEqual(@as(usize, 1), reader_at);
+
+            // The writer's own queue still works, which is the half that would
+            // have kept passing if the split had been made the wrong way round.
+            w.release(0);
+            wants_writer.await(io);
+            try testing.expectEqual(@as(usize, 0), writer_at);
+
+            w.release(0);
+            w.release(1);
+            w.release(2);
+        }
+    }.run);
+}
+
+test "the introspection query reads the rowid alias as not-null, and its near misses as null" {
+    // `dialect.SQLite.introspect` is asked directly rather than through
+    // `db.checkSchema`, which reports a problem with `std.log.err` and so
+    // fails the test runner for every test that provokes one. What is being
+    // held here is the query's three answers, which is what the check is
+    // built out of (ADR 0115).
+    try withIo(struct {
+        fn nullableOf(
+            w: *TestWire,
+            arena: std.mem.Allocator,
+            table: []const u8,
+            column: []const u8,
+        ) !?bool {
+            const columns = try w.columnsOf(arena, dialect.SQLite.introspect, null, table);
+            for (columns) |c| if (std.mem.eql(u8, c.name, column)) return c.nullable;
+            return error.TestUnexpectedResult;
+        }
+
+        fn run(io: std.Io) !void {
+            var w = try openTest(io, "file:rowid-introspect?mode=memory&cache=shared", 2);
+            defer w.close();
+            const gpa = testing.allocator;
+
+            const ddl = [_][]const u8{
+                "CREATE TABLE alias (id INTEGER PRIMARY KEY, label TEXT NOT NULL)",
+                "CREATE TABLE tuple_form (id INTEGER, label TEXT, PRIMARY KEY (id))",
+                "CREATE TABLE not_integer (id INT PRIMARY KEY, label TEXT)",
+                "CREATE TABLE composite (tenant_id INTEGER, id INTEGER, PRIMARY KEY (tenant_id, id))",
+                // A column with no declared type at all, which SQLite allows.
+                // Here because ADR 0118 made a NULL in a non-optional field an
+                // error, and this query reads `upper(i.type)` as a
+                // `[]const u8`: if the pragma answered NULL rather than the
+                // empty string for an untyped column, the schema check would
+                // have started failing on a table it used to read.
+                "CREATE TABLE untyped (id INTEGER PRIMARY KEY, whatever)",
+                "CREATE VIEW as_view AS SELECT id, label FROM alias",
+            };
+            for (ddl) |text| _ = try w.exec(gpa, text, .{}, null);
+
+            var scratch = std.heap.ArenaAllocator.init(gpa);
+            defer scratch.deinit();
+            const arena = scratch.allocator();
+
+            // The alias, inline and as a one-column tuple. Both are the rowid,
+            // both report `notnull = 0`, and neither may hold a NULL.
+            try testing.expectEqual(@as(?bool, false), try nullableOf(&w, arena, "alias", "id"));
+            try testing.expectEqual(@as(?bool, false), try nullableOf(&w, arena, "tuple_form", "id"));
+
+            // An ordinary column beside it, so the branch is not simply
+            // answering `false` for everything.
+            try testing.expectEqual(@as(?bool, false), try nullableOf(&w, arena, "alias", "label"));
+            try testing.expectEqual(@as(?bool, true), try nullableOf(&w, arena, "tuple_form", "label"));
+
+            // `INT` rather than `INTEGER`: the same affinity, and not an alias.
+            // SQLite's rule is the declared type spelled exactly `INTEGER`, and
+            // this column really does accept a NULL.
+            try testing.expectEqual(@as(?bool, true), try nullableOf(&w, arena, "not_integer", "id"));
+
+            // A composite key over a rowid table — the shape of every
+            // multi-tenant schema. Every column of it may hold a NULL, which is
+            // SQLite's own long-standing quirk, so neither becomes the rowid.
+            try testing.expectEqual(@as(?bool, true), try nullableOf(&w, arena, "composite", "tenant_id"));
+            try testing.expectEqual(@as(?bool, true), try nullableOf(&w, arena, "composite", "id"));
+
+            // The untyped column reads without the whole query failing, and
+            // the rowid beside it is still the rowid.
+            try testing.expectEqual(@as(?bool, true), try nullableOf(&w, arena, "untyped", "whatever"));
+            try testing.expectEqual(@as(?bool, false), try nullableOf(&w, arena, "untyped", "id"));
+
+            // And the third answer still arrives: a view says nothing about
+            // nullability and the check skips it (ADR 0056). The rowid branch
+            // sits behind the view branch so this cannot be turned into a
+            // `false` by an `id` that came from an aliased column.
+            try testing.expectEqual(@as(?bool, null), try nullableOf(&w, arena, "as_view", "id"));
         }
     }.run);
 }

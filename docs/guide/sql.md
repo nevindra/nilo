@@ -467,6 +467,16 @@ sixteen bytes. Your Row says `public: sql.Uuid` either way, and neither the
 insert nor the read changes
 ([ADR 0078](../adr/0078-a-uuid-is-whatever-the-database-stores.md)).
 
+**A `sql.Json(T)` column, an enum column and `.in` are not on it either**, and
+for a while they were on it in practice without being written down: SQLite has
+no `jsonb` and no enum type, so each of the three binds as text, and `.in` binds
+its whole list as one JSON array that `json_each` reads. Your Row and your
+condition are the same on both
+([ADR 0119](../adr/0119-the-sqlite-write-path-is-compiled.md)). `.in` is the
+one that costs something here — one arena allocation per condition, on SQLite
+only — because the array has to be written out where Postgres sends a native
+one.
+
 The schema check is weaker here too, and by exactly as much as SQLite is. A
 column's declared type is free text — `VARCHAR(255)`, `NVARCHAR` and `CLOB` are
 all one thing to the database — so the check catches a `Str` field over an
