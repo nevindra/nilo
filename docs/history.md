@@ -1562,3 +1562,36 @@ attempt.
 10ns is 8% and under it. **The bad number would have blocked a correctness fix**,
 which is the direction that costs the most: a measurement that is too pessimistic
 does not announce itself, because the answer it produces is "don't".
+
+## The fourth blocker that had already gone
+
+The roadmap said an `Upload` could not reach a disk because `bulkhead.Dir` can
+only open, and that adding a write meant deciding what a two-megabyte write does
+to the fiber issuing it. The pinned zio had `Dir.createFile`, `File.stdWriter`
+and `Dir.createFileAtomic` all along, and routes a descriptor the loop cannot
+poll to its own thread pool — so the write parks the fiber and nothing needed
+`nilo.blocking` ([ADR 0123](./adr/0123-a-file-is-written-by-the-engine.md)).
+
+That is the fourth time here, after [ADR 0063](./adr/0063-a-handlers-stack-is-per-connection.md)
+made re-reading a blocker a rule. What is new is *why this one survived*: the
+entry did not say "blocked on zio", it said "blocked on a design", and it
+argued the design at length and well. **An entry that reasons carefully from an
+unchecked premise reads as the most finished item on the page**, which is the
+opposite of the attention it needs. The premise here was one line —
+`engine.Dir` has no `createFile` — and it was true of nilo's wrapper and never
+of the thing being wrapped.
+
+## A standard-library trap that accuses the Engine
+
+`std.testing.tmpDir(.{})` in Zig 0.16 hands back a directory that cannot be
+iterated, and iterating it anyway does not return an error. It panics inside
+`std.Io.Threaded` — "programmer bug caused syscall error: BADF" — from a seek
+on the directory's descriptor, which reads as a file descriptor used after it
+was closed. **The symptom names the layer nilo owns**: a test that had just
+written a file through `bulkhead.Dir` looked exactly like a Bulkhead or an
+Engine bug, and the next person to hit it will go and read zio.
+`.{ .iterate = true }` is the whole fix.
+
+That is the second std 0.16 trap here whose symptom accuses the wrong layer,
+after `async_limit`. Both are worth the two lines they take, because the cost
+of one is not the fix — it is the hour spent reading the innocent file.

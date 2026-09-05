@@ -451,6 +451,14 @@ One file out of a multipart form, as a `Form(T)` field type.
 | `u.content_type` | `Str` — the client's claim, unverified |
 | `u.bytes` | `Str` — the file itself |
 | `u.len()` | how big it is |
+| `u.saveTo(dir, name)` | `!void` — write it into a [`Dir`](#dir) under **a name of yours** |
+
+`saveTo` replaces the file at `name` or leaves it untouched: the bytes go to a
+temporary name beside it and one rename puts them in place, so a request
+serving that same name out of the same `Dir` never reads it half-written
+([ADR 0123](adr/0123-a-file-is-written-by-the-engine.md)). Handing `u.filename`
+in as the name is `error.NameNotAllowed`, not a path resolved against the
+directory.
 
 ## `Str`
 
@@ -980,6 +988,7 @@ A directory, opened once and held open — what a service hands a `FileBody`.
 | `Dir.open(path)` | `!Dir` — relative to the working directory the server runs in. Startup work |
 | `d.close()` | |
 | `d.openFile(name)` | `!File` — a name inside it, resolved by the kernel against the descriptor |
+| `d.writeFileAtomic(name, bytes)` | `!void` — replace `name` with `bytes`, all of it or none of it |
 
 Nothing here resolves a path, which is why a name is a name: `openFile` hands it
 to the kernel with the directory, so there is no normalisation step to get

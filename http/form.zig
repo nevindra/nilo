@@ -35,7 +35,9 @@ const std = @import("std");
 
 const convert = @import("convert.zig");
 const ctx_mod = @import("ctx.zig");
+const bulkhead = @import("bulkhead.zig");
 const fail = @import("fail.zig");
+const filebody = @import("filebody.zig");
 const naming = @import("names.zig");
 const router = @import("router.zig");
 const str_mod = @import("nilo_core");
@@ -90,6 +92,44 @@ pub const Upload = struct {
     /// How big the file is.
     pub fn len(self: Upload) usize {
         return self.bytes.len();
+    }
+
+    /// Write the file into `dir` under `name`, replacing whatever was there.
+    ///
+    /// ```zig
+    /// fn setAvatar(uploads: *Uploads, account: u32, incoming: nilo.Form(Avatar)) !nilo.Status(201, void) {
+    ///     var buf: [32]u8 = undefined;
+    ///     const name = try std.fmt.bufPrint(&buf, "{d}.png", .{account});
+    ///     try incoming.value.image.saveTo(uploads.dir, name);
+    ///     return .{};
+    /// }
+    /// ```
+    ///
+    /// The `Dir` is a service opened once at startup, the same one a
+    /// `FileBody` is handed to serve out of.
+    ///
+    /// **`name` is yours to choose and `filename` is the client's**, which is
+    /// the distinction this exists to make hard to get wrong. A browser sends
+    /// whatever the machine it came from called the file and a stranger sends
+    /// whatever they like — `../../etc/cron.d/anything`, a NUL the kernel
+    /// truncates at, a drive letter on Windows. Handing `filename` straight in
+    /// is `error.NameNotAllowed` rather than a path resolved against the
+    /// directory, by the same check `sendFile` makes on the way out
+    /// ([ADR 0123](../docs/adr/0123-a-file-is-written-by-the-engine.md)).
+    ///
+    /// **The file is replaced, or it is not touched.** The bytes go to a
+    /// temporary name beside it and one rename puts them in place, so another
+    /// request serving that same name — through `sendFile`, out of the same
+    /// `nilo.Dir` — reads the old file or the new one and never the truncated
+    /// one that an open-and-write leaves on the disk while it writes.
+    ///
+    /// The fiber parks for the write and the executor thread goes on serving
+    /// every other connection it holds. Nothing is buffered, because the bytes
+    /// are already here: one write of `len()` bytes, and no buffer on a stack
+    /// the connection would then hold (ADR 0063).
+    pub fn saveTo(self: Upload, dir: bulkhead.Dir, name: []const u8) !void {
+        if (filebody.checkName(name) != null) return error.NameNotAllowed;
+        try dir.writeFileAtomic(name, self.bytes.view());
     }
 };
 
@@ -751,7 +791,6 @@ test "a urlencoded form reads a plus as a space, the way a browser writes one" {
 }
 
 fn expectFails(comptime T: type, arena: std.mem.Allocator, content_type: []const u8, body: []const u8, says: []const u8) !void {
-    const bulkhead = @import("bulkhead.zig");
     var in_flight = fail.InFlight{};
     in_flight.startRequest("POST", "/form");
     const previous = bulkhead.setFallbackSlot(&in_flight);
@@ -1055,7 +1094,6 @@ test "a form past that bound is refused rather than quietly cut short" {
     var body = try formOfParts(testing.allocator, max_parts * 2);
     defer body.deinit(testing.allocator);
 
-    const bulkhead = @import("bulkhead.zig");
     var in_flight = fail.InFlight{};
     in_flight.startRequest("POST", "/form");
     const previous = bulkhead.setFallbackSlot(&in_flight);
@@ -1068,5 +1106,58 @@ test "a form past that bound is refused rather than quietly cut short" {
     try testing.expectEqualStrings(
         "this form has more parts than nilo reads from one, which is 256",
         in_flight.failure.message(),
+    );
+}
+
+test "an upload is written under a name the handler chose, and the client's own name is refused" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // The filename a stranger can send, arriving intact — the parser's job is
+    // to hand it over unchanged, and `saveTo`'s is to refuse it.
+    const filled = try read(WithAvatar, arena.allocator(), multipart_type, comptime multipart(&.{
+        "Content-Disposition: form-data; name=\"email\"\r\n\r\nwati@example.dev",
+        "Content-Disposition: form-data; name=\"avatar\"; filename=\"../../etc/cron.d/anything\"\r\n" ++
+            "Content-Type: image/png\r\n\r\n\x89PNG\r\n\x1a\n bits",
+    }));
+
+    // `.iterate` because the leftovers are checked below, and a directory
+    // opened without it panics inside the standard library rather than
+    // failing.
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    // Something longer already under the name, so a short write that left the
+    // tail of it behind would read back wrong.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "avatar-7.png", .data = "an older and much longer avatar" });
+
+    var path_buf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const dir = try bulkhead.Dir.open(path);
+    defer dir.close();
+
+    try filled.avatar.saveTo(dir, "avatar-7.png");
+
+    var read_buf: [64]u8 = undefined;
+    try testing.expectEqualStrings(
+        "\x89PNG\r\n\x1a\n bits",
+        try tmp.dir.readFile(std.testing.io, "avatar-7.png", &read_buf),
+    );
+
+    // The temporary file the rename came from is gone: a directory an
+    // application serves out of would otherwise fill with 16-hex-digit
+    // leftovers, one per upload.
+    var count: usize = 0;
+    var entries = tmp.dir.iterate();
+    while (try entries.next(std.testing.io)) |entry| {
+        try testing.expectEqualStrings("avatar-7.png", entry.name);
+        count += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), count);
+
+    // And the name the client sent is an error rather than a path resolved
+    // against the directory, which is the whole reason this method exists.
+    try testing.expectError(
+        error.NameNotAllowed,
+        filled.avatar.saveTo(dir, filled.avatar.filename.view()),
     );
 }

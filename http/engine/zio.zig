@@ -1044,6 +1044,36 @@ pub const Dir = struct {
     pub fn openFile(self: Dir, name: []const u8) !File {
         return .{ ._file = try self._dir.openFile(name, .{ .allow_directory = false }) };
     }
+
+    /// Write `bytes` to `name` inside this directory, replacing what was
+    /// there, and leave nothing half-written behind if the write fails.
+    ///
+    /// A randomly named file next to the destination takes the bytes and one
+    /// rename puts it in place, so a reader of `name` — `sendFile`, a minute
+    /// later, in this same server — sees the file it had or the file it now
+    /// has, and never the truncated one that an open-and-write leaves visible
+    /// for the length of the write
+    /// ([ADR 0123](../../docs/adr/0123-a-file-is-written-by-the-engine.md)).
+    ///
+    /// Driven by the runtime exactly as `openFile` is: zio routes a
+    /// descriptor the loop cannot poll to its own thread pool rather than
+    /// issuing the call on the loop thread, so the fiber parks and the
+    /// executor goes on serving the other connections it holds.
+    pub fn writeFileAtomic(self: Dir, name: []const u8, bytes: []const u8) !void {
+        var atomic = try self._dir.createFileAtomic(name, .{});
+        // Removes the temporary file, including on the path where the fiber
+        // is cancelled — after `replace` there is nothing left to remove.
+        defer atomic.deinit();
+
+        // Nothing to buffer: every byte is already here, and this runs on a
+        // stack the connection holds for as long as it lives (ADR 0063).
+        var no_buffer: [0]u8 = .{};
+        var out = atomic.file.stdWriter(&no_buffer);
+        try out.interface.writeAll(bytes);
+        try out.interface.flush();
+
+        try atomic.replace();
+    }
 };
 
 /// One open file.

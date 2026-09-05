@@ -870,35 +870,6 @@ are both already written.
 guesses wrong is worse than one that makes the type say it — which is a marker,
 and this repository already has one shape for that (`nilo_json`).
 
-**An `Upload` has no way to reach the disk, and the missing piece is in the
-Engine.** `u.bytes` is the file, in the request arena, and writing it out is
-the caller's — including the part that is easy to get wrong. `u.filename` is
-what the client said, so a `..`, an absolute path, a NUL and on Windows a drive
-letter all have to be refused before anything is opened, and
-`filebody.checkName` already refuses exactly those.
-
-That check was the half this looked like it needed, and it is not the half that
-is missing. **`bulkhead.Dir` can only open**: there is no `createFile` and no
-write, so `u.saveTo(dir, name)` has nowhere to put the bytes. Adding one means
-the Engine, and it means answering what a two-megabyte write does to the fiber
-that issues it — a blocking `write` holds the executor thread every other
-connection on it is being served by, which is what `nilo.blocking` exists for
-and what nothing on the file path has needed until now.
-
-**The design question was answered upstream and nobody had looked.** zio has
-`Dir.createFile`, `File.writer(buffer)` — a `std.Io.Writer` whose drain goes
-through the runtime — and `Dir.createFileAtomic`, which creates a temporary file
-in the destination's own directory so the final move is a rename rather than a
-copy. Its `fs.zig` routes an fd the loop cannot poll to a thread pool, so a
-file write parks the fiber instead of holding the executor: the answer is an
-Engine operation, and the alternative — a hop to `nilo.blocking` — is not
-needed. `engine.Dir` and `engine.File` wrap `openFile`, `size` and `reader`
-already, and this is three more wrappers of the same shape.
-
-**Waiting on: ready.** `filebody.checkName` is the refusal half and it is
-written; `u.saveTo(dir, name)` is what is missing, and whether it uses the
-atomic path or the plain one is the only thing left to decide.
-
 **Every method nilo does not name is the same method.** `http1.Method` holds
 seven and `other`, and `methodFrom` maps everything else onto that one tag, so
 a route registered for `.other` answers `PROPFIND`, `PURGE` and `LINK` alike

@@ -829,6 +829,7 @@ const Snippets = struct {
         "docs/reference.md",
         "docs/guide/sessions.md",
         "docs/guide/config.md",
+        "docs/guide/forms.md",
     };
 
     const opens = "<!-- compiles";

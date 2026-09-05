@@ -314,6 +314,31 @@ a suite written before it existed keeps asserting what it always asserted
 
 `send(&app, raw)` is unchanged and applies neither: the bytes are yours.
 
+#### `Upload.saveTo(dir, name)` — an uploaded file reaching a disk
+
+```zig
+fn setAvatar(uploads: *Uploads, account: u32, incoming: nilo.Form(Avatar)) !nilo.Status(201, void) {
+    var buf: [32]u8 = undefined;
+    const name = try std.fmt.bufPrint(&buf, "{d}.png", .{account});
+    try incoming.value.image.saveTo(uploads.dir, name);
+    return .{};
+}
+```
+
+An `Upload` used to hand over the bytes and stop there, so every upload handler
+ended in the same four lines of `std.fs` — which block the executor thread and
+every other connection it is serving, and which resolve
+`../../etc/cron.d/anything` if the name came from `u.filename`. `saveTo` refuses
+that name by the same check `sendFile` makes on the way out, and the fiber parks
+for the write instead of the thread blocking
+([ADR 0123](./docs/adr/0123-a-file-is-written-by-the-engine.md)).
+
+**The file is replaced or it is not touched.** The bytes go to a temporary name
+beside it and one rename puts them in place, which matters because the directory
+an application uploads into is usually the one it serves out of: a request
+reading that name mid-write gets the old file rather than a truncated one.
+`nilo.Dir` gained the operation under it, `d.writeFileAtomic(name, bytes)`.
+
 #### Smaller
 
 - **`union(enum)` as a request body**, which used to be a compile error on the

@@ -112,6 +112,42 @@ Latin-1. A part carrying **only** the encoded one is a 400 naming the part
 rather than read as a text field full of upload bytes, which is what it used to
 become. No browser sends that shape; a hand-rolled HTTP client can.
 
+### Writing it to disk
+
+`saveTo` puts the bytes in a directory, under a name you choose:
+
+<!-- compiles -->
+```zig
+const Uploads = struct { dir: nilo.Dir };
+
+const Avatar = struct {
+    caption: nilo.Str,
+    image: nilo.Upload,
+};
+
+fn setAvatar(uploads: *Uploads, account: u32, incoming: nilo.Form(Avatar)) !nilo.Status(201, void) {
+    var buf: [32]u8 = undefined;
+    const name = try std.fmt.bufPrint(&buf, "{d}.png", .{account});
+    try incoming.value.image.saveTo(uploads.dir, name);
+    return .{};
+}
+```
+
+The `Dir` is opened once at startup and held as a service, exactly as
+[`FileBody`](responses.md#files) takes one — and it can be the same
+one, which is the case `saveTo` is careful about. **The file is replaced or it
+is not touched**: the bytes go to a temporary name beside it and one rename
+puts them in place, so a request serving that name while this one writes reads
+the old file rather than a truncated one
+([ADR 0123](../adr/0123-a-file-is-written-by-the-engine.md)).
+
+Passing `image.filename` in as the name is `error.NameNotAllowed` rather than a
+path resolved against the directory — the same check `sendFile` makes on the way
+out, for the same reason.
+
+The fiber parks for the write and the thread carries on serving every other
+connection it holds, so there is nothing to hand to `nilo.blocking`.
+
 ### How big a form can be
 
 The whole body is read into the request arena, bounded by `listen()`'s

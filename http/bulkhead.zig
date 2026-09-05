@@ -724,6 +724,30 @@ pub const Dir = struct {
         defer watchdog.waitedAnywhere(w);
         return .{ ._inner = try self._inner.openFile(name) };
     }
+
+    /// Write `bytes` to `name` inside this directory, replacing what was
+    /// there. Either the whole file lands or none of it does: a reader of
+    /// `name` never sees it half-written
+    /// ([ADR 0123](../docs/adr/0123-a-file-is-written-by-the-engine.md)).
+    ///
+    /// **The name is not checked here.** `filebody.checkName` is what refuses
+    /// a `..`, an absolute path, a NUL and a Windows drive letter, and the
+    /// caller has to have asked it — `Upload.saveTo` does. This is the same
+    /// division `openFile` already has: the Bulkhead says what the Engine can
+    /// do, and what a name is allowed to be is a layer up.
+    ///
+    /// The whole write is one call rather than an open, a writer and a close,
+    /// because that is the smaller thing to ask of an Engine: a `File` open
+    /// for writing is a second lifetime for every engine to get right, and
+    /// nothing here needs one.
+    ///
+    /// The fiber parks for the length of the call rather than the thread
+    /// blocking, which is why this is here and not behind `nilo.blocking`.
+    pub fn writeFileAtomic(self: Dir, name: []const u8, bytes: []const u8) !void {
+        const w = watchdog.waitingAnywhere();
+        defer watchdog.waitedAnywhere(w);
+        return self._inner.writeFileAtomic(name, bytes);
+    }
 };
 
 /// One open file, on its way to a client.
