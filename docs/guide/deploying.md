@@ -205,6 +205,14 @@ A header with fewer entries than there are hops means the chain is not the one
 configured, so `clientIp()` falls back to `peer()` rather than reading the
 closest thing to hand, which would be the forgery.
 
+**`allowance.with` is the first thing in nilo that acts on this**, so getting
+`trusted_hops` wrong stops being an inconvenience and becomes an outage: leave
+it at zero behind a proxy and every request looks like it came from the proxy,
+one address spends the whole allowance, and everybody else gets a 429. nilo says
+so in the log the first time it refuses a request that carried an
+`X-Forwarded-For` and was counted against the connection's own address — see
+[Middleware](./middleware.md#when-one-client-asks-too-often).
+
 Requests-per-second figures now exist, on one quiet box:
 [`bench/result/http.md`](../../bench/result/http.md) for nilo alone and
 [`../comparison.md`](../comparison.md) against eight other servers. Read the

@@ -32,6 +32,7 @@
 
 const std = @import("std");
 
+const accept_mod = @import("accept.zig");
 const bulkhead = @import("bulkhead.zig");
 
 pub const Options = struct {
@@ -39,12 +40,26 @@ pub const Options = struct {
     index: []const u8 = "index.html",
     /// Sent as `Cache-Control` on every file. Empty leaves the header off.
     cache_control: []const u8 = "public, max-age=3600",
-    /// Served for any path under the prefix that names no file — what a
-    /// single-page app needs so that a browser reload on `/users/42`
-    /// reaches the client-side router instead of a 404. Empty turns it off.
+    /// Served for a path under the prefix that names no file and could be a
+    /// browser opening a page — what a single-page app needs so that a reload
+    /// on `/users/42` reaches the client-side router instead of a 404. Empty
+    /// turns it off.
     ///
     /// The name is relative to the directory, e.g. `"index.html"`.
     spa_fallback: []const u8 = "",
+    /// Which requests the fallback answers (ADR 0109).
+    ///
+    /// `.navigations` is the default and is the rule every single-page server
+    /// arrives at: a request that asked for HTML gets the page, and a request
+    /// for `/app.abc123.js` that is not there gets a 404 saying so. Answering
+    /// a missing asset with a page turns a stale build hash into a syntax
+    /// error on line 1 of something that is not JavaScript, and a `fetch()`
+    /// into a JSON parse error, neither of which names the file.
+    ///
+    /// `.any_path` is what shipped before 0.2.0 and is kept for an app that
+    /// depends on it. It answers every path under the prefix, which is the
+    /// behaviour above.
+    spa_fallback_for: Fallback = .navigations,
     /// The line between a file held in memory and one left where it is.
     ///
     /// At or below it nothing has changed: the file is read at load,
@@ -99,7 +114,52 @@ pub const Options = struct {
     /// was already one packet. A file that comes out no smaller is dropped
     /// whatever this says.
     compress_min_bytes: usize = 1024,
+
+    /// Which requests a single-page fallback answers.
+    pub const Fallback = enum { navigations, any_path };
 };
+
+/// Whether a request that named no file could be a browser opening a page,
+/// which is the question `.navigations` asks before it answers with one
+/// (ADR 0109).
+///
+/// Two tests, in the order a client makes them answerable. What a browser
+/// sends when somebody types a URL or clicks a link is an `Accept` naming
+/// `text/html`, and no asset request has one: a `<script src>`, a `<link>`
+/// and an `<img>` all send `*/*`, and a `fetch()` for JSON usually says so.
+/// That is the whole of the first test and it is exact.
+///
+/// The second is for a client that expressed no preference — `curl`, a
+/// health checker, an old crawler — where the path is all there is to go on.
+/// A last segment with an extension in it is an asset, and one without is a
+/// deep link, which is the rule that keeps `curl /users/42` answering the
+/// page it answered before while `/app.abc123.js` becomes the 404 it should
+/// always have been.
+///
+/// What it does not catch is a `fetch()` that sends `*/*` to an extensionless
+/// path. That request is indistinguishable from a deep link at this layer and
+/// gets the page, exactly as it did before — said out loud in the guide
+/// rather than guessed at.
+pub fn navigational(path: []const u8, accept_header: ?[]const u8) bool {
+    return switch (accept_mod.asks(accept_header, "text/html")) {
+        .named => true,
+        .refused => false,
+        .anything, .unsaid => !hasExtension(path),
+    };
+}
+
+/// Whether the last segment of `path` ends in something that looks like a
+/// file extension.
+///
+/// A leading dot is not one — `/.well-known/x` and `/.env` are names rather
+/// than extensions — and a trailing dot is not one either, because there is
+/// nothing after it to be the type.
+fn hasExtension(path: []const u8) bool {
+    const slash = std.mem.lastIndexOfScalar(u8, path, '/');
+    const name = if (slash) |at| path[at + 1 ..] else path;
+    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return false;
+    return dot > 0 and dot + 1 < name.len;
+}
 
 pub const File = struct {
     /// The URL this answers to, prefix included: `/assets/app.css`.
@@ -235,6 +295,9 @@ pub const Set = struct {
     /// Sorted by url, so a lookup is a binary search rather than a walk.
     files: []File,
     fallback: ?*const File,
+    /// Which requests `fallback` answers — `Options.spa_fallback_for`, kept
+    /// here because the decision is per directory and `App` holds several.
+    fallback_for: Options.Fallback = .navigations,
     index: []const u8,
     /// The directory itself, held open for as long as the App is, because a
     /// spilled file is opened relative to it on every request that asks for
@@ -255,7 +318,14 @@ pub const Set = struct {
         self.dir = null;
     }
 
-    /// The file `path` names, or null if this set does not answer for it.
+    /// The file `path` actually names, or null if this set holds no such
+    /// file.
+    ///
+    /// **The single-page fallback is not here**, and that is the seam
+    /// ADR 0109 moved: a lookup that answers with `index.html` for every
+    /// path there is cannot tell a caller whether the file was found, so the
+    /// caller could not decide anything about the miss. `fallbackFor` is the
+    /// other half and the request decides which of the two it gets.
     pub fn find(self: *const Set, path: []const u8) ?*const File {
         if (!underPrefix(self.prefix, path)) return null;
 
@@ -271,7 +341,23 @@ pub const Set = struct {
             }
         }
 
-        return self.fallback;
+        return null;
+    }
+
+    /// The page this set answers a miss under its prefix with, if it has one
+    /// and if this request is the kind it is for.
+    ///
+    /// `accept_header` is the request's `Accept`, or null when it sent none.
+    /// A set configured `.any_path` never asks.
+    pub fn fallbackFor(
+        self: *const Set,
+        path: []const u8,
+        accept_header: ?[]const u8,
+    ) ?*const File {
+        const page = self.fallback orelse return null;
+        if (!underPrefix(self.prefix, path)) return null;
+        if (self.fallback_for == .any_path) return page;
+        return if (navigational(path, accept_header)) page else null;
     }
 
     /// Where a file this Set handed back sits in `files`, for a caller
@@ -614,6 +700,7 @@ pub fn load(
             // fallback that is not there.
             return error.StaticDirNotFound;
         };
+        set.fallback_for = options.spa_fallback_for;
     }
 
     // Held bytes and spilled files are two different numbers and are said as
@@ -1079,7 +1166,72 @@ test "the SPA fallback catches unknown paths but not unknown prefixes" {
 
     try testing.expectEqualStrings("/app.js", set.find("/app.js").?.url);
     // A browser reload deep inside a client-side route.
-    try testing.expectEqualStrings("/index.html", set.find("/users/42").?.url);
+    const browser = "text/html,application/xhtml+xml,*/*;q=0.8";
+    try testing.expect(set.find("/users/42") == null);
+    try testing.expectEqualStrings("/index.html", set.fallbackFor("/users/42", browser).?.url);
+}
+
+test "a fallback answers a page a browser asked for and not an asset that is gone" {
+    var set = try fakeSet(testing.allocator, "/", &.{ "/index.html", "/app.js" });
+    defer set.deinit();
+    set.fallback = set.lookup("/index.html").?;
+
+    const browser = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+    const script = "*/*";
+
+    // The whole point: a stale build hash is a 404 naming the file rather
+    // than a page a parser then reports a syntax error on (ADR 0109). A
+    // `<script src>` is the request that fetches one, and it says `*/*`.
+    try testing.expect(set.fallbackFor("/app.abc123.js", script) == null);
+    // Nor is a JSON call to a path that is not a route a page.
+    try testing.expect(set.fallbackFor("/api/orders", "application/json") == null);
+
+    // Somebody typing that same URL into the address bar is a different
+    // request and gets the page: they asked for HTML and there is one.
+    // Nothing fetches a script this way, which is what makes the two
+    // separable at all.
+    try testing.expectEqualStrings("/index.html", set.fallbackFor("/app.abc123.js", browser).?.url);
+
+    // A deep link still is one, however it arrives.
+    try testing.expectEqualStrings("/index.html", set.fallbackFor("/users/42", browser).?.url);
+    try testing.expectEqualStrings("/index.html", set.fallbackFor("/users/42", script).?.url);
+    try testing.expectEqualStrings("/index.html", set.fallbackFor("/users/42", null).?.url);
+
+    // And nothing outside the prefix is this set's business either way.
+    var under = try fakeSet(testing.allocator, "/app", &.{"/app/index.html"});
+    defer under.deinit();
+    under.fallback = under.lookup("/app/index.html").?;
+    try testing.expect(under.fallbackFor("/other/42", browser) == null);
+}
+
+test "a set told to answer any path does what it did before 0.2.0" {
+    var set = try fakeSet(testing.allocator, "/", &.{ "/index.html", "/app.js" });
+    defer set.deinit();
+    set.fallback = set.lookup("/index.html").?;
+    set.fallback_for = .any_path;
+
+    try testing.expectEqualStrings("/index.html", set.fallbackFor("/app.abc123.js", "*/*").?.url);
+    try testing.expectEqualStrings("/index.html", set.fallbackFor("/api/orders", "application/json").?.url);
+}
+
+test "what a navigation is, when the client said nothing about it" {
+    // An extension means an asset, and a bare segment means a route.
+    try testing.expect(!navigational("/app.abc123.js", null));
+    try testing.expect(!navigational("/assets/logo.png", "*/*"));
+    try testing.expect(navigational("/users/42", null));
+    try testing.expect(navigational("/", null));
+    try testing.expect(navigational("/settings/", "*/*"));
+
+    // A leading dot is a name rather than an extension, and a trailing one
+    // has nothing after it to be a type.
+    try testing.expect(navigational("/.well-known/thing", null));
+    try testing.expect(navigational("/report.", null));
+
+    // What the client says wins over the shape of the path, in both
+    // directions: a browser asking for a page with a dot in the route gets
+    // one, and an asset request that named a type does not.
+    try testing.expect(navigational("/releases/v1.2", "text/html"));
+    try testing.expect(!navigational("/users/42", "application/json"));
 }
 
 // ---- gzip, done once when the App is built ----

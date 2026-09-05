@@ -68,7 +68,7 @@ other module's.
 | [`nilo_config`](#nilo_config-settings) | needs no loop | reading a name the field is not called |
 | [`nilo_pw`](#nilo_pw-hashing-a-password) | needs no loop | a Cost floor that weighs the wrong half, and a patch `std` should have |
 | [`nilo_fetch`](#nilo_fetch-calling-somebody-elses-api) | borrows the loop | 4,139 bytes of stack per idle connection, and nothing measured through TLS |
-| [`nilo_http`](#nilo_http-the-server) | owns the loop | no rate limiting at all, a WebSocket route no test can drive, and a long tail |
+| [`nilo_http`](#nilo_http-the-server) | owns the loop | an allowance that can only be keyed on the address, nothing that reads a `Forwarded` header, and a long tail |
 | [`nilo_sql`](#nilo_sql-postgres-and-sqlite) | borrows the loop | a schema check that refuses the most ordinary SQLite table there is, four things the SQLite half cannot do that three documents say it can, and where migrations live |
 | [`nilo_s3`](#nilo_s3-object-storage) | borrows the loop | nothing measured through TLS, and no `LIST`, `COPY` or multipart |
 
@@ -383,38 +383,23 @@ accepted Zig's own literal grammar
 
 ### Next
 
-**1. Nothing refuses a client that asks too often.** There is no rate limiting
-anywhere in nilo — not a middleware, not an option, not a type. `fail.tooManyRequests`
-exists and returns 429, and **nothing in the framework ever calls it**.
-`Ctx.clientIp()` and `listen(.{ .trusted_hops = … })` were built for the three
-readers [ADR 0028](./adr/0028-tls-is-terminated-in-front.md) names — rate limits,
-audit logs, blocklists — and the first of those three has no caller. What stands
-in for it today is `.max_connections`, and that counts sockets **per process
-rather than per address** (`Capacity` in `http/engine/zio.zig`), so one client
-opening ten thousand connections closes the door on everybody else and the log
-line blames the machine.
+**1. An allowance can only be keyed on the address.** `allowance.with` counts
+against `clientIp()`, which is the right key for a scraper and the wrong one for
+everything the application knows: which account signed in, which API key was
+presented, which tenant the request belongs to. Ten accounts behind one office
+NAT share an allowance they should not, and one account with ten machines gets
+ten. The table, the sliding window and the eviction are all built and none of
+them cares what the key is
+([ADR 0114](./adr/0114-an-allowance-is-a-table-sized-while-compiling.md)) — what
+is missing is `allowance.keyed(fn (*Ctx) []const u8, .{ … })`, where returning
+nothing means "not counted".
 
-The shape has to pass [ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md)
-before it is worth writing, and that rules out how every other framework does it:
-a map keyed by an address string means a hash and an allocation on the path of
-every request it guards. What fits is the shape `app.metrics` already proved — a
-**fixed table sized once at `listen()`**, indexed by a hash of `clientIp()`, with
-the window and the ceiling settled while compiling, registered like CORS is
-(`app.use(…with(.{ … }))`) so a route that is not guarded pays nothing.
-
-Three questions decide it and none is answered:
-
-- **What a full table does.** A fixed number of slots means two clients can land
-  on one, and "your neighbour used your allowance" is a worse failure than no
-  limiting at all. Eviction, or slots-per-shard, or a counter that decays.
-- **Fixed window or sliding.** A fixed window lets twice the ceiling through
-  across a boundary; a sliding one costs more state per slot.
-- **What it is called.** [CONTEXT.md](../CONTEXT.md) already refuses *limiter*
-  and *throttle* under the Gate's entry, so this needs a noun of its own before
-  it has an API.
-
-**Waiting on: a design.** The mechanism is ordinary; the three answers above are
-what makes it shippable rather than a default that guesses.
+**Waiting on: a design** for what the key's bytes are allowed to be. A `Str` out
+of the request arena is gone by the next request, which is fine for a hash and
+not for the fingerprint, so either the fingerprint has to be enough on its own —
+it is 44 bits, and a collision hands somebody else's allowance to a *named
+account* rather than to an address — or a key has to be copied into the slot,
+which is a different table.
 
 **2. Reloading without a restart: static files, then the server.** A development
 annoyance rather than a design hole, because a deploy restarts anyway. The static
@@ -444,18 +429,7 @@ that ask for one.
 what `Bound(Query(T))` hands back — an `Outcome` is one reason per field, and a
 list can fail at element three.
 
-**4. A WebSocket route cannot be driven from a test at all.**
-`testing.Client` can send a header and keep a cookie now
-([ADR 0108](./adr/0108-the-test-client-can-do-what-a-client-does.md)), and this
-is the half that was left: there is no way to hand the App a reader that answers
-frames, so every WebSocket behaviour in the suite is tested through
-`app.handleRequest` against a fixed buffer that cannot answer back.
-
-**Waiting on: a design.** A fixed reader cannot carry a conversation, so this
-wants a reader the test drives turn by turn — which is a shape the harness does
-not have and is the same one `bench/ws_server.zig` would want for a Room.
-
-**5. `permessage-deflate`.** Negotiated in the handshake, and a compressor per
+**4. `permessage-deflate`.** Negotiated in the handshake, and a compressor per
 connection is memory that has not been budgeted.
 
 **Waiting on: a number.** The per-connection cost has to be priced against the
@@ -479,35 +453,6 @@ argued against for an operation and has never been argued about for a *request*.
 
 **Waiting on: a design** for where a whole-request deadline lives, given that
 a stream and a WebSocket must not have one.
-
-**A single-page app answers 200 with `index.html` for an asset that is not
-there.** `static.Set.find` falls through to `self.fallback` for every path under
-the prefix once the lookup and the index have missed, so `staticWith(.{
-.spa_fallback = "index.html" })` turns a stale build hash, a typo'd import and a
-deleted file into a 200 carrying `text/html`. A browser fetching `app.abc123.js`
-gets HTML and reports a syntax error on line 1; a `fetch()` gets HTML and reports
-a JSON parse error. Neither names the missing file.
-
-The fix is the rule every SPA server ends up with — fall back only for a request
-that could be a navigation, which is a path with no file extension, or an
-`Accept` that prefers `text/html`. `App.findStatic` already asks the docs set
-first for the same class of reason.
-
-**Waiting on: a design.** Which of the two tests to use, and whether an app can
-turn it off, given that the current behaviour is what shipped.
-
-**A CORS origin list is settled while compiling, so it cannot come from the
-environment.** `cors.with` takes `comptime Options` and unrolls the compare over
-the literals, which is what makes a named origin cost no allocation
-([ADR 0099](./adr/0099-one-allow-origin-header-means-the-list-is-matched-not-formatted.md)).
-The consequence is that the same binary cannot serve staging and production,
-because the front end's address is a fact about the deployment and every other
-deployment fact in nilo arrives through `nilo_config` at run time. Today the
-answer is to recompile, or to write the middleware yourself.
-
-**Waiting on: a design** that keeps the comptime path for an app that names its
-origins in code, since that path is the measured one, while letting a runtime
-list in beside it.
 
 **A byte slice that is not UTF-8 goes out as a JSON string, and `std.json` would
 have written a list of numbers.** `json.writeString` escapes quotes, backslashes
@@ -852,6 +797,196 @@ there is, so there is nothing to precompute for.
 **Waiting on: accepted.** One arena allocation on a cold path, bounded by the
 number of `use` calls.
 
+**Nothing can be listened on but an IPv4 or IPv6 port.** `bulkhead.Options`
+carries `address` and `port`, and `engine/zio.zig` hands them to
+`zio.net.IpAddress.parseIp`, so a unix socket has nowhere to go and neither
+does a listener somebody else opened. Two things follow from that. The proxy
+[ADR 0028](./adr/0028-tls-is-terminated-in-front.md) puts in front reaches the
+server over loopback TCP because there is nothing else to reach it over — and
+the same swap measured on `nilo_sql`'s outbound side was worth 359k req/s to
+458k with p99 halved ([`bench/result/sql.md`](../bench/result/sql.md)), which
+is the argument for measuring the inbound half rather than the answer to it.
+And a process that cannot be handed an open descriptor cannot take a socket
+over from the process it replaces, so a deploy with nothing in front of it
+drops the connections in flight whatever `shutdown_grace_ms` says.
+
+The option is one more variant on `address`. The work is in the Engine, which
+is the only file allowed to name zio
+([ADR 0002](./adr/0002-zio-as-the-engine-behind-the-bulkhead.md)).
+
+**Waiting on: a number** — what a unix socket is worth on the way in, on this
+box, against loopback TCP.
+
+**`Forwarded` is not read, only the `X-` headers are.** `clientIp`, `host` and
+`scheme` read `X-Forwarded-For`, `X-Forwarded-Host` and `X-Forwarded-Proto`
+under `trusted_hops`
+([ADR 0112](./adr/0112-a-request-can-be-read-past-the-parts-a-handler-names.md)).
+RFC 7239's `Forwarded: for=…;host=…;proto=…` says the same three things in one
+header with a grammar of its own, and a deployment whose proxy writes only that
+one gets the defaults — the socket's address, the `Host` header, and `"http"`.
+
+Nothing in the comparison writes it by default: nginx, HAProxy, Envoy, the
+cloud load balancers and Cloudflare all send the `X-` headers, and several send
+both. So this is a gap with no reported caller rather than a hole.
+
+**Waiting on: a caller** running a proxy that writes `Forwarded` and nothing
+else.
+
+**A proxy is trusted by how many stand in front, not by which one it is.**
+`trusted_hops` counts entries from the right of `X-Forwarded-For`, which is
+sound arithmetic and is all there is. There is no way to say the header counts
+only when the connection came from `10.0.0.0/8`, and no way to describe a
+deployment where the count differs by path — a load balancer adding a hop for
+public traffic while a health check reaches the pod directly. Gin takes a list
+of CIDRs and Fiber takes ranges plus the loopback and private classes; both
+answer that question and a hop count cannot.
+
+What it costs today is small, because counting from the right already resists
+a forged header. What it costs is that a wrong count is silent: `clientIp()`
+returns something that looks like an address either way, and **Next 1** above
+is the caller that would make a wrong answer expensive.
+
+**Waiting on: a caller** with a deployment where the number of hops is not one
+number.
+
+**A response a handler wrote can never answer 304.** An ETag is made in
+`static.zig` — `etagFor` over a held file's bytes, `etagForSpilled` over a
+mtime and a size — and matched by `static.etagMatches` against an
+`If-None-Match` or the `If-Range` that `range.parse` reads. Those are the file
+paths, and they are the only paths there are. A JSON endpoint polled every
+five seconds sends the whole body every time, and a handler that wants to do it
+by hand gets no help either: it reads `c.header("If-None-Match")`, works
+something out, and calls `c.sendEmpty(304)`.
+
+The reason this is not simply a middleware is
+[ADR 0018](./adr/0018-the-trade-budget-has-three-axes.md). Hashing a response
+means the body exists before the head is written, which the streaming paths do
+not do, and it means a buffer to hash over. A weak validator the handler hands
+in — a row's `updated_at`, a version column — costs nothing and is the shape
+worth designing.
+
+**Waiting on: a design** for what the handler hands over, given that nothing in
+this framework should be hashing a body per request.
+
+**A header or a cookie cannot be bound to a struct.** The slots a handler
+argument can fill are `Query(T)`, `Form(T)`, a JSON body, `Session(T)`,
+`Bound(W)`, a path param, a service and a resolved value. `X-Tenant-Id`, an API
+version and an `Idempotency-Key` are read with `c.header` and converted by hand,
+though `convert.zig` and `bound.zig` are the two halves that would do it and
+are both already written.
+
+**Waiting on: a design** for how a field name becomes a header name.
+`x_tenant_id` → `X-Tenant-Id` is a guess with a rule under it, and a rule that
+guesses wrong is worse than one that makes the type say it — which is a marker,
+and this repository already has one shape for that (`nilo_json`).
+
+**An `Upload` has no way to reach the disk, and the missing piece is in the
+Engine.** `u.bytes` is the file, in the request arena, and writing it out is
+the caller's — including the part that is easy to get wrong. `u.filename` is
+what the client said, so a `..`, an absolute path, a NUL and on Windows a drive
+letter all have to be refused before anything is opened, and
+`filebody.checkName` already refuses exactly those.
+
+That check was the half this looked like it needed, and it is not the half that
+is missing. **`bulkhead.Dir` can only open**: there is no `createFile` and no
+write, so `u.saveTo(dir, name)` has nowhere to put the bytes. Adding one means
+the Engine, and it means answering what a two-megabyte write does to the fiber
+that issues it — a blocking `write` holds the executor thread every other
+connection on it is being served by, which is what `nilo.blocking` exists for
+and what nothing on the file path has needed until now.
+
+**Waiting on: a design** for what a file write is here: an Engine operation the
+fiber parks on, or a hop to the blocking pool.
+
+**Every method nilo does not name is the same method.** `http1.Method` holds
+seven and `other`, and `methodFrom` maps everything else onto that one tag, so
+a route registered for `.other` answers `PROPFIND`, `PURGE` and `LINK` alike
+and no two of them can be told apart or registered separately. `CONNECT` and
+`TRACE` are in the same bucket, which is the right thing to do with them and is
+not a decision anybody wrote down.
+
+**Waiting on: a caller.** WebDAV, a cache purge and a handful of internal APIs
+are the whole audience, and the shape that fixes it — a method carrying its own
+text — costs a string compare on the request path that an enum tag does not.
+
+**A request body that arrives compressed is refused rather than decoded.** A
+`Content-Encoding` other than `identity` is a 415 naming the header
+([ADR 0111](./adr/0111-a-body-under-an-encoding-nilo-cannot-read-is-refused.md)),
+which is the answer for a server that cannot read what a body carries. Decoding
+one is the inbound twin of the response-compression gap above and inherits the
+same 64 KB window problem.
+
+**Waiting on: a design**, the same one — a pool of compressors sized to the
+thread count, which would serve both directions.
+
+**Middleware cannot be attached to one route.** `use`, `useOn(prefix)`,
+`group().use` and `without` are the whole vocabulary, so guarding a single
+endpoint means a prefix that matches only it, or a group holding one route. Gin
+and Fiber both take middleware as extra arguments to the route itself.
+
+`without` is the other direction of the same question and is better than what
+either of them has
+([ADR 0080](./adr/0080-a-route-can-say-it-is-not-covered.md)), which is why
+this entry is a small one: the awkward case is a route wanting *more* than its
+neighbours, and a group of one says that, just not where the route is written.
+
+**Waiting on: a caller.**
+
+**A route has no name, and the route table cannot be read from outside.**
+Nothing enumerates routes, nothing prints them at startup — one `std.log.info`
+names the address and that is all — and there is no way to build a URL from a
+route the way Fiber's `Name` and `GetRouteURL` do. The table exists and metrics
+already index into it
+([ADR 0100](./adr/0100-the-route-table-is-the-registry.md)); it is simply not
+reachable.
+
+`app.docs()` answers most of "did my routes register" for an app that serves an
+API description, and none of it for an app that does not.
+
+**Waiting on: a caller.**
+
+**A streamed response is always chunked, so a body whose length is known loses
+it.** `Ctx.stream` sets `chunked` from the request's minor version and there is
+no option beside it, so a handler moving bytes out of something that knows how
+many there are — `nilo_s3`'s `bucket.stream` reports `len` before the first
+byte arrives — sends them with no `Content-Length`. A browser downloading that
+shows no progress, and a `Range` against it cannot be answered. The file paths
+do not have this problem: `sendFile` and `FileBody` both send a length.
+
+**Waiting on: a design** for what happens when the count and the promise
+disagree.
+[ADR 0097](./adr/0097-a-frame-that-lies-about-its-length-is-not-sent.md) is the
+same question one layer down, and its answer — refuse to send a frame that lies
+about its length — is the one to copy.
+
+**Nothing tells a handler its client has gone, and nothing cuts a slow handler
+off.** `error.Canceled` comes from a shutdown or from one of the four deadlines
+the Engine sets; a client closing its connection in the middle of a handler
+produces neither, so the work runs to the end and the response is written into
+a socket nobody is reading. `block_warning_ms` watches a handler holding its
+thread and only ever logs
+([ADR 0034](./adr/0034-the-thing-a-handler-holds-is-watched-at-run-time.md)),
+and there is no per-route deadline — which is Fiber's `timeout` middleware and
+Gin's request context. Gin gets the disconnect from `net/http` for nothing;
+Fiber does not have it either, so this is one framework ahead rather than two.
+
+**Waiting on: a design.** A cancel that fires mid-handler is a cancel every
+handler has to survive, which is `nilo.Mutex`, `nilo.sleep` and every Service
+at once, and
+[ADR 0104](./adr/0104-a-cleanup-path-is-not-cancellable.md) has already had to
+carve the cleanup path out of cancellation once.
+
+**A cookie's value arrives exactly as the client wrote it, decoded by nothing.**
+`Ctx.cookie` hands back the bytes between the delimiters and allocates nothing,
+which is the design and is stated in the reference. What is worth naming is the
+interop: Gin and Fiber both percent-decode on the way in, so a front end
+storing a cookie with `encodeURIComponent` reads one string from JavaScript and
+a different one from Zig.
+
+**Waiting on: accepted.** Decoding would cost an allocation per cookie read on
+a path that is deliberately free of them, and `nilo.percent.decode` is one call
+away for a caller who knows their cookie is encoded.
+
 ### Not decided
 
 **Whether nilo ships the response headers a browser reads as policy.**
@@ -941,6 +1076,73 @@ which is why ADR 0086 refused that shape rather than deferring it.
 
 **What would settle it: somebody who has written the loop twice** and can say
 which of those policies they had to pick, and what they picked.
+
+**Whether nilo answers in anything but JSON.** `c.sendJson`, a returned value
+and the API description are the whole serialisation story, beside
+`c.send(status, type, bytes)` for somebody who produced the bytes themselves.
+Gin ships XML, YAML, TOML, ProtoBuf and three JSON variants; Fiber ships XML,
+CBOR, MsgPack and JSONP, and lets the JSON encoder itself be replaced. Being
+JSON-only is a real decision here — it is part of what lets the signature
+settle the document
+([ADR 0017](./adr/0017-the-api-description-comes-from-the-signatures.md)) — and
+it has never been written as one, which is why this is here rather than in
+[Not coming](#not-coming).
+
+**What would settle it: an API that has to answer XML** because the consumer is
+somebody else's system that will not change. The question after that is whether
+the answer is `c.send` with a serialiser of the caller's, or a second writer
+inside this module — and the second costs binary size for every program that
+links it, the way the API description already does.
+
+**Whether a rule like "this is an email address" belongs in this repository.**
+`Bound` reports five reasons a field did not bind — `missing`, `not_a_number`,
+`not_true_or_false`, `not_a_choice`, `wrong_kind` — and `must` lets a handler
+add a rule of its own to the same 422
+([ADR 0082](./adr/0082-a-rule-of-your-own-joins-the-answer.md)). What is not
+here is the vocabulary everybody else ships: `email`, `min`, `max`, `len`,
+`oneof`, `url`, and Gin's `dive` for the elements of a list. Every application
+writes those predicates itself.
+
+The shape that would fit is not an annotation, and that is what makes the
+question live: a rule is already an ordinary Zig function handed to `must`, so
+`nilo.rules.email` would be a constant that costs nothing to a handler that
+does not name it. The argument against is that a validator's vocabulary never
+stops growing, and the reference says plainly today that this is not a
+validator.
+
+**What would settle it: three applications having written the same predicate**,
+which is the evidence that it is vocabulary rather than policy.
+
+**Whether a route can be scoped by host.** Everything matches on path. Fiber has
+`app.Domain(…)` and `c.Subdomains()`, and what people use them for is a tenant
+per subdomain, an admin surface on a hostname of its own, and an API beside a
+marketing site in one process. The `Host` header is required and checked here
+already
+([ADR 0101](./adr/0101-a-request-nobody-else-would-answer-is-refused.md)), so
+the fact is parsed; what does not exist is a way to route on it, since `useOn`
+and `group` both scope by path prefix.
+
+**What would settle it: a deployment that cannot put two processes behind the
+proxy instead**, since that is the answer today and it is a good one.
+
+**Which of the small middleware everybody else ships earn a place here.** Fiber
+ships thirty-two. Setting aside the ones already queued above — CSRF, security
+headers, compression — and the allowance, what is left is `basicauth`, `keyauth`,
+`healthcheck`, `favicon`, `etag`, `cache`, `idempotency`, `responsetime`,
+`redirect` (a map of old paths to new), `rewrite`, `proxy` and `skip`. Gin adds
+only `BasicAuth` to that list. Most are between three and ten lines against
+nilo's own middleware shape, and that is the argument on both sides: cheap to
+ship, and cheap for an application to write, which is how a framework
+accumulates them without ever deciding to.
+
+Three are worth more than the rest, on the evidence of what people reach for
+first: basic auth, a health-check route, and an idempotency key. The last is
+the only one with a design under it, because it has to keep what it already
+answered somewhere, and nothing in this framework stores anything between
+requests.
+
+**What would settle it: one of the three arriving with its storage question
+answered**, rather than the list being adopted as a list.
 
 ---
 

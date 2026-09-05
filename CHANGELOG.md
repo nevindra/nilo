@@ -45,6 +45,123 @@ field full of upload bytes.
 
 ### Added
 
+#### `allowance.with` — how many requests one address may make
+
+```zig
+try app.useOn("/api", nilo.allowance.with(.{ .per_window = 100, .window_s = 60 }));
+```
+
+The hundred-and-first request from that address inside the minute is a 429 with
+a `Retry-After`, and the handler never runs. Nothing had ever called
+`fail.tooManyRequests`, so this is the first thing in nilo that refuses a client
+for asking too often.
+
+The table it counts in is **sized while compiling and lives in `.bss`**: no
+allocation per request, none at startup, 131,072 bytes at the default
+`.slots = 16 * 1024`, and nothing at all in a program that does not use it
+([ADR 0114](./docs/adr/0114-an-allowance-is-a-table-sized-while-compiling.md)).
+The window slides, so a hundred at 11:59:59 and a hundred at 12:00:00 is not two
+hundred through. An IPv6 client is a `/64` by default, because a `/128` is one
+of the addresses a customer was handed rather than the customer.
+
+Two things it does on purpose: a table with no room left forgets whichever
+address has been quiet longest rather than making two share one allowance, and a
+slot two requests reach at the same instant lets both through. **Behind a proxy,
+set `.trusted_hops` on `listen`** — leave it at zero and every request looks
+like it came from the proxy, which is one slot for the world. A refusal that
+finds an `X-Forwarded-For` on a request counted against the connection's own
+address says so in the log once.
+
+It is not a defence against a flood; that is still `max_connections`. And it can
+only be keyed on the address today — an allowance per account or per API key is
+in the roadmap.
+
+#### `testing.Conversation` — driving a WebSocket route from a test
+
+```zig
+var chat: nilo.testing.Conversation = try .init(testing.allocator, .{});
+defer chat.deinit();
+
+try chat.text("hello");
+try chat.close(1000, "bye");
+
+const talk = try chat.open(&app, "/chat");
+try testing.expectEqualStrings("hello", talk.at(0).?.bytes);
+try testing.expectEqual(@as(u16, 1000), talk.closedWith().?);
+```
+
+A handler that upgrades has no answer for `testing.Client` to read, so a
+WebSocket route could not be tested through the public API at all — nilo's own
+suite wrote masked frames as hex escapes and indexed into the response
+([ADR 0113](./docs/adr/0113-a-websocket-route-can-be-driven-from-a-test.md)).
+`text`, `binary`, `ping`, `pong`, `close`, `fragments` and `raw` are what you
+send; `at(n)`, `first(kind)` and `closedWith()` are what came back, decoded by
+a reader that shares no code with the encoder it is checking.
+
+Two things it does not do: the frames are queued before the server runs, so a
+test cannot answer what the server just said, and a conversation between two
+sockets — a `Room` broadcast — needs two connections and is out of reach.
+
+#### `c.queries()`, `c.queryString()`, `c.host()`, `c.scheme()`
+
+Four ways to read a request past the parts a handler names
+([ADR 0112](./docs/adr/0112-a-request-can-be-read-past-the-parts-a-handler-names.md)).
+
+```zig
+var it = c.queries();                       // every parameter, in arrival order
+while (it.next()) |q| log("{f}={f}", .{ q.name, q.value });
+
+const back = try std.fmt.allocPrint(c.arena(), "{f}://{f}/done", .{ c.scheme(), c.host() });
+```
+
+`query(name)` answers about a name you already knew, so a filter whose names are
+data — `?filter[status]=open` — and a name sent twice were both unreachable
+without touching an underscore field. `queryString()` is the bytes as they
+arrived, still encoded, for a signature or a proxy.
+
+`host()` and `scheme()` are what a handler writes a URL to its own service
+with. nilo does not speak TLS, so `scheme()` is `"http"` unless
+`listen(.{ .trusted_hops = … })` says a proxy stands in front — then
+`X-Forwarded-Proto` and `X-Forwarded-Host` are read, on exactly the terms
+`X-Forwarded-For` already is. A forwarded host that is not host-shaped is
+dropped rather than used: that value ends up in a link somebody clicks.
+
+#### `cors.reading` — CORS origins that come from the environment
+
+```zig
+var origins: nilo.cors.Origins = .empty;
+try origins.setSplit(&buf, settings.web_origins);   // "https://a.com,https://b.com"
+try app.use(nilo.cors.reading(&origins, .{ .credentials = true }));
+```
+
+`cors.with` settles its list while compiling, so the same binary could not
+serve staging and production — and the front end's address is a fact about the
+deployment, not about the program. This is the same middleware reading its list
+from a variable you fill before `listen()`
+([ADR 0110](./docs/adr/0110-an-origin-is-a-fact-about-the-deployment.md)).
+Everything else stays compile-time, `with` is untouched and still the measured
+path, and **a cross-origin response still allocates nothing**: the list is
+borrowed rather than copied, so the matched origin goes out as static text.
+`set` and `setSplit` refuse at startup what `with` refuses at build time, `"*"`
+is refused outright — that is `cors.permissive` — and a list nobody filled says
+so in the log once.
+
+#### `nilo.accept` — what an `Accept` header says about one type
+
+```zig
+if (nilo.accept.asks(c.header("Accept"), "text/html") == .named) …
+```
+
+Four answers rather than a `bool`, because a client that sent no `Accept` has
+not asked for HTML and has not ruled it out, and those are different: `.named`,
+`.anything`, `.unsaid`, `.refused`. Quality values are read, so
+`text/html;q=0, */*` refuses HTML and accepts everything else. Nothing is
+allocated and nothing is collected — it answers about the one type you name.
+It exists because the single-page fallback needed it
+([ADR 0109](./docs/adr/0109-a-fallback-answers-a-navigation-not-a-missing-asset.md))
+and is exported because a handler serving two content types wants the same
+question answered.
+
 #### Metrics — `app.metrics(.{})`
 
 Counters, which nilo has never had. One call puts a Prometheus page on
@@ -221,6 +338,41 @@ a suite written before it existed keeps asserting what it always asserted
   `python3 bench/mem.py --hold`.
 
 ### Changed
+
+- **A request body under a `Content-Encoding` other than `identity` is now a
+  415.** nilo decodes none of them, so a client sending `Content-Encoding: gzip`
+  had its gzip stream handed to `c.json` and got back a 400 saying the body was
+  malformed — true of the bytes, and useless to whoever sent them. The 415
+  names the header
+  ([ADR 0111](./docs/adr/0111-a-body-under-an-encoding-nilo-cannot-read-is-refused.md)).
+  The header on a request with no body is still ignored, so nothing that was
+  being answered stops being answered unless it really was sending a body nilo
+  could not read.
+
+- **A single-page fallback now answers a navigation rather than every path
+  under its prefix.** `staticWith(.{ .spa_fallback = "index.html" })` used to
+  answer 200 with the page for anything that named no file, so a build whose
+  hash had moved on handed a browser HTML where it asked for
+  `app.abc123.js` — a syntax error on line 1 of something that was never
+  JavaScript, with the missing file named nowhere. A request that names
+  `text/html`, or that says nothing and has no file extension in its last
+  segment, still gets the page; everything else gets a 404 saying which path
+  ([ADR 0109](./docs/adr/0109-a-fallback-answers-a-navigation-not-a-missing-asset.md)).
+
+  ```zig
+  try app.staticWith("/", "public", .{
+      .spa_fallback = "index.html",
+      .spa_fallback_for = .any_path,     // what shipped before, if you need it
+  });
+  ```
+
+  A `fetch()` sending `*/*` to a path with no extension is unchanged and still
+  gets the page: it is indistinguishable from a deep link at this layer, and
+  saying `Accept: application/json` is what separates them. **A second ordering
+  change comes with it** — every directory is asked for the file before any
+  directory is asked for its fallback, so a single-page app mounted at `/` no
+  longer answers `/assets/app.css` from its own `index.html` when the directory
+  holding that file was mounted after it.
 
 - **`c.body()` no longer commits the announced `Content-Length` before reading
   a byte of it.** A client that promised a megabyte and sent one byte a minute

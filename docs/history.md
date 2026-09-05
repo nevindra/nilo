@@ -1498,3 +1498,39 @@ explicit doubling saved almost none of it. The copying was never the cost —
 every growth past the retained arena block is a fresh node from the page
 allocator, and on two cores an `mmap`/`munmap` pair costs more than the rest of
 the request. What fits is one step of proof and then one allocation.
+
+## The mechanism the roadmap named was the one thing it got wrong
+
+The rate-limiting entry had sat under **Next** for two cycles with three
+questions on it, and it named the shape as well: *a fixed table sized once at
+`listen()`*, on the model of what `app.metrics` does. That sentence was wrong,
+and finding out why was the whole design.
+
+**A middleware has no startup hook.** `use()` takes a function pointer; there is
+nothing for one to run when the routes resolve. So "sized at `listen()`" would
+have meant a hook on `App`, or a registration protocol, or a Service — machinery
+in three files for a feature that is one. What replaces it is smaller than what
+was asked for: a table **sized while compiling**, in `.bss`, which is no
+allocation at startup either and no change to `App`, `Ctx` or the Bulkhead
+([ADR 0114](./adr/0114-an-allowance-is-a-table-sized-while-compiling.md)).
+
+The lesson is about how a roadmap entry decays. The *gap* stayed true for two
+cycles; the *mechanism* named beside it was a guess made before anybody tried to
+write it, and a guess in a plan is read as a constraint by whoever picks it up.
+An entry that names a shape should say whether the shape was tried.
+
+## A benchmark whose client is the bottleneck can only say "unchanged" quietly
+
+Four interleaved pairs put the allowance at +5.1%, −1.4%, +0.7% and −0.8%
+against its control — sign changing, spread wider than the margin, which by this
+repository's own rule reads as unchanged. It is a weaker "unchanged" than it
+looks. Both sides ran at **30k req/s on a two-core box** where the server does
+1.4M on the machine the rest of `bench/result/http.md` was taken on, because
+`wrk`'s per-request Lua callback defeats its own precomputed request buffer and
+the client ate the machine. **A cost of 50ns a request would have been invisible
+there, and 50ns is 7% of the real thing.**
+
+The rule that came out of it: *no difference* has a resolution, and the
+resolution belongs next to the result. "Unchanged" from an instrument that could
+not have seen the change is not the same claim as "unchanged" from one that
+could, and only the second one closes the question.

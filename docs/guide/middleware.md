@@ -75,7 +75,7 @@ Registering the open routes before the `use` call does **not** work and it looks
 like it should: chains are resolved in `listen()`, so mount order carries no
 meaning at all (ADR 0009).
 
-## The built-in two
+## The ones that come with it
 
 ```zig
 try app.use(nilo.logger.standard);
@@ -108,6 +108,104 @@ against a literal and nothing is allocated. An origin you did not name gets an
 ordinary response with no `Access-Control-Allow-Origin` on it, and the browser
 is what refuses it. Write them lowercase — a browser does, and nilo refuses a
 capital letter at build time rather than letting it silently never match.
+
+### When the origins come from the environment
+
+The address of your front end is a fact about *where this was deployed*, not
+about the program, so staging and production naming different ones is the
+ordinary case rather than an awkward one. `cors.reading` is the same middleware
+with its list read from somewhere you fill before `listen()`
+([ADR 0110](../adr/0110-an-origin-is-a-fact-about-the-deployment.md)):
+
+```zig
+var origins: nilo.cors.Origins = .empty;      // outlives the App
+
+pub fn main() !void {
+    // …settings read with nilo_config…
+    var buf: [4][]const u8 = undefined;
+    try origins.setSplit(&buf, settings.web_origins);   // "https://a.com,https://b.com"
+
+    try app.use(nilo.cors.reading(&origins, .{ .credentials = true }));
+    try app.listen(.{});
+}
+```
+
+Everything else stays where it was: the methods, the headers, `credentials` and
+`max_age` are all still compile-time, because none of them changes between one
+deployment of the same service and another.
+
+Three things worth knowing. **The text is borrowed**, so whatever you split has
+to outlive the server — the environment block and a `.env`'s text both do, and
+that is what keeps a cross-origin response at zero allocations. **`"*"` is
+refused**: answering anybody is `cors.permissive`, which needs no list at all.
+And a list you never filled refuses every cross-origin request, so nilo says so
+in the log once, the first time it happens.
+
+## When one client asks too often
+
+<!-- compiles: body -->
+```zig
+try app.useOn("/api", nilo.allowance.with(.{ .per_window = 100, .window_s = 60 }));
+```
+
+A hundred requests a minute from one address; the hundred-and-first is a 429
+with a `Retry-After`, and your handler never runs. Put it on a group rather than
+the whole App and the routes outside that prefix are not counted at all — a
+health check a load balancer hits every second is the usual reason.
+
+The sign-in form is the case worth naming separately, because the number is
+different by two orders of magnitude:
+
+<!-- compiles: body -->
+```zig
+try app.useOn("/api", nilo.allowance.with(.{ .per_window = 100, .window_s = 60 }));
+try app.useOn("/sign-in", nilo.allowance.with(.{
+    .per_window = 5,
+    .window_s = 60,
+    .name = "sign-in",       // ← counted apart from the one above
+}));
+```
+
+**`.name` is what keeps two allowances separate.** Two `with()` calls carrying
+the same options are the same table, which is usually what you want — the same
+allowance applied in two places — and is wrong the moment the two are meant to
+be counted apart. Different numbers already make them different; give one a name
+when the numbers happen to match.
+
+### Behind a proxy, set `trusted_hops`
+
+This counts against `c.clientIp()`, which is the socket's address unless you
+have told nilo how many proxies stand in front:
+
+```zig
+try app.listen(.{ .trusted_hops = 1 });
+```
+
+Leave it at zero behind a proxy and every request looks like it came from the
+proxy — one address, one slot, and the first busy second locks out everybody.
+nilo cannot see your deployment, but it can see a refusal whose request carried
+an `X-Forwarded-For` and was counted against the connection's own address, and
+it says so in the log the first time that happens.
+
+### What it costs, and what it is not
+
+Nothing per request: the table is sized while compiling and lives in the
+binary's `.bss`, 131,072 bytes at the default `.slots = 16 * 1024`. Nothing is
+allocated at startup either, and a program that never calls `with` links none of
+it. `.slots` is the number of addresses remembered at once, at eight bytes each,
+and it is a power of two.
+
+Two things it does on purpose, both the same trade
+([ADR 0114](../adr/0114-an-allowance-is-a-table-sized-while-compiling.md)). A
+table with no room left **forgets whichever of its addresses has been quiet longest**
+rather than making two addresses share one allowance, and a slot two requests
+reach at the same instant **lets them both through**. Being loose for one window
+is a smaller wrong than refusing somebody who has made no requests at all.
+
+And it is not a defence against a flood. A refused request is still read,
+parsed, matched and answered — cheaply, but not for free. Somebody opening ten
+thousand sockets is stopped by `max_connections` on `listen`, which counts per
+process rather than per address.
 
 ## Resolved values
 

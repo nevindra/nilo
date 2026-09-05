@@ -469,8 +469,23 @@ pub const logger = @import("logger.zig");
 pub const cors = @import("cors.zig");
 pub const metrics = @import("metrics.zig");
 
+/// How many requests one address may make inside a window, and a 429 when it
+/// asks for more: `app.useOn("/api", nilo.allowance.with(.{ .per_window = 100,
+/// .window_s = 60 }))`. The table is sized while compiling and lives in
+/// `.bss`, so it costs no allocation at startup and none per request
+/// ([ADR 0114](../docs/adr/0114-an-allowance-is-a-table-sized-while-compiling.md)).
+pub const allowance = @import("allowance.zig");
+
 /// Static files, held in memory (ADR 0010). Used through `app.static()`;
 /// the module itself is here for its `Options`.
+/// What an `Accept` header says about one media type: `.named`, `.anything`,
+/// `.unsaid` or `.refused`. `nilo.accept.asks(c.header("Accept"), "text/html")`
+/// — the reader the single-page fallback decides with
+/// ([ADR 0109](../docs/adr/0109-a-fallback-answers-a-navigation-not-a-missing-asset.md)),
+/// exported because a handler answering two content types wants the same
+/// question answered and there is no reason to make it parse the header again.
+pub const accept = @import("accept.zig");
+
 pub const static = @import("static.zig");
 
 /// The API description, worked out from the handler signatures (ADR 0017).
@@ -655,6 +670,7 @@ test {
     _ = @import("json.zig");
     _ = @import("jsonmark.zig");
     _ = @import("scan.zig");
+    _ = @import("accept.zig");
     _ = @import("static.zig");
     _ = @import("router.zig");
     _ = @import("fail.zig");
@@ -675,6 +691,7 @@ test {
     _ = @import("logger.zig");
     _ = @import("cors.zig");
     _ = @import("metrics.zig");
+    _ = @import("allowance.zig");
     _ = @import("app.zig");
     // Last, and the only one here that stands a real server up. Nothing else
     // in this suite opens a socket at all (ADR 0086).

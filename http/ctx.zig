@@ -393,6 +393,114 @@ pub const Ctx = struct {
         };
     }
 
+    /// One query parameter, as `queries()` hands them out. Both halves are
+    /// `Str` for the reason `RequestHeader`'s are.
+    pub const QueryParam = struct {
+        name: Str,
+        value: Str,
+    };
+
+    /// Walks every query parameter, in the order they arrived, decoded.
+    /// Returned by `Ctx.queries()`; nothing else constructs one.
+    pub const QueryIterator = struct {
+        _params: []const router.Param,
+        _at: usize = 0,
+        _lifetime: *const str_mod.Lifetime,
+
+        pub fn next(self: *QueryIterator) ?QueryParam {
+            if (self._at == self._params.len) return null;
+            const p = self._params[self._at];
+            self._at += 1;
+            return .{
+                .name = Str.fromRequest(p.name, self._lifetime),
+                .value = Str.fromRequest(p.value, self._lifetime),
+            };
+        }
+    };
+
+    /// Every query parameter, in arrival order, percent-decoded with `+` read
+    /// as a space — the same values `query(name)` answers with.
+    ///
+    /// ```zig
+    /// var it = c.queries();
+    /// while (it.next()) |q| { … }
+    /// ```
+    ///
+    /// `query(name)` is what almost every handler wants, and this is the case
+    /// it cannot serve: **a filter whose names are data**. `?filter[status]=
+    /// open&filter[owner]=7` has no list of names to ask for, and neither does
+    /// a request being logged, signed or forwarded whole. Both had to read
+    /// `c._query_params`, an underscore field and therefore nilo's to change
+    /// (ADR 0112).
+    ///
+    /// A name sent twice appears twice, in the order it was sent, which is the
+    /// other thing `query` cannot report: it answers with the first and never
+    /// says there was a second.
+    ///
+    /// Nothing is allocated. The parameters were split once, into the request
+    /// arena, before the handler ran.
+    pub fn queries(self: *const Ctx) QueryIterator {
+        return .{ ._params = self._query_params, ._lifetime = self._lifetime };
+    }
+
+    /// The query string as it arrived, still encoded and with no `?` on the
+    /// front — `""` when there was none.
+    ///
+    /// The bytes rather than the parts, for the callers that need what was
+    /// sent rather than what it meant: a signature computed over the request
+    /// line, a proxy passing one on, a log line that has to match somebody
+    /// else's. `queries()` is the one to reach for otherwise.
+    pub fn queryString(self: *const Ctx) Str {
+        return Str.fromRequest(self._query, self._lifetime);
+    }
+
+    /// The host this request was addressed to, without the scheme and with
+    /// the port still on it if the client sent one: `"api.example.com"`,
+    /// `"localhost:8080"`.
+    ///
+    /// The `Host` header, which an HTTP/1.1 request has exactly one of or it
+    /// is a 400 ([ADR 0101](../docs/adr/0101-a-request-nobody-else-would-answer-is-refused.md)) —
+    /// **unless `listen(.{ .trusted_hops = … })` says a proxy stands in
+    /// front**, in which case an `X-Forwarded-Host` it wrote is the answer.
+    /// With the default of zero that header is ignored, exactly as
+    /// `X-Forwarded-For` is, because a header a client can write is a header a
+    /// client can write: a forged one here ends up inside the password-reset
+    /// link somebody clicks.
+    pub fn host(self: *const Ctx) Str {
+        if (self._limits.trusted_hops > 0) {
+            if (self.header("X-Forwarded-Host")) |sent| {
+                // A proxy chain writes a list, and the first entry is the one
+                // the client asked for. A value that is not a host — a
+                // control byte, a space, a slash — is dropped rather than
+                // used, because this ends up in URLs.
+                const first = std.mem.trim(u8, upTo(sent.view(), ','), " \t");
+                if (isHostLike(first)) return Str.fromRequest(first, self._lifetime);
+            }
+        }
+        return self.header("Host") orelse Str.static("");
+    }
+
+    /// `"https"` or `"http"` — what the **client** used, which behind a proxy
+    /// is not what nilo saw.
+    ///
+    /// nilo does not speak TLS
+    /// ([ADR 0028](../docs/adr/0028-tls-is-terminated-in-front.md)), so every
+    /// request it reads arrived in plaintext and there is nothing to observe.
+    /// The proxy in front knows, and says so in `X-Forwarded-Proto` — read
+    /// only when `trusted_hops` is not zero, for the reason `host()` gives.
+    ///
+    /// With no proxy configured this is always `"http"`, and that is the
+    /// truth about the connection rather than a guess.
+    pub fn scheme(self: *const Ctx) Str {
+        if (self._limits.trusted_hops > 0) {
+            if (self.header("X-Forwarded-Proto")) |sent| {
+                const first = std.mem.trim(u8, upTo(sent.view(), ','), " \t");
+                if (std.ascii.eqlIgnoreCase(first, "https")) return Str.static("https");
+            }
+        }
+        return Str.static("http");
+    }
+
     /// This request's id — the one thing that ties a log line, a response,
     /// and a client's report of "it was slow at 14:02" to each other.
     ///
@@ -1301,12 +1409,16 @@ pub const Ctx = struct {
         // unless the route named somebody; `websocket.Options.origins` is the
         // whole account.
         if (self.header("Origin")) |origin| {
-            const host = if (self.header("Host")) |h| h.view() else "";
-            if (!websocket.originAllowed(origin.view(), host, options.origins)) {
+            // The `Host` header itself, deliberately, and not `host()`: that
+            // one reads `X-Forwarded-Host` under `trusted_hops`, and what
+            // this compares has to be the authority the request really named
+            // (ADR 0102).
+            const authority = if (self.header("Host")) |h| h.view() else "";
+            if (!websocket.originAllowed(origin.view(), authority, options.origins)) {
                 return fail.forbidden(
                     "this WebSocket answers \"{s}\" and the request came from \"{s}\" — " ++
                         "name it in .origins if that is a page you serve",
-                    .{ host, origin.view() },
+                    .{ authority, origin.view() },
                 );
             }
         }
@@ -1877,6 +1989,24 @@ fn fits(comptime T: type, value: std.json.Value) bool {
 /// Measured inside a request, `?q=hello%20world&sort=newest&page=3` went
 /// 263ns → 191ns. What is left is mostly the six `percent.decode` calls, one
 /// per name and value, and the one allocation the value with the `%20` needs.
+/// Everything before `sep`, or the whole of it when there is none.
+fn upTo(text: []const u8, sep: u8) []const u8 {
+    return if (std.mem.indexOfScalar(u8, text, sep)) |at| text[0..at] else text;
+}
+
+/// Whether this could be the authority of a URL: letters, digits, `.`, `-`,
+/// `:` for a port, and `[`/`]` for an IPv6 literal. Deliberately narrow —
+/// what it is guarding against is a forwarded value ending up inside a link
+/// in an email, so anything it is not sure about is not a host.
+fn isHostLike(text: []const u8) bool {
+    if (text.len == 0 or text.len > 253) return false;
+    for (text) |byte| switch (byte) {
+        'a'...'z', 'A'...'Z', '0'...'9', '.', '-', ':', '[', ']' => {},
+        else => return false,
+    };
+    return true;
+}
+
 pub fn parseQuery(arena: std.mem.Allocator, raw: []const u8) ![]const router.Param {
     if (raw.len == 0) return &.{};
 

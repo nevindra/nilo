@@ -267,6 +267,42 @@ because that isn't a browser and has no ambient cookie to be borrowed. `curl`,
 `wstest` and every native client send none
 ([ADR 0102](../adr/0102-a-websocket-handshake-is-same-origin-unless-the-route-says-otherwise.md)).
 
+## Testing one
+
+A handler that upgrades never returns a value, so there's nothing for
+`testing.Client` to read. `testing.Conversation` queues the frames a client
+would send, runs the handshake and the loop, and hands back what the server said
+([ADR 0113](../adr/0113-a-websocket-route-can-be-driven-from-a-test.md)):
+
+```zig
+test "the chat echoes what it is told" {
+    var app = nilo.App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/chat", chat);
+
+    var talking: nilo.testing.Conversation = try .init(testing.allocator, .{});
+    defer talking.deinit();
+
+    try talking.text("hello");
+    try talking.close(1000, "bye");
+
+    const talk = try talking.open(&app, "/chat");
+    try testing.expect(talk.accepted());
+    try testing.expectEqualStrings("hello", talk.at(0).?.bytes);
+    try testing.expectEqual(@as(u16, 1000), talk.closedWith().?);
+}
+```
+
+`text`, `binary`, `ping`, `pong`, `close`, `fragments` and `raw` are what you
+can send; `talk.at(n)`, `talk.first(.pong)` and `talk.closedWith()` are what
+came back. `setHeader` puts an `Origin` or a cookie on the handshake, which is
+how the [origin check](#which-pages-may-open-it) gets tested.
+
+**The frames are queued before the server runs**, so a test can't read what the
+server said and then decide what to send next — and a conversation between two
+sockets, which is what a [Room](#sending-to-a-socket-you-dont-hold) is, needs
+two connections and can't be driven from here at all.
+
 ## What isn't here
 
 `permessage-deflate`. It's negotiated in the handshake, and a compressor per

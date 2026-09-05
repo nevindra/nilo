@@ -433,6 +433,26 @@ const pw_refusals = [_]Refusal{
 /// `nilo: ` prefix because the build step adds it — see the loop in `build`.
 const refusals = [_]Refusal{
     .{
+        .name = "allowance_above_what_a_slot_holds",
+        .says = "an allowance above 1023 requests a window leaves too few bits for the fingerprint that tells two addresses apart.",
+    },
+    .{
+        .name = "allowance_of_no_requests",
+        .says = "an allowance of 0 requests is not a limit, it is a closed door.",
+    },
+    .{
+        .name = "allowance_prefix_longer_than_an_address",
+        .says = "an IPv6 address is 128 bits, so `.ipv6_prefix` cannot ask for more than 128 of them.",
+    },
+    .{
+        .name = "allowance_slots_not_a_power_of_two",
+        .says = "an allowance's `.slots` is a power of two, and at least 64, because the table is indexed by a hash and shared four ways to a bucket.",
+    },
+    .{
+        .name = "allowance_with_no_window",
+        .says = "an allowance needs a window to count inside — `.window_s = 60`.",
+    },
+    .{
         .name = "argument_not_recognised",
         .says = "argument 1 of the handler for route \"/users/:id\" is a [4]u8, which nilo does not recognise.",
     },
@@ -475,6 +495,10 @@ const refusals = [_]Refusal{
     .{
         .name = "cors_origin_with_a_capital_letter",
         .says = "the cors origin \"https://Example.com\" has a capital letter in it, and a browser sends its origin lowercased.",
+    },
+    .{
+        .name = "cors_reading_with_origins_named_too",
+        .says = "cors.reading takes its origins from the Origins you hand it, so the `.origins` field has nothing to do.",
     },
     .{
         .name = "filebody_as_an_argument",

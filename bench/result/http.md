@@ -1269,6 +1269,98 @@ python3 bench/slowloris.py --port 8792 --path /stream   # the shape that never h
 BODY_BYTES=65536 wrk -t2 -c32 -d8s -s bench/body_load.lua http://127.0.0.1:8792/echo
 ```
 
+## What an allowance costs
+
+**A different machine, and that is the first thing to read.** Everything above
+was taken on the 8-core Ryzen in [The machine](#the-machine). This section was
+taken on a **2-core Intel Xeon 8255C at 2.50 GHz, 7 GiB, kernel 6.8.0-110,
+wrk 4.1.0, Zig 0.16.0**, against `52ed106` plus the change. Nothing here is
+comparable to a number anywhere else in this file, and the absolute throughput
+figures are worthless — the load generator and the server are sharing two cores.
+What the run is for is the *ratio*, and even that is blunter than it should be.
+
+### Binary size: +0 unless it is used, and +5,712 when it is
+
+The unconditional row is a real zero, checked rather than assumed. Removing the
+`pub const allowance` line from `http/http.zig` and rebuilding gave
+**byte-for-byte identical** binaries — 902,928 for `example-hello` and 1,043,424
+for `example-rest`, stripped `ReleaseFast`, both ways. An unreferenced `pub`
+namespace is never analysed, so there is nothing for the linker to drop.
+
+Adding one `app.use(allowance.with(.{ .per_window = 100, .window_s = 60 }))` to
+each:
+
+| | without | with | delta |
+|---|---|---|---|
+| `example-hello` | 902,928 | 908,640 | **+5,712 B** |
+| `example-rest` | 1,043,424 | 1,049,008 | **+5,584 B** |
+| `bench/main.zig` | 910,000 | 915,760 | **+5,760 B** |
+
+Three programs agreeing within 128 bytes says the figure is the feature rather
+than whatever generic it woke up, which is the mistake ADR 0018 opens with.
+
+**The table is not in that number**, and that is worth saying plainly: 131,072
+bytes of `.bss` is `NOBITS` in the ELF, so it costs nothing on disk and 128 KiB
+of RSS the first time a page of it is touched. An operator reading the binary
+size will not see the memory, and an operator reading `ps` will not see it in
+the first second either.
+
+### Throughput: unchanged, at a resolution too poor to be sure
+
+Four interleaved pairs, 10s each, `wrk -t2 -c64`, a routed `GET /users/:id`
+answering ~1 KB of JSON, both sides listening with `.trusted_hops = 1` and both
+driven by the same Lua script — `bench/xff.lua`, which puts a different
+`X-Forwarded-For` on every request so the allowance sees 65,536 addresses
+instead of one. `.per_window = 1023, .slots = 1 << 17`, so nothing is refused.
+
+| pair | base req/s | allowance req/s | margin | base p99 | allowance p99 |
+|---|---|---|---|---|---|
+| 1 | 29,418 | 30,924 | **+5.1%** | 7.19ms | 6.11ms |
+| 2 | 30,869 | 30,448 | −1.4% | 6.71ms | 6.55ms |
+| 3 | 30,930 | 31,160 | +0.7% | 6.20ms | 6.43ms |
+| 4 | 30,918 | 30,672 | −0.8% | 6.57ms | 6.68ms |
+
+**The sign changes between pairs and the spread is wider than the margin, so
+the answer is "unchanged".** That is the rule this file already runs on, and
+here it is doing less work than usual, because the instrument is bad: 30k req/s
+on a server that does 1.4M on the Ryzen means **wrk is the bottleneck, not
+nilo**. `wrk`'s per-request `request()` callback defeats its own precomputed
+request buffer, and on two cores the client eats the machine. A cost of 50ns a
+request would be invisible at this resolution.
+
+So what the run actually establishes is narrower than the table looks: adding
+the allowance did not cost anything *findable at 30k req/s*, and the guarded
+path was exercised properly — 65,536 distinct addresses through a 131,072-slot
+table, with real hashing and real cache misses rather than one hot slot.
+
+**What would settle it** is the same run on the machine at the top of this file,
+where the baseline is 1.4M req/s and 50ns is 7%. That is one command and a
+different box, and it has not been done.
+
+### What is checked rather than measured
+
+Two of the four axes are held by tests instead, which is the stronger record:
+
+- **Allocations per request: 1, unchanged.** `test "an allowance adds nothing to
+  the allocation budget"` in `http/app.zig` sends a guarded request through a
+  counting allocator and asserts one allocation and no resizes — the same
+  numbers the unguarded path gets. The address is never copied and the slot it
+  lands in existed before `main` ran.
+- **Memory per idle connection: +0.** Nothing is held between requests, so there
+  is nothing per connection to measure. The 131,072 bytes are per process.
+
+### Reproducing the allowance run
+
+```bash
+# the size rows
+zig build examples -Doptimize=ReleaseFast -Dstrip=true
+stat -c "%n %s" zig-out/bin/example-hello zig-out/bin/example-rest
+# …then add one `app.use(nilo.allowance.with(.{ … }))` line to each and repeat
+
+# the throughput rows: build both servers first, then alternate them
+wrk -t2 -c64 -d10s --latency -s bench/xff.lua http://127.0.0.1:8787/users/42
+```
+
 ## Can these be pushed further
 
 Ranked, so the next person starts here rather than at the top of the file.

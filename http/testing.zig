@@ -528,9 +528,479 @@ fn parse(raw: []const u8, keep_alive: bool) !Answer {
     return answer;
 }
 
+// ---- a WebSocket, driven from a test (ADR 0113) ----
+
+/// What one frame carries. The four a handler ever sees, plus the two it
+/// answers control frames with.
+pub const Kind = enum { text, binary, ping, pong, close };
+
+/// One frame the **server** sent, decoded.
+pub const Message = struct {
+    kind: Kind,
+    bytes: []const u8,
+
+    /// The code inside a close frame, or null when this is not one — or is
+    /// one carrying no code, which is legal and means "no reason given".
+    pub fn code(self: Message) ?u16 {
+        if (self.kind != .close or self.bytes.len < 2) return null;
+        return std.mem.readInt(u16, self.bytes[0..2], .big);
+    }
+
+    /// The reason text beside that code, which is `""` when there is none.
+    pub fn reason(self: Message) []const u8 {
+        if (self.kind != .close or self.bytes.len < 2) return "";
+        return self.bytes[2..];
+    }
+};
+
+/// What a conversation came back with: the handshake, then every frame the
+/// server sent, in order.
+pub const Talk = struct {
+    /// The status line's code — 101 when the handshake was accepted, and
+    /// whatever refused it otherwise.
+    status: u16,
+    /// The response head, blank line included, for a test that wants to read
+    /// a header off it with `header`.
+    head: []const u8,
+    /// Every frame the server sent after the head, decoded in order.
+    messages: []const Message,
+
+    pub fn accepted(self: Talk) bool {
+        return self.status == 101;
+    }
+
+    pub fn header(self: Talk, name: []const u8) ?[]const u8 {
+        var lines = std.mem.splitSequence(u8, self.head, "\r\n");
+        _ = lines.next(); // the status line
+        while (lines.next()) |line| {
+            const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+            if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[0..colon], " "), name)) {
+                return std.mem.trim(u8, line[colon + 1 ..], " \t");
+            }
+        }
+        return null;
+    }
+
+    /// The `n`th message, or null. `talk.at(0)` reads better than an index
+    /// into a slice a test then has to bounds-check itself.
+    pub fn at(self: Talk, n: usize) ?Message {
+        return if (n < self.messages.len) self.messages[n] else null;
+    }
+
+    /// The first message of this kind, which is what a test asserting "it
+    /// answered the ping" or "it closed with 1009" actually wants.
+    pub fn first(self: Talk, kind: Kind) ?Message {
+        for (self.messages) |m| if (m.kind == kind) return m;
+        return null;
+    }
+
+    /// The code the server closed with, or null if it never closed.
+    pub fn closedWith(self: Talk) ?u16 {
+        const closing = self.first(.close) orelse return null;
+        return closing.code();
+    }
+};
+
+/// A WebSocket conversation: the frames a client sends, and what came back.
+///
+/// A handler that upgrades never returns a value and never writes a response
+/// a `Client` can read — it reads frames until they stop. So the only way to
+/// test one was to hand `handleRequest` a buffer with hand-masked bytes in it
+/// and index into the answer, which is how every WebSocket test in nilo's own
+/// suite was written (ADR 0113).
+///
+/// ```zig
+/// var chat: nilo.testing.Conversation = try .init(testing.allocator, .{});
+/// defer chat.deinit();
+///
+/// try chat.text("hello");
+/// try chat.close(1000, "bye");
+///
+/// const talk = try chat.open(&app, "/chat");
+/// try testing.expect(talk.accepted());
+/// try testing.expectEqualStrings("hello", talk.at(0).?.bytes);
+/// ```
+///
+/// **The frames are queued before the server runs, not while it runs.** There
+/// is one thread and no socket here, so a test cannot read what the server
+/// said and then decide what to send next. What it can do is send a script and
+/// read the whole answer, which is what nearly every WebSocket test is.
+pub const Conversation = struct {
+    gpa: std.mem.Allocator,
+    arena: std.heap.ArenaAllocator,
+    lifetime: str_mod.Lifetime = .{},
+    in_flight: fail.InFlight = .{},
+    buffer: []u8,
+    peer: bulkhead.Peer = .{},
+    /// The client's side of the wire: masked frames, in the order queued.
+    wire: std.ArrayList(u8) = .empty,
+    /// Extra request headers for the handshake — an `Origin`, a cookie, a
+    /// `Sec-WebSocket-Protocol`.
+    extra: std.ArrayList(Header) = .empty,
+
+    /// The key every example uses, and the one RFC 6455 §1.3 works through:
+    /// a server that hashes it correctly answers `s3pPLMBiTxaQ9kYGzzhZRbK+xOo=`.
+    pub const key = "dGhlIHNhbXBsZSBub25jZQ==";
+    pub const accept_for_key = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
+
+    /// Fixed rather than random, so a failing test shows the same bytes twice.
+    /// A client must mask (RFC 6455 §5.3) and a server must refuse a frame
+    /// that is not masked, so this is not a detail a test can skip.
+    const mask = [4]u8{ 0x37, 0xfa, 0x21, 0x3d };
+
+    pub fn init(gpa: std.mem.Allocator, options: Options) !Conversation {
+        return .{
+            .gpa = gpa,
+            .arena = std.heap.ArenaAllocator.init(gpa),
+            .buffer = try gpa.alloc(u8, options.response_bytes),
+            .peer = try bulkhead.Peer.from(options.client_address),
+        };
+    }
+
+    pub fn deinit(self: *Conversation) void {
+        for (self.extra.items) |h| {
+            self.gpa.free(h.name);
+            self.gpa.free(h.value);
+        }
+        self.extra.deinit(self.gpa);
+        self.wire.deinit(self.gpa);
+        self.gpa.free(self.buffer);
+        self.arena.deinit();
+    }
+
+    /// Send this header with the handshake — an `Origin`, a `Cookie`, a
+    /// `Sec-WebSocket-Protocol`. Copied, so a caller's buffer is safe.
+    pub fn setHeader(self: *Conversation, name: []const u8, value: []const u8) !void {
+        const kept_name = try self.gpa.dupe(u8, name);
+        errdefer self.gpa.free(kept_name);
+        const kept_value = try self.gpa.dupe(u8, value);
+        try self.extra.append(self.gpa, .{ .name = kept_name, .value = kept_value });
+    }
+
+    pub fn text(self: *Conversation, message: []const u8) !void {
+        try self.frame(0x1, message);
+    }
+
+    pub fn binary(self: *Conversation, bytes: []const u8) !void {
+        try self.frame(0x2, bytes);
+    }
+
+    pub fn ping(self: *Conversation, bytes: []const u8) !void {
+        try self.frame(0x9, bytes);
+    }
+
+    pub fn pong(self: *Conversation, bytes: []const u8) !void {
+        try self.frame(0xA, bytes);
+    }
+
+    /// A close frame carrying a code and a reason. `1000` is the ordinary
+    /// goodbye.
+    pub fn close(self: *Conversation, code: u16, why: []const u8) !void {
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(self.gpa);
+        try payload.appendSlice(self.gpa, &.{ @intCast(code >> 8), @truncate(code) });
+        try payload.appendSlice(self.gpa, why);
+        try self.frame(0x8, payload.items);
+    }
+
+    /// One message split across a first frame and its continuations, which is
+    /// what a browser sends for anything large and what a server assembling
+    /// them has to get right.
+    pub fn fragments(self: *Conversation, kind: Kind, pieces: []const []const u8) !void {
+        std.debug.assert(pieces.len > 0);
+        const opcode: u8 = switch (kind) {
+            .text => 0x1,
+            .binary => 0x2,
+            else => unreachable, // a control frame cannot be fragmented
+        };
+        for (pieces, 0..) |piece, i| {
+            const last = i == pieces.len - 1;
+            try self.write(if (i == 0) opcode else 0x0, piece, last);
+        }
+    }
+
+    /// Bytes straight onto the wire, masked by nobody and framed by nobody —
+    /// for a test about what a **malformed** frame does.
+    pub fn raw(self: *Conversation, bytes: []const u8) !void {
+        try self.wire.appendSlice(self.gpa, bytes);
+    }
+
+    /// Run the handshake and the frames queued behind it, and decode what came
+    /// back. The conversation can be reused: the queue is cleared, so the next
+    /// `open` sends only what was queued after this one.
+    pub fn open(self: *Conversation, app: *App, path: []const u8) !Talk {
+        try app.resolveChains();
+
+        var request: std.ArrayList(u8) = .empty;
+        defer request.deinit(self.gpa);
+        try request.print(self.gpa, "GET {s} HTTP/1.1\r\nHost: t\r\n", .{path});
+        try request.appendSlice(self.gpa, "Upgrade: websocket\r\nConnection: Upgrade\r\n");
+        try request.print(
+            self.gpa,
+            "Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {s}\r\n",
+            .{key},
+        );
+        for (self.extra.items) |h| {
+            try request.print(self.gpa, "{s}: {s}\r\n", .{ h.name, h.value });
+        }
+        try request.appendSlice(self.gpa, "\r\n");
+        try request.appendSlice(self.gpa, self.wire.items);
+        self.wire.clearRetainingCapacity();
+
+        var in = std.Io.Reader.fixed(request.items);
+        var out = std.Io.Writer.fixed(self.buffer);
+        _ = app.handleRequest(
+            self.arena.allocator(),
+            &self.lifetime,
+            &self.in_flight,
+            &in,
+            &out,
+            .off,
+            .off,
+            self.peer,
+        );
+        self.lifetime.end();
+        _ = self.arena.reset(.retain_capacity);
+
+        return decode(self.arena.allocator(), out.buffered());
+    }
+
+    fn frame(self: *Conversation, opcode: u8, payload: []const u8) !void {
+        try self.write(opcode, payload, true);
+    }
+
+    /// One frame, masked the way RFC 6455 §5.3 requires of a client.
+    fn write(self: *Conversation, opcode: u8, payload: []const u8, fin: bool) !void {
+        const g = self.gpa;
+        try self.wire.append(g, (if (fin) @as(u8, 0x80) else 0) | opcode);
+
+        if (payload.len < 126) {
+            try self.wire.append(g, 0x80 | @as(u8, @intCast(payload.len)));
+        } else if (payload.len <= std.math.maxInt(u16)) {
+            try self.wire.append(g, 0x80 | 126);
+            var be: [2]u8 = undefined;
+            std.mem.writeInt(u16, &be, @intCast(payload.len), .big);
+            try self.wire.appendSlice(g, &be);
+        } else {
+            try self.wire.append(g, 0x80 | 127);
+            var be: [8]u8 = undefined;
+            std.mem.writeInt(u64, &be, payload.len, .big);
+            try self.wire.appendSlice(g, &be);
+        }
+
+        try self.wire.appendSlice(g, &mask);
+        for (payload, 0..) |byte, i| try self.wire.append(g, byte ^ mask[i % 4]);
+    }
+};
+
+/// Split a response into its head and the frames behind it.
+///
+/// Written here rather than borrowed from `websocket.zig` on purpose: a
+/// decoder that shares code with the encoder it is checking agrees with it by
+/// construction, which is the property ADR 0090 says is not the one worth
+/// having.
+fn decode(arena: std.mem.Allocator, response: []const u8) !Talk {
+    const blank = std.mem.indexOf(u8, response, "\r\n\r\n") orelse
+        return .{ .status = 0, .head = response, .messages = &.{} };
+    const head = response[0 .. blank + 4];
+    var rest = response[blank + 4 ..];
+
+    var status: u16 = 0;
+    if (std.mem.indexOfScalar(u8, head, ' ')) |sp| {
+        status = std.fmt.parseInt(u16, head[sp + 1 ..][0..@min(3, head.len - sp - 1)], 10) catch 0;
+    }
+    // A refused handshake is an ordinary response with an ordinary body, and
+    // reading that body as frames would produce nonsense rather than nothing.
+    if (status != 101) return .{ .status = status, .head = head, .messages = &.{} };
+
+    var messages: std.ArrayList(Message) = .empty;
+    while (rest.len >= 2) {
+        const opcode = rest[0] & 0x0F;
+        const masked = rest[1] & 0x80 != 0;
+        // A server never masks (RFC 6455 §5.1), and a test that let one
+        // through would be reading payload out of a mask key.
+        if (masked) return error.ServerMaskedAFrame;
+
+        var length: u64 = rest[1] & 0x7F;
+        var at: usize = 2;
+        if (length == 126) {
+            if (rest.len < 4) break;
+            length = std.mem.readInt(u16, rest[2..4], .big);
+            at = 4;
+        } else if (length == 127) {
+            if (rest.len < 10) break;
+            length = std.mem.readInt(u64, rest[2..10], .big);
+            at = 10;
+        }
+        if (rest.len < at + length) break;
+
+        const kind: ?Kind = switch (opcode) {
+            0x1 => .text,
+            0x2 => .binary,
+            0x8 => .close,
+            0x9 => .ping,
+            0xA => .pong,
+            else => null, // a continuation, which this joins to nothing
+        };
+        if (kind) |k| {
+            try messages.append(arena, .{ .kind = k, .bytes = rest[at..][0..@intCast(length)] });
+        }
+        rest = rest[at + @as(usize, @intCast(length)) ..];
+    }
+
+    return .{ .status = status, .head = head, .messages = try messages.toOwnedSlice(arena) };
+}
+
 // ---- tests ----
 
 const testing = std.testing;
+
+// ---- the WebSocket harness (ADR 0113) ----
+
+const websocket_mod = @import("websocket.zig");
+
+fn wsEcho(c: *@import("ctx.zig").Ctx) anyerror!void {
+    return c.upgrade(wsEchoLoop, {});
+}
+
+fn wsEchoLoop(socket: *websocket_mod.Socket) anyerror!void {
+    while (try socket.receive()) |message| {
+        try socket.send(message.kind, message.data);
+    }
+}
+
+fn wsSmall(c: *@import("ctx.zig").Ctx) anyerror!void {
+    return c.upgradeWith(wsEchoLoop, {}, .{ .max_message = 8 });
+}
+
+test "a scripted conversation reaches the loop and comes back in order" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/ws", wsEcho);
+
+    var chat: Conversation = try .init(testing.allocator, .{});
+    defer chat.deinit();
+    try chat.text("one");
+    try chat.text("two");
+    try chat.binary(&.{ 1, 2, 3 });
+
+    const talk = try chat.open(&app, "/ws");
+    try testing.expect(talk.accepted());
+    // The handshake every client checks, worked out from the key RFC 6455
+    // §1.3 uses.
+    try testing.expectEqualStrings(
+        Conversation.accept_for_key,
+        talk.header("Sec-WebSocket-Accept").?,
+    );
+
+    try testing.expectEqual(@as(usize, 3), talk.messages.len);
+    try testing.expectEqualStrings("one", talk.at(0).?.bytes);
+    try testing.expectEqual(Kind.text, talk.at(1).?.kind);
+    try testing.expectEqualStrings("two", talk.at(1).?.bytes);
+    try testing.expectEqual(Kind.binary, talk.at(2).?.kind);
+}
+
+test "a ping is answered with a pong carrying the same bytes" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/ws", wsEcho);
+
+    var chat: Conversation = try .init(testing.allocator, .{});
+    defer chat.deinit();
+    try chat.ping("are you there");
+
+    // The handler's loop never sees a ping — `receive` answers it on the way
+    // past — so this is a behaviour no test could reach before.
+    const talk = try chat.open(&app, "/ws");
+    const pong = talk.first(.pong).?;
+    try testing.expectEqualStrings("are you there", pong.bytes);
+}
+
+test "a close from the client is answered and ends the loop" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/ws", wsEcho);
+
+    var chat: Conversation = try .init(testing.allocator, .{});
+    defer chat.deinit();
+    try chat.text("last thing");
+    try chat.close(1000, "bye");
+    // Anything after the close is not read, because the conversation is over.
+    try chat.text("ignored");
+
+    const talk = try chat.open(&app, "/ws");
+    try testing.expectEqualStrings("last thing", talk.at(0).?.bytes);
+    try testing.expectEqual(@as(u16, 1000), talk.closedWith().?);
+}
+
+test "a fragmented message arrives as one" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/ws", wsEcho);
+
+    var chat: Conversation = try .init(testing.allocator, .{});
+    defer chat.deinit();
+    try chat.fragments(.text, &.{ "one ", "two ", "three" });
+
+    const talk = try chat.open(&app, "/ws");
+    try testing.expectEqual(@as(usize, 1), talk.messages.len);
+    try testing.expectEqualStrings("one two three", talk.at(0).?.bytes);
+}
+
+test "a message past the ceiling is refused before it is read" {
+    // The loop ends in a failure on purpose, and App logs it — correctly, and
+    // to the test runner's stderr, where it reads like a broken suite.
+    const previous = testing.log_level;
+    defer testing.log_level = previous;
+    testing.log_level = .err;
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/ws", wsSmall);
+
+    var chat: Conversation = try .init(testing.allocator, .{});
+    defer chat.deinit();
+    try chat.text("this is longer than eight bytes");
+
+    const talk = try chat.open(&app, "/ws");
+    try testing.expectEqual(@as(u16, 1009), talk.closedWith().?);
+}
+
+test "a frame a client did not mask is a protocol error, said rather than hung up on" {
+    const previous = testing.log_level;
+    defer testing.log_level = previous;
+    testing.log_level = .err;
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/ws", wsEcho);
+
+    var chat: Conversation = try .init(testing.allocator, .{});
+    defer chat.deinit();
+    // FIN + text, five bytes, no mask bit. RFC 6455 §5.1 requires a client to
+    // mask, and `raw` is how a test says something no client library would.
+    try chat.raw("\x81\x05Hello");
+
+    const talk = try chat.open(&app, "/ws");
+    try testing.expectEqual(@as(u16, 1002), talk.closedWith().?);
+}
+
+test "a handshake the route refuses is a status and no frames at all" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/ws", wsEcho);
+
+    var chat: Conversation = try .init(testing.allocator, .{});
+    defer chat.deinit();
+    // A page nobody named, on a host that is not this one (ADR 0102).
+    try chat.setHeader("Origin", "https://elsewhere.example.com");
+    try chat.text("hello");
+
+    const talk = try chat.open(&app, "/ws");
+    try testing.expect(!talk.accepted());
+    try testing.expectEqual(@as(u16, 403), talk.status);
+    try testing.expectEqual(@as(usize, 0), talk.messages.len);
+}
 
 fn plain(c: *@import("ctx.zig").Ctx) anyerror!void {
     try c.setStaticHeader("X-Note", "hello");

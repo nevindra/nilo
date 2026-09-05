@@ -146,6 +146,10 @@ _Avoid_: dotenv file, env file, envfile
 A piece of work that runs before and after a handler, operates at the Ctx layer, and produces no value for the handler. Middleware enforces; a Resolved value provides.
 _Avoid_: filter, interceptor, hook, guard
 
+**Allowance**:
+How many requests one address may make inside a window, and the 429 it gets for asking again. The table that remembers is sized while compiling and lives in `.bss`, so it costs no allocation at startup and none per request; a bucket with no room forgets its stalest address rather than making two share one allowance, and contention lets the request through. It is against the client that asks too often, not against a flood — that is `max_connections`.
+_Avoid_: rate limit, limiter, throttle, quota, token bucket, budget, credits
+
 **Group**:
 One path prefix and everything registered beneath it — routes, middleware, static files, further groups. The prefix is compile-time text joined onto each pattern, so a Group leaves nothing behind at runtime.
 _Avoid_: router, scope, mount, namespace

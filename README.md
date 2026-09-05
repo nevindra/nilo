@@ -348,7 +348,7 @@ parts of it. [Contributing](#contributing) is what that takes.
 
 | Module | What it does | Where it is |
 |---|---|---|
-| **`nilo_http`** | routing, typed handlers, middleware, cookies and sessions, static files, streaming, WebSocket, OpenAPI, metrics | shipped |
+| **`nilo_http`** | routing, typed handlers, middleware, cookies and sessions, static files, streaming, WebSocket, OpenAPI, metrics, rate limiting | shipped |
 | **`nilo_sql`** | Postgres and SQLite. Your struct is the table | shipped: reads, writes, transactions, streaming. SQLite refuses batches, row locks and deadlines, and says so while compiling |
 | **`nilo_s3`** | object storage — S3, MinIO, R2. Your bucket is a type | shipped: get, put, range, stream, presign. No `LIST`, no multipart |
 | **`nilo_fetch`** | calling somebody else's HTTP API from inside a request | shipped: the policy in front of `std.http.Client`. No retries, no circuit breaker |

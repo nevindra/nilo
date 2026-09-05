@@ -295,6 +295,10 @@ plus a per-arm `allOf` for a tagged one. See
 | `c.path()` | `Str` — the path, without the query string |
 | `c.param(name)` | `?Str`, percent-decoded. `"*"` for a catch-all |
 | `c.query(name)` | `?Str`, percent-decoded, `+` as space |
+| `c.queries()` | an iterator over every query parameter, in arrival order — `while (it.next()) \|q\|`, `q.name` and `q.value` are `Str`. A name sent twice appears twice |
+| `c.queryString()` | `Str` — the query as it arrived, still encoded, no `?` on the front. `""` when there was none |
+| `c.host()` | `Str` — the host this request was addressed to. `X-Forwarded-Host` under `trusted_hops`, else the `Host` header |
+| `c.scheme()` | `Str` — `"https"` or `"http"`, what the **client** used. `X-Forwarded-Proto` under `trusted_hops`, else always `"http"` |
 | `c.header(name)` | `?Str`, name matched case-insensitively. The **first** of that name |
 | `c.headers()` | an iterator over every header, in arrival order — `while (it.next()) \|h\|`, `h.name` and `h.value` are `Str` |
 | `c.cookie(name)` | `?Str` — as the client sent it, nothing decoded. Allocates nothing |
@@ -349,6 +353,22 @@ may carry more than one of. `Set-Cookie` because two cookies cannot be folded
 into one line; `Vary` because two layers each name their own axis, and replacing
 threw one away ([ADR 0089](./adr/0089-two-layers-can-each-name-a-vary-axis.md)).
 Setting either with a name and value already present adds nothing.
+
+**`host()` and `scheme()` are how a handler writes a URL to its own service** —
+a password-reset link, an OAuth `redirect_uri`, an absolute `Location`. nilo
+does not speak TLS, so with no `trusted_hops` set `scheme()` is always
+`"http"`; behind a proxy set it and the two headers that proxy writes are
+believed, exactly as `X-Forwarded-For` is
+([ADR 0112](./adr/0112-a-request-can-be-read-past-the-parts-a-handler-names.md)).
+A forwarded host that is not host-shaped is dropped rather than used, because
+this ends up in a link somebody clicks.
+
+**A body arriving under a `Content-Encoding` other than `identity` is a 415**
+naming the header, before any handler runs — nilo decodes none of them, and
+handing a gzip stream to `c.json` produced a 400 about malformed JSON that was
+true of the bytes and useless to whoever sent them
+([ADR 0111](./adr/0111-a-body-under-an-encoding-nilo-cannot-read-is-refused.md)).
+The header on a request with no body is ignored.
 
 `sendFile` also takes `size` (null asks the file), `etag` and `cache_control`,
 and answers a `Range`, an `If-Range`, an `If-None-Match` and a `HEAD` from them.
@@ -1196,6 +1216,12 @@ nilo.logger.with(.{ .level = .info, .slow_micros = 0,   // slower than this → 
 nilo.cors.permissive                                    // origins &.{"*"}, no credentials
 nilo.cors.with(.{ .origins = &.{…}, .methods = …, .headers = …,
                    .expose = …, .credentials = false, .max_age = 0 })
+
+nilo.cors.reading(&origins, .{ … })                     // the list read at run time
+
+nilo.allowance.with(.{ .per_window = 100, .window_s = 60,   // 429 past this
+                        .slots = 16 * 1024,                  // addresses remembered
+                        .ipv6_prefix = 64, .name = "" })
 ```
 
 `origins` is a list because `Access-Control-Allow-Origin` carries one value:
@@ -1203,6 +1229,92 @@ the request's `Origin` is compared against each entry and the one that matched
 is what goes out. Lowercase, and refused at build time otherwise. `&.{"*"}`
 answers anyone and reads no header at all; anything else also sends
 `Vary: Origin`, whether or not it matched.
+
+**`cors.reading` is the same middleware with the list read at run time**, for
+the deployment fact `with` cannot express — the front end at one address in
+staging and another in production
+([ADR 0110](./adr/0110-an-origin-is-a-fact-about-the-deployment.md)).
+Everything but the list stays comptime.
+
+| | |
+|---|---|
+| `nilo.cors.Origins` | where the list lives. `.empty` to start; a `var` that outlives the App |
+| `o.set(&.{ … })` | take a list you assembled. `error.OriginNotLowercase`, `.OriginEmpty`, `.OriginIsWildcard` |
+| `o.setSplit(&buf, text)` | split `"https://a.com,https://b.com"` into `buf`, which is yours. `error.TooManyOrigins` past its length |
+| `nilo.cors.reading(&o, .{ … })` | the middleware. `.origins` in the options is a compile error — the list is `o`'s |
+
+**The text is borrowed and has to outlive the server** — the environment block
+and a `.env`'s text both do — which is what lets the matched origin go out
+without being copied, so a cross-origin request still allocates nothing. `"*"`
+is refused: that is `cors.permissive`. A list nobody filled refuses every
+cross-origin request and says so in the log once.
+
+### `nilo.allowance`
+
+**How many requests one address may make inside a window.** Past it the request
+is a 429 carrying `Retry-After`, and the handler is never reached.
+
+<!-- compiles: body -->
+```zig
+try app.useOn("/api", nilo.allowance.with(.{ .per_window = 100, .window_s = 60 }));
+```
+
+| | |
+|---|---|
+| `.per_window` | how many requests, 1 to 1023 |
+| `.window_s` | how long the window is, in seconds. Also what `Retry-After` says |
+| `.slots` | how many addresses are remembered at once. A power of two, ≥ 64. Eight bytes each |
+| `.ipv6_prefix` | how much of an IPv6 address is one client. 64 is one customer's allocation |
+| `.name` | tells this allowance apart from another with the same numbers |
+
+The table is sized while compiling and lives in `.bss`: **no allocation per
+request and none at startup**, 131,072 bytes at the default, and nothing at all
+in a program that does not use it. The window **slides** — the previous one is
+weighed by how far into the current one the request arrived — so a hundred at
+11:59:59 and a hundred at 12:00:00 is not two hundred through.
+
+Two things it does on purpose
+([ADR 0114](./adr/0114-an-allowance-is-a-table-sized-while-compiling.md)):
+a bucket with no room **forgets its stalest address** rather than letting two
+share one allowance, and a slot under contention **lets the request through**.
+Both are the same trade — being loose for one window beats refusing somebody who
+has made no requests at all.
+
+Two `with()` calls carrying the same options are one table. Give one a `.name`
+to count a sign-in route apart from a search route.
+
+**Behind a proxy, set `.trusted_hops`** on `listen`, or every request looks like
+it came from the proxy and the whole table is one slot. A refusal that finds an
+`X-Forwarded-For` on a request counted against the socket's own address says so
+in the log once.
+
+It is not a defence against a flood — a refused request is still read, parsed,
+matched and answered. That is `max_connections`.
+
+## `nilo.accept`
+
+What the request's `Accept` header says about one media type. One call, no
+allocation, and the reader the single-page fallback decides with
+([ADR 0109](./adr/0109-a-fallback-answers-a-navigation-not-a-missing-asset.md)).
+
+```zig
+switch (nilo.accept.asks(c.header("Accept"), "text/html")) {
+    .named => …,      // the client asked for it, or for `text/*`
+    .anything => …,   // it said `*/*` and nothing more specific
+    .unsaid => …,     // there is no Accept header at all
+    .refused => …,    // it named other types, or named this one with q=0
+}
+```
+
+`asks(header, kind)` takes `?[]const u8` — `c.header(…)` gives a `?Str`, so
+pass `if (c.header("Accept")) |h| h.view() else null`. The type is comptime and
+has to be a full media type: `"text/*"` is a compile error, because the answer
+is about one type rather than a family.
+
+The most specific entry decides, which is RFC 9110's rule: `text/html;q=0, */*`
+is `.refused` for HTML and `.anything` for everything else. There is no
+`Format`-shaped negotiation over several offers — this answers one question and
+a handler with two things to serve asks it twice.
 
 ## Static options
 
@@ -1213,9 +1325,16 @@ answers anyone and reads no header at all; anything else also sends
 | `index` | `"index.html"` |
 | `cache_control` | `"public, max-age=3600"` |
 | `spa_fallback` | `""` (off) |
+| `spa_fallback_for` | `.navigations` — or `.any_path`, which is what shipped before 0.2.0 |
 | `max_file_bytes` | `8 * 1024 * 1024` |
 | `max_total_bytes` | `64 * 1024 * 1024` |
 | `dotfiles` | `false` |
+
+`spa_fallback_for` decides which requests the fallback answers: `.navigations`
+is a request naming `text/html`, or one that named nothing and has no file
+extension in its last path segment, and everything else under the prefix is a
+404 naming the path. See
+[Static files](./guide/static-files.md#the-fallback-and-what-it-is-for).
 
 `max_file_bytes` is a threshold, not a ceiling: a file over it is listed but not
 read, and each request opens it and sends it from the disk — no gzipped copy, an
@@ -1269,6 +1388,41 @@ marker gets `{}` and a description saying so.
 | `answer.headerAt(name, n)` / `.headerCount(name)` | for the ones a response repeats |
 | `answer.setCookie(name)` | the whole `Set-Cookie` line that sets it |
 | `answer.text(&buf)` | the body with chunk framing undone |
+
+A WebSocket route has no answer to read, so it has a driver of its own
+([ADR 0113](./adr/0113-a-websocket-route-can-be-driven-from-a-test.md)):
+
+```zig
+var chat: nilo.testing.Conversation = try .init(gpa, .{});
+defer chat.deinit();
+
+try chat.text("hello");
+try chat.close(1000, "bye");
+
+const talk = try chat.open(&app, "/chat");
+try testing.expectEqualStrings("hello", talk.at(0).?.bytes);
+```
+
+| | |
+|---|---|
+| `Conversation.init(gpa, .{ … })` | the same `Options` a `Client` takes |
+| `chat.text(s)` / `binary(b)` / `ping(b)` / `pong(b)` | queue one frame, masked as a client must |
+| `chat.close(code, why)` | queue a close frame |
+| `chat.fragments(.text, &.{ … })` | one message split across continuations |
+| `chat.raw(bytes)` | bytes framed by nobody — for what a **malformed** frame does |
+| `chat.setHeader(name, value)` | sent with the handshake — an `Origin`, a cookie, a subprotocol |
+| `chat.open(&app, path)` | run it. The queue is cleared, so the same conversation can open again |
+| `talk.accepted()` / `.status` / `.header(name)` | the handshake |
+| `talk.at(n)` / `.first(kind)` / `.messages` | the frames the server sent, decoded and in order |
+| `talk.closedWith()` | the close code, or null if it never closed |
+
+A `Message` is `.kind` (`.text`, `.binary`, `.ping`, `.pong`, `.close`),
+`.bytes`, and `.code()` / `.reason()` for a close frame.
+
+**The frames are queued before the server runs, not while it runs.** One
+thread and no socket, so a test cannot read what the server said and then
+decide what to send next — and a conversation between *two* sockets, a `Room`
+broadcast included, needs two connections and is out of reach here.
 
 ## `nilo_sql`
 

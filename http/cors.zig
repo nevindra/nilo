@@ -63,6 +63,192 @@ pub const Options = struct {
 /// Allow any origin, no credentials. Reasonable for a public API.
 pub const permissive = with(.{});
 
+/// The origins a deployment answers, filled before `listen()` and read on the
+/// requests that carry an `Origin` (ADR 0110).
+///
+/// `with` settles its list while compiling, which is what makes a named origin
+/// cost one `mem.eql` against a literal and no allocation. The cost of that is
+/// that the same binary cannot serve staging and production, because the front
+/// end's address is a fact about the deployment — and every other deployment
+/// fact in nilo arrives through `nilo_config` at run time.
+///
+/// So this is the other half. A program declares one of these where it will
+/// outlive the App, fills it from wherever its settings come from, and hands
+/// its address to `cors.reading`:
+///
+/// ```zig
+/// var origins: nilo.cors.Origins = .empty;
+///
+/// pub fn main() !void {
+///     var buf: [4][]const u8 = undefined;
+///     try origins.setSplit(&buf, settings.web_origins);   // "https://a.com,https://b.com"
+///     try app.use(nilo.cors.reading(&origins, .{ .credentials = true }));
+///     try app.listen(.{});
+/// }
+/// ```
+///
+/// **The text is borrowed, not copied.** The entries point at whatever the
+/// caller passed — the environment block, a `.env`'s text, a literal — and
+/// have to outlive the server, which is the same rule `nilo_config` states
+/// for a `[]const u8` field.
+pub const Origins = struct {
+    /// Read on the request path, written before there is one. There is no
+    /// lock: a program that rewrites this while the server is running is
+    /// racing every in-flight request, and reloading configuration is a
+    /// separate feature that does not exist.
+    list: []const []const u8 = &.{},
+
+    pub const empty: Origins = .{};
+
+    pub const SetError = error{
+        /// An entry with a capital letter in it. A browser lowercases the
+        /// scheme and host before it sends them, so this would never match.
+        OriginNotLowercase,
+        /// An empty entry, which matches nothing.
+        OriginEmpty,
+        /// `"*"`. A runtime list names the deployments this server answers;
+        /// answering anybody is `cors.permissive`, and it needs no list.
+        OriginIsWildcard,
+    };
+
+    /// Take a list the caller assembled. The same four things `with` refuses
+    /// while compiling, refused here as errors, because a list that arrives
+    /// at run time cannot be refused any earlier.
+    pub fn set(self: *Origins, list: []const []const u8) SetError!void {
+        for (list) |origin| try checkOne(origin);
+        self.list = list;
+    }
+
+    /// Split `text` on commas into `into`, trimming spaces, and take the
+    /// result. `into` is the caller's — one array, no allocation, and its
+    /// length is the most origins this program will answer.
+    ///
+    /// `error.TooManyOrigins` when the text names more than `into` holds,
+    /// rather than a list quietly missing its last entry.
+    pub fn setSplit(
+        self: *Origins,
+        into: [][]const u8,
+        text: []const u8,
+    ) (SetError || error{TooManyOrigins})!void {
+        var n: usize = 0;
+        var parts = std.mem.splitScalar(u8, text, ',');
+        while (parts.next()) |raw| {
+            const origin = std.mem.trim(u8, raw, " \t");
+            if (origin.len == 0) continue;
+            if (n == into.len) return error.TooManyOrigins;
+            try checkOne(origin);
+            into[n] = origin;
+            n += 1;
+        }
+        self.list = into[0..n];
+    }
+
+    fn checkOne(origin: []const u8) SetError!void {
+        if (origin.len == 0) return error.OriginEmpty;
+        if (std.mem.eql(u8, origin, "*")) return error.OriginIsWildcard;
+        for (origin) |byte| {
+            if (byte >= 'A' and byte <= 'Z') return error.OriginNotLowercase;
+        }
+    }
+
+    fn matches(self: *const Origins, sent: []const u8) ?[]const u8 {
+        for (self.list) |allowed| {
+            if (std.mem.eql(u8, sent, allowed)) return allowed;
+        }
+        return null;
+    }
+};
+
+/// The CORS middleware, reading its origins from `held` rather than from a
+/// list settled while compiling (ADR 0110).
+///
+/// Everything else — the preflight, the credentials, the exposed headers, the
+/// max age — is comptime exactly as `with`'s is, because none of it is a fact
+/// about the deployment. What changes is one compare: a walk over a list whose
+/// length is known only at run time, instead of an unrolled compare against
+/// literals. Nothing is allocated either way.
+///
+/// `held` is a comptime pointer, so it has to be a variable that outlives the
+/// App — a container-level `var`, which is the shape the example above uses.
+pub fn reading(comptime held: *Origins, comptime options: Options) mw.Middleware {
+    comptime checkReading(options);
+
+    return struct {
+        /// Said once, on the first cross-origin request that finds the list
+        /// empty. Not at startup: nothing here runs at startup, and a program
+        /// that fills the list after `use` and before `listen` would be told
+        /// off for something it was about to do.
+        var said: std.atomic.Value(bool) = .init(false);
+
+        fn run(c: *Ctx, next: mw.Next) anyerror!void {
+            // Set whether or not anything matched, for the reason `with`
+            // states: the response really does vary by origin, and a shared
+            // cache that was not told so would hand one origin's response to
+            // another.
+            try c.setStaticHeader("Vary", "Origin");
+            if (c.header("Origin")) |sent| {
+                if (held.matches(sent.view())) |allowed| {
+                    // Not copied, which is the whole reason `Origins` says its
+                    // text has to outlive the server: that contract is what
+                    // makes this `setStaticHeader` rather than an allocation
+                    // on the request path, and it is what keeps the budget at
+                    // one (ADR 0018).
+                    try c.setStaticHeader("Access-Control-Allow-Origin", allowed);
+                } else if (held.list.len == 0) {
+                    sayItIsEmpty();
+                }
+            }
+
+            if (comptime options.credentials) {
+                try c.setStaticHeader("Access-Control-Allow-Credentials", "true");
+            }
+            if (comptime options.expose.len > 0) {
+                try c.setStaticHeader("Access-Control-Expose-Headers", options.expose);
+            }
+
+            if (c.method == .OPTIONS and c.header("Access-Control-Request-Method") != null) {
+                try c.setStaticHeader("Access-Control-Allow-Methods", options.methods);
+                try c.setStaticHeader("Access-Control-Allow-Headers", options.headers);
+                if (comptime options.max_age > 0) {
+                    try c.setStaticHeader("Access-Control-Max-Age", maxAgeText(options));
+                }
+                return c.sendEmpty(204);
+            }
+
+            return next.run(c);
+        }
+
+        fn sayItIsEmpty() void {
+            if (said.load(.monotonic)) return;
+            if (said.swap(true, .monotonic)) return;
+            std.log.warn(
+                "cors.reading was given no origins, so every cross-origin request is " ++
+                    "refused by the browser. Call set() or setSplit() on the Origins " ++
+                    "before listen().",
+                .{},
+            );
+        }
+    }.run;
+}
+
+/// The one thing that can be wrong with a `reading` call: naming origins in
+/// two places at once. Said while compiling, because a list that is ignored
+/// is a list somebody will edit and then wonder about.
+fn checkReading(comptime options: Options) void {
+    comptime {
+        if (options.origins.len != 1 or !std.mem.eql(u8, options.origins[0], "*")) @compileError(
+            "nilo: cors.reading takes its origins from the Origins you hand it, so the " ++
+                "`.origins` field has nothing to do.\n  Drop it, and call " ++
+                "`set()` or `setSplit()` on the Origins before listen() — or use " ++
+                "`cors.with(.{ .origins = … })` if the list is known while compiling.",
+        );
+    }
+}
+
+fn maxAgeText(comptime options: Options) []const u8 {
+    return comptime std.fmt.comptimePrint("{d}", .{options.max_age});
+}
+
 /// Whether this list is the one that means "anybody".
 fn allowsAnyone(comptime origins: []const []const u8) bool {
     return origins.len == 1 and std.mem.eql(u8, origins[0], "*");
@@ -193,4 +379,74 @@ fn lowered(comptime text: []const u8) []const u8 {
         const frozen = out;
         return &frozen;
     }
+}
+
+const testing = std.testing;
+
+test "a runtime list is taken, and matched exactly" {
+    var origins: Origins = .empty;
+    try origins.set(&.{ "https://app.example.com", "http://localhost:5173" });
+
+    try testing.expectEqualStrings(
+        "https://app.example.com",
+        origins.matches("https://app.example.com").?,
+    );
+    try testing.expect(origins.matches("https://evil.example.com") == null);
+    // A prefix is not a match: `https://app.example.com.evil.com` is somebody
+    // else's host, and so is a shorter one.
+    try testing.expect(origins.matches("https://app.example.com.evil.com") == null);
+    try testing.expect(origins.matches("https://app.example.co") == null);
+}
+
+test "the three things a runtime origin cannot be, refused where they arrive" {
+    var origins: Origins = .empty;
+
+    // The same mistakes `with` refuses while compiling. A list that arrives at
+    // run time cannot be refused any earlier than this, so `set` is where the
+    // program finds out — and it finds out at startup rather than from a
+    // browser saying nothing in particular months later.
+    try testing.expectError(error.OriginNotLowercase, origins.set(&.{"https://App.example.com"}));
+    try testing.expectError(error.OriginEmpty, origins.set(&.{""}));
+    try testing.expectError(error.OriginIsWildcard, origins.set(&.{"*"}));
+
+    // And a refused list is not half-taken.
+    try testing.expectEqual(@as(usize, 0), origins.list.len);
+}
+
+test "a comma-separated setting becomes a list, in the caller's own array" {
+    var buf: [4][]const u8 = undefined;
+    var origins: Origins = .empty;
+    try origins.setSplit(&buf, "https://app.example.com, https://staging.example.com");
+
+    try testing.expectEqual(@as(usize, 2), origins.list.len);
+    try testing.expectEqualStrings("https://app.example.com", origins.list[0]);
+    try testing.expectEqualStrings("https://staging.example.com", origins.list[1]);
+
+    // An empty setting is an empty list rather than one empty origin, which is
+    // what an unset environment variable looks like.
+    try origins.setSplit(&buf, "");
+    try testing.expectEqual(@as(usize, 0), origins.list.len);
+
+    // Trailing and doubled commas say nothing and are skipped.
+    try origins.setSplit(&buf, "https://a.example.com,,");
+    try testing.expectEqual(@as(usize, 1), origins.list.len);
+}
+
+test "more origins than the array holds is an error, not a list missing its last entry" {
+    var buf: [2][]const u8 = undefined;
+    var origins: Origins = .empty;
+    try testing.expectError(error.TooManyOrigins, origins.setSplit(
+        &buf,
+        "https://a.example.com,https://b.example.com,https://c.example.com",
+    ));
+}
+
+test "a bad entry in the middle of a setting stops the whole list" {
+    var buf: [4][]const u8 = undefined;
+    var origins: Origins = .empty;
+    try testing.expectError(error.OriginNotLowercase, origins.setSplit(
+        &buf,
+        "https://a.example.com,https://B.example.com",
+    ));
+    try testing.expectEqual(@as(usize, 0), origins.list.len);
 }

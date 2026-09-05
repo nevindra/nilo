@@ -33,6 +33,10 @@ pub const ParseError = error{
     BadRequestLine,
     BadHeader,
     UnsupportedVersion,
+    /// A body arrived under a `Content-Encoding` nilo cannot decode, which is
+    /// every one of them but `identity` (ADR 0111). A 415 rather than a 400:
+    /// the request is well formed and the server cannot read what it carries.
+    UnsupportedContentEncoding,
 };
 
 pub const Request = struct {
@@ -54,6 +58,11 @@ pub const Request = struct {
     /// in `applyHeaderAt` read it. Free in memory: it lands in padding the
     /// struct already had.
     has_content_length: bool = false,
+    /// Whether a `Content-Encoding` other than `identity` was sent. Read by
+    /// `finish`, which turns it into a 415 when there is a body under it.
+    /// Free in memory for the reason `has_content_length` is: it lands in
+    /// padding the struct already had.
+    encoded: bool = false,
     /// Whether a `Host` was sent, which RFC 9112 §3.2 requires exactly one of
     /// on an HTTP/1.1 request: none is a 400 and so is a second line, even one
     /// that agrees with the first — stricter than `Content-Length`, where an
@@ -552,6 +561,14 @@ pub fn parseHead(head: []const u8, r: *Request) ParseError!void {
 /// that does not claim to speak it is not held to it.
 fn finish(r: *const Request) ParseError!void {
     if (r.minor_version == 1 and !r.has_host) return error.BadHeader;
+    // Asked here rather than in the header arm, so the answer does not depend
+    // on whether the framing headers arrived before the encoding one.
+    //
+    // A body nilo cannot decode is refused rather than parsed as though the
+    // bytes were what they claim to be — the same failure `Transfer-Encoding`
+    // used to have, one header over (ADR 0111). A `Content-Encoding` on a
+    // request with no body says nothing about anything and is left alone.
+    if (r.encoded and (r.chunked or r.content_length > 0)) return error.UnsupportedContentEncoding;
 }
 
 pub fn parseRequestLine(line: []const u8, r: *Request) ParseError!void {
@@ -653,6 +670,16 @@ fn applyHeaderAt(buf: []const u8, from: usize, colon: usize, end: usize, r: *Req
             if (r.has_content_length and n != r.content_length) return error.BadHeader;
             r.content_length = n;
             r.has_content_length = true;
+        },
+        "content-encoding".len => {
+            if (!std.ascii.eqlIgnoreCase(name, "content-encoding")) return;
+            // `identity` is the one coding that means "these are the bytes",
+            // and it is the only one nilo can read. Anything else — gzip, br,
+            // deflate, zstd — would reach `c.json` as a compressed stream and
+            // be reported as a malformed body, which is true of the bytes and
+            // useless to whoever sent them. The refusal itself is `finish`'s,
+            // because whether there is a body to refuse is not settled yet.
+            if (!std.ascii.eqlIgnoreCase(headerValue(buf, colon, end), "identity")) r.encoded = true;
         },
         "transfer-encoding".len => {
             if (!std.ascii.eqlIgnoreCase(name, "transfer-encoding")) return;

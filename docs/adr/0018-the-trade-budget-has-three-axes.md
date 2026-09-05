@@ -70,6 +70,7 @@ Measured stripped, `ReleaseFast`, on the examples in this repository.
 | An object store as a Service, `nilo_s3` ([ADRs 0067](./0067-most-of-an-s3-client-is-not-s3.md)–[0072](./0072-an-object-store-is-a-service-that-dials.md)) | +0 | +0 |
 | Twenty findings from an application, closed together ([ADRs 0075](./0075-a-lazy-dependency-is-a-request.md)–[0084](./0084-a-library-can-tell-what-mode-the-program-was-built-in.md)) | +11,400 B | +17,272 B |
 | Counters ([ADR 0100](./0100-the-route-table-is-the-registry.md)) | +1,984 B | +1,984 B |
+| An allowance ([ADR 0114](./0114-an-allowance-is-a-table-sized-while-compiling.md)) | +0 | +0 |
 
 `nilo_fetch` is +0 on both examples because neither imports it, and that is the
 whole of the row rather than an accident: a module nothing names is never
@@ -106,6 +107,20 @@ The second row is one measurement of six changes because they landed together, w
 The third row is nearly the same on both, which says what it is: the name renderer and the extra descriptions live in the document writer, and the document writer is linked in whether or not `docs()` is called — the same unconditional cost the first row is about, and the same open question in `docs/roadmap.md`.
 
 The ADR 0071 row is unconditional too, and is the only row here that is a *cost bought deliberately*: cold paths that used to be inlined copies are now real functions, which is what makes the connection loop's frame small enough to fit in a page. `hello` has no WebSocket route and pays all 1,240 bytes of it. 0.14% of the binary for 4,096 bytes on every connection the process holds is the trade, stated rather than defended. All eight examples were measured rather than two, because the row is unconditional and a row that claims to be unconditional should be checked against something that could disprove it: the spread is 1,240 to 2,480 bytes, and the top of it is `chat`, the one example that opens a WebSocket and so also links the handover. The numbers are in [`bench/result/http.md`](../../bench/result/http.md) with the baseline they were taken against.
+
+The allowance row is a zero of the third kind on this table, and the only one
+checked by *removing* the feature: `pub const allowance` was taken out of
+`http/http.zig` and both examples rebuilt byte-for-byte identical, because Zig
+never analyses a `pub` namespace nothing references. An application that does
+call it pays **+5,712 bytes** on `hello` and **+5,584** on `rest`, and
+`bench/main.zig` a third figure 48 bytes from the first — three programs
+agreeing that closely is what says the number is the feature rather than a
+generic it woke up. None of those figures include the table: 131,072 bytes of
+`.bss` is `NOBITS` in the ELF, so it is 128 KiB of RSS and nothing on disk.
+Those rows were taken on a different machine from the rest of this table (a
+2-core Xeon rather than the Ryzen), which does not matter for a delta measured
+with both sides built the same way, and is recorded in
+[`bench/result/http.md`](../../bench/result/http.md) anyway.
 
 The fourth row is a real zero rather than a rounded one: the same three examples came out byte-for-byte identical, because both halves of that change — the message rewriting and the earlier check — happen while compiling and a message that is never produced is a string that never exists. It is a row rather than an omission because the rule is that a feature states its cost, and "none" is a number somebody may want to check later.
 

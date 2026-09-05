@@ -20,6 +20,7 @@ const typed = @import("typed.zig");
 const fail = @import("fail.zig");
 const mw = @import("middleware.zig");
 const cors = @import("cors.zig");
+const allowance = @import("allowance.zig");
 const static_mod = @import("static.zig");
 const openapi = @import("openapi.zig");
 const budget = @import("budget.zig");
@@ -53,6 +54,11 @@ const default_arena_keep = 16 * 1024;
 /// client has one thing to parse and not two.
 const RESPONSE_400 = http1.staticResponse(400, "Bad Request", failure_content_type, staticFailure(400, "malformed request"), false);
 const RESPONSE_431 = http1.staticResponse(431, "Request Header Fields Too Large", failure_content_type, staticFailure(431, "head too long"), false);
+/// Sent when a body arrives under a `Content-Encoding` nilo cannot decode,
+/// which is all of them but `identity` (ADR 0111). The message names the
+/// header, because the mistake is one line of client configuration and the
+/// alternative — a 400 about malformed JSON — sends the reader to the body.
+const RESPONSE_415 = http1.staticResponse(415, "Unsupported Media Type", failure_content_type, staticFailure(415, "this server does not decode a Content-Encoding: send the body as identity"), false);
 /// Sent when a request head started arriving and then stopped (ADR 0023).
 /// Not when a keep-alive connection simply sat idle: that client has not
 /// asked for anything, and a status answering nothing is noise a proxy has
@@ -1192,9 +1198,16 @@ pub const App = struct {
         defer _ = self.stop.in_flight.fetchSub(1, .acq_rel);
 
         var r = http1.Request{};
-        http1.parseHead(raw_head, &r) catch {
-            sendFinal(out, RESPONSE_400);
-            record.finish(400);
+        http1.parseHead(raw_head, &r) catch |err| {
+            // One of these is not a malformed request: a body under a
+            // `Content-Encoding` nilo cannot decode is a request everybody
+            // understands and this server cannot read (ADR 0111).
+            const answer, const status: u16 = switch (err) {
+                error.UnsupportedContentEncoding => .{ RESPONSE_415, 415 },
+                else => .{ RESPONSE_400, 400 },
+            };
+            sendFinal(out, answer);
+            record.finish(status);
             return .{ .keep_alive = false };
         };
 
@@ -1295,7 +1308,7 @@ pub const App = struct {
             chain = match.chain;
             terminal = match.handler;
             record.at(metrics_mod.fixed_slots + match.index);
-        } else if (self.findStatic(c.method, path)) |found| {
+        } else if (self.findStatic(&c, path)) |found| {
             // Resolved at `listen()` with the routes' chains, so an asset
             // served with a logger or a CORS in front of it allocates
             // nothing — which is the shape nearly every app deploys, and
@@ -1399,7 +1412,25 @@ pub const App = struct {
     /// The static file `path` names, if any set holds one. Only GET and
     /// HEAD: a POST to a `.css` is a mistake, and answering it with the
     /// stylesheet would hide that.
-    fn findStatic(self: *const App, method: http1.Method, path: []const u8) ?StaticHit {
+    /// The file this request names, or the page a single-page directory
+    /// answers a miss with — in that order, and the order is the point
+    /// (ADR 0109).
+    fn findStatic(self: *const App, c: *const Ctx, path: []const u8) ?StaticHit {
+        if (self.findStaticFile(c.method, path)) |found| return found;
+        if (c.method != .GET and c.method != .HEAD) return null;
+
+        // Only once every set has been asked for the file itself. A page one
+        // directory answers its misses with must not hide a file another
+        // directory really holds, and asking set by set would let it.
+        const accept_header: ?[]const u8 = if (c.header("Accept")) |h| h.view() else null;
+        for (self.static_sets.items, 0..) |*set, i| {
+            if (set.fallbackFor(path, accept_header)) |file| return self.hitIn(i, set, file);
+        }
+        return null;
+    }
+
+    /// The file `path` names, with no fallback anywhere in it.
+    fn findStaticFile(self: *const App, method: http1.Method, path: []const u8) ?StaticHit {
         if (method != .GET and method != .HEAD) return null;
         // Asked before the loaded directories, not after. A single-page app
         // served from `/` with an `index.html` fallback answers for every
@@ -1409,15 +1440,23 @@ pub const App = struct {
             if (set.find(path)) |file| return hit(file, self.docs_chains, set.indexOf(file));
         }
         for (self.static_sets.items, 0..) |*set, i| {
-            if (set.find(path)) |file| {
-                // A set appended without `resolveChains` having run since —
-                // which only a test reaching past `static()` can arrange —
-                // has no chains, exactly as an unresolved route has none.
-                const chains = if (i < self.static_chains.items.len) self.static_chains.items[i] else &.{};
-                return hit(file, chains, set.indexOf(file));
-            }
+            if (set.find(path)) |file| return self.hitIn(i, set, file);
         }
         return null;
+    }
+
+    /// A hit in the `i`th loaded directory, with the chain `listen()`
+    /// resolved for it. A set appended without `resolveChains` having run
+    /// since — which only a test reaching past `static()` can arrange — has
+    /// no chains, exactly as an unresolved route has none.
+    fn hitIn(
+        self: *const App,
+        i: usize,
+        set: *const static_mod.Set,
+        file: *const static_mod.File,
+    ) StaticHit {
+        const chains = if (i < self.static_chains.items.len) self.static_chains.items[i] else &.{};
+        return hit(file, chains, set.indexOf(file));
     }
 
     fn hit(
@@ -4266,7 +4305,7 @@ test "static files: content type, ETag, 304, index and the dotfile that is not s
     try testing.expect(std.mem.startsWith(u8, dotfile.response, "HTTP/1.1 404"));
 
     // The ETag the last response carried, handed back, costs no body.
-    const etag = app.findStatic(.GET, "/app.css").?.file.etag;
+    const etag = app.findStaticFile(.GET, "/app.css").?.file.etag;
     var request_buf: [256]u8 = undefined;
     const conditional = std.fmt.bufPrint(
         &request_buf,
@@ -4308,6 +4347,154 @@ test "static files: routes win, a prefix scopes, and middleware still wraps" {
     // Outside the prefix nothing is claimed.
     const outside = h.send(&app, "GET /users/42 HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, outside.response, "HTTP/1.1 404"));
+}
+
+test "an asset that is not there is a 404, and a deep link is still the page" {
+    // What this is about is the stale build hash (ADR 0109): `index.html`
+    // referring to a bundle the directory no longer holds used to answer 200
+    // with the page, and the browser reported a syntax error on line 1 of
+    // something that was never JavaScript.
+    var files = try TmpFiles.init(testing.allocator, &.{
+        .{ "app.js", "console.log(1)" },
+        .{ "index.html", "<h1>spa</h1>" },
+    });
+    defer files.deinit(testing.allocator);
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.staticWith("/", files.path, .{ .spa_fallback = "index.html" });
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const gone = h.send(&app, "GET /app.abc123.js HTTP/1.1\r\nHost: t\r\nAccept: */*\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, gone.response, "HTTP/1.1 404"));
+    // And it says which file, which the page never could.
+    try testing.expect(std.mem.indexOf(u8, gone.response, "/app.abc123.js") != null);
+
+    // A call that named a type it wants is not a navigation either.
+    const call = h.send(
+        &app,
+        "GET /api/orders HTTP/1.1\r\nHost: t\r\nAccept: application/json\r\n\r\n",
+    );
+    try testing.expect(std.mem.startsWith(u8, call.response, "HTTP/1.1 404"));
+
+    // The reload the fallback exists for still works, from a browser…
+    const browser = "GET /users/42 HTTP/1.1\r\nHost: t\r\n" ++
+        "Accept: text/html,application/xhtml+xml,*/*;q=0.8\r\n\r\n";
+    try testing.expect(std.mem.endsWith(u8, h.send(&app, browser).response, "<h1>spa</h1>"));
+    // …and from anything that said nothing about what it wanted.
+    const bare = h.send(&app, "GET /users/42 HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, bare.response, "<h1>spa</h1>"));
+
+    // The file that is there is unaffected, whatever it asked for.
+    const real = h.send(&app, "GET /app.js HTTP/1.1\r\nHost: t\r\nAccept: */*\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, real.response, "console.log(1)"));
+}
+
+test "a single-page app can ask for what shipped before, and gets it" {
+    var files = try TmpFiles.init(testing.allocator, &.{
+        .{ "index.html", "<h1>spa</h1>" },
+    });
+    defer files.deinit(testing.allocator);
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.staticWith("/", files.path, .{
+        .spa_fallback = "index.html",
+        .spa_fallback_for = .any_path,
+    });
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const asset = h.send(&app, "GET /app.abc123.js HTTP/1.1\r\nHost: t\r\nAccept: */*\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, asset.response, "<h1>spa</h1>"));
+}
+
+test "a file one directory holds beats a page another answers misses with" {
+    // Two directories, the first of them a single-page app mounted at `/`.
+    // Asking set by set would let its fallback answer for `/assets/app.css`
+    // before the directory that actually holds that file was reached.
+    var pages = try TmpFiles.init(testing.allocator, &.{
+        .{ "index.html", "<h1>spa</h1>" },
+    });
+    defer pages.deinit(testing.allocator);
+    var assets = try TmpFiles.init(testing.allocator, &.{
+        .{ "app.css", "body{}" },
+    });
+    defer assets.deinit(testing.allocator);
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.staticWith("/", pages.path, .{ .spa_fallback = "index.html" });
+    try app.static("/assets", assets.path);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const css = h.send(&app, "GET /assets/app.css HTTP/1.1\r\nHost: t\r\nAccept: */*\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, css.response, "body{}"));
+}
+
+/// Where a program using `cors.reading` keeps its list: somewhere that
+/// outlives the App, which for a test is the file itself.
+var test_origins: cors.Origins = .empty;
+
+test "a CORS origin can arrive at run time instead of being compiled in" {
+    // The deployment fact this is for: the same binary in staging and in
+    // production, with the front end at a different address in each
+    // (ADR 0110).
+    var buf: [4][]const u8 = undefined;
+    try test_origins.setSplit(&buf, "https://app.example.com, https://staging.example.com");
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(cors.reading(&test_origins, .{ .credentials = true }));
+    try app.get("/thing", plainOk);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    // The origin that matched is the one that goes back, and only it.
+    const staging = h.send(
+        &app,
+        "GET /thing HTTP/1.1\r\nHost: t\r\nOrigin: https://staging.example.com\r\n\r\n",
+    );
+    try testing.expect(std.mem.indexOf(
+        u8,
+        staging.response,
+        "Access-Control-Allow-Origin: https://staging.example.com\r\n",
+    ) != null);
+    try testing.expect(std.mem.indexOf(u8, staging.response, "Access-Control-Allow-Credentials: true") != null);
+
+    // Somebody else gets an ordinary response with no such header, and the
+    // browser is what refuses it — the same answer `cors.with` gives.
+    const other = h.send(
+        &app,
+        "GET /thing HTTP/1.1\r\nHost: t\r\nOrigin: https://evil.example.com\r\n\r\n",
+    );
+    try testing.expect(std.mem.indexOf(u8, other.response, "Access-Control-Allow-Origin") == null);
+    // …and it still says the response varies by origin, so a shared cache
+    // cannot hand this one to somebody who was allowed (ADR 0089).
+    try testing.expect(std.mem.indexOf(u8, other.response, "Vary: Origin") != null);
+
+    // A preflight is answered here and never reaches the route.
+    const preflight = h.send(
+        &app,
+        "OPTIONS /thing HTTP/1.1\r\nHost: t\r\nOrigin: https://app.example.com\r\n" ++
+            "Access-Control-Request-Method: POST\r\n\r\n",
+    );
+    try testing.expect(std.mem.startsWith(u8, preflight.response, "HTTP/1.1 204"));
+    try testing.expect(std.mem.indexOf(
+        u8,
+        preflight.response,
+        "Access-Control-Allow-Origin: https://app.example.com\r\n",
+    ) != null);
 }
 
 test "two layers each naming a Vary axis both survive onto the response" {
@@ -4660,6 +4847,51 @@ test "counting a request adds nothing to the allocation budget" {
     // is the claim ADR 0100 is built on: the table is sized once when the
     // routes are resolved, so a counted request touches memory that already
     // exists (ADR 0018).
+    try testing.expectEqual(@as(usize, 1), counting.allocs);
+    try testing.expectEqual(@as(usize, 0), counting.resizes);
+}
+
+test "an allowance adds nothing to the allocation budget" {
+    var db = Db{ .rows = &.{.{ .id = 7, .name = "wati" }} };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    try app.get("/users/:id", getUser);
+    try app.use(cors.permissive);
+    try app.use(allowance.with(.{ .per_window = 1000, .window_s = 60, .name = "budget" }));
+    try app.resolveChains();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var counting = budget.Counting{ .child = arena.allocator() };
+    var lifetime = str_mod.Lifetime{};
+    var in_flight = fail.InFlight{};
+    var buf: [4096]u8 = undefined;
+
+    const request = "GET /users/7 HTTP/1.1\r\nHost: example.dev\r\nUser-Agent: wrk\r\n" ++
+        "Accept: */*\r\nAccept-Encoding: gzip\r\nConnection: keep-alive\r\n\r\n";
+
+    const send = struct {
+        fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
+            var in = std.Io.Reader.fixed(request);
+            var out = std.Io.Writer.fixed(b);
+            _ = a.handleRequest(gpa, l, f, &in, &out, .off, .off, .{});
+            l.end();
+        }
+    }.once;
+
+    for (0..3) |_| {
+        send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+        _ = arena.reset(.{ .retain_with_limit = default_arena_keep });
+    }
+
+    counting.reset();
+    send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+
+    // Still the JSON body and nothing else, which is the whole reason the
+    // table is sized while compiling rather than kept in a map (ADR 0114).
+    // The address is not copied, not hashed into anything that allocates, and
+    // the slot it lands in existed before `main` ran.
     try testing.expectEqual(@as(usize, 1), counting.allocs);
     try testing.expectEqual(@as(usize, 0), counting.resizes);
 }
@@ -6780,6 +7012,175 @@ test "a socket a page on another origin asked for is not opened" {
     const unnamed = h.send(&app, "GET /named HTTP/1.1\r\nHost: api.example.com\r\n" ++
         "Origin: https://other.example.com\r\n" ++ rest);
     try testing.expect(std.mem.startsWith(u8, unnamed.response, "HTTP/1.1 403"));
+}
+
+// ---- what the request said, beyond the parts a handler asks for by name ----
+
+fn echoQueries(c: *Ctx) anyerror!void {
+    var out: std.ArrayList(u8) = .empty;
+    var it = c.queries();
+    while (it.next()) |q| {
+        try out.print(c._arena, "{f}={f};", .{ q.name, q.value });
+    }
+    try c.sendText(200, out.items);
+}
+
+fn echoQueryString(c: *Ctx) anyerror!void {
+    try c.sendText(200, try std.fmt.allocPrint(c._arena, "[{f}]", .{c.queryString()}));
+}
+
+test "every query parameter can be walked, including a name sent twice" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/q", echoQueries);
+    try app.resolveChains();
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    // The case `query(name)` cannot serve at all: names that are data, and a
+    // name sent more than once (ADR 0112).
+    const answer = h.send(
+        &app,
+        "GET /q?filter%5Bstatus%5D=open&tag=a&tag=b&empty= HTTP/1.1\r\nHost: t\r\n\r\n",
+    );
+    try testing.expect(std.mem.endsWith(
+        u8,
+        answer.response,
+        "filter[status]=open;tag=a;tag=b;empty=;",
+    ));
+
+    // No query at all is no parameters rather than one empty one.
+    const bare = h.send(&app, "GET /q HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, bare.response, "\r\n\r\n"));
+}
+
+test "the query string is also readable as the bytes that arrived" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/raw", echoQueryString);
+    try app.resolveChains();
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    // Still encoded, and with no `?` on the front: this is for a signature or
+    // a proxy, where what was sent matters and not what it meant.
+    const answer = h.send(&app, "GET /raw?a=1&b=%20two HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, answer.response, "[a=1&b=%20two]"));
+
+    const none = h.send(&app, "GET /raw HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, none.response, "[]"));
+}
+
+// ---- the URL the client used, which is not the one nilo saw ----
+
+fn echoBaseUrl(c: *Ctx) anyerror!void {
+    try c.sendText(200, try std.fmt.allocPrint(
+        c._arena,
+        "{f}://{f}",
+        .{ c.scheme(), c.host() },
+    ));
+}
+
+test "with no proxy trusted, the scheme is the connection's and the host is the Host header" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/where", echoBaseUrl);
+    try app.resolveChains();
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    // Forged, and ignored: nilo did not see TLS and nobody said a proxy did.
+    const answer = h.send(
+        &app,
+        "GET /where HTTP/1.1\r\nHost: api.example.com\r\n" ++
+            "X-Forwarded-Proto: https\r\nX-Forwarded-Host: evil.example.com\r\n\r\n",
+    );
+    try testing.expect(std.mem.endsWith(u8, answer.response, "http://api.example.com"));
+}
+
+test "with a proxy trusted, the scheme and host are the ones it forwarded" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/where", echoBaseUrl);
+    try app.resolveChains();
+    app.limits.trusted_hops = 1;
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    // The ordinary deployment: TLS terminated in front, the internal Host
+    // rewritten to the pod, and the real one in X-Forwarded-Host.
+    const answer = h.send(
+        &app,
+        "GET /where HTTP/1.1\r\nHost: 10.0.0.4:8080\r\n" ++
+            "X-Forwarded-Proto: https\r\nX-Forwarded-Host: api.example.com\r\n\r\n",
+    );
+    try testing.expect(std.mem.endsWith(u8, answer.response, "https://api.example.com"));
+
+    // A chain writes a list, and the first entry is what the client asked for.
+    const chained = h.send(
+        &app,
+        "GET /where HTTP/1.1\r\nHost: 10.0.0.4:8080\r\n" ++
+            "X-Forwarded-Proto: https, http\r\nX-Forwarded-Host: api.example.com, 10.0.0.4\r\n\r\n",
+    );
+    try testing.expect(std.mem.endsWith(u8, chained.response, "https://api.example.com"));
+
+    // A value that is not a host does not go into a URL somebody clicks.
+    const nonsense = h.send(
+        &app,
+        "GET /where HTTP/1.1\r\nHost: 10.0.0.4:8080\r\n" ++
+            "X-Forwarded-Host: api.example.com/../evil\r\n\r\n",
+    );
+    try testing.expect(std.mem.endsWith(u8, nonsense.response, "http://10.0.0.4:8080"));
+
+    // And a proxy that forwards plain HTTP is believed about that too.
+    const plain = h.send(
+        &app,
+        "GET /where HTTP/1.1\r\nHost: api.example.com\r\nX-Forwarded-Proto: http\r\n\r\n",
+    );
+    try testing.expect(std.mem.endsWith(u8, plain.response, "http://api.example.com"));
+}
+
+// ---- a body under an encoding nilo cannot read ----
+
+test "a compressed request body is refused with a 415 naming the header" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/things", plainOk);
+    try app.resolveChains();
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    // What used to happen: the gzip stream reached the JSON parser and came
+    // back as "malformed body", which is true of the bytes and useless to
+    // whoever sent them (ADR 0111).
+    const gzipped = h.send(
+        &app,
+        "POST /things HTTP/1.1\r\nHost: t\r\nContent-Encoding: gzip\r\n" ++
+            "Content-Type: application/json\r\nContent-Length: 3\r\n\r\n\x1f\x8b\x08",
+    );
+    try testing.expect(std.mem.startsWith(u8, gzipped.response, "HTTP/1.1 415"));
+    try testing.expect(std.mem.indexOf(u8, gzipped.response, "Content-Encoding") != null);
+
+    // `identity` is the one coding that means "these are the bytes".
+    const plain = h.send(
+        &app,
+        "POST /things HTTP/1.1\r\nHost: t\r\nContent-Encoding: identity\r\n" ++
+            "Content-Length: 2\r\n\r\nhi",
+    );
+    try testing.expect(std.mem.startsWith(u8, plain.response, "HTTP/1.1 200"));
+
+    // A header on a request with no body says nothing about anything, and is
+    // left alone rather than turned into a refusal nobody expected.
+    const bodyless = h.send(
+        &app,
+        "GET /nothing HTTP/1.1\r\nHost: t\r\nContent-Encoding: gzip\r\n\r\n",
+    );
+    try testing.expect(std.mem.startsWith(u8, bodyless.response, "HTTP/1.1 404"));
 }
 
 // ---- who the client is (X-Forwarded-For) ----

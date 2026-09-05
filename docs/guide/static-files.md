@@ -30,17 +30,50 @@ that can't be opened stops `listen()` with that sentence in the error.
 |---|---|
 | `index` | served for a path ending in `/`. Default `"index.html"`; empty turns it off |
 | `cache_control` | sent on every file. Default `"public, max-age=3600"` |
-| `spa_fallback` | served for any path under the prefix that names no file. Empty (the default) turns it off |
+| `spa_fallback` | served for a path under the prefix that names no file and could be a browser opening a page. Empty (the default) turns it off |
+| `spa_fallback_for` | which requests that covers. `.navigations` (the default) or `.any_path`, which is what shipped before 0.2.0 ([below](#the-fallback-and-what-it-is-for)) |
 | `max_file_bytes` | the line between a file held in memory and one opened per request. Default 8 MB |
 | `max_total_bytes` | the ceiling on what one tree may hold in memory, gzipped copies included. Default 64 MB |
 | `dotfiles` | whether to load names starting with `.`. Off by default |
 | `compress` | gzip every file worth gzipping, once, at load. On by default |
 | `compress_min_bytes` | files smaller than this are served as they are. Default 1 KB |
 
+Dotfiles are off because a `.env` or a `.git` that found its way into the
+directory being published on the first request is a bad way to learn it was
+there.
+
+### The fallback, and what it is for
+
 `spa_fallback` is what makes a browser reload on `/users/42` reach your
-client-side router instead of a 404. Dotfiles are off because a `.env` or a
-`.git` that found its way into the directory being published on the first request
-is a bad way to learn it was there.
+client-side router instead of a 404. **It answers a request that could be
+somebody opening a page, and nothing else**
+([ADR 0109](../adr/0109-a-fallback-answers-a-navigation-not-a-missing-asset.md)):
+
+| The request | The answer |
+|---|---|
+| `GET /users/42`, `Accept: text/html,…` — a reload, a deep link | the page |
+| `GET /users/42` with no `Accept`, or `*/*` — `curl`, a crawler | the page |
+| `GET /app.abc123.js`, `Accept: */*` — a `<script src>` | **404**, naming the path |
+| `GET /api/orders`, `Accept: application/json` — a `fetch` | **404** |
+
+The middle row is the one that changed in 0.2.0. A build whose hash has moved
+on refers to a bundle the directory no longer holds, and answering that with
+`index.html` is a 200 the browser reports as a syntax error on line 1 of
+something that is not JavaScript — with the name of the missing file nowhere in
+it. The same shape turns a `fetch` into a JSON parse error.
+
+Two things are worth knowing about the rule. **A `fetch()` that sends `*/*` to
+a path with no extension still gets the page**, because at this layer it is
+indistinguishable from a deep link; sending `Accept: application/json` is what
+separates them. And a directory that really does want the old behaviour says
+so:
+
+```zig
+try app.staticWith("/", "public", .{
+    .spa_fallback = "index.html",
+    .spa_fallback_for = .any_path,     // every path under the prefix, as before
+});
+```
 
 `max_total_bytes` is a real ceiling — the held part of the tree is going into
 RAM — and it is better to hit it at startup than at 3am. `max_file_bytes` is not
