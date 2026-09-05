@@ -1545,6 +1545,25 @@ the parent is in `do_wait` either way, and only the child's own `cputime` says
 whether anything is running. Redirect to a file rather than piping to `tail`,
 or the log is invisible until the end.
 
+**And there is a fourth signature, which is the dangerous one because it does
+not look like a failure at all: a green run about a tree that no longer
+exists.** A build reads each file when its step starts, so editing while one is
+in flight produces a pass that validated bytes nobody has. It happened twice
+here on a box where a suite takes forty minutes — the edit window is wide
+enough to walk through without noticing — and the second time the reported-green
+run was thrown away and re-run on the frozen tree rather than believed. So the
+three readings that all look like "the build is being slow" are now four:
+
+| what you see | what it is |
+|---|---|
+| `etime` high, `cputime` near zero | a deadlock |
+| both high, `free` near zero | an OOM kill |
+| empty output file | `2>&1 \| tail` holding the log until the pipe closes |
+| green | possibly about a tree you have since edited |
+
+**Stop editing, then run, then commit** — in that order, and the discipline is
+worth more the slower the box is.
+
 The hang itself was real and was in the new test rather than in the code under
 it. **`std.Io.Threaded`'s default `async_limit` is one less than the number of
 logical cores, and past that limit `io.async` runs the task inline on the
