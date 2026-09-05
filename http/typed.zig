@@ -79,6 +79,9 @@ pub fn Response(comptime T: type) type {
     // a forgotten `.value` go out as whatever was on the stack.
     if (T == void) return struct {
         pub const nilo_response = void;
+        /// What a nilo compile error calls this type, which is the name the
+        /// reader's own import line gives it (ADR 0122).
+        pub const nilo_type_name = "nilo.Response(void)";
 
         status: u16 = 200,
         headers: Headers = .{},
@@ -86,6 +89,9 @@ pub fn Response(comptime T: type) type {
     };
     return struct {
         pub const nilo_response = T;
+        /// What a nilo compile error calls this type, which is the name the
+        /// reader's own import line gives it (ADR 0122).
+        pub const nilo_type_name = "nilo.Response(" ++ naming.of(T) ++ ")";
 
         status: u16 = 200,
         headers: Headers = .{},
@@ -120,6 +126,9 @@ pub fn Status(comptime code: u16, comptime T: type) type {
     if (T == void) return struct {
         pub const nilo_response = void;
         pub const nilo_status = code;
+        /// What a nilo compile error calls this type, which is the name the
+        /// reader's own import line gives it (ADR 0122).
+        pub const nilo_type_name = std.fmt.comptimePrint("nilo.Status({d},void)", .{code});
 
         headers: Headers = .{},
         value: void = {},
@@ -127,6 +136,9 @@ pub fn Status(comptime code: u16, comptime T: type) type {
     return struct {
         pub const nilo_response = T;
         pub const nilo_status = code;
+        /// What a nilo compile error calls this type, which is the name the
+        /// reader's own import line gives it (ADR 0122).
+        pub const nilo_type_name = std.fmt.comptimePrint("nilo.Status({d},{s})", .{ code, naming.of(T) });
 
         headers: Headers = .{},
         value: T,
@@ -160,6 +172,10 @@ pub const Header = http1.Header;
 /// owns, or something built in the request arena. `c.setHeader` remains the
 /// way to set a header without a count to think about.
 pub const Headers = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.Headers";
+
     /// How many one response can carry. Enough for the ones a handler
     /// actually decides — `Location`, a couple of `Set-Cookie`, a cache
     /// directive — and small enough that carrying them by value is 264
@@ -244,6 +260,9 @@ pub const Headers = struct {
 pub fn Query(comptime T: type) type {
     return struct {
         pub const nilo_query = T;
+        /// What a nilo compile error calls this type, which is the name the
+        /// reader's own import line gives it (ADR 0122).
+        pub const nilo_type_name = "nilo.Query(" ++ naming.of(T) ++ ")";
 
         value: T,
     };

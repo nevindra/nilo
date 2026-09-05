@@ -468,6 +468,21 @@ a suite written before it existed keeps asserting what it always asserted
 
 ### Fixed
 
+- **A nilo compile error could rename your own type into one of nilo's.** An
+  application with `src/room.zig` holding a `pub const Room`, or
+  `src/session.zig` holding a `Session`, was told its type was `nilo.Room` or
+  `nilo.Session` — and sent looking for a type it never imported. The name
+  table matched on a file name, and `@typeName` spells a type as its path from
+  its own module's root, so an app rooted at `src/main.zig` produces exactly
+  the string nilo produces for its own type.
+
+  nilo's types now say their own name with a `pub const nilo_type_name`, which
+  yours cannot accidentally have
+  ([ADR 0122](./docs/adr/0122-a-type-says-its-own-name.md)). `session`, `room`,
+  `body`, `stream`, `form`, `cookie` and `app` are all ordinary file names, so
+  this is worth taking if you have any of them. Nothing at run time and nothing
+  in the binary.
+
 - **`GET http://example.com/users/7 HTTP/1.1` was a 404 on a route that plainly
   exists.** The whole target went to the router as a path, which split it into
   `http:`, ``, `example.com`, `users` and `7` and matched nothing. RFC 9112

@@ -31,7 +31,16 @@ const std = @import("std");
 /// `unset` leaves the attribute off the header entirely, which is not the
 /// same as `lax`: a browser with no `SameSite` applies its own default, and
 /// which default that is has changed twice. Say what you mean.
-pub const SameSite = enum { strict, lax, none, unset };
+pub const SameSite = enum {
+    strict,
+    lax,
+    none,
+    unset,
+
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.SameSite";
+};
 
 /// One cookie on the way out.
 ///
@@ -45,6 +54,10 @@ pub const SameSite = enum { strict, lax, none, unset };
 /// have treated localhost as a secure context since 2020, so a development
 /// server sets and receives these normally.
 pub const Cookie = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.Cookie";
+
     name: []const u8,
     value: []const u8,
 

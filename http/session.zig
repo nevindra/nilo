@@ -503,6 +503,10 @@ pub fn Session(comptime T: type) type {
 
         pub const nilo_resolve = read;
 
+        /// What a nilo compile error calls this type, which is the name the
+        /// reader's own import line gives it (ADR 0122).
+        pub const nilo_type_name = "nilo.Session(" ++ names.of(T) ++ ")";
+
         /// What arrived, if anything readable did.
         value: ?T,
 

@@ -42,6 +42,10 @@ pub const marker = "nilo_file";
 
 /// An answer that is a file on disk.
 pub const FileBody = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.FileBody";
+
     /// There is nothing for the marker to carry: unlike `Redirect(status)`
     /// or `Response(T)`, this type is not generic and has no compile-time
     /// parameter to hand on. Its presence is the whole message.

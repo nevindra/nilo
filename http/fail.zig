@@ -32,6 +32,10 @@ pub const Error = error{Failed};
 /// Where a fail function's message lives for one request. App keeps one
 /// per connection and clears it at the start of every request.
 pub const Failure = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.Failure";
+
     status: u16 = 0,
     n: usize = 0,
     buf: [max_message]u8 = undefined,

@@ -63,6 +63,10 @@ pub const Lifetime = struct {
 };
 
 pub const Str = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.Str";
+
     _bytes: []const u8,
     _marker: Marker,
 

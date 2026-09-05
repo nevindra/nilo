@@ -55,6 +55,9 @@ pub const marker = "nilo_form";
 pub fn Form(comptime T: type) type {
     return struct {
         pub const nilo_form = T;
+        /// What a nilo compile error calls this type, which is the name the
+        /// reader's own import line gives it (ADR 0122).
+        pub const nilo_type_name = "nilo.Form(" ++ naming.of(T) ++ ")";
 
         value: T,
     };
@@ -72,6 +75,10 @@ pub fn Form(comptime T: type) type {
 /// bytes under a name of your own and treat this as a label to show back to
 /// somebody, never as a path.
 pub const Upload = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.Upload";
+
     /// What the browser called the file on the machine it came from.
     filename: Str,
     /// The type the client claimed. Also unverified — sniff the bytes if it

@@ -92,6 +92,10 @@ pub const Progress = struct {
 
 /// A request body, arriving in pieces.
 pub const Body = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.Body";
+
     /// The body as a `std.Io.Reader`, for handing to something in the
     /// standard library. Unbuffered on purpose: a body reader is asked for
     /// runs of bytes, never for a line or a peek, and an unbuffered one

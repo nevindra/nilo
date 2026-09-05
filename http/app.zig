@@ -99,6 +99,10 @@ fn writeFailureBody(w: *std.Io.Writer, status: u16, message: []const u8) !void {
 }
 
 pub const App = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.App";
+
     gpa: std.mem.Allocator,
     router: router_mod.Router,
     services: service_mod.Registry,

@@ -365,6 +365,10 @@ fn writeHeader(into: *[max_header]u8, opcode: Opcode, len: u64) []u8 {
 
 /// An open WebSocket connection.
 pub const Socket = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.Socket";
+
     _in: *std.Io.Reader,
     _out: *std.Io.Writer,
     _stopping: ?*const std.atomic.Value(bool),

@@ -119,6 +119,9 @@ pub fn Bound(comptime W: type) type {
         const Self = @This();
 
         pub const nilo_bound = W;
+        /// What a nilo compile error calls this type, which is the name the
+        /// reader's own import line gives it (ADR 0122).
+        pub const nilo_type_name = "nilo.Bound(" ++ naming.of(W) ++ ")";
         pub const nilo_bound_slot = slot;
         /// The struct the handler actually asked for.
         pub const Value = T;

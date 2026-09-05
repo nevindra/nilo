@@ -747,50 +747,15 @@ of the loop was the socket and which was the handler.
 **Waiting on: a design** for what a message-scoped watch starts and stops at,
 given that `receive` also drains a Room before it reads.
 
-**A type of the reader's own can be renamed into nilo's in nilo's own error
-messages.** `names.zig` rewrites a type name by searching for an unqualified
-`module.Type` substring, so the table matches on the reader's file name as
-readily as on nilo's:
+**Two type names nilo still cannot say the reader's way.** A nilo type inside a
+*reader's* generic — `main.Page(nilo.Str)` — comes back spelled `main.Page(str.Str)`,
+because the argument of somebody else's generic is not recoverable from its name,
+and `Middleware` prints its whole signature because a function type cannot hold
+the declaration a nilo type names itself with
+([ADR 0122](./adr/0122-a-type-says-its-own-name.md)).
 
-```
-room.Room   -> nilo.Room
-body.Body   -> nilo.Body
-models.Room -> models.Room
-```
-
-An application with `src/session.zig` holding a `pub const Session`, or
-`src/room.zig` holding a `Room`, is told by a nilo compile error that its type
-is `nilo.Session` — and sent looking for a type it never imported. That is
-word-for-word the failure this file exists to prevent, described in its own
-header ("a true sentence about a source tree the reader does not have"), running
-the other way round.
-
-`session`, `room`, `body`, `stream`, `form`, `cookie` and `app` are all ordinary
-names for a file in an application that uses this framework, which is what makes
-the collision worth fixing rather than noting.
-
-**Anchoring the match is not the fix, and one experiment settles why.**
-`@typeName` spells a type as its path from *its own module's root*, so a
-project whose root is `src/main.zig` names a sibling `src/room.zig`'s type
-`room.Room` — the same string, byte for byte, as nilo's own. Requiring the
-match to start the name, or to sit on a `.` boundary, fixes only the layout
-where the reader's file is one directory further down (`src.room.Room`), and
-that is the rarer of the two.
-
-So the answer has to come from the type rather than from its name. The shape
-that works without a new table is a public declaration on nilo's own types —
-`pub const nilo_type_name = "nilo.Room"` — which `of(T)` reads with `@hasDecl`
-and a user's type cannot accidentally have. It is exact, it deletes the
-substring table, the branch quota and `replaced` along with it, and a generic
-computes its own from its argument (`"nilo.Response(" ++ of(T) ++ ")"`).
-`covers` then asks whether an export carries the decl, which is a stronger
-check than the table it replaces. What it costs is one line on each of about
-thirty-five types across fifteen files, and one case it gives up: a nilo type
-inside a *reader's* generic — `main.Page(str.Str)` — stays spelled `str.Str`,
-because that argument is not recoverable from the name and the reader's own
-head is no longer rewritten on spec.
-
-**Waiting on: ready.**
+**Waiting on: accepted.** Both are the price of never renaming a reader's own
+type into nilo's, which is the failure that was worth fixing.
 
 **Every number in this module was measured on one x86-64 machine.** `scan.lanes`
 is 32 because `std.simd.suggestVectorLength(u8)` reports 32 on x86-64 with AVX2,
@@ -920,8 +885,19 @@ that issues it — a blocking `write` holds the executor thread every other
 connection on it is being served by, which is what `nilo.blocking` exists for
 and what nothing on the file path has needed until now.
 
-**Waiting on: a design** for what a file write is here: an Engine operation the
-fiber parks on, or a hop to the blocking pool.
+**The design question was answered upstream and nobody had looked.** zio has
+`Dir.createFile`, `File.writer(buffer)` — a `std.Io.Writer` whose drain goes
+through the runtime — and `Dir.createFileAtomic`, which creates a temporary file
+in the destination's own directory so the final move is a rename rather than a
+copy. Its `fs.zig` routes an fd the loop cannot poll to a thread pool, so a
+file write parks the fiber instead of holding the executor: the answer is an
+Engine operation, and the alternative — a hop to `nilo.blocking` — is not
+needed. `engine.Dir` and `engine.File` wrap `openFile`, `size` and `reader`
+already, and this is three more wrappers of the same shape.
+
+**Waiting on: ready.** `filebody.checkName` is the refusal half and it is
+written; `u.saveTo(dir, name)` is what is missing, and whether it uses the
+atomic path or the plain one is the only thing left to decide.
 
 **Every method nilo does not name is the same method.** `http1.Method` holds
 seven and `other`, and `methodFrom` maps everything else onto that one tag, so

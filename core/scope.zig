@@ -84,6 +84,10 @@ pub fn check(comptime T: type, comptime called: []const u8) void {
 /// the debug trap watches a `Run` on the same terms it watches a handler,
 /// which is the point of it being a Scope rather than a bare allocator.
 pub const Run = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.Run";
+
     _arena: std.heap.ArenaAllocator,
     _lifetime: Lifetime,
 

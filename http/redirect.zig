@@ -22,6 +22,7 @@
 //! are, so building one in the request arena — or on the stack — is safe.
 
 const std = @import("std");
+const naming = @import("names.zig");
 
 const typed = @import("typed.zig");
 
@@ -37,6 +38,9 @@ pub fn Redirect(comptime status: u16) type {
         const Self = @This();
 
         pub const nilo_redirect = status;
+        /// What a nilo compile error calls this type, which is the name the
+        /// reader's own import line gives it (ADR 0122).
+        pub const nilo_type_name = std.fmt.comptimePrint("nilo.Redirect({d})", .{status});
 
         /// Where the client is being sent. A path (`/welcome`) or a whole
         /// URL; **which** destination is sensible is the application's

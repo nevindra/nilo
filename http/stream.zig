@@ -54,6 +54,10 @@ pub const Open = struct {
 /// library that writes to one — `std.json.Stringify.value`, a formatter of
 /// your own — writes into the response without an intermediate buffer.
 pub const Stream = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.Stream";
+
     /// Write here. Everything that lands in this buffer leaves as one chunk.
     writer: std.Io.Writer,
 
@@ -205,6 +209,10 @@ pub const Stream = struct {
 
 /// One message on an event stream.
 pub const Event = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.Event";
+
     /// The `event:` name a listener can subscribe to by itself. Empty is the
     /// default, which a browser delivers as `message`.
     name: []const u8 = "",
@@ -230,6 +238,10 @@ pub const Event = struct {
 /// Every send flushes, because an event that sits in a buffer waiting for
 /// the next one is an event that arrived late for no reason.
 pub const Events = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.Events";
+
     stream: Stream,
 
     pub const content_type = "text/event-stream";

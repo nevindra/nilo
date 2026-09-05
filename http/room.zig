@@ -193,6 +193,10 @@ pub const Error = error{
 };
 
 pub const Room = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.Room";
+
     gpa: std.mem.Allocator,
     seats: []Seat,
     ring_store: []?*Post,

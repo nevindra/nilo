@@ -1534,3 +1534,31 @@ The rule that came out of it: *no difference* has a resolution, and the
 resolution belongs next to the result. "Unchanged" from an instrument that could
 not have seen the change is not the same claim as "unchanged" from one that
 could, and only the second one closes the question.
+
+## A name cannot say whose file it came from
+
+`@typeName` spells a type as its path from **its own module's root**, so an
+application rooted at `src/main.zig` names a sibling's type `room.Room` — byte
+for byte what nilo names its own. Anchoring the rewrite table's match, which had
+been written down as the fix for months, could not have worked, and a twenty-line
+program in `/tmp` settled it in one run
+([ADR 0122](./adr/0122-a-type-says-its-own-name.md)).
+
+The lesson is about which experiments are cheap. The entry had sat under
+*Waiting on: a design* through several cycles while the question it turned on —
+what does `@typeName` actually print for somebody else's file — was one program
+away the whole time. **A design blocked on what a compiler does is blocked on
+nothing.**
+
+## A microbenchmark on a shared box needs its minimum, and needs running twice
+
+Best of five put `utf8ValidateSlice` at 38ns on the payload nilo measures and
+6,585ns on a kilobyte of non-ASCII. Best of 25, run three times, put the same
+two at 10ns and 2,404ns — 3.8× and 2.7× apart, with the last two runs within 1%
+of each other. Three of this session's own builds were on the box for the first
+attempt.
+
+38ns would have been 30% of the JSON write and the wrong side of ADR 0001's bar;
+10ns is 8% and under it. **The bad number would have blocked a correctness fix**,
+which is the direction that costs the most: a measurement that is too pessimistic
+does not announce itself, because the answer it produces is "don't".

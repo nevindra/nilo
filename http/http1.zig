@@ -15,6 +15,10 @@ const scan = @import("scan.zig");
 const bulkhead = @import("bulkhead.zig");
 
 pub const Method = enum {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.Method";
+
     GET,
     HEAD,
     POST,
@@ -274,7 +278,14 @@ fn takeLine(in: *std.Io.Reader) ![]const u8 {
     return trimCR(raw[0 .. raw.len - 1]);
 }
 
-pub const Header = struct { name: []const u8, value: []const u8 };
+pub const Header = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.Header";
+
+    name: []const u8,
+    value: []const u8,
+};
 
 /// Headers the framework writes itself. A response carrying two of any of
 /// these is not merely untidy — a duplicated `Content-Length` is the

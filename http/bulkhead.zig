@@ -139,6 +139,10 @@ pub const Peer = engine.Peer;
 /// time zio was replaced. The Engine reads the fields it knows and never
 /// names the rest.
 pub const Options = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.Options";
+
     /// An IPv4 or IPv6 address in the usual notation: `"127.0.0.1"` and
     /// `"::1"` for this machine only, `"0.0.0.0"` and `"::"` for every
     /// interface. A host name is not resolved — this is the address to bind
@@ -568,6 +572,10 @@ pub fn coarseNanos() u64 {
 /// or a busy lock would be reported as a blocking handler (ADR 0034). The
 /// three methods are the Engine's, in the order it defines them.
 pub const Mutex = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.Mutex";
+
     _inner: engine.Mutex = .init,
 
     pub const init: Mutex = .{};
@@ -620,6 +628,10 @@ pub const Mutex = struct {
 /// for a call that is eating 19 MiB and a core. Password hashing is the
 /// caller this exists for and the numbers are in ADR 0048.
 pub const Gate = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.Gate";
+
     _inner: engine.Semaphore,
 
     /// A Gate that lets `at_once` through. Zero would be a Gate nothing gets
@@ -673,6 +685,10 @@ pub const spawn = engine.spawn;
 /// shape of the type rather than by a normalisation step somebody has to
 /// get right.
 pub const Dir = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.Dir";
+
     _inner: engine.Dir,
 
     /// Open `path`, relative to the working directory the server runs in.

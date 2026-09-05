@@ -80,6 +80,10 @@ const Resolved = struct {
 };
 
 pub const Ctx = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.Ctx";
+
     method: http1.Method,
 
     _arena: std.mem.Allocator,

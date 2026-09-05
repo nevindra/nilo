@@ -26,6 +26,7 @@
 //! what is missing, and the API description all read a default the same way.
 
 const std = @import("std");
+const naming = @import("names.zig");
 
 pub fn Patch(comptime T: type) type {
     return union(enum) {
@@ -39,6 +40,10 @@ pub fn Patch(comptime T: type) type {
         /// What this is a patch of. Read by the body parser, by the message
         /// that says what a field will accept, and by the API description.
         pub const nilo_patch = T;
+
+        /// What a nilo compile error calls this type, which is the name the
+        /// reader's own import line gives it (ADR 0122).
+        pub const nilo_type_name = "nilo.Patch(" ++ naming.of(T) ++ ")";
 
         const Self = @This();
 
