@@ -335,6 +335,13 @@ like it needs.** ADR 0063 recorded the stack fix as blocked on zio, wrote it
 into the roadmap and filed an issue; the call it needed was public in the
 pinned version, one file over. Nothing downstream ever re-tests a blocker.
 
+**And the blocker that names nobody gets two.** A requirement written as one
+mechanism reads as a blocker; written as what it has to catch, it reads as a
+choice. Two entries were blocked for a cycle on "a design" and on "zio's
+`Timeout` cannot express both", and both sentences were true and neither was
+about the thing the feature had to do. The account is the last section of
+[ADR 0063](docs/adr/0063-a-handlers-stack-is-per-connection.md).
+
 Six habits go with it, each of which caught something here:
 
 - **Say what the number was measured *through*.** Every figure in this cycle

@@ -181,3 +181,41 @@ and no module code changed.
   no longer a number anybody should defend.
 - **The next thing to distrust is the next flat number.** This one was correct,
   published, repeated in two files, and describing a case nobody deploys.
+
+## The rule this ADR started, and what it missed
+
+The blocker above was resolved by
+[ADR 0071](./0071-where-a-connection-waits-is-what-it-costs.md) finding the
+call it needed had been public all along, and the rule that came out of it is
+in `CLAUDE.md`: **a conclusion of "blocked on somebody else" gets one more hour
+than it feels like it needs**, because nothing downstream ever re-tests a
+blocker.
+
+Two later cases show that rule is aimed one step short. It is about *who* a
+blocker is attributed to — an upstream, which somebody can go and check — and
+both of these were attributed to nobody:
+
+- **`Upload.saveTo` was blocked on "a design"**
+  ([ADR 0123](./0123-a-file-is-written-by-the-engine.md)), and the design was
+  argued at length and well, from a one-line premise about nilo's own wrapper
+  that nobody opened the manifest to check.
+- **The whole-body deadline was blocked on a union's arms**
+  ([ADR 0124](./0124-a-buffered-body-arrives-at-a-rate.md)) — "zio's `Timeout`
+  cannot express both" — which is true, and is a sentence about a type rather
+  than about the slow client the feature exists to catch.
+
+So the rule generalises past attribution, to grammar:
+
+> **A requirement written as one mechanism reads as a blocker. Written as what
+> it has to catch, it reads as a choice.**
+
+A blocker naming an upstream invites somebody to go and look. A blocker naming
+a design invites somebody to think, and thinking does not open the manifest. A
+blocker naming a type invites nothing at all, because there is visibly nothing
+to re-examine. **Each of the three read as settled, and a settled sentence is
+one nobody re-derives** — which is the same failure as a number with no run
+behind it, one level up.
+
+The practical form: when an entry says a feature is blocked, rewrite its
+blocker as the behaviour it has to produce before believing it. Half the time
+the mechanism it named was one of several.

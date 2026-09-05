@@ -1576,10 +1576,10 @@ That is the fourth time here, after [ADR 0063](./adr/0063-a-handlers-stack-is-pe
 made re-reading a blocker a rule. What is new is *why this one survived*: the
 entry did not say "blocked on zio", it said "blocked on a design", and it
 argued the design at length and well. **An entry that reasons carefully from an
-unchecked premise reads as the most finished item on the page**, which is the
-opposite of the attention it needs. The premise here was one line —
-`engine.Dir` has no `createFile` — and it was true of nilo's wrapper and never
-of the thing being wrapped.
+unchecked premise reads as the most finished item on the page.** The premise
+here was one line — `engine.Dir` has no `createFile` — true of nilo's wrapper
+and never of the thing being wrapped. The rule it generalises into is now the
+last section of ADR 0063.
 
 ## A standard-library trap that accuses the Engine
 
@@ -1611,9 +1611,8 @@ only thing it gives up is *where inside the run* the client is cut. Nobody
 wanted that.
 
 **A requirement written as one mechanism reads as a blocker; written as what it
-has to catch, it reads as a choice.** The entry that recorded this said
-"neither layer can express that today", which is a sentence about a union's
-arms rather than about a slow client — and a blocker phrased in somebody else's
-type is not re-examined, because there is visibly nothing to re-examine. This
-is the same failure as the one above it, one level up: that one planned against
-an unchecked premise, this one planned against an over-specified goal.
+has to catch, it reads as a choice.** The entry said "neither layer can express
+that today", which is a sentence about a union's arms rather than about a slow
+client. That one planned against an unchecked premise, this one against an
+over-specified goal; the rule both of them fell to is in ADR 0063's last
+section, and that is the canonical copy from here.
