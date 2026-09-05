@@ -803,6 +803,12 @@ pub const Ctx = struct {
 
             if (self._request.chunked) {
                 try self.aboutToReadBody();
+                // A chunked body announces nothing, so the only length there
+                // is to size a deadline from is the most it may be. That
+                // gives it the same worst case as a body that announced
+                // `max_body` and no more, which is the point: neither framing
+                // is the cheaper way to hold a connection (ADR 0124).
+                self._deadlines.armBodyRun(self._limits.max_body);
                 self._body = http1.readChunkedBody(self._in, self._arena, self._limits.max_body) catch |err| {
                     // The chunk sizes and the stream have come apart, so
                     // where this body ends is now a guess. Reading on and
@@ -810,7 +816,7 @@ pub const Ctx = struct {
                     // smuggled request gets through — even when the bytes
                     // happen to line up, which they sometimes will.
                     self._stream_desynced = true;
-                    return err;
+                    return self.slowBody(err);
                 };
             } else {
                 if (self._request.content_length > self._limits.max_body) return error.BodyTooLarge;
@@ -821,14 +827,27 @@ pub const Ctx = struct {
                 // Taken as it arrives rather than as it was announced, so a
                 // client that promises a megabyte and trickles holds what it
                 // sent and not what it said. See `readSizedBody`.
-                self._body = try http1.readSizedBody(
+                self._body = http1.readSizedBody(
                     self._in,
                     self._arena,
                     @intCast(self._request.content_length),
-                );
+                    self._deadlines,
+                ) catch |err| return self.slowBody(err);
             }
         }
         return Str.fromRequest(self._body.?, self._lifetime);
+    }
+
+    /// A body read that ended because the client was too slow, told apart
+    /// from one that ended because the connection broke.
+    ///
+    /// Both arrive as `error.ReadFailed` through a `std.Io` interface, and
+    /// they deserve different answers: 408 says the request never finished
+    /// arriving and inviting a retry is correct, where 500 blames the server
+    /// for something the client did (ADR 0124).
+    fn slowBody(self: *Ctx, err: anyerror) anyerror {
+        if (err == error.ReadFailed and self._deadlines.timedOut()) return error.BodyTooSlow;
+        return err;
     }
 
     /// The request body, read in pieces rather than all at once — for the

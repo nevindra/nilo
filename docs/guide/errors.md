@@ -44,8 +44,9 @@ finds its way back without a `Ctx`.
 An error a handler returns that isn't `error.Failed` goes through a mapping
 table: `error.FileNotFound` is a 404, the JSON and number-parsing errors
 (`error.InvalidCharacter`, `error.SyntaxError`, `error.MissingField`, …) are
-400s, `error.BodyTooLarge` is a 413, `error.Timeout` and `error.Canceled` are
-503s. Anything unrecognised becomes a **500 whose error name is logged but not
+400s, `error.BodyTooLarge` is a 413, `error.BodyTooSlow` is a 408 — the body the
+client announced never finished arriving — and `error.Timeout` and
+`error.Canceled` are 503s. Anything unrecognised becomes a **500 whose error name is logged but not
 sent to the client** — `error.DatabaseSchemaMismatch` is your business, not your
 caller's.
 

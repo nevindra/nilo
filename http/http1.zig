@@ -214,8 +214,18 @@ const sized_body_step = 4096;
 /// `gpa` is meant to be the request arena, on the same terms as
 /// `readChunkedBody`: a read that fails partway leaves what it had, which
 /// against an arena is free and correct.
-pub fn readSizedBody(in: *std.Io.Reader, gpa: std.mem.Allocator, length: usize) ![]const u8 {
+pub fn readSizedBody(
+    in: *std.Io.Reader,
+    gpa: std.mem.Allocator,
+    length: usize,
+    deadlines: bulkhead.Deadlines,
+) ![]const u8 {
+    // Each run gets a deadline sized from the bytes it is waiting for, which
+    // is what stops a client dribbling inside the per-read limit forever
+    // (ADR 0124). Two runs, so two arms: the step is bounded before the rest
+    // is committed, exactly as the allocation is.
     if (length <= sized_body_step) {
+        deadlines.armBodyRun(length);
         const whole = try gpa.alloc(u8, length);
         try in.readSliceAll(whole);
         return whole;
@@ -223,9 +233,11 @@ pub fn readSizedBody(in: *std.Io.Reader, gpa: std.mem.Allocator, length: usize) 
 
     // The step first, and nothing more until it has arrived.
     var body = try gpa.alloc(u8, sized_body_step);
+    deadlines.armBodyRun(sized_body_step);
     try in.readSliceAll(body);
 
     body = try gpa.realloc(body, length);
+    deadlines.armBodyRun(length - sized_body_step);
     try in.readSliceAll(body[sized_body_step..]);
     return body;
 }
@@ -1138,12 +1150,12 @@ test "a body of an announced length is taken as it arrives, not as it is promise
         for (bytes, 0..) |*b, i| b.* = @truncate(i);
 
         var in = std.Io.Reader.fixed(bytes);
-        try testing.expectEqualSlices(u8, bytes, try readSizedBody(&in, arena.allocator(), len));
+        try testing.expectEqualSlices(u8, bytes, try readSizedBody(&in, arena.allocator(), len, .off));
     }
 
     // The connection is left exactly at the next request.
     var two = std.Io.Reader.fixed("hiNEXT");
-    try testing.expectEqualStrings("hi", try readSizedBody(&two, arena.allocator(), 2));
+    try testing.expectEqualStrings("hi", try readSizedBody(&two, arena.allocator(), 2, .off));
     try testing.expectEqualStrings("NEXT", try two.take(4));
 }
 
@@ -1161,7 +1173,7 @@ test "a client that announces more than it sends holds only what it sent" {
     var in = std.Io.Reader.fixed("slow");
     try testing.expectError(
         error.EndOfStream,
-        readSizedBody(&in, arena.allocator(), 10 * 1024 * 1024),
+        readSizedBody(&in, arena.allocator(), 10 * 1024 * 1024, .off),
     );
 }
 

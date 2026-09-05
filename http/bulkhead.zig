@@ -65,14 +65,15 @@
 //!   thread, and the Engine is the only layer that knows how to wait
 //!   without doing that (ADR 0014).
 //! - `Dir`/`File` — open a directory, open a file inside it by name, ask
-//!   how big it is, close either. Four calls, and deliberately no fifth: no
-//!   seek, no write, and nothing that walks a directory while a request is
-//!   waiting on it. The list is that short because everything past it is
-//!   already standard — the reader is a `std.Io.File.Reader` and the bytes
-//!   leave through `sendFile`, which is a slot in the `std.Io.Writer`
-//!   vtable the Engine fills in anyway — so an Engine that has a `std.Io`
-//!   has these already and owes nothing it was not going to write
-//!   (ADR 0037).
+//!   how big it is, close either, and replace a whole file with bytes
+//!   already in hand. Five calls, and deliberately no sixth: no seek, no
+//!   file held open for writing, and nothing that walks a directory while a
+//!   request is waiting on it. The list is that short because everything
+//!   past it is already standard — the reader is a `std.Io.File.Reader` and
+//!   the bytes leave through `sendFile`, which is a slot in the
+//!   `std.Io.Writer` vtable the Engine fills in anyway — so an Engine that
+//!   has a `std.Io` has these already and owes nothing it was not going to
+//!   write (ADR 0037, ADR 0123).
 //!
 //! The Reader/Writer handed to the handler are plain std types
 //! (`*std.Io.Reader`, `*std.Io.Writer`), so the HTTP layer has no idea
@@ -237,6 +238,28 @@ pub const Options = struct {
     /// number on either in advance. A client that stops sending halfway
     /// through can be caught without guessing at that.
     body_timeout_ms: u32 = 30_000,
+    /// The rate a buffered body has to arrive at, in **bytes a second**, once
+    /// `body_grace_ms` has gone by. 0 turns it off and leaves
+    /// `body_timeout_ms` on its own.
+    ///
+    /// This is what `body_timeout_ms` cannot do. A per-read limit is satisfied
+    /// by any client that sends *something* often enough, so one byte every
+    /// twenty-nine seconds holds a fiber and a step of the arena for as long
+    /// as it likes ([ADR 0124](../docs/adr/0124-a-buffered-body-arrives-at-a-rate.md)).
+    /// A rate turns the announced length into a deadline —
+    /// `body_grace_ms + bytes / body_min_rate` — so how long a body may take
+    /// is a function of how big it said it was.
+    ///
+    /// **This is an admission policy, and 8 KiB/s is the slowest upload the
+    /// server will sit through.** At the default `max_body` the whole of a
+    /// one-megabyte body has 138 seconds. A client below the rate is a 408,
+    /// so a server whose clients are on a bad link should lower it rather
+    /// than raise the timeout.
+    body_min_rate: u32 = 8 * 1024,
+    /// The head start before the rate is asked for, covering the pause
+    /// between a head arriving and the body behind it — including the one an
+    /// `Expect: 100-continue` client takes to hear back.
+    body_grace_ms: u32 = 10_000,
     /// How long any single write to the client may take.
     ///
     /// The answer to a client that asks for something and then stops
@@ -445,6 +468,8 @@ pub fn serve(
             .header_ms = options.header_timeout_ms,
             .idle_ms = options.idle_timeout_ms,
             .body_ms = options.body_timeout_ms,
+            .body_min_rate = options.body_min_rate,
+            .body_grace_ms = options.body_grace_ms,
             .write_ms = options.write_timeout_ms,
         },
     }, Bridge.start, Bridge.run);
@@ -987,6 +1012,8 @@ pub const Deadlines = struct {
     header_ms: u32 = 0,
     idle_ms: u32 = 0,
     body_ms: u32 = 0,
+    body_min_rate: u32 = 0,
+    body_grace_ms: u32 = 0,
     write_ms: u32 = 0,
 
     pub const VTable = struct {
@@ -1032,6 +1059,33 @@ pub const Deadlines = struct {
     /// what a per-read limit catches.
     pub fn armBody(self: Deadlines) void {
         self.set(.read, if (self.body_ms == 0) .none else .{ .within_ms = self.body_ms });
+    }
+
+    /// A run of reads that has to deliver `bytes` of a **buffered** body —
+    /// one the framework is assembling in the arena, which the client cannot
+    /// be allowed to take forever over.
+    ///
+    /// `armBody`'s per-read limit is the wrong shape for this and the reason
+    /// is `armHeader`'s: a client sending a byte every twenty-nine seconds is
+    /// inside a thirty-second per-read limit indefinitely. What is different
+    /// here — and what makes a deadline possible where ADR 0023 says a
+    /// request may not have one — is that the client has said how many bytes
+    /// are coming, so the deadline is sized from the work rather than
+    /// guessed: `body_grace_ms` plus what `bytes` need at `body_min_rate`
+    /// ([ADR 0124](../docs/adr/0124-a-buffered-body-arrives-at-a-rate.md)).
+    ///
+    /// Armed per run rather than once for the body, because `readSizedBody`
+    /// takes the step before it commits the rest and the two are separately
+    /// bounded. `body_ms` at zero still means no limit at all, and
+    /// `body_min_rate` at zero falls back to the per-read one.
+    pub fn armBodyRun(self: Deadlines, bytes: u64) void {
+        if (self.body_ms == 0) return self.set(.read, .none);
+        if (self.body_min_rate == 0) return self.armBody();
+
+        // A megabyte at a kilobyte a second is 1,000 seconds; nothing here
+        // comes close to overflowing, since `bytes` is bounded by `max_body`.
+        const budget_ms: u64 = self.body_grace_ms + (bytes * std.time.ms_per_s) / self.body_min_rate;
+        self.set(.read, .{ .by_ns = monotonicNanos() + msToNanos(@intCast(@min(budget_ms, std.math.maxInt(u32)))) });
     }
 
     /// Writing to the client, one write at a time — same reasoning as
@@ -1176,6 +1230,40 @@ test "an idle limit is a duration, because each wait stands on its own" {
     d.armIdle();
     try testing.expectEqual(Side.read, caught.side);
     try testing.expectEqual(Limit{ .within_ms = 900 }, caught.limit);
+}
+
+test "a buffered body's limit is a deadline sized from the bytes it is waiting for" {
+    var caught = Caught{};
+    const d = caught.deadlines(.{ .body_ms = 1100, .body_min_rate = 1024, .body_grace_ms = 500 });
+
+    const before = monotonicNanos();
+    d.armBodyRun(2048);
+    const after = monotonicNanos();
+
+    // 500ms of grace plus two seconds for two kilobytes at a kilobyte a
+    // second, bracketed by two readings of the clock it was worked out from.
+    const want = 2500 * std.time.ns_per_ms;
+    const at = caught.limit.by_ns;
+    try testing.expect(at >= before + want);
+    try testing.expect(at <= after + want);
+}
+
+test "a rate of zero leaves the body on the per-read limit it had" {
+    // The way out for a server whose clients are slower than any rate worth
+    // naming: the old behaviour, unchanged, rather than a number to guess at.
+    var caught = Caught{};
+    const d = caught.deadlines(.{ .body_ms = 1100, .body_min_rate = 0 });
+    d.armBodyRun(2048);
+    try testing.expectEqual(Limit{ .within_ms = 1100 }, caught.limit);
+}
+
+test "a body timeout of zero means no limit, rate or no rate" {
+    // `body_timeout_ms = 0` is the switch for "do not put a clock on a body",
+    // and a rate underneath it must not put one back.
+    var caught = Caught{};
+    const d = caught.deadlines(.{ .body_ms = 0, .body_min_rate = 1024, .body_grace_ms = 500 });
+    d.armBodyRun(2048);
+    try testing.expectEqual(Limit.none, caught.limit);
 }
 
 test "a header limit is a deadline, so a byte at a time does not extend it" {

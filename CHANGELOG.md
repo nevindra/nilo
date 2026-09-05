@@ -339,6 +339,29 @@ an application uploads into is usually the one it serves out of: a request
 reading that name mid-write gets the old file rather than a truncated one.
 `nilo.Dir` gained the operation under it, `d.writeFileAtomic(name, bytes)`.
 
+#### `body_min_rate` — a body that arrives too slowly to be worth waiting for
+
+```zig
+try app.listen(.{ .body_min_rate = 8 * 1024, .body_grace_ms = 10_000 });  // the defaults
+```
+
+**A client sending one byte every twenty-nine seconds was inside the
+thirty-second `body_timeout_ms` forever**, holding a fiber, a step of the arena
+and a connection slot for as long as it liked. Every one of those bytes arrived
+on time, which is what a per-read limit asks for.
+
+A body nilo assembles in the arena — `c.body()`, and the `Form`, JSON and
+`Bound` handlers built on it — now has a deadline worked out from the length the
+client announced: `body_grace_ms` plus what those bytes need at `body_min_rate`.
+A megabyte gets 138 seconds at the defaults; a client below the rate is a **408**
+rather than a 500, because the request never finished arriving
+([ADR 0124](./docs/adr/0124-a-buffered-body-arrives-at-a-rate.md)).
+
+**This is an admission policy and may refuse an honest client on a bad link.**
+Lower the rate rather than raising the timeout; `body_min_rate = 0` restores the
+old behaviour exactly. `c.bodyStream()` and a WebSocket are untouched — nothing
+is being held on the client's behalf there.
+
 #### Smaller
 
 - **`union(enum)` as a request body**, which used to be a compile error on the

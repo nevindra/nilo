@@ -104,6 +104,8 @@ prefix that requires one. Its type is `nilo.GroupOf("/api", &.{mw})`.
 | `header_timeout_ms` | `10_000` — the whole head, from its first byte |
 | `idle_timeout_ms` | `75_000` — a connection between requests |
 | `body_timeout_ms` | `30_000` — any one read of a body |
+| `body_min_rate` | `8 * 1024` — bytes a second a buffered body has to keep up. `0` = off |
+| `body_grace_ms` | `10_000` — before the rate is asked for |
 | `write_timeout_ms` | `30_000` — any one write to the client |
 | `max_connections` | `10_000` — held at once, 4,669 bytes each when idle. `0` = no limit |
 | `max_body` | `1024 * 1024` — the most `c.body()` reads into the arena |

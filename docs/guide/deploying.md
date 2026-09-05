@@ -51,6 +51,8 @@ try app.listen(.{
     .header_timeout_ms = 10_000,  // first byte of a head to the blank line
     .idle_timeout_ms = 75_000,    // a connection between requests
     .body_timeout_ms = 30_000,    // any one read of a body
+    .body_min_rate = 8 * 1024,    // bytes a second a body has to keep up
+    .body_grace_ms = 10_000,      // before that rate is asked for
     .write_timeout_ms = 30_000,   // any one write to the client
 
     .max_connections = 10_000,    // held at once; 0 = no limit
@@ -93,6 +95,23 @@ per read: the whole head has that long from its first byte, so a client sending
 one byte a second is caught rather than granted an extension every time. It ends
 in a 408. An idle keep-alive connection that has asked for nothing is closed
 without a status — there is nothing to answer.
+
+`body_min_rate` is the same idea for a body, and it is the one to read twice
+because **it is an admission policy rather than a safety net**. A per-read limit
+cannot catch a client sending one byte every twenty-nine seconds — every byte
+arrives on time — so a body nilo is assembling in the arena gets a deadline
+worked out from the length the client announced: `body_grace_ms` plus what those
+bytes need at `body_min_rate`. A megabyte has 138 seconds at the defaults, and a
+client slower than 8 KiB/s is a 408 however honest it is
+([ADR 0124](../adr/0124-a-buffered-body-arrives-at-a-rate.md)).
+
+If your clients upload from places where that is not generous, lower the rate
+rather than raising the timeout — `body_min_rate = 0` turns it off entirely and
+leaves the per-read limit on its own. A chunked body announces no length, so it
+is sized from `max_body`: the same worst case as a body that announced the
+largest it may be. **`c.bodyStream()` is not touched by any of this** — nothing
+is being held on the client's behalf there, and a long upload through it is a
+request that lasts rather than a request that stalls.
 
 `idle_timeout_ms` is the knob whose real units are memory: an idle connection
 costs 4,669 bytes, so a server with many visitors and few of them active wants

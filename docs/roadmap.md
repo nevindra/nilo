@@ -437,49 +437,6 @@ connection is memory that has not been budgeted.
 
 ### Known gaps
 
-**A slow client can still buy more of the arena than it has paid for, and the
-exchange rate is the only thing that changed.** `c.body()` now takes a step
-first and commits the announced `Content-Length` only once the client has
-delivered it ([ADR 0105](./adr/0105-a-body-is-taken-as-it-arrives.md)), which
-turns unbounded amplification into a fixed multiple of the step. It does not
-turn it into nothing: a stranger who sends the step gets `max_body` of address
-space and can then stall forever, because `body_timeout_ms` is per read rather
-than for the body and that is deliberate
-([ADR 0023](./adr/0023-a-deadline-belongs-to-an-operation-not-to-a-request.md)).
-
-**The design is settled and the Engine is what is in the way.** What closes it
-is an absolute deadline on *assembling a buffered body* — armed when `c.body()`
-asks for its first byte, disarmed the moment a handler takes the connection
-over, and never reaching `bodyStream`, `stream` or a WebSocket. That is not the
-request deadline ADR 0023 refused: what is bounded is one framework operation
-that materialises a finite arena-backed value, and the *header* limit is already
-absolute for exactly this reason. It is still an amendment to ADR 0023 rather
-than something it already authorises, since that ADR's binding text says
-`body_timeout_ms` bounds any single read.
-
-The length to size it from is the announced `Content-Length`, so the deadline is
-`grace + announced / min_rate` rather than one flat number: a 200-byte JSON POST
-is cut in five seconds where a flat thirty would let it hold for thirty, and a
-slow legitimate upload is sized from what it said it was sending. A chunked body
-announces nothing and must get a flat deadline instead — substituting `max_body`
-would hand the least informative request the largest allowance. **This is an
-admission policy and the entry should not pretend otherwise**: the required
-whole-operation average converges on `min_rate`, so a client that keeps making
-progress below it is refused, and `Content-Length` is the attacker's to choose
-up to `max_body`.
-
-**Waiting on: the Engine.** Each read has to take the earlier of
-`body_timeout_ms` and the absolute instant, and neither layer can express that
-today: zio's `Timeout` is `none | duration | deadline` and nilo's `Limit` is the
-same three, so arming the absolute one *replaces* the per-read one. Absolute
-alone is worse than today for a client that announces a megabyte and goes
-silent — thirty seconds becomes seven minutes. `readSizedBody` reads through two
-`readSliceAll` calls and offers no per-read hook to re-arm at, and putting one
-there means the stepped loop
-[ADR 0105](./adr/0105-a-body-is-taken-as-it-arrives.md) measured and rejected on
-throughput. So the first move is a combined limit in `bulkhead.Limit` and the
-Engine behind it, not the policy above.
-
 **A response whose text is not ASCII pays a byte-at-a-time UTF-8 walk.**
 `json.zig` asks `std.unicode.utf8ValidateSlice` before writing a string, so a
 byte that is not text comes out as `std.json`'s array rather than as invalid

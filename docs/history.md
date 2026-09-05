@@ -1595,3 +1595,25 @@ Engine bug, and the next person to hit it will go and read zio.
 That is the second std 0.16 trap here whose symptom accuses the wrong layer,
 after `async_limit`. Both are worth the two lines they take, because the cost
 of one is not the fix — it is the hour spent reading the innocent file.
+
+## The blocker was the exact semantics, not the goal
+
+A buffered body needed a whole-body deadline and the roadmap had it blocked on
+the Engine, with the reasoning written out and correct: the wanted rule is
+"each read gets `body_timeout_ms`, and no read may pass an absolute instant",
+zio's `Timeout` is `none | duration | deadline`, and it cannot express both.
+True, checked, and the wrong question.
+
+What shipped is a deadline per read *run*, sized from the bytes that run is
+waiting for ([ADR 0124](./adr/0124-a-buffered-body-arrives-at-a-rate.md)). It
+catches the same client at the same instant, needs nothing from zio, and the
+only thing it gives up is *where inside the run* the client is cut. Nobody
+wanted that.
+
+**A requirement written as one mechanism reads as a blocker; written as what it
+has to catch, it reads as a choice.** The entry that recorded this said
+"neither layer can express that today", which is a sentence about a union's
+arms rather than about a slow client — and a blocker phrased in somebody else's
+type is not re-examined, because there is visibly nothing to re-examine. This
+is the same failure as the one above it, one level up: that one planned against
+an unchecked premise, this one planned against an over-specified goal.

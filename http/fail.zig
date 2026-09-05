@@ -189,6 +189,9 @@ pub fn statusFor(err: anyerror) u16 {
         // the module that raises it — the arrow still runs one way.
         error.Conflict, error.AlreadyExists => 409,
         error.BodyTooLarge => 413,
+        // The request never finished arriving, which is not the server's
+        // fault and is worth retrying (ADR 0124).
+        error.BodyTooSlow => 408,
         error.Timeout, error.Canceled => 503,
 
         else => 500,

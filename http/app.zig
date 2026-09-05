@@ -5242,6 +5242,8 @@ const test_limits: bulkhead.Deadlines = .{
     .header_ms = 700,
     .idle_ms = 900,
     .body_ms = 1100,
+    .body_min_rate = 1024,
+    .body_grace_ms = 500,
     .write_ms = 1300,
 };
 
@@ -5417,7 +5419,8 @@ test "a head that arrives whole still starts the header clock" {
 
 test "reading a body puts the body's limit on it, not the head's" {
     // The head's deadline has passed by the time a handler asks for the body,
-    // so a body read that inherited it would fail at once.
+    // so a body read that inherited it would fail at once. The body gets one
+    // of its own, worked out from the length the client announced.
     var d = Deadline.init();
     defer d.deinit();
     try d.app.post("/echo", struct {
@@ -5433,7 +5436,58 @@ test "reading a body puts the body's limit on it, not the head's" {
     );
 
     try testing.expect(std.mem.endsWith(u8, sent.response, "hello"));
-    try testing.expectEqual(bulkhead.Limit{ .within_ms = test_limits.body_ms }, d.clock.lastRead().?);
+
+    // A deadline rather than a per-read duration, and in the future: five
+    // bytes at the test's rate is 500ms of grace and a rounding error
+    // (ADR 0124).
+    const at = d.clock.lastRead().?.by_ns;
+    try testing.expect(at > bulkhead.monotonicNanos());
+}
+
+test "a client that stops halfway through a body is answered 408, not 500" {
+    // The client never finished sending, so the request is not one the server
+    // failed at — it is one that never arrived. A 500 would send whoever
+    // reads the log looking for a bug in a handler that did nothing wrong.
+    var d = Deadline.init();
+    defer d.deinit();
+    try d.app.post("/echo", struct {
+        fn run(c: *Ctx) anyerror!void {
+            try c.sendText(200, (try c.body()).view());
+        }
+    }.run);
+    try d.app.resolveChains();
+
+    // Announces five bytes, sends two, and the socket is the one that gives
+    // up — which is what the fake clock saying `timed_out` stands for.
+    d.clock.timed_out = true;
+    const sent = d.stall(
+        "POST /echo HTTP/1.1\r\nHost: example.dev\r\nContent-Length: 5\r\n\r\nhe",
+        64,
+    );
+
+    try testing.expect(std.mem.startsWith(u8, sent.response, "HTTP/1.1 408"));
+}
+
+test "a body read that failed because the connection broke is not a 408" {
+    // The other half of that decision: without a timeout underneath it, a
+    // read that failed is a read that failed, and calling it a 408 would tell
+    // a client that retrying is worth its while when nothing was wrong with
+    // the timing.
+    var d = Deadline.init();
+    defer d.deinit();
+    try d.app.post("/echo", struct {
+        fn run(c: *Ctx) anyerror!void {
+            try c.sendText(200, (try c.body()).view());
+        }
+    }.run);
+    try d.app.resolveChains();
+
+    const sent = d.stall(
+        "POST /echo HTTP/1.1\r\nHost: example.dev\r\nContent-Length: 5\r\n\r\nhe",
+        64,
+    );
+
+    try testing.expect(!std.mem.startsWith(u8, sent.response, "HTTP/1.1 408"));
 }
 
 test "a WebSocket is allowed to sit quiet once the handshake is done" {
