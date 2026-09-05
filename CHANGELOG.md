@@ -26,6 +26,14 @@ not `chunked`. Nothing a browser, a proxy or an HTTP library sends changes. A
 hand-written test client that spoke to the server directly and never bothered
 with `Host` will need one.
 
+**A slow upload can now be refused**, and it is the one change here to read
+before deploying rather than after. A body nilo reads into the arena has to
+arrive at 8 KiB/s once ten seconds of grace have gone by, or the request is a
+408 — which closes a hole a client could hold a connection open with
+indefinitely, and which will also refuse an honest client uploading from
+somewhere slower than that. `body_min_rate = 0` turns it off; the entry under
+Added has the rest.
+
 **Six more things behave differently at run time, and all six are in Fixed
 below.**
 Sessions now carry an expiry, so everybody holding one is signed out on the
