@@ -1778,31 +1778,39 @@ against Zig 0.16 rather than believed. `docs/history.md` has the run.
 **Waiting on: a design** that makes it a rule rather than two comments, or an
 upstream way to read a bound port.
 
-**Three published snippets carry a mark saying they compile, and no build step
-opens the page they are on.** `zig build snippets` reads a `pages` list in
-`build.zig` holding four entries — `README.md`, `docs/reference.md`,
-`docs/guide/sessions.md` and `docs/guide/config.md`. Twenty-four pages carry
-Zig blocks, 206 of them altogether, and the other twenty are never opened.
+**A `<!-- compiles -->` on a page nobody added to a list is silent, and it looks
+exactly like one that is checked.** `zig build snippets` does not scan the
+documentation; it reads a `pages` list in `build.zig`. A block marked on a page
+that is not in that list is never compiled and never complained about, so the
+mark means "somebody believed this" rather than "a build step read this" — and
+the two are indistinguishable from the page.
 
-Most of those blocks are simply unmarked, which is honest: `<!-- compiles -->`
-is opt-in per block and an unmarked block claims nothing. **The three that are
-not honest are `docs/guide/metrics.md:8`, `:129` and
-`docs/guide/responses.md:186`** — marked, and never compiled by anything,
-because their page is not in the list. Somebody wrote the mark believing it was
-a guarantee. That is this repository's own stated failure, a rule nobody runs,
-wearing the costume of a rule that does.
+That is this repository's own stated failure, a rule nobody runs wearing the
+costume of a rule that does, and **it is a class rather than an incident: the
+list has been added to before and the next marked block on an unlisted page is
+silent in the same way.** What would end it is the step reading every page that
+*has* a marked block, rather than a list somebody has to remember to join. The
+cost is a directory walk at build time on a step that already caches.
+
+*The instance, which is separable from the class and goes when it is fixed:*
+`pages` holds four entries — `README.md`, `docs/reference.md`,
+`docs/guide/sessions.md`, `docs/guide/config.md` — against twenty-four pages
+carrying 206 Zig blocks. Three marks are live but unread:
+`docs/guide/metrics.md:8`, `:129` and `docs/guide/responses.md:186`. Most other
+blocks are merely unmarked, which is honest, since a mark is opt-in per block
+and an unmarked one claims nothing.
 
 `docs/guide/sql.md` is the page this matters most for and the one furthest from
 fixed: 48 Zig blocks, more than the README and the reference together, and not
 one of them marked.
 
-**Waiting on: ready**, and it is an afternoon rather than a line. Adding a page
-to `pages` compiles nothing until a block on it is marked, and the marking is
-the work: [ADR 0083](./adr/0083-the-guide-is-the-source-of-its-own-snippets.md)
-records that doing it to one five-line example found seven mistakes. The three
-dead marks are the cheap half and need not wait for the rest. What would end
-the class rather than this instance is the step reading every page that has a
-marked block, instead of a list somebody has to remember to join.
+**Waiting on: ready** for the instance, which is an afternoon rather than a
+line — adding a page to `pages` compiles nothing until a block on it is marked,
+and the marking is the work.
+[ADR 0083](./adr/0083-the-guide-is-the-source-of-its-own-snippets.md) records
+that doing it to one five-line example found seven mistakes. **The class is
+`Waiting on: a design`**, and it is the half worth keeping when the instance
+closes.
 
 **A fail function in spawned work is safe only because of where a threadlocal
 gets written.** `bulkhead.slot()` falls back to a threadlocal when a fiber has
