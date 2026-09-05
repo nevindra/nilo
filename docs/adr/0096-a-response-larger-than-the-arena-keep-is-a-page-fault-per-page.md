@@ -130,7 +130,7 @@ It is recorded here so the next person measuring a large body knows, and
 gap without asking the caller for anything, and it is a real design — an arena
 whose big nodes come from a per-thread free list rather than from the gpa. Not
 built: it changes where request memory lives, which is
-[ADR 0004](./0004-a-str-belongs-to-its-request.md)'s territory, and the option
+[ADR 0004](./0004-request-arena-and-the-str-type.md)'s territory, and the option
 above covers the case that turned up. Written down so it is not re-derived.
 
 ## What this costs

@@ -50,6 +50,54 @@ pub const Options = struct {
     /// or refuses some of them, needs two different clients to be two
     /// different addresses before there is anything to test.
     client_address: []const u8 = "",
+
+    /// Keep the cookies the answers set, and send them back — a browser's
+    /// jar, so a test can sign in and then be that user.
+    ///
+    /// Off by default, and that is a decision rather than caution about the
+    /// feature. This API shipped without one, so a suite written against it
+    /// has requests that carry no cookie; turning a jar on underneath them
+    /// would change what those tests assert without changing a line of them.
+    /// A test that wants the jar says so, and says it once.
+    cookies: bool = false,
+};
+
+/// One header to send, for `Client.setHeader` and `Request.headers`.
+///
+/// `nilo.Header` is the response side and this is the request side, which is
+/// the same split `Ctx.RequestHeader` is on.
+pub const Header = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+/// A whole request, described rather than written out.
+///
+/// Every field has a default, so only what a test cares about is written:
+///
+/// ```zig
+/// const answer = try client.sendRequest(&app, .{
+///     .path = "/admin",
+///     .headers = &.{.{ .name = "Authorization", .value = "Bearer t" }},
+/// });
+/// ```
+///
+/// `Host`, `Content-Type` and `Content-Length` are written for you and only
+/// if `headers` does not already name them. That is not tidiness: a second
+/// `Content-Length` is a 400 now, and so is a second `Host`
+/// ([ADR 0101](../docs/adr/0101-a-request-nobody-else-would-answer-is-refused.md)),
+/// so a helper that added its own on top of yours would answer 400 to a test
+/// that looked correct.
+pub const Request = struct {
+    method: []const u8 = "GET",
+    path: []const u8 = "/",
+    /// Sent after the client's own sticky headers, in this order.
+    headers: []const Header = &.{},
+    /// Written as `Content-Type` when it is not empty. A form has to have one,
+    /// because `application/x-www-form-urlencoded` and `multipart/form-data`
+    /// are told apart by nothing else (ADR 0031).
+    content_type: []const u8 = "",
+    body: []const u8 = "",
 };
 
 /// One answer, taken apart far enough to ask questions of.
@@ -159,6 +207,12 @@ pub const Client = struct {
     in_flight: fail.InFlight = .{},
     buffer: []u8,
     peer: bulkhead.Peer = .{},
+    /// Sent with every request this client makes. Owned here rather than in
+    /// `arena`, which is reset after each one.
+    sticky: std.ArrayList(Header) = .empty,
+    /// The cookies the answers have set, when `Options.cookies` is on.
+    jar: std.ArrayList(Header) = .empty,
+    keep_cookies: bool = false,
 
     pub fn init(gpa: std.mem.Allocator, options: Options) !Client {
         // The one warning `listen()` gives that a test can also earn, and the
@@ -176,20 +230,64 @@ pub const Client = struct {
             .arena = std.heap.ArenaAllocator.init(gpa),
             .buffer = try gpa.alloc(u8, options.response_bytes),
             .peer = try bulkhead.Peer.from(options.client_address),
+            .keep_cookies = options.cookies,
         };
     }
 
     pub fn deinit(self: *Client) void {
+        for (self.sticky.items) |h| {
+            self.gpa.free(h.name);
+            self.gpa.free(h.value);
+        }
+        self.sticky.deinit(self.gpa);
+        for (self.jar.items) |c| {
+            self.gpa.free(c.name);
+            self.gpa.free(c.value);
+        }
+        self.jar.deinit(self.gpa);
         self.gpa.free(self.buffer);
         self.arena.deinit();
     }
 
+    /// Send this header with every request from now on — an `Authorization`,
+    /// an `Origin`, a tracing header of somebody else's shape.
+    ///
+    /// Setting the same name twice replaces it rather than sending two,
+    /// because a test that meant to send two says so with `Request.headers`
+    /// and a test that meant to change one should not have to remember
+    /// whether it set it already.
+    ///
+    /// The name and value are copied, so a buffer the caller reuses is safe.
+    pub fn setHeader(self: *Client, name: []const u8, value: []const u8) !void {
+        const kept = try self.gpa.dupe(u8, value);
+        errdefer self.gpa.free(kept);
+
+        for (self.sticky.items) |*h| {
+            if (!std.ascii.eqlIgnoreCase(h.name, name)) continue;
+            self.gpa.free(h.value);
+            h.value = kept;
+            return;
+        }
+        const kept_name = try self.gpa.dupe(u8, name);
+        errdefer self.gpa.free(kept_name);
+        try self.sticky.append(self.gpa, .{ .name = kept_name, .value = kept });
+    }
+
+    /// What the jar holds for `name`, or null. For a test that wants to look
+    /// at the cookie rather than only send it.
+    pub fn cookie(self: *const Client, name: []const u8) ?[]const u8 {
+        for (self.jar.items) |c| {
+            if (std.mem.eql(u8, c.name, name)) return c.value;
+        }
+        return null;
+    }
+
     pub fn get(self: *Client, app: *App, path: []const u8) !Answer {
-        return self.request(app, "GET", path, "");
+        return self.sendRequest(app, .{ .path = path });
     }
 
     pub fn post(self: *Client, app: *App, path: []const u8, body: []const u8) !Answer {
-        return self.request(app, "POST", path, body);
+        return self.sendRequest(app, .{ .method = "POST", .path = path, .body = body });
     }
 
     /// A POST that says what its body is — which a form has to, because
@@ -211,14 +309,12 @@ pub const Client = struct {
         content_type: []const u8,
         body: []const u8,
     ) !Answer {
-        var text: std.ArrayList(u8) = .empty;
-        defer text.deinit(self.gpa);
-        try text.print(
-            self.gpa,
-            "POST {s} HTTP/1.1\r\nHost: test\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n\r\n{s}",
-            .{ path, content_type, body.len, body },
-        );
-        return self.send(app, text.items);
+        return self.sendRequest(app, .{
+            .method = "POST",
+            .path = path,
+            .content_type = content_type,
+            .body = body,
+        });
     }
 
     pub fn request(
@@ -228,18 +324,60 @@ pub const Client = struct {
         path: []const u8,
         body: []const u8,
     ) !Answer {
+        return self.sendRequest(app, .{ .method = method, .path = path, .body = body });
+    }
+
+    /// A request described field by field: a header, a method, a body, or all
+    /// three. Every helper above is one of these with defaults.
+    ///
+    /// The sticky headers go out first, then `r.headers`, then the jar's
+    /// `Cookie` if there is one. `Host: test` is written unless something
+    /// already named it — see `Request`.
+    pub fn sendRequest(self: *Client, app: *App, r: Request) !Answer {
         var text: std.ArrayList(u8) = .empty;
         defer text.deinit(self.gpa);
-        try text.print(
-            self.gpa,
-            "{s} {s} HTTP/1.1\r\nHost: test\r\nContent-Length: {d}\r\n\r\n{s}",
-            .{ method, path, body.len, body },
-        );
+
+        try text.print(self.gpa, "{s} {s} HTTP/1.1\r\n", .{ r.method, r.path });
+        if (!self.names("Host", r)) try text.appendSlice(self.gpa, "Host: test\r\n");
+        if (r.content_type.len > 0 and !self.names("Content-Type", r)) {
+            try text.print(self.gpa, "Content-Type: {s}\r\n", .{r.content_type});
+        }
+        // Written even for a body of nothing, which is what the three helpers
+        // above have always sent and what a test asserting on the raw bytes
+        // would have seen.
+        if (!self.names("Content-Length", r)) {
+            try text.print(self.gpa, "Content-Length: {d}\r\n", .{r.body.len});
+        }
+        for (self.sticky.items) |h| try text.print(self.gpa, "{s}: {s}\r\n", .{ h.name, h.value });
+        for (r.headers) |h| try text.print(self.gpa, "{s}: {s}\r\n", .{ h.name, h.value });
+
+        if (self.jar.items.len > 0 and !self.names("Cookie", r)) {
+            try text.appendSlice(self.gpa, "Cookie: ");
+            for (self.jar.items, 0..) |c, i| {
+                if (i > 0) try text.appendSlice(self.gpa, "; ");
+                try text.print(self.gpa, "{s}={s}", .{ c.name, c.value });
+            }
+            try text.appendSlice(self.gpa, "\r\n");
+        }
+
+        try text.print(self.gpa, "\r\n{s}", .{r.body});
         return self.send(app, text.items);
+    }
+
+    /// Whether the caller has already written this header themselves, either
+    /// on the client or on this one request.
+    fn names(self: *const Client, name: []const u8, r: Request) bool {
+        for (self.sticky.items) |h| if (std.ascii.eqlIgnoreCase(h.name, name)) return true;
+        for (r.headers) |h| if (std.ascii.eqlIgnoreCase(h.name, name)) return true;
+        return false;
     }
 
     /// The whole request, written out. For a version, a header or a shape
     /// the helpers above do not cover.
+    ///
+    /// The sticky headers and the jar are **not** applied here: the bytes are
+    /// the caller's, exactly as given. The jar still *reads* the answer, so
+    /// signing in with a hand-written request and going on with `get` works.
     pub fn send(self: *Client, app: *App, raw_request: []const u8) !Answer {
         // What `listen()` would have done. Idempotent, so calling it once
         // per request costs nothing after the first.
@@ -274,9 +412,77 @@ pub const Client = struct {
         self.lifetime.end();
         defer _ = self.arena.reset(.retain_capacity);
 
-        return parse(out.buffered(), keep_alive);
+        const answer = try parse(out.buffered(), keep_alive);
+        if (self.keep_cookies) try self.takeCookies(answer);
+        return answer;
+    }
+
+    /// Put every cookie this answer set into the jar, and take out the ones it
+    /// removed.
+    ///
+    /// A copy, because `answer` points into the response buffer and the next
+    /// request writes over it.
+    ///
+    /// **Attributes are read for one thing only: whether the cookie is being
+    /// removed.** `Max-Age` of zero or less is what `Cookie.remove` sends
+    /// (ADR 0030), and it is the whole of what a test can produce. `Path`,
+    /// `Domain` and `Secure` are ignored, which a browser would not do — this
+    /// is a jar for driving one App on one host, and a jar that guessed at
+    /// scope would be a second implementation of a browser to be wrong in.
+    fn takeCookies(self: *Client, answer: Answer) !void {
+        var n: usize = 0;
+        while (answer.headerAt("Set-Cookie", n)) |line| : (n += 1) {
+            const equals = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+            const name = line[0..equals];
+            const rest = line[equals + 1 ..];
+            const semi = std.mem.indexOfScalar(u8, rest, ';') orelse rest.len;
+
+            if (removes(rest[semi..])) {
+                self.forget(name);
+                continue;
+            }
+            try self.remember(name, rest[0..semi]);
+        }
+    }
+
+    fn remember(self: *Client, name: []const u8, value: []const u8) !void {
+        const kept = try self.gpa.dupe(u8, value);
+        errdefer self.gpa.free(kept);
+
+        for (self.jar.items) |*c| {
+            if (!std.mem.eql(u8, c.name, name)) continue;
+            self.gpa.free(c.value);
+            c.value = kept;
+            return;
+        }
+        const kept_name = try self.gpa.dupe(u8, name);
+        errdefer self.gpa.free(kept_name);
+        try self.jar.append(self.gpa, .{ .name = kept_name, .value = kept });
+    }
+
+    fn forget(self: *Client, name: []const u8) void {
+        for (self.jar.items, 0..) |c, i| {
+            if (!std.mem.eql(u8, c.name, name)) continue;
+            self.gpa.free(c.name);
+            self.gpa.free(c.value);
+            _ = self.jar.orderedRemove(i);
+            return;
+        }
     }
 };
+
+/// Whether a `Set-Cookie`'s attributes say the cookie is going away.
+fn removes(attributes: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, attributes, ';');
+    while (parts.next()) |part| {
+        const one = std.mem.trim(u8, part, " \t");
+        const equals = std.mem.indexOfScalar(u8, one, '=') orelse continue;
+        if (!std.ascii.eqlIgnoreCase(one[0..equals], "Max-Age")) continue;
+        const seconds = std.fmt.parseInt(i64, one[equals + 1 ..], 10) catch continue;
+        return seconds <= 0;
+    }
+    return false;
+}
 
 fn parse(raw: []const u8, keep_alive: bool) !Answer {
     // A 100 is a response that is not the answer: the client reads it, drops
@@ -370,6 +576,106 @@ test "a chunked answer reassembles into what the handler wrote" {
 
     var buf: [64]u8 = undefined;
     try testing.expectEqualStrings("one two", try answer.text(&buf));
+}
+
+fn echoHeaders(c: *@import("ctx.zig").Ctx) anyerror!void {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+
+    var it = c.headers();
+    while (it.next()) |h| {
+        try out.print(testing.allocator, "{s}={s};", .{ h.name.view(), h.value.view() });
+    }
+    try c.sendText(200, out.items);
+}
+
+test "a header can be sent for one request, or for every request" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/echo", echoHeaders);
+
+    var client = try Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    // Per request.
+    const one = try client.sendRequest(&app, .{
+        .path = "/echo",
+        .headers = &.{.{ .name = "X-One", .value = "1" }},
+    });
+    try testing.expect(std.mem.indexOf(u8, one.body, "X-One=1;") != null);
+
+    // Sticky, and gone from the next request only if it is taken off.
+    try client.setHeader("Authorization", "Bearer first");
+    try client.setHeader("Authorization", "Bearer second");
+    const two = try client.get(&app, "/echo");
+    try testing.expect(std.mem.indexOf(u8, two.body, "Authorization=Bearer second;") != null);
+    // Set twice, sent once.
+    try testing.expect(std.mem.indexOf(u8, two.body, "Bearer first") == null);
+    try testing.expect(std.mem.indexOf(u8, two.body, "X-One") == null);
+
+    // A `Host` of the caller's own replaces the default rather than joining
+    // it, which two `Host` lines would make a 400 (ADR 0101).
+    const three = try client.sendRequest(&app, .{
+        .path = "/echo",
+        .headers = &.{.{ .name = "Host", .value = "elsewhere" }},
+    });
+    try testing.expectEqual(@as(u16, 200), three.status);
+    try testing.expect(std.mem.indexOf(u8, three.body, "Host=elsewhere;") != null);
+    try testing.expect(std.mem.indexOf(u8, three.body, "Host=test;") == null);
+}
+
+fn signIn(c: *@import("ctx.zig").Ctx) anyerror!void {
+    try c.setCookie(.{ .name = "session", .value = "abc123", .path = "/" });
+    try c.sendText(200, "in");
+}
+
+fn signOut(c: *@import("ctx.zig").Ctx) anyerror!void {
+    try c.clearCookie(.{ .name = "session" });
+    try c.sendText(200, "out");
+}
+
+fn whoami(c: *@import("ctx.zig").Ctx) anyerror!void {
+    const sent = c.header("Cookie") orelse return c.sendText(200, "nobody");
+    try c.sendText(200, sent.view());
+}
+
+test "a client with a jar signs in once and stays signed in" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/sign-in", signIn);
+    try app.post("/sign-out", signOut);
+    try app.get("/me", whoami);
+
+    var client = try Client.init(testing.allocator, .{ .cookies = true });
+    defer client.deinit();
+
+    try testing.expectEqualStrings("nobody", (try client.get(&app, "/me")).body);
+
+    _ = try client.post(&app, "/sign-in", "");
+    try testing.expectEqualStrings("abc123", client.cookie("session").?);
+    // What used to need copying the `Set-Cookie` out of one answer and pasting
+    // it into the next request by hand, which is what `examples/forms` does.
+    try testing.expectEqualStrings("session=abc123", (try client.get(&app, "/me")).body);
+
+    // And a removal empties the jar rather than sending a cookie the server
+    // has just told the client to drop.
+    _ = try client.post(&app, "/sign-out", "");
+    try testing.expect(client.cookie("session") == null);
+    try testing.expectEqualStrings("nobody", (try client.get(&app, "/me")).body);
+}
+
+test "a client without a jar sends no cookie, which is what shipped" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/sign-in", signIn);
+    try app.get("/me", whoami);
+
+    var client = try Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    _ = try client.post(&app, "/sign-in", "");
+    try testing.expect(client.cookie("session") == null);
+    try testing.expectEqualStrings("nobody", (try client.get(&app, "/me")).body);
 }
 
 test "a client can be used for more than one request" {

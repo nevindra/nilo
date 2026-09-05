@@ -1445,3 +1445,56 @@ nanoseconds of arithmetic cannot be 5% of a 26µs request; what wrk was measurin
 was the box. **Reach for the instrument that contains the change**, and when the
 whole-system number and the component number disagree by an order of magnitude,
 the component number is the one that means something.
+
+## A blocker that closed itself, and a gap the instrument could not see
+
+Five more gaps, and the first of them was not work — it was a number that had
+already been earned and nobody collected.
+
+**`nilo_fetch`'s 16,495 bytes an idle connection was measured two days before
+the fix for it shipped, and the entry describing the fix as unbuilt stood for a
+month.** `bench/result/fetch.md` ranked "give the fiber's stack pages back
+between requests" first and called it an `http/` change nobody had made;
+`releaseIdleStack` had made it, in the commit after the one that wrote the
+ranking. Re-running the same harness put the figure at **4,139**. Nothing was
+built to earn that; a benchmark was re-run.
+
+That is the fourth premise this repository has planned against after it stopped
+being true, and the first three are all above. What is new is the shape:
+previous ones were somebody else's code. This one was **our own commit, two
+days later, in a file the entry links to.** So the rule "a conclusion of blocked
+on somebody else gets one more hour" does not go far enough. **A number is a
+claim about a commit, and the next commit can retire it.** The cheap habit that
+would have caught it is re-running the ranked lever before quoting the ranking.
+
+**The same run inverted a lever that had been measured and dismissed.** Moving
+`std.http.Client`'s two buffers off the stack into the request arena was worth
+−66 bytes and was written up as "tried and lost". It is now worth **+4,096, one
+page, every time** — because stack is handed back when a connection goes quiet
+and the retained arena is not, so a lever that used to move bytes between two
+places that both held them now moves them out of the only one that lets go.
+**A result of "no difference" is the one nobody re-runs, and it is the one most
+likely to have changed sign.**
+
+**And a security gap was invisible to the instrument this repository reaches
+for first.** `c.body()` took the announced `Content-Length` out of the arena
+before reading a byte, and `bench/mem.py` reads `VmRSS` — which does not count
+a page nobody has written to. The first run said a stuck connection cost 17,281
+bytes either way and the gap did not exist. `VmData` said 1,852,080 against
+316,080. **A mapping nobody has touched is free in the instrument and not free
+in the machine**, so the right reading for "what did this commit *ask* for" is
+`VmData` and `VmRSS` is the reading for "what is it using".
+
+The honest half of that finding is that the roadmap's "ten gigabytes a server
+will commit" was right in kind and wrong about which resource, and the resident
+figure never moves. It was still worth fixing — but the fix had to be argued on
+address space and `vm.max_map_count`, not on RAM, and the two shapes tried
+before the one that shipped were both rejected on throughput rather than on
+memory ([ADR 0105](./adr/0105-a-body-is-taken-as-it-arrives.md)).
+
+**A growth loop is not free just because the copying is cheap.** Fixed 16 KiB
+steps into a `std.ArrayList` cost 35% of a 64 KiB body and 45% of a megabyte;
+explicit doubling saved almost none of it. The copying was never the cost —
+every growth past the retained arena block is a fresh node from the page
+allocator, and on two cores an `mmap`/`munmap` pair costs more than the rest of
+the request. What fits is one step of proof and then one allocation.

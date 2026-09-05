@@ -2330,6 +2330,47 @@ test "a request nobody else would answer is refused before it reaches a route" {
     );
 }
 
+test "a handler can walk every header, including one that was sent twice" {
+    const Walk = struct {
+        fn run(c: *Ctx) anyerror!void {
+            var out = std.ArrayList(u8).empty;
+            defer out.deinit(testing.allocator);
+
+            var it = c.headers();
+            while (it.next()) |h| {
+                try out.appendSlice(testing.allocator, h.name.view());
+                try out.append(testing.allocator, '=');
+                try out.appendSlice(testing.allocator, h.value.view());
+                try out.append(testing.allocator, ';');
+            }
+            try c.sendText(200, out.items);
+        }
+    };
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/walk", Walk.run);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(
+        &app,
+        "GET /walk HTTP/1.1\r\nHost: t\r\nAccept:  text/plain \r\n" ++
+            "X-Trace: one\r\nX-Trace: two\r\n\r\n",
+    );
+
+    // Arrival order, the value trimmed of the optional whitespace either side
+    // of it, and the request line skipped.
+    try testing.expect(std.mem.endsWith(
+        u8,
+        result.response,
+        "Host=t;Accept=text/plain;X-Trace=one;X-Trace=two;",
+    ));
+    // `header` answers with the first and cannot say there was a second, which
+    // is half of why the iterator exists.
+    try testing.expect(std.mem.indexOf(u8, result.response, "X-Trace=two;") != null);
+}
+
 test "an unrecognised error becomes a 500, but the connection stays alive" {
     var app = App.init(testing.allocator);
     defer app.deinit();

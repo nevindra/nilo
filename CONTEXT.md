@@ -219,8 +219,12 @@ A program written wrong on purpose, kept so that the message it stops with stays
 _Avoid_: negative test, compile-fail case, error test, fixture
 
 **Test client**:
-A stand-in for the other end of a connection, for testing a handler that writes its answer rather than returning one. Runs one request through the App with no server and no socket.
+A stand-in for the other end of a connection, for testing a handler that writes its answer rather than returning one. Runs one request through the App with no server and no socket. It may carry sticky headers and a jar; `send` is the raw entry point and carries neither.
 _Avoid_: mock, fixture, test server, harness
+
+**Jar**:
+What a test client keeps of the cookies the answers set, and sends back on the requests that follow. Off unless asked for. A browser's word, kept because that is what it imitates.
+_Avoid_: cookie store, session store, cookie cache
 
 ### SQL
 

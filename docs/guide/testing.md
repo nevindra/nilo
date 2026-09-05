@@ -87,18 +87,53 @@ to a buffer instead of a connection.
 | `client.get(&app, "/path")` | |
 | `client.post(&app, "/path", body)` | with `Content-Length` set |
 | `client.request(&app, "PUT", "/path", body)` | any method |
-| `client.send(&app, raw)` | the whole request written out, for a header or a version the others don't cover |
+| `client.sendRequest(&app, .{ … })` | any of the above plus headers, every field defaulted |
+| `client.send(&app, raw)` | the whole request written out, for a version the others don't cover |
 
-`send` is the one for anything unusual — HTTP/1.0, a `Range`, a header your
-middleware reads. **Write the `Host` yourself**: `get` and the rest put one in
-for you, and an HTTP/1.1 request without one is a 400 before it reaches a route
-([ADR 0101](../adr/0101-a-request-nobody-else-would-answer-is-refused.md)).
+`sendRequest` is the one to reach for when a route reads a header:
 
 ```zig
-const answer = try client.send(&app,
-    "GET /video.mp4 HTTP/1.1\r\nHost: t\r\nRange: bytes=0-20\r\n\r\n");
+const answer = try client.sendRequest(&app, .{
+    .path = "/video.mp4",
+    .headers = &.{.{ .name = "Range", .value = "bytes=0-20" }},
+});
 try testing.expectEqual(@as(u16, 206), answer.status);
 ```
+
+`client.setHeader("Authorization", "Bearer t")` sets one for every request from
+then on, which is what a suite behind a bearer token wants.
+
+`send` is left for what nothing else can express — an HTTP/1.0 request, a
+deliberately malformed one. **There, write the `Host` yourself**: every other
+entry point puts one in for you, and an HTTP/1.1 request without one is a 400
+before it reaches a route
+([ADR 0101](../adr/0101-a-request-nobody-else-would-answer-is-refused.md)).
+`send` also applies neither `setHeader` nor the jar — the bytes are yours,
+exactly as given.
+
+### Signing in, and staying signed in
+
+`Client.init(gpa, .{ .cookies = true })` keeps what the answers set and sends it
+back, the way a browser does. Without it a sign-in followed by a request *as*
+that user means copying the `Set-Cookie` out of one answer into the next request
+by hand.
+
+```zig
+var client = try nilo.testing.Client.init(testing.allocator, .{ .cookies = true });
+defer client.deinit();
+
+_ = try client.postWith(&app, "/sign-in", "application/x-www-form-urlencoded",
+    "email=wati%40example.dev&password=hunter2");
+
+// Carries the session cookie the sign-in set.
+const answer = try client.get(&app, "/me");
+```
+
+It is off by default so that a suite written before it existed keeps asserting
+what it always asserted
+([ADR 0108](../adr/0108-the-test-client-can-do-what-a-client-does.md)).
+`client.cookie("session")` is what the jar is holding, for a test that wants to
+look rather than only send.
 
 ### Reading the answer
 

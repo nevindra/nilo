@@ -111,17 +111,22 @@ sixty-five lines cost, not what `std.http.Client` costs.
 | axis | `nilo_fetch` | the call itself (std's) |
 |---|---|---|
 | allocations per call | **1**, the body into the Scope's arena | connection setup only, pooled |
-| memory per idle connection | **+1 byte**, which is noise | **+16,495 bytes** |
+| memory per idle connection | **0 bytes**, exactly | **+4,139 bytes** |
 | throughput | **within ±1%**, below this harness's drift | −40% off the floor |
 | binary size, stripped ReleaseFast | **+1,688 bytes** | +655,600 bytes |
 
-The one that matters is the second column's 16,495 bytes: an outbound call is
-the most expensive thing a handler can do to the per-connection axis, and by
+The one that matters is the second column: an outbound call is still the most
+expensive thing a handler can do to the per-connection axis, and by
 [ADR 0063](./0063-a-handlers-stack-is-per-connection.md) it is held for as long
-as the *inbound* connection stays open. It is fiber stack rather than buffers —
-moving the two client buffers into the request arena was tried and is worth −66
-bytes — so the lever is in `http/`, giving stack pages back between requests,
-and not in this module.
+as the *inbound* connection stays open. It is fiber stack rather than buffers.
+
+**Both figures in that row were measured twice, and the first reading of each
+was wrong by the time it was published.** The memory column read +16,495 and
++1; the stack release in `dcadb46` landed two days after the run and nothing
+re-ran it, so it stood for a month describing a server that no longer existed.
+The lever this ADR named as belonging to `http/` had already been pulled there.
+`bench/result/fetch.md` carries both runs rather than only the right one,
+because the pair is the lesson.
 
 **Arming a deadline is free**: two bytes an idle connection and nothing
 measurable on throughput, because a 192-byte slot lands inside a page the fiber

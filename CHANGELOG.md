@@ -153,6 +153,50 @@ The second line is only needed for a type that *arrives* in a request. Sending
 needs nothing, because nilo makes that call and reads the marker itself; reading
 is `std.json`'s call, and nothing can add a declaration to a type you wrote.
 
+#### `c.headers()` — every header a request sent
+
+`c.header(name)` answers with the first of that name and nothing could read the
+rest, so a middleware that does not know the names in advance — a signing proxy,
+somebody else's tracing header, a `Forwarded` reader — had to reach into
+`c._head`, which is nilo's to change.
+
+```zig
+var it = c.headers();
+while (it.next()) |h| { … }   // h.name and h.value are both Str
+```
+
+A wrapper over the walk `header` already does: no list is built, nothing is
+allocated, and a request that never calls it pays nothing. Both halves are `Str`
+because the head is usually borrowed from the connection's read buffer
+([ADR 0107](./docs/adr/0107-every-header-without-handing-out-the-head.md)).
+
+#### A test client that can be a client
+
+`testing.Client` wrote `Host: test` and nothing else, so a test of a route
+behind `Authorization`, behind CORS or behind a session had to hand-assemble
+the raw request text — the one place in this framework where the ordinary thing
+was harder than the raw thing.
+
+```zig
+try client.setHeader("Authorization", "Bearer t");   // every request from now on
+
+const answer = try client.sendRequest(&app, .{
+    .method = "PUT",
+    .path = "/settings",
+    .headers = &.{.{ .name = "X-Trace", .value = "abc" }},
+    .content_type = "application/json",
+    .body = "{}",
+});
+```
+
+And `Client.init(gpa, .{ .cookies = true })` keeps what the answers set and
+sends it back, so a sign-in followed by a request *as* that user is two calls
+rather than a `Set-Cookie` copied by hand. **The jar is off by default** so that
+a suite written before it existed keeps asserting what it always asserted
+([ADR 0108](./docs/adr/0108-the-test-client-can-do-what-a-client-does.md)).
+
+`send(&app, raw)` is unchanged and applies neither: the bytes are yours.
+
 #### Smaller
 
 - **`union(enum)` as a request body**, which used to be a compile error on the
@@ -177,6 +221,23 @@ is `std.json`'s call, and nothing can add a declaration to a type you wrote.
   `python3 bench/mem.py --hold`.
 
 ### Changed
+
+- **`c.body()` no longer commits the announced `Content-Length` before reading
+  a byte of it.** A client that promised a megabyte and sent one byte a minute
+  used to hold the megabyte for as long as it kept trickling — 1,852,080 bytes
+  of anonymous mapping per stuck connection, now 316,080. Nothing changes for a
+  body that arrives: it is the same one allocation it always was, and a body
+  over the step pays one more
+  ([ADR 0105](./docs/adr/0105-a-body-is-taken-as-it-arrives.md)).
+
+- **A number in a path param, a query value or a form field is no longer read
+  as a Zig literal.** `/users/+7` was user 7, `?page=1_0` was page ten, and
+  `?ratio=nan` was a `f64` that loses every comparison it is in. All four are a
+  400 now. A leading `-` on a signed field, a leading zero and an exponent's
+  sign are all still accepted
+  ([ADR 0106](./docs/adr/0106-a-number-in-a-request-is-not-a-zig-literal.md)).
+  A client that was relying on any of the four gets the 400 the value always
+  deserved.
 
 - **`cors.Options.origin` is now `origins`, and takes a list.** The one
   breaking change in this release. A single compile-time string meant an

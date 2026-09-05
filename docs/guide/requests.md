@@ -186,6 +186,13 @@ From a `*Ctx`:
 `c.body()` reads whole and is refused past **1 MB**. That is right for JSON and
 wrong for a file.
 
+It takes the arena as the bytes arrive rather than as `Content-Length` promises
+them, so a client that announces a megabyte and then trickles holds a page
+rather than a megabyte
+([ADR 0105](../adr/0105-a-body-is-taken-as-it-arrives.md)). A body that arrives
+normally pays for that in nothing: under a page it is the one allocation it
+always was, over a page it is two.
+
 ## Bodies too big to hold
 
 ```zig
@@ -246,6 +253,20 @@ c.header("X-Token") // a request header, name matched case-insensitively
 c.param("id")       // a path param, percent-decoded
 c.query("q")        // a query param, percent-decoded
 ```
+
+`c.header` answers with the **first** header of that name. For the rest of
+them — or for a middleware that does not know the names in advance — walk the
+lot:
+
+```zig
+var it = c.headers();
+while (it.next()) |h| {
+    // h.name and h.value are both Str, and both die with the request
+    std.log.debug("{s}: {s}", .{ h.name.view(), h.value.view() });
+}
+```
+
+Nothing is allocated either way: both read the head where it lies.
 
 The whole request head has to fit in the connection's `read_buffer` (8 KB by
 default); one that doesn't is answered with a 431. Turn it up in `listen()` if

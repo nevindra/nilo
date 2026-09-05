@@ -543,6 +543,40 @@ test "an upload arrives with its bytes, and an endpoint behind the sign-in refus
     );
 }
 
+test "signing in and then uploading is one client, with no cookie copied by hand" {
+    var sessions = Sessions{ .gpa = testing.allocator };
+    defer sessions.deinit();
+
+    var app = nilo.App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&sessions);
+    try app.post("/sign-in", signIn);
+    try app.post("/avatars", uploadAvatar);
+
+    // The jar is what makes this one test rather than two: every other test in
+    // this file that needs a signed-in request reaches into `Sessions` for a
+    // token and writes the `Cookie` header itself, because until ADR 0108
+    // there was no other way.
+    var client = try nilo.testing.Client.init(testing.allocator, .{ .cookies = true });
+    defer client.deinit();
+
+    const in = try client.postWith(
+        &app,
+        "/sign-in",
+        "application/x-www-form-urlencoded",
+        "email=wati%40example.dev&password=hunter2",
+    );
+    try testing.expectEqual(@as(u16, 303), in.status);
+
+    const body = "--B\r\nContent-Disposition: form-data; name=\"caption\"\r\n\r\nsigned in\r\n" ++
+        "--B\r\nContent-Disposition: form-data; name=\"image\"; filename=\"me.png\"\r\n" ++
+        "Content-Type: image/png\r\n\r\n\x89PNG\r\n\x1a\n\r\n" ++
+        "--B--\r\n";
+    const answer = try client.postWith(&app, "/avatars", "multipart/form-data; boundary=B", body);
+    try testing.expectEqual(@as(u16, 201), answer.status);
+    try testing.expect(std.mem.indexOf(u8, answer.body, "\"caption\":\"signed in\"") != null);
+}
+
 test "the same endpoint sent a form that cannot carry a file says which to send" {
     var sessions = Sessions{ .gpa = testing.allocator };
     defer sessions.deinit();

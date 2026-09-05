@@ -2255,6 +2255,24 @@ pub fn build(b: *std.Build) void {
     b.step("bench-stream-server", "A server of held-open streams, for what one costs")
         .dependOn(&b.addInstallArtifact(bench_stream_server, .{}).step);
 
+    // What a body costs while it is arriving, on both halves of the axis: what
+    // the growth costs a body that turns up normally, and what one that never
+    // finishes holds. Installed rather than run, the same as the two above:
+    // `bench/slowloris.py` drives the second half and `wrk` the first.
+    const bench_body_server_module = b.createModule(.{
+        .root_source_file = b.path("bench/body_server.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .strip = stripMeasured(strip, .ReleaseFast),
+        .imports = &.{.{ .name = "nilo_http", .module = bench_http }},
+    });
+    const bench_body_server = b.addExecutable(.{
+        .name = "nilo-bench-body-server",
+        .root_module = bench_body_server_module,
+    });
+    b.step("bench-body-server", "A server reading request bodies, for what one holds while it arrives")
+        .dependOn(&b.addInstallArtifact(bench_body_server, .{}).step);
+
     // The server `wstest` is driven at, which is a conformance run rather than
     // a measurement and is here because `bench/` is where a harness needing
     // something external already lives. Installed rather than run, because the

@@ -116,8 +116,17 @@ pub fn tryConvert(comptime P: type, comptime slot: Slot, s: Str, out: *P) ?Reaso
 
     const text = s.view();
     switch (@typeInfo(P)) {
-        .int => out.* = std.fmt.parseInt(P, text, 10) catch return .not_a_number,
-        .float => out.* = std.fmt.parseFloat(P, text) catch return .not_a_number,
+        // The shape is checked before the value, because `std.fmt` reads Zig
+        // source rather than request text and takes three spellings nobody
+        // typed on purpose. See `spelledAsNumber`.
+        .int => |i| {
+            if (!spelledAsNumber(text, i.signedness == .signed, false)) return .not_a_number;
+            out.* = std.fmt.parseInt(P, text, 10) catch return .not_a_number;
+        },
+        .float => {
+            if (!spelledAsNumber(text, true, true)) return .not_a_number;
+            out.* = std.fmt.parseFloat(P, text) catch return .not_a_number;
+        },
         .bool => out.* = boolFrom(text, slot) orelse return .not_true_or_false,
         .@"enum" => out.* = std.meta.stringToEnum(P, text) orelse return .not_a_choice,
         else => comptime unreachable,
@@ -220,6 +229,55 @@ fn boolFrom(text: []const u8, comptime slot: Slot) ?bool {
     return null;
 }
 
+/// Whether text is spelled the way a number is spelled outside a Zig source
+/// file: digits, a leading `-` where the type has one, and for a real number a
+/// fractional part and an exponent.
+///
+/// **`std.fmt` reads Zig's own literal grammar, and this is the one place a
+/// stranger's text reaches it.** `parseInt` takes a leading sign and Zig's
+/// digit separators, so `/users/+7` was user 7 and `?page=1_0` was page ten;
+/// `parseFloat` takes those plus `inf`, `nan` and hex floats, so `?ratio=nan`
+/// was a `f64` that loses every comparison it is ever in. None of the four is a
+/// thing a client types by accident, and each of them is two clients disagreeing
+/// about what was asked for — the same shape as a body framed twice, which
+/// [ADR 0090](../docs/adr/0090-a-body-framed-twice-is-refused.md) refused one
+/// layer up. `http1.digitsOnly` and `range.zig`'s copy are that rule for a
+/// header; this is it for the one place a *user's* number arrives.
+///
+/// Checked before `std.fmt` rather than instead of it, because the shape says
+/// nothing about whether the value fits in a `u8`.
+///
+/// A leading zero is allowed, for `digitsOnly`'s reason: `05` is legal in every
+/// grammar that has digits, everybody reads it as 5, and refusing it turns a
+/// request nobody disagrees about into a 400. A `+` in an *exponent* is allowed
+/// for the same reason — `1e+3` is how every JSON writer spells it — while a
+/// leading one is not, since nothing produces `+7`.
+fn spelledAsNumber(text: []const u8, signed: bool, real: bool) bool {
+    var rest = text;
+    if (signed and rest.len > 0 and rest[0] == '-') rest = rest[1..];
+
+    var i: usize = 0;
+    while (i < rest.len and std.ascii.isDigit(rest[i])) i += 1;
+    if (i == 0) return false;
+    if (i == rest.len) return true;
+    if (!real) return false;
+
+    if (rest[i] == '.') {
+        i += 1;
+        const from = i;
+        while (i < rest.len and std.ascii.isDigit(rest[i])) i += 1;
+        if (i == from) return false;
+        if (i == rest.len) return true;
+    }
+
+    if (rest[i] != 'e' and rest[i] != 'E') return false;
+    i += 1;
+    if (i < rest.len and (rest[i] == '+' or rest[i] == '-')) i += 1;
+    const from = i;
+    while (i < rest.len and std.ascii.isDigit(rest[i])) i += 1;
+    return i > from and i == rest.len;
+}
+
 /// The names an enum's values answer to, for the message that says what was
 /// expected. Built once at compile time.
 pub fn enumChoices(comptime E: type) []const u8 {
@@ -261,6 +319,49 @@ test "text that fits becomes the value" {
 
     const Sort = enum { newest, oldest };
     try testing.expectEqual(Sort.oldest, try convert(Sort, .query, given("oldest"), "?sort"));
+}
+
+test "a number in a request is not spelled the way a Zig literal is" {
+    const previous = bulkhead.setFallbackSlot(null);
+    defer _ = bulkhead.setFallbackSlot(previous);
+
+    var n: u32 = 0;
+    // What `std.fmt.parseInt` used to take: a sign nobody sends, and Zig's own
+    // digit separator. `/users/+7` was user 7 and `?page=1_0` was page ten.
+    try testing.expectEqual(Reason.not_a_number, tryConvert(u32, .query, given("+7"), &n).?);
+    try testing.expectEqual(Reason.not_a_number, tryConvert(u32, .query, given("1_0"), &n).?);
+    try testing.expectEqual(Reason.not_a_number, tryConvert(u32, .query, given(""), &n).?);
+    try testing.expectEqual(Reason.not_a_number, tryConvert(u32, .query, given("-"), &n).?);
+    try testing.expectEqual(Reason.not_a_number, tryConvert(u32, .query, given("7 "), &n).?);
+
+    // A signed field keeps its sign, and a leading zero stays legal for
+    // `digitsOnly`'s reason.
+    var i: i32 = 0;
+    try testing.expectEqual(@as(?Reason, null), tryConvert(i32, .query, given("-7"), &i));
+    try testing.expectEqual(@as(i32, -7), i);
+    try testing.expectEqual(Reason.not_a_number, tryConvert(i32, .query, given("+7"), &i).?);
+    try testing.expectEqual(@as(?Reason, null), tryConvert(u32, .query, given("05"), &n));
+    try testing.expectEqual(@as(u32, 5), n);
+
+    // An unsigned field never had one.
+    try testing.expectEqual(Reason.not_a_number, tryConvert(u32, .query, given("-7"), &n).?);
+}
+
+test "a float in a request is not inf, nan or a hex literal" {
+    const previous = bulkhead.setFallbackSlot(null);
+    defer _ = bulkhead.setFallbackSlot(previous);
+
+    var f: f64 = 0;
+    // `parseFloat` reads all four, and a `nan` that arrived in a query string
+    // is a value that loses every comparison a handler puts it in.
+    for ([_][]const u8{ "nan", "inf", "-inf", "0x1p3", "1_0", "+1.5", "1.", ".5", "1e", "1e+" }) |bad| {
+        try testing.expectEqual(Reason.not_a_number, tryConvert(f64, .query, given(bad), &f).?);
+    }
+
+    for ([_][]const u8{ "1.5", "-1.5", "0", "05", "1e3", "1e+3", "1E-3", "1.5e2" }) |good| {
+        try testing.expectEqual(@as(?Reason, null), tryConvert(f64, .query, given(good), &f));
+    }
+    try testing.expectEqual(@as(f64, 150), f);
 }
 
 test "text that does not fit fails with the label in it" {

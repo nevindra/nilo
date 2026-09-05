@@ -146,6 +146,67 @@ pub fn readChunkedBody(in: *std.Io.Reader, gpa: std.mem.Allocator, limit: usize)
     return body.items;
 }
 
+/// How much of a `Content-Length` body a client has to actually deliver before
+/// the rest of what it announced is committed.
+///
+/// **One page, and the size was settled by measurement rather than by taste.**
+/// The step has to come out of memory the request arena is already holding, or
+/// it costs a node of its own — and a node is a `mmap`/`munmap` pair, which on
+/// this machine is worth more than the whole rest of the request. `arena_keep`
+/// defaults to 16 KiB and a POST has spent a little of it on the head, so a
+/// page fits and 16 KiB does not: at 16 KiB a 64 KiB body loses **21%**, and at
+/// this size three interleaved pairs put it at −6.2%, +4.6% and −7.1%, which is
+/// a sign change inside the harness's own spread.
+/// [`bench/result/http.md`](../bench/result/http.md) has the sweep.
+const sized_body_step = 4096;
+
+/// Read a body of an announced length into one contiguous slice from `gpa`,
+/// **taking the memory as the bytes arrive rather than as they are promised.**
+///
+/// `Content-Length` is a number a stranger typed. Committing it up front is
+/// what let a client announce a megabyte, send one byte a minute and hold a
+/// megabyte of the connection's arena for as long as it kept trickling —
+/// `body_timeout_ms` is a limit per *read* and not for the body, deliberately
+/// ([ADR 0023](../docs/adr/0023-a-deadline-belongs-to-an-operation-not-to-a-request.md)),
+/// so a client answering inside every window never trips it. Times the default
+/// `max_connections` of 10,000 that is ten gigabytes committed on the strength
+/// of a header.
+///
+/// **One page of proof, then the announcement.** A client gets a page of the
+/// arena for nothing; the rest is committed only once it has delivered that. So
+/// the amplification a stranger can buy goes from unbounded to 256× at the
+/// default `max_body`, and a connection that opens, announces and says nothing
+/// holds a page rather than a megabyte.
+///
+/// **Two allocations rather than a growth loop, and that is a measurement
+/// rather than taste.** Reading in fixed 16 KiB steps into a `std.ArrayList`
+/// costs 35% of a 64 KiB body and 45% of a megabyte; explicit doubling saves
+/// almost none of that. The cost is not the copying — it is that every growth
+/// past the retained arena block is a fresh node from the page allocator, and
+/// on a two-core box an `mmap`/`munmap` pair with the TLB shootdown behind it
+/// is worth more than the whole rest of the request. Two allocations is one
+/// more than before and the shape is otherwise unchanged.
+/// [`bench/result/http.md`](../bench/result/http.md) has all four runs.
+///
+/// `gpa` is meant to be the request arena, on the same terms as
+/// `readChunkedBody`: a read that fails partway leaves what it had, which
+/// against an arena is free and correct.
+pub fn readSizedBody(in: *std.Io.Reader, gpa: std.mem.Allocator, length: usize) ![]const u8 {
+    if (length <= sized_body_step) {
+        const whole = try gpa.alloc(u8, length);
+        try in.readSliceAll(whole);
+        return whole;
+    }
+
+    // The step first, and nothing more until it has arrived.
+    var body = try gpa.alloc(u8, sized_body_step);
+    try in.readSliceAll(body);
+
+    body = try gpa.realloc(body, length);
+    try in.readSliceAll(body[sized_body_step..]);
+    return body;
+}
+
 pub fn discardChunkedBody(in: *std.Io.Reader, limit: u64) !void {
     var seen: u64 = 0;
     while (true) {
@@ -948,6 +1009,45 @@ test "a chunked body is reassembled" {
     try testing.expectEqualStrings("hello world", body);
     // The connection is left exactly at the next request.
     try testing.expectEqualStrings("GET", try in.take(3));
+}
+
+test "a body of an announced length is taken as it arrives, not as it is promised" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // Every size around the step boundary, so the loop is exercised at zero,
+    // one short, exact, one over and several steps.
+    for ([_]usize{ 0, 1, sized_body_step - 1, sized_body_step, sized_body_step + 1, sized_body_step * 3 + 7 }) |len| {
+        const bytes = try testing.allocator.alloc(u8, len);
+        defer testing.allocator.free(bytes);
+        for (bytes, 0..) |*b, i| b.* = @truncate(i);
+
+        var in = std.Io.Reader.fixed(bytes);
+        try testing.expectEqualSlices(u8, bytes, try readSizedBody(&in, arena.allocator(), len));
+    }
+
+    // The connection is left exactly at the next request.
+    var two = std.Io.Reader.fixed("hiNEXT");
+    try testing.expectEqualStrings("hi", try readSizedBody(&two, arena.allocator(), 2));
+    try testing.expectEqualStrings("NEXT", try two.take(4));
+}
+
+test "a client that announces more than it sends holds only what it sent" {
+    // Ten megabytes announced, four bytes delivered, and 64 KiB of allocator
+    // to serve it from — so the old shape, which took `content_length` out of
+    // the arena before reading a byte, cannot pass this: it fails allocating
+    // and never reaches the read. A slow-loris is the same request with the
+    // connection left open instead of ending.
+    var room: [64 * 1024]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&room);
+    var arena = std.heap.ArenaAllocator.init(fixed.allocator());
+    defer arena.deinit();
+
+    var in = std.Io.Reader.fixed("slow");
+    try testing.expectError(
+        error.EndOfStream,
+        readSizedBody(&in, arena.allocator(), 10 * 1024 * 1024),
+    );
 }
 
 test "chunk extensions and trailers are stepped over" {

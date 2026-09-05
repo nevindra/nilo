@@ -295,7 +295,8 @@ plus a per-arm `allOf` for a tagged one. See
 | `c.path()` | `Str` — the path, without the query string |
 | `c.param(name)` | `?Str`, percent-decoded. `"*"` for a catch-all |
 | `c.query(name)` | `?Str`, percent-decoded, `+` as space |
-| `c.header(name)` | `?Str`, name matched case-insensitively |
+| `c.header(name)` | `?Str`, name matched case-insensitively. The **first** of that name |
+| `c.headers()` | an iterator over every header, in arrival order — `while (it.next()) \|h\|`, `h.name` and `h.value` are `Str` |
 | `c.cookie(name)` | `?Str` — as the client sent it, nothing decoded. Allocates nothing |
 | `c.body()` | `!Str` — the whole body, up to `max_body` (1 MB) |
 | `c.json(T)` | `!T` — the body parsed as JSON |
@@ -1253,10 +1254,15 @@ marker gets `{}` and a description saying so.
 | | |
 |---|---|
 | `testing.Client.init(gpa, .{ .response_bytes = 64 * 1024 })` | |
+| `.{ .client_address = "203.0.113.7" }` | what `c.peer()` and `c.clientIp()` answer |
+| `.{ .cookies = true }` | keep what the answers set and send it back — a browser's jar. Off by default |
 | `client.get(&app, path)` / `post(&app, path, body)` | |
 | `client.postWith(&app, path, content_type, body)` | a POST that says what its body is — what a form needs |
 | `client.request(&app, method, path, body)` | |
-| `client.send(&app, raw_request)` | the whole request, written out |
+| `client.sendRequest(&app, .{ .method, .path, .headers, .content_type, .body })` | all of it, described. Every field has a default |
+| `client.setHeader(name, value)` | sent with every request from now on. Setting it again replaces it |
+| `client.cookie(name)` | `?[]const u8` — what the jar holds |
+| `client.send(&app, raw_request)` | the whole request, written out. Sticky headers and the jar are **not** applied |
 | `answer.status` / `.head` / `.body` / `.raw` / `.chunked` / `.keep_alive` | |
 | `answer.interim` | `?[]const u8` — the `100 Continue` that came first, or null. `.status` is the final one either way |
 | `answer.header(name)` | case-insensitive, the first of that name |

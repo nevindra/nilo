@@ -1160,6 +1160,115 @@ machine means anything; do not quote the column.
 Binary size, stripped ReleaseFast `nilo-hello`: 905,600 → 905,808 bytes, +208
 for all five changes in that commit together.
 
+## What a body costs while it is arriving
+
+**A different machine, and every figure in this section is only comparable
+within it.** 5 September 2026, `4131913` plus the working tree: 2-core Intel
+Xeon Platinum 8255C at 2.50 GHz, 7 GiB, generator on the same two cores as the
+server. Everything above is the 8-core Ryzen. The absolutes here are much lower
+than that machine's and mean nothing beside them; what is being read is the
+ratio between two builds measured one after the other on this one, and the
+`mmap` finding below is *sharper* on two cores than it would be on eight, which
+is said out loud rather than left for somebody to discover.
+
+`c.body()` took the announced `Content-Length` out of the request arena before
+reading a byte of it. `bench/body_server.zig` is what put a number on both
+halves of changing that — what a body that never finishes holds, and what the
+change costs a body that arrives normally — and it carries three controls:
+`/health` (no `Ctx`), `/drop` (the body arrives and nobody asks for it), and
+`/stream` (`c.bodyStream()`, the shape that never had the problem).
+
+### The instrument was wrong first, and that is the finding
+
+`bench/mem.py` reads `VmRSS`, and the first run said this:
+
+| route | before | after |
+|---|---|---|
+| `/echo`, `VmRSS`/conn | 17,281 | 17,281 |
+
+**A megabyte that is mapped and never written to is not resident**, so the
+whole gap was invisible to the instrument this repository reaches for first.
+`bench/slowloris.py` reports `VmData` beside it for exactly that reason.
+1,000 connections, each announcing `max_body` and delivering one byte:
+
+| route | `VmData`/conn before | after | `VmRSS`/conn, either |
+|---|---|---|---|
+| `/echo` — `c.body()` | 1,852,080 | **283,378** | 17,281 |
+| `/stream` — `c.bodyStream()` | 275,448 | 275,448 | 17,539 |
+| `/drop` — never reads it | 275,120 | 275,120 | 17,281 |
+
+`/drop` is the floor — the fiber's stack reservation and the connection's
+buffers — so **the body's own share went from 1,576,960 bytes to 8,258**, two
+pages, and `/echo` is now within 8 KiB of `/stream`. At 10,000 connections that
+is 18.5 GB of address space against 2.8 GB.
+
+**Resident memory does not move, and that is part of the result rather than a
+caveat.** The attack costs the machine no RAM either way, because a byte that
+was never sent is a page that was never touched. What it costs is anonymous
+mappings, which is `vm.max_map_count` and a strict-overcommit deployment. The
+roadmap's "ten gigabytes a server will commit" was right in kind and about the
+wrong resource.
+
+### Three growth policies, and the one that fits
+
+`wrk -t2 -c32 -d8s`, four interleaved pairs per body size, `bench/body_load.lua`
+against `/echo`. Means of four; the 1 KB row is the same single allocation in
+every shape and is here to prove the harness moves when the code does not.
+
+| shape | 1 KB | 64 KiB | 1 MB |
+|---|---|---|---|
+| before | 35,797 | 8,314 | 814 |
+| fixed 16 KiB steps into an `ArrayList` | unchanged | 5,341 (**−36%**) | 442 (**−46%**) |
+| explicit doubling from 16 KiB | unchanged | 5,613 (**−32%**) | — |
+| one 16 KiB step, then the rest | unchanged | 6,538 (**−21%**) | 754 (**−7.4%**) |
+| **one 4 KiB step, then the rest** | unchanged | **8,002 (−1.5%)** | **792 (−2.3%)** |
+
+**The copying was never the cost.** Doubling turns a linear number of copies
+into a logarithmic one and bought four points of thirty-six. What costs is the
+number of *allocations that need a new arena node*: each one is an
+`mmap`/`munmap` pair, and on two cores the TLB shootdown behind it is worth more
+than the whole rest of the request.
+
+That is also why the step size is the whole design. `arena_keep` defaults to
+16 KiB and a POST has already spent a little of it on the head, so **a 4 KiB
+first allocation fits in the block the arena is already holding and a 16 KiB one
+does not** — same shape, same two allocations, and the difference between −21%
+and −1.5% is whether the first of them calls the page allocator.
+
+The step sweep at 64 KiB, three interleaved pairs each, is what settled it:
+
+| step | pair 1 | pair 2 | pair 3 |
+|---|---|---|---|
+| 1 KiB | +8.1% | +0.7% | −3.2% |
+| 4 KiB | −6.2% | +4.6% | −7.1% |
+| 16 KiB | −21%, four pairs, no sign change | | |
+
+1 KiB and 4 KiB both change sign inside the harness's own spread, so both are
+**unchanged** rather than one being faster. 4 KiB is the one that shipped
+because it buys four times the defence for the same nothing: a client must
+deliver the step before `max_body` is committed, so the amplification a stranger
+can buy is 256× rather than 1024×.
+
+At the final size the four interleaved pairs at 64 KiB read 7,841/8,188,
+7,972/7,934, 8,080/8,241 and 8,115/8,139 — two of the four are flat and the
+margin is inside the drift. At 1 MB one of the four pairs is positive.
+
+### Reproducing the body run
+
+```bash
+zig build -Doptimize=ReleaseFast bench-body-server
+./zig-out/bin/nilo-bench-body-server        # listens on 8792
+
+# what a body that never finishes holds — a fresh server per route, and read
+# the `data` column, not only `rss`
+python3 bench/slowloris.py --port 8792 --path /echo
+python3 bench/slowloris.py --port 8792 --path /drop     # the floor
+python3 bench/slowloris.py --port 8792 --path /stream   # the shape that never had it
+
+# what it costs a body that arrives, at three sizes on either side of the step
+BODY_BYTES=65536 wrk -t2 -c32 -d8s -s bench/body_load.lua http://127.0.0.1:8792/echo
+```
+
 ## Can these be pushed further
 
 Ranked, so the next person starts here rather than at the top of the file.

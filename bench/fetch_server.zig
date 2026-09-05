@@ -147,13 +147,16 @@ fn arena(client: *Bare, c: *nilo.Ctx) !nilo.Str {
 /// No client, no socket, no outbound anything — just a handler that puts a
 /// kilobyte in the request arena and answers with it.
 ///
-/// **The control that ruled out the arena.** `/bare` costs 16,495 bytes an
-/// idle connection more than `/health`, and 16,384 of that is exactly
+/// **The control that ruled out the arena.** When `/bare` cost 16,495 bytes an
+/// idle connection more than `/health`, 16,384 of that was exactly
 /// `arena_keep` — which made the retained arena look like the whole answer.
-/// This route serves the same 1,008 bytes out of the same arena and costs
-/// **2,048**, so the arena is not where the 16 KB went. What is left is the
+/// This route serves the same 1,008 bytes out of the same arena and cost
+/// **2,048**, so the arena was not where the 16 KB went. What was left is the
 /// fiber stack, at the depth `std.http.Client` drives it to, held per
-/// connection exactly as ADR 0063 says.
+/// connection exactly as ADR 0063 says — and once `releaseIdleStack` started
+/// handing those pages back, the 16,495 fell to 4,139 and this route to 2,054.
+/// The control kept its answer across a change that moved everything else,
+/// which is the strongest thing a control can do.
 fn warm(c: *nilo.Ctx) !nilo.Str {
     const bytes = try c.arena().alloc(u8, 1_008);
     @memset(bytes, 'x');

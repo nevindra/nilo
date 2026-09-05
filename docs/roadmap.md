@@ -67,8 +67,8 @@ other module's.
 | [`nilo_id`](#nilo_id-identifiers) | needs no loop | quiet. Two questions about scope, one gap nobody has hit |
 | [`nilo_config`](#nilo_config-settings) | needs no loop | reading a name the field is not called |
 | [`nilo_pw`](#nilo_pw-hashing-a-password) | needs no loop | a Cost floor that weighs the wrong half, and a patch `std` should have |
-| [`nilo_fetch`](#nilo_fetch-calling-somebody-elses-api) | borrows the loop | 16,495 bytes of stack per idle connection, and nothing measured through TLS |
-| [`nilo_http`](#nilo_http-the-server) | owns the loop | no rate limiting at all, two ways to answer a request nobody else would, a body a stranger can make the server hold, and a long tail |
+| [`nilo_fetch`](#nilo_fetch-calling-somebody-elses-api) | borrows the loop | 4,139 bytes of stack per idle connection, and nothing measured through TLS |
+| [`nilo_http`](#nilo_http-the-server) | owns the loop | no rate limiting at all, a WebSocket route no test can drive, and a long tail |
 | [`nilo_sql`](#nilo_sql-postgres-and-sqlite) | borrows the loop | a schema check that refuses the most ordinary SQLite table there is, four things the SQLite half cannot do that three documents say it can, and where migrations live |
 | [`nilo_s3`](#nilo_s3-object-storage) | borrows the loop | nothing measured through TLS, and no `LIST`, `COPY` or multipart |
 
@@ -316,19 +316,24 @@ Nothing queued.
 
 ### Known gaps
 
-**A plain call costs 16,495 bytes on every idle connection**, which is the
-largest per-connection number in the framework. It is fiber stack rather than
-buffers: moving the two client buffers into the request arena was tried and is
-worth −66 bytes. The lever is in `http/`, giving *stack* pages back between
-requests, the `MADV_DONTNEED` treatment the connection buffers already get and
-stacks never have
-([ADR 0063](./adr/0063-a-handlers-stack-is-per-connection.md)). It would pay
-for every handler in the framework rather than only this one.
-[`bench/result/fetch.md`](../bench/result/fetch.md) has the routes and the two
-theories that died.
+**A plain call costs 4,139 bytes on every idle connection**, still the largest
+per-connection figure in the framework and no longer by three orders of
+magnitude. It is fiber stack rather than buffers, at the depth
+`std.http.Client` drives it to.
 
-**Waiting on: ready**, and it is the highest-value item in this file, because
-it is one change that moves every handler.
+This entry said 16,495 for a month and named the fix as unbuilt. The fix
+shipped two days after the measurement — `releaseIdleStack` gives a quiet
+connection's stack pages back ([ADR 0063](./adr/0063-a-handlers-stack-is-per-connection.md)) —
+and nothing re-ran the number, which is the fourth time this repository has
+planned against a premise that had already stopped being true.
+
+Two levers are left and both are small.
+[`bench/result/fetch.md`](../bench/result/fetch.md) ranks them, and the one at
+the top is shrinking the 2 KB redirect buffer and the 4 KB transfer buffer
+rather than moving them: moving them into the arena has now been measured twice
+and costs +4,096 bytes since the stack release.
+
+**Waiting on: a caller** who is holding enough connections for 4 KB to matter.
 
 **Nothing is measured through TLS.** Every figure in `bench/result/fetch.md` is
 `http://`, and the 59,151 bytes per HTTPS connection is std's number read out
@@ -359,16 +364,22 @@ number**, which is the same test every other feature here has had to pass.
 
 ## `nilo_http`: the server
 
-The longest list here, and it is really two. The first two **Known gaps** are
-things a stranger on the internet can do to a server that is running exactly as
-written; everything under them is work nilo has not done well enough yet. Both
-are gaps and only one group is urgent.
+The longest list here. It used to open with a group of five things a stranger on
+the internet could do to a server running exactly as written, and that group is
+down to one — a slow client can still buy more of the arena than it has paid
+for, at a fixed exchange rate rather than for free. Everything else here is work
+nilo has not done well enough yet.
 
-That group used to be five. The three that left were a `Transfer-Encoding` nilo
-could not decode being served as a request with no body, a request with no
-`Host` or two of them being served, and a WebSocket handshake that never looked
-at `Origin` — [ADR 0101](./adr/0101-a-request-nobody-else-would-answer-is-refused.md)
-and [ADR 0102](./adr/0102-a-websocket-handshake-is-same-origin-unless-the-route-says-otherwise.md).
+The three that left first were a
+`Transfer-Encoding` nilo could not decode being served as a request with no
+body, a request with no `Host` or two of them being served, and a WebSocket
+handshake that never looked at `Origin` —
+[ADR 0101](./adr/0101-a-request-nobody-else-would-answer-is-refused.md) and
+[ADR 0102](./adr/0102-a-websocket-handshake-is-same-origin-unless-the-route-says-otherwise.md).
+The last two were a `Content-Length` committed before a byte of it arrived
+([ADR 0105](./adr/0105-a-body-is-taken-as-it-arrives.md)) and a number that
+accepted Zig's own literal grammar
+([ADR 0106](./adr/0106-a-number-in-a-request-is-not-a-zig-literal.md)).
 
 ### Next
 
@@ -433,33 +444,18 @@ that ask for one.
 what `Bound(Query(T))` hands back — an `Outcome` is one reason per field, and a
 list can fail at element three.
 
-**4. A `Ctx` cannot read the headers it was not asked for by name.**
-`c.header("X")` is the whole surface. `http1.HeaderIterator` walks the head and
-is `pub`, and `http.zig` does not export `http1`, so a middleware that wants to
-see every header — a signing proxy, a tracing header of somebody else's shape, a
-`Forwarded` reader — has to reach into `c._head`, which is an underscore field
-and therefore nilo's. It is also the only way to read a header a request sent
-twice, since `header` answers with the first.
+**4. A WebSocket route cannot be driven from a test at all.**
+`testing.Client` can send a header and keep a cookie now
+([ADR 0108](./adr/0108-the-test-client-can-do-what-a-client-does.md)), and this
+is the half that was left: there is no way to hand the App a reader that answers
+frames, so every WebSocket behaviour in the suite is tested through
+`app.handleRequest` against a fixed buffer that cannot answer back.
 
-**Waiting on: ready.** An iterator over the head is a wrapper and no new state.
+**Waiting on: a design.** A fixed reader cannot carry a conversation, so this
+wants a reader the test drives turn by turn — which is a shape the harness does
+not have and is the same one `bench/ws_server.zig` would want for a Room.
 
-**5. The test client cannot send a header, keep a cookie, or open a socket.**
-`testing.Client` has `get`, `post`, `postWith` and `request`, and every one of
-them writes `Host: test` and nothing else — so a test of a route behind
-`Authorization`, behind CORS, or behind a session has to hand-assemble the raw
-request text and call `send`. There is no cookie jar either, so a sign-in
-followed by a request as that user means copying the `Set-Cookie` out of one
-`Answer` and pasting it into the next request by hand, which is what
-`examples/forms` does. And a WebSocket route cannot be driven at all: `Client`
-has no way to hand the App a reader that answers frames.
-
-That is the one place in the framework where the ordinary thing is harder than
-the raw thing, which is the opposite of what the rest of it sells.
-
-**Waiting on: ready.** Headers and a jar are additive; the socket half is a
-design of its own and can wait for its own entry.
-
-**6. `permessage-deflate`.** Negotiated in the handshake, and a compressor per
+**5. `permessage-deflate`.** Negotiated in the handshake, and a compressor per
 connection is memory that has not been budgeted.
 
 **Waiting on: a number.** The per-connection cost has to be priced against the
@@ -467,26 +463,22 @@ connection is memory that has not been budgeted.
 
 ### Known gaps
 
-**`c.body()` takes the announced `Content-Length` out of the arena before it
-reads a byte.** `const b = try self._arena.alloc(u8, content_length)` runs after
-the `max_body` check and before `readSliceAll`, so a request that says
-`Content-Length: 1048576` and then sends one byte a minute holds a megabyte of
-this connection's arena for as long as it keeps trickling. `body_timeout_ms` is
-30 seconds **per read**, not for the body, and that is deliberate
-([ADR 0023](./adr/0023-a-deadline-belongs-to-an-operation-not-to-a-request.md)) —
-so a client answering inside every window never trips it. Times the default
-`.max_connections` of 10,000 that is ten gigabytes a server will commit on the
-strength of a number a stranger typed.
+**A slow client can still buy more of the arena than it has paid for, and the
+exchange rate is the only thing that changed.** `c.body()` now takes a step
+first and commits the announced `Content-Length` only once the client has
+delivered it ([ADR 0105](./adr/0105-a-body-is-taken-as-it-arrives.md)), which
+turns unbounded amplification into a fixed multiple of the step. It does not
+turn it into nothing: a stranger who sends the step gets `max_body` of address
+space and can then stall forever, because `body_timeout_ms` is per read rather
+than for the body and that is deliberate
+([ADR 0023](./adr/0023-a-deadline-belongs-to-an-operation-not-to-a-request.md)).
 
-`c.bodyStream()` has none of this: it allocates nothing and the handler's buffer
-is the ceiling. So the ingredients are already here, and what is missing is
-`body()` growing what it holds as the bytes turn up rather than trusting the
-header — which costs a reallocation on large bodies and nothing on small ones,
-against an arena that is reset per request anyway.
+What would close it properly is a deadline for the whole body, which ADR 0023
+argued against for an operation and has never been argued about for a *request*.
+`core.Limits` is the mechanism and it is already used for an outbound call.
 
-**Waiting on: a number.** Two of them: what the growth costs a body that arrives
-normally, and what the current shape actually holds under a slow-loris, which
-nothing has measured.
+**Waiting on: a design** for where a whole-request deadline lives, given that
+a stream and a WebSocket must not have one.
 
 **A single-page app answers 200 with `index.html` for an asset that is not
 there.** `static.Set.find` falls through to `self.fallback` for every path under
@@ -516,20 +508,6 @@ answer is to recompile, or to write the middleware yourself.
 **Waiting on: a design** that keeps the comptime path for an app that names its
 origins in code, since that path is the measured one, while letting a runtime
 list in beside it.
-
-**A number in a path param, a query value or a form field accepts `+5` and
-`1_0`.** `convert.tryConvert` calls `std.fmt.parseInt(P, text, 10)`, which reads
-a leading sign and Zig's own digit separators — so `/users/+7` is user 7 and
-`?page=1_0` is page ten. This is exactly what
-[ADR 0090](./adr/0090-a-body-framed-twice-is-refused.md) refused for
-`Content-Length`, and `range.zig` carries four lines of `digitsOnly` for the same
-reason; the one place a *user's* number arrives never got the rule. Nothing is
-smuggled by it, but two clients disagreeing about which page they asked for is
-the same shape of bug one layer up, and a `u32` param that silently accepts an
-underscore is a difference between what a caller wrote and what the server read.
-
-**Waiting on: ready.** `digitsOnly` exists twice already; the question is only
-whether a signed field should still take its sign, which it should.
 
 **A byte slice that is not UTF-8 goes out as a JSON string, and `std.json` would
 have written a list of numbers.** `json.writeString` escapes quotes, backslashes

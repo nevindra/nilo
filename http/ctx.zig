@@ -332,11 +332,65 @@ pub const Ctx = struct {
     /// including the many that never look at a header at all, to save a
     /// scan of a few hundred bytes on the few that look twice.
     pub fn header(self: *const Ctx, name: []const u8) ?Str {
-        var headers = http1.HeaderIterator.from(self._head);
-        while (headers.next()) |h| {
+        var it = http1.HeaderIterator.from(self._head);
+        while (it.next()) |h| {
             if (std.ascii.eqlIgnoreCase(h.name, name)) return Str.fromRequest(h.value, self._lifetime);
         }
         return null;
+    }
+
+    /// One request header, as `headers()` hands them out.
+    ///
+    /// Both halves are `Str` rather than `[]const u8` for the reason the type
+    /// exists: the head is usually *borrowed* from the connection's read
+    /// buffer, so a name kept past the request points at somebody else's
+    /// request (ADR 0004). A name is as much a slice of the head as a value is.
+    pub const RequestHeader = struct {
+        name: Str,
+        value: Str,
+    };
+
+    /// Walks every header the request sent, in the order they arrived.
+    /// Returned by `Ctx.headers()`; nothing else constructs one.
+    ///
+    /// Not to be confused with `nilo.Headers`, which is the *response* side —
+    /// a list a handler writes. This one only reads.
+    pub const HeaderIterator = struct {
+        _inner: http1.HeaderIterator,
+        _lifetime: *const str_mod.Lifetime,
+
+        pub fn next(self: *HeaderIterator) ?RequestHeader {
+            const h = self._inner.next() orelse return null;
+            return .{
+                .name = Str.fromRequest(h.name, self._lifetime),
+                .value = Str.fromRequest(h.value, self._lifetime),
+            };
+        }
+    };
+
+    /// Every header the request sent, in arrival order.
+    ///
+    /// ```zig
+    /// var it = c.headers();
+    /// while (it.next()) |h| { … }
+    /// ```
+    ///
+    /// `header(name)` is what almost every handler wants and this is the
+    /// other two cases. A middleware that does not know the names in advance
+    /// — a signing proxy, somebody else's tracing header, a `Forwarded`
+    /// reader — had to reach into `c._head`, which is an underscore field and
+    /// therefore nilo's to change. And a header sent **twice** was unreadable
+    /// at all, because `header` answers with the first and never says there
+    /// was a second.
+    ///
+    /// A wrapper over the same walk `header` does, so it costs the same
+    /// nothing: no list is built and no allocation happens, and a request
+    /// that never calls this pays for none of it.
+    pub fn headers(self: *const Ctx) HeaderIterator {
+        return .{
+            ._inner = http1.HeaderIterator.from(self._head),
+            ._lifetime = self._lifetime,
+        };
     }
 
     /// This request's id — the one thing that ties a log line, a response,
@@ -504,8 +558,8 @@ pub const Ctx = struct {
     /// A request may carry more than one `Cookie` header — HTTP/2 clients
     /// split them, and a proxy may — so all of them are looked through.
     pub fn cookie(self: *const Ctx, name: []const u8) ?Str {
-        var headers = http1.HeaderIterator.from(self._head);
-        while (headers.next()) |h| {
+        var it = http1.HeaderIterator.from(self._head);
+        while (it.next()) |h| {
             if (!std.ascii.eqlIgnoreCase(h.name, "cookie")) continue;
             if (cookie_mod.find(h.value, name)) |value| {
                 return Str.fromRequest(value, self._lifetime);
@@ -641,9 +695,14 @@ pub const Ctx = struct {
                 // client that framed one as empty is not holding anything back,
                 // whatever it expected.
                 if (self._request.content_length > 0) try self.aboutToReadBody();
-                const b = try self._arena.alloc(u8, @intCast(self._request.content_length));
-                try self._in.readSliceAll(b);
-                self._body = b;
+                // Taken as it arrives rather than as it was announced, so a
+                // client that promises a megabyte and trickles holds what it
+                // sent and not what it said. See `readSizedBody`.
+                self._body = try http1.readSizedBody(
+                    self._in,
+                    self._arena,
+                    @intCast(self._request.content_length),
+                );
             }
         }
         return Str.fromRequest(self._body.?, self._lifetime);

@@ -10,7 +10,10 @@ with no client in it at all, and once against the same call made through plain
 two is nilo's.**
 
 Everything below was run on 17 August 2026, at `d3ee93c` plus the working tree
-that added `fetch/`.
+that added `fetch/` — **except the memory section marked "measured again"**,
+which is 5 September 2026 at `4131913` and supersedes the table above it. Read
+that one first: the headline figure fell by three quarters and nothing in
+`fetch/` changed.
 
 - AMD Ryzen 7 9700X, 8 cores / 16 threads, Linux 7.0.0-29-generic
 - Zig 0.16.0, `-Doptimize=ReleaseFast`, `-Dstrip=true` for the size figures
@@ -73,6 +76,11 @@ What is *not* free is the call itself, at **16,495 bytes an idle connection**,
 and that belongs to `std.http.Client` rather than to nilo. On a service holding
 10,000 keep-alive connections where every route calls out, that is 165 MB above
 the floor.
+
+> **This paragraph and the table above it are superseded.** The figure is 4,139
+> and the floor is 4,679; see *Measured again after the stack release* below.
+> They are kept rather than corrected in place because the two runs either side
+> of one commit are the finding.
 
 ### The obvious lever was tried and lost
 
@@ -196,25 +204,77 @@ anyway is a clean error rather than a `Str` full of noise.
 holds it against `Canned`, so deleting either line fails in `zig build test`
 rather than only in a step somebody remembers to run.
 
+## Measured again after the stack release: 16,495 became 4,139
+
+Everything above was taken at `81bd9df`. `dcadb46` landed two days later and
+gave a connection's *stack* pages back once it goes quiet
+([ADR 0063](../../docs/adr/0063-a-handlers-stack-is-per-connection.md),
+`releaseIdleStack` in `http/engine/zio.zig`), which is precisely the lever the
+ranked list below used to open with — and nothing re-ran this file, so the
+number stood for a month describing a server that no longer existed.
+
+Same six routes, same harness, out to 10,000 connections this time because at
+4,000 the marginal figure was still 100 bytes above where it settled.
+
+| route | 500 | 1,000 | 2,000 | 5,000 | 10,000 | over `/health` |
+|---|---|---|---|---|---|---|
+| `/health` | 4,801 | 4,739 | 4,706 | 4,686 | **4,679** | — |
+| `/bound` | 4,801 | 4,739 | 4,706 | 4,686 | **4,679** | 0 |
+| `/warm` | 6,980 | 6,853 | 6,787 | 6,747 | **6,733** | +2,054 |
+| `/bare` | 9,757 | 9,265 | 9,017 | 8,868 | **8,818** | +4,139 |
+| `/arena` | 13,894 | 13,390 | 13,115 | 12,965 | **12,914** | +8,235 |
+| `/call` | 9,757 | 9,265 | 9,017 | 8,868 | **8,818** | +4,139 |
+
+**Calling out costs 4,139 bytes an idle connection, not 16,495.** Three
+quarters of it was frames of `std.http.Client`'s call chain that had already
+returned, and the pages went back the moment the connection went quiet. On a
+service holding 10,000 keep-alive connections where every route calls out, that
+is 41 MB above the floor rather than 165 MB.
+
+Two of the rows say more than that one does.
+
+**`/call` is byte-for-byte `/bare`** — 8,818 against 8,818, where it used to be
+one byte over. `nilo_fetch` costs nothing on this axis, and now it costs
+nothing exactly rather than within noise.
+
+**`/arena` inverted.** Moving the two client buffers off the stack and into the
+request arena was worth −66 bytes when it was tried and it is now worth
+**+4,096, one page, every time.** Nothing about `/arena` changed; the ground
+under it did. Stack is given back when a connection goes quiet and the
+retained arena is not, so the lever that used to move memory from one place
+that held it to another place that held it now moves it *out* of the only
+place that lets go. **A comparison is only as current as the thing it is
+against**, and a lever measured as a wash is exactly the kind of result nobody
+re-runs.
+
+`/health` reproduces `http.md`'s 4,669 to within 10 bytes, which is what says
+the harness is still measuring the same thing it was — and that is worth more
+than usual here, because **it is not the same box.** The tables above are an
+8-core Ryzen 7 9700X; this run is a 2-core Intel Xeon Platinum 8255C with 7 GiB.
+A per-connection memory figure is the one axis that should survive that, and
+`/health` landing within 10 bytes of the other machine's is the evidence it did.
+Do not read the *throughput* tables above against this run.
+
+RSS only, `bench/mem.py`, load average under 1, 5 September 2026, `4131913`.
+
 ## Can these be pushed further
 
-Ranked, with the two that were already tried marked.
+Ranked, with the three that were already tried marked.
 
-1. **The 16,495 bytes an idle connection.** The largest number here by three
-   orders of magnitude and the only one worth work. It is fiber stack, so the
-   fix is not in `fetch/` at all: it is giving stack pages back between
-   requests, the same `MADV_DONTNEED` treatment `http.md` describes for the
-   connection buffers, which ADR 0063 records as never having been applied to
-   stacks. That is an `http/` change and it would pay for every handler in the
-   framework rather than only this one.
-2. ~~Move the two client buffers into the arena.~~ *Tried, −66 bytes.* See
-   above; they do not set the high-water mark.
-3. ~~Blame the retained request arena.~~ *Tried, ruled out by `/warm`.*
-4. **Shrink the two buffers.** 2 KB of redirect buffer is generous for a service
+1. ~~Give the fiber's stack pages back between requests.~~ **Done, and it was
+   worth 12,356 bytes an idle connection** — see the table above. It paid for
+   every handler in the framework, exactly as this entry predicted; it is left
+   here because the prediction being right is the reason to trust the next one.
+2. **Shrink the two buffers.** 2 KB of redirect buffer is generous for a service
    calling a known endpoint, and 4 KB of transfer buffer bounds nothing that
-   `max_body` does not already bound. Expected to be worth nothing, for the
-   reason `/arena` was worth nothing — but it is cheap to test and it has not
-   been.
+   `max_body` does not already bound. Now the *largest* untried lever rather
+   than the fourth, because the number it would come off is a quarter of what
+   it was — and `/arena`'s inversion says buffers on the stack are cheaper than
+   buffers anywhere else, which is an argument for making them small rather
+   than for moving them.
+3. ~~Move the two client buffers into the arena.~~ *Tried twice: −66 bytes
+   before the stack release and +4,096 after it.* Do not try a third time.
+4. ~~Blame the retained request arena.~~ *Tried, ruled out by `/warm`.*
 5. **Nothing on throughput.** ±1% against the control, on a harness whose own
    run-to-run drift is larger. There is no signal here to chase.
 6. **Nothing on binary size.** 1,640 bytes for the module; the rest is std's and
@@ -227,8 +287,9 @@ zig build -Doptimize=ReleaseFast bench-fetch-server
 ./zig-out/bin/nilo-bench-fetch-server        # listens on 8791, upstream on 8900+
 
 # memory per idle connection — a fresh server per route, because RSS is a
-# high-water mark and the previous route's pages are still in it
-python3 bench/mem.py --port 8791 --path /call --steps 500,1000,2000,4000
+# high-water mark and the previous route's pages are still in it, and out to
+# 10,000 because at 4,000 the marginal figure is still 100 bytes high
+python3 bench/mem.py --port 8791 --path /call --steps 500,1000,2000,5000,10000
 
 # throughput, all six routes against one server
 ./bench/bench.sh http://127.0.0.1:8791/call
