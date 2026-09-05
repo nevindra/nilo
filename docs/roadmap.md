@@ -397,8 +397,8 @@ nothing means "not counted".
 **Waiting on: a design** for what the key's bytes are allowed to be. A `Str` out
 of the request arena is gone by the next request, which is fine for a hash and
 not for the fingerprint, so either the fingerprint has to be enough on its own —
-it is 44 bits, and a collision hands somebody else's allowance to a *named
-account* rather than to an address — or a key has to be copied into the slot,
+it is 34 bits at the default ceiling and 28 at the widest, and a collision hands
+somebody else's allowance to a *named account* rather than to an address — or a key has to be copied into the slot,
 which is a different table.
 
 **2. Reloading without a restart: static files, then the server.** A development
