@@ -1786,11 +1786,19 @@ mark means "somebody believed this" rather than "a build step read this" — and
 the two are indistinguishable from the page.
 
 That is this repository's own stated failure, a rule nobody runs wearing the
-costume of a rule that does, and **it is a class rather than an incident: the
-list has been added to before and the next marked block on an unlisted page is
-silent in the same way.** What would end it is the step reading every page that
-*has* a marked block, rather than a list somebody has to remember to join. The
-cost is a directory walk at build time on a step that already caches.
+costume of a rule that does. **What makes it a class rather than an oversight is
+that it propagates by being read.** The way to find out how a block is marked
+here is to open a neighbouring guide page and copy what is above the fence — and
+a dead mark is copied exactly as readily as a live one, because from the page
+they are the same three words. So the defect reproduces through the ordinary,
+correct habit of matching the surrounding code, and "somebody forgot to join the
+list" understates it: more care does not help a reader who cannot tell the two
+apart.
+
+What would end it is **the step finding its pages by looking for marks** rather
+than reading a list. Then a mark cannot be written anywhere the step will not
+read it, and imitation stops being able to carry a dead one. The cost is a
+directory walk at build time, on a step that already caches.
 
 *The instance, which is separable from the class and goes when it is fixed:*
 `pages` holds four entries — `README.md`, `docs/reference.md`,
