@@ -285,6 +285,14 @@ The generated API description follows whichever encoding the type asked for:
 plus a per-arm `allOf` for a tagged one. See
 [Responses](./guide/responses.md#json-shapes-of-your-own).
 
+**A `[]const u8` or a `Str` that is not valid UTF-8 goes out as an array of
+byte values** — `{"name":[255]}` — because JSON has no way to carry a byte that
+is not text. That is what `std.json` does with the same value, and this writer's
+whole contract is to write what `std.json` writes
+([ADR 0121](./adr/0121-a-byte-that-is-not-text-is-not-a-string.md)). The
+description still calls the field a string, since the type is text and only the
+value is not.
+
 ## `Ctx`
 
 ### Reading
@@ -297,7 +305,7 @@ plus a per-arm `allOf` for a tagged one. See
 | `c.query(name)` | `?Str`, percent-decoded, `+` as space |
 | `c.queries()` | an iterator over every query parameter, in arrival order — `while (it.next()) \|q\|`, `q.name` and `q.value` are `Str`. A name sent twice appears twice |
 | `c.queryString()` | `Str` — the query as it arrived, still encoded, no `?` on the front. `""` when there was none |
-| `c.host()` | `Str` — the host this request was addressed to. `X-Forwarded-Host` under `trusted_hops`, else the `Host` header |
+| `c.host()` | `Str` — the host this request was addressed to. `X-Forwarded-Host` under `trusted_hops`, else the authority of an absolute-form target, else the `Host` header |
 | `c.scheme()` | `Str` — `"https"` or `"http"`, what the **client** used. `X-Forwarded-Proto` under `trusted_hops`, else always `"http"` |
 | `c.header(name)` | `?Str`, name matched case-insensitively. The **first** of that name |
 | `c.headers()` | an iterator over every header, in arrival order — `while (it.next()) \|h\|`, `h.name` and `h.value` are `Str` |
@@ -362,6 +370,14 @@ believed, exactly as `X-Forwarded-For` is
 ([ADR 0112](./adr/0112-a-request-can-be-read-past-the-parts-a-handler-names.md)).
 A forwarded host that is not host-shaped is dropped rather than used, because
 this ends up in a link somebody clicks.
+
+**A target that arrived in absolute form answers `host()` before the header
+does.** `GET http://example.com/users/7` is what a client sends to what it
+believes is a proxy, and RFC 9112 §3.2 gives an origin server no choice: the
+authority on the request line is the host, and a `Host` header beside it is
+ignored ([ADR 0120](./adr/0120-a-target-is-read-in-the-form-it-arrived-in.md)).
+The router still matches on the path, so nothing about writing routes changes.
+A trusted `X-Forwarded-Host` outranks both.
 
 **A body arriving under a `Content-Encoding` other than `identity` is a 415**
 naming the header, before any handler runs — nilo decodes none of them, and

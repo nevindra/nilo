@@ -46,6 +46,16 @@ pub const Request = struct {
     /// `Str` (ADR 0004).
     method: []const u8 = "",
     target: []const u8 = "",
+    /// The authority out of an absolute-form target — `example.com:8080` from
+    /// `GET http://example.com:8080/users/7` — and empty for the origin-form
+    /// every browser sends (ADR 0120).
+    ///
+    /// It is the `Host` for this request when it is there. RFC 9112 §3.2 does
+    /// not offer a choice about that: an origin server **must** ignore the
+    /// `Host` header when the target names an authority, rather than reconcile
+    /// the two. `Ctx.host` is where that is answered, and `finish` reads this
+    /// to know the request said which host it wanted.
+    authority: []const u8 = "",
 
     /// 0 for HTTP/1.0, 1 for HTTP/1.1.
     minor_version: u1 = 1,
@@ -559,8 +569,13 @@ pub fn parseHead(head: []const u8, r: *Request) ParseError!void {
 ///
 /// HTTP/1.0 is left alone. `Host` was not required until 1.1, and a request
 /// that does not claim to speak it is not held to it.
+///
+/// An absolute-form target answers the rule on its own, because it **is** the
+/// authority — RFC 9112 §3.2 has an origin server ignore the header in favour
+/// of it (ADR 0120). A `Host` beside one is still read and a second one is
+/// still a 400; what changes is only that the request line can answer for it.
 fn finish(r: *const Request) ParseError!void {
-    if (r.minor_version == 1 and !r.has_host) return error.BadHeader;
+    if (r.minor_version == 1 and !r.has_host and r.authority.len == 0) return error.BadHeader;
     // Asked here rather than in the header arm, so the answer does not depend
     // on whether the framing headers arrived before the encoding one.
     //
@@ -592,6 +607,68 @@ pub fn parseRequestLine(line: []const u8, r: *Request) ParseError!void {
 
     r.method = method;
     r.target = target;
+    // Origin-form is the whole of what a browser sends, and it is already a
+    // path. Anything else is one of the three other forms, and only one of
+    // them has a route behind it.
+    if (target[0] != '/') {
+        if (try absoluteForm(target)) |split| {
+            r.authority = split.authority;
+            r.target = split.target;
+        }
+    }
+}
+
+/// The authority and the path out of an absolute-form target, or null for a
+/// target that is not in that form.
+///
+/// `GET http://example.com/users/7 HTTP/1.1` is legal — **RFC 9112 §3.2.2 says
+/// a server must accept it** — and a client talking to what it believes is a
+/// proxy sends it. nilo handed the whole thing to the router as a path, which
+/// split it into `http:`, ``, `example.com`, `users` and `7`, and matched
+/// nothing: a 404 on a route that plainly exists
+/// ([ADR 0120](../docs/adr/0120-a-target-is-read-in-the-form-it-arrived-in.md)).
+///
+/// The two forms left are passed through untouched, because neither names a
+/// route here: **asterisk-form** (`OPTIONS *`) is server-wide OPTIONS, and
+/// **authority-form** (`CONNECT example.com:443`) asks for a tunnel from a
+/// proxy nilo is not. Both reach the router as they arrived and get the 404 or
+/// 405 they had before.
+///
+/// Two shapes inside absolute-form are refused rather than served:
+///
+/// - **Userinfo.** `http://real.example.com@evil.example.net/` names
+///   `evil.example.net`, and RFC 9110 §4.2.4 says a recipient must reject a
+///   userinfo subcomponent. A host somebody misreads is worse than a 400.
+/// - **An empty path with a query.** `http://example.com?a=1` would have to
+///   become `/?a=1`, and there is no `/` in front of that query to point at —
+///   this parser copies nothing and every slice it hands back is inside the
+///   head. Dropping the query silently is the alternative, and it is worse.
+fn absoluteForm(target: []const u8) ParseError!?struct { authority: []const u8, target: []const u8 } {
+    const scheme_len: usize = if (std.ascii.startsWithIgnoreCase(target, "http://"))
+        "http://".len
+    else if (std.ascii.startsWithIgnoreCase(target, "https://"))
+        "https://".len
+    else
+        return null;
+
+    const rest = target[scheme_len..];
+    var end: usize = 0;
+    while (end < rest.len and rest[end] != '/' and rest[end] != '?' and rest[end] != '#') end += 1;
+
+    const authority = rest[0..end];
+    if (authority.len == 0) return error.BadRequestLine;
+    if (std.mem.indexOfScalar(u8, authority, '@') != null) return error.BadRequestLine;
+
+    if (end == rest.len) {
+        // `http://example.com`, which is a request for `/`. The slash handed
+        // back is the second one of the target's own `//`, so this stays a
+        // slice of the head like every other one — `App` moves these onto a
+        // copy of the head by their offset into it, and a static `"/"` has no
+        // offset into anything.
+        return .{ .authority = authority, .target = target[scheme_len - 1 .. scheme_len] };
+    }
+    if (rest[end] != '/') return error.BadRequestLine;
+    return .{ .authority = authority, .target = rest[end..] };
 }
 
 /// Only five header names are looked at: four change how the request is read,
@@ -1367,6 +1444,93 @@ test "two Host lines are a 400 even when they say the same thing" {
     }) |head| {
         var r = Request{};
         try testing.expectError(error.BadHeader, parseHead(head, &r));
+    }
+}
+
+test "an absolute-form target is split into an authority and a path" {
+    // What a client talking to what it believes is a proxy sends, and what
+    // RFC 9112 §3.2.2 says a server must accept. The router matches on the
+    // path, so the path is what it has to be handed (ADR 0120).
+    var r = Request{};
+    try parseHead("GET http://example.com/users/7?x=1 HTTP/1.1\r\nHost: example.com\r\n\r\n", &r);
+    try testing.expectEqualStrings("example.com", r.authority);
+    try testing.expectEqualStrings("/users/7?x=1", r.target);
+
+    // The port belongs to the authority, and the scheme is case-insensitive.
+    var ported = Request{};
+    try parseHead("GET HTTP://example.com:8080/a HTTP/1.1\r\nHost: x\r\n\r\n", &ported);
+    try testing.expectEqualStrings("example.com:8080", ported.authority);
+    try testing.expectEqualStrings("/a", ported.target);
+
+    // https on a server that does not speak it is still a target it can
+    // answer: the scheme says what the client believed, not what arrived.
+    var secure = Request{};
+    try parseHead("GET https://example.com/a HTTP/1.1\r\nHost: x\r\n\r\n", &secure);
+    try testing.expectEqualStrings("example.com", secure.authority);
+    try testing.expectEqualStrings("/a", secure.target);
+
+    // No path at all is a request for `/`, and the slash handed back is one
+    // of the target's own bytes rather than a literal — `App` moves these
+    // onto a copy of the head by their offset into it.
+    const head = "GET http://example.com HTTP/1.1\r\nHost: x\r\n\r\n";
+    var bare = Request{};
+    try parseHead(head, &bare);
+    try testing.expectEqualStrings("example.com", bare.authority);
+    try testing.expectEqualStrings("/", bare.target);
+    const at = @intFromPtr(bare.target.ptr) - @intFromPtr(head.ptr);
+    try testing.expect(at < head.len);
+}
+
+test "an absolute-form target answers for the Host the request never sent" {
+    // RFC 9112 §3.2 has an origin server ignore `Host` in favour of the
+    // target's authority, so a request carrying one and not the other is not
+    // the 400 a missing `Host` otherwise is.
+    var r = Request{};
+    try parseHead("GET http://example.com/a HTTP/1.1\r\n\r\n", &r);
+    try testing.expectEqualStrings("example.com", r.authority);
+    try testing.expect(!r.has_host);
+
+    // A `Host` beside it is still read, and a second one is still a 400 —
+    // what changed is only which line can answer the rule.
+    var two = Request{};
+    try testing.expectError(error.BadHeader, parseHead(
+        "GET http://example.com/a HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n",
+        &two,
+    ));
+}
+
+test "the three targets that are not absolute-form are left where they were" {
+    // Asterisk-form is server-wide OPTIONS and authority-form asks for a
+    // tunnel; neither names a route here, so both reach the router as they
+    // arrived and get the 404 or 405 they had before.
+    for ([_][2][]const u8{
+        .{ "OPTIONS * HTTP/1.1\r\nHost: x\r\n\r\n", "*" },
+        .{ "CONNECT example.com:443 HTTP/1.1\r\nHost: x\r\n\r\n", "example.com:443" },
+        // A scheme nilo is not an origin server for.
+        .{ "GET ftp://example.com/a HTTP/1.1\r\nHost: x\r\n\r\n", "ftp://example.com/a" },
+    }) |case| {
+        var r = Request{};
+        try parseHead(case[0], &r);
+        try testing.expectEqualStrings(case[1], r.target);
+        try testing.expectEqualStrings("", r.authority);
+    }
+}
+
+test "an absolute-form target nilo cannot read without inventing bytes is a 400" {
+    for ([_][]const u8{
+        // Userinfo names `evil.example.net`, and a host somebody misreads is
+        // worse than a refusal (RFC 9110 §4.2.4).
+        "GET http://real.example.com@evil.example.net/ HTTP/1.1\r\nHost: x\r\n\r\n",
+        "GET http://user:pass@example.com/a HTTP/1.1\r\nHost: x\r\n\r\n",
+        // No authority to be the host.
+        "GET http:///a HTTP/1.1\r\nHost: x\r\n\r\n",
+        // `/?a=1` is what this means, and there is no `/` in front of that
+        // query to point at. Dropping the query quietly is the alternative.
+        "GET http://example.com?a=1 HTTP/1.1\r\nHost: x\r\n\r\n",
+        "GET http://example.com#a HTTP/1.1\r\nHost: x\r\n\r\n",
+    }) |head| {
+        var r = Request{};
+        try testing.expectError(error.BadRequestLine, parseHead(head, &r));
     }
 }
 

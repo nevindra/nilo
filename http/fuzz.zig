@@ -129,7 +129,7 @@ fn refParseHead(head: []const u8, r: *http1.Request) http1.ParseError!void {
 /// is caught as it goes past; that there was never a first one is only
 /// knowable once the head has ended, which is why this is separate.
 fn refFinish(r: *const http1.Request) http1.ParseError!void {
-    if (r.minor_version == 1 and !r.has_host) return error.BadHeader;
+    if (r.minor_version == 1 and !r.has_host and r.authority.len == 0) return error.BadHeader;
 }
 
 fn refParseRequestLine(line: []const u8, r: *http1.Request) http1.ParseError!void {
@@ -156,6 +156,43 @@ fn refParseRequestLine(line: []const u8, r: *http1.Request) http1.ParseError!voi
     } else return error.UnsupportedVersion;
     r.method = method;
     r.target = target;
+    try refSplitTarget(r);
+}
+
+/// The absolute-form split, done the other way round: find `://` anywhere in
+/// the target and check what is in front of it, where `http1.absoluteForm`
+/// matches the two schemes as prefixes and never searches. A target with
+/// `://` further in — `http://a/b://c` — is what tells the two apart, and it
+/// is the reason this is written from the separator rather than from the
+/// scheme.
+fn refSplitTarget(r: *http1.Request) http1.ParseError!void {
+    const target = r.target;
+    if (target[0] == '/') return;
+
+    const sep = std.mem.indexOf(u8, target, "://") orelse return;
+    const scheme = target[0..sep];
+    if (!std.ascii.eqlIgnoreCase(scheme, "http") and !std.ascii.eqlIgnoreCase(scheme, "https")) return;
+
+    const rest = target[sep + 3 ..];
+    var cut: usize = rest.len;
+    for (rest, 0..) |ch, i| {
+        if (ch == '/' or ch == '?' or ch == '#') {
+            cut = i;
+            break;
+        }
+    }
+
+    const authority = rest[0..cut];
+    if (authority.len == 0) return error.BadRequestLine;
+    if (std.mem.indexOfScalar(u8, authority, '@') != null) return error.BadRequestLine;
+
+    r.authority = authority;
+    if (cut == rest.len) {
+        r.target = "/";
+        return;
+    }
+    if (rest[cut] != '/') return error.BadRequestLine;
+    r.target = rest[cut..];
 }
 
 fn refApplyHeader(line: []const u8, r: *http1.Request) http1.ParseError!void {
@@ -229,6 +266,7 @@ fn parsedTheSameAsTheObviousWay(head: []const u8) !void {
 
     try testing.expectEqualStrings(slow.method, fast.method);
     try testing.expectEqualStrings(slow.target, fast.target);
+    try testing.expectEqualStrings(slow.authority, fast.authority);
     try testing.expectEqual(slow.minor_version, fast.minor_version);
     try testing.expectEqual(slow.keep_alive, fast.keep_alive);
     try testing.expectEqual(slow.content_length, fast.content_length);
@@ -241,6 +279,10 @@ fn parsedTheSameAsTheObviousWay(head: []const u8) !void {
     // inside the head it came from, or the request outlives its own bytes.
     try expectInside(head, fast.method);
     try expectInside(head, fast.target);
+    // Including the two an absolute-form target produces. `App` moves these
+    // onto a copy of the head by their offset into it, so one pointing
+    // anywhere else is a slice it would rebase into somebody else's memory.
+    try expectInside(head, fast.authority);
 }
 
 fn expectInside(haystack: []const u8, part: []const u8) !void {

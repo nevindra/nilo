@@ -466,6 +466,15 @@ pub const Ctx = struct {
     /// `X-Forwarded-For` is, because a header a client can write is a header a
     /// client can write: a forged one here ends up inside the password-reset
     /// link somebody clicks.
+    ///
+    /// A request whose target arrived in absolute form — `GET
+    /// http://example.com/users/7`, which a client talking to what it believes
+    /// is a proxy sends — is answered from the target instead, because RFC
+    /// 9112 §3.2 does not leave an origin server a choice about that
+    /// ([ADR 0120](../docs/adr/0120-a-target-is-read-in-the-form-it-arrived-in.md)).
+    /// A proxy nilo was told to trust still outranks it: `X-Forwarded-Host` is
+    /// what the deployment says the client asked for, and the authority is
+    /// what this hop was addressed as.
     pub fn host(self: *const Ctx) Str {
         if (self._limits.trusted_hops > 0) {
             if (self.header("X-Forwarded-Host")) |sent| {
@@ -477,6 +486,8 @@ pub const Ctx = struct {
                 if (isHostLike(first)) return Str.fromRequest(first, self._lifetime);
             }
         }
+        const authority = self._request.authority;
+        if (authority.len > 0) return Str.fromRequest(authority, self._lifetime);
         return self.header("Host") orelse Str.static("");
     }
 

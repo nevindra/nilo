@@ -447,49 +447,57 @@ space and can then stall forever, because `body_timeout_ms` is per read rather
 than for the body and that is deliberate
 ([ADR 0023](./adr/0023-a-deadline-belongs-to-an-operation-not-to-a-request.md)).
 
-What would close it properly is a deadline for the whole body, which ADR 0023
-argued against for an operation and has never been argued about for a *request*.
-`core.Limits` is the mechanism and it is already used for an outbound call.
+**The design is settled and the Engine is what is in the way.** What closes it
+is an absolute deadline on *assembling a buffered body* — armed when `c.body()`
+asks for its first byte, disarmed the moment a handler takes the connection
+over, and never reaching `bodyStream`, `stream` or a WebSocket. That is not the
+request deadline ADR 0023 refused: what is bounded is one framework operation
+that materialises a finite arena-backed value, and the *header* limit is already
+absolute for exactly this reason. It is still an amendment to ADR 0023 rather
+than something it already authorises, since that ADR's binding text says
+`body_timeout_ms` bounds any single read.
 
-**Waiting on: a design** for where a whole-request deadline lives, given that
-a stream and a WebSocket must not have one.
+The length to size it from is the announced `Content-Length`, so the deadline is
+`grace + announced / min_rate` rather than one flat number: a 200-byte JSON POST
+is cut in five seconds where a flat thirty would let it hold for thirty, and a
+slow legitimate upload is sized from what it said it was sending. A chunked body
+announces nothing and must get a flat deadline instead — substituting `max_body`
+would hand the least informative request the largest allowance. **This is an
+admission policy and the entry should not pretend otherwise**: the required
+whole-operation average converges on `min_rate`, so a client that keeps making
+progress below it is refused, and `Content-Length` is the attacker's to choose
+up to `max_body`.
 
-**A byte slice that is not UTF-8 goes out as a JSON string, and `std.json` would
-have written a list of numbers.** `json.writeString` escapes quotes, backslashes
-and control characters and passes everything else through, so a `[]const u8`
-holding `\xff` is written inside quotes and the response is not valid JSON.
-`std.json` asks `utf8ValidateSlice` first and falls back to an array when the
-answer is no.
+**Waiting on: the Engine.** Each read has to take the earlier of
+`body_timeout_ms` and the absolute instant, and neither layer can express that
+today: zio's `Timeout` is `none | duration | deadline` and nilo's `Limit` is the
+same three, so arming the absolute one *replaces* the per-read one. Absolute
+alone is worse than today for a client that announces a megabyte and goes
+silent — thirty seconds becomes seven minutes. `readSizedBody` reads through two
+`readSliceAll` calls and offers no per-read hook to re-arm at, and putting one
+there means the stepped loop
+[ADR 0105](./adr/0105-a-body-is-taken-as-it-arrives.md) measured and rejected on
+throughput. So the first move is a combined limit in `bulkhead.Limit` and the
+Engine behind it, not the policy above.
 
-That is the one place left where this file's stated contract — "the output is
-byte-for-byte what `std.json` would have written" — is untrue, and it predates
-the sentinel-slice fix rather than arriving with it
-([ADR 0103](./adr/0103-one-file-decides-what-counts-as-text.md)). `expectSame`
-never asks, because every string in it is text somebody typed.
+**A response whose text is not ASCII pays a byte-at-a-time UTF-8 walk.**
+`json.zig` asks `std.unicode.utf8ValidateSlice` before writing a string, so a
+byte that is not text comes out as `std.json`'s array rather than as invalid
+JSON ([ADR 0121](./adr/0121-a-byte-that-is-not-text-is-not-a-string.md)). That
+function clears 32 bytes of ASCII at a time and then walks everything from the
+first byte over `0x7f` onwards one at a time: 10ns for the 365-byte payload this
+repository measures, 278ns for a kilobyte with one `é` in the middle, and
+2,404ns for a kilobyte of nothing but `é`
+([`bench/result/http.md`](../bench/result/http.md)). The last of those is 19×
+the whole JSON write.
 
-Two ways out and they are different arguments. Validating in `writeString` costs
-a UTF-8 pass on every string a response carries, on the request path, to catch
-something almost nothing sends. Refusing the type is not available — `[]const u8`
-is the ordinary spelling of text. The third answer is that the contract is wrong
-and a server should not be sending unvalidated bytes as JSON at all, which is a
-decision rather than a fix.
+`std.json` has always paid the same, so nothing got slower — but nilo's claim
+is that it is eight times faster than `std.json` on this path, and on Japanese
+or Arabic text it would be much closer to it. A vectorised validator of the
+Keiser–Lemire shape runs at about a byte a cycle whatever the input.
 
-**Waiting on: a design**, and the number that goes with the first option.
-
-**An absolute-form request target matches no route.** `GET
-http://example.com/users/7 HTTP/1.1` is legal — RFC 9112 §3.2.2 says a server
-**must** accept it, and a client talking to what it believes is a proxy sends
-it — and `parseRequestLine` hands the whole thing to the router as a path, which
-splits it into `http:`, ``, `example.com`, `users`, `7` and matches nothing. The
-answer is a 404 on a route that plainly exists.
-
-Nobody has hit it, because a browser sends origin-form and the proxy in front
-rewrites. It is here because it is four lines and because the shape of the
-mistake — reading a target without deciding what form it is in — is the one
-[ADR 0101](./adr/0101-a-request-nobody-else-would-answer-is-refused.md) closed
-two of, one header over.
-
-**Waiting on: a caller**, and a cheap one to answer if it ever turns up.
+**Waiting on: a caller** whose payloads are mostly not ASCII. Every payload in
+`bench/` is English.
 
 **A `Room`'s roster lock is held across the whole broadcast, and the field says
 it is not.** `Room.roster`'s doc says it guards taking and giving up a seat and
@@ -761,11 +769,28 @@ the other way round.
 names for a file in an application that uses this framework, which is what makes
 the collision worth fixing rather than noting.
 
-**Waiting on: a design.** Matching the whole `@typeName` prefix rather than a
-substring is the obvious answer and it is not free: the table exists because a
-nilo type appears *inside* a generic's name — `typed.Response(str.Str)` has to
-rewrite both — so the rule has to keep matching mid-string while stopping short
-of somebody else's file.
+**Anchoring the match is not the fix, and one experiment settles why.**
+`@typeName` spells a type as its path from *its own module's root*, so a
+project whose root is `src/main.zig` names a sibling `src/room.zig`'s type
+`room.Room` — the same string, byte for byte, as nilo's own. Requiring the
+match to start the name, or to sit on a `.` boundary, fixes only the layout
+where the reader's file is one directory further down (`src.room.Room`), and
+that is the rarer of the two.
+
+So the answer has to come from the type rather than from its name. The shape
+that works without a new table is a public declaration on nilo's own types —
+`pub const nilo_type_name = "nilo.Room"` — which `of(T)` reads with `@hasDecl`
+and a user's type cannot accidentally have. It is exact, it deletes the
+substring table, the branch quota and `replaced` along with it, and a generic
+computes its own from its argument (`"nilo.Response(" ++ of(T) ++ ")"`).
+`covers` then asks whether an export carries the decl, which is a stronger
+check than the table it replaces. What it costs is one line on each of about
+thirty-five types across fifteen files, and one case it gives up: a nilo type
+inside a *reader's* generic — `main.Page(str.Str)` — stays spelled `str.Str`,
+because that argument is not recoverable from the name and the reader's own
+head is no longer rewritten on spec.
+
+**Waiting on: ready.**
 
 **Every number in this module was measured on one x86-64 machine.** `scan.lanes`
 is 32 because `std.simd.suggestVectorLength(u8)` reports 32 on x86-64 with AVX2,

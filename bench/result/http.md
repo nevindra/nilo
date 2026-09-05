@@ -1397,6 +1397,100 @@ profile` measures a request; nothing measures a message. The 5–8% margin over
 gws is a black box — it could be the frame parser, the syscall count, or the
 scheduler, and no lever can be ranked until something says which.
 
+## What a field on `Request` costs per connection
+
+Run for
+[ADR 0120](../../docs/adr/0120-a-target-is-read-in-the-form-it-arrived-in.md),
+which added a 16-byte `authority` slice to `http1.Request` so an absolute-form
+target could be split. `Request` lives in the connection loop's frame and a
+fiber holds its stack at its high-water mark
+([ADR 0063](../../docs/adr/0063-a-handlers-stack-is-per-connection.md)), so the
+question was whether 16 bytes there is 16 bytes per connection.
+
+`bench/mem.py --port 8787 --path /users/1` against `bench/main.zig`,
+`-Doptimize=ReleaseFast`, this commit against a `git archive` of its parent,
+same box, one run each.
+
+| connections | before | after |
+|---:|---:|---:|
+| 500 | 8,905 B | 9,028 B |
+| 1,000 | 8,839 B | 8,901 B |
+| 2,000 | 8,835 B | 8,835 B |
+| 5,000 | 8,795 B | 8,795 B |
+| 10,000 | **8,781 B** | **8,781 B** |
+
+**Identical from two thousand connections onwards, and whole-process RSS at ten
+thousand was 89,272 kB against 89,280 kB** — eight kilobytes apart across ten
+thousand connections. The frame was rounded well past 16 bytes already and this
+landed inside the rounding.
+
+The 500- and 1,000-connection rows disagree by 123 and 62 bytes **in the same
+direction as the change**, which is exactly the trap the WebSocket section
+below documents: at small counts the per-connection figure is still carrying
+the process's fixed cost, and a real 16-byte regression would not have vanished
+by 2,000. Reading the first row alone would have published a 123-byte cost for
+a 16-byte field.
+
+8,781 rather than the 4,669 this document quotes for an idle connection because
+`/users/:id` builds a JSON response and the handler's stack is part of what the
+connection holds. Same reason, one route over.
+
+## What validating a string as UTF-8 costs
+
+Run for
+[ADR 0121](../../docs/adr/0121-a-byte-that-is-not-text-is-not-a-string.md),
+which made `json.zig` ask `std.unicode.utf8ValidateSlice` before writing a
+string so that a byte that is not text comes out as `std.json`'s array of
+numbers rather than as invalid JSON. The question the run had to answer was
+whether the check is affordable on the request path.
+
+Standalone program, `-OReleaseFast`, `taskset -c 0`, best of 25 rounds of
+200,000 calls, three interleaved runs. 2-core Xeon Platinum 8255C vCPU — the
+same weak box as the `Host` section above.
+
+| input | bytes | ns |
+|---|---:|---:|
+| the primary metric's payload, all ASCII | 365 | **10** |
+| a short field value | 9 | 5 |
+| 1 KB with one `é` halfway through | 1,024 | 278 |
+| 1 KB with one `é` near the front | 1,024 | 704 |
+| 1 KB of nothing but `é` | 1,024 | 2,404 |
+
+The last two runs agreed within 1% on every row.
+
+**The cost is not a function of length. It is a function of where the first
+byte over `0x7f` falls.** `utf8ValidateSlice` clears 32 bytes of ASCII at a
+time with a vector compare and hands everything from the first non-ASCII byte
+onwards to a byte-at-a-time decoder — which is why the same kilobyte costs
+278ns with the accent halfway and 704ns with it near the front.
+
+**What it decided:** ship it. 10ns against the 126ns that writing the whole
+payload costs is +8%, under
+[ADR 0001](../../docs/adr/0001-dx-wins-below-the-10-percent-threshold.md)'s bar,
+and the case it fixes is a response that could not be parsed at all.
+
+**What it changed about how the next one gets run:** best of five was not
+enough. The first attempt read 38ns for the ASCII row and 6,585ns for the
+all-`é` row — 3.8× and 2.7× the settled figures, and 38ns would have put the
+ASCII case at 30% of the write, which is the wrong side of the bar and would
+have blocked the fix. Three of this author's own `zig build test-all` runs were
+on the box at the time. **A microbenchmark on a shared box needs its minimum
+taken over enough rounds to find an unpreempted one, and needs running again
+afterwards to see whether it moved.**
+
+### Can it be pushed further
+
+Yes, and only on the non-ASCII rows. A vectorised UTF-8 validator of the
+Keiser–Lemire shape runs at roughly a byte a cycle whatever the input, which
+would take the all-`é` kilobyte from 2,404ns to something near the ASCII row
+instead of 19× the whole JSON write. Nothing here needs it — the payloads this
+repository measures are ASCII — so it is a roadmap entry rather than work, and
+this is the number that would justify it.
+
+The ASCII rows have no headroom worth chasing: 10ns for 365 bytes is already
+the vector path, and the only way past it is not to ask the question, which is
+what the bug was.
+
 ## What is still missing
 
 - **A quiet machine, and a second one to generate load from.** Both readings

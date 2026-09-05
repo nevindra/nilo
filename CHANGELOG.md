@@ -468,6 +468,32 @@ a suite written before it existed keeps asserting what it always asserted
 
 ### Fixed
 
+- **`GET http://example.com/users/7 HTTP/1.1` was a 404 on a route that plainly
+  exists.** The whole target went to the router as a path, which split it into
+  `http:`, ``, `example.com`, `users` and `7` and matched nothing. RFC 9112
+  §3.2.2 says a server must accept that form, and a client talking to what it
+  believes is a proxy sends it. The authority is taken off and the path is
+  routed
+  ([ADR 0120](./docs/adr/0120-a-target-is-read-in-the-form-it-arrived-in.md)).
+
+  Two things follow that you may notice. `c.host()` answers from the target
+  when a request arrived that way, because RFC 9112 §3.2 gives an origin server
+  no choice about that — a trusted `X-Forwarded-Host` still outranks both. And
+  such a request no longer needs a `Host` header to escape a 400, since it
+  named its host on the first line. Two absolute-form shapes are now a 400
+  rather than a 404: one carrying userinfo (`http://a@b/`), and one with no
+  path but a query (`http://example.com?a=1`). `OPTIONS *` and `CONNECT` are
+  unchanged. One byte compare on the request path, nothing per connection.
+
+- **A `[]const u8` holding a byte that is not text went out as a JSON string,
+  and the response was not valid JSON.** `{"name":"\xff"}` — quoted, escaped
+  for nothing, and unparseable by whoever asked for it. `std.json` validates
+  UTF-8 first and writes `{"name":[255]}` instead, which is now what nilo
+  writes
+  ([ADR 0121](./docs/adr/0121-a-byte-that-is-not-text-is-not-a-string.md)).
+  It was the last place where this module's stated contract — the output is
+  byte-for-byte what `std.json` would have written — was untrue.
+
 - **A `[:0]const u8` went out as a JSON array of byte values while the generated
   document said it was a string.** `{"name":[104,101,108,108,111]}` where
   `std.json` writes `{"name":"hello"}`, and where `openapi.json` — reading the

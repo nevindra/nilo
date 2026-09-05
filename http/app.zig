@@ -1227,11 +1227,15 @@ pub const App = struct {
         const borrowed = !http1.readsMore(&r);
         const request_head = if (borrowed) raw_head else copy: {
             const copied = arena.dupe(u8, raw_head) catch return .{ .keep_alive = false };
-            // The two slices the parser left pointing into the old bytes.
+            // The slices the parser left pointing into the old bytes.
             // Everything derived below — the path, the query, the params —
-            // comes off `r.target`, so moving these two moves all of it.
+            // comes off `r.target`, so moving these moves all of it.
             r.method = rebase(raw_head, copied, r.method);
             r.target = rebase(raw_head, copied, r.target);
+            // Empty unless the target arrived in absolute form (ADR 0120), and
+            // an empty slice has no offset into the head to move — `""` points
+            // at a static byte, and rebasing that lands anywhere.
+            if (r.authority.len > 0) r.authority = rebase(raw_head, copied, r.authority);
             break :copy copied;
         };
         in.toss(raw_head.len);

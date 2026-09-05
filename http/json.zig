@@ -134,8 +134,8 @@ fn coversWithin(comptime T: type, comptime depth: usize) bool {
 }
 
 fn writeValue(comptime T: type, w: *std.Io.Writer, value: T) std.Io.Writer.Error!void {
-    if (T == Str) return writeString(w, value.view());
-    if (comptime isByteSlice(T)) return writeString(w, value);
+    if (T == Str) return writeText(w, value.view());
+    if (comptime isByteSlice(T)) return writeText(w, value);
 
     switch (@typeInfo(T)) {
         .bool => return w.writeAll(if (value) "true" else "false"),
@@ -216,6 +216,37 @@ fn writeValue(comptime T: type, w: *std.Io.Writer, value: T) std.Io.Writer.Error
 
         else => comptime unreachable,
     }
+}
+
+/// A run of bytes as JSON: a string when it is text, and the array of numbers
+/// `std.json` writes when it is not.
+///
+/// **JSON has no way to carry a byte that is not text.** A `[]const u8` holding
+/// `\xff` was written inside quotes and the response was not valid JSON — the
+/// one place left where this file's contract, that the output is byte-for-byte
+/// what `std.json` would have written, was untrue
+/// ([ADR 0121](../docs/adr/0121-a-byte-that-is-not-text-is-not-a-string.md)).
+/// `std.json` asks `utf8ValidateSlice` first and falls back to `[104,101]`, so
+/// that is what this asks and that is what this writes.
+///
+/// The cost is the validation, and it is the same function `std.json` calls:
+/// a 32-byte-at-a-time scan that stops at the first byte over 0x7f, and the
+/// real UTF-8 walk only from there. Text a handler actually returns is ASCII
+/// or close to it, so the common case is one vector pass.
+fn writeText(w: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
+    if (!std.unicode.utf8ValidateSlice(text)) return writeByteArray(w, text);
+    return writeString(w, text);
+}
+
+/// The bytes as a JSON array of numbers, which is what `std.json` writes for a
+/// `[]const u8` it cannot call a string.
+fn writeByteArray(w: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Error!void {
+    try w.writeByte('[');
+    for (bytes, 0..) |b, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.printInt(b, 10, .lower, .{});
+    }
+    return w.writeByte(']');
 }
 
 /// A JSON string. Only three things need escaping — a quote, a backslash, and
@@ -350,6 +381,24 @@ test "a string with nothing to escape, and one with everything" {
     try expectSame(@as([]const u8, "backspace\x08 formfeed\x0c"));
     try expectSame(@as([]const u8, "control\x00\x01\x0b\x0e\x1f end"));
     try expectSame(@as([]const u8, "café ☕ emoji 🎉"));
+}
+
+test "a run of bytes that is not text is a list of numbers, not a string" {
+    // JSON has no way to carry a byte that is not text, and `std.json` answers
+    // that by writing the array instead. Written inside quotes, as this used
+    // to, the response is simply not valid JSON (ADR 0121).
+    try expectSame(@as([]const u8, "\xff"));
+    try expectSame(@as([]const u8, "caf\xe9")); // latin-1, not UTF-8
+    try expectSame(@as([]const u8, "\xc3")); // a lead byte with nothing after it
+    try expectSame(@as([]const u8, "ok\x80bad"));
+    try expectSame(@as([]const u8, "\xed\xa0\x80")); // a surrogate half
+    // A quote inside bytes that are not text: the array wins, so nothing is
+    // escaped at all.
+    try expectSame(@as([]const u8, "\xff\"\n"));
+    // And the whole of it stays true one type over.
+    var lifetime = @import("nilo_core").Lifetime{};
+    try expectSame(Str.fromRequest("\xff", &lifetime));
+    try expectSame(struct { name: []const u8, id: u32 }{ .name = "\xfe\xff", .id = 7 });
 }
 
 test "an escape lands on every offset of a block boundary" {
