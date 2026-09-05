@@ -204,12 +204,12 @@ both of these were attributed to nobody:
   cannot express both" — which is true, and is a sentence about a type rather
   than about the slow client the feature exists to catch.
 - **Keying an allowance on something other than the IP was blocked on a choice
-  between two mechanisms** ([ADR 0114](./0114-an-allowance-is-a-table-sized-while-compiling.md)):
-  the key's bytes do not outlive the request, so either the fingerprint is
-  enough on its own or the key is copied into the slot, which is a different
-  table. Both true. The answer is a third neither arm named — a 64-bit tag
-  from a keyed hash, where the bytes only have to live long enough to be
-  hashed, so the arena stops being the constraint.
+  between two mechanisms**, in a roadmap entry that read: "either the
+  fingerprint has to be enough on its own … or a key has to be copied into the
+  slot, which is a different table." Both arms true, and the pair not
+  exhaustive — the answer is a third neither of them named: a 64-bit tag from a
+  keyed hash, where the key's bytes only have to live long enough to be hashed,
+  so the request arena stops being the constraint at all.
 
 So the rule generalises past attribution, to grammar:
 
