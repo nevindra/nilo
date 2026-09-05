@@ -1778,6 +1778,32 @@ against Zig 0.16 rather than believed. `docs/history.md` has the run.
 **Waiting on: a design** that makes it a rule rather than two comments, or an
 upstream way to read a bound port.
 
+**Three published snippets carry a mark saying they compile, and no build step
+opens the page they are on.** `zig build snippets` reads a `pages` list in
+`build.zig` holding four entries — `README.md`, `docs/reference.md`,
+`docs/guide/sessions.md` and `docs/guide/config.md`. Twenty-four pages carry
+Zig blocks, 206 of them altogether, and the other twenty are never opened.
+
+Most of those blocks are simply unmarked, which is honest: `<!-- compiles -->`
+is opt-in per block and an unmarked block claims nothing. **The three that are
+not honest are `docs/guide/metrics.md:8`, `:129` and
+`docs/guide/responses.md:186`** — marked, and never compiled by anything,
+because their page is not in the list. Somebody wrote the mark believing it was
+a guarantee. That is this repository's own stated failure, a rule nobody runs,
+wearing the costume of a rule that does.
+
+`docs/guide/sql.md` is the page this matters most for and the one furthest from
+fixed: 48 Zig blocks, more than the README and the reference together, and not
+one of them marked.
+
+**Waiting on: ready**, and it is an afternoon rather than a line. Adding a page
+to `pages` compiles nothing until a block on it is marked, and the marking is
+the work: [ADR 0083](./adr/0083-the-guide-is-the-source-of-its-own-snippets.md)
+records that doing it to one five-line example found seven mistakes. The three
+dead marks are the cheap half and need not wait for the rest. What would end
+the class rather than this instance is the step reading every page that has a
+marked block, instead of a list somebody has to remember to join.
+
 **A fail function in spawned work is safe only because of where a threadlocal
 gets written.** `bulkhead.slot()` falls back to a threadlocal when a fiber has
 no slot, which spawned fibers never do. It is null on executor threads only
