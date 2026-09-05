@@ -203,6 +203,13 @@ both of these were attributed to nobody:
   ([ADR 0124](./0124-a-buffered-body-arrives-at-a-rate.md)) — "zio's `Timeout`
   cannot express both" — which is true, and is a sentence about a type rather
   than about the slow client the feature exists to catch.
+- **Keying an allowance on something other than the IP was blocked on a choice
+  between two mechanisms** ([ADR 0114](./0114-an-allowance-is-a-table-sized-while-compiling.md)):
+  the key's bytes do not outlive the request, so either the fingerprint is
+  enough on its own or the key is copied into the slot, which is a different
+  table. Both true. The answer is a third neither arm named — a 64-bit tag
+  from a keyed hash, where the bytes only have to live long enough to be
+  hashed, so the arena stops being the constraint.
 
 So the rule generalises past attribution, to grammar:
 
@@ -212,9 +219,16 @@ So the rule generalises past attribution, to grammar:
 A blocker naming an upstream invites somebody to go and look. A blocker naming
 a design invites somebody to think, and thinking does not open the manifest. A
 blocker naming a type invites nothing at all, because there is visibly nothing
-to re-examine. **Each of the three read as settled, and a settled sentence is
-one nobody re-derives** — which is the same failure as a number with no run
-behind it, one level up.
+to re-examine. **Each of them read as settled, and a settled sentence is one
+nobody re-derives** — which is the same failure as a number with no run behind
+it, one level up.
+
+**The enumeration is the worst of the four**, and it is the one that looks most
+like diligence. One named mechanism invites "is that really the only way"; two
+named mechanisms invite "which of these", and that question never reaches
+outside the pair. A wrong premise is never more convincing than when it arrives
+as a list of alternatives, because the work of considering alternatives appears
+to have been done already.
 
 The practical form: when an entry says a feature is blocked, rewrite its
 blocker as the behaviour it has to produce before believing it. Half the time
