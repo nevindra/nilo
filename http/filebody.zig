@@ -387,7 +387,7 @@ test "a range against a FileBody is answered by the shared primitive" {
 
     const answer = try client.send(
         &app,
-        "GET /invoices/1 HTTP/1.1\r\nRange: bytes=0-4\r\n\r\n",
+        "GET /invoices/1 HTTP/1.1\r\nHost: t\r\nRange: bytes=0-4\r\n\r\n",
     );
     try testing.expectEqual(@as(u16, 206), answer.status);
     try testing.expectEqualStrings("bytes 0-4/19", answer.header("Content-Range").?);

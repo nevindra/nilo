@@ -164,7 +164,17 @@ const Seat = struct {
     /// How many posts this connection was too slow to take. Reported rather
     /// than logged: a number a handler can read beats a line in a log nobody
     /// is watching.
-    dropped: u64 = 0,
+    ///
+    /// Atomic because `missed` reads it and does not take this seat's lock to
+    /// do so — it is a counter to show somebody, and putting a handler asking
+    /// for it behind a broadcast would cost more than the number is worth.
+    /// It used to be a plain `u64` read outside the lock that guards it, which
+    /// nothing tears on but which is a race all the same.
+    ///
+    /// Every write is under the seat's lock, so the increment is a load and a
+    /// store rather than an atomic add: the lock is what makes it exclusive,
+    /// and the atomic is only there so the reader is not racing.
+    dropped: std.atomic.Value(u64) = .init(0),
 };
 
 /// Where a connection sits, and proof it is still the one sitting there.
@@ -280,7 +290,20 @@ pub const Room = struct {
         const ticket = socket.ticket() orelse return;
         socket.unseat();
 
-        self.roster.lock() catch return;
+        // **Neither of these may be the cancellable `lock`.** Both used to be,
+        // and both gave up the same way — `catch return` — on the one error
+        // they can return, which is `Canceled`: what a fiber gets when the
+        // server is shutting down. Returning here leaves `seat.taken` true and
+        // `seat.waker` pointing into the `Socket` of a handler on its way out,
+        // so the next `say` walks the roll, finds the seat still on the taken
+        // half, pushes a post into its ring and rings a bell whose fiber has
+        // ended. `zio.Mutex.lock` tries uncontended first and only then checks
+        // cancellation, so it takes a broadcast in flight at the moment the
+        // connection is cancelled — narrow, and a use-after-free.
+        //
+        // Giving a seat up is short, takes no other lock and waits for
+        // nothing, which is what makes it safe to make uninterruptible.
+        self.roster.lockUncancelable();
         defer self.roster.unlock();
 
         const seat = &self.seats[ticket.index];
@@ -288,7 +311,7 @@ pub const Room = struct {
 
         // Under the seat's own lock, because a `say` already past the roster
         // may be pushing into this ring right now.
-        seat.lock.lock() catch return;
+        seat.lock.lockUncancelable();
         self.drain(seat);
         seat.lock.unlock();
 
@@ -369,7 +392,7 @@ pub const Room = struct {
         const ticket = socket.ticket() orelse return 0;
         const seat = &self.seats[ticket.index];
         if (!seat.taken or seat.era != ticket.era) return 0;
-        return seat.dropped;
+        return seat.dropped.load(.monotonic);
     }
 
     // ---- what the Socket calls ----
@@ -457,7 +480,7 @@ pub const Room = struct {
         defer seat.lock.unlock();
 
         if (seat.count == self.backlog) {
-            seat.dropped += 1;
+            seat.dropped.store(seat.dropped.load(.monotonic) + 1, .monotonic);
             switch (self.full) {
                 .drop_newest => return,
                 .drop_oldest => {
@@ -491,7 +514,7 @@ pub const Room = struct {
         seat.taken = true;
         seat.era +%= 1;
         seat.slot = @intCast(taken);
-        seat.dropped = 0;
+        seat.dropped.store(0, .monotonic);
         self.here.store(taken + 1, .monotonic);
         return .{ .index = index, .era = seat.era };
     }
@@ -588,7 +611,7 @@ test "a full backlog drops the oldest and counts it" {
     try room.sayText("two");
     try room.sayText("three");
 
-    try testing.expectEqual(@as(u64, 1), seat.dropped);
+    try testing.expectEqual(@as(u64, 1), seat.dropped.load(.monotonic));
 
     const first = room.take(ticket).?;
     try testing.expectEqualStrings("two", room.contentsOf(first).data);
@@ -613,7 +636,7 @@ test "dropping the newest keeps what was already queued" {
     try room.sayText("two");
     try room.sayText("three");
 
-    try testing.expectEqual(@as(u64, 1), seat.dropped);
+    try testing.expectEqual(@as(u64, 1), seat.dropped.load(.monotonic));
     const first = room.take(ticket).?;
     try testing.expectEqualStrings("one", room.contentsOf(first).data);
     room.release(first);

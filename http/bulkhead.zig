@@ -57,7 +57,9 @@
 //!   thread under it. Handlers run concurrently on several threads, so a
 //!   Service with mutable state needs one; and `std.Thread.Mutex` is the
 //!   wrong tool, because blocking the thread also stops every other fiber
-//!   sharing it — including, possibly, the one holding the lock.
+//!   sharing it — including, possibly, the one holding the lock. Taking one
+//!   can be refused, so the Engine also has to offer a way of taking it that
+//!   cannot be: a cleanup path has nowhere to put a `Canceled`.
 //! - `blocking`/`sleep` — the general form of that same problem. A handler
 //!   that calls anything blocking stops every other request sharing its
 //!   thread, and the Engine is the only layer that knows how to wait
@@ -574,6 +576,24 @@ pub const Mutex = struct {
         const w = watchdog.waitingAnywhere();
         defer watchdog.waitedAnywhere(w);
         return self._inner.lock();
+    }
+
+    /// `lock`, for a caller that has nothing useful to do with a refusal.
+    ///
+    /// **A cleanup path should not be cancellable.** `lock` fails with
+    /// `Canceled` when the fiber is being shut down, and the two answers to
+    /// that — give up, or carry on unlocked — are a resource never released
+    /// and a data race. `Room.leave` had the first: it returned before
+    /// clearing its seat, leaving the room a `waker` pointing into a `Socket`
+    /// whose fiber had ended.
+    ///
+    /// Only for a section that is short and cannot itself wait, because
+    /// nothing can interrupt it. The cancellation is not lost — the Engine
+    /// still holds the request, and the next call that can fail will.
+    pub fn lockUncancelable(self: *Mutex) void {
+        const w = watchdog.waitingAnywhere();
+        defer watchdog.waitedAnywhere(w);
+        return self._inner.lockUncancelable();
     }
 
     /// Take the lock if it is free, without waiting. Never parks, so there

@@ -117,11 +117,19 @@ fn refParseHead(head: []const u8, r: *http1.Request) http1.ParseError!void {
             first_line = false;
             continue;
         }
-        if (line.len == 0) return; // the blank line ends the head
+        if (line.len == 0) return refFinish(r); // the blank line ends the head
         try refApplyHeader(line, r);
     }
     // A head that is only a request line, and no newline after it.
-    if (first_line) return refParseRequestLine(head, r);
+    if (first_line) try refParseRequestLine(head, r);
+    return refFinish(r);
+}
+
+/// The one rule about a head rather than about a line in it. A second `Host`
+/// is caught as it goes past; that there was never a first one is only
+/// knowable once the head has ended, which is why this is separate.
+fn refFinish(r: *const http1.Request) http1.ParseError!void {
+    if (r.minor_version == 1 and !r.has_host) return error.BadHeader;
 }
 
 fn refParseRequestLine(line: []const u8, r: *http1.Request) http1.ParseError!void {
@@ -156,7 +164,10 @@ fn refApplyHeader(line: []const u8, r: *http1.Request) http1.ParseError!void {
     const name = line[0..colon];
     const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
 
-    if (std.ascii.eqlIgnoreCase(name, "connection")) {
+    if (std.ascii.eqlIgnoreCase(name, "host")) {
+        if (r.has_host) return error.BadHeader;
+        r.has_host = true;
+    } else if (std.ascii.eqlIgnoreCase(name, "connection")) {
         if (std.ascii.eqlIgnoreCase(value, "close")) {
             r.keep_alive = false;
         } else if (std.ascii.eqlIgnoreCase(value, "keep-alive")) {
@@ -180,10 +191,11 @@ fn refApplyHeader(line: []const u8, r: *http1.Request) http1.ParseError!void {
         var codings = std.mem.splitScalar(u8, value, ',');
         var last: []const u8 = "";
         while (codings.next()) |coding| last = std.mem.trim(u8, coding, " \t");
-        if (std.ascii.eqlIgnoreCase(last, "chunked")) {
-            if (r.has_content_length) return error.BadHeader;
-            r.chunked = true;
-        }
+        // Anything but `chunked` last is a coding nilo cannot decode, which
+        // RFC 9112 §6.1 makes a 400 rather than a request with no body.
+        if (!std.ascii.eqlIgnoreCase(last, "chunked")) return error.BadHeader;
+        if (r.has_content_length) return error.BadHeader;
+        r.chunked = true;
     }
 }
 
@@ -221,6 +233,7 @@ fn parsedTheSameAsTheObviousWay(head: []const u8) !void {
     try testing.expectEqual(slow.keep_alive, fast.keep_alive);
     try testing.expectEqual(slow.content_length, fast.content_length);
     try testing.expectEqual(slow.has_content_length, fast.has_content_length);
+    try testing.expectEqual(slow.has_host, fast.has_host);
     try testing.expectEqual(slow.chunked, fast.chunked);
     try testing.expectEqual(slow.upgrade, fast.upgrade);
 
@@ -350,35 +363,60 @@ fn seed(comptime text: []const u8) []const u8 {
 
 const corpus = [_][]const u8{
     // Ordinary, and the two framings.
-    seed("GET / HTTP/1.1\r\n\r\n"),
-    seed("POST /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello"),
-    seed("POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"),
+    seed("GET / HTTP/1.1\r\nHost: h\r\n\r\n"),
+    seed("POST /x HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\n\r\nhello"),
+    seed("POST /x HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"),
 
     // Both framings at once, which is the classic smuggling pair.
-    seed("POST / HTTP/1.1\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n"),
-    seed("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n"),
-    seed("POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\n"),
-    seed("POST / HTTP/1.1\r\nTransfer-Encoding: chunked, identity\r\n\r\n"),
-    seed("POST / HTTP/1.1\r\nTransfer-Encoding:\tchunked \r\n\r\n"),
+    seed("POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n"),
+    seed("POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n"),
+    seed("POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\n"),
+    seed("POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\n"),
+    seed("POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked, identity\r\n\r\n"),
+    seed("POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding:\tchunked \r\n\r\n"),
+
+    // A last coding nilo cannot decode, which RFC 9112 §6.1 makes a 400
+    // rather than a request framed as having no body at all. The bytes after
+    // the head are there on purpose: what used to happen to them is that the
+    // next request on this connection was parsed out of them.
+    seed("POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: gzip\r\n\r\nGET /next HTTP/1.1\r\nHost: h\r\n\r\n"),
+    seed("POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked, gzip\r\n\r\n"),
+    seed("POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: xchunked\r\n\r\n"),
+    seed("POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: \r\n\r\n"),
+
+    // The authority. HTTP/1.1 wants exactly one and HTTP/1.0 wants none, and
+    // a repeat is refused even when the two agree (RFC 9112 §3.2).
+    seed("GET / HTTP/1.1\r\n\r\n"),
+    seed("GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n"),
+    seed("GET / HTTP/1.1\r\nHost: a\r\nHost: a\r\n\r\n"),
+    seed("GET / HTTP/1.1\r\nhOsT: h\r\n\r\n"),
+    seed("GET / HTTP/1.1\r\nHost:\r\n\r\n"),
+    seed("GET / HTTP/1.1\r\nHostname: h\r\n\r\n"),
+    seed("GET / HTTP/1.0\r\n\r\n"),
+    seed("GET / HTTP/1.0\r\nHost: a\r\nHost: b\r\n\r\n"),
 
     // Line endings, which is where a boundary is agreed or not.
-    seed("GET / HTTP/1.1\n\n"),
-    seed("GET / HTTP/1.1\r\n\n"),
-    seed("GET / HTTP/1.1\n\r\n"),
-    seed("GET / HTTP/1.1\r\r\n\r\n"),
-    seed("GET / HTTP/1.1\r\n\r"),
-    seed("GET / HTTP/1.1\r\n"),
+    seed("GET / HTTP/1.1\nHost: h\n\n"),
+    seed("GET / HTTP/1.1\r\nHost: h\r\n\n"),
+    seed("GET / HTTP/1.1\nHost: h\n\r\n"),
+    seed("GET / HTTP/1.1\r\r\nHost: h\r\n\r\n"),
+    seed("GET / HTTP/1.1\r\nHost: h\r\n\r"),
+    seed("GET / HTTP/1.1\r\nHost: h\r\n"),
     seed("GET / HTTP/1.1"),
     seed("\r\n\r\n"),
     seed("\n\n"),
     seed(""),
 
     // The head boundary landing on a block edge, since the scan reads a
-    // block at a time and the interesting index is the last one in it.
+    // block at a time and the interesting index is the last one in it. These
+    // are the one group left without a `Host`: their offsets are the whole
+    // point, and a header line in front of the blank one would move every one
+    // of them. What they are for is where the head *ends*, which is asked
+    // before anything is parsed.
     seed("GET /aaaaaaaaaaaaaaaaaaaaaaaaaa HTTP/1.1\r\n\r\n"),
     seed("GET /aaaaaaaaaaaaaaaaaaaaaaaaaaa HTTP/1.1\r\n\r\n"),
     seed("GET /aaaaaaaaaaaaaaaaaaaaaaaaaaaa HTTP/1.1\r\n\r\n"),
-    seed("GET / HTTP/1.1\r\nX: " ++ "a" ** 60 ++ "\r\n\r\n"),
+    seed("GET / HTTP/1.1\r\nHost: h\r\nX: " ++ "a" ** 60 ++ "\r\n\r\n"),
 
     // Request lines that are not.
     seed("GET/HTTP/1.1\r\n\r\n"),
@@ -392,24 +430,24 @@ const corpus = [_][]const u8{
     seed("GET  / HTTP/1.1\r\n\r\n"),
 
     // Header lines that are not.
-    seed("GET / HTTP/1.1\r\nNoColon\r\n\r\n"),
-    seed("GET / HTTP/1.1\r\n: novalue\r\n\r\n"),
-    seed("GET / HTTP/1.1\r\nContent-Length:\r\n\r\n"),
-    seed("GET / HTTP/1.1\r\nContent-Length: -1\r\n\r\n"),
-    seed("GET / HTTP/1.1\r\nContent-Length: +5\r\n\r\n"),
-    seed("GET / HTTP/1.1\r\nContent-Length: 0x10\r\n\r\n"),
-    seed("GET / HTTP/1.1\r\nContent-Length: 18446744073709551616\r\n\r\n"),
-    seed("GET / HTTP/1.1\r\nContent-Length: 5 5\r\n\r\n"),
-    seed("GET / HTTP/1.1\r\ncOnTeNt-LeNgTh: 5\r\n\r\n"),
-    seed("GET / HTTP/1.1\r\nConnection: Upgrade, keep-alive\r\n\r\n"),
-    seed("GET / HTTP/1.1\r\nConnection: close, keep-alive\r\n\r\n"),
-    seed("GET / HTTP/1.1\r\n Connection: close\r\n\r\n"),
+    seed("GET / HTTP/1.1\r\nHost: h\r\nNoColon\r\n\r\n"),
+    seed("GET / HTTP/1.1\r\nHost: h\r\n: novalue\r\n\r\n"),
+    seed("GET / HTTP/1.1\r\nHost: h\r\nContent-Length:\r\n\r\n"),
+    seed("GET / HTTP/1.1\r\nHost: h\r\nContent-Length: -1\r\n\r\n"),
+    seed("GET / HTTP/1.1\r\nHost: h\r\nContent-Length: +5\r\n\r\n"),
+    seed("GET / HTTP/1.1\r\nHost: h\r\nContent-Length: 0x10\r\n\r\n"),
+    seed("GET / HTTP/1.1\r\nHost: h\r\nContent-Length: 18446744073709551616\r\n\r\n"),
+    seed("GET / HTTP/1.1\r\nHost: h\r\nContent-Length: 5 5\r\n\r\n"),
+    seed("GET / HTTP/1.1\r\nHost: h\r\ncOnTeNt-LeNgTh: 5\r\n\r\n"),
+    seed("GET / HTTP/1.1\r\nHost: h\r\nConnection: Upgrade, keep-alive\r\n\r\n"),
+    seed("GET / HTTP/1.1\r\nHost: h\r\nConnection: close, keep-alive\r\n\r\n"),
+    seed("GET / HTTP/1.1\r\nHost: h\r\n Connection: close\r\n\r\n"),
 
     // Bytes a text protocol is not supposed to contain.
-    seed("GET / HTTP/1.1\r\nX\x00: y\r\n\r\n"),
-    seed("GET /\x00 HTTP/1.1\r\n\r\n"),
+    seed("GET / HTTP/1.1\r\nHost: h\r\nX\x00: y\r\n\r\n"),
+    seed("GET /\x00 HTTP/1.1\r\nHost: h\r\n\r\n"),
     seed("\xff\xfe\xfd\xfc\r\n\r\n"),
-    seed("GET / HTTP/1.1\r\nX: \xc3\x28\r\n\r\n"),
+    seed("GET / HTTP/1.1\r\nHost: h\r\nX: \xc3\x28\r\n\r\n"),
 
     // Chunk sizes, which arrive as attacker-chosen hex.
     seed("0\r\n\r\n"),
@@ -451,11 +489,16 @@ test "the differential checks fail when the two sides really differ" {
     // The reference reads the same head as the parser does, so the way to
     // make them disagree is to hand the reference a different head.
     var slow: http1.Request = .{};
-    try refParseHead("GET / HTTP/1.1\r\nContent-Length: 5\r\n\r\n", &slow);
+    try refParseHead("GET / HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\n\r\n", &slow);
     try testing.expectEqual(@as(u64, 5), slow.content_length);
 
     var also: http1.Request = .{};
-    try testing.expectError(error.BadHeader, refParseHead("GET / HTTP/1.1\r\nNoColon\r\n\r\n", &also));
+    try testing.expectError(error.BadHeader, refParseHead("GET / HTTP/1.1\r\nHost: h\r\nNoColon\r\n\r\n", &also));
+
+    // And the whole-head rule really is one the reference applies, or every
+    // entry in the corpus above would be refused by one side only.
+    var hostless: http1.Request = .{};
+    try testing.expectError(error.BadHeader, refParseHead("GET / HTTP/1.1\r\n\r\n", &hostless));
 
     // And the oracle really does find a boundary where one is.
     try testing.expectEqual(@as(?usize, 18), refEndOfHead("GET / HTTP/1.1\r\n\r\n"));

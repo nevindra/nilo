@@ -1080,6 +1080,86 @@ worse, because the server asks for one thread per CPU and then the load
 generator wants four more. The script is the convenient form; the pinned
 commands are the ones that measure something.
 
+## What checking `Host` costs the parser
+
+**A different machine, and it matters more than usual.** Everything above is the
+8-core Ryzen; this pair was run on a 2-core Xeon Platinum 8255C vCPU with the
+load generator on the same box, which is the weakest possible place to take a
+throughput number. It is written down anyway, because the change it prices is on
+the request path of every request.
+
+What changed:
+[ADR 0101](../../docs/adr/0101-a-request-nobody-else-would-answer-is-refused.md)
+put `'h'` into the parser's first-byte set, so a `Host` line now reaches
+`applyHeaderAt` and costs a four-byte `eqlIgnoreCase` instead of being thrown
+out for nothing, and `parseHead` gained one branch at the end of the head.
+
+Both sides built `-Doptimize=ReleaseFast` from a `git archive` of the parent
+commit and from the working tree, run interleaved.
+
+### `zig build profile` — the row that moved
+
+| run | before | after |
+|---|---|---|
+| 1 | 104ns | 107ns |
+| 2 | 99ns | 106ns |
+| 3 | 102ns | 115ns |
+| 4 | 97ns | 106ns |
+
+**Parse the head: 100ns → 109ns, and every "after" run is above every "before"
+run.** That is the signal — about +8ns, which is roughly what one call and one
+four-byte compare should cost. Head parsing is 13% of a request on this shape,
+so it is around +1% of a request.
+
+End to end over the same four rounds was 785/814/757/776 before and
+785/805/814/797 after. The means differ by 2% and the ranges overlap almost
+completely, so **that number is unchanged and should not be quoted as a
+regression.** The two rows disagreeing is the point of having both: a signal
+worth 8ns is visible in the row that contains it and invisible in the total.
+
+### wrk — four interleaved pairs, and what they are worth
+
+`-t1 -c32 -d10s`, server pinned to core 0 and wrk to core 1.
+
+| pair | before | after | |
+|---|---|---|---|
+| 1 | 38,888 | 37,486 | −3.6% |
+| 2 | 39,202 | 37,122 | −5.3% |
+| 3 | 38,550 | 38,649 | +0.3% |
+| 4 | 39,878 | 38,067 | −4.5% |
+
+**The spread on either side alone is 3–4%, so this table says nothing.** The
+sign changes, and a margin that size cannot be told from code layout on a shared
+vCPU — an 8ns arithmetic difference cannot be 5% of a 26µs request. It is here
+so that nobody re-runs it expecting an answer: on this box the throughput
+question is not answerable, and `zig build profile` is what to run instead.
+
+### Memory per idle connection — unchanged, and checked rather than argued
+
+`python3 bench/mem.py --port 8787 --path /users/42 --steps 200,500,1000`, a
+fresh server each time, alternating:
+
+| | 200 | 500 | 1,000 |
+|---|---|---|---|
+| before | 9,134 B | 8,905 B | 8,843 B |
+| after | 9,134 B | 8,905 B | 8,843 B |
+| before, again | 9,134 B | 8,905 B | 8,851 B |
+| after, again | 9,134 B | 8,970 B | 8,901 B |
+
+The first pair is byte-identical at every step. `Request` gained a `has_host`
+bool and `websocket.Options` gained a slice, and neither was expected to cost
+anything — the bool lands in padding (`@sizeOf(Request)` is 48 both ways) and
+the Options live in the handshake's frame, which unwinds before the connection
+loop takes over (ADR 0071). This is that reasoning checked.
+
+**The absolute figure is this box's, not the framework's.** 8,843 bytes here
+against the 4,669 published above, on two cores rather than eight and with a
+different executor count under it. Only the before/after comparison on one
+machine means anything; do not quote the column.
+
+Binary size, stripped ReleaseFast `nilo-hello`: 905,600 → 905,808 bytes, +208
+for all five changes in that commit together.
+
 ## Can these be pushed further
 
 Ranked, so the next person starts here rather than at the top of the file.

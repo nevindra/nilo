@@ -90,7 +90,9 @@ to a buffer instead of a connection.
 | `client.send(&app, raw)` | the whole request written out, for a header or a version the others don't cover |
 
 `send` is the one for anything unusual — HTTP/1.0, a `Range`, a header your
-middleware reads:
+middleware reads. **Write the `Host` yourself**: `get` and the rest put one in
+for you, and an HTTP/1.1 request without one is a 400 before it reaches a route
+([ADR 0101](../adr/0101-a-request-nobody-else-would-answer-is-refused.md)).
 
 ```zig
 const answer = try client.send(&app,

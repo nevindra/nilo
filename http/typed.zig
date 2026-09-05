@@ -50,6 +50,7 @@ const openapi = @import("openapi.zig");
 const patch_mod = @import("patch.zig");
 const bound_mod = @import("bound.zig");
 const filebody = @import("filebody.zig");
+const json_mod = @import("json.zig");
 
 const Ctx = ctx_mod.Ctx;
 const Str = str_mod.Str;
@@ -569,8 +570,15 @@ fn answerWith(comptime status: ?u16, comptime V: type) openapi.Answer {
     }
 }
 
+/// What a returned value is labelled as. Bytes are text and everything else is
+/// JSON, and **which types count as bytes is `json.isByteSlice`'s to say** —
+/// named by exact type here, this missed `[:0]const u8` and labelled it
+/// `application/json` while the body it labelled was a JSON array of numbers
+/// and the generated document said `type: string`. Three files reading the
+/// same question is what put them out of step; one of them answering it fixes
+/// all three at once.
 fn contentTypeFor(comptime T: type) []const u8 {
-    if (T == Str or T == []const u8 or T == []u8) return "text/plain";
+    if (T == Str or json_mod.isByteSlice(T)) return "text/plain";
     return "application/json";
 }
 
@@ -1043,7 +1051,10 @@ fn sendValue(c: *Ctx, status: u16, value: anytype) !void {
     // `Response(FileBody)` could be right about which.
     if (comptime filebody.isFileBody(T)) return filebody.send(c, value);
     if (T == Str) return c.sendText(status, value.view());
-    if (T == []const u8 or T == []u8) return c.sendText(status, value);
+    // The same question `contentTypeFor` asks, and it has to be the same
+    // answer: a body sent as JSON under a `text/plain` label, or the other way
+    // round, is the response and its own description disagreeing.
+    if (comptime json_mod.isByteSlice(T)) return c.sendText(status, value);
     return c.sendJson(status, value);
 }
 

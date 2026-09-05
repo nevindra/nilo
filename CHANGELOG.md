@@ -7,17 +7,27 @@ What was measured and what was got wrong on the way is in
 
 ## Unreleased
 
-**One source change is needed to move a 0.2.0 program to this**, and only one:
-`cors.Options.origin` is now `origins` and takes a list. If you never called
-`cors.with` — `cors.permissive` is unchanged — there is nothing to do. Needs
-Zig 0.16, as 0.2.0 does.
+**Two source changes may be needed to move a 0.2.0 program to this**, and one
+of them only if you serve WebSockets. `cors.Options.origin` is now `origins` and
+takes a list; if you never called `cors.with` — `cors.permissive` is unchanged —
+there is nothing to do. And **a WebSocket served from a different host to the
+page that opens it now needs `.origins` naming that page**, or the handshake is
+a 403. Needs Zig 0.16, as 0.2.0 does.
 
 **If you serve WebSockets, take this one for the shutdown fix alone.** A server
 that had served any usually did not come back from a SIGTERM, which is a deploy
 that hangs and a core that spins. Nothing to change on your side; it is the
 first entry in Fixed.
 
-**Six things behave differently at run time, and all six are in Fixed below.**
+**Two requests that used to be answered are now refused with a 400**, and both
+are shapes the proxy in front of you already rejects: an HTTP/1.1 request with
+no `Host` or with two of them, and a `Transfer-Encoding` whose last coding is
+not `chunked`. Nothing a browser, a proxy or an HTTP library sends changes. A
+hand-written test client that spoke to the server directly and never bothered
+with `Host` will need one.
+
+**Six more things behave differently at run time, and all six are in Fixed
+below.**
 Sessions now carry an expiry, so everybody holding one is signed out on the
 deploy that picks this up, and a session cookie that used to last indefinitely
 now lasts a day unless `max_age` says otherwise. A response header value holding
@@ -203,7 +213,80 @@ is `std.json`'s call, and nothing can add a declaration to a type you wrote.
   for**, so a client generated from it reads what the server actually sends. A
   tagged union is `oneOf` with `discriminator`; an untagged union is still `{}`.
 
+- **A WebSocket handshake is same-origin unless the route says otherwise.** A
+  browser applies no CORS to a WebSocket — no preflight, and it ignores
+  `Access-Control-Allow-Origin` — so a `cors.with` in front of an upgrade route
+  set headers nobody enforced and the socket opened anyway, **carrying the
+  session cookie**, because the handshake is an ordinary GET. An application
+  with `Session(T)` and `c.upgrade` on the same server was open to any page on
+  any origin reading and writing that user's socket.
+
+  A handshake carrying an `Origin` that does not name the authority its `Host`
+  named is now a 403. A request with no `Origin` at all — `curl`, `wstest`, a
+  native client — is unaffected, because the ambient cookie this guards is a
+  browser's.
+
+  ```zig
+  return c.upgradeWith(chatLoop, room, .{
+      .origins = &.{"https://app.example.com"},  // the page, on another host
+  });
+  ```
+
+  `&.{"*"}` allows anybody, for a public socket carrying nothing worth
+  stealing. The scheme is not compared, because TLS is terminated in front and
+  nilo never learns which one the browser used
+  ([ADR 0102](./docs/adr/0102-a-websocket-handshake-is-same-origin-unless-the-route-says-otherwise.md)).
+  Nothing per request and nothing per connection: one compare, on the
+  handshake.
+
+- **An HTTP/1.1 request with no `Host`, or with two, is a 400.** RFC 9112 §3.2
+  requires it, and the front end nilo assumes is there already refuses both — so
+  answering them was nilo agreeing to read a request nobody else agreed to. A
+  repeat is refused even when the two agree, which is stricter than
+  `Content-Length`. HTTP/1.0 is unaffected
+  ([ADR 0101](./docs/adr/0101-a-request-nobody-else-would-answer-is-refused.md)).
+
+- **A `Transfer-Encoding` whose last coding is not `chunked` is a 400.** It used
+  to be served as a request with **no body at all** — no error, no framing —
+  leaving the bytes the client sent still in the read buffer for the next turn
+  of the connection loop to parse as a second request. RFC 9112 §6.1 makes it a
+  400, and nilo can decode exactly one coding. `Transfer-Encoding: chunked` is
+  unchanged.
+
 ### Fixed
+
+- **A `[:0]const u8` went out as a JSON array of byte values while the generated
+  document said it was a string.** `{"name":[104,101,108,108,111]}` where
+  `std.json` writes `{"name":"hello"}`, and where `openapi.json` — reading the
+  same type correctly — promised a generated client a string. The response was
+  also labelled `application/json` where a `[]const u8` would have been
+  `text/plain`.
+
+  A sentinel-terminated slice is not exotic: it is what `@tagName` returns, what
+  `allocPrintSentinel` returns, and what any field crossing a C boundary is
+  spelled as. Three files asked whether a type was a run of bytes and one of
+  them got it right; there is one predicate now and the other two call it
+  ([ADR 0103](./docs/adr/0103-one-file-decides-what-counts-as-text.md)). Nothing
+  at run time either way.
+
+- **A type holding a list of its own type could not reach a response at all.** A
+  comment with replies, a category with children — the walk that decides which
+  writer to use recursed with no floor, so it failed to *compile*, with a
+  message in nilo's own file whose advice was to raise the branch quota. It
+  stops at eight now, the same ceiling the schema walker has, and sends the
+  value to `std.json`, which writes it correctly.
+
+- **A connection cancelled while leaving a `Room` kept its seat and its bell.**
+  `Room.leave` gave up on `error.Canceled` — what a fiber gets when the server
+  is shutting down — before releasing the seat, so a later broadcast pushed a
+  message into the ring of a handler that had ended and rang a waker pointing
+  into its `Socket`. It needs a broadcast in flight at the moment the connection
+  is cancelled, so it is narrow, and it is a use-after-free.
+
+  Both locks on that path are now uninterruptible: a cleanup path has nowhere to
+  put a failure ([ADR 0104](./docs/adr/0104-a-cleanup-path-is-not-cancellable.md)).
+  `nilo.Mutex.lockUncancelable` is new and is what a Service with its own
+  cleanup path should reach for. Nothing per connection, nothing per message.
 
 - **A server that had served WebSockets usually did not come back from a
   SIGTERM.** The process never exited and one executor thread spun at 100% for

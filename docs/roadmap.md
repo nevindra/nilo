@@ -68,7 +68,7 @@ other module's.
 | [`nilo_config`](#nilo_config-settings) | needs no loop | reading a name the field is not called |
 | [`nilo_pw`](#nilo_pw-hashing-a-password) | needs no loop | a Cost floor that weighs the wrong half, and a patch `std` should have |
 | [`nilo_fetch`](#nilo_fetch-calling-somebody-elses-api) | borrows the loop | 16,495 bytes of stack per idle connection, and nothing measured through TLS |
-| [`nilo_http`](#nilo_http-the-server) | owns the loop | no rate limiting at all, four ways to answer a request nobody else would, a response body that contradicts its own document, and a long tail |
+| [`nilo_http`](#nilo_http-the-server) | owns the loop | no rate limiting at all, two ways to answer a request nobody else would, a body a stranger can make the server hold, and a long tail |
 | [`nilo_sql`](#nilo_sql-postgres-and-sqlite) | borrows the loop | a schema check that refuses the most ordinary SQLite table there is, four things the SQLite half cannot do that three documents say it can, and where migrations live |
 | [`nilo_s3`](#nilo_s3-object-storage) | borrows the loop | nothing measured through TLS, and no `LIST`, `COPY` or multipart |
 
@@ -359,10 +359,16 @@ number**, which is the same test every other feature here has had to pass.
 
 ## `nilo_http`: the server
 
-The longest list here, and it is really two. The first five **Known gaps** are
+The longest list here, and it is really two. The first two **Known gaps** are
 things a stranger on the internet can do to a server that is running exactly as
 written; everything under them is work nilo has not done well enough yet. Both
 are gaps and only one group is urgent.
+
+That group used to be five. The three that left were a `Transfer-Encoding` nilo
+could not decode being served as a request with no body, a request with no
+`Host` or two of them being served, and a WebSocket handshake that never looked
+at `Origin` — [ADR 0101](./adr/0101-a-request-nobody-else-would-answer-is-refused.md)
+and [ADR 0102](./adr/0102-a-websocket-handshake-is-same-origin-unless-the-route-says-otherwise.md).
 
 ### Next
 
@@ -461,58 +467,6 @@ connection is memory that has not been budgeted.
 
 ### Known gaps
 
-**A `Transfer-Encoding` whose last coding is not `chunked` is served as a request
-with no body.** `applyHeaderAt` reads the header, asks `saysChunked`, and when
-the answer is no it does *nothing at all* — no error, no framing, and
-`content_length` stays zero. So `Transfer-Encoding: gzip` with no
-`Content-Length`, and `Transfer-Encoding: chunked, gzip`, are both answered
-immediately, and the bytes the client sent as a body are still in the read buffer
-when the connection loop goes round for the next request. RFC 9112 §6.1 says a
-server that cannot decode the final coding **must** answer 400, and the proxy in
-front ([ADR 0028](./adr/0028-tls-is-terminated-in-front.md)) is entitled to a
-different reading — which is the definition of the smuggling case
-[ADR 0090](./adr/0090-a-body-framed-twice-is-refused.md) was written to close.
-
-ADR 0090 closed four ways for the two parsers to disagree and this is the fifth,
-missed for the reason the ADR itself gives about differential testing: `fuzz.zig`
-carries `Transfer-Encoding: chunked, identity` in its corpus and the reference
-parser reads it the same wrong way, so the two agree and the test passes.
-
-**Waiting on: ready.** One arm in `applyHeaderAt`, one line in the reference
-parser, one corpus entry.
-
-**A request with no `Host`, or with two different ones, is served.** Nothing in
-`http1.zig` looks at `Host` — the parser's four-header switch does not include
-it, and neither does `App`. RFC 9112 §3.2 requires a 400 for an HTTP/1.1 request
-that carries no `Host` and for one that carries more than one, and both are
-refused by the front end nilo assumes is there. So this is the same class as the
-entry above: nilo agreeing to answer a request nobody else agreed to, and a
-`Host` a handler reads back into a `Location` or a link is text no layer has
-checked.
-
-**Waiting on: ready.** It is a fifth arm on the length switch the parser already
-has, and `has_content_length` is the worked example of the extra bool fitting in
-padding that was already there.
-
-**A WebSocket handshake never looks at `Origin`, so a cross-site page can open
-one.** `Ctx.handshake` checks the method, `Upgrade`, `Connection`,
-`Sec-WebSocket-Version` and `Sec-WebSocket-Key`, and stops. A browser does not
-apply CORS to a WebSocket and sends no preflight, so the CORS middleware in front
-of the route sets headers nobody enforces and the socket opens anyway —
-**carrying the session cookie**, because the handshake is an ordinary GET. An
-application that puts `Session(T)` and `c.upgrade` on the same server is
-therefore open to a page on another origin reading and writing that user's socket
-for as long as the tab is open.
-
-This is worse than the CORS story it looks like, because there is no browser step
-that refuses it: the whole check has to be the server's.
-
-**Waiting on: a design.** The mechanism is four lines — compare `Origin` against
-a list. What is not settled is where the list comes from, since
-`websocket.Options` is per-call while `cors.with` is per-App, and a default of
-"refuse everything cross-origin" would break a socket served from a different
-host to the page, which is an ordinary deployment.
-
 **`c.body()` takes the announced `Content-Length` out of the arena before it
 reads a byte.** `const b = try self._arena.alloc(u8, content_length)` runs after
 the `max_body` check and before `readSliceAll`, so a request that says
@@ -577,6 +531,28 @@ underscore is a difference between what a caller wrote and what the server read.
 **Waiting on: ready.** `digitsOnly` exists twice already; the question is only
 whether a signed field should still take its sign, which it should.
 
+**A byte slice that is not UTF-8 goes out as a JSON string, and `std.json` would
+have written a list of numbers.** `json.writeString` escapes quotes, backslashes
+and control characters and passes everything else through, so a `[]const u8`
+holding `\xff` is written inside quotes and the response is not valid JSON.
+`std.json` asks `utf8ValidateSlice` first and falls back to an array when the
+answer is no.
+
+That is the one place left where this file's stated contract — "the output is
+byte-for-byte what `std.json` would have written" — is untrue, and it predates
+the sentinel-slice fix rather than arriving with it
+([ADR 0103](./adr/0103-one-file-decides-what-counts-as-text.md)). `expectSame`
+never asks, because every string in it is text somebody typed.
+
+Two ways out and they are different arguments. Validating in `writeString` costs
+a UTF-8 pass on every string a response carries, on the request path, to catch
+something almost nothing sends. Refusing the type is not available — `[]const u8`
+is the ordinary spelling of text. The third answer is that the contract is wrong
+and a server should not be sending unvalidated bytes as JSON at all, which is a
+decision rather than a fix.
+
+**Waiting on: a design**, and the number that goes with the first option.
+
 **An absolute-form request target matches no route.** `GET
 http://example.com/users/7 HTTP/1.1` is legal — RFC 9112 §3.2.2 says a server
 **must** accept it, and a client talking to what it believes is a proxy sends
@@ -586,69 +562,11 @@ answer is a 404 on a route that plainly exists.
 
 Nobody has hit it, because a browser sends origin-form and the proxy in front
 rewrites. It is here because it is four lines and because the shape of the
-mistake — reading a target without deciding what form it is in — is the one the
-two entries at the top of this list are also about.
+mistake — reading a target without deciding what form it is in — is the one
+[ADR 0101](./adr/0101-a-request-nobody-else-would-answer-is-refused.md) closed
+two of, one header over.
 
 **Waiting on: a caller**, and a cheap one to answer if it ever turns up.
-
-**A `[:0]const u8` goes out as a JSON array of numbers, and the API description
-says it is a string.** `json.zig` recognises `Str`, `[]const u8` and `[]u8` by
-exact type and nothing else, so a sentinel-terminated slice falls through to the
-`.pointer` arm, `covers(u8)` says yes, and the generated writer emits a list of
-byte values. Run against the module's own contract:
-
-```
-covers(struct { name: [:0]const u8 }) = true
-nilo : {"name":[104,101,108,108,111]}
-std  : {"name":"hello"}
-```
-
-That contract is the file's whole justification — "the output is byte-for-byte
-what `std.json` would have written… the speed is only allowed to exist because
-the bytes are identical" — and `expectSame` never asks about this shape, so the
-suite passes.
-
-**The document and the response disagree, which is the worse half.**
-`openapi.schemaWithin` reads the same type as `p.child == u8` and writes
-`type: string`, correctly. So a generated client is told to expect a string and
-receives an array. That is exactly the failure
-[ADR 0076](./adr/0076-a-type-that-writes-its-own-json-says-so.md)
-was written about — a `Uuid` documented as an object and sent as a string —
-running the other way round. `typed.contentTypeFor` misses it a third time and
-labels the response `application/json` where a `[]const u8` would have been
-`text/plain`.
-
-`[:0]const u8` is not exotic: it is what `@tagName` returns, what
-`allocPrintSentinel` returns, and what any field crossing a C boundary is
-spelled as.
-
-**Waiting on: ready.** Three files read the same question and one of them has
-the answer already; the fix is `p.child == u8` in `json.zig` and in
-`contentTypeFor`, and a test that walks a type nobody thought of rather than one
-somebody wrote down.
-
-**A type that holds a list of itself cannot reach a response at all.**
-`json.covers` recurses through `.pointer` with no depth limit, so an ordinary
-JSON tree — a comment with replies, a category with children — never terminates:
-
-```
-http/json.zig:94:52: error: evaluation exceeded 1000 backwards branches
-        .pointer => |p| p.size == .slice and covers(p.child),
-http/json.zig:94:52: note: use @setEvalBranchQuota() to raise the branch limit
-```
-
-The message is in nilo's file and its advice is wrong — raising the quota buys
-more recursion, not an answer. `std.json` writes the value fine, because its
-recursion is over a value at run time rather than over a type while compiling,
-so the fallback path this fell off is the one that works.
-
-`openapi.schemaWithin` takes the same walk and caps it — `max_depth = 8`, then
-`.unknown` — for the same reason and eight levels earlier
-([ADR 0081](./adr/0081-a-ceiling-that-is-reached-is-said-out-loud.md)). `covers`
-has no such line.
-
-**Waiting on: ready.** A depth argument that answers false at the ceiling sends
-the value to `std.json`, which is the correct answer rather than a degraded one.
 
 **A `Room`'s roster lock is held across the whole broadcast, and the field says
 it is not.** `Room.roster`'s doc says it guards taking and giving up a seat and
@@ -671,34 +589,6 @@ showing the contention was real.
 runs the chat loop from `examples/chat/` with the room deliberately taken out,
 so every WebSocket number in [`bench/result/http.md`](../bench/result/http.md)
 is a socket that joined nothing.
-
-**A connection cancelled while leaving a Room keeps its seat and its bell.**
-`Room.leave` takes two locks and gives up on both the same way — `roster.lock()
-catch return` and `seat.lock.lock() catch return` — and the error they return is
-`Canceled`, which is what a fiber gets when the server is shutting down. Both
-paths return before `seat.taken = false`, so the seat is never released and
-`seat.waker` still points into the `Socket` of a handler that is on its way out.
-A later `say` walks the roll, finds that seat still on the taken half, pushes a
-post into its ring and rings a bell whose fiber has ended.
-
-The window is narrow and worth stating exactly: `zio.Mutex.lock` tries
-uncontended first and only then checks cancellation, so this needs a broadcast
-in flight at the moment the connection is cancelled. It is not the ordinary
-shutdown.
-
-**A cleanup path should not be cancellable**, which is the shape the fix takes:
-`zio.Mutex.lockUncancelable` is in the pinned v0.17.0 and is written for exactly
-this — "cancellation requests are ignored during the lock acquisition". The
-Bulkhead does not expose it, so this is one method on `nilo.Mutex` and two lines
-in `leave`.
-
-While there: `Room.missed` reads `seat.dropped` with no lock, and `put` writes
-it under the seat's. Nothing tears on a 64-bit load, but it is the one field in
-this file read outside the lock that guards it.
-
-**Waiting on: ready.** The call exists upstream and is one file over, which is
-the check [ADR 0063](./adr/0063-a-handlers-stack-is-per-connection.md) taught
-this repository to run before writing down a blocker.
 
 **The two arms of static-file serving live in two files, and the rule they share
 lives in a third.** `App.serveHeldFile` answers a file read at startup,
@@ -1959,6 +1849,15 @@ types the generated writer may touch, and it errs narrow. A tuple, a `[N]u8`, a
 type with its own `jsonStringify`, and anything unrecognised all fall back.
 Floats are handed to `std.json` field by field rather than reimplemented.
 
+**This one has gone off, which is why it is worth reading rather than nodding
+at.** `[:0]const u8` was recognised by neither and went out as a JSON array of
+byte values under an `application/json` label, while the generated document
+described it as a string
+([ADR 0103](./adr/0103-one-file-decides-what-counts-as-text.md)). The tests did
+not catch it because every value in them was a type somebody sat down and
+wrote. One case is still open — a byte slice that is not valid UTF-8 — and it is
+a gap above rather than a risk here.
+
 **Deadlines are on by default, so a client on a genuinely bad link could be cut
 off where it used to be served.** The numbers are generous and each bounds one
 wait rather than a whole request, so nothing legitimate and slow is hurried by
@@ -1981,6 +1880,13 @@ Coverage-guided fuzzing is not available, because `zig build test --fuzz` fails
 to compile inside std's own test runner on Zig 0.16.0, so the generator is the
 substitute and the targets are written to become coverage-guided the day that
 is fixed.
+
+**What it cannot catch is a reading both sides share**, and it did not: the
+reference parser read `Transfer-Encoding: gzip` exactly as wrongly as
+`http1.zig` did, so the corpus entry for it passed
+([ADR 0101](./adr/0101-a-request-nobody-else-would-answer-is-refused.md)). A
+differential test proves the two implementations agree, which is not the same
+as either being right. Only the RFC settles that.
 
 **Nothing bounds how many connections one process holds.**
 `.max_connections`, 10,000 by default. Past it a connection is accepted and

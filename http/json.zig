@@ -45,17 +45,43 @@ pub fn write(w: *std.Io.Writer, value: anytype) std.Io.Writer.Error!void {
 /// Answerable only while compiling — it reads the types of a struct's fields —
 /// so call it as `comptime covers(T)`.
 pub fn covers(comptime T: type) bool {
+    return coversWithin(T, 0);
+}
+
+/// How far into nested types to follow before answering no.
+///
+/// **A type holding a list of its own type has no bottom to recurse to** — a
+/// comment with replies, a category with children — and `covers` used to walk
+/// one until the compiler gave up, with a message in nilo's own file whose
+/// advice (raise the branch quota) buys more recursion rather than an answer.
+/// Answering false at the ceiling sends the value to `std.json`, which writes
+/// it correctly: its recursion is over a *value* at run time rather than over a
+/// type while compiling, so the fallback this fell off is the one that works.
+///
+/// Eight, the same as `openapi.schemaWithin`'s and for the same reason
+/// (ADR 0081). The two walk the same types and disagreeing about how deep is
+/// how a response and its description come apart.
+const max_depth = 8;
+
+fn coversWithin(comptime T: type, comptime depth: usize) bool {
+    if (depth >= max_depth) return false;
     // Reading the marker is what checks it, and this is the line that makes the
     // check happen at all: a `.tag` on a struct describes nothing and would
     // otherwise sit there doing nothing in silence.
     if (mark.marked(T)) _ = mark.of(T);
     if (T == Str) return true;
-    if (T == []const u8 or T == []u8) return true;
+    // **Any slice of bytes is text**, not a list of numbers — the reading
+    // `std.json` and `openapi.schemaWithin` both already give it. Named by
+    // exact type this used to miss `[:0]const u8`, which is what `@tagName`
+    // returns and what a field crossing a C boundary is spelled as: it fell
+    // through to the `.pointer` arm and went out as `[104,101,108,108,111]`
+    // while the generated document said `type: string`.
+    if (isByteSlice(T)) return true;
     return switch (@typeInfo(T)) {
         .bool, .int, .comptime_int, .float, .comptime_float => true,
         // An enum with a writer of its own is not just its tag name.
         .@"enum" => !hasDecl(T, "jsonStringify"),
-        .optional => |o| covers(o.child),
+        .optional => |o| coversWithin(o.child, depth + 1),
 
         // A tagged union, in both encodings.
         //
@@ -82,7 +108,7 @@ pub fn covers(comptime T: type) bool {
                     if (!tagged) break :covered false;
                     continue;
                 }
-                if (!covers(f.type)) break :covered false;
+                if (!coversWithin(f.type, depth + 1)) break :covered false;
             }
             break :covered true;
         },
@@ -90,8 +116,8 @@ pub fn covers(comptime T: type) bool {
         // `[3]u8{ 1, 2, 3 }` comes out as three escaped characters in quotes.
         // Rather than reproduce that rule and its edges, an array of bytes is
         // left to it.
-        .array => |a| a.child != u8 and covers(a.child),
-        .pointer => |p| p.size == .slice and covers(p.child),
+        .array => |a| a.child != u8 and coversWithin(a.child, depth + 1),
+        .pointer => |p| p.size == .slice and coversWithin(p.child, depth + 1),
         .@"struct" => |s| covered: {
             // A tuple is a JSON array to std.json, and reading that back off
             // the type is more care than the shape deserves; a type that
@@ -99,7 +125,7 @@ pub fn covers(comptime T: type) bool {
             if (s.is_tuple) break :covered false;
             if (hasDecl(T, "jsonStringify")) break :covered false;
             for (s.fields) |f| {
-                if (!covers(f.type)) break :covered false;
+                if (!coversWithin(f.type, depth + 1)) break :covered false;
             }
             break :covered true;
         },
@@ -109,7 +135,7 @@ pub fn covers(comptime T: type) bool {
 
 fn writeValue(comptime T: type, w: *std.Io.Writer, value: T) std.Io.Writer.Error!void {
     if (T == Str) return writeString(w, value.view());
-    if (T == []const u8 or T == []u8) return writeString(w, value);
+    if (comptime isByteSlice(T)) return writeString(w, value);
 
     switch (@typeInfo(T)) {
         .bool => return w.writeAll(if (value) "true" else "false"),
@@ -249,6 +275,21 @@ fn nextEscape(text: []const u8, from: usize) ?usize {
     return null;
 }
 
+/// Whether `T` is a run of bytes and therefore text: `[]const u8`, `[]u8`, and
+/// every sentinel-terminated or aligned spelling of the two.
+///
+/// Public because three layers have to give the same answer to it — this file
+/// writes the bytes, `typed.contentTypeFor` labels them and
+/// `openapi.schemaWithin` describes them — and the last of those reading
+/// `p.child == u8` while the first read the exact type is how a response and
+/// its own description came to disagree.
+pub fn isByteSlice(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .pointer => |p| p.size == .slice and p.child == u8,
+        else => false,
+    };
+}
+
 fn hasDecl(comptime T: type, comptime name: []const u8) bool {
     return switch (@typeInfo(T)) {
         .@"struct", .@"union", .@"enum", .@"opaque" => @hasDecl(T, name),
@@ -345,6 +386,58 @@ test "structs, nesting, optionals and enums" {
         inner: struct { deep: struct { x: bool } },
     }{ .outer = 1, .inner = .{ .deep = .{ .x = true } } });
     try expectSame(struct { maybe: ?struct { x: u8 } }{ .maybe = .{ .x = 2 } });
+}
+
+test "a sentinel-terminated string is a string, not a list of its bytes" {
+    // `[:0]const u8` is what `@tagName` returns, what `allocPrintSentinel`
+    // returns, and what a field crossing a C boundary is spelled as. Named by
+    // exact type, `covers` missed all three: the value went out as
+    // `[104,101,108,108,111]` while `openapi.schemaWithin` — reading the same
+    // type as `p.child == u8` — described it as a string.
+    try expectSame(@as([:0]const u8, "hello"));
+    try expectSame(@as([:0]const u8, ""));
+    try expectSame(@as([:0]const u8, "with a \" in it"));
+    try expectSame(struct { name: [:0]const u8, id: u32 }{ .name = "wati", .id = 7 });
+    try expectSame(@as([]const [:0]const u8, &.{ "a", "b" }));
+
+    // A mutable one, and the plain pair that always worked.
+    var buf = [_:0]u8{ 'h', 'i' };
+    try expectSame(@as([:0]u8, &buf));
+    try expectSame(@as([]const u8, "hello"));
+    try expectSame(@as([]u8, buf[0..2]));
+}
+
+test "a type that holds a list of itself is std.json's to write" {
+    // `covers` recursed through `.pointer` with no floor, so an ordinary JSON
+    // tree — a comment with replies, a category with children — did not come
+    // out wrong: it failed to compile, with a message in this file whose
+    // advice was to raise the branch quota, which buys more recursion rather
+    // than an answer. Eight deep and then no, the same ceiling
+    // `openapi.schemaWithin` has (ADR 0081).
+    const Comment = struct {
+        body: []const u8,
+        replies: []const @This(),
+    };
+    comptime std.debug.assert(!covers(Comment));
+
+    // And the fallback is not a degraded answer — it is the correct one,
+    // because `std.json` recurses over a value at run time rather than over a
+    // type while compiling.
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try write(&out.writer, Comment{
+        .body = "top",
+        .replies = &.{.{ .body = "under", .replies = &.{} }},
+    });
+    try testing.expectEqualStrings(
+        \\{"body":"top","replies":[{"body":"under","replies":[]}]}
+    , out.written());
+
+    // A shape that is merely deep rather than endless is still on the fast
+    // path, so the ceiling has not quietly swallowed ordinary types.
+    try expectSame(struct { a: struct { b: struct { c: struct { d: u32 } } } }{
+        .a = .{ .b = .{ .c = .{ .d = 1 } } },
+    });
 }
 
 test "lists" {

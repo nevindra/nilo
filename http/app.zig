@@ -2271,7 +2271,7 @@ test "POST JSON in, JSON out" {
     defer h.deinit();
     const body = "{\"message\":\"hello\"}";
     var request_buf: [256]u8 = undefined;
-    const request = std.fmt.bufPrint(&request_buf, "POST /echo HTTP/1.1\r\nContent-Length: {d}\r\n\r\n{s}", .{ body.len, body }) catch unreachable;
+    const request = std.fmt.bufPrint(&request_buf, "POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: {d}\r\n\r\n{s}", .{ body.len, body }) catch unreachable;
     const result = h.send(&app, request);
 
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 201 Created\r\n"));
@@ -2285,9 +2285,49 @@ test "an unknown route answers 404 and the body is still discarded" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "POST /nowhere HTTP/1.1\r\nContent-Length: 4\r\n\r\nxxxxGET /here HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "POST /nowhere HTTP/1.1\r\nHost: t\r\nContent-Length: 4\r\n\r\nxxxxGET /here HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(result.keep_alive);
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 404 Not Found\r\n"));
+}
+
+test "a request nobody else would answer is refused before it reaches a route" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/here", testQuiet);
+    try app.post("/here", testQuiet);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    // No `Host`, and two of them. RFC 9112 §3.2 makes both a 400, the front
+    // end in front of nilo refuses both, and the route plainly exists — so
+    // answering one is nilo agreeing to read a request nobody else agreed to.
+    for ([_][]const u8{
+        "GET /here HTTP/1.1\r\n\r\n",
+        "GET /here HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n",
+    }) |request| {
+        const result = h.send(&app, request);
+        try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 400"));
+        try testing.expect(!result.keep_alive);
+    }
+
+    // A final coding nilo cannot decode. What used to happen is the worse
+    // half: the head was answered as a request with no body at all, and the
+    // bytes behind it — a whole request here — were still in the read buffer
+    // for the next turn of the connection loop to parse. That is request
+    // smuggling, and the connection closing is what makes it impossible.
+    const smuggled = h.send(
+        &app,
+        "POST /here HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip\r\n\r\n" ++
+            "GET /here HTTP/1.1\r\nHost: t\r\n\r\n",
+    );
+    try testing.expect(std.mem.startsWith(u8, smuggled.response, "HTTP/1.1 400"));
+    try testing.expect(!smuggled.keep_alive);
+    // One answer, not two.
+    try testing.expectEqual(
+        @as(?usize, null),
+        std.mem.indexOfPos(u8, smuggled.response, 1, "HTTP/1.1 "),
+    );
 }
 
 test "an unrecognised error becomes a 500, but the connection stays alive" {
@@ -2297,7 +2337,7 @@ test "an unrecognised error becomes a 500, but the connection stays alive" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "GET /explode HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /explode HTTP/1.1\r\nHost: t\r\n\r\n");
 
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 500 Internal Server Error\r\n"));
     // Not a single byte of a response had gone out when the handler
@@ -2321,7 +2361,7 @@ test "a handler that fails after answering closes the connection" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "GET /half HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /half HTTP/1.1\r\nHost: t\r\n\r\n");
 
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 OK\r\n"));
     try testing.expect(!result.keep_alive);
@@ -2334,7 +2374,7 @@ test "a quiet handler answers an empty 200" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "GET /quiet HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /quiet HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(result.keep_alive);
     // No Content-Type: there is no content to give one to.
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n"));
@@ -2356,7 +2396,7 @@ test "query params and headers are readable from Ctx" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "GET /search?word=zig&empty= HTTP/1.1\r\nX-Token: secret\r\n\r\n");
+    const result = h.send(&app, "GET /search?word=zig&empty= HTTP/1.1\r\nHost: t\r\nX-Token: secret\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200"));
 }
 
@@ -2395,7 +2435,7 @@ test "typed handler: service and path param matched by type" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "GET /users/7 HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /users/7 HTTP/1.1\r\nHost: t\r\n\r\n");
 
     try testing.expect(result.keep_alive);
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 OK\r\n"));
@@ -2422,7 +2462,7 @@ test "a fail function becomes its status and message, connection stays alive" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "GET /users/99 HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /users/99 HTTP/1.1\r\nHost: t\r\n\r\n");
 
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 404 Not Found\r\n"));
     try testing.expect(std.mem.indexOf(u8, result.response, "no user 99") != null);
@@ -2439,7 +2479,7 @@ test "a path param that is not a number becomes a 400 with a clear message" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "GET /users/abc HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /users/abc HTTP/1.1\r\nHost: t\r\n\r\n");
 
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 400 Bad Request\r\n"));
     try testing.expect(std.mem.indexOf(u8, result.response, ":id has to be a whole number") != null);
@@ -2457,10 +2497,10 @@ test "the Failure does not leak into the next request on the same connection" {
     var h = Harness.init();
     defer h.deinit();
 
-    const failed_first = h.send(&app, "GET /users/99 HTTP/1.1\r\n\r\n");
+    const failed_first = h.send(&app, "GET /users/99 HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, failed_first.response, "HTTP/1.1 404"));
 
-    const then_succeeded = h.send(&app, "GET /users/7 HTTP/1.1\r\n\r\n");
+    const then_succeeded = h.send(&app, "GET /users/7 HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, then_succeeded.response, "HTTP/1.1 200 OK\r\n"));
     try testing.expect(std.mem.indexOf(u8, then_succeeded.response, "no user") == null);
 }
@@ -2479,7 +2519,7 @@ test "a JSON body comes in as a struct, Response(T) sets the status" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "POST /users HTTP/1.1\r\nContent-Length: 16\r\n\r\n{\"name\":\"wati\"}\r\n");
+    const result = h.send(&app, "POST /users HTTP/1.1\r\nHost: t\r\nContent-Length: 16\r\n\r\n{\"name\":\"wati\"}\r\n");
 
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 201 Created\r\n"));
     try testing.expect(std.mem.indexOf(u8, result.response, "{\"id\":1,\"name\":\"wati\"}") != null);
@@ -2492,7 +2532,7 @@ test "a JSON body that breaks a rule becomes a 422 via a fail function" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "POST /users HTTP/1.1\r\nContent-Length: 12\r\n\r\n{\"name\":\"\"}\n");
+    const result = h.send(&app, "POST /users HTTP/1.1\r\nHost: t\r\nContent-Length: 12\r\n\r\n{\"name\":\"\"}\n");
 
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 422 Unprocessable Content\r\n"));
     try testing.expect(std.mem.indexOf(u8, result.response, "name must not be empty") != null);
@@ -2505,7 +2545,7 @@ test "broken JSON is a 400 that says where it stopped making sense" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "POST /users HTTP/1.1\r\nContent-Length: 5\r\n\r\n{name");
+    const result = h.send(&app, "POST /users HTTP/1.1\r\nHost: t\r\nContent-Length: 5\r\n\r\n{name");
 
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 400 Bad Request\r\n"));
     try testing.expect(std.mem.indexOf(u8, result.response, "not valid JSON") != null);
@@ -2533,7 +2573,7 @@ fn signupResponse(h: *Harness, app: *App, body: []const u8) []const u8 {
     var head_buf: [128]u8 = undefined;
     const head = std.fmt.bufPrint(
         &head_buf,
-        "POST /signup HTTP/1.1\r\nContent-Length: {d}\r\n\r\n",
+        "POST /signup HTTP/1.1\r\nHost: t\r\nContent-Length: {d}\r\n\r\n",
         .{body.len},
     ) catch unreachable;
     var request_buf: [512]u8 = undefined;
@@ -2649,7 +2689,7 @@ test "a PATCH body tells a field left out from one sent as null" {
         var buf: [256]u8 = undefined;
         const request = std.fmt.bufPrint(
             &buf,
-            "PATCH /todos HTTP/1.1\r\nContent-Length: {d}\r\n\r\n{s}",
+            "PATCH /todos HTTP/1.1\r\nHost: t\r\nContent-Length: {d}\r\n\r\n{s}",
             .{ case.body.len, case.body },
         ) catch unreachable;
         const response = h.send(&app, request).response;
@@ -2664,7 +2704,7 @@ test "a PATCH body tells a field left out from one sent as null" {
     // Patch takes its value or null, and nothing else.
     const wrong = h.send(
         &app,
-        "PATCH /todos HTTP/1.1\r\nContent-Length: 14\r\n\r\n{\"title\":123}\n",
+        "PATCH /todos HTTP/1.1\r\nHost: t\r\nContent-Length: 14\r\n\r\n{\"title\":123}\n",
     );
     try testing.expect(std.mem.startsWith(u8, wrong.response, "HTTP/1.1 400"));
     try testing.expect(try Harness.saysFailure(wrong.response, "\"title\" has to be text or null"));
@@ -2730,7 +2770,7 @@ test "a field below the top level is named by where it is, not left to a bare 40
         var head_buf: [128]u8 = undefined;
         const head = std.fmt.bufPrint(
             &head_buf,
-            "POST /orders HTTP/1.1\r\nContent-Length: {d}\r\n\r\n",
+            "POST /orders HTTP/1.1\r\nHost: t\r\nContent-Length: {d}\r\n\r\n",
             .{case.body.len},
         ) catch unreachable;
         var request_buf: [1024]u8 = undefined;
@@ -2792,7 +2832,7 @@ test "a body nested past the depth the walk follows says so, rather than nothing
         var head_buf: [128]u8 = undefined;
         const head = std.fmt.bufPrint(
             &head_buf,
-            "POST /deep HTTP/1.1\r\nContent-Length: {d}\r\n\r\n",
+            "POST /deep HTTP/1.1\r\nHost: t\r\nContent-Length: {d}\r\n\r\n",
             .{case.body.len},
         ) catch unreachable;
         var request_buf: [1024]u8 = undefined;
@@ -2992,7 +3032,7 @@ test "Query(T) fills from the query string: defaults, optionals, decoding" {
     defer h.deinit();
 
     // Only the required field given: the rest fall back to their defaults.
-    const bare = h.send(&app, "GET /search?q=zig HTTP/1.1\r\n\r\n");
+    const bare = h.send(&app, "GET /search?q=zig HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, bare.response, "HTTP/1.1 200 OK\r\n"));
     try testing.expect(std.mem.indexOf(
         u8,
@@ -3001,7 +3041,7 @@ test "Query(T) fills from the query string: defaults, optionals, decoding" {
     ) != null);
 
     // Everything given, and percent-decoded on the way in like a path param.
-    const full = h.send(&app, "GET /search?q=hello%20world&page=3&sort=oldest&tag=a+b HTTP/1.1\r\n\r\n");
+    const full = h.send(&app, "GET /search?q=hello%20world&page=3&sort=oldest&tag=a+b HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(
         u8,
         full.response,
@@ -3018,11 +3058,11 @@ test "a query param that is missing or malformed is a 400 that says which one" {
     defer h.deinit();
 
     // No default and not optional, so absent is the client's mistake.
-    const missing = h.send(&app, "GET /search HTTP/1.1\r\n\r\n");
+    const missing = h.send(&app, "GET /search HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, missing.response, "HTTP/1.1 400 Bad Request\r\n"));
     try testing.expect(std.mem.indexOf(u8, missing.response, "?q is required") != null);
 
-    const not_a_number = h.send(&app, "GET /search?q=zig&page=soon HTTP/1.1\r\n\r\n");
+    const not_a_number = h.send(&app, "GET /search?q=zig&page=soon HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, not_a_number.response, "HTTP/1.1 400"));
     try testing.expect(try Harness.saysFailure(
         not_a_number.response,
@@ -3030,7 +3070,7 @@ test "a query param that is missing or malformed is a 400 that says which one" {
     ));
 
     // An enum says what it would have accepted, rather than only refusing.
-    const bad_enum = h.send(&app, "GET /search?q=zig&sort=sideways HTTP/1.1\r\n\r\n");
+    const bad_enum = h.send(&app, "GET /search?q=zig&sort=sideways HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, bad_enum.response, "HTTP/1.1 400"));
     try testing.expect(std.mem.indexOf(u8, bad_enum.response, "newest, oldest") != null);
 
@@ -3056,7 +3096,7 @@ test "Response(T) carries headers of its own, without reaching for a Ctx" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "POST /users HTTP/1.1\r\nContent-Length: 0\r\n\r\n");
+    const result = h.send(&app, "POST /users HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n");
 
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 201 Created\r\n"));
     try testing.expect(std.mem.indexOf(u8, result.response, "Location: /users/7\r\n") != null);
@@ -3093,7 +3133,7 @@ test "an empty response is a 204 with nothing after the head" {
     // connection is fine to carry another request.
     for ([_][]const u8{ "/one", "/two" }) |path| {
         var buf: [64]u8 = undefined;
-        const request = std.fmt.bufPrint(&buf, "DELETE {s} HTTP/1.1\r\n\r\n", .{path}) catch unreachable;
+        const request = std.fmt.bufPrint(&buf, "DELETE {s} HTTP/1.1\r\nHost: t\r\n\r\n", .{path}) catch unreachable;
         const result = h.send(&app, request);
         try testing.expectEqualStrings(
             "HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\n\r\n",
@@ -3110,7 +3150,7 @@ test "a Status(code, T) answers that code and carries headers like a Response do
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "POST /users HTTP/1.1\r\nContent-Length: 0\r\n\r\n");
+    const result = h.send(&app, "POST /users HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n");
 
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 201 Created\r\n"));
     try testing.expect(std.mem.indexOf(u8, result.response, "Location: /users/7\r\n") != null);
@@ -3130,13 +3170,13 @@ test "a handler returning ?T answers 404 when there is none, and never sends nul
     var h = Harness.init();
     defer h.deinit();
 
-    const found = h.send(&app, "GET /users/7 HTTP/1.1\r\n\r\n");
+    const found = h.send(&app, "GET /users/7 HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, found.response, "HTTP/1.1 200 OK\r\n"));
     try testing.expect(std.mem.indexOf(u8, found.response, "{\"id\":7,\"name\":\"wati\"}") != null);
 
     // Not `200 null`, which is what this used to be and what nobody meant
     // (ADR 0024). The path is in the message, so the log says which one.
-    const missing = h.send(&app, "GET /users/99 HTTP/1.1\r\n\r\n");
+    const missing = h.send(&app, "GET /users/99 HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, missing.response, "HTTP/1.1 404 Not Found\r\n"));
     try testing.expect(try Harness.saysFailure(missing.response, "there is no /users/99"));
     try testing.expect(missing.keep_alive);
@@ -3196,14 +3236,14 @@ test "a handler can ask for the request arena to build a header in" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "POST /users/42 HTTP/1.1\r\nContent-Length: 0\r\n\r\n");
+    const result = h.send(&app, "POST /users/42 HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n");
 
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 201 Created\r\n"));
     try testing.expect(std.mem.indexOf(u8, result.response, "Location: /users/42\r\n") != null);
 
     // The arena is reset between requests, so a second one is not looking
     // at what the first left behind.
-    const again = h.send(&app, "POST /users/7 HTTP/1.1\r\nContent-Length: 0\r\n\r\n");
+    const again = h.send(&app, "POST /users/7 HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, again.response, "Location: /users/7\r\n") != null);
 }
 
@@ -3220,15 +3260,15 @@ test "a catch-all route hands the rest of the path to the handler" {
     var h = Harness.init();
     defer h.deinit();
 
-    const deep = h.send(&app, "GET /files/css/site.css HTTP/1.1\r\n\r\n");
+    const deep = h.send(&app, "GET /files/css/site.css HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, deep.response, "HTTP/1.1 200 OK\r\n"));
     try testing.expect(std.mem.endsWith(u8, deep.response, "css/site.css"));
 
     // A literal route still wins over the catch-all it sits inside.
-    const literal = h.send(&app, "GET /files/readme HTTP/1.1\r\n\r\n");
+    const literal = h.send(&app, "GET /files/readme HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.endsWith(u8, literal.response, "handler"));
 
-    const nothing = h.send(&app, "GET /elsewhere HTTP/1.1\r\n\r\n");
+    const nothing = h.send(&app, "GET /elsewhere HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, nothing.response, "HTTP/1.1 404"));
 }
 
@@ -3276,19 +3316,61 @@ test "path params typed as Str, a number, an enum, and a bool" {
     var h = Harness.init();
     defer h.deinit();
 
-    const greeting = h.send(&app, "GET /greet/wati HTTP/1.1\r\n\r\n");
+    const greeting = h.send(&app, "GET /greet/wati HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, greeting.response, "Content-Type: text/plain") != null);
     try testing.expect(std.mem.endsWith(u8, greeting.response, "wati"));
 
-    const product = h.send(&app, "GET /times/6/7 HTTP/1.1\r\n\r\n");
+    const product = h.send(&app, "GET /times/6/7 HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.endsWith(u8, product.response, "42"));
 
-    const colour = h.send(&app, "GET /colour/green/true HTTP/1.1\r\n\r\n");
+    const colour = h.send(&app, "GET /colour/green/true HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.endsWith(u8, colour.response, "green"));
 
-    const wrong = h.send(&app, "GET /colour/purple/true HTTP/1.1\r\n\r\n");
+    const wrong = h.send(&app, "GET /colour/purple/true HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, wrong.response, "HTTP/1.1 400 Bad Request\r\n"));
     try testing.expect(std.mem.indexOf(u8, wrong.response, ":c is not one of the known choices") != null);
+}
+
+/// What `@tagName` returns, and what any field crossing a C boundary is
+/// spelled as. A handler is as likely to have one of these in hand as a plain
+/// `[]const u8`, and nothing about it is exotic.
+fn sentinelName(c: Colour) [:0]const u8 {
+    return @tagName(c);
+}
+
+const Sentinel = struct { name: [:0]const u8, id: u32 };
+
+fn sentinelInside() Sentinel {
+    return .{ .name = "wati", .id = 7 };
+}
+
+test "a sentinel-terminated string is text, and inside a struct it is a JSON string" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/tag/:c", sentinelName);
+    try app.get("/held", sentinelInside);
+    app.docs(.{ .title = "t", .version = "1" });
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    // Three files read this type and one of them got it right, which is the
+    // worse half: the response went out as a JSON array of byte values under
+    // `application/json` while the generated document said `type: string`.
+    const tag = h.send(&app, "GET /tag/green HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, tag.response, "Content-Type: text/plain") != null);
+    try testing.expect(std.mem.endsWith(u8, tag.response, "green"));
+
+    const held = h.send(&app, "GET /held HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, held.response, "Content-Type: application/json") != null);
+    try testing.expect(std.mem.endsWith(u8, held.response, "{\"name\":\"wati\",\"id\":7}"));
+
+    // And the document says the same thing the body does, which is the check
+    // that was missing when the two disagreed.
+    const doc = h.send(&app, "GET /openapi.json HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, doc.response, "\"type\":\"string\"") != null);
+    try testing.expect(std.mem.indexOf(u8, doc.response, "text/plain") != null);
 }
 
 test "a service that was never registered is caught before serving" {
@@ -3322,7 +3404,7 @@ test "a const service and a *Ctx can be asked for together" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "GET /mode HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /mode HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.endsWith(u8, result.response, "debug"));
 }
 
@@ -3338,10 +3420,10 @@ test "HEAD gives the same head as GET, with no body" {
     var h = Harness.init();
     defer h.deinit();
 
-    const got = h.send(&app, "GET /users/7 HTTP/1.1\r\n\r\n");
+    const got = h.send(&app, "GET /users/7 HTTP/1.1\r\nHost: t\r\n\r\n");
     const got_head = got.response[0 .. std.mem.indexOf(u8, got.response, "\r\n\r\n").? + 4];
 
-    const headed = h.send(&app, "HEAD /users/7 HTTP/1.1\r\n\r\n");
+    const headed = h.send(&app, "HEAD /users/7 HTTP/1.1\r\nHost: t\r\n\r\n");
 
     // The head is identical — including the Content-Length naming the
     // length of the body it would have sent — but not one byte of body.
@@ -3361,12 +3443,12 @@ test "HEAD on an unknown route and on the failure path is also body-less" {
     var h = Harness.init();
     defer h.deinit();
 
-    const failed = h.send(&app, "HEAD /users/99 HTTP/1.1\r\n\r\n");
+    const failed = h.send(&app, "HEAD /users/99 HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, failed.response, "HTTP/1.1 404 Not Found\r\n"));
     try testing.expect(std.mem.endsWith(u8, failed.response, "\r\n\r\n"));
     try testing.expect(std.mem.indexOf(u8, failed.response, "no user 99") == null);
 
-    const unrouted = h.send(&app, "HEAD /nowhere HTTP/1.1\r\n\r\n");
+    const unrouted = h.send(&app, "HEAD /nowhere HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, unrouted.response, "HTTP/1.1 404 Not Found\r\n"));
     try testing.expect(std.mem.endsWith(u8, unrouted.response, "\r\n\r\n"));
 }
@@ -3384,7 +3466,7 @@ test "a *Ctx handler need not declare the path params" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "GET /raw/42/x HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /raw/42/x HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.endsWith(u8, result.response, "42"));
 }
 
@@ -3403,7 +3485,7 @@ test "extra response headers are written after the framework's own" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "GET /h HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /h HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expectEqualStrings(
         "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n" ++
             "Connection: keep-alive\r\nX-One: 1\r\nX-Two: 2\r\n\r\nok",
@@ -3438,7 +3520,7 @@ test "a header value carrying a line break cannot write the rest of the response
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "GET /go HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /go HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, result.response, "Set-Cookie") == null);
     try testing.expect(std.mem.indexOf(u8, result.response, "Location: /welcome\r\n") != null);
 }
@@ -3462,7 +3544,7 @@ test "framework-owned headers are refused, repeats replace" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "GET /h HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /h HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, result.response, "x-once: second") != null);
     try testing.expect(std.mem.indexOf(u8, result.response, "first") == null);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, result.response, "Content-Length:"));
@@ -3481,7 +3563,7 @@ test "a header value carrying a newline is refused, not written" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "GET /go HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /go HTTP/1.1\r\nHost: t\r\n\r\n");
 
     // The forged header never reaches the wire, and neither does the second
     // status line behind it.
@@ -3510,7 +3592,7 @@ test "a Set-Cookie set as a plain header is checked like every other one" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "GET /c HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /c HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, result.response, "X-Injected") == null);
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 500 "));
 }
@@ -3530,7 +3612,7 @@ test "a header name that is not a token is refused, and an ordinary value still 
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "GET /n HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /n HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, result.response, "X-Fine: one, two\ttext\r\n") != null);
     try testing.expect(std.mem.indexOf(u8, result.response, "X-Bad") == null);
 }
@@ -3579,7 +3661,7 @@ test "middleware wraps the handler and can set response headers" {
     var h = Harness.init();
     defer h.deinit();
     try h.ready(&app);
-    const result = h.send(&app, "GET /x HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, result.response, "X-Order: outer") != null);
     try testing.expect(std.mem.endsWith(u8, result.response, "handler"));
 }
@@ -3595,7 +3677,7 @@ test "use and get can be registered in either order" {
     var h = Harness.init();
     defer h.deinit();
     try h.ready(&app);
-    const result = h.send(&app, "GET /x HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, result.response, "X-Order: outer") != null);
 }
 
@@ -3610,10 +3692,10 @@ test "a prefix scopes middleware to the routes under it" {
     defer h.deinit();
     try h.ready(&app);
 
-    const on = h.send(&app, "GET /api/thing HTTP/1.1\r\n\r\n");
+    const on = h.send(&app, "GET /api/thing HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, on.response, "X-Inner: yes") != null);
 
-    const off = h.send(&app, "GET /health HTTP/1.1\r\n\r\n");
+    const off = h.send(&app, "GET /health HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, off.response, "X-Inner") == null);
 }
 
@@ -3634,14 +3716,14 @@ test "a prefix carrying a param scopes middleware the same way" {
     defer h.deinit();
     try h.ready(&app);
 
-    const on = h.send(&app, "GET /orgs/acme/members HTTP/1.1\r\n\r\n");
+    const on = h.send(&app, "GET /orgs/acme/members HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, on.response, "X-Inner: yes") != null);
 
-    const missing = h.send(&app, "GET /orgs/acme/nothing-here HTTP/1.1\r\n\r\n");
+    const missing = h.send(&app, "GET /orgs/acme/nothing-here HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, missing.response, "HTTP/1.1 404"));
     try testing.expect(std.mem.indexOf(u8, missing.response, "X-Inner: yes") != null);
 
-    const off = h.send(&app, "GET /health HTTP/1.1\r\n\r\n");
+    const off = h.send(&app, "GET /health HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, off.response, "X-Inner") == null);
 }
 
@@ -3654,7 +3736,7 @@ test "middleware that answers short-circuits the handler" {
     var h = Harness.init();
     defer h.deinit();
     try h.ready(&app);
-    const result = h.send(&app, "GET /x HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.endsWith(u8, result.response, "from middleware"));
 }
 
@@ -3667,7 +3749,7 @@ test "middleware failing goes through the same path as a handler failing" {
     var h = Harness.init();
     defer h.deinit();
     try h.ready(&app);
-    const result = h.send(&app, "GET /api/secret HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /api/secret HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 401 Unauthorized\r\n"));
     try testing.expect(std.mem.indexOf(u8, result.response, "no token") != null);
     try testing.expect(result.keep_alive);
@@ -3682,7 +3764,7 @@ test "middleware runs even when no route matched" {
     var h = Harness.init();
     defer h.deinit();
     try h.ready(&app);
-    const result = h.send(&app, "GET /nowhere HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /nowhere HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 404 Not Found\r\n"));
     // A logger has to be able to see 404s, and CORS has to answer
     // preflights for paths with no route (ADR 0009).
@@ -3699,14 +3781,14 @@ test "CORS adds its headers and answers a preflight" {
     defer h.deinit();
     try h.ready(&app);
 
-    const normal = h.send(&app, "GET /x HTTP/1.1\r\n\r\n");
+    const normal = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, normal.response, "Access-Control-Allow-Origin: *") != null);
     try testing.expect(std.mem.endsWith(u8, normal.response, "handler"));
 
     // A preflight on a path with no OPTIONS route is still answered.
     const preflight = h.send(
         &app,
-        "OPTIONS /x HTTP/1.1\r\nAccess-Control-Request-Method: POST\r\n\r\n",
+        "OPTIONS /x HTTP/1.1\r\nHost: t\r\nAccess-Control-Request-Method: POST\r\n\r\n",
     );
     try testing.expect(std.mem.startsWith(u8, preflight.response, "HTTP/1.1 204 No Content\r\n"));
     try testing.expect(std.mem.indexOf(u8, preflight.response, "Access-Control-Allow-Methods:") != null);
@@ -3730,12 +3812,12 @@ test "headers middleware set survive onto a failure response" {
 
     // An error response that quietly dropped its CORS headers is one the
     // browser refuses to show — the worst moment to lose them.
-    const failed = h.send(&app, "GET /gone HTTP/1.1\r\n\r\n");
+    const failed = h.send(&app, "GET /gone HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, failed.response, "HTTP/1.1 404 Not Found\r\n"));
     try testing.expect(std.mem.indexOf(u8, failed.response, "Access-Control-Allow-Origin: *") != null);
 
     // Same for the empty 200 App fills in when a handler sends nothing.
-    const quiet = h.send(&app, "GET /quiet2 HTTP/1.1\r\n\r\n");
+    const quiet = h.send(&app, "GET /quiet2 HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, quiet.response, "Access-Control-Allow-Origin: *") != null);
 }
 
@@ -3750,7 +3832,7 @@ test "CORS with a named origin also sends Vary" {
     try h.ready(&app);
     const result = h.send(
         &app,
-        "GET /x HTTP/1.1\r\nOrigin: https://example.com\r\n\r\n",
+        "GET /x HTTP/1.1\r\nHost: t\r\nOrigin: https://example.com\r\n\r\n",
     );
     try testing.expect(std.mem.indexOf(u8, result.response, "Access-Control-Allow-Origin: https://example.com") != null);
     try testing.expect(std.mem.indexOf(u8, result.response, "Vary: Origin") != null);
@@ -3777,7 +3859,7 @@ test "two named origins each get told about themselves and nobody else" {
         var buf: [128]u8 = undefined;
         const request = try std.fmt.bufPrint(
             &buf,
-            "GET /x HTTP/1.1\r\nOrigin: {s}\r\n\r\n",
+            "GET /x HTTP/1.1\r\nHost: t\r\nOrigin: {s}\r\n\r\n",
             .{origin},
         );
         const answer = h.send(&app, request);
@@ -3809,7 +3891,7 @@ test "an origin nobody named is answered, and the browser is what refuses it" {
 
     const answer = h.send(
         &app,
-        "GET /x HTTP/1.1\r\nOrigin: https://evil.example.com\r\n\r\n",
+        "GET /x HTTP/1.1\r\nHost: t\r\nOrigin: https://evil.example.com\r\n\r\n",
     );
     try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 200"));
     try testing.expect(std.mem.indexOf(u8, answer.response, "Access-Control-Allow-Origin") == null);
@@ -3832,7 +3914,7 @@ test "a request with no Origin is not cross-origin and gets no allow header" {
     defer h.deinit();
     try h.ready(&app);
 
-    const answer = h.send(&app, "GET /x HTTP/1.1\r\n\r\n");
+    const answer = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, answer.response, "Access-Control-Allow-Origin") == null);
     try testing.expect(std.mem.indexOf(u8, answer.response, "Vary: Origin") != null);
 }
@@ -3852,7 +3934,7 @@ test "a preflight from a named origin is answered 204 with the methods" {
 
     const answer = h.send(
         &app,
-        "OPTIONS /x HTTP/1.1\r\nOrigin: https://b.example.com\r\n" ++
+        "OPTIONS /x HTTP/1.1\r\nHost: t\r\nOrigin: https://b.example.com\r\n" ++
             "Access-Control-Request-Method: GET\r\n\r\n",
     );
     try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 204"));
@@ -3874,7 +3956,7 @@ test "\"*\" still answers anyone, and says nothing about Vary" {
 
     const answer = h.send(
         &app,
-        "GET /x HTTP/1.1\r\nOrigin: https://anywhere.example.com\r\n\r\n",
+        "GET /x HTTP/1.1\r\nHost: t\r\nOrigin: https://anywhere.example.com\r\n\r\n",
     );
     try testing.expect(std.mem.indexOf(u8, answer.response, "Access-Control-Allow-Origin: *") != null);
     try testing.expect(std.mem.indexOf(u8, answer.response, "Vary: Origin") == null);
@@ -3899,13 +3981,13 @@ test "path params and query values arrive decoded" {
     var h = Harness.init();
     defer h.deinit();
 
-    const spaced = h.send(&app, "GET /hello/wati%20sari?q=caf%C3%A9+latte HTTP/1.1\r\n\r\n");
+    const spaced = h.send(&app, "GET /hello/wati%20sari?q=caf%C3%A9+latte HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.endsWith(u8, spaced.response, "wati sari|café latte"));
 
     // An encoded slash is one character of data. Had the target been
     // decoded before matching, this would have been three segments and
     // would not have matched /hello/:name at all.
-    const slashed = h.send(&app, "GET /hello/a%2Fb HTTP/1.1\r\n\r\n");
+    const slashed = h.send(&app, "GET /hello/a%2Fb HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.endsWith(u8, slashed.response, "a/b|-"));
 }
 
@@ -3923,7 +4005,7 @@ test "a chunked body reaches the handler and keep-alive survives it" {
     defer h.deinit();
     const result = h.send(
         &app,
-        "POST /echo HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n" ++
+        "POST /echo HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n" ++
             "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
     );
     try testing.expect(std.mem.endsWith(u8, result.response, "hello world"));
@@ -3939,7 +4021,7 @@ test "Expect: 100-continue is answered the moment the body is about to be read" 
     defer h.deinit();
     const result = h.send(
         &app,
-        "POST /echo HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\nhello",
+        "POST /echo HTTP/1.1\r\nHost: t\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\nhello",
     );
     // The interim first, whole and on its own, then the answer. A client that
     // gets neither waits on its own timer — curl's is a second, on every
@@ -3958,7 +4040,7 @@ test "a chunked body expecting a continue gets one too" {
     defer h.deinit();
     const result = h.send(
         &app,
-        "POST /echo HTTP/1.1\r\nExpect: 100-continue\r\nTransfer-Encoding: chunked\r\n\r\n" ++
+        "POST /echo HTTP/1.1\r\nHost: t\r\nExpect: 100-continue\r\nTransfer-Encoding: chunked\r\n\r\n" ++
             "5\r\nhello\r\n0\r\n\r\n",
     );
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 100 Continue\r\n\r\n"));
@@ -3978,7 +4060,7 @@ test "a request that is refused before the body gets its status and no continue"
     // Nothing routes here, so nothing ever asks for the body.
     const missing = h.send(
         &app,
-        "POST /nowhere HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n",
+        "POST /nowhere HTTP/1.1\r\nHost: t\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n",
     );
     try testing.expect(std.mem.startsWith(u8, missing.response, "HTTP/1.1 404 Not Found\r\n"));
     try testing.expect(std.mem.indexOf(u8, missing.response, "100 Continue") == null);
@@ -3990,7 +4072,7 @@ test "a request that is refused before the body gets its status and no continue"
     // the 413 goes out with the upload still unsent.
     const too_big = h.send(
         &app,
-        "POST /echo HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 99999999\r\n\r\n",
+        "POST /echo HTTP/1.1\r\nHost: t\r\nExpect: 100-continue\r\nContent-Length: 99999999\r\n\r\n",
     );
     try testing.expect(std.mem.startsWith(u8, too_big.response, "HTTP/1.1 413 "));
     try testing.expect(std.mem.indexOf(u8, too_big.response, "100 Continue") == null);
@@ -4017,7 +4099,7 @@ test "a continue is not sent to a client that could not use one" {
     // said it expected.
     const empty = h.send(
         &app,
-        "POST /echo HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 0\r\n\r\n",
+        "POST /echo HTTP/1.1\r\nHost: t\r\nExpect: 100-continue\r\nContent-Length: 0\r\n\r\n",
     );
     try testing.expect(std.mem.indexOf(u8, empty.response, "100 Continue") == null);
     try testing.expect(empty.keep_alive);
@@ -4026,7 +4108,7 @@ test "a continue is not sent to a client that could not use one" {
     // nothing changed.
     const plain = h.send(
         &app,
-        "POST /echo HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello",
+        "POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: 5\r\n\r\nhello",
     );
     try testing.expect(std.mem.startsWith(u8, plain.response, "HTTP/1.1 200 "));
     try testing.expect(plain.keep_alive);
@@ -4042,8 +4124,8 @@ test "a chunked body nobody read is still stepped over" {
     // Two requests down one connection: the second only parses if the
     // first body was consumed to exactly the right byte.
     var in = std.Io.Reader.fixed(
-        "POST /ignore HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n" ++
-            "GET /ignore HTTP/1.1\r\n\r\n",
+        "POST /ignore HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n" ++
+            "GET /ignore HTTP/1.1\r\nHost: t\r\n\r\n",
     );
     var out = std.Io.Writer.fixed(&h.buf);
     try testing.expect(app.handleRequest(h.arena.allocator(), &h.lifetime, &h.in_flight, &in, &out, .off, .off, .{}));
@@ -4062,7 +4144,7 @@ test "a chunked body whose sizes do not add up gets a 400, not silence" {
     // Says 5 bytes, then does not put a CRLF where one has to be.
     const result = h.send(
         &app,
-        "POST /echo HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhelloXX\r\n0\r\n\r\n",
+        "POST /echo HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhelloXX\r\n0\r\n\r\n",
     );
 
     // The stream is at an unknown byte now, so the connection goes — but
@@ -4078,7 +4160,7 @@ test "HEAD with no HEAD route falls back to the GET one" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "HEAD /page HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "HEAD /page HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 OK\r\n"));
     try testing.expect(std.mem.indexOf(u8, result.response, "Content-Length: 7\r\n") != null);
     try testing.expect(std.mem.endsWith(u8, result.response, "\r\n\r\n")); // no body
@@ -4126,20 +4208,20 @@ test "static files: content type, ETag, 304, index and the dotfile that is not s
     var h = Harness.init();
     defer h.deinit();
 
-    const css = h.send(&app, "GET /app.css HTTP/1.1\r\n\r\n");
+    const css = h.send(&app, "GET /app.css HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, css.response, "HTTP/1.1 200 OK\r\n"));
     try testing.expect(std.mem.indexOf(u8, css.response, "Content-Type: text/css; charset=utf-8") != null);
     try testing.expect(std.mem.indexOf(u8, css.response, "Cache-Control: public, max-age=3600") != null);
     try testing.expect(std.mem.endsWith(u8, css.response, "body{}"));
 
     // A directory path picks up its index.html.
-    const home = h.send(&app, "GET / HTTP/1.1\r\n\r\n");
+    const home = h.send(&app, "GET / HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.endsWith(u8, home.response, "<h1>home</h1>"));
-    const docs = h.send(&app, "GET /docs/ HTTP/1.1\r\n\r\n");
+    const docs = h.send(&app, "GET /docs/ HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.endsWith(u8, docs.response, "<h1>docs</h1>"));
 
     // A dotfile that found its way into the directory is not published.
-    const dotfile = h.send(&app, "GET /.env HTTP/1.1\r\n\r\n");
+    const dotfile = h.send(&app, "GET /.env HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, dotfile.response, "HTTP/1.1 404"));
 
     // The ETag the last response carried, handed back, costs no body.
@@ -4147,7 +4229,7 @@ test "static files: content type, ETag, 304, index and the dotfile that is not s
     var request_buf: [256]u8 = undefined;
     const conditional = std.fmt.bufPrint(
         &request_buf,
-        "GET /app.css HTTP/1.1\r\nIf-None-Match: {s}\r\n\r\n",
+        "GET /app.css HTTP/1.1\r\nHost: t\r\nIf-None-Match: {s}\r\n\r\n",
         .{etag},
     ) catch unreachable;
     const not_modified = h.send(&app, conditional);
@@ -4173,17 +4255,17 @@ test "static files: routes win, a prefix scopes, and middleware still wraps" {
     try h.ready(&app);
 
     // A route beats a file of the same name.
-    const shadowed = h.send(&app, "GET /assets/app.js HTTP/1.1\r\n\r\n");
+    const shadowed = h.send(&app, "GET /assets/app.js HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.endsWith(u8, shadowed.response, "handler"));
 
     // The SPA fallback catches a deep link under the prefix — and CORS,
     // registered as ordinary middleware, wraps the static response too.
-    const deep = h.send(&app, "GET /assets/users/42 HTTP/1.1\r\n\r\n");
+    const deep = h.send(&app, "GET /assets/users/42 HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.endsWith(u8, deep.response, "spa"));
     try testing.expect(std.mem.indexOf(u8, deep.response, "Access-Control-Allow-Origin: *") != null);
 
     // Outside the prefix nothing is claimed.
-    const outside = h.send(&app, "GET /users/42 HTTP/1.1\r\n\r\n");
+    const outside = h.send(&app, "GET /users/42 HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, outside.response, "HTTP/1.1 404"));
 }
 
@@ -4210,7 +4292,7 @@ test "two layers each naming a Vary axis both survive onto the response" {
 
     const asked = h.send(
         &app,
-        "GET /assets/app.css HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n",
+        "GET /assets/app.css HTTP/1.1\r\nHost: t\r\nAccept-Encoding: gzip\r\n\r\n",
     );
     try testing.expect(std.mem.indexOf(u8, asked.response, "Content-Encoding: gzip\r\n") != null);
     try testing.expect(std.mem.indexOf(u8, asked.response, "Vary: Origin\r\n") != null);
@@ -4352,7 +4434,7 @@ test "a repeated header naming what is already there is not said twice" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "GET /v HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /v HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, result.response, "Vary: "));
     try testing.expect(std.mem.indexOf(u8, result.response, "Vary: Origin\r\n") != null);
     try testing.expect(std.mem.indexOf(u8, result.response, "Vary: Accept-Language\r\n") != null);
@@ -4369,11 +4451,11 @@ test "static files: HEAD gives the head, POST is not answered with the file" {
     var h = Harness.init();
     defer h.deinit();
 
-    const headed = h.send(&app, "HEAD /logo.svg HTTP/1.1\r\n\r\n");
+    const headed = h.send(&app, "HEAD /logo.svg HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, headed.response, "Content-Length: 6\r\n") != null);
     try testing.expect(std.mem.endsWith(u8, headed.response, "\r\n\r\n"));
 
-    const posted = h.send(&app, "POST /logo.svg HTTP/1.1\r\nContent-Length: 0\r\n\r\n");
+    const posted = h.send(&app, "POST /logo.svg HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, posted.response, "HTTP/1.1 404"));
 }
 
@@ -4620,7 +4702,7 @@ test "one header more than the Ctx holds inline spills, and all of them go out i
 
     var h = Harness.init();
     defer h.deinit();
-    const sent = h.send(&app, "GET /many HTTP/1.1\r\n\r\n");
+    const sent = h.send(&app, "GET /many HTTP/1.1\r\nHost: t\r\n\r\n");
 
     // Every one of them survived the move into the spill list, in one piece.
     inline for (0..spilling_headers) |i| {
@@ -5465,14 +5547,14 @@ test "docs can be asked for before or after the routes, and both pages appear" {
     defer h.deinit();
     try h.ready(&app);
 
-    const spec = h.send(&app, "GET /openapi.json HTTP/1.1\r\n\r\n");
+    const spec = h.send(&app, "GET /openapi.json HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, spec.response, "HTTP/1.1 200 OK\r\n"));
     try testing.expect(std.mem.indexOf(u8, spec.response, "Content-Type: application/json") != null);
     try testing.expect(std.mem.indexOf(u8, spec.response, "\"title\":\"Late\"") != null);
     // Served as a file, so it arrives with an ETag like any other.
     try testing.expect(std.mem.indexOf(u8, spec.response, "ETag: ") != null);
 
-    const page = h.send(&app, "GET /reference HTTP/1.1\r\n\r\n");
+    const page = h.send(&app, "GET /reference HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, page.response, "Content-Type: text/html") != null);
     try testing.expect(std.mem.indexOf(u8, page.response, "data-url=\"/openapi.json\"") != null);
 }
@@ -5491,7 +5573,7 @@ test "no docs asked for, no documents served" {
     try testing.expect(app.docs_set == null);
     try testing.expect(std.mem.startsWith(
         u8,
-        h.send(&app, "GET /openapi.json HTTP/1.1\r\n\r\n").response,
+        h.send(&app, "GET /openapi.json HTTP/1.1\r\nHost: t\r\n\r\n").response,
         "HTTP/1.1 404 Not Found\r\n",
     ));
 }
@@ -5508,7 +5590,7 @@ test "a route of your own at the docs path still wins" {
 
     // Routes are matched before anything static is looked at, docs included
     // — so this is the handler, not the reader page.
-    const result = h.send(&app, "GET /docs HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /docs HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.endsWith(u8, result.response, "handler"));
 }
 
@@ -5533,11 +5615,11 @@ test "a single-page app serving everything does not swallow the document" {
     // this test exists for rather than an aside.
     try testing.expect(std.mem.indexOf(
         u8,
-        h.send(&app, "GET /whatever/deep HTTP/1.1\r\n\r\n").response,
+        h.send(&app, "GET /whatever/deep HTTP/1.1\r\nHost: t\r\n\r\n").response,
         "<h1>app</h1>",
     ) != null);
 
-    const spec = h.send(&app, "GET /openapi.json HTTP/1.1\r\n\r\n");
+    const spec = h.send(&app, "GET /openapi.json HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, spec.response, "Content-Type: application/json") != null);
     try testing.expect(std.mem.indexOf(u8, spec.response, "\"title\":\"Behind an SPA\"") != null);
 }
@@ -5582,14 +5664,14 @@ test "a group puts its prefix on every route inside it" {
 
     try testing.expect(std.mem.startsWith(
         u8,
-        h.send(&app, "GET /api/v1/users HTTP/1.1\r\n\r\n").response,
+        h.send(&app, "GET /api/v1/users HTTP/1.1\r\nHost: t\r\n\r\n").response,
         "HTTP/1.1 200 OK\r\n",
     ));
     // And the unprefixed path is not a route, which is the other half of
     // what "the prefix is on every route" means.
     try testing.expect(std.mem.startsWith(
         u8,
-        h.send(&app, "GET /users HTTP/1.1\r\n\r\n").response,
+        h.send(&app, "GET /users HTTP/1.1\r\nHost: t\r\n\r\n").response,
         "HTTP/1.1 404 Not Found\r\n",
     ));
 }
@@ -5611,7 +5693,7 @@ test "a group's own path is the prefix, with no trailing slash left on it" {
     try h.ready(&app);
     try testing.expect(std.mem.startsWith(
         u8,
-        h.send(&app, "GET /api HTTP/1.1\r\n\r\n").response,
+        h.send(&app, "GET /api HTTP/1.1\r\nHost: t\r\n\r\n").response,
         "HTTP/1.1 200 OK\r\n",
     ));
 }
@@ -5629,10 +5711,10 @@ test "use on a group scopes the middleware to the group" {
     defer h.deinit();
     try h.ready(&app);
 
-    const inside = h.send(&app, "GET /api/thing HTTP/1.1\r\n\r\n");
+    const inside = h.send(&app, "GET /api/thing HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, inside.response, "X-Inner: yes") != null);
 
-    const outside = h.send(&app, "GET /health HTTP/1.1\r\n\r\n");
+    const outside = h.send(&app, "GET /health HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, outside.response, "X-Inner") == null);
 }
 
@@ -5650,7 +5732,7 @@ test "groups nest, and nesting is the same as writing the prefix out" {
     try h.ready(&app);
     try testing.expect(std.mem.startsWith(
         u8,
-        h.send(&app, "GET /api/v1/users/7 HTTP/1.1\r\n\r\n").response,
+        h.send(&app, "GET /api/v1/users/7 HTTP/1.1\r\nHost: t\r\n\r\n").response,
         "HTTP/1.1 200 OK\r\n",
     ));
 }
@@ -5669,10 +5751,10 @@ test "a plugin is a function taking a group, and mounts wherever it is put" {
     try h.ready(&app);
 
     for ([_][]const u8{
-        "GET /internal/healthz HTTP/1.1\r\n\r\n",
-        "GET /internal/readyz HTTP/1.1\r\n\r\n",
-        "GET /admin/healthz HTTP/1.1\r\n\r\n",
-        "GET /admin/readyz HTTP/1.1\r\n\r\n",
+        "GET /internal/healthz HTTP/1.1\r\nHost: t\r\n\r\n",
+        "GET /internal/readyz HTTP/1.1\r\nHost: t\r\n\r\n",
+        "GET /admin/healthz HTTP/1.1\r\nHost: t\r\n\r\n",
+        "GET /admin/readyz HTTP/1.1\r\nHost: t\r\n\r\n",
     }) |request| {
         try testing.expect(std.mem.startsWith(
             u8,
@@ -5697,7 +5779,7 @@ test "a group at the root registers exactly what it was given" {
     var h = Harness.init();
     defer h.deinit();
     try h.ready(&app);
-    const result = h.send(&app, "GET /healthz HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /healthz HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 OK\r\n"));
     try testing.expect(std.mem.indexOf(u8, result.response, "X-Inner: yes") != null);
 }
@@ -5777,7 +5859,7 @@ test "a handler asks for the signed-in user by writing it in its arguments" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "GET /me HTTP/1.1\r\nAuthorization: t0k\r\n\r\n");
+    const result = h.send(&app, "GET /me HTTP/1.1\r\nHost: t\r\nAuthorization: t0k\r\n\r\n");
 
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 OK\r\n"));
     try testing.expect(std.mem.indexOf(u8, result.response, "{\"id\":7,\"name\":\"wati\"}") != null);
@@ -5794,11 +5876,11 @@ test "a resolver that refuses answers its own status and the handler never runs"
     var h = Harness.init();
     defer h.deinit();
 
-    const no_header = h.send(&app, "GET /me HTTP/1.1\r\n\r\n");
+    const no_header = h.send(&app, "GET /me HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, no_header.response, "HTTP/1.1 401 Unauthorized\r\n"));
     try testing.expect(std.mem.indexOf(u8, no_header.response, "needs an Authorization header") != null);
 
-    const wrong = h.send(&app, "GET /me HTTP/1.1\r\nAuthorization: nope\r\n\r\n");
+    const wrong = h.send(&app, "GET /me HTTP/1.1\r\nHost: t\r\nAuthorization: nope\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, wrong.response, "HTTP/1.1 401 Unauthorized\r\n"));
     // Refusing a request is a normal thing to do, not a reason to hang up.
     try testing.expect(wrong.keep_alive);
@@ -5819,7 +5901,7 @@ test "a middleware and the handler behind it resolve the user once between them"
     var h = Harness.init();
     defer h.deinit();
     try h.ready(&app);
-    const result = h.send(&app, "GET /me HTTP/1.1\r\nAuthorization: t0k\r\n\r\n");
+    const result = h.send(&app, "GET /me HTTP/1.1\r\nHost: t\r\nAuthorization: t0k\r\n\r\n");
 
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 OK\r\n"));
     try testing.expectEqual(@as(usize, 1), sessions.lookups);
@@ -5839,14 +5921,14 @@ test "what one request resolved does not leak into the next on the same connecti
     var h = Harness.init();
     defer h.deinit();
 
-    const first = h.send(&app, "GET /me HTTP/1.1\r\nAuthorization: wati\r\n\r\n");
+    const first = h.send(&app, "GET /me HTTP/1.1\r\nHost: t\r\nAuthorization: wati\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, first.response, "\"id\":7") != null);
 
     // Same connection, different token. The cache lives in the request
     // arena and the arena is reset between requests, so this is the second
     // user and not the first one again — which would be the worst bug this
     // feature could have.
-    const second = h.send(&app, "GET /me HTTP/1.1\r\nAuthorization: budi\r\n\r\n");
+    const second = h.send(&app, "GET /me HTTP/1.1\r\nHost: t\r\nAuthorization: budi\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, second.response, "\"id\":9") != null);
     try testing.expectEqual(@as(usize, 2), sessions.lookups);
 }
@@ -5913,7 +5995,7 @@ test "the in-flight request is readable, which is what the panic handler uses" {
 
     var h = Harness.init();
     defer h.deinit();
-    _ = h.send(&app, "GET /known HTTP/1.1\r\n\r\n");
+    _ = h.send(&app, "GET /known HTTP/1.1\r\nHost: t\r\n\r\n");
 
     // App records these before running the chain, so a panic anywhere
     // inside it can name the request (ADR 0008).
@@ -5996,7 +6078,7 @@ test "a HEAD of a streamed route gets the head a GET would have, and no body" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "HEAD /rows HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "HEAD /rows HTTP/1.1\r\nHost: t\r\n\r\n");
 
     try testing.expect(std.mem.indexOf(u8, result.response, "Transfer-Encoding: chunked\r\n") != null);
     const body = result.response[std.mem.indexOf(u8, result.response, "\r\n\r\n").? + 4 ..];
@@ -6011,7 +6093,7 @@ test "headers set before a stream go out in its head" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "GET /report HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /report HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, result.response, "X-Report: quarterly\r\n") != null);
 }
 
@@ -6022,7 +6104,7 @@ test "a stream nobody finished still leaves the connection usable" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "GET /oops HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /oops HTTP/1.1\r\nHost: t\r\n\r\n");
 
     // App writes the terminator the handler forgot, so the client is told
     // where the body stopped rather than waiting for more.
@@ -6094,7 +6176,7 @@ test "an event stream carries its events, and the headers a proxy needs" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "GET /events HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /events HTTP/1.1\r\nHost: t\r\n\r\n");
 
     try testing.expect(std.mem.indexOf(u8, result.response, "Content-Type: text/event-stream\r\n") != null);
     try testing.expect(std.mem.indexOf(u8, result.response, "Cache-Control: no-cache\r\n") != null);
@@ -6135,7 +6217,7 @@ test "a shutdown asks a stream to wind up rather than cutting it off" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "GET /forever HTTP/1.1\r\n\r\n");
+    const result = h.send(&app, "GET /forever HTTP/1.1\r\nHost: t\r\n\r\n");
 
     // Two events went out and the third was never started: `live()` went
     // false, the loop ended, and the body was closed properly (ADR 0020).
@@ -6179,7 +6261,7 @@ test "a body read in pieces arrives whole, and says how big it said it was" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "POST /weigh HTTP/1.1\r\nContent-Length: 20\r\n\r\nabcdefghijklmnopqrst");
+    const result = h.send(&app, "POST /weigh HTTP/1.1\r\nHost: t\r\nContent-Length: 20\r\n\r\nabcdefghijklmnopqrst");
 
     // Twenty bytes through an eight-byte buffer: three reads, and the
     // handler never held more than eight of them.
@@ -6196,7 +6278,7 @@ test "a chunked body read in pieces says nothing about its size" {
     defer h.deinit();
     const result = h.send(
         &app,
-        "POST /weigh HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n" ++
+        "POST /weigh HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n" ++
             "5\r\nhello\r\n7\r\n, world\r\n0\r\n\r\n",
     );
 
@@ -6214,7 +6296,7 @@ test "a body the handler stopped reading is discarded, and the connection contin
     defer h.deinit();
     const result = h.send(
         &app,
-        "POST /peek HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n" ++
+        "POST /peek HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n" ++
             "5\r\nhello\r\n7\r\n, world\r\n0\r\n\r\n",
     );
 
@@ -6241,7 +6323,7 @@ test "a Content-Length past the ceiling is refused before a byte is read" {
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "POST /upload HTTP/1.1\r\nContent-Length: 20\r\n\r\nabcdefghijklmnopqrst");
+    const result = h.send(&app, "POST /upload HTTP/1.1\r\nHost: t\r\nContent-Length: 20\r\n\r\nabcdefghijklmnopqrst");
 
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 413"));
     try testing.expect(std.mem.indexOf(u8, result.response, "bigger than this endpoint takes") != null);
@@ -6263,7 +6345,7 @@ test "a body read in pieces allocates nothing" {
     var in_flight = fail.InFlight{};
     var buf: [4096]u8 = undefined;
 
-    const request = "POST /weigh HTTP/1.1\r\nContent-Length: 200\r\n\r\n" ++ ("x" ** 200);
+    const request = "POST /weigh HTTP/1.1\r\nHost: t\r\nContent-Length: 200\r\n\r\n" ++ ("x" ** 200);
     const send = struct {
         fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
             var in = std.Io.Reader.fixed(request);
@@ -6302,11 +6384,11 @@ test "a range asks for part of a file and gets a 206" {
     defer h.deinit();
 
     // A whole-file request advertises that ranges are possible at all.
-    const whole = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\n\r\n");
+    const whole = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, whole.response, "Accept-Ranges: bytes\r\n") != null);
     try testing.expect(std.mem.endsWith(u8, whole.response, "abcdefghijklmnopqrstuvwxyz"));
 
-    const part = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\nRange: bytes=3-7\r\n\r\n");
+    const part = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\nHost: t\r\nRange: bytes=3-7\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, part.response, "HTTP/1.1 206 Partial Content\r\n"));
     try testing.expect(std.mem.indexOf(u8, part.response, "Content-Range: bytes 3-7/26\r\n") != null);
     // Content-Length is the part's length, not the file's.
@@ -6315,12 +6397,12 @@ test "a range asks for part of a file and gets a 206" {
     try testing.expect(part.keep_alive);
 
     // Resuming a download: everything from here on.
-    const rest = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\nRange: bytes=20-\r\n\r\n");
+    const rest = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\nHost: t\r\nRange: bytes=20-\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, rest.response, "Content-Range: bytes 20-25/26\r\n") != null);
     try testing.expect(std.mem.endsWith(u8, rest.response, "uvwxyz"));
 
     // The tail, counted from the end.
-    const tail = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\nRange: bytes=-3\r\n\r\n");
+    const tail = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\nHost: t\r\nRange: bytes=-3\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, tail.response, "Content-Range: bytes 23-25/26\r\n") != null);
     try testing.expect(std.mem.endsWith(u8, tail.response, "xyz"));
 }
@@ -6338,7 +6420,7 @@ test "a range past the end of a file says how big it really is" {
     var h = Harness.init();
     defer h.deinit();
 
-    const past = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\nRange: bytes=100-200\r\n\r\n");
+    const past = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\nHost: t\r\nRange: bytes=100-200\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, past.response, "HTTP/1.1 416 Range Not Satisfiable\r\n"));
     // The whole content of the answer, and the reason a client asked wrong.
     try testing.expect(std.mem.indexOf(u8, past.response, "Content-Range: bytes */26\r\n") != null);
@@ -6346,12 +6428,12 @@ test "a range past the end of a file says how big it really is" {
 
     // Nonsense is ignored rather than refused: the whole file is a correct
     // answer to every request, and a 416 for a typo helps nobody.
-    const nonsense = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\nRange: bytes=abc-def\r\n\r\n");
+    const nonsense = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\nHost: t\r\nRange: bytes=abc-def\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, nonsense.response, "HTTP/1.1 200 OK\r\n"));
     try testing.expect(std.mem.endsWith(u8, nonsense.response, "abcdefghijklmnopqrstuvwxyz"));
 
     // More than one range wants a multipart body nilo does not assemble.
-    const several = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\nRange: bytes=0-2,10-12\r\n\r\n");
+    const several = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\nHost: t\r\nRange: bytes=0-2,10-12\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, several.response, "HTTP/1.1 200 OK\r\n"));
 }
 
@@ -6369,7 +6451,7 @@ test "If-Range holds a resumed download to the file it started with" {
     defer h.deinit();
 
     // Read the ETag off a normal response, the way a client resuming would.
-    const first = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\n\r\n");
+    const first = h.send(&app, "GET /alphabet.txt HTTP/1.1\r\nHost: t\r\n\r\n");
     const etag_at = std.mem.indexOf(u8, first.response, "ETag: ").? + 6;
     const etag_end = std.mem.indexOfPos(u8, first.response, etag_at, "\r\n").?;
     var etag_buf: [64]u8 = undefined;
@@ -6379,7 +6461,7 @@ test "If-Range holds a resumed download to the file it started with" {
     var request: [256]u8 = undefined;
     const matching = std.fmt.bufPrint(
         &request,
-        "GET /alphabet.txt HTTP/1.1\r\nRange: bytes=20-\r\nIf-Range: {s}\r\n\r\n",
+        "GET /alphabet.txt HTTP/1.1\r\nHost: t\r\nRange: bytes=20-\r\nIf-Range: {s}\r\n\r\n",
         .{etag},
     ) catch unreachable;
     const resumed = h.send(&app, matching);
@@ -6389,7 +6471,7 @@ test "If-Range holds a resumed download to the file it started with" {
     // with, so byte 20 of it is not the byte they wanted. All of it, then.
     const stale = h.send(
         &app,
-        "GET /alphabet.txt HTTP/1.1\r\nRange: bytes=20-\r\nIf-Range: \"nope\"\r\n\r\n",
+        "GET /alphabet.txt HTTP/1.1\r\nHost: t\r\nRange: bytes=20-\r\nIf-Range: \"nope\"\r\n\r\n",
     );
     try testing.expect(std.mem.startsWith(u8, stale.response, "HTTP/1.1 200 OK\r\n"));
     try testing.expect(std.mem.endsWith(u8, stale.response, "abcdefghijklmnopqrstuvwxyz"));
@@ -6408,7 +6490,7 @@ test "a HEAD with a range gets the head a GET would have, and no body" {
     var h = Harness.init();
     defer h.deinit();
 
-    const head = h.send(&app, "HEAD /alphabet.txt HTTP/1.1\r\nRange: bytes=3-7\r\n\r\n");
+    const head = h.send(&app, "HEAD /alphabet.txt HTTP/1.1\r\nHost: t\r\nRange: bytes=3-7\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, head.response, "HTTP/1.1 206 Partial Content\r\n"));
     try testing.expect(std.mem.indexOf(u8, head.response, "Content-Range: bytes 3-7/26\r\n") != null);
     try testing.expect(std.mem.indexOf(u8, head.response, "Content-Length: 5\r\n") != null);
@@ -6596,16 +6678,67 @@ test "a request that is not asking to be upgraded is told which part is missing"
 
     const no_version = h.send(
         &app,
-        "GET /ws HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+        "GET /ws HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
     );
     try testing.expect(std.mem.indexOf(u8, no_version.response, "missing Sec-WebSocket-Version") != null);
 
     const wrong_version = h.send(
         &app,
-        "GET /ws HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" ++
+        "GET /ws HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" ++
             "Sec-WebSocket-Version: 8\r\nSec-WebSocket-Key: x\r\n\r\n",
     );
     try testing.expect(std.mem.indexOf(u8, wrong_version.response, "speaks WebSocket version 13") != null);
+}
+
+test "a socket a page on another origin asked for is not opened" {
+    const Named = struct {
+        fn open(c: *Ctx) anyerror!void {
+            return c.upgradeWith(echoLoop, {}, .{ .origins = &.{"https://app.example.com"} });
+        }
+    };
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/ws", echoSocket);
+    try app.get("/named", Named.open);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const rest = "Upgrade: websocket\r\nConnection: Upgrade\r\n" ++
+        "Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+
+    // The whole reason this check exists: a browser applies no CORS to a
+    // WebSocket, sends no preflight and honours no `Access-Control-Allow-
+    // Origin`, so nothing in front of the handshake refuses this — and the
+    // handshake is an ordinary GET, so it arrives with the session cookie on
+    // it. Nothing but the server can say no.
+    const foreign = h.send(&app, "GET /ws HTTP/1.1\r\nHost: example.dev\r\n" ++
+        "Origin: https://evil.dev\r\n" ++ rest);
+    try testing.expect(std.mem.startsWith(u8, foreign.response, "HTTP/1.1 403"));
+    try testing.expect(std.mem.indexOf(u8, foreign.response, "101") == null);
+    try testing.expect(std.mem.indexOf(u8, foreign.response, ".origins") != null);
+
+    // The server's own page, which is the ordinary case and needs no option.
+    const own = h.send(&app, "GET /ws HTTP/1.1\r\nHost: example.dev\r\n" ++
+        "Origin: https://example.dev\r\n" ++ rest);
+    try testing.expect(std.mem.startsWith(u8, own.response, "HTTP/1.1 101"));
+
+    // No `Origin` at all is not a browser, and the ambient cookie this
+    // guards is a browser's. `wstest` and every command-line client send
+    // none.
+    const headless = h.send(&app, "GET /ws HTTP/1.1\r\nHost: example.dev\r\n" ++ rest);
+    try testing.expect(std.mem.startsWith(u8, headless.response, "HTTP/1.1 101"));
+
+    // And a page on the host the route named, which is what a socket served
+    // from a different host to the page needs.
+    const named = h.send(&app, "GET /named HTTP/1.1\r\nHost: api.example.com\r\n" ++
+        "Origin: https://app.example.com\r\n" ++ rest);
+    try testing.expect(std.mem.startsWith(u8, named.response, "HTTP/1.1 101"));
+
+    const unnamed = h.send(&app, "GET /named HTTP/1.1\r\nHost: api.example.com\r\n" ++
+        "Origin: https://other.example.com\r\n" ++ rest);
+    try testing.expect(std.mem.startsWith(u8, unnamed.response, "HTTP/1.1 403"));
 }
 
 // ---- who the client is (X-Forwarded-For) ----
@@ -6628,7 +6761,7 @@ test "with no proxies trusted, a forged X-Forwarded-For is ignored" {
     defer h.deinit();
     h.peer = try bulkhead.Peer.from("198.51.100.7");
 
-    const answer = h.send(&app, "GET /who HTTP/1.1\r\nX-Forwarded-For: 1.2.3.4\r\n\r\n");
+    const answer = h.send(&app, "GET /who HTTP/1.1\r\nHost: t\r\nX-Forwarded-For: 1.2.3.4\r\n\r\n");
     try testing.expect(std.mem.endsWith(u8, answer.response, "198.51.100.7"));
 }
 
@@ -6645,7 +6778,7 @@ test "with one proxy trusted, the client is the entry that proxy wrote" {
 
     // Nothing forged: the proxy appended the address it saw, and that is
     // the only entry there is.
-    const plain = h.send(&app, "GET /who HTTP/1.1\r\nX-Forwarded-For: 203.0.113.9\r\n\r\n");
+    const plain = h.send(&app, "GET /who HTTP/1.1\r\nHost: t\r\nX-Forwarded-For: 203.0.113.9\r\n\r\n");
     try testing.expect(std.mem.endsWith(u8, plain.response, "203.0.113.9"));
 
     // The client sent an address of its own and the proxy appended after
@@ -6654,7 +6787,7 @@ test "with one proxy trusted, the client is the entry that proxy wrote" {
     // from the right and not from the left.
     const forged = h.send(
         &app,
-        "GET /who HTTP/1.1\r\nX-Forwarded-For: 9.9.9.9, 203.0.113.9\r\n\r\n",
+        "GET /who HTTP/1.1\r\nHost: t\r\nX-Forwarded-For: 9.9.9.9, 203.0.113.9\r\n\r\n",
     );
     try testing.expect(std.mem.endsWith(u8, forged.response, "203.0.113.9"));
 }
@@ -6674,7 +6807,7 @@ test "with two proxies trusted, the client is two entries from the right" {
     // and appended that. Two hops back from the right is the client.
     const answer = h.send(
         &app,
-        "GET /who HTTP/1.1\r\nX-Forwarded-For: 203.0.113.9, 198.51.100.2\r\n\r\n",
+        "GET /who HTTP/1.1\r\nHost: t\r\nX-Forwarded-For: 203.0.113.9, 198.51.100.2\r\n\r\n",
     );
     try testing.expect(std.mem.endsWith(u8, answer.response, "203.0.113.9"));
 }
@@ -6693,11 +6826,11 @@ test "a header with fewer entries than there are hops falls back to the socket" 
     // Two proxies were configured and one entry turned up, so the chain is
     // not the one this server was told about. The closest guess would be
     // the client's own forgery, so there is no guess.
-    const short = h.send(&app, "GET /who HTTP/1.1\r\nX-Forwarded-For: 9.9.9.9\r\n\r\n");
+    const short = h.send(&app, "GET /who HTTP/1.1\r\nHost: t\r\nX-Forwarded-For: 9.9.9.9\r\n\r\n");
     try testing.expect(std.mem.endsWith(u8, short.response, "10.0.0.1"));
 
     // And no header at all is the same answer.
-    const none = h.send(&app, "GET /who HTTP/1.1\r\n\r\n");
+    const none = h.send(&app, "GET /who HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.endsWith(u8, none.response, "10.0.0.1"));
 }
 
@@ -6716,7 +6849,7 @@ test "the socket's own address is there whatever the header says" {
     defer h.deinit();
     h.peer = try bulkhead.Peer.from("198.51.100.7");
 
-    const answer = h.send(&app, "GET /peer HTTP/1.1\r\nX-Forwarded-For: 1.2.3.4\r\n\r\n");
+    const answer = h.send(&app, "GET /peer HTTP/1.1\r\nHost: t\r\nX-Forwarded-For: 1.2.3.4\r\n\r\n");
     try testing.expect(std.mem.endsWith(u8, answer.response, "198.51.100.7"));
 }
 
@@ -6736,7 +6869,7 @@ test "a body past max_body is a 413, and max_body is what listen() was told" {
     defer h.deinit();
 
     const body = "0123456789";
-    const request = "POST /echo HTTP/1.1\r\nContent-Length: 10\r\n\r\n" ++ body;
+    const request = "POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: 10\r\n\r\n" ++ body;
 
     // Ten bytes is under the default megabyte.
     const allowed = h.send(&app, request);
@@ -6772,7 +6905,7 @@ test "a chunked body is counted against max_body as it arrives" {
     // is to count the chunks.
     const answer = h.send(
         &app,
-        "POST /echo HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n" ++
+        "POST /echo HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n" ++
             "5\r\nhello\r\n0\r\n\r\n",
     );
     try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 413"));
@@ -6803,7 +6936,7 @@ test "a client that says gzip gets the copy made at startup" {
     var h = Harness.init();
     defer h.deinit();
 
-    const answer = h.send(&app, "GET /app.css HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n");
+    const answer = h.send(&app, "GET /app.css HTTP/1.1\r\nHost: t\r\nAccept-Encoding: gzip\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 200"));
     try testing.expect(std.mem.indexOf(u8, answer.response, "Content-Encoding: gzip") != null);
     // Whenever there are two representations, whichever one goes out.
@@ -6822,7 +6955,7 @@ test "a client that says nothing gets the file as it is, and still gets Vary" {
     var h = Harness.init();
     defer h.deinit();
 
-    const answer = h.send(&app, "GET /app.css HTTP/1.1\r\n\r\n");
+    const answer = h.send(&app, "GET /app.css HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, answer.response, "Content-Encoding") == null);
     // Said even though the plain copy is the one going out: a shared cache
     // that stored this without it would hand it to every client after,
@@ -6851,7 +6984,7 @@ test "a CORS Vary and a compression Vary are both sent, not one over the other" 
     defer h.deinit();
     try h.ready(&app);
 
-    const answer = h.send(&app, "GET /app.css HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n");
+    const answer = h.send(&app, "GET /app.css HTTP/1.1\r\nHost: t\r\nAccept-Encoding: gzip\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, answer.response, "Vary: Origin") != null);
     try testing.expect(std.mem.indexOf(u8, answer.response, "Vary: Accept-Encoding") != null);
     try testing.expect(std.mem.indexOf(u8, answer.response, "Content-Encoding: gzip") != null);
@@ -6864,7 +6997,7 @@ test "a client that refuses gzip with q=0 is not sent gzip" {
     var h = Harness.init();
     defer h.deinit();
 
-    const answer = h.send(&app, "GET /app.css HTTP/1.1\r\nAccept-Encoding: gzip;q=0\r\n\r\n");
+    const answer = h.send(&app, "GET /app.css HTTP/1.1\r\nHost: t\r\nAccept-Encoding: gzip;q=0\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, answer.response, "Content-Encoding") == null);
     try testing.expect(std.mem.endsWith(u8, answer.response, test_css));
 }
@@ -6878,11 +7011,11 @@ test "the ETag of one representation does not answer for the other" {
 
     // Collect both tags, from the two answers that carry them.
     var plain_buf: [128]u8 = undefined;
-    const plain = h.send(&app, "GET /app.css HTTP/1.1\r\n\r\n");
+    const plain = h.send(&app, "GET /app.css HTTP/1.1\r\nHost: t\r\n\r\n");
     const plain_etag = try dupeHeader(&plain_buf, plain.response, "ETag");
 
     var gz_buf: [128]u8 = undefined;
-    const gz = h.send(&app, "GET /app.css HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n");
+    const gz = h.send(&app, "GET /app.css HTTP/1.1\r\nHost: t\r\nAccept-Encoding: gzip\r\n\r\n");
     const gz_etag = try dupeHeader(&gz_buf, gz.response, "ETag");
 
     try testing.expect(!std.mem.eql(u8, plain_etag, gz_etag));
@@ -6891,14 +7024,14 @@ test "the ETag of one representation does not answer for the other" {
     var buf: [512]u8 = undefined;
     const plain_again = h.send(&app, try std.fmt.bufPrint(
         &buf,
-        "GET /app.css HTTP/1.1\r\nIf-None-Match: {s}\r\n\r\n",
+        "GET /app.css HTTP/1.1\r\nHost: t\r\nIf-None-Match: {s}\r\n\r\n",
         .{plain_etag},
     ));
     try testing.expect(std.mem.startsWith(u8, plain_again.response, "HTTP/1.1 304"));
 
     const gz_again = h.send(&app, try std.fmt.bufPrint(
         &buf,
-        "GET /app.css HTTP/1.1\r\nAccept-Encoding: gzip\r\nIf-None-Match: {s}\r\n\r\n",
+        "GET /app.css HTTP/1.1\r\nHost: t\r\nAccept-Encoding: gzip\r\nIf-None-Match: {s}\r\n\r\n",
         .{gz_etag},
     ));
     try testing.expect(std.mem.startsWith(u8, gz_again.response, "HTTP/1.1 304"));
@@ -6908,7 +7041,7 @@ test "the ETag of one representation does not answer for the other" {
     // gzip, must be sent gzip rather than told what it has is current.
     const crossed = h.send(&app, try std.fmt.bufPrint(
         &buf,
-        "GET /app.css HTTP/1.1\r\nAccept-Encoding: gzip\r\nIf-None-Match: {s}\r\n\r\n",
+        "GET /app.css HTTP/1.1\r\nHost: t\r\nAccept-Encoding: gzip\r\nIf-None-Match: {s}\r\n\r\n",
         .{plain_etag},
     ));
     try testing.expect(std.mem.startsWith(u8, crossed.response, "HTTP/1.1 200"));
@@ -6926,7 +7059,7 @@ test "a range is served from the plain file even when gzip was offered" {
     // bytes would hand back the wrong ones, silently.
     const answer = h.send(
         &app,
-        "GET /app.css HTTP/1.1\r\nAccept-Encoding: gzip\r\nRange: bytes=0-4\r\n\r\n",
+        "GET /app.css HTTP/1.1\r\nHost: t\r\nAccept-Encoding: gzip\r\nRange: bytes=0-4\r\n\r\n",
     );
     try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 206"));
     try testing.expect(std.mem.indexOf(u8, answer.response, "Content-Encoding") == null);
@@ -6946,7 +7079,7 @@ test "a file too small to be worth gzipping has one representation and no Vary" 
     var h = Harness.init();
     defer h.deinit();
 
-    const answer = h.send(&app, "GET /hi.txt HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n");
+    const answer = h.send(&app, "GET /hi.txt HTTP/1.1\r\nHost: t\r\nAccept-Encoding: gzip\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, answer.response, "Content-Encoding") == null);
     try testing.expect(std.mem.indexOf(u8, answer.response, "Vary") == null);
     try testing.expect(std.mem.endsWith(u8, answer.response, "hello"));
@@ -7046,10 +7179,10 @@ test "a middleware scoped below a static prefix still runs, and still costs noth
     var h = Harness.init();
     defer h.deinit();
 
-    const open = h.send(&app, "GET /assets/open.css HTTP/1.1\r\n\r\n");
+    const open = h.send(&app, "GET /assets/open.css HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, open.response, "HTTP/1.1 200"));
 
-    const shut = h.send(&app, "GET /assets/private/secret.css HTTP/1.1\r\n\r\n");
+    const shut = h.send(&app, "GET /assets/private/secret.css HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, shut.response, "HTTP/1.1 401"));
 }
 
@@ -7075,12 +7208,12 @@ test "a cookie is read out of the head the connection delivered" {
     defer h.deinit();
     try h.ready(&app);
 
-    const answer = h.send(&app, "GET /me HTTP/1.1\r\nCookie: theme=dark; session=abc123\r\n\r\n");
+    const answer = h.send(&app, "GET /me HTTP/1.1\r\nHost: t\r\nCookie: theme=dark; session=abc123\r\n\r\n");
     try testing.expect(std.mem.endsWith(u8, answer.response, "abc123"));
 
     // A request carrying no cookie at all takes the other branch rather
     // than reading somebody else's head.
-    const bare = h.send(&app, "GET /me HTTP/1.1\r\n\r\n");
+    const bare = h.send(&app, "GET /me HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.endsWith(u8, bare.response, "no cookie"));
 }
 
@@ -7094,7 +7227,7 @@ test "a cookie split across two Cookie headers is still found" {
     defer h.deinit();
     try h.ready(&app);
 
-    const answer = h.send(&app, "GET /me HTTP/1.1\r\nCookie: theme=dark\r\nCookie: session=abc123\r\n\r\n");
+    const answer = h.send(&app, "GET /me HTTP/1.1\r\nHost: t\r\nCookie: theme=dark\r\nCookie: session=abc123\r\n\r\n");
     try testing.expect(std.mem.endsWith(u8, answer.response, "abc123"));
 }
 
@@ -7225,7 +7358,7 @@ test "a cookie value that would smuggle an attribute is refused, not escaped" {
     defer h.deinit();
     try h.ready(&app);
 
-    const answer = h.send(&app, "GET /bad HTTP/1.1\r\n\r\n");
+    const answer = h.send(&app, "GET /bad HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 500"));
     try testing.expect(try Harness.saysFailure(answer.response, "holds a character a cookie value cannot"));
     // And nothing went out with it.
@@ -7279,13 +7412,13 @@ test "a form that does not fit is a 400 naming the field, like a query param" {
     defer h.deinit();
     try h.ready(&app);
 
-    const missing = h.send(&app, "POST /sign-in HTTP/1.1\r\n" ++
+    const missing = h.send(&app, "POST /sign-in HTTP/1.1\r\nHost: t\r\n" ++
         "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 24\r\n\r\n" ++
         "email=wati%40example.dev");
     try testing.expect(std.mem.startsWith(u8, missing.response, "HTTP/1.1 400"));
     try testing.expect(try Harness.saysFailure(missing.response, "the form is missing \"password\""));
 
-    const wrong_type = h.send(&app, "POST /sign-in HTTP/1.1\r\n" ++
+    const wrong_type = h.send(&app, "POST /sign-in HTTP/1.1\r\nHost: t\r\n" ++
         "Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}");
     try testing.expect(std.mem.startsWith(u8, wrong_type.response, "HTTP/1.1 400"));
     try testing.expect(try Harness.saysFailure(wrong_type.response, "this endpoint takes a form"));
@@ -7309,7 +7442,7 @@ test "a request with no id of its own is given one, and told which" {
     defer h.deinit();
     try h.ready(&app);
 
-    const answer = h.send(&app, "GET /x HTTP/1.1\r\n\r\n");
+    const answer = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 200"));
 
     // Sixteen hex characters, and the handler and the response header agree
@@ -7330,7 +7463,7 @@ test "an id from the proxy in front is adopted rather than replaced" {
     defer h.deinit();
     try h.ready(&app);
 
-    const answer = h.send(&app, "GET /x HTTP/1.1\r\nX-Request-Id: 2f8a4c1e-5b6d\r\n\r\n");
+    const answer = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\nX-Request-Id: 2f8a4c1e-5b6d\r\n\r\n");
     try testing.expectEqualStrings("2f8a4c1e-5b6d", sentHeader(answer.response, "X-Request-Id").?);
     try testing.expect(std.mem.endsWith(u8, answer.response, "2f8a4c1e-5b6d"));
 }
@@ -7348,13 +7481,13 @@ test "an id that would smuggle something is ignored, not repeated" {
     // A header value cannot carry a bare CR or LF this far — the parser
     // stops that — so the shape that does arrive is the one with characters
     // a JSON log line or a downstream reader would take as structure.
-    const answer = h.send(&app, "GET /x HTTP/1.1\r\nX-Request-Id: \"quoted, and long\"\r\n\r\n");
+    const answer = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\nX-Request-Id: \"quoted, and long\"\r\n\r\n");
     const sent = sentHeader(answer.response, "X-Request-Id").?;
     try testing.expectEqual(@as(usize, 16), sent.len);
     for (sent) |ch| try testing.expect(std.ascii.isHex(ch));
 
     // And an over-long one is dropped for the same reason.
-    const long = h.send(&app, "GET /x HTTP/1.1\r\nX-Request-Id: " ++ ("a" ** 65) ++ "\r\n\r\n");
+    const long = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\nX-Request-Id: " ++ ("a" ** 65) ++ "\r\n\r\n");
     try testing.expectEqual(@as(usize, 16), sentHeader(long.response, "X-Request-Id").?.len);
 }
 
@@ -7370,7 +7503,7 @@ test "a request nobody asks about is given no id at all" {
     defer h.deinit();
     try h.ready(&app);
 
-    const answer = h.send(&app, "GET /x HTTP/1.1\r\n\r\n");
+    const answer = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, answer.response, "X-Request-Id") == null);
 }
 
@@ -7424,7 +7557,7 @@ test "a form binding hands every failed field back at once" {
 
     // Two things wrong at once. The all-or-nothing `Form(T)` would have said
     // only the first, which is the gap this exists to close.
-    const answer = h.send(&app, "POST /register HTTP/1.1\r\n" ++
+    const answer = h.send(&app, "POST /register HTTP/1.1\r\nHost: t\r\n" ++
         "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 9\r\n\r\n" ++
         "age=soon&");
     try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 422"));
@@ -7498,7 +7631,7 @@ test "a JSON body binding names every field that did not bind" {
 
     const body = "{\"quantity\":\"soon\",\"priority\":\"sideways\"}";
     var head_buf: [128]u8 = undefined;
-    const head = std.fmt.bufPrint(&head_buf, "POST /orders HTTP/1.1\r\n" ++
+    const head = std.fmt.bufPrint(&head_buf, "POST /orders HTTP/1.1\r\nHost: t\r\n" ++
         "Content-Type: application/json\r\nContent-Length: {d}\r\n\r\n", .{body.len}) catch unreachable;
 
     var request_buf: [256]u8 = undefined;
@@ -7537,21 +7670,21 @@ test "what leaves no binding to hand back is still a plain 400" {
 
     // A field the endpoint has never heard of: naming the typo ends the
     // search, where "reference is missing" would not.
-    const unknown = h.send(&app, "POST /orders HTTP/1.1\r\n" ++
+    const unknown = h.send(&app, "POST /orders HTTP/1.1\r\nHost: t\r\n" ++
         "Content-Type: application/json\r\nContent-Length: 14\r\n\r\n" ++
         "{\"refrence\":1}");
     try testing.expect(std.mem.startsWith(u8, unknown.response, "HTTP/1.1 400"));
     try testing.expect(try Harness.saysFailure(unknown.response, "a field \"refrence\" this endpoint does not know"));
 
     // Text that is not JSON at all is not a mistake about any one field.
-    const garbage = h.send(&app, "POST /orders HTTP/1.1\r\n" ++
+    const garbage = h.send(&app, "POST /orders HTTP/1.1\r\nHost: t\r\n" ++
         "Content-Type: application/json\r\nContent-Length: 5\r\n\r\n" ++
         "{[[[[");
     try testing.expect(std.mem.startsWith(u8, garbage.response, "HTTP/1.1 400"));
     try testing.expect(try Harness.saysFailure(garbage.response, "not valid JSON"));
 
     // And a body that is not a form at all, on the form side.
-    const not_a_form = h.send(&app, "POST /register HTTP/1.1\r\n" ++
+    const not_a_form = h.send(&app, "POST /register HTTP/1.1\r\nHost: t\r\n" ++
         "Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}");
     try testing.expect(std.mem.startsWith(u8, not_a_form.response, "HTTP/1.1 400"));
     try testing.expect(try Harness.saysFailure(not_a_form.response, "this endpoint takes a form"));
@@ -7607,7 +7740,7 @@ test "an endpoint wanting a file, sent a form that cannot carry one, says which 
     defer h.deinit();
     try h.ready(&app);
 
-    const answer = h.send(&app, "POST /avatars HTTP/1.1\r\n" ++
+    const answer = h.send(&app, "POST /avatars HTTP/1.1\r\nHost: t\r\n" ++
         "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 11\r\n\r\n" ++
         "caption=hey");
     try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 400"));
@@ -7647,7 +7780,7 @@ test "a redirect with nowhere to go is a 500 rather than a Location nobody can f
     defer h.deinit();
     try h.ready(&app);
 
-    const answer = h.send(&app, "GET /old HTTP/1.1\r\n\r\n");
+    const answer = h.send(&app, "GET /old HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 500"));
     try testing.expect(try Harness.saysFailure(answer.response, "has to say where to"));
 }
@@ -7725,7 +7858,7 @@ test "a handler that blocks is caught, on the first request and with nobody else
     defer h.deinit();
 
     const before = watchdog.caught.load(.monotonic);
-    const answer = h.send(&app, "GET /slow HTTP/1.1\r\n\r\n");
+    const answer = h.send(&app, "GET /slow HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 200"));
     try testing.expectEqual(before + 1, watchdog.caught.load(.monotonic));
 }
@@ -7743,7 +7876,7 @@ test "the same wait through nilo.blocking is not" {
     defer h.deinit();
 
     const before = watchdog.caught.load(.monotonic);
-    const answer = h.send(&app, "GET /slow HTTP/1.1\r\n\r\n");
+    const answer = h.send(&app, "GET /slow HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 200"));
     try testing.expectEqual(before, watchdog.caught.load(.monotonic));
 }
@@ -7758,7 +7891,7 @@ test "zero turns it off, and then even a blocking handler goes unremarked" {
     defer h.deinit();
 
     const before = watchdog.caught.load(.monotonic);
-    _ = h.send(&app, "GET /slow HTTP/1.1\r\n\r\n");
+    _ = h.send(&app, "GET /slow HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expectEqual(before, watchdog.caught.load(.monotonic));
 }
 
@@ -7782,7 +7915,7 @@ test "a stream is excused, because holding the connection is what it is for" {
     defer h.deinit();
 
     const before = watchdog.caught.load(.monotonic);
-    const answer = h.send(&app, "GET /feed HTTP/1.1\r\n\r\n");
+    const answer = h.send(&app, "GET /feed HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 200"));
     try testing.expectEqual(before, watchdog.caught.load(.monotonic));
 }
@@ -7805,7 +7938,7 @@ test "work after the answer went out is still work, and still counted" {
     defer h.deinit();
 
     const before = watchdog.caught.load(.monotonic);
-    _ = h.send(&app, "GET /late HTTP/1.1\r\n\r\n");
+    _ = h.send(&app, "GET /late HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expectEqual(before + 1, watchdog.caught.load(.monotonic));
 }
 
@@ -7826,7 +7959,7 @@ test "a handler that blocks and then fails is caught on the way out" {
     defer h.deinit();
 
     const before = watchdog.caught.load(.monotonic);
-    const answer = h.send(&app, "GET /gone HTTP/1.1\r\n\r\n");
+    const answer = h.send(&app, "GET /gone HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 404"));
     try testing.expectEqual(before + 1, watchdog.caught.load(.monotonic));
 }
@@ -7846,7 +7979,7 @@ test "a nilo.Mutex still locks after being wrapped for the detector" {
 
     var h = Harness.init();
     defer h.deinit();
-    const answer = h.send(&app, "GET /guarded HTTP/1.1\r\n\r\n");
+    const answer = h.send(&app, "GET /guarded HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 200"));
 }
 

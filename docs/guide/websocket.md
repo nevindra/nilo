@@ -241,6 +241,32 @@ Thirty seconds costs a dead connection about a minute to notice and a live one
 two frames a minute. Proxies that drop quiet connections usually do so at sixty
 ([ADR 0023](../adr/0023-a-deadline-belongs-to-an-operation-not-to-a-request.md)).
 
+## Which pages may open it
+
+**A browser applies no CORS to a WebSocket.** It sends no preflight and it
+ignores `Access-Control-Allow-Origin`, so a `cors.with(…)` in front of an
+upgrade route sets headers nobody enforces. The handshake is an ordinary GET, so
+it arrives carrying the session cookie — which means that without a check here,
+a page on any origin could open your users' sockets and read and write them for
+as long as its tab was open. There is no browser step that refuses it.
+
+So the default is your own pages: a handshake whose `Origin` does not name the
+authority its `Host` named is a 403. Nothing to write for the ordinary case,
+where the page and the socket are the same server.
+
+```zig
+// the page is on another host to the socket
+return c.upgradeWith(chatLoop, room, .{ .origins = &.{"https://app.example.com"} });
+// a public socket, carrying nothing worth stealing
+return c.upgradeWith(feedLoop, {}, .{ .origins = &.{"*"} });
+```
+
+The scheme isn't compared — TLS is terminated in front, so nilo never learns
+which one the browser used — and a request with **no** `Origin` is allowed,
+because that isn't a browser and has no ambient cookie to be borrowed. `curl`,
+`wstest` and every native client send none
+([ADR 0102](../adr/0102-a-websocket-handshake-is-same-origin-unless-the-route-says-otherwise.md)).
+
 ## What isn't here
 
 `permessage-deflate`. It's negotiated in the handshake, and a compressor per

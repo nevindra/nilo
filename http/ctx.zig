@@ -1234,6 +1234,23 @@ pub const Ctx = struct {
         // `handleRequest` to copy it, and it is deliberately the looser of the
         // two tests — anything `isUpgrade` accepts, it accepted first.
         self.aboutToRead();
+        // Before anything else about the handshake, because which page is
+        // asking decides whether there is a handshake to have. A browser
+        // applies no CORS to a WebSocket and sends no preflight, so nothing in
+        // front of this refuses a cross-site page — and the handshake is an
+        // ordinary GET, so it arrives carrying the session cookie. Same-origin
+        // unless the route named somebody; `websocket.Options.origins` is the
+        // whole account.
+        if (self.header("Origin")) |origin| {
+            const host = if (self.header("Host")) |h| h.view() else "";
+            if (!websocket.originAllowed(origin.view(), host, options.origins)) {
+                return fail.forbidden(
+                    "this WebSocket answers \"{s}\" and the request came from \"{s}\" — " ++
+                        "name it in .origins if that is a page you serve",
+                    .{ host, origin.view() },
+                );
+            }
+        }
         const version = self.header("Sec-WebSocket-Version") orelse
             return fail.badRequest("the handshake is missing Sec-WebSocket-Version", .{});
         // 13 is the only version there has ever been in the published RFC.

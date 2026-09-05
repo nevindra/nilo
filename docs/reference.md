@@ -1010,6 +1010,23 @@ silence asks a question rather than ending anything. `0` waits forever.
 `.max_message` is the ceiling on one message, 16 KiB by default; a frame
 announcing more is refused with a 1009 before a byte of it is read.
 
+`.origins` is **which pages may open this socket, and it defaults to yours
+alone.** A browser applies no CORS to a WebSocket — no preflight, and it ignores
+`Access-Control-Allow-Origin` — so the handshake is an ordinary GET that arrives
+carrying the session cookie, and nothing but the server can refuse it
+([ADR 0102](adr/0102-a-websocket-handshake-is-same-origin-unless-the-route-says-otherwise.md)).
+An `Origin` that does not name the authority the request's `Host` named is a
+403. The scheme is not compared, because TLS is terminated in front. A request
+with no `Origin` at all — `curl`, a native client — is allowed, because the
+ambient cookie this guards is a browser's.
+
+```zig
+// the page is on another host to the socket
+return c.upgradeWith(chatLoop, room, .{ .origins = &.{"https://app.example.com"} });
+// a public socket carrying nothing worth stealing
+return c.upgradeWith(feedLoop, {}, .{ .origins = &.{"*"} });
+```
+
 `Close`: `.normal`, `.going_away`, `.protocol_error`, `.unsupported`,
 `.invalid_payload`, `.policy`, `.too_big`, `.internal`, or a number.
 
@@ -1089,7 +1106,7 @@ failure, whatever the endpoint returns when it works.
 
 | | |
 |---|---|
-| `nilo.Mutex` | `.init`, then `try lock()`, `unlock()`, `tryLock()` |
+| `nilo.Mutex` | `.init`, then `try lock()`, `unlock()`, `tryLock()`, `lockUncancelable()` |
 | `nilo.blocking(f, args)` | run a blocking call off the event loop |
 | `nilo.Gate` | `.open(n)`, then `try enter()`, `leave()` — a lock that lets `n` through |
 | `nilo.sleep(ms)` | wait without parking the thread |
@@ -1099,7 +1116,11 @@ failure, whatever the endpoint returns when it works.
 | `nilo.monotonicNanos()` | a clock reading, for durations |
 
 `lock()` and `sleep()` fail with `error.Canceled` if the request went away, which
-maps to a 503.
+maps to a 503. `lockUncancelable()` cannot fail and cannot be interrupted, which
+is for a cleanup path — one that has nowhere to put a failure, and would leave
+something unreleased if it gave up
+([ADR 0104](adr/0104-a-cleanup-path-is-not-cancellable.md)). Only for a short
+section that does not itself wait; `lock()` is still the one to reach for.
 
 ## What time it is
 

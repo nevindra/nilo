@@ -55,6 +55,43 @@ pub const Options = struct {
     /// expects.
     protocol: []const u8 = "",
 
+    /// Pages on other origins that may open this socket. Empty — the default —
+    /// means only the origin this server is itself serving; `&.{"*"}` means
+    /// anybody, which is what a public socket carrying no session wants.
+    ///
+    /// **A browser applies no CORS to a WebSocket.** It sends no preflight and
+    /// honours no `Access-Control-Allow-Origin`, so a CORS middleware in front
+    /// of an upgrade route sets headers nobody enforces and the socket opens
+    /// anyway — **carrying the session cookie**, because the handshake is an
+    /// ordinary GET. An application with `Session(T)` and `c.upgrade` on the
+    /// same server was therefore open to a page on another origin reading and
+    /// writing that user's socket for as long as the tab was open, and there is
+    /// no browser step that refuses it: the whole check has to be the server's.
+    ///
+    /// So the default is same-origin, and what "same" means is the request's
+    /// `Origin` naming the authority its `Host` did — **the scheme is not
+    /// compared**, because TLS is terminated in front (ADR 0028) and nilo never
+    /// learns which one the browser used. A request with no `Origin` at all is
+    /// allowed: that is not a browser, and the ambient-cookie problem this
+    /// exists for is a browser's.
+    ///
+    /// Name an origin when the page and the socket are served from different
+    /// hosts, which is an ordinary deployment:
+    ///
+    /// ```zig
+    /// return c.upgradeWith(chatLoop, room, .{
+    ///     .origins = &.{"https://app.example.com"},
+    /// });
+    /// ```
+    ///
+    /// Compared case-insensitively and read at run time rather than while
+    /// compiling — unlike `cors.with`, whose list has to be a constant because
+    /// the value that matched goes back out in a header. Here nothing goes
+    /// back out, and a handshake happens once per connection, so an unrolled
+    /// compare would buy nothing measurable and cost the option its ability to
+    /// come from `nilo_config`.
+    origins: []const []const u8 = &.{},
+
     /// How long this connection may say nothing before it is asked whether it
     /// is still there. Zero waits forever, which is what nilo did before this
     /// existed.
@@ -1172,6 +1209,31 @@ pub fn isUpgrade(head: []const u8) bool {
     return false;
 }
 
+/// Whether a page at `origin` may open this socket, given the `Host` the
+/// request named and the origins the route allows. See `Options.origins` for
+/// why this check exists at all and why the scheme is not part of it.
+///
+/// `host` is the whole `Host` field — authority and port, as the browser sent
+/// it. An empty one matches nothing, which is what a hand-built `Ctx` and an
+/// HTTP/1.0 request both come to; a real HTTP/1.1 request always has one,
+/// because `parseHead` refuses the ones that do not (RFC 9112 §3.2).
+pub fn originAllowed(origin: []const u8, host: []const u8, allowed: []const []const u8) bool {
+    for (allowed) |one| {
+        if (std.mem.eql(u8, one, "*")) return true;
+        if (std.ascii.eqlIgnoreCase(one, origin)) return true;
+    }
+    return sameAuthority(origin, host);
+}
+
+/// Whether an origin names the authority a `Host` named, scheme aside.
+/// `https://example.com` and `example.com` are the same place; so are
+/// `http://localhost:5173` and `localhost:5173`.
+fn sameAuthority(origin: []const u8, host: []const u8) bool {
+    if (host.len == 0) return false;
+    const scheme_end = std.mem.indexOf(u8, origin, "://") orelse return false;
+    return std.ascii.eqlIgnoreCase(origin[scheme_end + "://".len ..], host);
+}
+
 /// The answer to `Sec-WebSocket-Key`: SHA-1 of the key and a fixed string,
 /// base64'd. It proves nothing about anybody; it proves the server on the
 /// other end knows what protocol it is speaking.
@@ -1556,21 +1618,57 @@ test "the handshake answer is the one every client checks" {
 
 test "an upgrade is recognised, and an ordinary request is not" {
     try testing.expect(isUpgrade(
-        "GET /ws HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+        "GET /ws HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
     ));
     // A browser sends `keep-alive, Upgrade`, so the value is a list.
     try testing.expect(isUpgrade(
-        "GET /ws HTTP/1.1\r\nUpgrade: websocket\r\nConnection: keep-alive, Upgrade\r\n\r\n",
+        "GET /ws HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: keep-alive, Upgrade\r\n\r\n",
     ));
     try testing.expect(!isUpgrade("GET / HTTP/1.1\r\nHost: x\r\n\r\n"));
     // Half an upgrade is not one.
-    try testing.expect(!isUpgrade("GET /ws HTTP/1.1\r\nUpgrade: websocket\r\n\r\n"));
-    try testing.expect(!isUpgrade("GET /ws HTTP/1.1\r\nConnection: Upgrade\r\n\r\n"));
+    try testing.expect(!isUpgrade("GET /ws HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\n\r\n"));
+    try testing.expect(!isUpgrade("GET /ws HTTP/1.1\r\nHost: t\r\nConnection: Upgrade\r\n\r\n"));
     // The answer is settled before the rest of the head is walked.
     try testing.expect(isUpgrade(
-        "GET /ws HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n" ++
+        "GET /ws HTTP/1.1\r\nHost: t\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n" ++
             "X-Whatever: and a hundred more of these\r\n\r\n",
     ));
+}
+
+test "the page that opens a socket has to be one this server serves" {
+    const none: []const []const u8 = &.{};
+
+    // Same authority, whichever scheme the browser thinks it used. nilo sits
+    // behind the TLS terminator (ADR 0028) and never learns which it was.
+    try testing.expect(originAllowed("https://example.dev", "example.dev", none));
+    try testing.expect(originAllowed("http://example.dev", "example.dev", none));
+    try testing.expect(originAllowed("http://localhost:5173", "localhost:5173", none));
+    try testing.expect(originAllowed("https://EXAMPLE.dev", "example.dev", none));
+
+    // A different host, a different port, and a host that merely ends the
+    // same way — the three shapes of somebody else's page.
+    try testing.expect(!originAllowed("https://evil.dev", "example.dev", none));
+    try testing.expect(!originAllowed("http://localhost:5174", "localhost:5173", none));
+    try testing.expect(!originAllowed("https://notexample.dev", "example.dev", none));
+    // `null` is what a browser sends from a sandboxed iframe or a `file://`
+    // page, and it is not an authority.
+    try testing.expect(!originAllowed("null", "example.dev", none));
+
+    // A named origin, which is what a page and a socket on two hosts needs.
+    const named: []const []const u8 = &.{"https://app.example.com"};
+    try testing.expect(originAllowed("https://app.example.com", "api.example.com", named));
+    try testing.expect(originAllowed("HTTPS://App.Example.com", "api.example.com", named));
+    try testing.expect(!originAllowed("https://other.example.com", "api.example.com", named));
+    // Naming one does not stop the server answering its own pages.
+    try testing.expect(originAllowed("https://api.example.com", "api.example.com", named));
+
+    // And the public socket, which carries nothing worth stealing.
+    try testing.expect(originAllowed("https://anywhere.dev", "example.dev", &.{"*"}));
+
+    // With no `Host` to compare against — a hand-built `Ctx`, or HTTP/1.0 —
+    // only a named origin gets in.
+    try testing.expect(!originAllowed("https://example.dev", "", none));
+    try testing.expect(originAllowed("https://example.dev", "", &.{"https://example.dev"}));
 }
 
 test "a text message arrives unmasked, and is echoed back without a mask" {

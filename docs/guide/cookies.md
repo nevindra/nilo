@@ -136,7 +136,7 @@ try testing.expectEqual(@as(usize, 2), answer.headerCount("Set-Cookie"));
 and a request carries one the way any header does, through `client.send`:
 
 ```
-POST /me HTTP/1.1\r\nCookie: session=abc123\r\n\r\n
+POST /me HTTP/1.1\r\nHost: t\r\nCookie: session=abc123\r\n\r\n
 ```
 
 ## See also

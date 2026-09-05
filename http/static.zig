@@ -1385,7 +1385,7 @@ test "a spilled file answers whole, in parts, and with a 304" {
     // (ADR 0018). No `Vary` either: there is only one representation.
     const asked = try client.send(
         &app,
-        "GET /alphabet.txt HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n",
+        "GET /alphabet.txt HTTP/1.1\r\nHost: t\r\nAccept-Encoding: gzip\r\n\r\n",
     );
     try testing.expectEqual(@as(u16, 200), asked.status);
     try testing.expect(asked.header("Content-Encoding") == null);
@@ -1393,7 +1393,7 @@ test "a spilled file answers whole, in parts, and with a 304" {
     try testing.expectEqualStrings(alphabet, asked.body);
 
     // Part of it, from the middle, without the rest being read.
-    const part = try client.send(&app, "GET /alphabet.txt HTTP/1.1\r\nRange: bytes=3-5\r\n\r\n");
+    const part = try client.send(&app, "GET /alphabet.txt HTTP/1.1\r\nHost: t\r\nRange: bytes=3-5\r\n\r\n");
     try testing.expectEqual(@as(u16, 206), part.status);
     try testing.expectEqualStrings("bytes 3-5/26", part.header("Content-Range").?);
     try testing.expectEqualStrings("def", part.body);
@@ -1403,7 +1403,7 @@ test "a spilled file answers whole, in parts, and with a 304" {
     var request_buf: [256]u8 = undefined;
     const resumed = try client.send(&app, try std.fmt.bufPrint(
         &request_buf,
-        "GET /alphabet.txt HTTP/1.1\r\nRange: bytes=20-\r\nIf-Range: {s}\r\n\r\n",
+        "GET /alphabet.txt HTTP/1.1\r\nHost: t\r\nRange: bytes=20-\r\nIf-Range: {s}\r\n\r\n",
         .{etag},
     ));
     try testing.expectEqual(@as(u16, 206), resumed.status);
@@ -1412,7 +1412,7 @@ test "a spilled file answers whole, in parts, and with a 304" {
     // And a repeat visitor: a comparison and a head, no body and no disk.
     const conditional = try client.send(&app, try std.fmt.bufPrint(
         &request_buf,
-        "GET /alphabet.txt HTTP/1.1\r\nIf-None-Match: {s}\r\n\r\n",
+        "GET /alphabet.txt HTTP/1.1\r\nHost: t\r\nIf-None-Match: {s}\r\n\r\n",
         .{etag},
     ));
     try testing.expectEqual(@as(u16, 304), conditional.status);
@@ -1450,7 +1450,7 @@ test "a held file and a spilled one answer a conditional range the same way" {
         var request_buf: [256]u8 = undefined;
         const resumed = try client.send(&app, try std.fmt.bufPrint(
             &request_buf,
-            "GET /a.bin HTTP/1.1\r\nRange: bytes=20-\r\nIf-Range: {s}\r\n\r\n",
+            "GET /a.bin HTTP/1.1\r\nHost: t\r\nRange: bytes=20-\r\nIf-Range: {s}\r\n\r\n",
             .{etag},
         ));
         try testing.expectEqual(@as(u16, 206), resumed.status);
@@ -1461,7 +1461,7 @@ test "a held file and a spilled one answer a conditional range the same way" {
         // not the byte it wanted: all of it, and no `Content-Range` (ADR 0021).
         const stale = try client.send(
             &app,
-            "GET /a.bin HTTP/1.1\r\nRange: bytes=20-\r\nIf-Range: \"gone\"\r\n\r\n",
+            "GET /a.bin HTTP/1.1\r\nHost: t\r\nRange: bytes=20-\r\nIf-Range: \"gone\"\r\n\r\n",
         );
         try testing.expectEqual(@as(u16, 200), stale.status);
         try testing.expectEqualStrings(alphabet, stale.body);
@@ -1475,7 +1475,7 @@ test "a held file and a spilled one answer a conditional range the same way" {
         // only the `W/` decides it.
         const weak = try client.send(&app, try std.fmt.bufPrint(
             &request_buf,
-            "GET /a.bin HTTP/1.1\r\nRange: bytes=20-\r\nIf-Range: W/{s}\r\n\r\n",
+            "GET /a.bin HTTP/1.1\r\nHost: t\r\nRange: bytes=20-\r\nIf-Range: W/{s}\r\n\r\n",
             .{etag},
         ));
         try testing.expectEqual(@as(u16, 200), weak.status);
@@ -1484,7 +1484,7 @@ test "a held file and a spilled one answer a conditional range the same way" {
 
         const wildcard = try client.send(
             &app,
-            "GET /a.bin HTTP/1.1\r\nRange: bytes=20-\r\nIf-Range: *\r\n\r\n",
+            "GET /a.bin HTTP/1.1\r\nHost: t\r\nRange: bytes=20-\r\nIf-Range: *\r\n\r\n",
         );
         try testing.expectEqual(@as(u16, 200), wildcard.status);
         try testing.expectEqualStrings(alphabet, wildcard.body);
@@ -1494,14 +1494,14 @@ test "a held file and a spilled one answer a conditional range the same way" {
         // the strong comparison did not simply refuse everything.
         const still_resumes = try client.send(&app, try std.fmt.bufPrint(
             &request_buf,
-            "GET /a.bin HTTP/1.1\r\nRange: bytes=24-\r\nIf-Range: {s}\r\n\r\n",
+            "GET /a.bin HTTP/1.1\r\nHost: t\r\nRange: bytes=24-\r\nIf-Range: {s}\r\n\r\n",
             .{etag},
         ));
         try testing.expectEqual(@as(u16, 206), still_resumes.status);
         try testing.expectEqualStrings("yz", still_resumes.body);
 
         // Past the end says how big it really is, on both sides.
-        const past = try client.send(&app, "GET /a.bin HTTP/1.1\r\nRange: bytes=99-\r\n\r\n");
+        const past = try client.send(&app, "GET /a.bin HTTP/1.1\r\nHost: t\r\nRange: bytes=99-\r\n\r\n");
         try testing.expectEqual(@as(u16, 416), past.status);
         try testing.expectEqualStrings("bytes */26", past.header("Content-Range").?);
     }

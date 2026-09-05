@@ -54,6 +54,16 @@ pub const Request = struct {
     /// in `applyHeaderAt` read it. Free in memory: it lands in padding the
     /// struct already had.
     has_content_length: bool = false,
+    /// Whether a `Host` was sent, which RFC 9112 §3.2 requires exactly one of
+    /// on an HTTP/1.1 request: none is a 400 and so is a second line, even one
+    /// that agrees with the first — stricter than `Content-Length`, where an
+    /// identical repeat is legal.
+    ///
+    /// Read by `finish`, which is where the "none at all" half is answered,
+    /// and by `Ctx.handshake`, which will not compare an `Origin` against a
+    /// host the request did not settle. Free in memory for the same reason
+    /// `has_content_length` is: it lands in padding the struct already had.
+    has_host: bool = false,
     /// Whether `Connection` mentions an upgrade — so this connection may stop
     /// being HTTP and start being read by something else (ADR 0022).
     ///
@@ -427,7 +437,7 @@ pub fn parseHead(head: []const u8, r: *Request) ParseError!void {
                 try parseRequestLine(head[line_start..end], r);
                 first_line = false;
             } else {
-                if (end == line_start) return; // the blank line ends the head
+                if (end == line_start) return finish(r); // the blank line ends the head
                 // No colon (0 is the sentinel), a colon where the name
                 // should be, or one past the end of the line. A field name
                 // is one or more characters (RFC 9110 §5.1), so `: value`
@@ -435,15 +445,14 @@ pub fn parseHead(head: []const u8, r: *Request) ParseError!void {
                 // colon at all — found by `fuzz.zig`, which had nilo
                 // ignoring it and every reference parser refusing it.
                 if (colon <= line_start or colon >= end) return error.BadHeader;
-                // Four headers matter and they begin with three letters, so one
-                // compare throws out Host, Accept, User-Agent and the rest
-                // before their name is even measured. `e` is here for `Expect`
-                // and is the cheapest of the three to have added: a set of
-                // three bytes compiles to the same range test and mask as a set
-                // of two, and the header it lets through is one almost nothing
-                // sends.
+                // Five headers matter and between them they start with four
+                // letters, so one compare throws out Accept, User-Agent and the
+                // rest before their name is even measured. `e` is here for
+                // `Expect` and `h` for `Host`, and both were cheap for the same
+                // reason: a set of four bytes compiles to the same range test
+                // and mask as a set of two.
                 switch (head[line_start] | 0x20) {
-                    'c', 'e', 't' => try applyHeaderAt(head, line_start, colon, end, r),
+                    'c', 'e', 'h', 't' => try applyHeaderAt(head, line_start, colon, end, r),
                     else => {},
                 }
             }
@@ -458,10 +467,30 @@ pub fn parseHead(head: []const u8, r: *Request) ParseError!void {
     // a caller parsing a fragment can. Whatever is left is one more line.
     if (line_start < head.len or first_line) {
         const line = trimCR(head[@min(line_start, head.len)..]);
-        if (first_line) return parseRequestLine(line, r);
-        if (line.len == 0) return;
-        return applyHeader(line, r);
+        if (first_line) {
+            try parseRequestLine(line, r);
+        } else if (line.len > 0) {
+            try applyHeader(line, r);
+        }
     }
+    return finish(r);
+}
+
+/// What has to be true of a head as a whole rather than of any one line in it,
+/// asked once however the parse got here.
+///
+/// There is one such rule and it is `Host`. **RFC 9112 §3.2 requires a 400 for
+/// an HTTP/1.1 request that carries none**, and the front end nilo assumes is
+/// there (ADR 0028) refuses one too — so serving it is nilo agreeing to answer
+/// a request nobody else agreed to, which is the shape ADR 0090 is about. It
+/// also matters one layer up: a `Host` a handler reads back into a `Location`
+/// or a link used to be text no layer had checked, and `Ctx.handshake` now
+/// compares an `Origin` against it.
+///
+/// HTTP/1.0 is left alone. `Host` was not required until 1.1, and a request
+/// that does not claim to speak it is not held to it.
+fn finish(r: *const Request) ParseError!void {
+    if (r.minor_version == 1 and !r.has_host) return error.BadHeader;
 }
 
 pub fn parseRequestLine(line: []const u8, r: *Request) ParseError!void {
@@ -487,10 +516,12 @@ pub fn parseRequestLine(line: []const u8, r: *Request) ParseError!void {
     r.target = target;
 }
 
-/// Only three header names change how the request is read. Every other
-/// one is still checked for a colon — a line without one is malformed and
-/// is not going to be quietly accepted — but nothing past the name is
-/// touched, because the parser has no use for it.
+/// Only five header names are looked at: four change how the request is read,
+/// and `Host` is counted rather than read, because RFC 9112 §3.2 makes both
+/// none of it and two of it a 400. Every other one is still checked for a
+/// colon — a line without one is malformed and is not going to be quietly
+/// accepted — but nothing past the name is touched, because the parser has no
+/// use for it.
 ///
 /// The name length is looked at before the name itself, so a request full
 /// of `Accept`, `Cookie` and `User-Agent` costs one integer compare each
@@ -510,6 +541,18 @@ fn applyHeaderAt(buf: []const u8, from: usize, colon: usize, end: usize, r: *Req
     const name = buf[from..colon];
 
     switch (name.len) {
+        "host".len => {
+            // `ETag` and `Date` are the same length and reach here too; both
+            // fail `eqlIgnoreCase` on their first byte.
+            if (!std.ascii.eqlIgnoreCase(name, "host")) return;
+            // **A second `Host` line is a 400 even when it agrees with the
+            // first**, which is where this differs from `Content-Length` two
+            // arms down: RFC 9112 §3.2 refuses the repeat itself rather than
+            // the disagreement, because a request naming two authorities is
+            // one the front end and nilo may route differently.
+            if (r.has_host) return error.BadHeader;
+            r.has_host = true;
+        },
         "expect".len => {
             // `Cookie` is the same length and reaches here too, so this arm is
             // on the path of most requests. It costs one `eqlIgnoreCase` that
@@ -556,10 +599,18 @@ fn applyHeaderAt(buf: []const u8, from: usize, colon: usize, end: usize, r: *Req
             // list (RFC 9110 §5.3), so a `chunked` already seen is no longer
             // the last coding, which RFC 9112 §6.1 requires it to be.
             if (r.chunked) return error.BadHeader;
-            if (saysChunked(headerValue(buf, colon, end))) {
-                if (r.has_content_length) return error.BadHeader;
-                r.chunked = true;
-            }
+            // **A final coding that is not `chunked` is a 400**, which RFC 9112
+            // §6.1 requires of a server that cannot decode it — and nilo can
+            // decode exactly one. Doing nothing here instead, which is what
+            // this arm used to do, left `Transfer-Encoding: gzip` framed as a
+            // request with no body at all: answered immediately, with the bytes
+            // the client sent as a body still in the read buffer for the next
+            // request to be parsed out of. That is the fifth way the two
+            // parsers ADR 0090 is about can disagree, and the four it closed
+            // were closed for this reason.
+            if (!saysChunked(headerValue(buf, colon, end))) return error.BadHeader;
+            if (r.has_content_length) return error.BadHeader;
+            r.chunked = true;
         },
         else => {},
     }
@@ -845,13 +896,13 @@ test "HTTP/1.0 defaults to close, keep-alive when asked for" {
 }
 
 test "Connection: close turns keep-alive off" {
-    var in = std.Io.Reader.fixed("GET / HTTP/1.1\r\nConnection: close\r\n\r\n");
+    var in = std.Io.Reader.fixed("GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
     const r = try readRequest(&in);
     try testing.expect(!r.keep_alive);
 }
 
 test "Content-Length is read and the body is discarded" {
-    var in = std.Io.Reader.fixed("POST /send HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloGET");
+    var in = std.Io.Reader.fixed("POST /send HTTP/1.1\r\nHost: t\r\nContent-Length: 5\r\n\r\nhelloGET");
     const r = try readRequest(&in);
     try testing.expectEqualStrings("POST", r.method);
     try testing.expectEqual(@as(u64, 5), r.content_length);
@@ -860,7 +911,7 @@ test "Content-Length is read and the body is discarded" {
 }
 
 test "two requests back to back on one connection" {
-    var in = std.Io.Reader.fixed("GET /one HTTP/1.1\r\n\r\nGET /two HTTP/1.1\r\nConnection: close\r\n\r\n");
+    var in = std.Io.Reader.fixed("GET /one HTTP/1.1\r\nHost: t\r\n\r\nGET /two HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
     const r1 = try readRequest(&in);
     try testing.expectEqualStrings("/one", r1.target);
     const r2 = try readRequest(&in);
@@ -885,7 +936,7 @@ test "a head with no end does not produce a half parse" {
 
 test "a chunked body is reassembled" {
     var in = std.Io.Reader.fixed(
-        "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n" ++
+        "POST / HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n" ++
             "5\r\nhello\r\n1\r\n \r\n5\r\nworld\r\n0\r\n\r\nGET",
     );
     const r = try readRequest(&in);
@@ -911,8 +962,8 @@ test "chunk extensions and trailers are stepped over" {
 
 test "a chunked body nobody read is discarded so the connection survives" {
     var in = std.Io.Reader.fixed(
-        "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n" ++
-            "3\r\nabc\r\n0\r\n\r\nGET /next HTTP/1.1\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n" ++
+            "3\r\nabc\r\n0\r\n\r\nGET /next HTTP/1.1\r\nHost: t\r\n\r\n",
     );
     const r = try readRequest(&in);
     try discardBody(&in, &r, 1024);
@@ -977,7 +1028,7 @@ test "a line with no colon is refused, whatever the line before it had" {
     var r2 = Request{};
     try testing.expectError(
         error.BadHeader,
-        parseHead("GET / HTTP/1.1\r\nAccept no-colon\r\n\r\n", &r2),
+        parseHead("GET / HTTP/1.1\r\nHost: t\r\nAccept no-colon\r\n\r\n", &r2),
     );
 }
 
@@ -992,7 +1043,7 @@ test "a colon is found wherever it falls against a block boundary" {
         name[0] = 'C'; // survives the first-byte filter, so it is really read
 
         const head = try std.mem.concat(gpa, u8, &.{
-            "GET / HTTP/1.1\r\n", name, ": v\r\nConnection: close\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: t\r\n", name, ": v\r\nConnection: close\r\n\r\n",
         });
         defer gpa.free(head);
 
@@ -1018,7 +1069,7 @@ test "colons in a value do not stand in for the next line's" {
     var r2 = Request{};
     try testing.expectError(
         error.BadHeader,
-        parseHead("GET / HTTP/1.1\r\nX: a:b:c:d:e\r\nNope\r\n\r\n", &r2),
+        parseHead("GET / HTTP/1.1\r\nHost: t\r\nX: a:b:c:d:e\r\nNope\r\n\r\n", &r2),
     );
 }
 
@@ -1035,7 +1086,7 @@ test "the headers that matter are read at any position in a long head" {
         // The two framings take a turn each at the same offsets rather than
         // sharing one head, because a head carrying both is now refused.
         const sized = try std.mem.concat(gpa, u8, &.{
-            "POST / HTTP/1.1\r\nX-Pad: ", filler,
+            "POST / HTTP/1.1\r\nHost: t\r\nX-Pad: ", filler,
             "\r\nContent-Length: 1234\r\nConnection: close\r\n\r\n",
         });
         defer gpa.free(sized);
@@ -1048,7 +1099,7 @@ test "the headers that matter are read at any position in a long head" {
         try testing.expect(!r.chunked);
 
         const streamed = try std.mem.concat(gpa, u8, &.{
-            "POST / HTTP/1.1\r\nX-Pad: ", filler,
+            "POST / HTTP/1.1\r\nHost: t\r\nX-Pad: ", filler,
             "\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
         });
         defer gpa.free(streamed);
@@ -1069,7 +1120,7 @@ test "a Content-Length that is not plain digits is refused" {
         var buf: [128]u8 = undefined;
         const head = try std.fmt.bufPrint(
             &buf,
-            "POST / HTTP/1.1\r\nContent-Length: {s}\r\n\r\n",
+            "POST / HTTP/1.1\r\nHost: t\r\nContent-Length: {s}\r\n\r\n",
             .{value},
         );
         try testing.expectError(error.BadHeader, parseHead(head, &r));
@@ -1081,7 +1132,7 @@ test "a Content-Length that is not plain digits is refused" {
         var buf: [128]u8 = undefined;
         const head = try std.fmt.bufPrint(
             &buf,
-            "POST / HTTP/1.1\r\nContent-Length: {s}\r\n\r\n",
+            "POST / HTTP/1.1\r\nHost: t\r\nContent-Length: {s}\r\n\r\n",
             .{case[0]},
         );
         try parseHead(head, &r);
@@ -1095,14 +1146,14 @@ test "a body framed twice is refused rather than framed either way" {
     // picked the other would have let a second request through inside this
     // one's body.
     const both_ways = [_][]const u8{
-        "POST / HTTP/1.1\r\nContent-Length: 6\r\nTransfer-Encoding: chunked\r\n\r\n",
-        "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 6\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 6\r\nTransfer-Encoding: chunked\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\nContent-Length: 6\r\n\r\n",
         // Two lengths that disagree, in either order.
-        "POST / HTTP/1.1\r\nContent-Length: 6\r\nContent-Length: 7\r\n\r\n",
-        "POST / HTTP/1.1\r\nContent-Length: 7\r\nContent-Length: 6\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 6\r\nContent-Length: 7\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 7\r\nContent-Length: 6\r\n\r\n",
         // Two `Transfer-Encoding` lines are one list, so the first `chunked`
         // was not the last coding.
-        "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: gzip\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: gzip\r\n\r\n",
     };
     for (both_ways) |head| {
         var r = Request{};
@@ -1112,22 +1163,26 @@ test "a body framed twice is refused rather than framed either way" {
     // Repeating the *same* length is allowed: RFC 9110 §5.3 lets a recipient
     // treat it as the one value it agrees on.
     var same = Request{};
-    try parseHead("POST / HTTP/1.1\r\nContent-Length: 6\r\nContent-Length: 6\r\n\r\n", &same);
+    try parseHead("POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 6\r\nContent-Length: 6\r\n\r\n", &same);
     try testing.expectEqual(@as(u64, 6), same.content_length);
 }
 
 test "chunked has to be the last coding, and has to be spelled that way" {
     // `xchunked` is not `chunked`. A substring search took it for one, which
     // is a front end reading an unknown coding while nilo reads framing.
-    for ([_][]const u8{ "xchunked", "chunked-x", "chunked, gzip", "gzip" }) |value| {
+    //
+    // And none of these is a request with no body, which is what they used to
+    // become: RFC 9112 §6.1 has a server that cannot decode the final coding
+    // answer 400, and nilo can decode exactly one.
+    for ([_][]const u8{ "xchunked", "chunked-x", "chunked, gzip", "gzip", "" }) |value| {
         var r = Request{};
         var buf: [128]u8 = undefined;
         const head = try std.fmt.bufPrint(
             &buf,
-            "POST / HTTP/1.1\r\nTransfer-Encoding: {s}\r\n\r\n",
+            "POST / HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: {s}\r\n\r\n",
             .{value},
         );
-        try parseHead(head, &r);
+        try testing.expectError(error.BadHeader, parseHead(head, &r));
         try testing.expect(!r.chunked);
     }
 
@@ -1136,11 +1191,55 @@ test "chunked has to be the last coding, and has to be spelled that way" {
         var buf: [128]u8 = undefined;
         const head = try std.fmt.bufPrint(
             &buf,
-            "POST / HTTP/1.1\r\nTransfer-Encoding: {s}\r\n\r\n",
+            "POST / HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: {s}\r\n\r\n",
             .{value},
         );
         try parseHead(head, &r);
         try testing.expect(r.chunked);
+    }
+}
+
+test "an HTTP/1.1 request with no Host is a 400, and an HTTP/1.0 one is not" {
+    var missing = Request{};
+    try testing.expectError(error.BadHeader, parseHead("GET / HTTP/1.1\r\n\r\n", &missing));
+    // A head full of other headers is no closer to having one.
+    var busy = Request{};
+    try testing.expectError(error.BadHeader, parseHead(
+        "GET / HTTP/1.1\r\nAccept: */*\r\nUser-Agent: curl\r\nConnection: close\r\n\r\n",
+        &busy,
+    ));
+
+    // `Host` was not required until 1.1, and a request that does not claim to
+    // speak it is not held to it.
+    var old = Request{};
+    try parseHead("GET / HTTP/1.0\r\n\r\n", &old);
+    try testing.expect(!old.has_host);
+
+    var present = Request{};
+    try parseHead("GET / HTTP/1.1\r\nhOsT: example.dev\r\n\r\n", &present);
+    try testing.expect(present.has_host);
+    // A name that merely starts the same way is a different header.
+    var nearly = Request{};
+    try testing.expectError(error.BadHeader, parseHead("GET / HTTP/1.1\r\nHostname: x\r\n\r\n", &nearly));
+    // An empty value is still a `Host` line. Which authority it names is not
+    // this layer's question; that there is exactly one of them is.
+    var empty = Request{};
+    try parseHead("GET / HTTP/1.1\r\nHost:\r\n\r\n", &empty);
+    try testing.expect(empty.has_host);
+}
+
+test "two Host lines are a 400 even when they say the same thing" {
+    // Stricter than `Content-Length`, where an identical repeat is legal:
+    // RFC 9112 §3.2 refuses the repeat itself, because a request naming two
+    // authorities is one the front end and nilo may route differently.
+    for ([_][]const u8{
+        "GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n",
+        "GET / HTTP/1.1\r\nHost: a\r\nHost: a\r\n\r\n",
+        "GET / HTTP/1.1\r\nHost: a\r\nAccept: */*\r\nhost: a\r\n\r\n",
+        "GET / HTTP/1.0\r\nHost: a\r\nHost: b\r\n\r\n",
+    }) |head| {
+        var r = Request{};
+        try testing.expectError(error.BadHeader, parseHead(head, &r));
     }
 }
 
@@ -1150,7 +1249,7 @@ test "Expect: 100-continue is read, and no other expectation is" {
         var buf: [128]u8 = undefined;
         const head = try std.fmt.bufPrint(
             &buf,
-            "POST / HTTP/1.1\r\nExpect: {s}\r\nContent-Length: 3\r\n\r\n",
+            "POST / HTTP/1.1\r\nHost: t\r\nExpect: {s}\r\nContent-Length: 3\r\n\r\n",
             .{value},
         );
         try parseHead(head, &r);
@@ -1165,7 +1264,7 @@ test "Expect: 100-continue is read, and no other expectation is" {
         var buf: [128]u8 = undefined;
         const head = try std.fmt.bufPrint(
             &buf,
-            "POST / HTTP/1.1\r\nExpect: {s}\r\nContent-Length: 3\r\n\r\n",
+            "POST / HTTP/1.1\r\nHost: t\r\nExpect: {s}\r\nContent-Length: 3\r\n\r\n",
             .{value},
         );
         try parseHead(head, &r);
@@ -1184,7 +1283,7 @@ test "Expect is found wherever it falls, and Cookie is not mistaken for it" {
         @memset(filler, 'y');
 
         const head = try std.mem.concat(gpa, u8, &.{
-            "POST / HTTP/1.1\r\nX-Pad: ",         filler,
+            "POST / HTTP/1.1\r\nHost: t\r\nX-Pad: ",         filler,
             "\r\nExpect: 100-continue\r\nCookie: session=abc\r\nContent-Length: 9\r\n\r\n",
         });
         defer gpa.free(head);
@@ -1198,7 +1297,7 @@ test "Expect is found wherever it falls, and Cookie is not mistaken for it" {
     // `Cookie` is exactly as long as `Expect`, so it lands in the same arm of
     // the length switch and has to fall out of it.
     var only_cookie = Request{};
-    try parseHead("POST / HTTP/1.1\r\nCookie: expect=100-continue\r\n\r\n", &only_cookie);
+    try parseHead("POST / HTTP/1.1\r\nHost: t\r\nCookie: expect=100-continue\r\n\r\n", &only_cookie);
     try testing.expect(!only_cookie.expect_continue);
 }
 
@@ -1212,37 +1311,39 @@ test "the fused parser agrees with a plain line-by-line one" {
             try parseRequestLine(first, r);
             while (lines.next()) |raw| {
                 const line = trimCR(raw);
-                if (line.len == 0) return;
+                if (line.len == 0) break;
                 try applyHeader(line, r);
             }
+            // The one rule about the head rather than about a line in it.
+            return finish(r);
         }
     }.parse;
 
     const heads = [_][]const u8{
-        "GET / HTTP/1.1\r\n\r\n",
+        "GET / HTTP/1.1\r\nHost: t\r\n\r\n",
         "GET /users/7 HTTP/1.1\r\nHost: example.dev\r\nUser-Agent: wrk\r\n" ++
             "Accept: */*\r\nAccept-Encoding: gzip\r\nConnection: keep-alive\r\n\r\n",
         "GET / HTTP/1.0\r\n\r\n",
         "GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n",
         "GET / HTTP/1.1\nHost: x\n\n",
-        "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n",
-        "POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\n",
-        "POST / HTTP/1.1\r\nContent-Length:  42  \r\n\r\n",
-        "GET / HTTP/1.1\r\nConnection: close\r\n\r\n",
-        "GET / HTTP/1.1\r\nCONNECTION: CLOSE\r\n\r\n",
-        "GET / HTTP/1.1\r\nCookie: a=1; b=2\r\nConnection: close\r\n\r\n",
-        "GET / HTTP/1.1\r\nX: a:b:c\r\nConnection: close\r\n\r\n",
-        "GET / HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 3\r\n\r\n",
-        "POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",
-        "POST / HTTP/1.1\r\nTransfer-Encoding: xchunked\r\n\r\n",
-        "POST / HTTP/1.1\r\nContent-Length: 6\r\nContent-Length: 6\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 5\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: t\r\nContent-Length:  42  \r\n\r\n",
+        "GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+        "GET / HTTP/1.1\r\nHost: t\r\nCONNECTION: CLOSE\r\n\r\n",
+        "GET / HTTP/1.1\r\nHost: t\r\nCookie: a=1; b=2\r\nConnection: close\r\n\r\n",
+        "GET / HTTP/1.1\r\nHost: t\r\nX: a:b:c\r\nConnection: close\r\n\r\n",
+        "GET / HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: 3\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: xchunked\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 6\r\nContent-Length: 6\r\n\r\n",
         // Malformed, so both have to refuse it.
-        "GET / HTTP/1.1\r\nBroken\r\n\r\n",
+        "GET / HTTP/1.1\r\nHost: t\r\nBroken\r\n\r\n",
         "GET / HTTP/1.1\r\nHost: x\r\nBroken\r\n\r\n",
-        "POST / HTTP/1.1\r\nContent-Length: +5\r\n\r\n",
-        "POST / HTTP/1.1\r\nContent-Length: 6\r\nTransfer-Encoding: chunked\r\n\r\n",
-        "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 6\r\n\r\n",
-        "POST / HTTP/1.1\r\nContent-Length: 6\r\nContent-Length: 7\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: t\r\nContent-Length: +5\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 6\r\nTransfer-Encoding: chunked\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\nContent-Length: 6\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 6\r\nContent-Length: 7\r\n\r\n",
         // No blank line at all, which only a caller parsing a fragment does.
         "GET / HTTP/1.1\r\nHost: x\r\n",
         "GET / HTTP/1.1",

@@ -1413,3 +1413,35 @@ Without that, an app with an `orders_placed` of its own runs a second metrics
 server, and nilo's page is not incomplete, it is a decoy. `app.expose` is the
 answer and it costs nothing per request: **a refusal is only as good as the
 thing it leaves you able to do instead.**
+
+## An oracle that shares your reading proves nothing
+
+Five gaps closed at once, and two of them had been sitting in front of a test
+written to catch exactly that class of bug.
+
+**`fuzz.zig` carried `Transfer-Encoding: chunked, identity` in its corpus, and
+the reference parser read it the same wrong way `http1.zig` did.** The two
+agreed, the differential passed, and a request framed as having no body while
+its body sat in the read buffer went unnoticed
+([ADR 0101](./adr/0101-a-request-nobody-else-would-answer-is-refused.md)). A
+differential test whose oracle was written from the same reading of the spec
+checks that the reading is *consistent*, not that it is right. Nothing about the
+harness finds that; reading the RFC again does.
+
+**A rule that refuses more can silently retire the corpus that was testing
+everything else.** Requiring a `Host` would have made all forty entries fail for
+want of one, so the forty checks about framing would have stopped running while
+staying green. Every framing entry grew a `Host`; the block-edge trio deliberately
+did not, because their byte offsets are the point and a header line in front
+would move all of them. **When a new refusal lands upstream of an existing test
+corpus, the corpus is part of the change.**
+
+**And the throughput number was measured on the wrong instrument.** Four
+interleaved wrk pairs on a two-core box put the parser change at −3.6%, −5.3%,
++0.3%, −4.5% — three negatives and a spread as wide as the margin. `zig build
+profile` put the row that actually changed, *parse the head*, at 100ns → 109ns
+across four interleaved rounds with every "after" above every "before". Eight
+nanoseconds of arithmetic cannot be 5% of a 26µs request; what wrk was measuring
+was the box. **Reach for the instrument that contains the change**, and when the
+whole-system number and the component number disagree by an order of magnitude,
+the component number is the one that means something.

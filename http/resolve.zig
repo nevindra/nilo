@@ -374,7 +374,7 @@ const Standin = struct {
     }
 };
 
-const with_token = "GET /me HTTP/1.1\r\nAuthorization: secret\r\n\r\n";
+const with_token = "GET /me HTTP/1.1\r\nHost: t\r\nAuthorization: secret\r\n\r\n";
 const without_token = "GET /me HTTP/1.1\r\nHost: x\r\n\r\n";
 
 test "a resolved value is worked out from the request" {

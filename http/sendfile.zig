@@ -368,7 +368,7 @@ test "a range is answered from the middle of the file without reading the rest" 
     var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
-    const answer = try client.send(&app, "GET /file HTTP/1.1\r\nRange: bytes=3-5\r\n\r\n");
+    const answer = try client.send(&app, "GET /file HTTP/1.1\r\nHost: t\r\nRange: bytes=3-5\r\n\r\n");
     try testing.expectEqual(@as(u16, 206), answer.status);
     try testing.expectEqualStrings("bytes 3-5/10", answer.header("Content-Range").?);
     try testing.expectEqualStrings("3", answer.header("Content-Length").?);
@@ -388,7 +388,7 @@ test "a suffix range counts back from the end" {
     var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
-    const answer = try client.send(&app, "GET /file HTTP/1.1\r\nRange: bytes=-4\r\n\r\n");
+    const answer = try client.send(&app, "GET /file HTTP/1.1\r\nHost: t\r\nRange: bytes=-4\r\n\r\n");
     try testing.expectEqual(@as(u16, 206), answer.status);
     try testing.expectEqualStrings("bytes 6-9/10", answer.header("Content-Range").?);
     try testing.expectEqualStrings("ghij", answer.body);
@@ -407,7 +407,7 @@ test "a range past the end says how big the file actually is" {
     var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
-    const answer = try client.send(&app, "GET /file HTTP/1.1\r\nRange: bytes=99-\r\n\r\n");
+    const answer = try client.send(&app, "GET /file HTTP/1.1\r\nHost: t\r\nRange: bytes=99-\r\n\r\n");
     try testing.expectEqual(@as(u16, 416), answer.status);
     try testing.expectEqualStrings("bytes */10", answer.header("Content-Range").?);
     // The 416 carries the headers every other answer carries, so a client
@@ -430,7 +430,7 @@ test "a matching If-None-Match costs a head and nothing else" {
     var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
-    const answer = try client.send(&app, "GET /file HTTP/1.1\r\nIf-None-Match: \"abc\"\r\n\r\n");
+    const answer = try client.send(&app, "GET /file HTTP/1.1\r\nHost: t\r\nIf-None-Match: \"abc\"\r\n\r\n");
     try testing.expectEqual(@as(u16, 304), answer.status);
     try testing.expectEqualStrings("", answer.body);
     // A 304 says nothing about a length (ADR: `http1.bodyless`), but it does
@@ -455,7 +455,7 @@ test "If-Range matching keeps the range, and not matching sends the whole file" 
 
     const resumed = try client.send(
         &app,
-        "GET /file HTTP/1.1\r\nRange: bytes=6-\r\nIf-Range: \"abc\"\r\n\r\n",
+        "GET /file HTTP/1.1\r\nHost: t\r\nRange: bytes=6-\r\nIf-Range: \"abc\"\r\n\r\n",
     );
     try testing.expectEqual(@as(u16, 206), resumed.status);
     try testing.expectEqualStrings("ghij", resumed.body);
@@ -464,7 +464,7 @@ test "If-Range matching keeps the range, and not matching sends the whole file" 
     // byte 6 of the old one, so the answer is all of it (ADR 0021).
     const changed = try client.send(
         &app,
-        "GET /file HTTP/1.1\r\nRange: bytes=6-\r\nIf-Range: \"stale\"\r\n\r\n",
+        "GET /file HTTP/1.1\r\nHost: t\r\nRange: bytes=6-\r\nIf-Range: \"stale\"\r\n\r\n",
     );
     try testing.expectEqual(@as(u16, 200), changed.status);
     try testing.expectEqualStrings(alphabet, changed.body);
@@ -484,13 +484,13 @@ test "a HEAD gets the length a GET would have sent, and no bytes" {
     var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
-    const whole = try client.send(&app, "HEAD /file HTTP/1.1\r\n\r\n");
+    const whole = try client.send(&app, "HEAD /file HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expectEqual(@as(u16, 200), whole.status);
     try testing.expectEqualStrings("10", whole.header("Content-Length").?);
     try testing.expectEqualStrings("", whole.body);
 
     // And a HEAD of a range still describes the range.
-    const part = try client.send(&app, "HEAD /file HTTP/1.1\r\nRange: bytes=0-2\r\n\r\n");
+    const part = try client.send(&app, "HEAD /file HTTP/1.1\r\nHost: t\r\nRange: bytes=0-2\r\n\r\n");
     try testing.expectEqual(@as(u16, 206), part.status);
     try testing.expectEqualStrings("3", part.header("Content-Length").?);
     try testing.expectEqualStrings("bytes 0-2/10", part.header("Content-Range").?);
@@ -516,7 +516,7 @@ test "an empty file is a 200 with nothing in it" {
     try testing.expectEqualStrings("", answer.body);
     // A file with no bytes has no part of it to send, so a range against it
     // is ignored rather than refused (range.zig).
-    const ranged = try client.send(&app, "GET /file HTTP/1.1\r\nRange: bytes=0-9\r\n\r\n");
+    const ranged = try client.send(&app, "GET /file HTTP/1.1\r\nHost: t\r\nRange: bytes=0-9\r\n\r\n");
     try testing.expectEqual(@as(u16, 200), ranged.status);
 }
 
@@ -552,7 +552,7 @@ test "a file with no ETag answers without one, and ignores a conditional" {
     var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
-    const answer = try client.send(&app, "GET /file HTTP/1.1\r\nIf-None-Match: *\r\n\r\n");
+    const answer = try client.send(&app, "GET /file HTTP/1.1\r\nHost: t\r\nIf-None-Match: *\r\n\r\n");
     try testing.expectEqual(@as(u16, 200), answer.status);
     try testing.expect(answer.header("ETag") == null);
     try testing.expectEqualStrings(alphabet, answer.body);
@@ -561,7 +561,7 @@ test "a file with no ETag answers without one, and ignores a conditional" {
     // honoured — the safe direction, the same one ADR 0021 took for a date.
     const ranged = try client.send(
         &app,
-        "GET /file HTTP/1.1\r\nRange: bytes=0-2\r\nIf-Range: *\r\n\r\n",
+        "GET /file HTTP/1.1\r\nHost: t\r\nRange: bytes=0-2\r\nIf-Range: *\r\n\r\n",
     );
     try testing.expectEqual(@as(u16, 200), ranged.status);
     try testing.expectEqualStrings(alphabet, ranged.body);
@@ -596,11 +596,11 @@ test "the descriptor is given back however the answer ends" {
     defer client.deinit();
 
     const requests = [_][]const u8{
-        "GET /file HTTP/1.1\r\n\r\n", // the whole file
-        "GET /file HTTP/1.1\r\nRange: bytes=2-4\r\n\r\n", // part of it
-        "GET /file HTTP/1.1\r\nRange: bytes=500-\r\n\r\n", // a 416
-        "GET /file HTTP/1.1\r\nIf-None-Match: \"abc\"\r\n\r\n", // a 304
-        "HEAD /file HTTP/1.1\r\n\r\n", // no body at all
+        "GET /file HTTP/1.1\r\nHost: t\r\n\r\n", // the whole file
+        "GET /file HTTP/1.1\r\nHost: t\r\nRange: bytes=2-4\r\n\r\n", // part of it
+        "GET /file HTTP/1.1\r\nHost: t\r\nRange: bytes=500-\r\n\r\n", // a 416
+        "GET /file HTTP/1.1\r\nHost: t\r\nIf-None-Match: \"abc\"\r\n\r\n", // a 304
+        "HEAD /file HTTP/1.1\r\nHost: t\r\n\r\n", // no body at all
     };
 
     // One round first, so that anything opened once and kept — the temporary
