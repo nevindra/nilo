@@ -102,8 +102,11 @@ or the layout has to change there and here together.
 ## Commands
 
 ```
-zig build test         # the loop: the suite in Debug, plus the refusals
-zig build test-all     # the above, plus the same suite in ReleaseSafe — what CI runs
+zig build test         # the loop: the suite in Debug, plus the refusals — and every
+                       #   module's gate below except test-sql, plus layering and snippets
+zig build test-all     # the above, plus the same suite in ReleaseSafe, plus test-sql
+                       #   and refusals-sql. What CI runs, and the whole gate: nothing
+                       #   under this list has to be remembered separately
 zig build test-core    # only Core, both modes — no Engine, no module graph
 zig build test-id      # only nilo_id, the same way
 zig build test-config  # only nilo_config, the same way, plus its refusals
@@ -147,6 +150,17 @@ builds of the two measured binaries strip; examples and tests keep theirs).
 **The refusals are the slow part of `zig build test` and never cache** — the
 compiler keeps nothing from a compilation that failed, so all of them are
 re-analysed every run. They stay on `test` on purpose (ADR 0027).
+
+**`test-all` is the whole gate, and the list below is a list of *narrower* runs
+rather than of things it misses.** It carries every module's own step —
+`test-core`, `test-id`, `test-config`, `test-pw`, `test-fetch`,
+`test-fetch-engine`, `test-s3`, `test-sql` and both refusal tables under those —
+plus `layering` and `snippets`. This is worth stating because two readers of
+this file concluded the opposite in one evening and gated a merge by running
+seven steps by hand: a change under `core/` moves every module above it while
+showing no lines under any of them in a diffstat, and the answer to that is one
+command rather than a convention to remember. `zig build test-all --summary all`
+prints the tree if it is ever in doubt again.
 
 **Read the exit code, not the word "failed".** A passing run of `test` and
 `test-all` prints several `failed command: ./.zig-cache/…/test …` lines and
