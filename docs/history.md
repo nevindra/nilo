@@ -1723,3 +1723,12 @@ implemented ([ADR 0062](./adr/0062-a-pool-that-dialled-itself-whatever-it-was-to
 and as five `<!-- compiles -->` marks on pages no build step opened. Each time,
 **the documentation was believed and the thing it documents was not opened.**
 The fix here was to the paragraph, not the build.
+
+There is a third variety with nobody at fault, and it turned up an hour later in
+the paragraph describing those marks. It said three marks on four pages, which
+was true of the tree it was written on; the merge brought a fifth page and two
+more marks, and the sentence went stale without anybody touching it. **A count
+is a claim with an expiry date, and a merge is when it expires** — so the line
+worth writing beside one is its closing condition. "Delete this when `pages`
+names every page below and `snippets` is green" survives a merge; "three marks,
+at these line numbers" cannot.
