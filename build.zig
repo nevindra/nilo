@@ -830,6 +830,14 @@ const Snippets = struct {
         "docs/guide/sessions.md",
         "docs/guide/config.md",
         "docs/guide/forms.md",
+        // These three were carrying `<!-- compiles -->` marks that nothing
+        // read, which is worse than an unmarked block: an unmarked block
+        // claims nothing, and a marked one claims a build step checked it.
+        // Five blocks across the three, two of them written the same day this
+        // list was found to be short.
+        "docs/guide/metrics.md",
+        "docs/guide/middleware.md",
+        "docs/guide/responses.md",
     };
 
     const opens = "<!-- compiles";

@@ -1785,3 +1785,38 @@ loss, not collision.** At 100,000 addresses through 16,384 slots every bucket is
 full and about 84,000 insertions displace somebody. "Your neighbour used your
 allowance" was the failure this design was built to avoid, and it arrives anyway
 through the front door.
+
+## A false guarantee spread by being copied, in under an hour
+
+`<!-- compiles -->` above a fenced block means a build step extracts it and
+compiles it ([ADR 0083](./adr/0083-the-guide-is-the-source-of-its-own-snippets.md)). The
+step reads a list of pages in `build.zig`, and a marked block on a page that is
+not in that list is silent — it looks exactly like a checked one and claims
+exactly as much.
+
+Three such blocks had been sitting in `docs/guide/metrics.md` and
+`docs/guide/responses.md`. Two more were added to `docs/guide/middleware.md`
+**the same evening the gap was being discussed**, by somebody who had been told
+about it an hour earlier. All five compiled once the pages were listed, so the
+marks were truthful about the code and false about being checked.
+
+The two new ones are the useful half, because the old ones can be explained as
+drift and these cannot. **They were produced by imitation.** Looking for the
+right way to mark a block, the thing to do in this repository is to match the
+surrounding code — so `docs/guide/metrics.md` was opened, the
+`<!-- compiles: body -->` above `try app.metrics(.{});` was read, and the
+pattern was copied. That page was one of the three already dead. The confidence
+came from precedent rather than from verification, and the precedent was the
+bug.
+
+So the failure mode is not forgetfulness, which is what "somebody has to
+remember to join the list" suggests and which more care would fix. **It is that
+a broken instance of a convention is indistinguishable from a working one when
+read, and reading is how conventions spread.** Two people looking at the gap
+directly, on the same evening, produced two more of it.
+
+What ends the class is not a bigger list: it is the step finding the pages
+itself — every page that *contains* a marked block — so that a mark cannot be
+written anywhere the step will not read. Until then the list is a rule that
+looks like a build step and is not one, which is the thing this repository
+already says it will not keep.
