@@ -20,6 +20,14 @@
 //!   not exist yet, and a pool built without one blocks the thread every
 //!   request shares (ADR 0040). The type is std's, not zio's, so this hands
 //!   out nothing that names the Engine.
+//! - `stopping(state)` inside that call — run once on the way out, after
+//!   the last connection has been cut off and before the Engine's loop is
+//!   torn down. The mirror of `ready`, and it exists for the same caller: a
+//!   Service that put work on the loop in `ready` has to take it off, or
+//!   the loop cannot be shut down at all. It takes no `Io` and cannot fail
+//!   — a service is stopped on the loop it was started on, and there is
+//!   nobody left to hand an error to. It runs on the failure paths too,
+//!   including a `ready` that refused the boot (ADR 0151).
 //! - `Limits.arm`/`release`/`fired` — put a time limit on an operation that
 //!   is *not* a read or write of a connection nilo holds, and say afterwards
 //!   whether that limit is what cancelled it. `Deadlines` below covers
@@ -486,6 +494,7 @@ pub fn serve(
     stop: *Stop,
     state: anytype,
     comptime ready: anytype,
+    comptime stopping: anytype,
     comptime handler: anytype,
 ) !void {
     const State = @TypeOf(state);
@@ -518,6 +527,13 @@ pub fn serve(
         fn start(carried: Carried, io: std.Io) anyerror!void {
             return ready(carried.state, io, engine_limits_value);
         }
+
+        /// The shutdown hook, unwrapped the same way. No `io` and no error:
+        /// a service is stopped on the loop it was started on, and there is
+        /// nobody left to hand a failure to (ADR 0151).
+        fn winddown(carried: Carried) void {
+            return stopping(carried.state);
+        }
     };
 
     return engine.serve(gpa, options, stop, Carried{
@@ -531,7 +547,7 @@ pub fn serve(
             .body_grace_ms = options.body_grace_ms,
             .write_ms = options.write_timeout_ms,
         },
-    }, Bridge.start, Bridge.run);
+    }, Bridge.start, Bridge.winddown, Bridge.run);
 }
 
 const engine_waker: Waker.VTable = .{

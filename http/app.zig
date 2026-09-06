@@ -1076,7 +1076,15 @@ pub const App = struct {
                 return error.SessionSecretWrongLength;
             };
         }
-        try bulkhead.serve(self.gpa, options_, &self.stop, self, serverStarting, handleConnection);
+        try bulkhead.serve(
+            self.gpa,
+            options_,
+            &self.stop,
+            self,
+            serverStarting,
+            serverStopping,
+            handleConnection,
+        );
     }
 
     /// Everything `listen()` does **before it accepts anything**, for a
@@ -1147,6 +1155,22 @@ pub const App = struct {
     fn serverStarting(self: *App, io: std.Io, limits: bulkhead.Limits) anyerror!void {
         try self.startServices(io, limits);
         try self.startBackground();
+    }
+
+    /// The mirror of `serverStarting`, run on the way out of `listen()`
+    /// (ADR 0151).
+    ///
+    /// A Service that was handed the Engine's loop in `nilo_start` may have
+    /// left work on it — pg.zig's pool refills itself from a task there —
+    /// and the loop cannot be torn down while that work exists. So every
+    /// service that declared `nilo_stop` gets told, after the connections
+    /// are cut off and before the Runtime goes.
+    ///
+    /// **It runs whether or not the server ever started.** `startServices`
+    /// stops at the first failure, so a `Db` that came up before the one
+    /// that refused the boot is holding a pool nobody will ever ask for.
+    fn serverStopping(self: *App) void {
+        self.services.stopAll();
     }
 
     /// Start what `spawn` registered, into the group the Engine has by now.

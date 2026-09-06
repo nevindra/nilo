@@ -41,6 +41,21 @@ account of why is in the ADR it links.
 
 - **`cors.Options.origin` is now `origins` and takes a list.** Nothing to do if
   you never called `cors.with` — `cors.permissive` is unchanged.
+- **A server whose database never came up used to panic when it stopped.**
+  The log said `info: nilo stopped` and the process crashed on the line after
+  it — and so did a server that nilo itself refused to start, over a bad
+  connection string or a Row that disagrees with its table. Both are fixed, and
+  neither needs anything from you
+  ([ADR 0151](./docs/adr/0151-a-service-is-stopped-before-the-loop-is.md),
+  [ADR 0152](./docs/adr/0152-the-panic-under-the-panic.md)).
+  **What does change: a `sql.Db` is closed when `listen()` returns**, because
+  that is the only moment it can let go of the event loop it was built on. A
+  program that used the `Db` after `listen()` came back has to stop doing that;
+  `defer db.deinit()` is unchanged and still correct.
+- **A Service of your own that puts work on the event loop should declare
+  `pub fn nilo_stop(self: *T) void`.** It is the mirror of `nilo_start` and
+  `listen()` calls it on the way out. Nothing to do if your service only holds
+  data, or if it never touches the loop.
 - **`db.raw` and `tx.raw` take a `comptime` statement.** Text assembled at run
   time cannot be passed any more, and there is no replacement call. What you
   get for it: the `SELECT` list is counted against the Row's fields while
@@ -605,6 +620,19 @@ than a split response. All three are under Fixed.
   ([ADR 0095](./docs/adr/0095-the-name-table-is-checked-against-the-exports.md)).
 
 #### `nilo_sql`
+
+- **The process panicked on the way out whenever the pool never filled.**
+  Two ways in, and the second was never reported because nobody expected it:
+  nilo refusing to start (a schema mismatch, or credentials the database
+  rejects), and an **ordinary shutdown of a server whose database was down the
+  whole time**. The reported one was pg.zig returning from its reconnector
+  while its mutex was unlocked, so the `defer` unlocked it twice — fixed
+  upstream, and the pin is now past it. Underneath it was nilo's: a service was
+  handed the event loop and never told to let go of it, so the loop was torn
+  down with the pool's work still on it
+  ([ADR 0151](./docs/adr/0151-a-service-is-stopped-before-the-loop-is.md),
+  [ADR 0152](./docs/adr/0152-the-panic-under-the-panic.md)). Both exits are
+  clean now, checked by two programs that used to panic and now return 0.
 
 - **`db.raw` was the one call in the module the compiler did not check**, and
   it fills the Row by position. Two columns of the same type in the wrong order

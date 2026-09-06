@@ -906,6 +906,7 @@ pub fn serve(
     stop: *Stop,
     state: anytype,
     comptime ready: anytype,
+    comptime stopping: anytype,
     comptime handler: anytype,
 ) !void {
     const State = @TypeOf(state);
@@ -917,6 +918,19 @@ pub fn serve(
 
     const rt = try zio.Runtime.init(gpa, .{ .executors = .exact(threads) });
     defer rt.deinit();
+
+    // **Registered second, so it runs second to last** — after the group
+    // below has cut off every connection, and before the Runtime is torn
+    // down (ADR 0151). Both halves of that are load-bearing: a service put
+    // down while a handler still holds it is a use-after-free, and a
+    // service that still has work on this loop is a Runtime that cannot be
+    // deinitialised — zio asserts `task_count == 0` and the process panics
+    // one line after saying "nilo stopped".
+    //
+    // It runs on the failure paths too, which is the case that named this:
+    // `ready` below can start a pool and then refuse the boot, and "the
+    // server did not start" has to mean the pool let go of the loop.
+    defer stopping(state);
 
     // Failing to take the port is the most common way a server does not
     // start, and it used to arrive as a stack trace three files deep in the

@@ -56,7 +56,7 @@ pub const panic = nilo.panic;                     // optional: name the request 
 |---|---|
 | `App.init(gpa)` | a new App. The allocator is for the App's furniture, not for requests |
 | `app.deinit()` | |
-| `app.provide(&thing)` | register a service, looked up later by its pointer type |
+| `app.provide(&thing)` | register a service, looked up later by its pointer type. A service may declare `pub fn nilo_start(self: *T, io: std.Io) !void` to finish building itself once there is an event loop ([ADR 0040](./adr/0040-a-service-that-needs-the-loop-is-finished-when-the-loop-exists.md)) and `pub fn nilo_stop(self: *T) void` to put it down again before the loop goes ([ADR 0151](./adr/0151-a-service-is-stopped-before-the-loop-is.md)). **A service that put work on the loop needs the second one**, or the loop cannot be torn down |
 | `app.spawn(f, args)` | work that is not a request, started once the server is up ([ADR 0086](./adr/0086-work-that-is-not-a-request-belongs-to-the-server.md)) |
 | `app.use(mw)` | middleware, everywhere |
 | `app.useOn(prefix, mw)` | middleware, under a path prefix |
@@ -1895,6 +1895,12 @@ request copies it, and it still never reaches the client
 
 `db.nilo_start(io, limits)` is what `listen()` calls; a program starting a `Db`
 by hand passes `.off` and the pool's waits are bounded by nothing.
+`db.nilo_stop()` is the other half, and `listen()` calls that too — after the
+last connection is cut off and before the Engine's loop is torn down, so the
+pool lets go of the loop it was built on
+([ADR 0151](./adr/0151-a-service-is-stopped-before-the-loop-is.md)). **A `Db`
+is not usable after `listen()` returns.** A program driving one by hand calls
+`deinit` as it always did.
 
 `init` opens nothing. The pool is built by `listen()`, which is the only
 moment there is an event loop to dial through — so a server starts with its

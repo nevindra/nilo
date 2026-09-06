@@ -49,6 +49,11 @@ pub const Registry = struct {
         /// ordinary case and costs one branch at startup, never per
         /// request.
         start: ?*const fn (*anyopaque, std.Io, Limits) anyerror!void = null,
+        /// Set only for a service that declared `nilo_stop`. The mirror of
+        /// `start`, and the reason it exists is that a service which put
+        /// work on the Engine's loop has to take it off again before the
+        /// loop is torn down (ADR 0151).
+        stop: ?*const fn (*anyopaque) void = null,
     };
 
     /// The `nilo_start` hook, with the type erased so the registry can hold
@@ -88,6 +93,59 @@ pub const Registry = struct {
                 const self: *T = @ptrCast(@alignCast(erased));
                 if (params.len == 2) return T.nilo_start(self, io);
                 return T.nilo_start(self, io, limits);
+            }
+        }.call;
+    }
+
+    /// The `nilo_stop` hook, erased the way `nilo_start` is.
+    ///
+    /// **One arity and no error.** A stop hook runs from a `defer` on the
+    /// way out of `listen()`, where there is nobody left to hand a failure
+    /// to and nothing useful to do with one — a service that hits trouble
+    /// putting something down logs it and carries on, which is what every
+    /// `deinit` in this repository already does. And it takes no `std.Io`:
+    /// the loop it was started on is the loop it is still on, and a service
+    /// that needed to remember it kept it in `nilo_start` (ADR 0151).
+    ///
+    /// A service with no `nilo_stop` is the ordinary case and costs one
+    /// branch, once, on the way out.
+    fn stopHook(comptime T: type) ?*const fn (*anyopaque) void {
+        if (!@hasDecl(T, "nilo_stop")) return null;
+
+        const info = @typeInfo(@TypeOf(T.nilo_stop));
+        if (info != .@"fn") @compileError(
+            "nilo: " ++ names.of(T) ++ ".nilo_stop is not a function, and it has to be one.\n" ++
+                "  fn nilo_stop(self: *" ++ names.of(T) ++ ") void",
+        );
+        const f = info.@"fn";
+        if (f.params.len != 1) @compileError(
+            "nilo: " ++ names.of(T) ++ ".nilo_stop takes " ++
+                std.fmt.comptimePrint("{d}", .{f.params.len}) ++
+                " parameters, and it has to take 1.\n" ++
+                "  fn nilo_stop(self: *" ++ names.of(T) ++ ") void\n" ++
+                "  It runs on the way out of `listen()`, so there is nothing else to hand it.",
+        );
+        if (f.params[0].type != *T) @compileError(
+            "nilo: " ++ names.of(T) ++ ".nilo_stop takes " ++
+                names.of(f.params[0].type orelse anyopaque) ++
+                ", and it has to take `*" ++ names.of(T) ++ "`.\n" ++
+                "  A stop hook puts something down, so it needs the service it is putting down.",
+        );
+        // The type is deliberately not printed. An inferred error union has
+        // no readable name — `names.of` renders it as the `@typeInfo` chain
+        // that produced it — and naming it adds nothing the reader needs.
+        if (f.return_type != void) @compileError(
+            "nilo: " ++ names.of(T) ++ ".nilo_stop returns something other than `void`, and " ++
+                "a stop hook has to return `void`.\n" ++
+                "  fn nilo_stop(self: *" ++ names.of(T) ++ ") void\n" ++
+                "  It runs from a `defer` on the way out of `listen()`, where there is nobody " ++
+                "left to hand a failure to. Log what went wrong and carry on.",
+        );
+
+        return &struct {
+            fn call(erased: *anyopaque) void {
+                const self: *T = @ptrCast(@alignCast(erased));
+                T.nilo_stop(self);
             }
         }.call;
     }
@@ -136,6 +194,7 @@ pub const Registry = struct {
             .ptr = @ptrCast(@constCast(ptr)),
             .is_const = info.is_const,
             .start = startHook(info.child),
+            .stop = stopHook(info.child),
         });
     }
 
@@ -149,6 +208,30 @@ pub const Registry = struct {
     pub fn start(self: *const Registry, io: std.Io, limits: Limits) !void {
         for (self.entries.items) |e| {
             if (e.start) |hook| try hook(e.ptr, io, limits);
+        }
+    }
+
+    /// Let every service that asked put down what it is holding, **in the
+    /// reverse of the order they were provided** — the ordinary unwinding
+    /// order, so a service built on top of another is taken down first.
+    ///
+    /// Run from inside `listen()`, after the last connection has been cut
+    /// off and before the Engine's loop is torn down (ADR 0151). It cannot
+    /// fail and it cannot be skipped: a service that put work on the loop
+    /// and did not take it off is a loop that cannot be deinitialised, and
+    /// zio says so with an assert on the way out.
+    ///
+    /// **It also runs when the server never started.** `start` stops at the
+    /// first failure, so the services before that one are up and holding
+    /// things, and "the server did not start" has to mean they let go.
+    /// A hook is therefore written to survive being called on a service
+    /// whose `nilo_start` never ran.
+    pub fn stopAll(self: *const Registry) void {
+        var i = self.entries.items.len;
+        while (i > 0) {
+            i -= 1;
+            const e = self.entries.items[i];
+            if (e.stop) |hook| hook(e.ptr);
         }
     }
 
@@ -247,4 +330,71 @@ test "has answers the requirements computed at compile time" {
     try testing.expect(r.has(requirementFor(*Db, "/users/:id")));
     try testing.expect(r.has(requirementFor(*const Db, "/users/:id")));
     try testing.expect(!r.has(requirementFor(*Config, "/users/:id")));
+}
+
+/// A service that records being stopped, and the order it happened in.
+var stop_order: [4]u8 = @splat(0);
+var stopped_count: usize = 0;
+
+fn Stoppable(comptime mark: u8) type {
+    return struct {
+        const Self = @This();
+        stopped: bool = false,
+
+        pub fn nilo_stop(self: *Self) void {
+            self.stopped = true;
+            stop_order[stopped_count] = mark;
+            stopped_count += 1;
+        }
+    };
+}
+
+test "a service that says how to stop is stopped, and one that does not is left alone" {
+    stopped_count = 0;
+    var r = Registry.init(testing.allocator);
+    defer r.deinit();
+
+    var one = Stoppable('a'){};
+    var plain = Db{};
+    try r.add(&one);
+    try r.add(&plain);
+
+    r.stopAll();
+    try testing.expect(one.stopped);
+    try testing.expectEqual(@as(usize, 1), stopped_count);
+}
+
+test "services are stopped in the reverse of the order they were provided" {
+    stopped_count = 0;
+    stop_order = @splat(0);
+    var r = Registry.init(testing.allocator);
+    defer r.deinit();
+
+    var first = Stoppable('1'){};
+    var second = Stoppable('2'){};
+    var third = Stoppable('3'){};
+    try r.add(&first);
+    try r.add(&second);
+    try r.add(&third);
+
+    // The ordinary unwinding order, so a service built on top of another is
+    // put down before the one underneath it (ADR 0151).
+    r.stopAll();
+    try testing.expectEqual(@as(usize, 3), stopped_count);
+    try testing.expectEqualSlices(u8, "321", stop_order[0..3]);
+}
+
+test "a service is stopped even though it never started" {
+    stopped_count = 0;
+    var r = Registry.init(testing.allocator);
+    defer r.deinit();
+
+    // `start` stops at the first failure, so a service registered before the
+    // one that refused the boot is up and holding something. Nothing here
+    // ever calls `start`, which is that case.
+    var never = Stoppable('x'){};
+    try r.add(&never);
+
+    r.stopAll();
+    try testing.expect(never.stopped);
 }

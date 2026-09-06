@@ -2225,3 +2225,43 @@ So the rule to carry: **a comptime check ships with `zig build snippets`, not
 after it.** ADR 0083 made the guide compile so it could not drift; the second
 thing it buys is a corpus of deliberately awkward real statements, and it is
 the only one this repository has.
+
+## Two panics stacked, and the upstream one was on top
+
+A caller reported that nilo panics when it decides *not* to start. The trace
+named pg.zig, and it was right: `Reconnector.run` unlocks its mutex inside the
+loop and then `return`s while unlocked, so the `defer` at the top unlocks a
+second time and xsync's `unreachable` fires. Upstream had fixed it eight days
+earlier and the pin was two commits behind
+([ADR 0152](./adr/0152-the-panic-under-the-panic.md)).
+
+Bumping the pin did not fix it. It changed it. The same commit moved the
+reconnector from `Thread.spawn` to `Io.Group`, so the work became a task on
+nilo's own loop — and nilo has no way to stop a service before tearing that
+loop down. The panic came back from zio instead, as `task_count == 0`
+([ADR 0151](./adr/0151-a-service-is-stopped-before-the-loop-is.md)).
+
+**Reading the trace would have stopped one frame too early.** What found the
+second bug was building two throwaway programs — one that refuses to start, one
+that boots with the database down and is then stopped normally — and running
+both against *both* pins. That is also what found the row nobody reported:
+ordinary shutdown panics too, on both pins, whenever the pool never filled.
+Which is every deploy where Postgres is down.
+
+`zig build test-all` was green on the new pin while both programs still
+panicked. **A dependency bump is not verified by the suite that passes after
+it** — the suite has a database and never watches a server refuse to start.
+
+## A sentence with four clauses needs four runs
+
+[ADR 0062](./adr/0062-a-pool-that-dialled-itself-whatever-it-was-told.md)
+recorded a server that "boots with the database down, connects when it comes
+up, serves 134,967 requests a second at a pool of eight, and shuts down clean."
+Three of those were measured. The fourth was written in the same breath and
+never exercised, because the run behind the sentence used a database that came
+up — so the shutdown it measured was not the shutdown the clause claims.
+
+This is the fifth premise in this file that decayed, and the first that decayed
+*inside* a sentence whose other half was solid. The earlier four were whole
+claims nobody re-tested. This one had a run behind it, which is what made it
+read as safe. **The unit that needs evidence is the clause, not the sentence.**

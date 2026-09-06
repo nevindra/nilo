@@ -35,7 +35,7 @@ the type makes.
 `nilo_sql`, and `zig build layering` holds that. So this joins the eleven
 marker protocols already read the same way — `nilo_openapi`, `nilo_form`,
 `nilo_query`, `nilo_resolve`, `nilo_redirect`, `nilo_bound`, `nilo_patch`,
-`nilo_column`, `nilo_read`, `nilo_write`, `nilo_start` — and is the reason a
+`nilo_column`, `nilo_read`, `nilo_write`, `nilo_start` (and now `nilo_stop`) — and is the reason a
 module in the bottom layer can offer something to the top one at all.
 
 **A `nilo_parse` of the wrong shape is refused where the type is named**, five

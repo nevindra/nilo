@@ -819,6 +819,22 @@ const refusals = [_]Refusal{
         .says = "start_hook_wrong_arity.Mailer.nilo_start takes 4 parameters, and it has to take 2 or 3.",
     },
     .{
+        .name = "stop_hook_wrong_arity",
+        .says = "stop_hook_wrong_arity.Mailer.nilo_stop takes 2 parameters, and it has to take 1.",
+    },
+    .{
+        .name = "stop_hook_that_can_fail",
+        .says = "stop_hook_that_can_fail.Mailer.nilo_stop returns something other than `void`, and a stop hook has to return `void`.",
+    },
+    .{
+        .name = "stop_hook_taking_a_copy",
+        .says = "stop_hook_taking_a_copy.Mailer.nilo_stop takes stop_hook_taking_a_copy.Mailer, and it has to take `*stop_hook_taking_a_copy.Mailer`.",
+    },
+    .{
+        .name = "stop_hook_that_is_not_a_function",
+        .says = "stop_hook_that_is_not_a_function.Mailer.nilo_stop is not a function, and it has to be one.",
+    },
+    .{
         .name = "too_few_pattern_params",
         .says = "argument 1 of the handler for route \"/users\" is a u32, so nilo reads it as a path param — but the route has no path params at all.",
     },
@@ -2854,13 +2870,13 @@ pub fn build(b: *std.Build) void {
     // take them off `test` and leave them on `test-all` — not to stop
     // checking.
     // Named for the framework rather than for all of them, because it only
-    // runs the framework's 105. The other five tables hang off their own
+    // runs the framework's 109. The other five tables hang off their own
     // module's test step (ADR 0027) and have their own `refusals-*` steps —
     // and a name that over-promised sent one reader to run this, watch it
     // pass, and believe a `sql/refusals/` file had been checked.
     const refusals_step = b.step(
         "refusals",
-        "Check the framework's 105 compile errors — see refusals-sql, -s3, -config, -pw, -cache for the rest",
+        "Check the framework's 109 compile errors — see refusals-sql, -s3, -config, -pw, -cache for the rest",
     );
     for (refusals) |refusal| {
         const module = b.createModule(.{

@@ -73,7 +73,19 @@ written. `Pool.init` hands `size - connect_on_init_count` connections to a
 
 Under the engine that is fine — measured, not assumed: a server with
 `connect_on_init = 0` boots with the database down, connects when it comes up,
-serves 134,967 requests a second at a pool of eight, and shuts down clean.
+and serves 134,967 requests a second at a pool of eight.
+
+> **Correction, and it is the fourth clause of that sentence.** This also said
+> "and shuts down clean". It does, *if the database came up*. If it never does,
+> the reconnector is still going at shutdown, and the process panics one line
+> after `info: nilo stopped` — on the old pin through pg.zig's own double
+> unlock, and after the bump through zio's `task_count` assert, because nilo
+> had no way to stop a service before tearing the loop down
+> ([ADR 0151](0151-a-service-is-stopped-before-the-loop-is.md),
+> [ADR 0152](0152-the-panic-under-the-panic.md)). The measurement behind the
+> three clauses that survive was taken against a database that came up, so the
+> fourth clause was never exercised by it. **A sentence with four clauses needs
+> four runs**, and this one had three.
 
 **Under `std.Io.Threaded` it panics, and it took 77 tests with it.** The
 reconnector's thread parks on an `xsync.Mutex` against the `Io` it was handed,

@@ -21,8 +21,8 @@
         // off for a dependent until they pass `.sql = true`. ADR 0075 is where
         // that was found, a year after the sentence above was published.
         .pg = .{
-            .url = "git+https://github.com/lalinsky/pg.zig#a2c98876a7d8a36b1771679ce912bfead46ee8f6",
-            .hash = "pg-0.0.0-Wp_7gUqUBgDARGCn8B7brldZRA9lmDQGn262ySg2tg3W",
+            .url = "git+https://github.com/lalinsky/pg.zig#91d07055c57b80de1fb4c91129d56ecd9799bce8",
+            .hash = "pg-0.0.0-Wp_7gYqSBgB2l9zNurSVlD_wRF_zGWjCUPDpQQNIZWnc",
             .lazy = true,
         },
         // The other driver behind `nilo_sql`, and lazy for the same reason.

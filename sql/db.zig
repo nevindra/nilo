@@ -621,6 +621,25 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             }
         }
 
+        /// Put the pool down, on the loop it was built on
+        /// ([ADR 0151](../docs/adr/0151-a-service-is-stopped-before-the-loop-is.md)).
+        ///
+        /// `listen()` calls this on the way out, after the last connection
+        /// has been cut off and before the Engine's loop is torn down. It has
+        /// to happen there rather than in `deinit`: pg.zig's pool refills
+        /// itself from a task on that loop, and a task outstanding when the
+        /// Runtime is deinitialised is an assert inside zio, one line after
+        /// nilo has said it stopped cleanly.
+        ///
+        /// **Idempotent, and it has to be.** It runs when `nilo_start` never
+        /// ran — a `Db` provided beside another one that refused the boot —
+        /// and `deinit` runs after it on the caller's own `defer`. Clearing
+        /// `wire` is what makes both of those a no-op.
+        pub fn nilo_stop(self: *Self) void {
+            if (self.wire) |*w| w.close();
+            self.wire = null;
+        }
+
         // -- reading ---------------------------------------------------------
 
         /// Every row matching `options`, in the request's arena.
@@ -757,9 +776,25 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         ///
         /// The way past *one table, conditions that filter rows*: joins,
         /// aggregates, `HAVING`, window functions, CTEs. It keeps the arena,
-        /// keeps the `Str` rule, keeps the row filling — and gives up the
-        /// compile-time column check, which is the whole of what it costs.
-        /// The `SELECT` list has to line up with `Row`'s fields by position.
+        /// keeps the `Str` rule and keeps the row filling.
+        ///
+        /// **The text is comptime and the `SELECT` list is checked against the
+        /// Row** ([ADR 0148](../docs/adr/0148-a-raw-statement-is-counted-while-compiling.md)):
+        /// the columns are counted against the Row's fields, each column that
+        /// plainly has a name is checked against the field in its position,
+        /// and a disagreement is a compile error naming both. The statement is
+        /// kept prepared like every other one.
+        ///
+        /// **What is still given up is the *type* check**, which is the whole
+        /// of what this call costs now. A comptime pass has no schema, so
+        /// `SELECT id, email` into `struct { id: i64, email: Str }` is checked
+        /// for shape and not for whether `email` is really `text`. That half
+        /// belongs to `db.checking`, which asks the database.
+        ///
+        /// A `*` in the list, and a statement with no `SELECT` and no
+        /// `RETURNING`, are counted as "not counted" rather than guessed at —
+        /// so `SELECT *` into a narrow Row still compiles, and the run-time
+        /// width check is what holds it (ADR 0134).
         pub fn raw(
             self: *Self,
             comptime Row: type,
@@ -1377,6 +1412,11 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 return fill(Row, stmt.reserve, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
             }
 
+            /// `db.raw` inside the transaction, and the same call in every
+            /// other way: comptime text, the `SELECT` list counted and named
+            /// against the Row while compiling, and the statement kept
+            /// prepared (ADR 0148). The type check is still the database's,
+            /// through `db.checking`.
             pub fn raw(
                 self: *Tx,
                 comptime Row: type,
@@ -4744,4 +4784,29 @@ test "db.exec answers with the rows it changed and needs no Row to do it" {
     errdefer tx.rollback();
     _ = try tx.exec(&run, "CREATE INDEX accounts_email ON accounts(email)", .{});
     try tx.commit();
+}
+
+test "a Db can be stopped, and stopping it twice or deiniting after is a no-op" {
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = 1 };
+
+    // `listen()` calls this on the way out, and the caller's own
+    // `defer db.deinit()` runs after it. Both have to be safe, and so does a
+    // stop on a `Db` whose `nilo_start` never ran (ADR 0151).
+    db.nilo_stop();
+    try testing.expect(db.wire == null);
+    db.nilo_stop();
+    db.deinit();
+    try testing.expect(db.wire == null);
+}
+
+test "a Db that never started can still be stopped" {
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+
+    // `Registry.start` stops at the first failure, so a `Db` provided beside
+    // one that refused the boot reaches `stopAll` having opened nothing.
+    db.nilo_stop();
+    try testing.expect(db.wire == null);
 }
