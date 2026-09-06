@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-**nilo is a toolkit for Zig 0.16 — eight modules, of which the largest is an HTTP
+**nilo is a toolkit for Zig 0.16 — nine modules, of which the largest is an HTTP
 server.** It is not a framework with parts bolted beside it, and that
 distinction decides where new work goes. What the modules share is one idea:
 **your types are the contract, and the compiler is the check.** A plain Zig
@@ -34,15 +34,15 @@ and the way a Service reaches request-lifetime memory is a Scope, not a `Ctx`.
 ADR 0070 built the layer for.
 
 **The bottom layer holds more than one module** (ADR 0042). `core/` is the
-vocabulary and sits under the rest of it; `id/`, `config/` and `pw/` are **tool
-modules** — one job, no event loop, imports nothing above them. A Service may
+vocabulary and sits under the rest of it; `id/`, `config/`, `pw/` and `cache/`
+are **tool modules** — one job, no event loop, imports nothing above them. A Service may
 import a tool module, which is downward. **The rule is a build step, not a
 paragraph**: `zig build layering` reads the `@import`s under `core/`, `id/`,
-`config/`, `pw/`, `fetch/`, `sql/` and `s3/` and refuses one that is not in that
-module's row of the `layers` table in `build.zig`. Adding a module means adding
+`config/`, `pw/`, `cache/`, `fetch/`, `sql/` and `s3/` and refuses one that is
+not in that module's row of the `layers` table in `build.zig`. Adding a module means adding
 a row — there and in `shipped_roots`, and in `.paths` in `build.zig.zon`.
 
-A tool module *may* name `nilo_core` and neither of them does, which is not an
+A tool module *may* name `nilo_core` and none of them does, which is not an
 accident: naming it costs the property that decides the layer — running under a
 plain `zig test`, with no module graph. ADR 0043 is where that was settled, and
 it is why `nilo_config` reads `[]const u8` rather than `Str` and carries forty
@@ -89,7 +89,7 @@ goes in an ADR, a number goes in `docs/history.md`, a rule goes in a build step.
 
 Two of those rules are build steps rather than paragraphs, and they are the ones
 to lean on: `zig build layering` refuses an import that goes upward or sideways,
-and the five `refusals` steps check the wording of 163 error messages. Prefer making
+and the six `refusals` steps check the wording of 169 error messages. Prefer making
 a new rule enforceable that way over writing it down here — a paragraph nobody
 runs is the thing that rots.
 
@@ -111,18 +111,21 @@ zig build test-core    # only Core, both modes — no Engine, no module graph
 zig build test-id      # only nilo_id, the same way
 zig build test-config  # only nilo_config, the same way, plus its refusals
 zig build test-pw      # only nilo_pw, the same way, plus its refusals
+zig build test-cache   # only nilo_cache, the same way, plus its refusals
 zig build test-fetch   # only nilo_fetch, both modes — a real socket, no Engine
 zig build test-fetch-engine  # an outbound deadline firing against a real port; on `test`
 zig build test-s3      # only nilo_s3, both modes, plus its refusals
 zig build layering     # check that no module imports upward or sideways
-zig build refusals     # the framework's 97 compile-error checks — NOT the others
+zig build refusals     # the framework's 98 compile-error checks — NOT the others
 zig build refusals-sql # nilo_sql's 44; also run by test-sql
 zig build refusals-config  # nilo_config's 9, and refusals-pw for nilo_pw's 3
+zig build refusals-cache   # nilo_cache's 5; also run by test-cache
 zig build refusals-s3  # nilo_s3's 10; also run by test-s3
 zig build snippets     # the documentation's own marked snippets, which must compile
 zig build smoke-tls -Dnetwork   # a real HTTPS endpoint — NOT part of test
 zig build examples     # build all nine examples
 zig build fuzz -- --iterations 1000000 --seed 0x…   # generated requests at the parser
+zig build bench-cache  # what a cache operation costs, and what an entry weighs
 zig build bench-sql    # what a prepared statement is worth: SQLite always, Postgres if reachable
 zig build bench-sql-server  # a server reading Postgres per request, for wrk/oha
 zig build bench-fetch-server # what an outbound call costs, with its controls
@@ -138,6 +141,7 @@ python3 bench/slowloris.py --port … --path …  # what a body that never finis
 python3 bench/ws_idle.py both            # the same axis for WebSockets, nilo and gws
 python3 bench/s3_setup.py                # the bucket and objects both of the above want
 python3 bench/compare-s3/drive.py        # nilo_s3 against Go, Rust and Bun — needs MinIO
+bash bench/compare-cache/run.sh          # nilo_cache against go-cache — needs Go
 zig build run          # the benchmark server (bench/main.zig): GET /users/:id, ~1 KB JSON
 zig build profile      # where the time inside one request goes
 zig build run-{hello,rest,orders,forms,spa,stream,chat,scheduled,outbound}  # run one example
@@ -153,8 +157,8 @@ re-analysed every run. They stay on `test` on purpose (ADR 0027).
 
 **`test-all` is the whole gate, and the list below is a list of *narrower* runs
 rather than of things it misses.** It carries every module's own step —
-`test-core`, `test-id`, `test-config`, `test-pw`, `test-fetch`,
-`test-fetch-engine`, `test-s3`, `test-sql` and both refusal tables under those —
+`test-core`, `test-id`, `test-config`, `test-pw`, `test-cache`, `test-fetch`,
+`test-fetch-engine`, `test-s3`, `test-sql` and the refusal tables under those —
 plus `layering` and `snippets`. This is worth stating because two readers of
 this file concluded the opposite in one evening and gated a merge by running
 seven steps by hand: a change under `core/` moves every module above it while
@@ -203,10 +207,12 @@ zig test core/core.zig                  # the vocabulary, no build.zig
 zig test id/id.zig                      # nilo_id, likewise
 zig test config/config.zig              # nilo_config, likewise
 zig test pw/pw.zig                      # nilo_pw, likewise
+zig test cache/cache.zig                # nilo_cache, likewise
 zig build test-core                     # the same, both optimize modes
 zig build test-id
 zig build test-config
 zig build test-pw
+zig build test-cache
 ```
 
 A Fitting cannot quite do that — it borrows the loop — but it comes one step
@@ -251,7 +257,7 @@ Bottom to top. Each layer knows nothing about the one above it.
 | Layer | Files | What it is |
 |---|---|---|
 | **Core** | `core/` | `Str`, the Scope, the clock and percent coding. The vocabulary every layer agrees about, and no IO at all — a separate module (`nilo_core`) that names no Engine, so `zig test core/core.zig` runs the whole of it (ADR 0041). A file gets in by being needed by two layers, which is how `percent` arrived (ADR 0066). |
-| **Tools** | `id/`, `config/`, `pw/` | one job each, no event loop, and `nilo_core` is the most they may import. All three import nothing at all (ADR 0042, ADR 0043, ADR 0048). |
+| **Tools** | `id/`, `config/`, `pw/`, `cache/` | one job each, no event loop, and `nilo_core` is the most they may import. All four import nothing at all (ADR 0042, ADR 0043, ADR 0048, ADR 0138). **`cache/` is where the language decided the design**: `std.Io.Mutex.lock` takes an `Io` this layer has none of, so its lock spins — and nothing that waits may ever go inside a critical section. |
 | **Fitting** | `fetch/` | borrows the loop, owns no destination — an HTTP client for calling somebody else's API. Imports `nilo_core` and nothing else; its tests run under `std.Io.Threaded` with no Engine, which is the entry condition for the layer (ADR 0070). |
 | **Services** | `sql/`, `s3/` | borrow the loop and hold a named system — a Postgres pool, a SQLite file, an object store's endpoint and credentials. **A SQLite statement is the one thing down here that blocks with nothing to wait on**, which is why `sqlite.Options.threading` has no default (ADR 0073). `s3/` is the only module that imports a Fitting, which is downward and is what the layer was built for (ADR 0072). Neither may name `nilo_http`. |
 | **Engine** | `http/engine/zio.zig` | accept, read, write. **The only file in the repo allowed to name zio** (ADR 0002). |
@@ -322,7 +328,8 @@ body, not a sentence in a session — the file. One file an area, named for it:
 [`http.md`](bench/result/http.md) for the server,
 [`sql.md`](bench/result/sql.md) for the database,
 [`fetch.md`](bench/result/fetch.md) for the way out,
-[`s3.md`](bench/result/s3.md) for the object store. Each carries what was run,
+[`s3.md`](bench/result/s3.md) for the object store,
+[`cache.md`](bench/result/cache.md) for the cache. Each carries what was run,
 the machine, the commit, the numbers, and the decision they moved — and a
 closing section saying whether the number can be pushed further, so the next
 person starts from the ranked levers rather than from the top. A run that
@@ -399,10 +406,10 @@ everything else does. `bench/result/` is the raw record those two cite.
 **Error messages are a feature, and a build step holds them.** Each file in
 `refusals/` is a program written wrong on purpose; it must fail to compile with
 a message nilo wrote. Adding a comptime check means adding **both** a file in
-`refusals/` and a row in the matching table in `build.zig`. **There are four
-tables and four steps**, one per module — `refusals`, `sql_refusals`,
-`config_refusals`, `pw_refusals` — and adding a row to one while running
-another is a check that silently never ran. Leave the `nilo: `
+`refusals/` and a row in the matching table in `build.zig`. **There are six
+tables and six steps**, one per module — `refusals`, `sql_refusals`,
+`s3_refusals`, `config_refusals`, `pw_refusals`, `cache_refusals` — and adding
+a row to one while running another is a check that silently never ran. Leave the `nilo: `
 prefix off the `.says` text — the build step supplies it, which is what makes a
 failure inside the standard library impossible to record as passing. See
 `refusals/README.md` and ADR 0027.

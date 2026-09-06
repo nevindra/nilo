@@ -1,0 +1,9 @@
+// No dependencies, on purpose. See build.zig.
+.{
+    .name = .cache_ring_spike,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0xa542881d48f24155,
+    .dependencies = .{},
+    .paths = .{ "build.zig", "build.zig.zon", "main.zig" },
+}

@@ -38,8 +38,8 @@ with a vibe.
 zig build test         # the loop: the suite in Debug, plus the refusals
 zig build test-all     # the above plus the same suite in ReleaseSafe. This is what CI runs
 zig build layering     # check that no module imports upward or sideways
-zig build refusals     # the framework's 77 compile-error checks — NOT the others
-zig build refusals-sql # nilo_sql's 44; refusals-config, -pw and -s3 for the rest
+zig build refusals     # the framework's 98 compile-error checks — NOT the others
+zig build refusals-sql # nilo_sql's 44; refusals-config, -pw, -cache and -s3 for the rest
 zig build snippets     # the documentation's marked snippets, which must compile
 zig build examples     # build all nine examples
 
@@ -47,6 +47,7 @@ zig build test-core    # only nilo_core, both modes. No engine, no module graph
 zig build test-id      # only nilo_id, the same way
 zig build test-config  # only nilo_config, the same way, plus its refusals
 zig build test-pw      # only nilo_pw, the same way, plus its refusals
+zig build test-cache   # only nilo_cache, the same way, plus its refusals
 zig build test-fetch   # only nilo_fetch, both modes — a real socket, no Engine
 zig build test-s3      # only nilo_s3, both modes, plus its refusals
 
@@ -125,15 +126,16 @@ the feature, and it needs a program that proves the message still says the right
 thing.
 
 That means a file in `refusals/` (or `sql/refusals/`, `config/refusals/`,
-`pw/refusals/`, `s3/refusals/`) and a row in the matching table in `build.zig`.
+`pw/refusals/`, `cache/refusals/`, `s3/refusals/`) and a row in the matching table in `build.zig`.
 [`refusals/README.md`](./refusals/README.md) shows exactly how, including the
 trick for finding out what to put in `.says`: guess, run the **matching** step —
-`refusals`, `refusals-sql`, `refusals-config`, `refusals-pw` or `refusals-s3`,
+`refusals`, `refusals-sql`, `refusals-config`, `refusals-pw`, `refusals-cache`
+or `refusals-s3`,
 because each one runs only its own table and a row added to one while another is
 running is a check that silently never ran —
 and read what it prints.
 
-**There are five tables now.** That warning gets sharper with each one, and the
+**There are six tables now.** That warning gets sharper with each one, and the
 failure is silent by construction: the row is there, the file is there, and the
 step you ran never looked at either.
 
@@ -190,7 +192,7 @@ reads is discarded outside the page rather than with an `_ =` inside it.
 
 **A benchmark that changed a decision gets written down where it can be
 re-run.** `bench/result/http.md` is the server, `bench/result/sql.md` is the
-database, and a new area gets a new file rather than a paragraph in an existing
+database, `bench/result/cache.md` is the cache, and a new area gets a new file rather than a paragraph in an existing
 one. The entry says what was run, on what machine, at what commit, what the
 numbers were, and what they changed — plus what a number was measured
 *through*, because a transport is part of a figure and not a footnote. The same

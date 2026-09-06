@@ -11,11 +11,15 @@ const std = @import("std");
 /// **Adding a module means adding a row here as well as to `.paths`.** Core
 /// shipped for a whole session with neither, and nothing noticed, because a
 /// list that does not name a directory cannot check it.
-const shipped_roots = [_][]const u8{ "core", "id", "config", "pw", "fetch", "http", "sql", "s3" };
+const shipped_roots = [_][]const u8{ "core", "id", "config", "pw", "cache", "fetch", "http", "sql", "s3" };
 
 comptime {
     const manifest = @embedFile("build.zig.zon");
-    @setEvalBranchQuota(8 * manifest.len + 1_000);
+    // Derived from the list rather than written as a constant: the ninth
+    // module made the old `8 *` too small, and a quota that has to be raised
+    // by hand every time a module lands is a quota that fails the build for
+    // the wrong reason.
+    @setEvalBranchQuota(2 * shipped_roots.len * manifest.len + 1_000);
     for (shipped_roots) |root| {
         const quoted = "\"" ++ root ++ "\"";
         if (std.mem.indexOf(u8, manifest, quoted) == null) @compileError(
@@ -59,6 +63,13 @@ const layers = [_]Layer{
     // the caller's, which is what keeps `zig test pw/pw.zig` the whole of its
     // suite. `http/password.zig` is the half that has a Bulkhead.
     .{ .root = "pw", .may_import = &.{} },
+    // The fourth, and it names nothing either (ADR 0138). What it wanted from
+    // a layer above was a clock and a lock, and it has neither: the clock is
+    // `clock_gettime` written a second time rather than `nilo_core`'s, and
+    // the lock spins because `std.Io.Mutex` needs an `Io` this layer does not
+    // have. Both of those are the layer deciding the design rather than the
+    // other way round, which is why the row is empty.
+    .{ .root = "cache", .may_import = &.{} },
     // The first Fitting (ADR 0070): it borrows the loop and owns no
     // destination. That is what puts it below a Service and above a tool
     // module — `zig test fetch/fetch.zig` needs `nilo_core` and so needs the
@@ -425,6 +436,32 @@ const pw_refusals = [_]Refusal{
     .{
         .name = "pw_cost_more_lanes_than_memory",
         .says = "a password Cost of 2048 lanes needs at least 16384 KiB of memory, and it has 8192.",
+    },
+};
+
+/// The same, for `cache/refusals/`, hanging off `test-cache` for the reason
+/// the Config and Password ones hang off theirs: a module in the bottom layer
+/// keeps its own (ADR 0138).
+const cache_refusals = [_]Refusal{
+    .{
+        .name = "cache_value_holds_a_pointer",
+        .says = "a cached Cart cannot keep `Cart.name`, which is a pointer.",
+    },
+    .{
+        .name = "cache_value_nested_pointer",
+        .says = "a cached Cart cannot keep `Cart.first.label`, which is a pointer.",
+    },
+    .{
+        .name = "cache_value_over_the_ceiling",
+        .says = "a cached Page is 131080 bytes, and a cache entry holds at most 65535.",
+    },
+    .{
+        .name = "cache_space_with_no_name",
+        .says = "a cache Space needs a name.",
+    },
+    .{
+        .name = "cache_bytes_space_with_no_room",
+        .says = "the cache Space \"page\" holds bytes and its `max_bytes` is 0.",
     },
 };
 
@@ -1237,6 +1274,24 @@ fn pwFor(
     });
 }
 
+/// A copy of `nilo_cache` for one optimize mode (ADR 0138).
+///
+/// Shared rather than merely built from the same file, for the reason `pwFor`
+/// is: a `Space` is a type, and two modules built from one root are two types
+/// to Zig — so a handler holding a `*Carts` from one would not match the
+/// `Carts` a Store registered from the other.
+fn cacheFor(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    mode: std.builtin.OptimizeMode,
+) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("cache/cache.zig"),
+        .target = target,
+        .optimize = mode,
+    });
+}
+
 /// A copy of `nilo_fetch` for one optimize mode (ADR 0070).
 ///
 /// The first Fitting, and the first module down here that is not self
@@ -1677,6 +1732,17 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // The fourth tool module: a cache that never leaves the process
+    // (ADR 0138). It imports nothing at all, which `zig build layering`
+    // checks, and `nilo_http` does not name it — a program with no cache in
+    // it links no ring, no table and no spin lock. A project that wants one
+    // writes `@import("nilo_cache")`.
+    const nilo_cache = b.addModule("nilo_cache", .{
+        .root_source_file = b.path("cache/cache.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // The first Fitting: it borrows the loop and owns no destination
     // (ADR 0070). `nilo_http` does **not** name it — a program that calls
     // nobody else's API links no HTTP client, no TLS and no certificate
@@ -1956,6 +2022,36 @@ pub fn build(b: *std.Build) void {
     test_pw_step.dependOn(refusals_pw_step);
     test_step.dependOn(test_pw_step);
 
+    // And the fourth (ADR 0138). `zig test cache/cache.zig` is this without
+    // `build.zig` at all — the entry condition for the layer, and the reason
+    // a program that is not a server can take this module on its own.
+    const test_cache_step = b.step(
+        "test-cache",
+        "Run nilo_cache's tests — no Engine, no module graph",
+    );
+    for (test_modes) |mode| {
+        const tests = b.addTest(.{ .root_module = cacheFor(b, target, mode) });
+        test_cache_step.dependOn(&b.addRunArtifact(tests).step);
+    }
+
+    const refusals_cache_step = b.step(
+        "refusals-cache",
+        "Check that each cached-value mistake stops in nilo's own words",
+    );
+    for (cache_refusals) |refusal| {
+        const module = b.createModule(.{
+            .root_source_file = b.path(b.fmt("cache/refusals/{s}.zig", .{refusal.name})),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{.{ .name = "nilo_cache", .module = nilo_cache }},
+        });
+        const refused = b.addObject(.{ .name = refusal.name, .root_module = module });
+        refused.expect_errors = .{ .contains = b.fmt("error: nilo: {s}", .{refusal.says}) };
+        refusals_cache_step.dependOn(&refused.step);
+    }
+    test_cache_step.dependOn(refusals_cache_step);
+    test_step.dependOn(test_cache_step);
+
     // The Fitting layer's entry condition, as something that runs (ADR 0070).
     // A Tool module proves its layer under a plain `zig test`; a Fitting
     // borrows the loop, so it proves its own under `std.Io.Threaded` — std's,
@@ -2227,6 +2323,25 @@ pub fn build(b: *std.Build) void {
     // calls make two modules with the same root file, which Zig refuses.
     const bench_live_config = live_config.createModule();
     bench_nilo_sql.addImport("live_config", bench_live_config);
+
+    // What a cache operation costs, and what an entry costs to hold
+    // (ADR 0138). No Engine and no server: the module needs neither, so
+    // neither is in the way of the number.
+    const bench_cache = b.addExecutable(.{
+        .name = "nilo-bench-cache",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/cache_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "nilo_cache", .module = nilo_cache }},
+        }),
+    });
+    {
+        const run = b.addRunArtifact(bench_cache);
+        if (b.args) |args| run.addArgs(args);
+        b.step("bench-cache", "Time a cache operation, and weigh an entry")
+            .dependOn(&run.step);
+    }
 
     const bench_sql_module = b.createModule(.{
         .root_source_file = b.path("bench/sql.zig"),
@@ -2701,6 +2816,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "nilo_config", .module = nilo_config },
                     .{ .name = "nilo_fetch", .module = nilo_fetch },
                     .{ .name = "nilo_s3", .module = nilo_s3 },
+                    .{ .name = "nilo_cache", .module = nilo_cache },
                 },
             });
             const compiled = b.addObject(.{ .name = snippet.name, .root_module = module });

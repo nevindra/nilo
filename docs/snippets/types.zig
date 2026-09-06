@@ -28,6 +28,7 @@ pub const pw = @import("nilo_pw");
 pub const config = @import("nilo_config");
 pub const fetch = @import("nilo_fetch");
 pub const s3 = @import("nilo_s3");
+pub const cache = @import("nilo_cache");
 
 pub const Str = nilo.Str;
 pub const Redirect = nilo.Redirect;
@@ -48,6 +49,17 @@ pub const Account = User;
 
 /// What that guide's session actually holds — a user's id, not the row.
 pub const Signed = struct { user: u32, admin: bool = false };
+
+/// What the cache page keeps: a flat value, because a cache entry outlives the
+/// request that wrote it and so may hold no pointer (ADR 0138).
+pub const Cart = struct {
+    owner: u64,
+    items: u16,
+    total_cents: u64,
+};
+
+/// The Space the reference and the guide read and write.
+pub const Carts = cache.Space("cart", Cart, .{ .ttl_s = 300 });
 
 /// A row whose key is generated rather than counted, for `nilo_id`.
 pub const Doc = struct {

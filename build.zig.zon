@@ -49,6 +49,7 @@
         "id",
         "config",
         "pw",
+        "cache",
         "fetch",
         "http",
         "sql",

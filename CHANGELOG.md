@@ -10,6 +10,19 @@ What was measured and what was got wrong on the way is in
 Needs Zig 0.16, as 0.2.0 does. Each entry says what you have to change; the
 account of why is in the ADR it links.
 
+### New
+
+- **`nilo_cache`, the ninth module: an expiring cache in this process**
+  ([ADR 0138](./docs/adr/0138-a-cache-holds-its-bytes-under-a-lock-it-can-spin-on.md),
+  [ADR 0139](./docs/adr/0139-an-in-process-cache-and-a-redis-client-are-two-modules.md)).
+  A tool module — it imports nothing, needs no event loop, and a program that
+  is not a server can take it on its own. `cache.Space("cart", Cart, .{ .ttl_s
+  = 300 })` is a keyspace as a type; the value type decides whether `get` hands
+  back a value or fills an array you declared, and a value with a pointer in it
+  is a compile error naming the field. One number is the whole memory budget
+  and it is a ceiling: nothing is allocated after `open` and nothing grows.
+  Nothing to change — nothing imports it unless you do.
+
 ### Read this before deploying
 
 - **`cors.Options.origin` is now `origins` and takes a list.** The one breaking

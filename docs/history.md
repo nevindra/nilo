@@ -1959,3 +1959,88 @@ on its own screen. Compiling them against one world is what makes the drift a
 build failure. This is the same failure mode as
 [a number that was stated and never held](#a-number-that-was-stated-and-never-held),
 one layer over: a second copy that nothing checks.
+
+## The thread nobody thought about was the one writing
+
+`nilo_cache`'s ring was reasoned through carefully and shipped nothing, because
+the reasoning covered the wrong thread. A reader copying bytes out of a ring
+checks afterwards that the window still holds the position it copied from; if
+it does, nothing can have overwritten those bytes. That is true, and it is
+about readers. **A *writer* descheduled inside its own `memcpy` is lapped by
+the ring and writes over an entry newer than itself**, and the victim's
+position is recent enough to pass every check a reader makes
+([ADR 0138](./adr/0138-a-cache-holds-its-bytes-under-a-lock-it-can-spin-on.md)).
+
+Seven wrong values in 1.9 million hits. Two details are the transferable part:
+
+**It only appeared with more threads than cores.** One writer and one reader on
+two cores produced zero wrong answers in 34.9 million gets — a run that would
+have been read as a pass. A concurrency test that does not oversubscribe the
+machine is testing the interleavings the scheduler happened to pick.
+
+**Sharding read like a fix and measured as none.** Sixteen rings gave eight
+wrong rather than seven, because the race lives inside one ring. The plausible
+mitigation was refuted by the same run that found the bug, which is the only
+reason it did not get built.
+
+The other finding came from the compiler rather than the measurement, and no
+amount of thinking about layers would have produced it: **Zig 0.16's
+`std.Io.Mutex.lock` takes an `io: Io`.** Parking on a futex is a runtime's job,
+so a module with no event loop cannot hold a mutex without putting `Io` into
+its signature and leaving the layer that
+[ADR 0042](./adr/0042-the-bottom-layer-holds-more-than-one-module.md) defines.
+What is left is `tryLock` and a spin, which turns a preference into a rule the
+module keeps forever: nothing that waits, ever, inside a critical section.
+
+Both were found in an afternoon in [`spike/cache_ring/`](../spike/cache_ring/),
+before a module existed to be wrong. That is the argument for spiking the one
+part whose answer is unknown rather than the parts that merely have to be
+written.
+
+## The cache that used more memory than the thing it was built to beat
+
+`nilo_cache`'s first working version cost **125.8 bytes an entry against
+go-cache's 96.9**, which was the opposite of the point of building it. Nothing
+was wrong with it. Two roundings were.
+
+**A masked ring has to be a power of two, and a power of two is a rounding a
+caller pays for.** A 12 MiB budget became an 8 MiB ring with a third of it
+unreachable. Storing an offset and a pass number instead of a
+forever-increasing position needs no mask, so the ring is sized exactly — and
+it also took the split `memcpy` out of every read and write, because an entry
+that will not fit before the end now starts again at the beginning instead of
+straddling the seam.
+
+**And a slot is paid for whether or not anything is in it.** Halving it from
+sixteen bytes to eight and doubling the ways from four to eight is the same
+64-byte cache line touched, half the table, and *better* retention — a key
+arriving at a full bucket is what a set-associative table loses, and eight ways
+lose far fewer than four. The two together: **63.3 bytes an entry at 99.1%
+retrievable**.
+
+The generalisable half is that both roundings were invisible in the code and
+obvious in one measurement against somebody else's implementation. Neither
+would have been found by reading, and neither showed up in this module's own
+numbers — they only appeared next to a competitor's.
+
+## A benchmark can hand the other language a shortcut it has no way to take
+
+The first comparison put go-cache 1.64× ahead on small values. It is 1.3–1.5×.
+
+The Go benchmark looked keys up with the very string objects it had stored, and
+Go compares two strings by checking their data pointers before their bytes.
+Every probe took that shortcut, so its key comparison cost nothing. The other
+side compares bytes out of a ring and has no such path. Giving Go a separate
+copy of the same text — `string([]byte(k))`, which is what a key built from a
+request actually is — moved the gap by twenty per cent.
+
+**Neither side's source shows this.** It is a property of how the harness got
+its keys, and the harness looked symmetrical. Two more of the same shape turned
+up in the same afternoon and both also produced *higher* numbers, which is the
+direction nobody investigates: a row that measured a cache an earlier row had
+emptied, reporting 0% hits at 7.4 million lookups a second, and a warm-up that
+filled the cache with the values the row was not going to read.
+
+Written down in [`bench/result/cache.md`](../bench/result/cache.md) with the
+rule they produce: **when a benchmark row is faster than expected, find out
+why before keeping it.**

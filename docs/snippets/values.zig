@@ -17,3 +17,7 @@ pub var gpa: std.mem.Allocator = undefined;
 // `app.metrics(.{})` of the metrics page, and anything else registered on the
 // way to `listen()`.
 pub var app: nilo.App = undefined;
+
+// The cache a snippet about reading one says without opening one.
+pub var store: cache.Store = undefined;
+pub var carts: Carts = undefined;

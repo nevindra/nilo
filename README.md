@@ -8,12 +8,12 @@ nilo is a toolkit for that layer. It has one idea.
 
 > **Your types are the contract. The compiler is the check.**
 
-Eight modules. The biggest one is an HTTP server, but the server is not the
+Nine modules. The biggest one is an HTTP server, but the server is not the
 point. You import the modules you use, and Zig never compiles the rest.
 
 **It's built for people and for coding agents at the same time**, which turns
 out to be one job rather than two. One rule covers the whole argument list.
-Nothing depends on the order you wrote it in. And 141 error messages are held in
+Nothing depends on the order you wrote it in. And 169 error messages are held in
 place by a build step, so a mistake comes back as a sentence while your code is
 still compiling instead of as a 500 at runtime. That helps you, and it helps
 whatever is writing code next to you.
@@ -279,8 +279,8 @@ const exe = b.addExecutable(.{
 
 The package is `nilo` and the module is `nilo_http`. **There is no module called
 `nilo`**, because the name belongs to the project rather than to any one part of
-it. `nilo_sql`, `nilo_s3`, `nilo_fetch`, `nilo_config`, `nilo_pw`, `nilo_id` and
-`nilo_core` are its siblings, and you add a line above for each one you actually
+it. `nilo_sql`, `nilo_s3`, `nilo_fetch`, `nilo_cache`, `nilo_config`, `nilo_pw`,
+`nilo_id` and `nilo_core` are its siblings, and you add a line above for each one you actually
 use. In your own code, alias it back to something short:
 
 ```zig
@@ -352,6 +352,7 @@ parts of it. [Contributing](#contributing) is what that takes.
 | **`nilo_sql`** | Postgres and SQLite. Your struct is the table | shipped: reads, writes, transactions, streaming. SQLite refuses batches, row locks and deadlines, and says so while compiling |
 | **`nilo_s3`** | object storage — S3, MinIO, R2. Your bucket is a type | shipped: get, put, range, stream, presign. No `LIST`, no multipart |
 | **`nilo_fetch`** | calling somebody else's HTTP API from inside a request | shipped: the policy in front of `std.http.Client`. No retries, no circuit breaker |
+| **`nilo_cache`** | an expiring cache in this process. A fixed budget, and nothing allocated per operation | shipped: `get`, `put`, TTLs, stats. It holds bytes, so a cached value keeps no pointers |
 | **`nilo_config`** | settings out of the environment, every bad one named at once | shipped. It parses no files, and that's a decision |
 | **`nilo_pw`** | password hashing: argon2id, stored as PHC | shipped: hashing and checking. Rate limiting the endpoint is still yours |
 | **`nilo_id`** | UUIDs, v4 and v7 | shipped: the format. Where the randomness comes from is still yours |

@@ -5,7 +5,7 @@ each one assumes the ones above it — and jump straight in afterwards.
 
 ## Which module a page is about
 
-nilo is a toolkit of eight modules rather than one library, and which one a page
+nilo is a toolkit of nine modules rather than one library, and which one a page
 belongs to is decided by a single question — does it need the event loop?
 ([ADR 0041](../adr/0041-a-module-sits-where-the-loop-puts-it.md),
 [ADR 0042](../adr/0042-the-bottom-layer-holds-more-than-one-module.md),
@@ -19,6 +19,7 @@ belongs to is decided by a single question — does it need the event loop?
 | **`nilo_fetch`** | calling somebody else's HTTP API from a handler | [the reference](../reference.md#nilo_fetch) |
 | **`nilo_config`** | settings out of the environment, into a struct of yours | [Settings](./config.md) |
 | **`nilo_pw`** | password hashing: argon2id, stored as PHC | [Sessions](./sessions.md) |
+| **`nilo_cache`** | an expiring cache in this process, holding no pointers | [the reference](../reference.md#nilo_cache) |
 | **`nilo_id`** | UUIDs, v4 and v7 | [the reference](../reference.md#nilo_id) |
 | **`nilo_core`** | `Str`, the Scope and the clock the rest share | [the reference](../reference.md#scope) |
 

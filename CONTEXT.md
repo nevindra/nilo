@@ -1,6 +1,6 @@
 # nilo
 
-A toolkit for Zig — eight modules for the ordinary jobs, of which the largest is an HTTP server. It puts the comfort of writing code first, with performance as a consequence rather than the other way round. It is aimed at people who are used to Go or Node and are giving Zig a try.
+A toolkit for Zig — nine modules for the ordinary jobs, of which the largest is an HTTP server. It puts the comfort of writing code first, with performance as a consequence rather than the other way round. It is aimed at people who are used to Go or Node and are giving Zig a try.
 
 ## Language
 
@@ -271,7 +271,7 @@ _Avoid_: row lock, pessimistic locking, select for update, mutex
 ### Object store
 
 **Store**:
-The endpoint, the region, the credentials, and the signing key they turn into — everything every bucket in the program shares, including one connection pool. It is what changes between a laptop and production, which is why nothing on it is settled while compiling.
+Whatever every named place in a module shares, held once for the program. In `nilo_s3` that is the endpoint, the region, the credentials and the signing key they turn into, plus one connection pool — what changes between a laptop and production, which is why nothing on it is settled while compiling. In `nilo_cache` it is the memory itself. The word is the same in both because the role is: the Store is opened, and the named places hang off it.
 _Avoid_: client, connection, session, provider, backend
 
 **Bucket**:
@@ -297,3 +297,29 @@ _Avoid_: string to sign, signing payload, request digest, normalized request
 **Presigned URL**:
 A link that carries its own signature in the query, so somebody with no credentials can use it once, for a while. The while it reports is the true one — the smallest of what was asked for, what the bucket allows, and what the credentials themselves have left.
 _Avoid_: signed link, temporary URL, share link, token URL
+
+### Cache
+
+**Space**:
+A named, typed keyspace inside one Store — the cache's answer to what a Bucket is to an object store. The name is compiled in and the type is the contract: a Space of `Cart` hands back a `Cart` and a Space of bytes fills a buffer you declared. Two Spaces over one Store share its memory and cannot read each other's keys.
+_Avoid_: namespace, region, partition, table, prefix
+
+**Flat value**:
+A type a cached value is allowed to be: no pointer anywhere inside it, at any depth. The cache holds bytes and has no collector to keep the other end alive, so a pointer stored in it would outlive what it points at. A value that breaks the rule is refused while compiling, by the field path that broke it.
+_Avoid_: POD, plain type, value type, serialisable
+
+**Ring**:
+Where the bytes live: one run of memory, sized once, written forwards. An entry is live if the cursor has not come round and passed it. Nothing is owned individually, so nothing is freed, no free list fragments and no size class wastes.
+_Avoid_: heap, pool, buffer, arena, log
+
+**Slot**:
+Eight bytes in the table saying where an entry sits in the Ring, which pass over it wrote it, and a fingerprint of the key. Eight of them are one cache line, which is what a lookup touches. The key itself is in the Ring rather than the Slot, so a fingerprint match is confirmed rather than trusted.
+_Avoid_: bucket entry, index entry, handle, reference
+
+**Budget**:
+The bytes a Store is opened with, and the whole of what it will ever hold. It is not a target it drifts around or a limit a sweep restores — the table and the Ring are taken out of it at `open` and never grow, which is what a cache in front of a database is for.
+_Avoid_: capacity, limit, quota, max size, high water mark
+
+**Eviction**:
+Not something that runs. Writing an entry is what forgets an older one, either by lapping it in the Ring or by displacing the stalest of the eight ways when a key's line is full. A cache is allowed to miss, and this one says how often it did.
+_Avoid_: expiry, reaping, sweeping, LRU, purge

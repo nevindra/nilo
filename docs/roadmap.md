@@ -67,6 +67,7 @@ other module's.
 | [`nilo_id`](#nilo_id-identifiers) | needs no loop | quiet. Two questions about scope, one gap nobody has hit |
 | [`nilo_config`](#nilo_config-settings) | needs no loop | reading a name the field is not called |
 | [`nilo_pw`](#nilo_pw-hashing-a-password) | needs no loop | a Cost floor that weighs the wrong half, and a patch `std` should have |
+| [`nilo_cache`](#nilo_cache-an-expiring-cache-in-this-process) | needs no loop | a read that costs two cache misses where a Go map costs one |
 | [`nilo_fetch`](#nilo_fetch-calling-somebody-elses-api) | borrows the loop | 4,139 bytes of stack per idle connection, and nothing measured through TLS |
 | [`nilo_http`](#nilo_http-the-server) | owns the loop | a megabyte of request arena held per connection, nothing that reads a `Forwarded` header, and a long tail |
 | [`nilo_sql`](#nilo_sql-postgres-and-sqlite) | borrows the loop | a `Timestamp` the two halves of SQLite disagree about, a pool option dropped without a word, and where migrations live |
@@ -299,6 +300,76 @@ copy of somebody else's crypto to get it
 ([ADR 0049](./adr/0049-a-hash-asks-for-the-pages-it-walks.md)).
 
 **What would settle it: somebody sending the patch.** It is upstream's to take.
+
+---
+
+## `nilo_cache`: an expiring cache in this process
+
+A ring of bytes with a table over it, sized once and never grown
+([ADR 0138](./adr/0138-a-cache-holds-its-bytes-under-a-lock-it-can-spin-on.md)).
+It imports nothing, so `zig test cache/cache.zig` is the whole of its suite,
+and a program that is not a server can take it on its own.
+
+### Next
+
+**1. A read costs two dependent cache misses where a Go map costs one, and
+that is the whole of the small-value gap.** A slot points at a ring, so a
+lookup misses on the bucket and then again on the entry. go-cache keeps the key
+beside the probe and misses once, which is worth between a third and a half on
+values of a few dozen bytes ([`bench/result/cache.md`](../bench/result/cache.md)).
+Closing it means entries in the table, which is the design that cannot bound
+its own memory — so it would be a second structure beside this one rather than
+a change to it.
+
+**Waiting on: a caller.** Nobody has a workload where the difference decides
+anything, and the memory this buys instead is the reason the module exists.
+
+**2. The clock is read on every `get`, whether or not anything in the Space
+expires.** `CLOCK_MONOTONIC_COARSE` is about 5ns of a 230ns operation. Skipping
+it needs the shard to know whether any entry it holds has an expiry, and
+reading that flag outside the lock is a race worth about 2%.
+
+**Waiting on: a number**, taken on a machine with cores to spare rather than
+this one.
+
+### Known gaps
+
+**Nothing has been measured on a machine that is not a two-core shared box.**
+Every ratio in `bench/result/cache.md` is from two cores with an operating
+system also wanting one, and neither side of the go-cache comparison could be
+pinned because there was nowhere to pin to. The ranges are wide enough that a
+single run of either side would have been misleading, and they should be
+re-taken before being quoted anywhere else.
+
+**Waiting on: a machine.**
+
+**A value of `[]const u8` is the only shape that is not flat.** A struct with a
+`[]const u8` field in it is refused by name, and the caller encodes it. The
+shape that would fix it — writing the slices' bytes after the fixed part and
+pointing them back into the caller's buffer on the way out — is known and is
+maybe 120 lines of comptime, and nobody has asked for it yet.
+
+**Waiting on: a caller.**
+
+**There is no `getOrPut`.** Every caller writes the miss, the compute and the
+put, which is three lines rather than one and, more to the point, lets two
+threads compute the same value at once. A cache stampede is a real thing and
+this module has no answer to it. The answer is not obvious either: holding the
+lock across the caller's computation is the one thing this module may never do
+(ADR 0138).
+
+**Waiting on: a design.**
+
+### Not decided
+
+**Whether a bucket should have sixteen ways rather than eight.** Eight
+eight-byte slots are one cache line and that is where the number came from.
+Sixteen would be two lines touched, better retention at high load, and a table
+the same size. Nobody knows whether the second line costs more than the keys it
+saves.
+
+**What would settle it:** the retention curve and the read cost, both swept
+across ways, on a machine where the read cost is not mostly memory latency.
 
 ---
 
@@ -1577,17 +1648,36 @@ A section rather than a list inside somebody else's, because what decides
 whether one of these gets built is a repository-level seam rather than anything
 in a module that is already here.
 
-**A `nilo_mail`, a `nilo_redis`, anything else that dials.** Nothing structural
-is in the way. Each is a Fitting or a Service by one question rather than a
-seam to design first: does it hold a connection to a named system, or is it
-given an address per call
+**`nilo_redis`: the same keyspace shape against somebody else's process.** A
+Service rather than a tool module, and deliberately not the one built first
+([ADR 0139](./adr/0139-an-in-process-cache-and-a-redis-client-are-two-modules.md)).
+Two of the three usual reasons to reach for a Redis are already gone here —
+a session is sealed into a cookie and an allowance is a table in this process —
+so what is left is several instances having to agree, and nobody has brought
+one. **The two will not share an interface**: what can fail differs, and hiding
+that turns "the cache is down" into "the cache is cold". Both existing Zig
+clients are alpha and neither has pub/sub, so a dependency would not hand over
+cross-instance fan-out either; ADR 0139 records what each one does have.
+
+**Waiting on: a caller.** Bring the deployment with more than one instance in
+it, not the patch.
+
+**Anything else that dials — a `nilo_mail`, a queue, a second store.** Nothing
+structural is in the way. Each is a Fitting or a Service by one question rather
+than a seam to design first: does it hold a connection to a named system, or is
+it given an address per call
 ([ADR 0070](./adr/0070-a-fitting-borrows-the-loop.md))? `nilo_s3` is the worked
 example of the second answer, and the most useful thing it leaves behind is
 that `nilo_fetch` turned out to be the right size. It needed one addition,
 `Exchange`, and no changes.
 
-**Waiting on: ready**, and this is the most useful thing an outside contributor
-could take on.
+**The bar is what a caller cannot already do**, and mail is the example of
+failing it: transactional mail is an HTTPS POST to a provider, which
+`nilo_fetch` sends today. A module wrapping that is fifty lines of somebody's
+own program plus a vendor's API to keep in step.
+
+**Waiting on: a caller**, and this is still the most useful place for an
+outside contributor to look — with the bar above applied first.
 
 ---
 
