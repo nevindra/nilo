@@ -277,9 +277,18 @@ A quarter of a second is the default; `listen(.{ .block_warning_ms = … })` mov
 it and `0` turns it off. A repeat offender is logged once a second with a count
 of the rest, rather than once per request.
 
-Three things are not watched, because holding the connection is exactly what
-they are for: a stream, a body reader, and a WebSocket. A blocking call inside a
-WebSocket loop is real and will not be reported.
+What it measures is the longest stretch the fiber ran **without parking**, not
+the total. That is what lets it watch a handler that never returns: a stream, a
+body reader and a WebSocket used to be excused entirely, because a total has no
+upper bound on a connection that stays open for an hour. One stretch means the
+same thing on a request that lasts a millisecond and on a connection that lasts
+a day, so a blocking call inside a WebSocket loop is reported now — and it is
+where the mistake costs the most, since a stalled fiber there holds its executor
+against every other socket that executor is serving
+([ADR 0132](../adr/0132-what-is-watched-is-one-unparked-stretch.md)).
+
+A handler that yields every 30ms is not holding its thread, whatever it adds up
+to over a request, and is not reported.
 
 See [ADR 0014](../adr/0014-handlers-must-not-block-the-thread.md) for the rule
 and [ADR 0034](../adr/0034-the-thing-a-handler-holds-is-watched-at-run-time.md)

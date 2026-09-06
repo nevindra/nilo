@@ -22,6 +22,8 @@ const sendfile_mod = @import("sendfile.zig");
 const service_mod = @import("service.zig");
 const static_mod = @import("static.zig");
 const stream_mod = @import("stream.zig");
+const url_mod = @import("url.zig");
+const proxies_mod = @import("proxies.zig");
 const str_mod = @import("nilo_core");
 const patch_mod = @import("patch.zig");
 const websocket = @import("websocket.zig");
@@ -37,6 +39,10 @@ const Str = str_mod.Str;
 pub const Limits = struct {
     max_body: usize = 1024 * 1024,
     trusted_hops: u8 = 0,
+    /// The networks `.trusted_proxies` named, parsed once at `listen()` and
+    /// owned by the App (ADR 0129). Empty means the hop count decides, which
+    /// is what every App that never set it gets.
+    trusted_proxies: []const proxies_mod.Cidr = &.{},
     block_warning_ms: u32 = 250,
 };
 
@@ -317,6 +323,28 @@ pub const Ctx = struct {
             if (std.mem.eql(u8, p.name, name)) return Str.fromRequest(p.value, self._lifetime);
         }
         return null;
+    }
+
+    /// The URL of one of this server's routes, built out of the pattern it was
+    /// registered under
+    /// ([ADR 0127](../docs/adr/0127-a-route-pattern-is-the-name-of-its-url.md)).
+    ///
+    /// ```zig
+    /// try c.redirect(303, (try c.url("/users/:id", .{ .id = made.id })).view());
+    /// ```
+    ///
+    /// The pattern is the name, so there is no route name to register and
+    /// none to keep in step. Every mistake left is a compile error: a param
+    /// with no value, a value with no param, a type a path cannot carry. Each
+    /// value is percent-encoded, so nothing a user typed can add a segment.
+    ///
+    /// One allocation out of the request arena, on a request that asked for
+    /// one. `url.into` is the same call with a buffer of the caller's, for
+    /// code with no request in flight.
+    pub fn url(self: *Ctx, comptime pattern: []const u8, args: anytype) !Str {
+        var out: std.Io.Writer.Allocating = .init(self._arena);
+        try url_mod.write(&out.writer, pattern, args);
+        return Str.fromRequest(out.written(), self._lifetime);
     }
 
     /// A query param, percent-decoded: `/search?q=hello%20world` →
@@ -701,27 +729,108 @@ pub const Ctx = struct {
         return self._peer;
     }
 
-    /// The address of the client, looking through however many proxies
-    /// `listen()` was told stand in front (`.trusted_hops`).
+    /// Give this request a deadline, `ms` from now.
     ///
-    /// With the default of zero this is `peer()` — the connection's own
-    /// address — because `X-Forwarded-For` is a header like any other and
-    /// a server that believes it without being told to has handed every
-    /// client the ability to be any address it likes. Rate limits, audit
-    /// logs and blocklists are the things that read this, and they are
-    /// exactly the things worth lying to.
+    /// Normally written as `nilo.deadline(2000)` on a route rather than called
+    /// by hand; this is what that middleware does
+    /// ([ADR 0133](../docs/adr/0133-a-route-can-say-how-long-it-has.md)).
     ///
-    /// Counted from the right, so the entries a trusted proxy wrote are
-    /// the only ones reachable and anything the client put in the header
-    /// itself stays to the left, unread. A header with fewer entries than
-    /// there are hops means the chain is not the one configured, so the
-    /// socket's address is used rather than the closest guess.
+    /// **What it bounds is every wait nilo owns**: reading the body, writing
+    /// the response, a stream's pieces, a WebSocket's silence. Each of those
+    /// has a limit of its own already and each is cut down to whichever comes
+    /// first. **What it cannot bound is a handler that is running rather than
+    /// waiting** — there is no interruption here, and there deliberately is
+    /// not ([ADR 0104](../docs/adr/0104-a-cleanup-path-is-not-cancellable.md)).
+    /// A loop that does its own work asks `overdue()`.
+    ///
+    /// Zero takes the deadline off.
+    pub fn giveDeadline(self: *Ctx, ms: u32) void {
+        self._deadlines.until_ns = if (ms == 0) 0 else bulkhead.monotonicNanos() + @as(u64, ms) * std.time.ns_per_ms;
+    }
+
+    /// Whether this request has run out of the time it was given.
+    ///
+    /// Always false for a request with no deadline, so a handler may ask
+    /// without knowing whether the route it is on set one:
+    ///
+    /// ```zig
+    /// while (try rows.next()) |row| {
+    ///     if (c.overdue()) return fail.status(503, "too many rows to do in time", .{});
+    ///     try out.json(row);
+    /// }
+    /// ```
+    pub fn overdue(self: *const Ctx) bool {
+        const until = self._deadlines.until_ns;
+        return until != 0 and bulkhead.monotonicNanos() >= until;
+    }
+
+    /// How many milliseconds are left, or null when this request has no
+    /// deadline. Zero once it has passed.
+    ///
+    /// For a handler that has a limit of its own to hand somewhere else — an
+    /// outbound call, say — and should not be given longer than the request
+    /// has.
+    pub fn timeLeftMs(self: *const Ctx) ?u32 {
+        const until = self._deadlines.until_ns;
+        if (until == 0) return null;
+        const now = bulkhead.monotonicNanos();
+        if (now >= until) return 0;
+        return @intCast(@min((until - now) / std.time.ns_per_ms, std.math.maxInt(u32)));
+    }
+
+    /// The address of the client, looking through whatever `listen()` was told
+    /// stands in front — `.trusted_proxies`, or `.trusted_hops`.
+    ///
+    /// With neither set this is `peer()` — the connection's own address —
+    /// because `X-Forwarded-For` is a header like any other and a server that
+    /// believes it without being told to has handed every client the ability
+    /// to be any address it likes. Rate limits, audit logs and blocklists are
+    /// the things that read this, and they are exactly the things worth lying
+    /// to.
+    ///
+    /// **`.trusted_proxies` is the one to use**, and it wins when both are set
+    /// ([ADR 0129](../docs/adr/0129-a-proxy-is-trusted-by-which-one-it-is.md)).
+    /// The header is read only when the connection came from an address you
+    /// named; entries written by addresses you named are skipped from the
+    /// right; the first one left is the client. Nothing depends on how many
+    /// proxies there are today.
+    ///
+    /// **A connection over a unix socket passes that first check by arriving.**
+    /// It has no address for a rule to name, and nothing but a process on this
+    /// machine could have opened it — which is what a `"loopback"` rule
+    /// establishes about a proxy over TCP
+    /// ([ADR 0130](../docs/adr/0130-a-path-is-an-address-to-listen-on.md)).
+    /// Without `.trusted_proxies` set, `clientIp` on such a connection is
+    /// empty, because there is no address and nobody said to read the header.
+    ///
+    /// `.trusted_hops` is the older shape and still works: counted from the
+    /// right, so the entries a trusted proxy wrote are the only ones reachable
+    /// and anything the client put in the header itself stays to the left,
+    /// unread. A header with fewer entries than there are hops means the chain
+    /// is not the one configured, so the socket's address is used rather than
+    /// the closest guess.
     pub fn clientIp(self: *const Ctx) Str {
         const hops = self._limits.trusted_hops;
-        if (hops == 0) return Str.fromRequest(self._peer.address(), self._lifetime);
+        const named_proxies = self._limits.trusted_proxies;
+        if (hops == 0 and named_proxies.len == 0) {
+            return Str.fromRequest(self._peer.address(), self._lifetime);
+        }
 
         const forwarded = self.header("X-Forwarded-For") orelse
             return Str.fromRequest(self._peer.address(), self._lifetime);
+
+        // Naming the network wins over counting it: an operator who described
+        // their proxies meant that, and a hop count left over from before is
+        // the thing the description exists to stop mattering.
+        if (named_proxies.len > 0) {
+            const found = proxies_mod.clientFrom(
+                named_proxies,
+                self._peer.address(),
+                self._peer.local,
+                forwarded.view(),
+            ) orelse return Str.fromRequest(self._peer.address(), self._lifetime);
+            return Str.fromRequest(found, self._lifetime);
+        }
 
         // Walk right to left, counting entries. `hops` of them belong to
         // proxies; the one before those is the client.
@@ -886,7 +995,9 @@ pub const Ctx = struct {
 
         self._took_over = true;
         self._incoming = .start(self._request, options.max_bytes);
-        return .init(self._in, &self._incoming.?);
+        var incoming: body_mod.Body = .init(self._in, &self._incoming.?);
+        incoming._watch = self._watch;
+        return incoming;
     }
 
     /// Parse the request body as JSON into `T`. The result lives in the
@@ -1307,7 +1418,17 @@ pub const Ctx = struct {
         return self.streamWith(status, content_type, .{});
     }
 
-    /// `stream`, with the buffer size turned up or down.
+    /// `stream`, with the buffer size turned up or down — and with the body's
+    /// length, for a handler that already knows it.
+    ///
+    /// ```zig
+    /// const object = try bucket.stream(c, key);
+    /// var body = try c.streamWith(200, object.content_type, .{ .length = object.len });
+    /// ```
+    ///
+    /// See `stream.Options.length`: a promised length is a `Content-Length`
+    /// rather than chunked framing, and it is held to
+    /// ([ADR 0128](../docs/adr/0128-a-stream-that-knows-its-length-says-so.md)).
     pub fn streamWith(
         self: *Ctx,
         status: u16,
@@ -1316,16 +1437,22 @@ pub const Ctx = struct {
     ) !stream_mod.Stream {
         std.debug.assert(!self._sent); // one request, one response
 
-        // HTTP/1.0 has no chunked framing, so the end of the body can only
-        // be the end of the connection — which means this connection cannot
-        // carry another request whatever either side asked for.
-        const chunked = self._request.minor_version == 1;
-        if (!chunked) self._force_close = true;
+        // A length already says where the body stops, so there is nothing for
+        // chunked framing to add and a head must not carry both. Otherwise
+        // HTTP/1.1 gets chunks; HTTP/1.0 has neither, so the end of the body
+        // can only be the end of the connection — which means that connection
+        // cannot carry another request whatever either side asked for.
+        const chunked = options.length == null and self._request.minor_version == 1;
+        if (!chunked and options.length == null) self._force_close = true;
 
         self._sent = true;
         self._status = status;
         self._took_over = true;
-        self._stream = .{ .chunked = chunked, .drop = self.method == .HEAD };
+        self._stream = .{
+            .chunked = chunked,
+            .drop = self.method == .HEAD,
+            .promised = options.length,
+        };
 
         try http1.writeStreamHead(
             self._out,
@@ -1333,6 +1460,7 @@ pub const Ctx = struct {
             http1.statusPhrase(status),
             content_type,
             chunked,
+            options.length,
             self.keepAlive(),
             self.extraHeaders(),
         );
@@ -1340,7 +1468,10 @@ pub const Ctx = struct {
         // The one allocation a stream makes, made once. Everything written
         // afterwards goes through this buffer and allocates nothing.
         const buffer = try self._arena.alloc(u8, options.buffer);
-        return .init(buffer, self._out, self._stopping, &self._stream);
+        var out: stream_mod.Stream =
+            .initClosing(buffer, self._out, self._stopping, &self._stream, &self._force_close);
+        out._watch = self._watch;
+        return out;
     }
 
     /// Turn this request into a WebSocket connection (ADR 0022, ADR 0071).
@@ -1502,6 +1633,7 @@ pub const Ctx = struct {
             // moving; a hand-built `Ctx` with no loop above it falls back to
             // the Socket's own slot.
             ._max_message = options.max_message,
+            ._watch = self._watch,
         };
     }
 

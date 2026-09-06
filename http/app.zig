@@ -22,6 +22,7 @@ const mw = @import("middleware.zig");
 const cors = @import("cors.zig");
 const allowance = @import("allowance.zig");
 const static_mod = @import("static.zig");
+const proxies_mod = @import("proxies.zig");
 const openapi = @import("openapi.zig");
 const budget = @import("budget.zig");
 const watchdog = @import("watchdog.zig");
@@ -115,6 +116,14 @@ pub const App = struct {
     /// (ADR 0080). Empty for almost every App: the shape it exists for is the
     /// sign-up route inside a prefix that requires a session.
     exemptions: std.ArrayList(mw.Exemption) = .empty,
+    /// The networks `listen(.{ .trusted_proxies = … })` named, parsed once
+    /// (ADR 0129). Owned by the App; `limits.trusted_proxies` points at it.
+    trusted_proxies: []const proxies_mod.Cidr = &.{},
+    /// Routes carrying a middleware of their own, from `with` (ADR 0126). The
+    /// other direction of the same question, and empty for almost every App
+    /// too: the shape it exists for is the one endpoint inside a group that
+    /// needs a guard its neighbours do not.
+    attached: std.ArrayList(mw.Attached) = .empty,
     /// Directories loaded into memory by `static`, searched only when no
     /// route matched (ADR 0010).
     static_sets: std.ArrayList(static_mod.Set) = .empty,
@@ -229,6 +238,8 @@ pub const App = struct {
         self.static_chains.deinit(self.gpa);
         self.scoped.deinit(self.gpa);
         self.exemptions.deinit(self.gpa);
+        self.attached.deinit(self.gpa);
+        self.gpa.free(self.trusted_proxies);
         self.requirements.deinit(self.gpa);
         self.services.deinit();
         self.router.deinit();
@@ -307,12 +318,60 @@ pub const App = struct {
         return .{ .app = self };
     }
 
+    /// The App, with `middleware` on for the routes registered through what
+    /// this hands back — one route, if one route is what you register.
+    ///
+    /// The shape it exists for is the awkward case `without` left open: a route
+    /// that wants *more* than its neighbours. `use`, `useOn` and `group().use`
+    /// all scope by path, so guarding a single endpoint meant inventing a prefix
+    /// that matches only it, or a group holding one route
+    /// ([ADR 0126](../docs/adr/0126-a-route-can-say-what-covers-it.md)).
+    ///
+    /// ```zig
+    /// try app.with(requireAdmin).delete("/users/:id", removeUser);
+    /// ```
+    ///
+    /// **It runs innermost**, after everything a `use` put in front of the same
+    /// route, whatever order the two were written in. That is the order the
+    /// nesting means: a group's session check has to have run before the route's
+    /// own check of what that session may do.
+    ///
+    /// It composes with the rest of the vocabulary, because it is the same
+    /// vocabulary — `group`, `with` and `without` all hand back a group, and
+    /// which middleware a route ends up in is settled while compiling:
+    ///
+    /// ```zig
+    /// const v1 = app.group("/v1");
+    /// try v1.use(requireOperator);
+    /// try v1.with(auditLog).post("/orders", place);
+    /// ```
+    pub fn with(self: *App, comptime middleware: mw.Middleware) GroupWith("", &.{}, &.{middleware}) {
+        return .{ .app = self };
+    }
+
     /// Record that `pattern` is not covered by `middleware`, whatever a
     /// `use`/`useOn` says. Called by the route methods on a group built with
     /// `without`, never by hand — the point is that the exception is attached
     /// by the registration rather than typed as a second string.
-    fn exempt(self: *App, pattern: []const u8, middleware: mw.Middleware) !void {
-        try self.exemptions.append(self.gpa, .{ .pattern = pattern, .middleware = middleware });
+    fn exempt(self: *App, pattern: []const u8, method: http1.Method, middleware: mw.Middleware) !void {
+        try self.exemptions.append(self.gpa, .{
+            .pattern = pattern,
+            .method = method,
+            .middleware = middleware,
+        });
+    }
+
+    /// Record that `pattern` carries `middleware` of its own. Called by the
+    /// route methods on a group built with `with`, never by hand — for the
+    /// reason `exempt` is not called by hand: the pattern is the one the
+    /// registration produced, so renaming the route moves the middleware with
+    /// it rather than leaving a string behind that guards nothing.
+    fn attach(self: *App, pattern: []const u8, method: http1.Method, middleware: mw.Middleware) !void {
+        try self.attached.append(self.gpa, .{
+            .pattern = pattern,
+            .method = method,
+            .middleware = middleware,
+        });
     }
 
     /// Serve the contents of `dir_path` under `url_prefix`.
@@ -630,6 +689,50 @@ pub const App = struct {
         if (self.metrics_table) |*t| t.exposed = self.exposed.items;
     }
 
+    /// Turn `listen(.{ .trusted_proxies = … })` into the networks `clientIp`
+    /// compares against, once (ADR 0129).
+    ///
+    /// A rule that is not an address stops the server here rather than being
+    /// quietly ignored, because "ignored" means answering with the wrong
+    /// client address for the life of the deployment — and the things that
+    /// read `clientIp` are the rate limit and the audit log.
+    fn parseTrustedProxies(self: *App, rules: []const []const u8) !void {
+        self.gpa.free(self.trusted_proxies);
+        self.trusted_proxies = &.{};
+        if (rules.len == 0) return;
+
+        var room: usize = 0;
+        for (rules) |rule| room += proxies_mod.expands(rule);
+
+        const parsed = try self.gpa.alloc(proxies_mod.Cidr, room);
+        errdefer self.gpa.free(parsed);
+
+        var n: usize = 0;
+        for (rules) |rule| {
+            n += try proxies_mod.parseInto(parsed[n..], rule);
+        }
+        self.trusted_proxies = parsed[0..n];
+    }
+
+    /// Every route this App answers, in the order they were registered
+    /// ([ADR 0127](../docs/adr/0127-a-route-pattern-is-the-name-of-its-url.md)).
+    ///
+    /// The question it exists for is "did my routes register", which
+    /// `app.docs()` answered only for an app that serves an API description
+    /// and one `std.log.info` naming the address answered for nobody:
+    ///
+    /// ```zig
+    /// std.log.info("serving {d} routes:\n{f}", .{ app.routes().len(), app.routes() });
+    /// ```
+    ///
+    /// A view over the table rather than a copy of it, so this allocates
+    /// nothing and costs a request nothing: the table is what the router
+    /// already scans and what metrics already index into (ADR 0100). It stays
+    /// valid until another route is registered.
+    pub fn routes(self: *const App) Routes {
+        return .{ ._inner = self.router.routes.items };
+    }
+
     /// The first requirement that is not met, or null if every handler got
     /// what it asked for.
     pub fn missingService(self: *const App) ?service_mod.Requirement {
@@ -654,14 +757,14 @@ pub const App = struct {
             if (self.services.has(r)) continue;
             if (alreadyReported(self.requirements.items[0..i], r)) continue;
 
-            var routes: [3][]const u8 = undefined;
+            var wanting: [3][]const u8 = undefined;
             var n: usize = 0;
             var total: usize = 0;
             for (self.requirements.items) |other| {
                 if (!sameService(other, r)) continue;
                 total += 1;
-                if (n < routes.len) {
-                    routes[n] = other.route;
+                if (n < wanting.len) {
+                    wanting[n] = other.route;
                     n += 1;
                 }
             }
@@ -675,7 +778,7 @@ pub const App = struct {
                     total,
                     if (total == 1) "" else "s",
                     if (total == 1) "s" else "",
-                    RouteList{ .routes = routes[0..n] },
+                    RouteList{ .routes = wanting[0..n] },
                     if (total > n) ", …" else "",
                 },
             );
@@ -693,7 +796,7 @@ pub const App = struct {
     pub fn resolveChains(self: *App) !void {
         self.freeChains();
         for (self.router.routes.items) |*r| {
-            r.chain = try mw.chainFor(self.gpa, self.scoped.items, self.exemptions.items, r.pattern);
+            r.chain = try mw.chainFor(self.gpa, self.scoped.items, self.exemptions.items, self.attached.items, r.method, r.pattern);
         }
         try self.buildDocs();
 
@@ -734,7 +837,7 @@ pub const App = struct {
             self.gpa.free(chains);
         }
         for (set.files, chains) |file, *chain| {
-            chain.* = try mw.chainFor(self.gpa, self.scoped.items, self.exemptions.items, file.url);
+            chain.* = try mw.chainFor(self.gpa, self.scoped.items, self.exemptions.items, self.attached.items, null, file.url);
             made += 1;
         }
         return chains;
@@ -815,7 +918,14 @@ pub const App = struct {
     /// `tryListen` to get the error as a value and no message.
     pub fn listen(self: *App, options_: bulkhead.Options) !void {
         self.tryListen(options_) catch |err| {
-            if (bulkhead.explained(err) or err == error.MissingService) std.process.exit(1);
+            // Every one of these has already said, in one line, what is
+            // wrong and what to change. `TrustedProxyNotAnAddress` and
+            // `SessionSecretWrongLength` are `tryListen`'s own; the rest are
+            // the Engine's.
+            if (bulkhead.explained(err) or
+                err == error.MissingService or
+                err == error.TrustedProxyNotAnAddress or
+                err == error.SessionSecretWrongLength) std.process.exit(1);
             return err;
         };
     }
@@ -829,12 +939,31 @@ pub const App = struct {
         try self.checkServices();
         try self.resolveChains();
         self.countUndescribed();
-        // The two knobs a request reads rather than the socket. Kept on the
+        // Parsed here rather than per request, and before the port is taken:
+        // a rule that is not an address is a deployment mistake, and the
+        // moment somebody is watching for one is startup (ADR 0129).
+        self.parseTrustedProxies(options_.trusted_proxies) catch |err| {
+            // Said here rather than inside the parse, so the parse can be
+            // tested: a logged error during a test is a failed test whatever
+            // level it prints at (see `test_root.zig`), and in this project an
+            // error line means the server will not start — which is what
+            // happens on the next line.
+            if (proxies_mod.firstBad(options_.trusted_proxies)) |rule| std.log.err(
+                "trusted proxy \"{s}\" is not an address, a CIDR, \"private\" or " ++
+                    "\"loopback\" — nothing would ever match it, so every request would " ++
+                    "be answered with the address the connection came from",
+                .{rule},
+            );
+            return err;
+        };
+
+        // The knobs a request reads rather than the socket. Kept on the
         // App because that is what a request can reach; a test driving
         // `handleRequest` with no server gets the defaults below.
         self.limits = .{
             .max_body = options_.max_body,
             .trusted_hops = options_.trusted_hops,
+            .trusted_proxies = self.trusted_proxies,
             .block_warning_ms = options_.block_warning_ms,
         };
         // Read once per request by the connection loop rather than by a
@@ -1333,7 +1462,7 @@ pub const App = struct {
             // allocation, bounded by the middleware count, and paid only by
             // a 404 or a 405.
             if (self.scoped.items.len > 0) {
-                chain = mw.chainFor(arena, self.scoped.items, self.exemptions.items, path) catch &.{};
+                chain = mw.chainFor(arena, self.scoped.items, self.exemptions.items, self.attached.items, null, path) catch &.{};
             }
             // No route for this method, but the path itself is spelled out
             // by routes under other methods. "There is nothing here" and
@@ -1360,10 +1489,10 @@ pub const App = struct {
         // (ADR 0034). Bracketed around the whole chain rather than around
         // the terminal handler, because a middleware that blocks stops the
         // thread just as dead as a handler that does.
-        watchdog.begin(&in_flight.watch, self.limits.block_warning_ms);
+        watchdog.begin(&in_flight.watch, self.limits.block_warning_ms, @tagName(c.method), path);
 
         (mw.Next{ .rest = chain, .handler = terminal }).run(&c) catch |err| {
-            watchdog.finish(&in_flight.watch, @tagName(c.method), path, c._took_over);
+            watchdog.finish(&in_flight.watch);
             // A half-sent response cannot be taken back, so the connection
             // is closed: the next request on it would read leftover bytes
             // of unclear provenance.
@@ -1380,7 +1509,7 @@ pub const App = struct {
             sendFailure(&c, failure, err) catch return .{ .keep_alive = false, .handover = handover };
             return .{ .keep_alive = reusable, .handover = handover };
         };
-        watchdog.finish(&in_flight.watch, @tagName(c.method), path, c._took_over);
+        watchdog.finish(&in_flight.watch);
 
         // A body the handler did not read is discarded so the next request
         // on this connection starts at the right byte.
@@ -1476,6 +1605,57 @@ pub const App = struct {
     }
 };
 
+/// One registered route, as much of it as is anybody's business from outside:
+/// what it answers and where.
+///
+/// Not the handler, not the middleware chain, not the split segments. Those
+/// are how the router does its job, and a reader that could reach them is a
+/// reader the router cannot change underneath.
+pub const Registered = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.Registered";
+
+    method: http1.Method,
+    /// The joined pattern the route was registered under — the same literal
+    /// `Ctx.url` takes and every error message quotes.
+    pattern: []const u8,
+
+    pub fn format(self: Registered, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try w.print("{s} {s}", .{ @tagName(self.method), self.pattern });
+    }
+};
+
+/// A read-only view over the route table — what `app.routes()` hands back.
+///
+/// A view rather than a list of its own: nothing is copied, nothing is
+/// allocated, and a route is turned into a `Registered` only when somebody
+/// asks for one.
+pub const Routes = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.Routes";
+
+    _inner: []const router_mod.Route,
+
+    pub fn len(self: Routes) usize {
+        return self._inner.len;
+    }
+
+    pub fn at(self: Routes, i: usize) Registered {
+        const r = self._inner[i];
+        return .{ .method = r.method, .pattern = r.pattern };
+    }
+
+    /// One route a line, so a whole table goes into one log call.
+    pub fn format(self: Routes, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        for (self._inner, 0..) |r, i| {
+            if (i > 0) try w.writeByte('\n');
+            try w.print("  {s} {s}", .{ @tagName(r.method), r.pattern });
+        }
+    }
+};
+
 /// One prefix and everything registered beneath it — what `app.group()`
 /// hands back (ADR 0015).
 ///
@@ -1499,6 +1679,23 @@ pub fn Group(comptime prefix: []const u8) type {
 /// is what puts something in it, and what comes back is a different type, so
 /// which routes carry an exception is decided while compiling.
 pub fn GroupOf(comptime prefix: []const u8, comptime excluded: []const mw.Middleware) type {
+    return GroupWith(prefix, excluded, &.{});
+}
+
+/// The same, plus the middlewares the routes registered through it carry of
+/// their own — what `with` puts there
+/// ([ADR 0126](../docs/adr/0126-a-route-can-say-what-covers-it.md)).
+///
+/// Three comptime parameters and no fields but the App: which middleware a
+/// route ends up wrapped in is settled while compiling, and the chain itself
+/// is built once at `listen()` like every other. A route that carries one
+/// costs a request exactly what a route covered by a `use` costs — nothing
+/// beyond running it.
+pub fn GroupWith(
+    comptime prefix: []const u8,
+    comptime excluded: []const mw.Middleware,
+    comptime attached: []const mw.Middleware,
+) type {
     comptime checkPrefix(prefix);
 
     return struct {
@@ -1516,16 +1713,28 @@ pub fn GroupOf(comptime prefix: []const u8, comptime excluded: []const mw.Middle
 
         /// A group inside this one. `app.group("/api").group("/v1")` and
         /// `app.group("/api/v1")` are the same thing.
-        pub fn group(self: Self, comptime sub: []const u8) GroupOf(prefix ++ sub, excluded) {
+        pub fn group(self: Self, comptime sub: []const u8) GroupWith(prefix ++ sub, excluded, attached) {
             return .{ .app = self.app };
         }
 
         /// This group with `middleware` off for the routes registered through
         /// what comes back — see `App.without`, which is the same call at the
         /// top level.
-        pub fn without(self: Self, comptime middleware: mw.Middleware) GroupOf(
+        pub fn without(self: Self, comptime middleware: mw.Middleware) GroupWith(
             prefix,
             excluded ++ &[_]mw.Middleware{middleware},
+            attached,
+        ) {
+            return .{ .app = self.app };
+        }
+
+        /// This group with `middleware` **on** for the routes registered
+        /// through what comes back — see `App.with`, which is the same call at
+        /// the top level.
+        pub fn with(self: Self, comptime middleware: mw.Middleware) GroupWith(
+            prefix,
+            excluded,
+            attached ++ &[_]mw.Middleware{middleware},
         ) {
             return .{ .app = self.app };
         }
@@ -1533,9 +1742,18 @@ pub fn GroupOf(comptime prefix: []const u8, comptime excluded: []const mw.Middle
         /// Record this route's exceptions, if it has any. Inlined into every
         /// registration below; `excluded` is empty for almost every group, and
         /// an empty `inline for` compiles to nothing.
-        fn excepting(self: Self, comptime pattern: []const u8) !void {
+        fn excepting(self: Self, comptime pattern: []const u8, method: http1.Method) !void {
             inline for (excluded) |middleware| {
-                try self.app.exempt(comptime joined(prefix, pattern), middleware);
+                try self.app.exempt(comptime joined(prefix, pattern), method, middleware);
+            }
+        }
+
+        /// Record what this route carries of its own, the same way and for the
+        /// same cost: `attached` is empty for every group but the one `with`
+        /// made, and an empty `inline for` compiles to nothing.
+        fn attaching(self: Self, comptime pattern: []const u8, method: http1.Method) !void {
+            inline for (attached) |middleware| {
+                try self.app.attach(comptime joined(prefix, pattern), method, middleware);
             }
         }
 
@@ -1562,43 +1780,50 @@ pub fn GroupOf(comptime prefix: []const u8, comptime excluded: []const mw.Middle
 
         pub fn get(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
             comptime typed.check(joined(prefix, pattern), handler);
-            try self.excepting(pattern);
+            try self.excepting(pattern, .GET);
+            try self.attaching(pattern, .GET);
             return self.app.get(comptime joined(prefix, pattern), handler);
         }
 
         pub fn post(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
             comptime typed.check(joined(prefix, pattern), handler);
-            try self.excepting(pattern);
+            try self.excepting(pattern, .POST);
+            try self.attaching(pattern, .POST);
             return self.app.post(comptime joined(prefix, pattern), handler);
         }
 
         pub fn put(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
             comptime typed.check(joined(prefix, pattern), handler);
-            try self.excepting(pattern);
+            try self.excepting(pattern, .PUT);
+            try self.attaching(pattern, .PUT);
             return self.app.put(comptime joined(prefix, pattern), handler);
         }
 
         pub fn delete(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
             comptime typed.check(joined(prefix, pattern), handler);
-            try self.excepting(pattern);
+            try self.excepting(pattern, .DELETE);
+            try self.attaching(pattern, .DELETE);
             return self.app.delete(comptime joined(prefix, pattern), handler);
         }
 
         pub fn patch(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
             comptime typed.check(joined(prefix, pattern), handler);
-            try self.excepting(pattern);
+            try self.excepting(pattern, .PATCH);
+            try self.attaching(pattern, .PATCH);
             return self.app.patch(comptime joined(prefix, pattern), handler);
         }
 
         pub fn head(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
             comptime typed.check(joined(prefix, pattern), handler);
-            try self.excepting(pattern);
+            try self.excepting(pattern, .HEAD);
+            try self.attaching(pattern, .HEAD);
             return self.app.head(comptime joined(prefix, pattern), handler);
         }
 
         pub fn options(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
             comptime typed.check(joined(prefix, pattern), handler);
-            try self.excepting(pattern);
+            try self.excepting(pattern, .OPTIONS);
+            try self.attaching(pattern, .OPTIONS);
             return self.app.options(comptime joined(prefix, pattern), handler);
         }
 
@@ -1609,7 +1834,8 @@ pub fn GroupOf(comptime prefix: []const u8, comptime excluded: []const mw.Middle
             comptime handler: anytype,
         ) !void {
             comptime typed.check(joined(prefix, pattern), handler);
-            try self.excepting(pattern);
+            try self.excepting(pattern, method);
+            try self.attaching(pattern, method);
             return self.app.route(method, comptime joined(prefix, pattern), handler);
         }
 
@@ -1620,7 +1846,8 @@ pub fn GroupOf(comptime prefix: []const u8, comptime excluded: []const mw.Middle
             comptime handler: anytype,
         ) !void {
             comptime typed.check(joined(prefix, pattern), handler);
-            try self.excepting(pattern);
+            try self.excepting(pattern, method);
+            try self.attaching(pattern, method);
             return self.app.tryRoute(method, comptime joined(prefix, pattern), handler);
         }
 
@@ -1947,6 +2174,15 @@ fn serveStaticFile(c: *Ctx) anyerror!void {
 /// being read now: the descriptor goes to `sendfile.send`, which writes the
 /// head and hands the bytes to the socket without them passing through this
 /// process.
+///
+/// **Everything in the head comes from the descriptor about to be sent**, not
+/// from what the directory walk wrote down
+/// ([ADR 0125](../docs/adr/0125-a-file-is-described-by-the-descriptor-being-sent.md)).
+/// A held file cannot go stale, because its bytes are the copy in memory; a
+/// spilled file is only a name, and the file under that name is free to move
+/// while the server runs. Describing it from the walk meant a file that grew
+/// went out as its first recorded-length bytes under the ETag of the version
+/// before — a complete, correct-looking response carrying a prefix.
 fn serveSpilledFile(
     c: *Ctx,
     file: *const static_mod.File,
@@ -1964,18 +2200,31 @@ fn serveSpilledFile(
         else => return err,
     };
 
+    // One look, after the open, at the descriptor whose bytes are going out.
+    // Both numbers in the head come from it, so the length and the tag cannot
+    // describe two different files however often the disk changes underneath.
+    // A `stat` that fails takes the descriptor with it, which is the one exit
+    // from here that `sendFile` is not already covering.
+    const now = open.stat() catch |err| {
+        open.close();
+        return err;
+    };
+
+    // Written into this frame and borrowed until `sendFile` returns, which is
+    // after the head is on the wire — the request arena is not touched, and
+    // the budget of one allocation per request is unchanged (ADR 0018).
+    var etag_buf: [static_mod.max_spilled_etag]u8 = undefined;
+    const etag = static_mod.spilledEtag(&etag_buf, @as(i96, now.mtime_ns), now.size);
+
     // No `Vary`, because there is nothing to vary on: a spilled file has one
     // representation and no gzipped copy to negotiate against (ADR 0018 —
     // nothing compresses per request). No `defer open.close()` either: the
     // file belongs to `sendFile` from here, on every path out of it.
-    //
-    // The size is the one the walk recorded rather than a fresh `stat`,
-    // because the ETag is made of that number.
     return c.sendFile(.{
         .file = open,
-        .size = on_disk.size,
+        .size = now.size,
         .content_type = file.content_type,
-        .etag = file.etag,
+        .etag = etag,
         .cache_control = file.cache_control,
     });
 }
@@ -2094,6 +2343,14 @@ noinline fn endAbandonedStream(c: *Ctx) bool {
     );
     if (open.chunked and !open.drop) http1.writeLastChunk(c._out) catch return false;
     c._out.flush() catch return false;
+
+    // A promised length that was never met cannot be tidied up the way a
+    // missing zero-length chunk can: the head has gone out saying how many
+    // bytes are coming, and this connection has to close rather than let the
+    // next response be read as the rest of them (ADR 0128).
+    if (open.promised) |promised| {
+        if (!open.drop and open.written < promised) return false;
+    }
     return c.keepAlive();
 }
 
@@ -7316,6 +7573,99 @@ test "with two proxies trusted, the client is two entries from the right" {
     try testing.expect(std.mem.endsWith(u8, answer.response, "203.0.113.9"));
 }
 
+test "naming the network reads the client whatever the chain's length turned out to be" {
+    // The gap a hop count leaves: grow a hop and the count is silently wrong,
+    // because `clientIp()` goes on returning something that looks like an
+    // address (ADR 0129). Described instead, the length stops mattering.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/who", echoClientIp);
+    try app.resolveChains();
+    try app.parseTrustedProxies(&.{"private"});
+    app.limits.trusted_proxies = app.trusted_proxies;
+
+    var h = Harness.init();
+    defer h.deinit();
+    h.peer = try bulkhead.Peer.from("10.0.0.1");
+
+    // One proxy in front.
+    const one = h.send(&app, "GET /who HTTP/1.1\r\nHost: t\r\nX-Forwarded-For: 203.0.113.9\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, one.response, "203.0.113.9"));
+
+    // Two, on the same configuration and with nothing changed. This is the
+    // line a hop count of 1 would have got wrong, quietly.
+    const two = h.send(
+        &app,
+        "GET /who HTTP/1.1\r\nHost: t\r\nX-Forwarded-For: 203.0.113.9, 10.0.0.4\r\n\r\n",
+    );
+    try testing.expect(std.mem.endsWith(u8, two.response, "203.0.113.9"));
+
+    // And a client forging entries of its own: they sit to the left of the
+    // first address that is not ours, and are never reached.
+    const forged = h.send(
+        &app,
+        "GET /who HTTP/1.1\r\nHost: t\r\nX-Forwarded-For: 1.1.1.1, 203.0.113.9, 10.0.0.4\r\n\r\n",
+    );
+    try testing.expect(std.mem.endsWith(u8, forged.response, "203.0.113.9"));
+}
+
+test "a header from a machine that is not one of ours is not read" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/who", echoClientIp);
+    try app.resolveChains();
+    try app.parseTrustedProxies(&.{"10.0.0.0/8"});
+    app.limits.trusted_proxies = app.trusted_proxies;
+
+    var h = Harness.init();
+    defer h.deinit();
+    // Straight off the internet. Whatever it claims to be forwarding for is
+    // its own invention, and the socket's address is the honest answer.
+    h.peer = try bulkhead.Peer.from("198.51.100.7");
+
+    const answer = h.send(&app, "GET /who HTTP/1.1\r\nHost: t\r\nX-Forwarded-For: 1.2.3.4\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, answer.response, "198.51.100.7"));
+}
+
+test "a named network wins over a hop count left over from before" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/who", echoClientIp);
+    try app.resolveChains();
+    try app.parseTrustedProxies(&.{"10.0.0.0/8"});
+    app.limits.trusted_proxies = app.trusted_proxies;
+    // Set, and wrong for this chain. The description is what the operator
+    // meant; the number is the thing it exists to stop mattering.
+    app.limits.trusted_hops = 1;
+
+    var h = Harness.init();
+    defer h.deinit();
+    h.peer = try bulkhead.Peer.from("10.0.0.1");
+
+    const answer = h.send(
+        &app,
+        "GET /who HTTP/1.1\r\nHost: t\r\nX-Forwarded-For: 203.0.113.9, 10.0.0.4\r\n\r\n",
+    );
+    try testing.expect(std.mem.endsWith(u8, answer.response, "203.0.113.9"));
+}
+
+test "a trusted proxy that is not an address stops the server rather than being ignored" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try testing.expectError(
+        error.TrustedProxyNotAnAddress,
+        app.parseTrustedProxies(&.{ "10.0.0.0/8", "the load balancer" }),
+    );
+    // Nothing half-parsed is left behind for `clientIp` to read.
+    try testing.expectEqual(@as(usize, 0), app.trusted_proxies.len);
+    // And the sentence `listen()` prints names the rule that was wrong, not
+    // the one before it.
+    try testing.expectEqualStrings(
+        "the load balancer",
+        proxies_mod.firstBad(&.{ "10.0.0.0/8", "the load balancer" }).?,
+    );
+}
+
 test "a header with fewer entries than there are hops falls back to the socket" {
     var app = App.init(testing.allocator);
     defer app.deinit();
@@ -8406,10 +8756,22 @@ fn streamsSlowly(c: *Ctx) anyerror!void {
     try out.finish();
 }
 
-test "a stream is excused, because holding the connection is what it is for" {
-    // The stated gap, pinned so that closing it later is a decision rather
-    // than a surprise: a blocking call inside a stream, a body reader or a
-    // WebSocket is real and is not reported.
+fn streamsProperly(c: *Ctx) anyerror!void {
+    var out = try c.stream(200, "text/plain");
+    // The same wait, done right. Every piece written closes a stretch, so the
+    // 20ms here is spent on the other side of one and is nobody's handler
+    // time — which is the half that decides whether the detector stays on.
+    try out.writeAll("first");
+    try out.flush();
+    bulkhead.blocking(holdFor, .{held_ms});
+    try out.writeAll("done");
+    try out.finish();
+}
+
+test "a stream that blocks is caught, where it used to be excused" {
+    // This test asserted the opposite until ADR 0132: a stream, a body reader
+    // and a WebSocket were excused entirely, so a blocking call inside one
+    // was never reported — and a WebSocket loop is where it costs the most.
     var app = App.init(testing.allocator);
     defer app.deinit();
     app.limits.block_warning_ms = 10;
@@ -8421,6 +8783,47 @@ test "a stream is excused, because holding the connection is what it is for" {
     const before = watchdog.caught.load(.monotonic);
     const answer = h.send(&app, "GET /feed HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 200"));
+    try testing.expectEqual(before + 1, watchdog.caught.load(.monotonic));
+}
+
+test "and a stream that waits properly still is not" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    app.limits.block_warning_ms = 10;
+    try app.get("/feed", streamsProperly);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const before = watchdog.caught.load(.monotonic);
+    const answer = h.send(&app, "GET /feed HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 200"));
+    try testing.expectEqual(before, watchdog.caught.load(.monotonic));
+}
+
+fn blocksBetweenTwoWaits(c: *Ctx) anyerror!void {
+    // Two stretches, each under the limit, with the whole request well over
+    // it. The old metric summed elapsed-minus-parked and reported this; one
+    // stretch does not, and a handler that yields every 6ms is not holding
+    // its thread (ADR 0132).
+    for (0..4) |_| {
+        bulkhead.blocking(holdFor, .{held_ms / 4});
+        holdFor(held_ms / 4);
+    }
+    try c.sendEmpty(200);
+}
+
+test "a handler that yields between short stretches is not holding its thread" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    app.limits.block_warning_ms = held_ms;
+    try app.get("/chunky", blocksBetweenTwoWaits);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const before = watchdog.caught.load(.monotonic);
+    _ = h.send(&app, "GET /chunky HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expectEqual(before, watchdog.caught.load(.monotonic));
 }
 
@@ -8544,6 +8947,154 @@ test "an exception frees one route from one middleware, and nothing else" {
     defer client.deinit();
     try testing.expectEqual(@as(u16, 200), (try client.post(&app, "/v1/sign-up", "")).status);
     try testing.expectEqual(@as(u16, 401), (try client.post(&app, "/v1/invite", "")).status);
+}
+
+fn adminOnly(c: *Ctx, next: mw.Next) anyerror!void {
+    if (c.header("X-Admin") == null) return fail.forbidden("not yours to delete", .{});
+    try next.run(c);
+}
+
+fn removed(id: u32) []const u8 {
+    _ = id;
+    return "gone";
+}
+
+fn shown(id: u32) []const u8 {
+    _ = id;
+    return "in";
+}
+
+test "a route can carry a middleware its neighbours do not" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+
+    // One endpoint inside a group needs a guard the rest do not. Before `with`
+    // this meant a prefix invented to match only it, or a group of one
+    // (ADR 0126).
+    const v1 = app.group("/v1");
+    try v1.get("/users/:id", shown);
+    try v1.with(adminOnly).delete("/users/:id", removed);
+
+    var client = try @import("testing.zig").Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    // The sibling on the same path is untouched: this is exact, not a prefix.
+    try testing.expectEqual(@as(u16, 200), (try client.get(&app, "/v1/users/7")).status);
+
+    try testing.expectEqual(@as(u16, 403), (try client.send(
+        &app,
+        "DELETE /v1/users/7 HTTP/1.1\r\nHost: t\r\n\r\n",
+    )).status);
+    try testing.expectEqual(@as(u16, 200), (try client.send(
+        &app,
+        "DELETE /v1/users/7 HTTP/1.1\r\nHost: t\r\nX-Admin: wati\r\n\r\n",
+    )).status);
+}
+
+test "a carried middleware runs inside the group's, whichever was written first" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+
+    // `use` after the route, on purpose: chains are resolved at `listen()`, so
+    // the order these two lines are written in still does not matter (ADR 0009)
+    // — and the carried one is still the inner of the two.
+    const v1 = app.group("/v1");
+    try v1.with(adminOnly).delete("/users/:id", removed);
+    try v1.use(guard);
+
+    var client = try @import("testing.zig").Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    // The group's guard is outermost, so its answer is the one that arrives
+    // when neither header is there.
+    try testing.expectEqual(@as(u16, 401), (try client.send(
+        &app,
+        "DELETE /v1/users/7 HTTP/1.1\r\nHost: t\r\n\r\n",
+    )).status);
+
+    // Past it, the route's own guard is what refuses.
+    try testing.expectEqual(@as(u16, 403), (try client.send(
+        &app,
+        "DELETE /v1/users/7 HTTP/1.1\r\nHost: t\r\nX-Operator: wati\r\n\r\n",
+    )).status);
+
+    try testing.expectEqual(@as(u16, 200), (try client.send(
+        &app,
+        "DELETE /v1/users/7 HTTP/1.1\r\nHost: t\r\nX-Operator: wati\r\nX-Admin: wati\r\n\r\n",
+    )).status);
+}
+
+test "with and without compose, and neither reaches the other's routes" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+
+    const v1 = app.group("/v1");
+    try v1.use(guard);
+    // Excused from the group's guard, and carrying one of its own — the two
+    // directions of the same question, on one route.
+    try v1.without(guard).with(adminOnly).post("/sign-up", signUp);
+    try v1.get("/whoami", signedIn);
+
+    var client = try @import("testing.zig").Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    // No operator header, so the group's guard would have refused this. It was
+    // excused; what refuses is the middleware the route asked for.
+    try testing.expectEqual(@as(u16, 403), (try client.post(&app, "/v1/sign-up", "")).status);
+    try testing.expectEqual(@as(u16, 200), (try client.send(
+        &app,
+        "POST /v1/sign-up HTTP/1.1\r\nHost: t\r\nX-Admin: wati\r\nContent-Length: 0\r\n\r\n",
+    )).status);
+
+    // And the neighbour has the group's guard and not the route's.
+    try testing.expectEqual(@as(u16, 401), (try client.get(&app, "/v1/whoami")).status);
+}
+
+fn urlBuilder(c: *Ctx) anyerror!void {
+    const where = try c.url("/users/:id/posts/:slug", .{ .id = @as(u32, 42), .slug = "a b/c" });
+    try c.send(200, "text/plain", where.view());
+}
+
+test "the route table can be read from outside, and printed" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+
+    try app.get("/users/:id", shown);
+    try app.post("/users", signUp);
+    const v1 = app.group("/v1");
+    try v1.delete("/users/:id", removed);
+
+    // In registration order, with the joined pattern a group produced — the
+    // same literal an error message would quote.
+    try testing.expectEqual(@as(usize, 3), app.routes().len());
+    try testing.expectEqual(http1.Method.GET, app.routes().at(0).method);
+    try testing.expectEqualStrings("/users/:id", app.routes().at(0).pattern);
+    try testing.expectEqualStrings("/users", app.routes().at(1).pattern);
+    try testing.expectEqualStrings("/v1/users/:id", app.routes().at(2).pattern);
+    try testing.expectEqual(http1.Method.DELETE, app.routes().at(2).method);
+
+    // One log call prints the lot, which is the whole question this answers.
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try w.print("{f}", .{app.routes()});
+    try testing.expectEqualStrings(
+        "  GET /users/:id\n  POST /users\n  DELETE /v1/users/:id",
+        w.buffered(),
+    );
+}
+
+test "a URL is built from the pattern, with every value encoded" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/build", urlBuilder);
+
+    var client = try @import("testing.zig").Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    // The slash in the slug is a character somebody typed, so it stays inside
+    // one segment rather than inventing another (ADR 0127).
+    const answer = try client.get(&app, "/build");
+    try testing.expectEqualStrings("/users/42/posts/a%20b%2Fc", answer.body);
 }
 
 test "a group says where it is mounted, so a plugin can ask" {

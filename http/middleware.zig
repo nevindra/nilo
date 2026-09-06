@@ -25,6 +25,7 @@
 
 const std = @import("std");
 const Ctx = @import("ctx.zig").Ctx;
+const http1 = @import("http1.zig");
 
 /// The innermost layer: a plain Ctx handler. This is what the typed layer
 /// compiles down to, and what the onion wraps.
@@ -103,42 +104,94 @@ fn underPrefix(prefix: []const u8, path: []const u8) bool {
 /// exists.
 pub const Exemption = struct {
     pattern: []const u8,
+    /// Which verb on that pattern. `GET /users/:id` and `DELETE /users/:id`
+    /// are two routes, and excusing one of them must not excuse the other —
+    /// which it did until `with` arrived and needed the same distinction
+    /// ([ADR 0126](../docs/adr/0126-a-route-can-say-what-covers-it.md)).
+    method: http1.Method,
     middleware: Middleware,
 
-    fn frees(self: Exemption, path: []const u8, middleware: Middleware) bool {
-        return self.middleware == middleware and std.mem.eql(u8, self.pattern, path);
+    fn frees(self: Exemption, path: []const u8, method: ?http1.Method, middleware: Middleware) bool {
+        if (self.middleware != middleware) return false;
+        if (method == null or self.method != method.?) return false;
+        return std.mem.eql(u8, self.pattern, path);
     }
 };
 
-/// The chain for `path`, in registration order. The caller owns the
-/// result. Resolved once per route at `listen()`; for a request that
-/// matched no route this runs per request, which is fine because that is
-/// the cold path.
+/// One route saying a middleware *does* cover it — the other direction of
+/// `Exemption`, and the same shape for the same reason
+/// ([ADR 0126](../docs/adr/0126-a-route-can-say-what-covers-it.md)).
+///
+/// **The awkward case `use` cannot say** is a route that wants more than its
+/// neighbours: `use`, `useOn` and `group().use` all scope by path, so one
+/// endpoint behind an extra guard meant a prefix invented to match only it, or
+/// a group holding a single route. Gin and Fiber both take middleware as extra
+/// arguments to the route; here it is `with`, which hands back a group, so the
+/// vocabulary does not grow a second shape.
+///
+/// The pattern is **exact** and is the joined one the route was registered
+/// under, produced by the same `joined(prefix, pattern)` call `Exemption` uses
+/// — which is what keeps the compiler in the loop when somebody renames the
+/// route.
+pub const Attached = struct {
+    pattern: []const u8,
+    /// Which verb on that pattern, for the reason `Exemption` carries one:
+    /// `with(adminOnly).delete("/users/:id", …)` must not put `adminOnly` on
+    /// the `GET` that reads the same path.
+    method: http1.Method,
+    middleware: Middleware,
+
+    fn covers(self: Attached, path: []const u8, method: ?http1.Method) bool {
+        if (method == null or self.method != method.?) return false;
+        return std.mem.eql(u8, self.pattern, path);
+    }
+};
+
+/// The chain for `path`: the scoped middleware in registration order, then
+/// whatever the route carries of its own. The caller owns the result.
+/// Resolved once per route at `listen()`; for a request that matched no route
+/// this runs per request, which is fine because that is the cold path.
+///
+/// **Attached last means attached innermost**, which is the order the nesting
+/// means rather than a choice between two equally good ones: a group's session
+/// check has to have run before the one route's check of what that session is
+/// allowed to do. A route with nothing attached gets the identical chain it
+/// got before, because the second loop runs zero times.
 pub fn chainFor(
     gpa: std.mem.Allocator,
     scoped: []const Scoped,
     exemptions: []const Exemption,
+    attached: []const Attached,
+    method: ?http1.Method,
     path: []const u8,
 ) ![]const Middleware {
     var n: usize = 0;
     for (scoped) |s| {
-        if (covered(s, exemptions, path)) n += 1;
+        if (covered(s, exemptions, method, path)) n += 1;
+    }
+    for (attached) |a| {
+        if (a.covers(path, method)) n += 1;
     }
     if (n == 0) return &.{};
 
     const chain = try gpa.alloc(Middleware, n);
     var i: usize = 0;
     for (scoped) |s| {
-        if (!covered(s, exemptions, path)) continue;
+        if (!covered(s, exemptions, method, path)) continue;
         chain[i] = s.middleware;
+        i += 1;
+    }
+    for (attached) |a| {
+        if (!a.covers(path, method)) continue;
+        chain[i] = a.middleware;
         i += 1;
     }
     return chain;
 }
 
-fn covered(s: Scoped, exemptions: []const Exemption, path: []const u8) bool {
+fn covered(s: Scoped, exemptions: []const Exemption, method: ?http1.Method, path: []const u8) bool {
     if (!s.covers(path)) return false;
-    for (exemptions) |e| if (e.frees(path, s.middleware)) return false;
+    for (exemptions) |e| if (e.frees(path, method, s.middleware)) return false;
     return true;
 }
 
@@ -206,11 +259,11 @@ test "a prefix scopes a middleware to the routes under it" {
         .{ .prefix = "/api", .middleware = markB },
     };
 
-    const on_api = try chainFor(testing.allocator, &scoped, &.{}, "/api/users/:id");
+    const on_api = try chainFor(testing.allocator, &scoped, &.{}, &.{}, .GET, "/api/users/:id");
     defer testing.allocator.free(on_api);
     try testing.expectEqual(@as(usize, 2), on_api.len);
 
-    const off_api = try chainFor(testing.allocator, &scoped, &.{}, "/health");
+    const off_api = try chainFor(testing.allocator, &scoped, &.{}, &.{}, .GET, "/health");
     defer testing.allocator.free(off_api);
     try testing.expectEqual(@as(usize, 1), off_api.len);
     try testing.expect(off_api[0] == markA);
@@ -219,18 +272,18 @@ test "a prefix scopes a middleware to the routes under it" {
 test "a prefix only covers whole segments" {
     const scoped = [_]Scoped{.{ .prefix = "/api", .middleware = markA }};
 
-    const inside = try chainFor(testing.allocator, &scoped, &.{}, "/api/users");
+    const inside = try chainFor(testing.allocator, &scoped, &.{}, &.{}, .GET, "/api/users");
     defer testing.allocator.free(inside);
     try testing.expectEqual(@as(usize, 1), inside.len);
 
     // The group's own path, with nothing under it.
-    const itself = try chainFor(testing.allocator, &scoped, &.{}, "/api");
+    const itself = try chainFor(testing.allocator, &scoped, &.{}, &.{}, .GET, "/api");
     defer testing.allocator.free(itself);
     try testing.expectEqual(@as(usize, 1), itself.len);
 
     // `startsWith` used to put this middleware on a route that merely began
     // with the same letters. `static.zig` had the right rule all along.
-    const apiary = try chainFor(testing.allocator, &scoped, &.{}, "/apiary");
+    const apiary = try chainFor(testing.allocator, &scoped, &.{}, &.{}, .GET, "/apiary");
     defer testing.allocator.free(apiary);
     try testing.expectEqual(@as(usize, 0), apiary.len);
 }
@@ -239,24 +292,93 @@ test "a prefix carrying a param covers a pattern and a real path alike" {
     const scoped = [_]Scoped{.{ .prefix = "/orgs/:org", .middleware = markA }};
 
     // What `listen()` asks: the chain for each route, against its pattern.
-    const pattern = try chainFor(testing.allocator, &scoped, &.{}, "/orgs/:org/members");
+    const pattern = try chainFor(testing.allocator, &scoped, &.{}, &.{}, .GET, "/orgs/:org/members");
     defer testing.allocator.free(pattern);
     try testing.expectEqual(@as(usize, 1), pattern.len);
 
     // What a request that matched no route asks: against the real path.
-    const real = try chainFor(testing.allocator, &scoped, &.{}, "/orgs/acme/members");
+    const real = try chainFor(testing.allocator, &scoped, &.{}, &.{}, .GET, "/orgs/acme/members");
     defer testing.allocator.free(real);
     try testing.expectEqual(@as(usize, 1), real.len);
 
     // A param matches one segment, not the rest of the path.
-    const elsewhere = try chainFor(testing.allocator, &scoped, &.{}, "/teams/acme/members");
+    const elsewhere = try chainFor(testing.allocator, &scoped, &.{}, &.{}, .GET, "/teams/acme/members");
     defer testing.allocator.free(elsewhere);
     try testing.expectEqual(@as(usize, 0), elsewhere.len);
 
     // Too short to be under it at all.
-    const short = try chainFor(testing.allocator, &scoped, &.{}, "/orgs");
+    const short = try chainFor(testing.allocator, &scoped, &.{}, &.{}, .GET, "/orgs");
     defer testing.allocator.free(short);
     try testing.expectEqual(@as(usize, 0), short.len);
+}
+
+test "a middleware a route carries runs inside the ones scoped over it" {
+    // The order the nesting means: the group's guard has already run by the
+    // time the route's own guard does (ADR 0126).
+    const scoped = [_]Scoped{.{ .prefix = "", .middleware = markA }};
+    const attached = [_]Attached{.{ .pattern = "/v1/orders", .method = .POST, .middleware = markB }};
+
+    const both = try chainFor(testing.allocator, &scoped, &.{}, &attached, .POST, "/v1/orders");
+    defer testing.allocator.free(both);
+    try testing.expectEqual(@as(usize, 2), both.len);
+    try testing.expect(both[0] == markA);
+    try testing.expect(both[1] == markB);
+
+    trail_len = 0;
+    var c: Ctx = undefined;
+    try (Next{ .rest = both, .handler = terminal }).run(&c);
+    try testing.expectEqualStrings("abHBA", trail());
+}
+
+test "an attached middleware covers its own route and nothing beside it" {
+    // Exact, not a prefix — which is the difference between this and `useOn`,
+    // and the reason `with` can be used on a route whose neighbours are named
+    // similarly.
+    const attached = [_]Attached{.{ .pattern = "/v1/orders", .method = .POST, .middleware = markA }};
+
+    const itself = try chainFor(testing.allocator, &.{}, &.{}, &attached, .POST, "/v1/orders");
+    defer testing.allocator.free(itself);
+    try testing.expectEqual(@as(usize, 1), itself.len);
+
+    // A route underneath it is a different route.
+    const under = try chainFor(testing.allocator, &.{}, &.{}, &attached, .POST, "/v1/orders/:id");
+    defer testing.allocator.free(under);
+    try testing.expectEqual(@as(usize, 0), under.len);
+
+    // And one that merely begins with the same letters is not it either.
+    const alike = try chainFor(testing.allocator, &.{}, &.{}, &attached, .POST, "/v1/orders-archive");
+    defer testing.allocator.free(alike);
+    try testing.expectEqual(@as(usize, 0), alike.len);
+}
+
+test "an attached middleware covers one verb on its path, not every verb" {
+    // `with(adminOnly).delete("/users/:id", …)` must not put `adminOnly` on
+    // the `GET` that reads the same path. They are two routes (ADR 0126).
+    const attached = [_]Attached{.{ .pattern = "/users/:id", .method = .DELETE, .middleware = markA }};
+
+    const removing = try chainFor(testing.allocator, &.{}, &.{}, &attached, .DELETE, "/users/:id");
+    defer testing.allocator.free(removing);
+    try testing.expectEqual(@as(usize, 1), removing.len);
+
+    const reading = try chainFor(testing.allocator, &.{}, &.{}, &attached, .GET, "/users/:id");
+    defer testing.allocator.free(reading);
+    try testing.expectEqual(@as(usize, 0), reading.len);
+}
+
+test "an exemption frees one verb on its path, not every verb" {
+    // The same distinction, in the direction `without` goes — and it was
+    // missing until `with` needed it: a `GET` registered on the path of an
+    // excused `POST` was excused too.
+    const scoped = [_]Scoped{.{ .prefix = "", .middleware = markA }};
+    const exemptions = [_]Exemption{.{ .pattern = "/sign-up", .method = .POST, .middleware = markA }};
+
+    const posting = try chainFor(testing.allocator, &scoped, &exemptions, &.{}, .POST, "/sign-up");
+    defer testing.allocator.free(posting);
+    try testing.expectEqual(@as(usize, 0), posting.len);
+
+    const getting = try chainFor(testing.allocator, &scoped, &exemptions, &.{}, .GET, "/sign-up");
+    defer testing.allocator.free(getting);
+    try testing.expectEqual(@as(usize, 1), getting.len);
 }
 
 test "registration order is the run order, prefix or not" {
@@ -264,7 +386,7 @@ test "registration order is the run order, prefix or not" {
         .{ .prefix = "/api", .middleware = markB },
         .{ .prefix = "", .middleware = markA },
     };
-    const chain = try chainFor(testing.allocator, &scoped, &.{}, "/api/x");
+    const chain = try chainFor(testing.allocator, &scoped, &.{}, &.{}, .GET, "/api/x");
     defer testing.allocator.free(chain);
     try testing.expect(chain[0] == markB);
     try testing.expect(chain[1] == markA);

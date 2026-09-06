@@ -437,6 +437,10 @@ const refusals = [_]Refusal{
         .says = "an allowance above 1023 requests a window leaves too few bits for the fingerprint that tells two addresses apart.",
     },
     .{
+        .name = "allowance_keyed_by_something_that_is_not_a_key",
+        .says = "the first argument to allowance.keyed is what a request is counted against, and it has to be a function of one `*nilo.Ctx` returning an optional key.",
+    },
+    .{
         .name = "allowance_of_no_requests",
         .says = "an allowance of 0 requests is not a limit, it is a closed door.",
     },
@@ -499,6 +503,10 @@ const refusals = [_]Refusal{
     .{
         .name = "cors_reading_with_origins_named_too",
         .says = "cors.reading takes its origins from the Origins you hand it, so the `.origins` field has nothing to do.",
+    },
+    .{
+        .name = "deadline_of_no_time",
+        .says = "a deadline of 0 milliseconds is not a limit, it is a request that has already run out.",
     },
     .{
         .name = "filebody_as_an_argument",
@@ -767,6 +775,22 @@ const refusals = [_]Refusal{
     .{
         .name = "upload_as_an_argument",
         .says = "argument 1 of the handler for route \"/avatars\" is a `nilo.Upload`, which is a field of a form rather than an argument of its own.",
+    },
+    .{
+        .name = "url_for_a_catch_all",
+        .says = "\"/assets/*\" has a `*` catch-all, and a URL cannot be built for one.",
+    },
+    .{
+        .name = "url_param_with_no_value",
+        .says = "\"/users/:id/posts/:slug\" has a param `:slug` and nothing was given for it.",
+    },
+    .{
+        .name = "url_value_a_path_cannot_carry",
+        .says = "`:id` in \"/users/:id\" was given a url_value_a_path_cannot_carry.User, which is not something a path segment can carry.",
+    },
+    .{
+        .name = "url_value_with_no_param",
+        .says = "\"/users/:id\" has no param called `:slug`, so the value given for it would go nowhere.",
     },
     .{
         .name = "wildcard_in_segment",

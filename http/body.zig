@@ -21,6 +21,7 @@
 const std = @import("std");
 
 const http1 = @import("http1.zig");
+const watchdog = @import("watchdog.zig");
 
 pub const Options = struct {
     /// The most a body may be. A `Content-Length` past this is refused
@@ -106,6 +107,10 @@ pub const Body = struct {
     _in: *std.Io.Reader,
     /// The `Ctx`'s record of how far this has got.
     _progress: *Progress,
+    /// The request's blocking detector, or null when there is no request
+    /// behind this — a Body a test built against a fixed reader. A stretch of
+    /// handler time ends at every read (ADR 0132).
+    _watch: ?*watchdog.Watch = null,
 
     /// The next piece of the body, or null once there is none.
     ///
@@ -240,6 +245,14 @@ pub const Body = struct {
 
     fn streamFn(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
         const self: *Body = @alignCast(@fieldParentPtr("reader", r));
+        // Waiting for the client to send more is not the handler holding its
+        // thread, and saying so is what lets a body reader be watched at all
+        // rather than excused (ADR 0132). Through the slot rather than a
+        // pointer on `Body`, because a read is a syscall and the lookup is
+        // not.
+        const token = watchdog.waiting(self._watch);
+        defer watchdog.waited(self._watch, token);
+
         const run = try self.runLength();
         if (run == 0) return error.EndOfStream;
         const n = try self._in.stream(w, limit.min(.limited64(run)));
@@ -249,6 +262,9 @@ pub const Body = struct {
 
     fn discardFn(r: *std.Io.Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
         const self: *Body = @alignCast(@fieldParentPtr("reader", r));
+        const token = watchdog.waiting(self._watch);
+        defer watchdog.waited(self._watch, token);
+
         const run = try self.runLength();
         if (run == 0) return error.EndOfStream;
         const n = try self._in.discard(limit.min(.limited64(run)));

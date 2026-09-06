@@ -43,6 +43,7 @@ const builtin = @import("builtin");
 
 const bulkhead = @import("bulkhead.zig");
 const Ctx = @import("ctx.zig").Ctx;
+const Str = @import("nilo_core").Str;
 const fail = @import("fail.zig");
 const mw = @import("middleware.zig");
 
@@ -159,6 +160,267 @@ pub fn with(comptime options: Options) mw.Middleware {
     }.run;
 }
 
+/// What to do with a request the key function had no answer for.
+///
+/// There is no default, and that is the point. `keyed(signedInAccount, …)` on
+/// a sign-in route with a silent "not counted" leaves every *failed* sign-in
+/// uncounted — which is the attack the route exists to stop. Writing one of
+/// these two is the moment somebody thinks about it.
+pub const OnNull = enum {
+    /// Not counted, and through. Right when the allowance is an extra limit
+    /// on top of one that is already keyed on the address.
+    skip,
+    /// Refused with a 403. Right when there is nothing else counting, and a
+    /// request nobody can count is a request nobody can limit.
+    reject,
+};
+
+/// An allowance counted against something the application knows, rather than
+/// against the address the connection came from.
+pub const Keyed = struct {
+    /// What a nilo compile error calls this type (ADR 0122).
+    pub const nilo_type_name = "nilo.allowance.Keyed";
+
+    /// How many requests one key may make inside `window_s`.
+    ///
+    /// The whole `u16` is available here, unlike `Options.per_window`, which
+    /// stops at 1023: an address's fingerprint shares its 64-bit word with the
+    /// counters, and a key's tag is a word of its own
+    /// ([ADR 0131](../docs/adr/0131-a-key-the-application-knows-is-a-word-of-its-own.md)).
+    per_window: u16 = 100,
+    /// How long the window is, in seconds. Also what `Retry-After` says.
+    window_s: u16 = 60,
+    /// How many keys this table remembers at once. A power of two.
+    ///
+    /// **Sixteen bytes each**, not eight: a tag word beside the counters. The
+    /// default of 4,096 is 65,536 bytes in `.bss`, once, for the whole
+    /// process — smaller than the address table's default because there are
+    /// fewer accounts in flight than there are addresses on the internet.
+    slots: u32 = 4 * 1024,
+    /// Required. See `OnNull`.
+    on_null: OnNull,
+    /// Tells this allowance apart from another with the same numbers, for the
+    /// reason `Options.name` exists: two calls carrying identical options are
+    /// one table.
+    name: []const u8 = "",
+};
+
+/// The same middleware, counting against whatever `key` returns — the account
+/// that signed in, the API key that was presented, the tenant the request
+/// belongs to.
+///
+/// ```zig
+/// fn account(c: *nilo.Ctx) ?[]const u8 {
+///     const who = c.session(Account) orelse return null;
+///     return who.id.view();
+/// }
+///
+/// try app.useOn("/api", nilo.allowance.keyed(account, .{
+///     .per_window = 1000,
+///     .on_null = .reject,
+/// }));
+/// ```
+///
+/// `key` may return a `Str` instead, which is what most of `Ctx` hands back.
+/// **Its bytes are not kept.** They live in the request arena and are gone by
+/// the next request; what goes in the table is a 64-bit tag computed from
+/// them, so there is no key-length policy to invent and no account id sitting
+/// in `.bss`.
+pub fn keyed(comptime key: anytype, comptime options: Keyed) mw.Middleware {
+    comptime checkKey(key);
+    comptime checkCounts(options);
+
+    const S = KeyedSlot(options);
+    const buckets = options.slots / ways;
+    const window_ns: u64 = @as(u64, options.window_s) * std.time.ns_per_s;
+    const retry_after = std.fmt.comptimePrint("{d}", .{options.window_s});
+    const refusal = std.fmt.comptimePrint(
+        "too many requests: {d} every {d} seconds",
+        .{ options.per_window, options.window_s },
+    );
+
+    return struct {
+        /// Two words a slot, both in `.bss` and neither allocated. The tag
+        /// says whose slot it is; the state is the same sliding window an
+        /// address-keyed allowance uses.
+        var tags: [options.slots]std.atomic.Value(u64) align(64) = @splat(.init(0));
+        var state: [options.slots]std.atomic.Value(u64) align(64) = @splat(.init(0));
+
+        fn run(c: *Ctx, next: mw.Next) anyerror!void {
+            const text = keyText(key, c) orelse switch (options.on_null) {
+                .skip => return next.run(c),
+                .reject => return fail.forbidden(
+                    "this request carries nothing to count a rate limit against",
+                    .{},
+                ),
+            };
+
+            const now = bulkhead.coarseNanos();
+            const window: u16 = @truncate(now / window_ns);
+            const into = now % window_ns;
+
+            // Two hashes of the same bytes, off the same per-process seed: one
+            // picks the bucket, the other is the tag. A collision has to match
+            // both, which is 2^(bucket bits + 64) rather than the 2^46 a
+            // packed fingerprint would give — and 2^46 is grindable offline
+            // for a key an attacker chooses, like a username (ADR 0131).
+            const h = std.hash.Wyhash.hash(hashSeed(), text);
+            const at = (h % buckets) * ways;
+            const allowed = chargeKeyed(
+                S,
+                options,
+                window_ns,
+                tags[at..][0..ways],
+                state[at..][0..ways],
+                tagOf(text),
+                window,
+                into,
+            );
+            if (allowed) return next.run(c);
+
+            try c.setStaticHeader("Retry-After", retry_after);
+            return fail.tooManyRequests(refusal, .{});
+        }
+    }.run;
+}
+
+/// A keyed slot: the same sliding window, with the owner taken out.
+///
+/// The 48 bits an address's slot spends on two counters and a window are the
+/// same 48 here; what was the fingerprint is padding, because the owner is a
+/// word of its own. That is what lets `per_window` go to 65,535.
+fn KeyedSlot(comptime o: Keyed) type {
+    const count_bits = std.math.log2_int_ceil(u32, @as(u32, o.per_window) + 1);
+    const spare = 64 - 2 * @as(u16, count_bits) - 16;
+    return packed struct(u64) {
+        cur: std.meta.Int(.unsigned, count_bits),
+        prev: std.meta.Int(.unsigned, count_bits),
+        window: u16,
+        _: std.meta.Int(.unsigned, spare) = 0,
+    };
+}
+
+/// The tag, off a second hash of the same bytes.
+///
+/// Zero is "empty", which is what `.bss` starts as, so a key whose tag is zero
+/// borrows one — exactly as `fingerprintOf` does.
+fn tagOf(text: []const u8) u64 {
+    const tag = std.hash.Wyhash.hash(hashSeed() ^ 0x9e37_79b9_7f4a_7c15, text);
+    return if (tag == 0) 1 else tag;
+}
+
+/// `charge`, with the owner in a word beside the counters instead of inside
+/// them.
+///
+/// **The two words cannot be moved together**, and what that costs is written
+/// down here rather than left to be discovered. A way is claimed by putting
+/// the tag in first, because the tag is what other fibers look for; the state
+/// is stored immediately after. A fiber that arrives between those two sees
+/// this key's tag against the previous owner's counters, reads the window as
+/// old, and starts a fresh count — so a takeover can lose the handful of
+/// requests in flight at that instant. A takeover is an eviction, which is
+/// rare by construction, and the alternative is a 128-bit compare-and-swap
+/// that not every target has.
+///
+/// The other direction is closed: a count that lands after somebody else took
+/// the way over is thrown away and tried again, rather than charged to them.
+fn chargeKeyed(
+    comptime S: type,
+    comptime o: Keyed,
+    comptime window_ns: u64,
+    owners: []std.atomic.Value(u64),
+    cells: []std.atomic.Value(u64),
+    tag: u64,
+    window: u16,
+    into: u64,
+) bool {
+    // Whether this key was ever seen to own a way in this bucket. Once it has,
+    // running out of tries is a refusal rather than a pass: the contention is
+    // its own (ADR 0114).
+    var ours = false;
+
+    var tries: u8 = 0;
+    while (tries < 4) : (tries += 1) {
+        var oldest: usize = 0;
+        var oldest_age: u16 = 0;
+        var found: ?usize = null;
+
+        for (owners, 0..) |*owner, i| {
+            const was = owner.load(.monotonic);
+            if (was == tag) {
+                found = i;
+                break;
+            }
+            if (was == 0) {
+                oldest = i;
+                oldest_age = std.math.maxInt(u16);
+                continue;
+            }
+            const st: S = @bitCast(cells[i].load(.monotonic));
+            const age = window -% st.window;
+            if (age > oldest_age) {
+                oldest = i;
+                oldest_age = age;
+            }
+        }
+
+        if (found) |i| {
+            ours = true;
+            const cell = &cells[i];
+            const was: S = @bitCast(cell.load(.monotonic));
+            switch (take(S, o, window_ns, cell, was, window, into)) {
+                .allowed => {
+                    // Still ours? A takeover between reading the tag and
+                    // counting would have charged this request to whoever
+                    // owns the way now.
+                    if (owners[i].load(.monotonic) == tag) return true;
+                    continue;
+                },
+                .refused => return false,
+                .again => continue,
+            }
+        }
+
+        const owner = &owners[oldest];
+        const was_tag = owner.load(.monotonic);
+        if (was_tag == tag) continue; // somebody put us here; look again
+        if (owner.cmpxchgWeak(was_tag, tag, .monotonic, .monotonic) == null) {
+            const fresh: S = .{ .window = window, .cur = 1, .prev = 0 };
+            cells[oldest].store(@bitCast(fresh), .monotonic);
+            return true;
+        }
+    }
+
+    return !ours;
+}
+
+/// Call the caller's key function, whichever of the two shapes it has.
+fn keyText(comptime key: anytype, c: *Ctx) ?[]const u8 {
+    const answer = key(c) orelse return null;
+    if (@TypeOf(answer) == []const u8) return answer;
+    return answer.view();
+}
+
+/// The key function has to be one, and it has to take a `*Ctx` and hand back
+/// something optional.
+fn checkKey(comptime key: anytype) void {
+    comptime {
+        const info = @typeInfo(@TypeOf(key));
+        const bad = "nilo: the first argument to allowance.keyed is what a request is " ++
+            "counted against, and it has to be a function of one `*nilo.Ctx` returning " ++
+            "an optional key.\n  `fn (c: *nilo.Ctx) ?[]const u8` or `fn (c: *nilo.Ctx) " ++
+            "?nilo.Str` — return null for a request that carries nothing to count, and " ++
+            "say what that means with `.on_null`.\n  Got: " ++
+            @typeName(@TypeOf(key)) ++ ".";
+
+        if (info != .@"fn") @compileError(bad);
+        const f = info.@"fn";
+        if (f.params.len != 1 or f.params[0].type != *Ctx) @compileError(bad);
+        const ret = f.return_type orelse @compileError(bad);
+        if (@typeInfo(ret) != .optional) @compileError(bad);
+    }
+}
+
 /// One address's state, in one word.
 ///
 /// Two counters rather than one, which is a sliding window: a fixed one lets
@@ -215,7 +477,7 @@ fn fingerprintOf(comptime S: type, h: u64) @FieldType(S, "fp") {
 /// the shipped design; see the entry in `docs/history.md`.
 fn charge(
     comptime S: type,
-    comptime o: Options,
+    comptime o: anytype,
     comptime window_ns: u64,
     bucket: []std.atomic.Value(u64),
     fp: @FieldType(S, "fp"),
@@ -280,7 +542,7 @@ const Outcome = enum { allowed, refused, again };
 /// counts for, and take one if there is room.
 fn take(
     comptime S: type,
-    comptime o: Options,
+    comptime o: anytype,
     comptime window_ns: u64,
     cell: *std.atomic.Value(u64),
     was: S,
@@ -297,8 +559,15 @@ fn take(
     if (carried + cur >= o.per_window) return .refused;
 
     cur += 1;
-    const fresh: S = .{
+    // A keyed slot's owner is a word of its own rather than a field in here,
+    // so there is no fingerprint to carry forward. Everything else about the
+    // arithmetic is the same, which is why there is one copy of it.
+    const fresh: S = if (@hasField(S, "fp")) .{
         .fp = was.fp,
+        .window = window,
+        .cur = @intCast(cur),
+        .prev = @intCast(prev),
+    } else .{
         .window = window,
         .cur = @intCast(cur),
         .prev = @intCast(prev),
@@ -509,16 +778,28 @@ fn parseIp6(text: []const u8) ?[16]u8 {
 /// Four things that cannot be right, said while compiling.
 fn check(comptime o: Options) void {
     comptime {
-        if (o.per_window == 0) @compileError(
-            "nilo: an allowance of 0 requests is not a limit, it is a closed door.\n" ++
-                "  A route nobody may reach is one that answers 403, or one that is not " ++
-                "registered.",
-        );
+        checkCounts(o);
         if (o.per_window > 1023) @compileError(
             "nilo: an allowance above 1023 requests a window leaves too few bits for the " ++
                 "fingerprint that tells two addresses apart.\n  Widen the window instead: " ++
                 "`.per_window = 600, .window_s = 60` and `.per_window = 100, .window_s = 10` " ++
                 "are the same rate.",
+        );
+        if (o.ipv6_prefix > 128) @compileError(
+            "nilo: an IPv6 address is 128 bits, so `.ipv6_prefix` cannot ask for more than " ++
+                "128 of them.\n  The default of 64 is one customer's allocation; 128 counts " ++
+                "each address on its own.",
+        );
+    }
+}
+
+/// The three that are true of any allowance, keyed on an address or not.
+fn checkCounts(comptime o: anytype) void {
+    comptime {
+        if (o.per_window == 0) @compileError(
+            "nilo: an allowance of 0 requests is not a limit, it is a closed door.\n" ++
+                "  A route nobody may reach is one that answers 403, or one that is not " ++
+                "registered.",
         );
         if (o.window_s == 0) @compileError(
             "nilo: an allowance needs a window to count inside — `.window_s = 60`.",
@@ -527,11 +808,6 @@ fn check(comptime o: Options) void {
             "nilo: an allowance's `.slots` is a power of two, and at least 64, because the " ++
                 "table is indexed by a hash and shared four ways to a bucket.\n  " ++
                 std.fmt.comptimePrint("Got {d}.", .{o.slots}),
-        );
-        if (o.ipv6_prefix > 128) @compileError(
-            "nilo: an IPv6 address is 128 bits, so `.ipv6_prefix` cannot ask for more than " ++
-                "128 of them.\n  The default of 64 is one customer's allocation; 128 counts " ++
-                "each address on its own.",
         );
     }
 }
@@ -719,6 +995,143 @@ test "a client past its allowance is refused, and the next client is not" {
     var neighbour = try test_client.Client.init(testing.allocator, .{ .client_address = "198.51.100.4" });
     defer neighbour.deinit();
     try testing.expectEqual(@as(u16, 200), (try neighbour.get(&app, "/thing")).status);
+}
+
+fn accountHeader(c: *Ctx) ?Str {
+    return c.header("X-Account");
+}
+
+test "a keyed allowance counts against the account, not the address" {
+    const previous = testing.log_level;
+    defer testing.log_level = previous;
+    testing.log_level = .err;
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(keyed(accountHeader, .{
+        .per_window = 2,
+        .window_s = 60,
+        .on_null = .skip,
+        .name = "test-keyed-account",
+    }));
+    try app.get("/thing", allowanceOk);
+
+    // Two accounts behind one office NAT. Keyed on the address they would
+    // share an allowance neither of them spent; keyed on the account they do
+    // not, which is the whole point.
+    var office = try test_client.Client.init(testing.allocator, .{ .client_address = "203.0.113.7" });
+    defer office.deinit();
+
+    try office.setHeader("X-Account", "acct-alice");
+    for (0..2) |_| try testing.expectEqual(@as(u16, 200), (try office.get(&app, "/thing")).status);
+    const spent = try office.get(&app, "/thing");
+    try testing.expectEqual(@as(u16, 429), spent.status);
+    try testing.expectEqualStrings("60", spent.header("Retry-After").?);
+
+    try office.setHeader("X-Account", "acct-bob");
+    try testing.expectEqual(@as(u16, 200), (try office.get(&app, "/thing")).status);
+
+    // And the other way round: one account on a second machine is still one
+    // account, where an address-keyed allowance would have given it two.
+    var laptop = try test_client.Client.init(testing.allocator, .{ .client_address = "198.51.100.4" });
+    defer laptop.deinit();
+    try laptop.setHeader("X-Account", "acct-alice");
+    try testing.expectEqual(@as(u16, 429), (try laptop.get(&app, "/thing")).status);
+}
+
+test "a request with no key is skipped or refused, and the caller says which" {
+    const previous = testing.log_level;
+    defer testing.log_level = previous;
+    testing.log_level = .err;
+
+    // `.skip`: not counted, and through. For an allowance that sits on top of
+    // one already keyed on the address.
+    var lenient = App.init(testing.allocator);
+    defer lenient.deinit();
+    try lenient.use(keyed(accountHeader, .{
+        .per_window = 1,
+        .window_s = 60,
+        .on_null = .skip,
+        .name = "test-keyed-skip",
+    }));
+    try lenient.get("/thing", allowanceOk);
+
+    var anonymous = try test_client.Client.init(testing.allocator, .{ .client_address = "203.0.113.7" });
+    defer anonymous.deinit();
+    for (0..5) |_| {
+        try testing.expectEqual(@as(u16, 200), (try anonymous.get(&lenient, "/thing")).status);
+    }
+
+    // `.reject`: a request nobody can count is a request nobody can limit. A
+    // 403 rather than a 429, because it is not a rate that was exceeded.
+    var strict = App.init(testing.allocator);
+    defer strict.deinit();
+    try strict.use(keyed(accountHeader, .{
+        .per_window = 1,
+        .window_s = 60,
+        .on_null = .reject,
+        .name = "test-keyed-reject",
+    }));
+    try strict.get("/thing", allowanceOk);
+
+    try testing.expectEqual(@as(u16, 403), (try anonymous.get(&strict, "/thing")).status);
+    try anonymous.setHeader("X-Account", "acct-alice");
+    try testing.expectEqual(@as(u16, 200), (try anonymous.get(&strict, "/thing")).status);
+}
+
+test "a keyed slot's owner is a word of its own, so eviction is by age" {
+    const o: Keyed = .{ .per_window = 2, .window_s = 60, .on_null = .skip };
+    const S = KeyedSlot(o);
+    const window_ns: u64 = 60 * std.time.ns_per_s;
+
+    var owners: [ways]std.atomic.Value(u64) = @splat(.init(0));
+    var cells: [ways]std.atomic.Value(u64) = @splat(.init(0));
+
+    const mine = tagOf("acct-alice");
+    try testing.expect(chargeKeyed(S, o, window_ns, &owners, &cells, mine, 7, 0));
+    try testing.expect(chargeKeyed(S, o, window_ns, &owners, &cells, mine, 7, 0));
+    try testing.expect(!chargeKeyed(S, o, window_ns, &owners, &cells, mine, 7, 0));
+
+    // Three strangers fill the rest of the bucket, and none of them inherits
+    // the spent allowance.
+    for ([_][]const u8{ "acct-bob", "acct-carol", "acct-dan" }) |who| {
+        try testing.expect(chargeKeyed(S, o, window_ns, &owners, &cells, tagOf(who), 7, 0));
+    }
+
+    // Full, and the oldest way is taken. A key that arrives now displaces
+    // somebody rather than sharing their count.
+    try testing.expect(chargeKeyed(S, o, window_ns, &owners, &cells, tagOf("acct-eve"), 9, 0));
+
+    // A window later the count has rolled forward rather than reset, which is
+    // the same arithmetic the address table uses — one copy of it.
+    var only: [ways]std.atomic.Value(u64) = @splat(.init(0));
+    var only_state: [ways]std.atomic.Value(u64) = @splat(.init(0));
+    try testing.expect(chargeKeyed(S, o, window_ns, &only, &only_state, mine, 7, 0));
+    try testing.expect(chargeKeyed(S, o, window_ns, &only, &only_state, mine, 7, 0));
+    // Right at the boundary the whole of the previous window still counts.
+    try testing.expect(!chargeKeyed(S, o, window_ns, &only, &only_state, mine, 8, 0));
+    // Most of the way through it, it does not.
+    try testing.expect(chargeKeyed(S, o, window_ns, &only, &only_state, mine, 8, window_ns - 1));
+}
+
+test "a keyed allowance may count far past what an address's slot holds" {
+    // The bits an address spends on its fingerprint are a word of their own
+    // here, so `per_window` is the whole `u16` rather than stopping at 1023.
+    // A per-account API quota is the case: 10,000 an hour is an ordinary
+    // number and `.per_window = 10_000` is a compile error on the other one.
+    const o: Keyed = .{ .per_window = 5000, .window_s = 3600, .on_null = .reject };
+    const S = KeyedSlot(o);
+    try testing.expectEqual(@as(usize, 64), @bitSizeOf(S));
+
+    var owners: [ways]std.atomic.Value(u64) = @splat(.init(0));
+    var cells: [ways]std.atomic.Value(u64) = @splat(.init(0));
+    const window_ns: u64 = 3600 * std.time.ns_per_s;
+    const mine = tagOf("acct-alice");
+
+    for (0..5000) |_| {
+        try testing.expect(chargeKeyed(S, o, window_ns, &owners, &cells, mine, 1, 0));
+    }
+    try testing.expect(!chargeKeyed(S, o, window_ns, &owners, &cells, mine, 1, 0));
 }
 
 test "a route the allowance does not cover is not counted" {

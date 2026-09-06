@@ -65,7 +65,7 @@
 //!   thread, and the Engine is the only layer that knows how to wait
 //!   without doing that (ADR 0014).
 //! - `Dir`/`File` — open a directory, open a file inside it by name, ask
-//!   how big it is, close either, and replace a whole file with bytes
+//!   what it is, close either, and replace a whole file with bytes
 //!   already in hand. Five calls, and deliberately no sixth: no seek, no
 //!   file held open for writing, and nothing that walks a directory while a
 //!   request is waiting on it. The list is that short because everything
@@ -131,6 +131,10 @@ pub const engine_limits_value: Limits = .{ .vtable = &engine_limits };
 pub const debug_io = engine.debug_io;
 pub const Peer = engine.Peer;
 
+/// What one look at an open file said: its length and its modification time.
+/// See `File.stat`.
+pub const Stat = engine.Stat;
+
 /// Everything `listen()` takes.
 ///
 /// Declared here rather than in the Engine, even though most of it is the
@@ -149,13 +153,33 @@ pub const Options = struct {
     /// interface. A host name is not resolved — this is the address to bind
     /// to, and a name would make which interface it lands on a lookup's
     /// business rather than yours.
+    ///
+    /// **`"unix:/run/nilo.sock"` listens on a path instead**, which is what
+    /// the proxy ADR 0028 puts in front should reach the server over: there
+    /// is no port to leave open, and the file's permissions are who may
+    /// connect ([ADR 0130](../docs/adr/0130-a-path-is-an-address-to-listen-on.md)).
+    /// `port` is not read at all then. A socket left behind by a server that
+    /// was killed is taken away on the next start when `reuse_address` is on,
+    /// and the path is removed when this server stops.
+    ///
+    /// A request that arrives that way has no client address — `Ctx.peer()`
+    /// is empty — so a server behind a proxy over a socket wants
+    /// `.trusted_proxies` set and reads `X-Forwarded-For`, which it is
+    /// allowed to do because nothing remote can open a unix socket.
     address: []const u8 = "127.0.0.1",
+    /// Ignored when `address` names a unix socket.
     port: u16 = 8787,
     /// On by default so that stopping the server and starting it again
     /// works. Without it, connections left in TIME_WAIT hold the port and
     /// the restart fails with `AddressInUse` — which, during development,
     /// is every single restart. It does not let two servers share a port:
     /// a second listener on the same address is still refused.
+    ///
+    /// On a unix socket it means the matching thing: a socket file left
+    /// behind by a process that is gone is removed before binding. Only a
+    /// path that is a socket, and only when connecting to it is refused —
+    /// a file, a directory, or a socket something is still listening on is
+    /// left alone.
     reuse_address: bool = true,
 
     /// How many OS threads run fibers. 0 means one per core.
@@ -348,7 +372,42 @@ pub const Options = struct {
     ///
     /// Fewer entries than hops means the chain is not what this says it is,
     /// so the socket's own address is used rather than a guess.
+    ///
+    /// **`.trusted_proxies` below is the better answer** where you can name
+    /// your network, and it wins when both are set.
     trusted_hops: u8 = 0,
+
+    /// Which addresses in front of this server are allowed to say who the
+    /// client is
+    /// ([ADR 0129](../docs/adr/0129-a-proxy-is-trusted-by-which-one-it-is.md)).
+    ///
+    /// ```zig
+    /// try app.listen(.{ .trusted_proxies = &.{"private"} });
+    /// ```
+    ///
+    /// Each entry is a CIDR (`10.0.0.0/8`, `fd00::/8`), a bare address meaning
+    /// only that host, or one of two names: `"private"` for the RFC 1918
+    /// ranges plus carrier-grade NAT, link-local, unique-local v6 and the
+    /// loopback, and `"loopback"` for the loopback alone. A v4 rule matches a
+    /// client that arrived v4-mapped, so a server bound to `::` needs the rule
+    /// written once.
+    ///
+    /// **This describes the network instead of counting it**, which is what
+    /// makes it hard to get wrong in a way nothing notices. `trusted_hops` is
+    /// a number that has to match how many proxies are in front today; grow a
+    /// hop and it keeps answering, with the wrong address and no complaint.
+    /// Here the header is read only when the connection came from an address
+    /// you named, entries written by addresses you named are skipped, and the
+    /// first one left is the client — whatever the chain's length turned out
+    /// to be.
+    ///
+    /// Empty is the default and means the same as it always did: trust
+    /// nothing, and `Ctx.clientIp()` is the address the connection came from.
+    /// An entry that is not an address stops the server at `listen()` with a
+    /// sentence naming it.
+    ///
+    /// The text is borrowed and has to outlive the App, which a literal does.
+    trusted_proxies: []const []const u8 = &.{},
 
     /// How many password hashes may be in flight at once (ADR 0048).
     ///
@@ -779,12 +838,20 @@ pub const Dir = struct {
 pub const File = struct {
     _inner: engine.File,
 
-    /// How many bytes there are, asked of the operating system rather than
-    /// remembered. What the `Content-Length` of a file response is made of.
-    pub fn size(self: File) !u64 {
+    /// What the file is, asked of the operating system rather than
+    /// remembered: how many bytes, and when it last changed.
+    ///
+    /// Both numbers together rather than a `size` on its own, and that is the
+    /// whole of ADR 0125. A file response writes a length and an ETag, and
+    /// nilo's ETag for a file nobody read is made of exactly these two
+    /// numbers — so asking twice, or asking for one and remembering the
+    /// other, is how a response comes to promise a length from one file and a
+    /// tag from another. One look at one descriptor cannot disagree with
+    /// itself.
+    pub fn stat(self: File) !Stat {
         const w = watchdog.waitingAnywhere();
         defer watchdog.waitedAnywhere(w);
-        return self._inner.size();
+        return self._inner.stat();
     }
 
     pub fn close(self: File) void {
@@ -1016,6 +1083,15 @@ pub const Deadlines = struct {
     body_grace_ms: u32 = 0,
     write_ms: u32 = 0,
 
+    /// When this request runs out of time altogether, as a `monotonicNanos`
+    /// reading. Zero — the default — means it does not.
+    ///
+    /// Set by `nilo.deadline` and read here rather than at each call site:
+    /// every limit armed below is clamped to it, so a handler waiting on a
+    /// client cannot wait past the deadline whichever of the four it is
+    /// waiting under ([ADR 0133](../docs/adr/0133-a-route-can-say-how-long-it-has.md)).
+    until_ns: u64 = 0,
+
     pub const VTable = struct {
         limit: *const fn (target: ?*anyopaque, side: Side, l: Limit) void,
         timedOut: *const fn (target: ?*anyopaque) bool,
@@ -1121,7 +1197,22 @@ pub const Deadlines = struct {
     }
 
     fn set(self: Deadlines, side: Side, l: Limit) void {
-        self.vtable.limit(self.target, side, l);
+        self.vtable.limit(self.target, side, self.clamped(l));
+    }
+
+    /// Cut a limit down to the request's own deadline, if it has one.
+    ///
+    /// **Every arming above goes through here**, including `armIdle` and
+    /// `readForever`, which is what makes the deadline one number rather than
+    /// six places to remember. `none` becomes the deadline itself: "as long
+    /// as it takes" is exactly what a deadline is for.
+    fn clamped(self: Deadlines, l: Limit) Limit {
+        if (self.until_ns == 0) return l;
+        return switch (l) {
+            .none => .{ .by_ns = self.until_ns },
+            .within_ms => |ms| .{ .by_ns = @min(monotonicNanos() + msToNanos(ms), self.until_ns) },
+            .by_ns => |ns| .{ .by_ns = @min(ns, self.until_ns) },
+        };
     }
 };
 

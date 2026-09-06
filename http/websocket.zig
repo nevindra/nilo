@@ -38,6 +38,7 @@
 const std = @import("std");
 
 const bulkhead = @import("bulkhead.zig");
+const watchdog = @import("watchdog.zig");
 const http1 = @import("http1.zig");
 const json_mod = @import("json.zig");
 const names = @import("names.zig");
@@ -407,6 +408,11 @@ pub const Socket = struct {
     /// A ping has gone out and nothing has come back yet. The next stretch of
     /// silence is what turns that into a verdict.
     _awaiting_pong: bool = false,
+
+    /// The request's blocking detector, or null for a Socket a test built by
+    /// hand. A stretch of handler time ends at every park, so what is between
+    /// two of them is what the handler did with one message (ADR 0132).
+    _watch: ?*watchdog.Watch = null,
 
     /// The next message, or null once the connection is over.
     ///
@@ -916,6 +922,13 @@ pub const Socket = struct {
     /// process with eight threads shoots TLB entries down on all of them. A
     /// socket with a conversation on it answers inside 200ms and never pays.
     fn park(self: *Socket, may_give_buffer: bool) bulkhead.Woken {
+        // Silence on a socket is not the handler holding its thread. This is
+        // the wait that used to excuse a WebSocket from the detector
+        // entirely; bracketed, what is left between two of them is exactly
+        // what the handler did with one message (ADR 0132).
+        const token = watchdog.waiting(self._watch);
+        defer watchdog.waited(self._watch, token);
+
         // A ping limit shorter than the peek is left alone rather than
         // reordered: the peek is supposed to be a prefix of the wait, not
         // longer than it.

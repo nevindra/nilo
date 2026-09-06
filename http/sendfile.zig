@@ -76,7 +76,7 @@ pub fn send(c: *Ctx, contents: Contents) !void {
     // that gives it back — see the module comment.
     defer contents.file.close();
 
-    const total = contents.size orelse try contents.file.size();
+    const total = contents.size orelse (try contents.file.stat()).size;
 
     if (contents.etag.len > 0) try c.setStaticHeader("ETag", contents.etag);
     if (contents.cache_control.len > 0) try c.setStaticHeader("Cache-Control", contents.cache_control);

@@ -68,7 +68,7 @@ other module's.
 | [`nilo_config`](#nilo_config-settings) | needs no loop | reading a name the field is not called |
 | [`nilo_pw`](#nilo_pw-hashing-a-password) | needs no loop | a Cost floor that weighs the wrong half, and a patch `std` should have |
 | [`nilo_fetch`](#nilo_fetch-calling-somebody-elses-api) | borrows the loop | 4,139 bytes of stack per idle connection, and nothing measured through TLS |
-| [`nilo_http`](#nilo_http-the-server) | owns the loop | an allowance that can only be keyed on the address, nothing that reads a `Forwarded` header, and a long tail |
+| [`nilo_http`](#nilo_http-the-server) | owns the loop | a megabyte of request arena held per connection, nothing that reads a `Forwarded` header, and a long tail |
 | [`nilo_sql`](#nilo_sql-postgres-and-sqlite) | borrows the loop | a `Timestamp` the two halves of SQLite disagree about, a pool option dropped without a word, and where migrations live |
 | [`nilo_s3`](#nilo_s3-object-storage) | borrows the loop | nothing measured through TLS, and no `LIST`, `COPY` or multipart |
 
@@ -383,66 +383,22 @@ accepted Zig's own literal grammar
 
 ### Next
 
-**1. An allowance can only be keyed on the address.** `allowance.with` counts
-against `clientIp()`, which is the right key for a scraper and the wrong one for
-everything the application knows: which account signed in, which API key was
-presented, which tenant the request belongs to. Ten accounts behind one office
-NAT share an allowance they should not, and one account with ten machines gets
-ten. The table, the sliding window and the eviction are all built and none of
-them cares what the key is
-([ADR 0114](./adr/0114-an-allowance-is-a-table-sized-while-compiling.md)) — what
-is missing is `allowance.keyed(fn (*Ctx) ?[]const u8, .{ … })`, where returning
-nothing means "not counted".
-
-The shape is decided and the arithmetic behind it has been done. A `Str` out of
-the request arena is gone by the next request, so the key's bytes cannot be
-kept — but they do not need to be. **A separate 64-bit tag from a keyed hash is
-what this wants**, not the inline copy of the key that looked like the only
-alternative: the bytes only have to live long enough to compute the tag, there
-is no key-length policy to invent, no account id sits in `.bss`, and 4,096 slots
-cost 32 KB rather than the 128 KB of 32-byte copies.
-
-The packed fingerprint is not enough here and the reason is not the one this
-entry used to give. A targeted collision has to match the index *and* the
-fingerprint, so it is `2^(b+f)` — `2^46` at the default, and still `2^46` at the
-widest ceiling, because the bits the fingerprint loses the index gains. `2^46`
-is out of reach for a server-generated opaque account id. It is **not** out of
-reach for a username or a tenant slug, which an attacker grinds offline and then
-registers the winner of: hours at a billion tries a second.
-
-Two things have to be settled with it. **A fingerprint mismatch needs a policy
-and both obvious ones are attacks** under a guessable mapping — evicting the
-occupant is an allowance reset, refusing the newcomer locks the victim out, and
-both cost about `2^12` offline candidates. The per-process seed
-([ADR 0114](./adr/0114-an-allowance-is-a-table-sized-while-compiling.md)) is
-what defuses them, so `keyed` inherits it rather than solving it again. And
-**`null` cannot quietly mean "not counted"**: `keyed(authenticatedAccount, …)`
-on a sign-in route leaves every *failed* sign-in uncounted, which is the attack
-the route exists to stop. The null policy has to be written by the caller —
-`.on_null = .skip | .reject`, or two constructors — and the key on a sign-in
-route is the *claimed* username rather than the authenticated account, composed
-with an address-keyed allowance.
-
-**Waiting on: a caller.** Nothing above is unknown any more; what is missing is
-an application that wants it, to say whether the tag is 64 bits or 128 and
-whether the compact and strong forms are two modes or two functions.
-
-**2. Reloading without a restart: static files, then the server.** A development
-annoyance rather than a design hole, because a deploy restarts anyway. The static
-half is a watch option on `staticWith`, re-reading a directory that has changed.
-The other half is the whole process and cannot live inside `App`, because a
-running binary cannot rebuild itself, so it belongs in the build alongside `zig
-build run`. jetzig's dev server sums the modification times of its source tree
-and rebuilds when the sum moves, which is about as much machinery as this
-deserves. The part to be careful about is that neither half can end up in a
-release binary.
-
-The static half stopped being purely a convenience when files began spilling to
-disk. See the stale-length gap below, which this is the fix for.
+**1. Reloading the server without a restart.** A development annoyance rather
+than a design hole, because a deploy restarts anyway. The static half is built:
+`staticWith(.{ .reload = true })` leaves every file on disk and opens it per
+request ([ADR 0125](./adr/0125-a-file-is-described-by-the-descriptor-being-sent.md)),
+and a file that changes under a running server is described by the descriptor
+its bytes come out of. A file that did not exist at startup still needs a
+restart. What
+is left is the whole process, which cannot live inside `App` — a running binary
+cannot rebuild itself — so it belongs in the build alongside `zig build run`.
+jetzig's dev server sums the modification times of its source tree and rebuilds
+when the sum moves, which is about as much machinery as this deserves. The part
+to be careful about is that it cannot end up in a release binary.
 
 **Waiting on: ready.**
 
-**3. A repeated name cannot bind to a list.** `convert.convertible` accepts a
+**2. A repeated name cannot bind to a list.** `convert.convertible` accepts a
 `Str`, a number, a `bool`, an enum and optionals of those, and nothing else — so
 `?tag=a&tag=b` into `tags: []const Str`, and a `<select multiple>` or a checkbox
 group into a `Form(T)`, are both a compile error naming the field. `parseQuery`
@@ -455,7 +411,7 @@ that ask for one.
 what `Bound(Query(T))` hands back — an `Outcome` is one reason per field, and a
 list can fail at element three.
 
-**4. `permessage-deflate`.** Negotiated in the handshake, and a compressor per
+**3. `permessage-deflate`.** Negotiated in the handshake, and a compressor per
 connection is memory that has not been budgeted.
 
 **Waiting on: a number.** The per-connection cost has to be priced against the
@@ -630,25 +586,27 @@ The rest of that gap is `@memset`, which is Zig's rather than nilo's, and on the
 write path itself nilo already answers **22,018 req/s to axum's 17,209**
 ([`bench/result/s3.md`](../bench/result/s3.md)).
 
-**Waiting on: a design.** It changes where request memory lives, which is
-[ADR 0004](./adr/0004-request-arena-and-the-str-type.md)'s territory, and nobody
-has drawn one.
+**The free list as described above cannot be built, and that is the finding
+rather than the design.** A block recycled into another connection's arena
+while an `io_uring` send still references it corrupts that response — the
+completion holds the pointer, not a copy, and the arena has no idea a write is
+outstanding. So a per-thread cache needs a block to be unreachable until every
+operation naming it has completed, which is a lifetime rule the arena does not
+have and `defer` cannot express.
 
-**A spilled static file that changes on disk serves a stale length.** A file
-over the threshold has its size, mtime and ETag recorded at load and its bytes
-opened per request, so editing one under a running server splits what used to
-be one consistent copy. Shrinking it is caught: fewer bytes arrive than the
-head promised, so the connection closes rather than letting the client read the
-next response as the rest of this body, and the log says which request it was.
-Growing it is not caught. The first recorded-length bytes go out under the old
-ETag, which is a complete, correct-looking response carrying a prefix of a file
-that has moved on.
+**And the number that motivates it cannot be reproduced here.** 76.6 MB against
+23.2 MB, and 10,229 req/s to 14,365, were taken where sixty-four connections
+each hold a megabyte on a chip with 32 MB of L3. This box has two cores and no
+such working set, so anybody picking this up starts by rebuilding the before
+([`bench/result/http.md`](../bench/result/http.md)'s rule) on a machine where
+the L3 argument is real. The cheaper alternative that keeps coming up — raise
+`arena_keep` and let each connection hold its block — is the page-fault cost
+[ADR 0096](./adr/0096-a-response-larger-than-the-arena-keep-is-a-page-fault-per-page.md)
+measured, paid per connection instead of per request.
 
-Both are the same instruction as before, that changing a file means restarting.
-But a held file could not fail this way and a spilled one can.
-
-**Waiting on: Next 2**, the watch option, which is why this is not an item of
-its own.
+**Waiting on: a design** for when a block is safe to recycle, which is
+[ADR 0004](./adr/0004-request-arena-and-the-str-type.md)'s territory and is a
+harder question than the cache. Nobody has drawn one.
 
 **The API description is silent about authentication.** A handler taking a
 `CurrentUser` needs an `Authorization` header and the document does not say so,
@@ -709,27 +667,6 @@ thread is the right size or a guess that happened to work.
 **Waiting on: ready.** `bench/compare/wsload/` takes a `-payload`, so the run is
 there. The interpretation is what is missing.
 
-**The blocking detector is switched off for exactly the handlers that hold a
-thread longest.** `watchdog.finish` takes an `excused` flag, and a request that
-took the connection over — a WebSocket, a stream, a body reader — passes it. The
-reasoning is sound: those handlers hold their fiber legitimately, for as long as
-they like, and most of that time is socket I/O the watch does not account for.
-The consequence is that a `std.fs` call or a synchronous driver inside a
-WebSocket loop is never reported, and a WebSocket loop is where it costs the
-most — a stalled fiber there holds its executor against every other socket that
-executor is serving, for the life of the connection rather than for one request.
-
-`watchdog.zig`'s own header states this ("a stated gap, not an oversight") and
-nowhere else does, which is why it is here: a gap recorded only in the file that
-has it is a gap nobody planning work will find.
-
-The machinery is not missing. `Socket.receive` already parks, and `waiting`/
-`waited` is exactly the bracket that would tell a per-message watch which part
-of the loop was the socket and which was the handler.
-
-**Waiting on: a design** for what a message-scoped watch starts and stops at,
-given that `receive` also drains a Room before it reads.
-
 **Two type names nilo still cannot say the reader's way.** A nilo type inside a
 *reader's* generic — `main.Page(nilo.Str)` — comes back spelled `main.Page(str.Str)`,
 because the argument of somebody else's generic is not recoverable from its name,
@@ -770,25 +707,23 @@ there is, so there is nothing to precompute for.
 **Waiting on: accepted.** One arena allocation on a cold path, bounded by the
 number of `use` calls.
 
-**Nothing can be listened on but an IPv4 or IPv6 port.** `bulkhead.Options`
-carries `address` and `port`, and `engine/zio.zig` hands them to
-`zio.net.IpAddress.parseIp`, so a unix socket has nowhere to go and neither
-does a listener somebody else opened. Two things follow from that. The proxy
-[ADR 0028](./adr/0028-tls-is-terminated-in-front.md) puts in front reaches the
-server over loopback TCP because there is nothing else to reach it over — and
-the same swap measured on `nilo_sql`'s outbound side was worth 359k req/s to
-458k with p99 halved ([`bench/result/sql.md`](../bench/result/sql.md)), which
-is the argument for measuring the inbound half rather than the answer to it.
-And a process that cannot be handed an open descriptor cannot take a socket
-over from the process it replaces, so a deploy with nothing in front of it
+**A listener somebody else opened cannot be taken over.** `.address =
+"unix:/run/nilo.sock"` is there now
+([ADR 0130](./adr/0130-a-path-is-an-address-to-listen-on.md)), so the proxy
+[ADR 0028](./adr/0028-tls-is-terminated-in-front.md) puts in front no longer has
+to reach the server over loopback TCP. The other half of that gap is not: a
+process that cannot be handed an open descriptor cannot take the socket over
+from the process it replaces, so a deploy with nothing in front of it still
 drops the connections in flight whatever `shutdown_grace_ms` says.
 
-The option is one more variant on `address`. The work is in the Engine, which
-is the only file allowed to name zio
-([ADR 0002](./adr/0002-zio-as-the-engine-behind-the-bulkhead.md)).
+It is one more variant on `address` again, and the work is in the Engine
+([ADR 0002](./adr/0002-zio-as-the-engine-behind-the-bulkhead.md)). Two things
+have to be settled with it: an inherited descriptor has to be put into
+non-blocking mode before the loop may have it, and how it is named is a protocol
+decision — systemd's `LISTEN_FDS` convention, or a bare number.
 
-**Waiting on: a number** — what a unix socket is worth on the way in, on this
-box, against loopback TCP.
+**Waiting on: a caller** with a deploy that has nothing in front of it, to say
+which of the two spellings their supervisor actually uses.
 
 **`Forwarded` is not read, only the `X-` headers are.** `clientIp`, `host` and
 `scheme` read `X-Forwarded-For`, `X-Forwarded-Host` and `X-Forwarded-Proto`
@@ -804,23 +739,6 @@ both. So this is a gap with no reported caller rather than a hole.
 
 **Waiting on: a caller** running a proxy that writes `Forwarded` and nothing
 else.
-
-**A proxy is trusted by how many stand in front, not by which one it is.**
-`trusted_hops` counts entries from the right of `X-Forwarded-For`, which is
-sound arithmetic and is all there is. There is no way to say the header counts
-only when the connection came from `10.0.0.0/8`, and no way to describe a
-deployment where the count differs by path — a load balancer adding a hop for
-public traffic while a health check reaches the pod directly. Gin takes a list
-of CIDRs and Fiber takes ranges plus the loopback and private classes; both
-answer that question and a hop count cannot.
-
-What it costs today is small, because counting from the right already resists
-a forged header. What it costs is that a wrong count is silent: `clientIp()`
-returns something that looks like an address either way, and **Next 1** above
-is the caller that would make a wrong answer expensive.
-
-**Waiting on: a caller** with a deployment where the number of hops is not one
-number.
 
 **A response a handler wrote can never answer 304.** An ETag is made in
 `static.zig` — `etagFor` over a held file's bytes, `etagForSpilled` over a
@@ -874,62 +792,21 @@ same 64 KB window problem.
 **Waiting on: a design**, the same one — a pool of compressors sized to the
 thread count, which would serve both directions.
 
-**Middleware cannot be attached to one route.** `use`, `useOn(prefix)`,
-`group().use` and `without` are the whole vocabulary, so guarding a single
-endpoint means a prefix that matches only it, or a group holding one route. Gin
-and Fiber both take middleware as extra arguments to the route itself.
+**Nothing tells a handler its client has gone.** `error.Canceled` comes from a
+shutdown or from one of the deadlines the Engine sets; a client closing its
+connection in the middle of a handler produces neither, so the work runs to the
+end and the response is written into a socket nobody is reading. The other half
+of this — cutting a slow handler off — is `nilo.deadline(ms)` now
+([ADR 0133](./adr/0133-a-route-can-say-how-long-it-has.md)). This half is not,
+and it is not simply unbuilt: **the obvious implementation is wrong.** A
+read-side EOF is not "the client left". A client that sent `Connection: close`
+and then `shutdown(SHUT_WR)` produces exactly that and is still waiting for its
+response, so answering "peer gone" from it would abandon correct requests. Gin
+gets the disconnect from `net/http` for nothing; Fiber does not have it either.
 
-`without` is the other direction of the same question and is better than what
-either of them has
-([ADR 0080](./adr/0080-a-route-can-say-it-is-not-covered.md)), which is why
-this entry is a small one: the awkward case is a route wanting *more* than its
-neighbours, and a group of one says that, just not where the route is written.
-
-**Waiting on: a caller.**
-
-**A route has no name, and the route table cannot be read from outside.**
-Nothing enumerates routes, nothing prints them at startup — one `std.log.info`
-names the address and that is all — and there is no way to build a URL from a
-route the way Fiber's `Name` and `GetRouteURL` do. The table exists and metrics
-already index into it
-([ADR 0100](./adr/0100-the-route-table-is-the-registry.md)); it is simply not
-reachable.
-
-`app.docs()` answers most of "did my routes register" for an app that serves an
-API description, and none of it for an app that does not.
-
-**Waiting on: a caller.**
-
-**A streamed response is always chunked, so a body whose length is known loses
-it.** `Ctx.stream` sets `chunked` from the request's minor version and there is
-no option beside it, so a handler moving bytes out of something that knows how
-many there are — `nilo_s3`'s `bucket.stream` reports `len` before the first
-byte arrives — sends them with no `Content-Length`. A browser downloading that
-shows no progress, and a `Range` against it cannot be answered. The file paths
-do not have this problem: `sendFile` and `FileBody` both send a length.
-
-**Waiting on: a design** for what happens when the count and the promise
-disagree.
-[ADR 0097](./adr/0097-a-frame-that-lies-about-its-length-is-not-sent.md) is the
-same question one layer down, and its answer — refuse to send a frame that lies
-about its length — is the one to copy.
-
-**Nothing tells a handler its client has gone, and nothing cuts a slow handler
-off.** `error.Canceled` comes from a shutdown or from one of the four deadlines
-the Engine sets; a client closing its connection in the middle of a handler
-produces neither, so the work runs to the end and the response is written into
-a socket nobody is reading. `block_warning_ms` watches a handler holding its
-thread and only ever logs
-([ADR 0034](./adr/0034-the-thing-a-handler-holds-is-watched-at-run-time.md)),
-and there is no per-route deadline — which is Fiber's `timeout` middleware and
-Gin's request context. Gin gets the disconnect from `net/http` for nothing;
-Fiber does not have it either, so this is one framework ahead rather than two.
-
-**Waiting on: a design.** A cancel that fires mid-handler is a cancel every
-handler has to survive, which is `nilo.Mutex`, `nilo.sleep` and every Service
-at once, and
-[ADR 0104](./adr/0104-a-cleanup-path-is-not-cancellable.md) has already had to
-carve the cleanup path out of cancellation once.
+**Waiting on: a design** that separates "the client half-closed and is waiting"
+from "the socket is gone", which is two named signals rather than one flag. What
+is already real is a write that fails, and a handler sees that today.
 
 **A cookie's value arrives exactly as the client wrote it, decoded by nothing.**
 `Ctx.cookie` hands back the bytes between the delimiters and allocates nothing,

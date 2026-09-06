@@ -25,6 +25,7 @@ const std = @import("std");
 
 const http1 = @import("http1.zig");
 const json_mod = @import("json.zig");
+const watchdog = @import("watchdog.zig");
 
 /// How much a stream buffers before a piece goes out on its own.
 ///
@@ -34,6 +35,30 @@ const json_mod = @import("json.zig");
 /// that, `Events` already flushes after each one.
 pub const Options = struct {
     buffer: usize = 4 * 1024,
+
+    /// How many bytes the body will be, when the handler already knows.
+    ///
+    /// Null is the ordinary case and is what the whole module is named for: a
+    /// length nobody knows yet, framed in chunks. Set it and the head carries
+    /// a `Content-Length` instead, which is what a browser needs to draw a
+    /// progress bar and what makes a `Range` against the response answerable
+    /// ([ADR 0128](../docs/adr/0128-a-stream-that-knows-its-length-says-so.md)).
+    ///
+    /// The caller that has this is the one moving bytes out of something that
+    /// counted them already — `nilo_s3`'s `bucket.stream` reports `len` before
+    /// the first byte arrives, and a proxying handler has the length it was
+    /// given upstream.
+    ///
+    /// **A promise is held to.** Writing past it is refused rather than sent,
+    /// at the flush that would have sent the extra bytes rather than at the
+    /// call that buffered them —
+    /// for the reason a WebSocket frame that lies about its length is refused
+    /// ([ADR 0097](../docs/adr/0097-a-frame-that-lies-about-its-length-is-not-sent.md)):
+    /// the bytes past the promise would be read by the client as the start of
+    /// the next response. Finishing short cannot be taken back — the head has
+    /// gone — so the connection closes rather than leaving a client waiting
+    /// for bytes that are not coming.
+    length: ?u64 = null,
 };
 
 /// What an open stream is, from `Ctx`'s side. Lives on the `Ctx` rather than
@@ -41,11 +66,19 @@ pub const Options = struct {
 /// has to know what was left open after the handler has returned.
 pub const Open = struct {
     /// False for an HTTP/1.0 client, which has no chunked encoding and gets
-    /// the pieces unframed with the connection closing at the end.
+    /// the pieces unframed with the connection closing at the end — and false
+    /// for a stream that promised a `Content-Length`, which needs no framing
+    /// because the promise already says where the body stops.
     chunked: bool,
     /// True when answering a HEAD: the handler writes as usual and none of
     /// it goes out, so a handler need not know which verb it is answering.
     drop: bool,
+    /// What the head promised, when it promised anything (ADR 0128).
+    promised: ?u64 = null,
+    /// How much of that promise has been written. Counted rather than
+    /// inferred, because the buffer means the writer and the wire are never
+    /// at the same place.
+    written: u64 = 0,
 };
 
 /// A response being written in pieces.
@@ -69,6 +102,16 @@ pub const Stream = struct {
     _stopping: ?*const std.atomic.Value(bool),
     /// The `Ctx`'s record of this stream, set to null by `finish`.
     _open: *?Open,
+    /// The `Ctx`'s "this connection cannot carry another request" flag, or
+    /// null when nothing owns one — a test driving a Stream against a buffer.
+    /// Set when a promised length is not met, which is the one failure here
+    /// that cannot be taken back (ADR 0128).
+    _force_close: ?*bool = null,
+    /// The request's blocking detector, or null when there is no request
+    /// behind this — a Stream a test built against a buffer. A stretch of
+    /// handler time ends at every write, which is what lets a stream be
+    /// watched rather than excused (ADR 0132).
+    _watch: ?*watchdog.Watch = null,
 
     /// Write `bytes` into the stream. Nothing leaves until the buffer fills
     /// or something flushes.
@@ -115,12 +158,36 @@ pub const Stream = struct {
 
     /// End the body. Required, and safe to call twice.
     pub fn finish(self: *Stream) !void {
-        const open = self._open.* orelse return;
+        if (self._open.* == null) return;
         // Flushed before the record is cleared, not after: `drain` reads it
         // to know how to frame what it is writing, and a null one means the
-        // body has already ended.
+        // body has already ended. Re-read afterwards, because the flush is
+        // what moves `written`.
         try self.writer.flush();
+        const open = self._open.*.?;
         self._open.* = null;
+
+        // A promise that was not met. The head has gone out saying how many
+        // bytes are coming, so there is no correcting it: what is left is to
+        // stop the client waiting for the rest, and to stop the next response
+        // on this connection being read as the tail of this one. A HEAD is not
+        // this case — nothing was going to be written (ADR 0128).
+        if (open.promised) |promised| {
+            if (!open.drop and open.written < promised) {
+                // A warning rather than an error, because in this project
+                // `std.log.err` means the server is refusing to start — every
+                // other one is a `listen()` that returns rather than binds.
+                // A handler that mis-counted its own body is one request going
+                // wrong, which is what `warn` is for here and in `App`.
+                std.log.warn(
+                    "nilo: a stream promised {d} bytes and wrote {d} — the response is short, " ++
+                        "so the connection is being closed rather than left half-answered",
+                    .{ promised, open.written },
+                );
+                if (self._force_close) |flag| flag.* = true;
+            }
+        }
+
         if (open.chunked and !open.drop) try http1.writeLastChunk(self._out);
         try self._out.flush();
 
@@ -141,6 +208,13 @@ pub const Stream = struct {
     /// one repeated `splat` times.
     fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
         const self: *Stream = @alignCast(@fieldParentPtr("writer", w));
+
+        // Putting a piece on the wire is nilo waiting on the client, not the
+        // handler running — and saying so is what lets a stream be watched at
+        // all rather than excused (ADR 0132). A client too slow to take what
+        // is being sent parks this fiber for as long as it takes.
+        const token = watchdog.waiting(self._watch);
+        defer watchdog.waited(self._watch, token);
 
         const buffered = w.buffered();
         const pattern = data[data.len - 1];
@@ -174,6 +248,26 @@ pub const Stream = struct {
             return from_data;
         }
 
+        // Past what the head promised. These bytes cannot go out: a client
+        // reading a `Content-Length` stops there, so everything after it is
+        // read as the beginning of the next response — which is a
+        // response-splitting bug rather than a lost tail. Refused for the
+        // reason a WebSocket frame that lies about its length is refused
+        // (ADR 0097, ADR 0128), and loudly, because a silent one would leave
+        // somebody looking for the missing end of a file. Loudly means
+        // `warn`: `err` is reserved for a server that will not start.
+        if (open.promised) |promised| {
+            if (open.written + total > promised) {
+                std.log.warn(
+                    "nilo: a stream promised {d} bytes and tried to write {d} — refused, " ++
+                        "because the bytes past the promise would be read as the next response",
+                    .{ promised, open.written + total },
+                );
+                return error.WriteFailed;
+            }
+            self._open.*.?.written = open.written + total;
+        }
+
         if (open.chunked) http1.writeChunkHeader(self._out, total) catch return error.WriteFailed;
         if (buffered.len > 0) self._out.writeAll(buffered) catch return error.WriteFailed;
         for (data[0 .. data.len - 1]) |slice| self._out.writeAll(slice) catch return error.WriteFailed;
@@ -197,6 +291,20 @@ pub const Stream = struct {
             ._stopping = stopping,
             ._open = open,
         };
+    }
+
+    /// The same, for a caller that owns the connection's "close after this"
+    /// flag — which is `Ctx` and nobody else.
+    pub fn initClosing(
+        buffer: []u8,
+        out: *std.Io.Writer,
+        stopping: ?*const std.atomic.Value(bool),
+        open: *?Open,
+        force_close: *bool,
+    ) Stream {
+        var self = init(buffer, out, stopping, open);
+        self._force_close = force_close;
+        return self;
     }
 };
 
@@ -334,6 +442,13 @@ const Wire = struct {
     fn stream(self: *Wire, chunked: bool, drop: bool) Stream {
         self.open = .{ .chunked = chunked, .drop = drop };
         return .init(&self.stream_buf, &self.out, null, &self.open);
+    }
+
+    /// A stream whose head promised `length` bytes: no chunk framing, and a
+    /// close flag for the one failure that cannot be taken back.
+    fn promising(self: *Wire, length: u64, closing: *bool) Stream {
+        self.open = .{ .chunked = false, .drop = false, .promised = length };
+        return .initClosing(&self.stream_buf, &self.out, null, &self.open, closing);
     }
 
     fn written(self: *const Wire) []const u8 {
@@ -519,6 +634,91 @@ test "an event's json data is one line, and comments and retry go out as themsel
             ": keeping the proxy awake\n\n",
         wire.written(),
     );
+}
+
+test "a stream that promised a length writes its bytes unframed" {
+    var wire: Wire = .{};
+    wire.init();
+    var closing = false;
+    var body = wire.promising(11, &closing);
+
+    try body.writeAll("hello ");
+    try body.flush();
+    try body.writeAll("world");
+    try body.finish();
+
+    // No chunk headers and no terminator: the `Content-Length` in the head is
+    // what says where this stops (ADR 0128).
+    try testing.expectEqualStrings("hello world", wire.written());
+    try testing.expect(!closing);
+}
+
+test "a stream refuses to write past the length it promised" {
+    var wire: Wire = .{};
+    wire.init();
+    var closing = false;
+    var body = wire.promising(5, &closing);
+
+    try body.writeAll("hello");
+    try body.flush();
+
+    // Provoked on purpose, and a logged line is a failed test whatever the
+    // level (see `test_root.zig`), so it is turned down around the call.
+    const noisy = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = noisy;
+
+    // One byte more than the head promised. A client reading a
+    // `Content-Length` stops at five, so this byte would be read as the first
+    // byte of the next response — which is the failure ADR 0097 refuses one
+    // layer down, and this refuses here.
+    //
+    // **The refusal arrives at the write that would have sent it**, not at the
+    // call that buffered it: the counting is in `drain`, which is where every
+    // byte actually passes. A `finish()` always flushes, so a handler cannot
+    // reach the end of its response without being told.
+    try body.writeAll("!");
+    try testing.expectError(error.WriteFailed, body.flush());
+
+    try testing.expectEqualStrings("hello", wire.written());
+}
+
+test "a stream that promised more than it wrote closes the connection" {
+    var wire: Wire = .{};
+    wire.init();
+    var closing = false;
+    var body = wire.promising(10, &closing);
+
+    // Provoked on purpose, and a logged line is a failed test whatever the
+    // level (see `test_root.zig`), so it is turned down around the call.
+    const noisy = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = noisy;
+
+    try body.writeAll("short");
+    try body.finish();
+
+    // The head has gone out promising ten. There is no correcting that, so
+    // what is left is to stop the client waiting for five bytes that are not
+    // coming — and to stop the next response being read as those five bytes.
+    try testing.expect(closing);
+    try testing.expectEqualStrings("short", wire.written());
+}
+
+test "a HEAD that promised a length writes nothing and closes nothing" {
+    var wire: Wire = .{};
+    wire.init();
+    var closing = false;
+    wire.open = .{ .chunked = false, .drop = true, .promised = 100 };
+    var body: Stream = .initClosing(&wire.stream_buf, &wire.out, null, &wire.open, &closing);
+
+    // The head said a hundred bytes, because that is what a GET would have
+    // said. Nothing follows it, and nothing about that is short.
+    try body.print("{s}", .{"ignored"});
+    try body.finish();
+
+    try testing.expectEqualStrings("", wire.written());
+    try testing.expect(!closing);
 }
 
 test "live follows the server's stopping flag" {

@@ -285,6 +285,41 @@ fn ask(gpa: std.mem.Allocator, port: u16, request: []const u8) !Answer {
     } else return error.ServerNeverCameUp;
     defer stream.close(io);
 
+    return converse(gpa, io, stream, request);
+}
+
+/// The same request over a unix socket. `std.Io.net.UnixAddress` is std's own
+/// — no zio anywhere on this side, which is what makes the answer evidence
+/// that an ordinary client reaches the server rather than that two halves of
+/// the same library agree.
+/// The caller waits for the server first — `waitForServer` — because
+/// `std.Io.net.UnixAddress.ConnectError` does not list `ConnectionRefused`,
+/// so a connect that arrives before the server has bound comes back as
+/// `error.Unexpected` with a stack trace on stderr, which is the shape of a
+/// failing suite (`CLAUDE.md`).
+fn askOverPath(gpa: std.mem.Allocator, path: []const u8, request: []const u8) !Answer {
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const address = try std.Io.net.UnixAddress.init(path);
+    var stream: std.Io.net.Stream = for (0..300) |_| {
+        break address.connect(io) catch {
+            std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
+            continue;
+        };
+    } else return error.ServerNeverCameUp;
+    defer stream.close(io);
+
+    return converse(gpa, io, stream, request);
+}
+
+fn converse(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    stream: std.Io.net.Stream,
+    request: []const u8,
+) !Answer {
     var out_buf: [512]u8 = undefined;
     var writer = stream.writer(io, &out_buf);
     try writer.interface.writeAll(request);
@@ -379,6 +414,191 @@ test "a spilled file's bytes reach a real socket, by the route only a real socke
 
     try testing.expect(std.mem.startsWith(u8, part.head, "HTTP/1.1 206 "));
     try testing.expectEqualStrings(Spilled.contents[10..20], part.body);
+}
+
+/// The server under test on a path rather than a port.
+const ServingOnPath = struct {
+    app: *nilo.App,
+    path: []const u8,
+    trusted: []const []const u8 = &.{},
+    bound: std.atomic.Value(bool) = .init(true),
+    /// Set by a fiber the server owns, so it cannot be set before there is a
+    /// server. See `waitForServer`.
+    up: std.atomic.Value(bool) = .init(false),
+
+    fn sayUp(flag: *std.atomic.Value(bool)) void {
+        flag.store(true, .release);
+    }
+
+    fn run(self: *ServingOnPath) void {
+        var buf: [std.Io.net.UnixAddress.max_len + 8]u8 = undefined;
+        const address = std.fmt.bufPrint(&buf, "unix:{s}", .{self.path}) catch {
+            self.bound.store(false, .release);
+            return;
+        };
+        self.app.spawn(sayUp, .{&self.up}) catch {
+            self.bound.store(false, .release);
+            return;
+        };
+        self.app.tryListen(.{
+            .address = address,
+            .threads = 1,
+            .stop_on_signal = false,
+            .trusted_proxies = self.trusted,
+        }) catch {
+            self.bound.store(false, .release);
+        };
+    }
+};
+
+fn whoIsAsking(c: *nilo.Ctx) anyerror!void {
+    try c.sendText(200, try std.fmt.allocPrint(c._arena, "{f}", .{c.clientIp()}));
+}
+
+/// A temporary directory with room for a socket in it, named short enough
+/// that the whole path fits in the 108 bytes the operating system allows.
+const SocketDir = struct {
+    tmp: std.testing.TmpDir,
+    path: []u8,
+
+    fn init(gpa: std.mem.Allocator, name: []const u8) !SocketDir {
+        var tmp = std.testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        return .{
+            .tmp = tmp,
+            .path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, name }),
+        };
+    }
+
+    fn deinit(self: *SocketDir, gpa: std.mem.Allocator) void {
+        gpa.free(self.path);
+        self.tmp.cleanup();
+    }
+};
+
+/// Wait until the server is listening, or give up.
+///
+/// Asked of the server rather than of the filesystem, because the filesystem
+/// cannot answer it: on a path that already held a **stale** socket the file
+/// is there before the server is, and the inode of the replacement is
+/// routinely the one just freed. `ServingOnPath` registers a fiber that only
+/// runs once the loop is up and the socket is bound
+/// ([ADR 0029](../docs/adr/0029-a-spawned-fiber-belongs-to-the-server.md)),
+/// which is the same fact stated somewhere that can be read.
+///
+/// Bounded, because a server that never binds has to fail here rather than
+/// leave the suite waiting (`CLAUDE.md`).
+fn waitForServer(gpa: std.mem.Allocator, serving: *const ServingOnPath) !void {
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    for (0..300) |_| {
+        if (serving.up.load(.acquire)) return;
+        if (!serving.bound.load(.acquire)) return error.ServerNeverCameUp;
+        std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
+    }
+    return error.ServerNeverCameUp;
+}
+
+fn stillThere(gpa: std.mem.Allocator, path: []const u8) bool {
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    _ = std.Io.Dir.cwd().statFile(threaded.io(), path, .{}) catch return false;
+    return true;
+}
+
+test "a server on a path answers over it, reads the proxy's header, and gives the path back" {
+    hush();
+    const gpa = std.heap.smp_allocator;
+
+    var where = try SocketDir.init(gpa, "nilo.sock");
+    defer where.deinit(gpa);
+
+    var app = nilo.App.init(gpa);
+    defer app.deinit();
+    try app.get("/who", whoIsAsking);
+
+    var serving: ServingOnPath = .{
+        .app = &app,
+        .path = where.path,
+        // The deployment this feature is for: nginx in front, reaching the
+        // server over the socket. There is no connection address for a rule
+        // to name, and the connection is trusted by having arrived at all
+        // (ADR 0130).
+        .trusted = &.{"private"},
+    };
+    const thread = try std.Thread.spawn(.{}, ServingOnPath.run, .{&serving});
+    // Stopped by hand at the end of the test rather than only here, because
+    // what is being asserted is what the stop leaves behind. The flag keeps
+    // the two from joining the same thread twice.
+    var stopped = false;
+    defer if (!stopped) {
+        if (serving.bound.load(.acquire)) app.shutdown();
+        thread.join();
+    };
+    try waitForServer(gpa, &serving);
+
+    const forwarded = try askOverPath(gpa, where.path,
+        "GET /who HTTP/1.1\r\nHost: nilo\r\nX-Forwarded-For: 203.0.113.9\r\n" ++
+            "Connection: close\r\n\r\n");
+    defer forwarded.deinit(gpa);
+    try testing.expect(std.mem.startsWith(u8, forwarded.head, "HTTP/1.1 200 "));
+    try testing.expectEqualStrings("203.0.113.9", forwarded.body);
+
+    // Nothing forwarded, so there is nobody to name: a unix connection has no
+    // address of its own to fall back to.
+    const bare = try askOverPath(gpa, where.path,
+        "GET /who HTTP/1.1\r\nHost: nilo\r\nConnection: close\r\n\r\n");
+    defer bare.deinit(gpa);
+    try testing.expect(std.mem.startsWith(u8, bare.head, "HTTP/1.1 200 "));
+    try testing.expectEqualStrings("", bare.body);
+
+    // A socket file is a file, and closing the descriptor leaves it there. A
+    // server that did not take its own path away would refuse to start next
+    // time on the socket it made itself.
+    app.shutdown();
+    thread.join();
+    stopped = true;
+    try testing.expect(!stillThere(gpa, where.path));
+}
+
+test "a socket left behind by a server that is gone does not stop the next one" {
+    hush();
+    const gpa = std.heap.smp_allocator;
+
+    var where = try SocketDir.init(gpa, "stale.sock");
+    defer where.deinit(gpa);
+
+    // A socket file with nobody behind it, which is what a killed process
+    // leaves. Closing the descriptor does not remove the path — that is the
+    // whole of the problem, and during development it is every restart.
+    {
+        var threaded: std.Io.Threaded = .init(gpa, .{});
+        defer threaded.deinit();
+        const io = threaded.io();
+        const addr = try std.Io.net.UnixAddress.init(where.path);
+        var dead = try addr.listen(io, .{});
+        dead.socket.close(io);
+    }
+    try testing.expect(stillThere(gpa, where.path));
+
+    var app = nilo.App.init(gpa);
+    defer app.deinit();
+    try app.get("/who", whoIsAsking);
+
+    var serving: ServingOnPath = .{ .app = &app, .path = where.path };
+    const thread = try std.Thread.spawn(.{}, ServingOnPath.run, .{&serving});
+    defer {
+        if (serving.bound.load(.acquire)) app.shutdown();
+        thread.join();
+    }
+
+    try waitForServer(gpa, &serving);
+    const answer = try askOverPath(gpa, where.path,
+        "GET /who HTTP/1.1\r\nHost: nilo\r\nConnection: close\r\n\r\n");
+    defer answer.deinit(gpa);
+    try testing.expect(std.mem.startsWith(u8, answer.head, "HTTP/1.1 200 "));
 }
 
 test "spawning with no server says so, and the App is what remembers instead" {

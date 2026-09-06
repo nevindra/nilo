@@ -1824,3 +1824,78 @@ itself — every page that *contains* a marked block — so that a mark cannot b
 written anywhere the step will not read. Until then the list is a rule that
 looks like a build step and is not one, which is the thing this repository
 already says it will not keep.
+
+
+## Two conventions that only a test runner enforces
+
+Zig's test runner fails a run when `std.log.err` is called during it, whatever
+`std.testing.log_level` says — the level decides whether the line is *printed*,
+and the counter increments either way. Nothing in this repository knew that,
+because nothing had ever logged at that level from a path a test takes.
+
+That turned out to be a convention rather than luck: **every `std.log.err` in
+nilo means the server is refusing to start.** Twenty-three call sites, all of
+them a `listen()` that returns instead of binding, and everything on the request
+path — including a handler that failed — is `warn`. Three new lines broke it in
+one evening, and the compiler had nothing to say about any of them.
+
+The fix for the two on the request path was to match the convention. The third
+was a genuine startup refusal, and it moved the *message* into `listen()` and
+left the parse returning a plain error — which is what the three older startup
+refusals do, and is why none of them had ever been unit-tested. The test got
+better rather than worse: it now also checks that the sentence names the rule
+that was wrong instead of the one before it.
+
+**The general shape is worth keeping.** A rule the codebase follows perfectly
+and states nowhere is a rule the next change breaks, and it breaks quietly if
+the thing that catches it is a test runner's exit code inside a build step that
+prints `failed command:` lines on a good day
+([`CLAUDE.md`](../CLAUDE.md)).
+
+## A stack trace on the ordinary restart path
+
+A unix socket left behind by a killed process is cleared by connecting to it:
+a live server accepts, a stale path refuses. The probe went through `std`, and
+`std.Io.net.UnixAddress.ConnectError` does not list `ConnectionRefused` — so
+std answers the refusal *the probe is looking for* with `error.Unexpected`,
+`unexpected errno: 111`, and a stack trace on stderr, in every Debug build.
+
+`catch {}` does not help: the trace is printed before the error is returned.
+zio maps the same errno properly, so the probe uses zio and the `stat` beside
+it still uses std.
+
+The same shape then appeared in the test client, where a connect racing a
+server that had not bound yet produced the same trace and the same "this suite
+is failing" appearance. Waiting on the filesystem was not enough — on a path
+that already held a stale socket the file is there before the server is, and
+the inode of the replacement is routinely the one just freed. What answers it
+is asking the *server*: a fiber registered with `app.spawn` cannot run until
+the loop is up and the socket is bound
+([ADR 0029](./adr/0029-a-spawned-fiber-belongs-to-the-server.md)).
+
+**`error.Unexpected` from `std` is not a quiet error**, and a path that expects
+one should be read as a path that prints a stack trace.
+
+## The exemption that was forced by the metric, not by the feature
+
+`watchdog.zig` excused a stream, a body reader and a WebSocket from the blocking
+detector, and its header called that "a stated gap, not an oversight". The
+roadmap wanted a message-scoped watch and was waiting on a design for where one
+would start and stop.
+
+Neither was the real question. The exemption was forced by the *metric*:
+elapsed-minus-parked, summed over a request, has no upper bound on a connection
+that stays open, so a WebSocket answering a thousand messages a second
+accumulates seconds of perfectly correct handler time. Change the metric to the
+longest stretch between two parks and the exemption evaporates — one stretch
+means the same thing on a request that lasts a millisecond and on a connection
+that lasts a day ([ADR 0132](./adr/0132-what-is-watched-is-one-unparked-stretch.md)).
+
+What it needed was three waits saying so, and each of the three was the reason
+its handler had been excused in the first place. The machinery was already
+there; `waiting`/`waited` were doing the wrong arithmetic with it.
+
+**A gap that has been waiting on a design for a while is worth re-reading as a
+question about the measurement rather than about the feature.** This one had
+been stated three times, in three files, always as "what should a per-message
+watch bracket".

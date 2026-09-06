@@ -58,7 +58,8 @@ try app.listen(.{
     .max_connections = 10_000,    // held at once; 0 = no limit
 
     .max_body = 1024 * 1024,      // the most `c.body()` reads into the arena
-    .trusted_hops = 0,            // how many proxies stand in front
+    .trusted_proxies = &.{},      // which machines may say who they forward for
+    .trusted_hops = 0,            // or, older: how many stand in front
 });
 ```
 
@@ -204,11 +205,36 @@ so a server that believed it without being told to would let every client claim
 any address it liked. The things that read a client address — rate limits, audit
 logs, blocklists — are precisely the things worth lying to.
 
-`trusted_hops` is how many proxies you actually run:
+**`trusted_proxies` is the one to use**: name the networks your proxies are on
+and the count stops mattering.
+
+```zig
+try app.listen(.{ .trusted_proxies = &.{"private"} });
+```
+
+Each entry is a CIDR (`10.0.0.0/8`, `fd00::/8`), a bare address meaning that
+host alone, or one of two names — `"private"` for the RFC 1918 ranges plus
+carrier-grade NAT, link-local, unique-local v6 and the loopback, and
+`"loopback"` for the loopback alone. The header is not read at all unless the
+connection came from one of them; entries written by one of them are skipped
+from the right; the first one left is the client. A rule that is not an address
+stops the server at `listen()` with a sentence naming it
+([ADR 0129](../adr/0129-a-proxy-is-trusted-by-which-one-it-is.md)).
+
+The reason to prefer it over a count is that **a wrong count says nothing**.
+Add a CDN in front of the load balancer and the number is one short from that
+afternoon on — and the server goes on answering, with the load balancer's
+address, or with whatever the client wrote in the header. Nothing logs and no
+test turns red.
+
+`trusted_hops` is the older shape and still works. It is how many proxies you
+actually run:
 
 ```zig
 try app.listen(.{ .trusted_hops = 1 });   // one Caddy, nginx or ALB in front
 ```
+
+When both are set, the description wins.
 
 Set it to the number of proxies, **not** to the number of entries you have seen
 in a header. Each proxy appends the address it heard from, so the entries are
@@ -225,7 +251,7 @@ configured, so `clientIp()` falls back to `peer()` rather than reading the
 closest thing to hand, which would be the forgery.
 
 **`allowance.with` is the first thing in nilo that acts on this**, so getting
-`trusted_hops` wrong stops being an inconvenience and becomes an outage: leave
+this wrong stops being an inconvenience and becomes an outage: leave
 it at zero behind a proxy and every request looks like it came from the proxy,
 one address spends the whole allowance, and everybody else gets a 429. nilo says
 so in the log the first time it refuses a request that carried an
@@ -338,7 +364,7 @@ per-connection memory figure this project publishes.
 
 On Fly.io, Railway, Render, Cloud Run, a Kubernetes ingress, an ALB or
 Cloudflare this changes nothing — every one of them terminates TLS before the
-request arrives. Set `trusted_hops` to 1 and carry on.
+request arrives. Set `.trusted_proxies = &.{"private"}` and carry on.
 
 On a bare VPS, the whole of it is a Caddyfile:
 
@@ -371,8 +397,17 @@ server {
 ```
 
 Either way, bind nilo to `127.0.0.1` so nothing reaches it except through the
-proxy, and say `.trusted_hops = 1` so `clientIp()` reads the address the proxy
-saw.
+proxy, and say `.trusted_proxies = &.{"loopback"}` so `clientIp()` reads the
+address the proxy saw.
+
+**Or take the port away entirely.** `.address = "unix:/run/nilo.sock"` listens
+on a path instead, and then the answer to "who may connect" is the answer to
+"who may write to that directory" — `proxy_pass http://unix:/run/nilo.sock;` in
+nginx, `reverse_proxy unix//run/nilo.sock` in Caddy. `port` is not read. A
+request that arrives that way has no client address of its own, so
+`.trusted_proxies` is what `clientIp()` reads, and it is allowed to because
+nothing remote can open a unix socket
+([ADR 0130](../adr/0130-a-path-is-an-address-to-listen-on.md)).
 
 Two things go with this decision and are worth knowing before you need them:
 **HTTP/2 is not available** — browsers only speak it over TLS, negotiated during

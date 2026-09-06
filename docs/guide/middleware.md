@@ -75,6 +75,34 @@ Registering the open routes before the `use` call does **not** work and it looks
 like it should: chains are resolved in `listen()`, so mount order carries no
 meaning at all (ADR 0009).
 
+### And the one route that wants more
+
+The other direction, for an endpoint that wants a guard its neighbours do not:
+
+```zig
+try app.with(adminOnly).delete("/users/:id", removeUser);
+```
+
+`with` hands back a group exactly as `without` does, so there is no second way
+to register a route and nothing new to learn. A carried middleware runs
+**innermost** — the group's session check has to have run by the time the
+route's own check of what that session may do runs.
+
+The two compose, because they are the same vocabulary:
+
+```zig
+const v1 = app.group("/v1");
+try v1.use(requireOperator);
+try v1.without(requireOperator).with(rateLimitSignups).post("/sign-up", signUp);
+```
+
+Both match on the joined pattern **and the method**, so renaming the route moves
+its middleware with it, `/v1/orders` does not cover `/v1/orders/:id`, and a
+guard on `DELETE /users/:id` does not cover the `GET` beside it. That last part
+is the difference between this and `useOn`, where the prefix is a string
+somebody has to keep in step
+([ADR 0126](../adr/0126-a-route-can-say-what-covers-it.md)).
+
 ## The ones that come with it
 
 ```zig
@@ -172,14 +200,21 @@ allowance applied in two places — and is wrong the moment the two are meant to
 be counted apart. Different numbers already make them different; give one a name
 when the numbers happen to match.
 
-### Behind a proxy, set `trusted_hops`
+### Behind a proxy, say which machines are in front
 
 This counts against `c.clientIp()`, which is the socket's address unless you
-have told nilo how many proxies stand in front:
+have told nilo what stands in front:
 
 ```zig
-try app.listen(.{ .trusted_hops = 1 });
+try app.listen(.{ .trusted_proxies = &.{"private"} });
 ```
+
+An entry is a CIDR, a bare address, or one of two names — `"private"` for the
+RFC 1918 ranges plus the loopback and their v6 equivalents, `"loopback"` for the
+loopback alone. `trusted_hops = 1` still works and is the older shape; the
+description wins when both are set, because a count goes wrong the day somebody
+puts a CDN in front and nothing says so
+([ADR 0129](../adr/0129-a-proxy-is-trusted-by-which-one-it-is.md)).
 
 Leave it at zero behind a proxy and every request looks like it came from the
 proxy — one address, one slot, and the first busy second locks out everybody.
@@ -194,6 +229,24 @@ binary's `.bss`, 131,072 bytes at the default `.slots = 16 * 1024`. Nothing is
 allocated at startup either, and a program that never calls `with` links none of
 it. `.slots` is the number of addresses remembered at once, at eight bytes each,
 and it is a power of two.
+
+**`allowance.keyed` counts against something you know instead** — the account
+that signed in, the API key, the tenant. Ten accounts behind one office NAT
+share an address-keyed allowance they should not, and one account on ten
+machines gets ten:
+
+```zig
+try app.useOn("/api", nilo.allowance.keyed(account, .{
+    .per_window = 1000,
+    .on_null = .reject,
+}));
+```
+
+`account` is any `fn (*nilo.Ctx) ?nilo.Str`, and its bytes are not kept — what
+goes in the table is a tag computed from them. `.on_null` has no default and
+that is deliberate: on a sign-in route a silent "not counted" leaves every
+*failed* sign-in uncounted, which is the attack the route exists to stop
+([ADR 0131](../adr/0131-a-key-the-application-knows-is-a-word-of-its-own.md)).
 
 Two things it does on purpose, both the same trade
 ([ADR 0114](../adr/0114-an-allowance-is-a-table-sized-while-compiling.md)). A

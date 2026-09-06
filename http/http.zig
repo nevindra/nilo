@@ -12,6 +12,19 @@ pub const Group = @import("app.zig").Group;
 /// rather than as `anytype` has to be able to write it down.
 pub const GroupOf = @import("app.zig").GroupOf;
 
+/// A group, the middlewares its routes are excused from, and the ones they
+/// carry of their own — what `with` hands back (ADR 0126). `GroupOf` is this
+/// with nothing carried.
+pub const GroupWith = @import("app.zig").GroupWith;
+
+/// One route, as `app.routes()` reports it (ADR 0127).
+pub const Registered = @import("app.zig").Registered;
+pub const Routes = @import("app.zig").Routes;
+
+/// Building a URL out of a route pattern, checked while compiling. `Ctx.url`
+/// is the same call with the request arena behind it (ADR 0127).
+pub const url = @import("url.zig");
+
 pub const Ctx = @import("ctx.zig").Ctx;
 pub const Str = @import("nilo_core").Str;
 
@@ -476,6 +489,14 @@ pub const metrics = @import("metrics.zig");
 /// ([ADR 0114](../docs/adr/0114-an-allowance-is-a-table-sized-while-compiling.md)).
 pub const allowance = @import("allowance.zig");
 
+/// How long a route gets: `app.with(nilo.deadline(2000)).get("/report", …)`.
+///
+/// Every wait nilo owns — the body, the write, a stream's pieces, a
+/// WebSocket's silence — is cut down to it, and a handler doing its own work
+/// asks `c.overdue()`. A running handler is not interrupted, and deliberately
+/// is not ([ADR 0133](../docs/adr/0133-a-route-can-say-how-long-it-has.md)).
+pub const deadline = @import("deadline.zig").with;
+
 /// Static files, held in memory (ADR 0010). Used through `app.static()`;
 /// the module itself is here for its `Options`.
 /// What an `Accept` header says about one media type: `.named`, `.anything`,
@@ -487,6 +508,10 @@ pub const allowance = @import("allowance.zig");
 pub const accept = @import("accept.zig");
 
 pub const static = @import("static.zig");
+
+/// Which addresses in front of this server may say who the client is —
+/// what `listen(.{ .trusted_proxies = … })` is parsed into (ADR 0129).
+pub const proxies = @import("proxies.zig");
 
 /// The API description, worked out from the handler signatures (ADR 0017).
 /// Switched on with `app.docs(.{ .title = "…" })`; the module is here for
@@ -676,6 +701,8 @@ test {
     _ = @import("accept.zig");
     _ = @import("static.zig");
     _ = @import("router.zig");
+    _ = @import("url.zig");
+    _ = @import("proxies.zig");
     _ = @import("fail.zig");
     _ = @import("service.zig");
     _ = @import("resolve.zig");
@@ -695,6 +722,7 @@ test {
     _ = @import("cors.zig");
     _ = @import("metrics.zig");
     _ = @import("allowance.zig");
+    _ = @import("deadline.zig");
     _ = @import("app.zig");
     // Last, and the only one here that stands a real server up. Nothing else
     // in this suite opens a socket at all (ADR 0086).

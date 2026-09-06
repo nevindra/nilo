@@ -917,27 +917,39 @@ pub fn writeResponse(
 
 // ---- writing a body whose length is not known yet ----
 
-/// The head of a streamed response. No `Content-Length`, because the point
-/// is that nobody knows it yet; instead one of the two ways HTTP has of
-/// saying where a body stops.
+/// The head of a streamed response: one of the three ways HTTP has of saying
+/// where a body stops.
 ///
-/// `chunked` is for an HTTP/1.1 client: each piece is framed with its own
-/// length and a zero-length one ends the body, so the connection survives to
-/// carry another request. HTTP/1.0 has no such framing, and the only thing
-/// left to mark the end of the body with is the end of the connection — so
-/// there `chunked` is false, `keep_alive` must be false with it, and the
-/// pieces go out unframed (ADR 0020).
+/// `length` is the one a handler can only use when it already knows — bytes
+/// being moved out of something that counted them first. It is a
+/// `Content-Length` like any other response, which is what lets a browser draw
+/// a progress bar and a client ask for a `Range`
+/// ([ADR 0128](../../docs/adr/0128-a-stream-that-knows-its-length-says-so.md)).
+///
+/// `chunked` is the ordinary case for an HTTP/1.1 client whose handler does
+/// not know: each piece is framed with its own length and a zero-length one
+/// ends the body, so the connection survives to carry another request.
+///
+/// HTTP/1.0 has neither, and the only thing left to mark the end of the body
+/// with is the end of the connection — so there both are off, `keep_alive`
+/// must be false with them, and the pieces go out unframed (ADR 0020).
 pub fn writeStreamHead(
     out: *std.Io.Writer,
     status: u16,
     phrase: []const u8,
     content_type: []const u8,
     chunked: bool,
+    length: ?u64,
     keep_alive: bool,
     extra: []const Header,
 ) !void {
+    // Never both: a head carrying a length and a chunked encoding is one a
+    // proxy is entitled to read either way, which is how a request smuggles.
+    std.debug.assert(!(chunked and length != null));
+
     try writeStatusLine(out, status, phrase);
     try out.print("Content-Type: {s}\r\n", .{content_type});
+    if (length) |n| try out.print("Content-Length: {d}\r\n", .{n});
     if (chunked) try out.writeAll("Transfer-Encoding: chunked\r\n");
     try out.print("Connection: {s}\r\n", .{if (keep_alive) "keep-alive" else "close"});
     for (extra) |h| try out.print("{s}: {s}\r\n", .{ h.name, h.value });

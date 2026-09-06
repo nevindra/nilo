@@ -106,6 +106,30 @@ pub const Options = struct {
     /// says how much it came to.
     compress: bool = true,
 
+    /// Serve every file from the disk, so editing one is visible on the next
+    /// request without restarting the server. **For development.**
+    ///
+    /// This is not a watcher and there is no fiber behind it. A file over
+    /// `max_file_bytes` was always left on the disk and opened per request
+    /// (ADR 0037), and since
+    /// [ADR 0125](../docs/adr/0125-a-file-is-described-by-the-descriptor-being-sent.md)
+    /// that path describes what it is about to send rather than what the walk
+    /// saw — so "hold nothing in memory" already *is* reload, and this option
+    /// is the name for it rather than machinery beside it. It sets the
+    /// threshold to zero. Nothing else changes.
+    ///
+    /// What it costs is what a spilled file costs, on every file: an `open`,
+    /// a `stat` and a read from the disk per request, no gzipped copy, and no
+    /// answer at all from memory. That is the trade development wants and
+    /// production never does, so it says one line at load and is off by
+    /// default.
+    ///
+    /// **What it does not do is notice a file that did not exist at startup.**
+    /// The list of names comes from the walk, and a request for a name that is
+    /// not in it is a 404 whatever is on the disk. Editing a file works;
+    /// adding one still needs a restart.
+    reload: bool = false,
+
     /// Files smaller than this are served as they are.
     ///
     /// A gzip stream carries about 20 bytes of framing, so below a few
@@ -228,10 +252,17 @@ pub const File = struct {
         /// the socket opened, so `../../etc/passwd` is still not a path
         /// that gets resolved — it is a name that is not in the list.
         path: []const u8,
-        /// What the walk's `stat` said. Handed to `sendfile.send` rather
-        /// than re-statting per request, because the ETag is made of this
-        /// number: a fresh `stat` could hand a client a length and a tag
-        /// that describe two different files.
+        /// What the walk's `stat` said, and **not** what any response
+        /// promises. A request describes the file from the descriptor it is
+        /// about to send
+        /// ([ADR 0125](../docs/adr/0125-a-file-is-described-by-the-descriptor-being-sent.md)),
+        /// because a name is all this entry really holds and the file under
+        /// that name is free to move while the server runs.
+        ///
+        /// Kept because it is what the load line reports and what the suite
+        /// holds the two ETag writers to: the tag the walk wrote and the tag
+        /// a request writes from an unchanged file have to be the same bytes,
+        /// and these are the numbers that make that checkable.
         size: u64,
         /// The other half of that ETag. Kept as the number it came from
         /// rather than only as the hex inside the tag, so that anything
@@ -560,6 +591,20 @@ pub fn load(
     var spilled_files: usize = 0;
     var skipped_dotfiles: usize = 0;
 
+    // `.reload` is the threshold set to zero and nothing else, so there is one
+    // spill rule below rather than two (see `Options.reload`). Said out loud
+    // at load, because a directory answering from the disk on every request is
+    // not what anybody wants in production and the line is how they find out.
+    const spill_over: usize = if (options.reload) 0 else options.max_file_bytes;
+    if (options.reload) {
+        std.log.warn(
+            "nilo: static directory \"{s}\" is serving every file from the disk (.reload) — " ++
+                "an open, a stat and a read per request, and no gzipped copies. " ++
+                "For development; take it out to serve from memory again.",
+            .{dir_path},
+        );
+    }
+
     var walker = try dir.walk(gpa);
     defer walker.deinit();
 
@@ -593,7 +638,7 @@ pub fn load(
             return error.StaticReadFailed;
         };
 
-        if (stat.size > options.max_file_bytes) {
+        if (stat.size > spill_over) {
             // Over the line, so what goes in the list is where to find it
             // rather than what is in it (ADR 0037). Nothing is added to
             // `held_total`: this file holds no memory to be counted.
@@ -623,7 +668,7 @@ pub fn load(
         // it at all now means the file grew between the `stat` above and
         // this read, which is a read that failed rather than a size that was
         // refused.
-        const bytes = entry.dir.readFileAlloc(io, entry.basename, gpa, .limited64(options.max_file_bytes +| 1)) catch |err| {
+        const bytes = entry.dir.readFileAlloc(io, entry.basename, gpa, .limited64(spill_over +| 1)) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
             std.log.err("nilo: static file \"{s}\" could not be read ({s})", .{ entry.path, @errorName(err) });
             return error.StaticReadFailed;
@@ -942,7 +987,30 @@ fn etagFor(gpa: std.mem.Allocator, bytes: []const u8) ![]const u8 {
 /// clock is allowed to say anything, including a negative number, and a
 /// panic while loading a directory is not the way to find that out.
 fn etagForSpilled(gpa: std.mem.Allocator, mtime_ns: i96, size: u64) ![]const u8 {
-    return std.fmt.allocPrint(gpa, "\"{x}-{x}\"", .{ @as(u96, @bitCast(mtime_ns)), size });
+    var buf: [max_spilled_etag]u8 = undefined;
+    return gpa.dupe(u8, spilledEtag(&buf, mtime_ns, size));
+}
+
+/// The longest `spilledEtag` can write: two quotes, a dash, 24 hex digits of
+/// a u96 and 16 of a u64.
+pub const max_spilled_etag = 2 + 1 + 24 + 16;
+
+/// The same tag, written into a caller's buffer instead of an allocation.
+///
+/// **The two callers are the two moments a spilled file is described**, and
+/// they have to agree to the byte or a client's `If-None-Match` stops
+/// matching a file that never changed: the directory walk writes one at load,
+/// and `serveSpilledFile` writes one per request from a fresh look at the
+/// descriptor ([ADR 0125](../docs/adr/0125-a-file-is-described-by-the-descriptor-being-sent.md)).
+/// Sharing the format string is not tidiness — it is the only reason those
+/// two are the same tag rather than two spellings of one idea.
+///
+/// The request-path caller writes into its own stack frame, so this costs no
+/// allocation on a path whose budget is one ([ADR 0018](../docs/adr/0018-the-trade-budget-has-three-axes.md)).
+pub fn spilledEtag(buf: *[max_spilled_etag]u8, mtime_ns: i96, size: u64) []const u8 {
+    // Cannot overflow: `max_spilled_etag` is what the widest pair of numbers
+    // comes to, so the only way past it is a wider integer type.
+    return std.fmt.bufPrint(buf, "\"{x}-{x}\"", .{ @as(u96, @bitCast(mtime_ns)), size }) catch unreachable;
 }
 
 /// Whether an `If-None-Match` header matches `etag`. Handles the `*`
@@ -1657,6 +1725,121 @@ test "a held file and a spilled one answer a conditional range the same way" {
         try testing.expectEqual(@as(u16, 416), past.status);
         try testing.expectEqualStrings("bytes */26", past.header("Content-Range").?);
     }
+}
+
+test "a spilled file that grew on disk goes out whole, under a tag that moved with it" {
+    // The bug this is here for: the walk recorded a size and an ETag, the
+    // request wrote both into the head, and the bytes came from a file that
+    // had moved on. What went out was a complete, correct-looking response
+    // carrying a prefix of the new file under the old file's tag — and a
+    // client holding that tag was then told 304 for content that had changed
+    // (ADR 0125).
+    const gpa = testing.allocator;
+    var tree = try TmpTree.init(gpa, &.{.{ "app.js", "0123456789" }});
+    defer tree.deinit(gpa);
+
+    var app = App.init(gpa);
+    defer app.deinit();
+    try app.tryStaticWith("/", tree.path, .{ .max_file_bytes = 4 });
+
+    var client = try nilo_testing.Client.init(gpa, .{});
+    defer client.deinit();
+
+    const before = try client.get(&app, "/app.js");
+    try testing.expectEqual(@as(u16, 200), before.status);
+    try testing.expectEqualStrings("0123456789", before.body);
+    var etag_buf: [max_spilled_etag]u8 = undefined;
+    const old_etag = etag_buf[0..before.header("ETag").?.len];
+    @memcpy(old_etag, before.header("ETag").?);
+
+    // The same name, longer contents — a rebuilt asset, which is the whole
+    // reason this file was left on the disk in the first place.
+    const grown = "0123456789abcdefghij";
+    try tree.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "app.js", .data = grown });
+
+    const after = try client.get(&app, "/app.js");
+    try testing.expectEqual(@as(u16, 200), after.status);
+    // All twenty bytes, and a `Content-Length` that says twenty. Before the
+    // fix this was the first ten, with a head promising ten.
+    try testing.expectEqualStrings(grown, after.body);
+    try testing.expectEqualStrings("20", after.header("Content-Length").?);
+
+    // And the tag moved, so a cache in front is not still holding the old
+    // bytes under a name that now means something else.
+    try testing.expect(!std.mem.eql(u8, old_etag, after.header("ETag").?));
+
+    // The other half of the same bug: the client that kept the old tag is
+    // told the file changed rather than handed a 304.
+    var request_buf: [256]u8 = undefined;
+    const conditional = try client.send(&app, try std.fmt.bufPrint(
+        &request_buf,
+        "GET /app.js HTTP/1.1\r\nHost: t\r\nIf-None-Match: {s}\r\n\r\n",
+        .{old_etag},
+    ));
+    try testing.expectEqual(@as(u16, 200), conditional.status);
+    try testing.expectEqualStrings(grown, conditional.body);
+}
+
+test "an unchanged spilled file is described the same way twice, by two different writers" {
+    // `load` writes the tag with `etagForSpilled` and a request writes it with
+    // `spilledEtag` from a fresh look at the descriptor. They are the same
+    // function underneath, and this is what says so: drift here would break
+    // every `If-None-Match` a client ever sends for a file nobody touched.
+    const gpa = testing.allocator;
+    var tree = try TmpTree.init(gpa, &.{.{ "big.bin", "0123456789" }});
+    defer tree.deinit(gpa);
+
+    var app = App.init(gpa);
+    defer app.deinit();
+    try app.tryStaticWith("/", tree.path, .{ .max_file_bytes = 4 });
+
+    // What the walk wrote down, before any request runs.
+    const at_load = app.static_sets.items[0].find("/big.bin").?.etag;
+
+    var client = try nilo_testing.Client.init(gpa, .{});
+    defer client.deinit();
+    const served = try client.get(&app, "/big.bin");
+    try testing.expectEqualStrings(at_load, served.header("ETag").?);
+}
+
+test "reload leaves every file on the disk, however small it is" {
+    // `.reload` is the spill threshold set to zero and nothing else — no
+    // watcher, no fiber, no second code path (see `Options.reload`). What it
+    // buys is that editing a file is visible on the next request, which falls
+    // out of the spilled path describing what it is about to send.
+    const gpa = testing.allocator;
+    var tree = try TmpTree.init(gpa, &.{
+        .{ "app.css", "body{}" },
+        .{ "page.html", "<p>one</p>" },
+    });
+    defer tree.deinit(gpa);
+
+    var app = App.init(gpa);
+    defer app.deinit();
+    try app.tryStaticWith("/", tree.path, .{ .reload = true });
+
+    // Nothing is held, so nothing was gzipped and nothing counts against the
+    // memory budget — a six-byte stylesheet included.
+    for (app.static_sets.items[0].files) |f| {
+        try testing.expect(f.contents == .spilled);
+    }
+
+    var client = try nilo_testing.Client.init(gpa, .{});
+    defer client.deinit();
+    const first = try client.get(&app, "/page.html");
+    try testing.expectEqualStrings("<p>one</p>", first.body);
+    // Copied out: the next request writes over the buffer this points into.
+    var etag_buf: [max_spilled_etag]u8 = undefined;
+    const before = etag_buf[0..first.header("ETag").?.len];
+    @memcpy(before, first.header("ETag").?);
+
+    // Edited under a running server, which is the whole point of the option.
+    // A different length as well as different bytes, so the tag has to move
+    // even on a filesystem whose modification times are coarse.
+    try tree.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "page.html", .data = "<p>two, longer</p>" });
+    const second = try client.get(&app, "/page.html");
+    try testing.expectEqualStrings("<p>two, longer</p>", second.body);
+    try testing.expect(!std.mem.eql(u8, before, second.header("ETag").?));
 }
 
 test "a set with no directory closes cleanly, and one with a directory gives it back" {

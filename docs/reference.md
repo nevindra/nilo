@@ -57,6 +57,7 @@ pub const panic = nilo.panic;                     // optional: name the request 
 | `app.use(mw)` | middleware, everywhere |
 | `app.useOn(prefix, mw)` | middleware, under a path prefix |
 | `app.without(mw)` | the same App with `mw` off for the routes registered through what comes back — how a sign-up route sits inside a guarded prefix ([ADR 0080](./adr/0080-a-route-can-say-it-is-not-covered.md)) |
+| `app.with(mw)` | the other direction: the same App with `mw` **on** for the routes registered through what comes back, so one endpoint can be guarded where its neighbours are not ([ADR 0126](./adr/0126-a-route-can-say-what-covers-it.md)) |
 | `app.group(prefix)` | a group — see below |
 | `app.get / post / put / delete / patch / head / options (pattern, handler)` | a route |
 | `app.route(method, pattern, handler)` | any other method |
@@ -70,6 +71,7 @@ pub const panic = nilo.panic;                     // optional: name the request 
 | `app.shutdown()` | stop, from any thread or from inside a handler |
 | `app.tryListen / tryRoute / tryStatic / tryStaticWith` | the same calls, error returned rather than reported |
 | `app.checkServices()` | `error.MissingService` if a route needs one nobody provided |
+| `app.routes()` | every route, in registration order — a view rather than a copy. `.len()`, `.at(i)` and `{f}` ([ADR 0127](./adr/0127-a-route-pattern-is-the-name-of-its-url.md)) |
 
 `pattern` and `handler` are `comptime`. Registration order never matters.
 
@@ -88,17 +90,28 @@ so a plugin taking `anytype` can ask either.
 through it, which is how the two routes that create a session sit inside a
 prefix that requires one. Its type is `nilo.GroupOf("/api", &.{mw})`.
 
+`g.with(mw)` is the other direction, for a route that wants *more* than its
+neighbours. A carried middleware runs innermost, and both `with` and `without`
+match on the joined pattern **and the method**, so a `DELETE` guard does not
+cover the `GET` beside it. They compose:
+
+```zig
+const v1 = app.group("/v1");
+try v1.use(requireOperator);
+try v1.without(requireOperator).with(rateLimitSignups).post("/sign-up", signUp);
+```
+
 ### `listen` options
 
 | | Default |
 |---|---|
-| `address` | `"127.0.0.1"` — an address, not a host name |
-| `port` | `8787` |
+| `address` | `"127.0.0.1"` — an address, not a host name. `"unix:/run/nilo.sock"` listens on a path ([ADR 0130](./adr/0130-a-path-is-an-address-to-listen-on.md)) |
+| `port` | `8787` — not read when `address` names a unix socket |
 | `threads` | `0` (one per core) |
 | `read_buffer` | `8 * 1024` — also the ceiling on a request head |
 | `write_buffer` | `4 * 1024` |
 | `arena_keep` | `16 * 1024` — of a connection's request arena, kept between requests |
-| `reuse_address` | `true` |
+| `reuse_address` | `true` — on a unix socket, removes a socket file left behind by a process that is gone |
 | `stop_on_signal` | `true` — Ctrl-C and SIGTERM |
 | `shutdown_grace_ms` | `10_000` |
 | `header_timeout_ms` | `10_000` — the whole head, from its first byte |
@@ -110,6 +123,7 @@ prefix that requires one. Its type is `nilo.GroupOf("/api", &.{mw})`.
 | `max_connections` | `10_000` — held at once, 4,669 bytes each when idle. `0` = no limit |
 | `max_body` | `1024 * 1024` — the most `c.body()` reads into the arena |
 | `trusted_hops` | `0` — how many proxies stand in front, for `c.clientIp()` |
+| `trusted_proxies` | `&.{}` — **which** ones: CIDRs, bare addresses, `"private"`, `"loopback"`. Wins over `trusted_hops` ([ADR 0129](./adr/0129-a-proxy-is-trusted-by-which-one-it-is.md)) |
 | `session_secret` | `null` — 32 bytes, for `Session(T)`. The same on every instance |
 | `block_warning_ms` | `250` — say so when a handler holds its thread. `0` = off |
 
@@ -326,7 +340,10 @@ value is not.
 | `c.bodyStream()` | `!Body` — the body in pieces |
 | `c.bodyStreamWith(.{ .max_bytes = … })` | the same, with a ceiling. Default 64 MB |
 | `c.peer()` | the address the connection came from — the proxy's, if there is one |
-| `c.clientIp()` | `Str` — the client, looking through `trusted_hops` proxies |
+| `c.clientIp()` | `Str` — the client, looking through `trusted_proxies` or `trusted_hops`. Empty on a unix socket with neither set |
+| `c.overdue()` | whether the deadline `nilo.deadline(ms)` gave this route has passed. Always false without one |
+| `c.timeLeftMs()` | `?u32` — milliseconds left, `null` without a deadline, `0` once it has gone |
+| `c.giveDeadline(ms)` | set one by hand. `nilo.deadline(ms)` is what normally calls this |
 | `c.service(*Db)` | `?*Db` |
 | `c.resolve(V)` | `!V` — a resolved value, worked out once per request |
 | `c.keepAlive()` | whether the connection will carry another request |
@@ -349,6 +366,8 @@ value is not.
 | `c.sendFile(.{ .file = f, .content_type = … })` | an open file. **Closed here**, on every way out |
 | `c.stream(status, content_type)` | `!Stream` |
 | `c.streamWith(status, content_type, .{ .buffer = … })` | the same, buffer of your own. Default 4 KB |
+| `c.streamWith(…, .{ .length = n })` | a stream whose length is already known: `Content-Length` and no chunk framing ([ADR 0128](./adr/0128-a-stream-that-knows-its-length-says-so.md)) |
+| `c.url(pattern, args)` | `!Str` — a URL for a route, every value percent-encoded and every mistake a compile error ([ADR 0127](./adr/0127-a-route-pattern-is-the-name-of-its-url.md)) |
 | `c.events()` | `!Events` |
 | `c.upgrade(loop, state)` | `!void` — the connection becomes a WebSocket and `loop` reads it. `{}` when there is no state |
 | `c.upgradeWith(loop, state, .{ .protocol = "chat.v1" })` | the same, naming a subprotocol |
@@ -387,6 +406,19 @@ handing a gzip stream to `c.json` produced a 400 about malformed JSON that was
 true of the bytes and useless to whoever sent them
 ([ADR 0111](./adr/0111-a-body-under-an-encoding-nilo-cannot-read-is-refused.md)).
 The header on a request with no body is ignored.
+
+**A stream with a `.length` is held to it.** Writing past the promise is
+refused before a byte of the overrun goes out, because a client reading a
+`Content-Length` stops there and everything after it is read as the next
+response. Finishing short cannot be refused — the head has gone — so the
+connection closes and the log names both numbers.
+
+**`c.url` is checked while compiling.** A param with no value, a value with no
+param, a value a path segment cannot carry and a `*` catch-all are all compile
+errors naming the field. Values are matched by name, so `.{ .slug = t, .id = 42 }`
+and `.{ .id = 42, .slug = t }` are the same URL. `nilo.url.into(buf, pattern, args)`
+is the same call with a buffer of your own and no allocation, for code with no
+request in flight.
 
 `sendFile` also takes `size` (null asks the file), `etag` and `cache_control`,
 and answers a `Range`, an `If-Range`, an `If-None-Match` and a `HEAD` from them.
@@ -1249,6 +1281,12 @@ nilo.cors.reading(&origins, .{ … })                     // the list read at ru
 nilo.allowance.with(.{ .per_window = 100, .window_s = 60,   // 429 past this
                         .slots = 16 * 1024,                  // addresses remembered
                         .ipv6_prefix = 64, .name = "" })
+
+nilo.allowance.keyed(account, .{ .per_window = 1000,        // …counted against
+                        .window_s = 60, .slots = 4 * 1024,   //   what `account`
+                        .on_null = .reject, .name = "" })    //   returns
+
+nilo.deadline(2000)                                         // how long a route gets
 ```
 
 `origins` is a list because `Access-Control-Allow-Origin` carries one value:
@@ -1318,6 +1356,77 @@ in the log once.
 It is not a defence against a flood — a refused request is still read, parsed,
 matched and answered. That is `max_connections`.
 
+#### `allowance.keyed` — counted against something the application knows
+
+**`with` counts against the address**, which is right for a scraper and wrong
+for everything the application knows: ten accounts behind one office NAT share
+an allowance they should not, and one account on ten machines gets ten.
+
+```zig
+fn account(c: *nilo.Ctx) ?nilo.Str {
+    const who = c.session(Account) orelse return null;
+    return who.id;
+}
+
+try app.useOn("/api", nilo.allowance.keyed(account, .{
+    .per_window = 1000,
+    .on_null = .reject,
+}));
+```
+
+The first argument is a function of one `*Ctx` returning `?[]const u8` or
+`?nilo.Str`. **Its bytes are not kept** — they live in the request arena — so
+what goes in the table is a 64-bit tag from a keyed hash, in a word of its own
+beside the counters ([ADR 0131](./adr/0131-a-key-the-application-knows-is-a-word-of-its-own.md)).
+
+| | |
+|---|---|
+| `.per_window` | how many requests, 1 to 65,535 — the whole range, unlike `with` |
+| `.window_s` | as `with` |
+| `.slots` | how many keys are remembered at once. A power of two, ≥ 64. **Sixteen** bytes each; 4,096 by default |
+| `.on_null` | **required.** `.skip` — not counted, and through. `.reject` — a 403 |
+| `.name` | as `with` |
+
+**`on_null` has no default on purpose.** `keyed(signedInAccount, …)` on a
+sign-in route with a silent skip leaves every *failed* sign-in uncounted, which
+is the attack the route exists to stop. The right shape for that route is the
+*claimed* username with `.on_null = .reject`, composed with an address-keyed
+`allowance.with` underneath it — which is `use` twice.
+
+`.reject` answers 403 rather than 429: nothing was rated and nothing exceeded,
+and a `Retry-After` on it would be a lie.
+
+### `nilo.deadline`
+
+**How long a route gets**, as a middleware:
+
+```zig
+try app.with(nilo.deadline(2000)).get("/report", buildReport);
+```
+
+`listen()`'s four deadlines bound one wait for the network each and none of them
+bounds the request. This clamps every wait nilo owns — the body, the write, a
+stream's pieces, a WebSocket's silence — to whichever comes first.
+
+**A running handler is not interrupted**, and deliberately is not: a cancel
+firing mid-handler is a cancel every handler, every `nilo.Mutex` and every
+Service has to survive
+([ADR 0104](./adr/0104-a-cleanup-path-is-not-cancellable.md)). A loop doing its
+own work asks `c.overdue()`:
+
+```zig
+while (try rows.next()) |row| {
+    if (c.overdue()) return nilo.fail.status(503, "too many rows to do in time", .{});
+    try out.json(row);
+}
+```
+
+A handler that fails while overdue with nothing sent gets a 503 naming the
+budget. One that finishes late still answers — the work is done and correct —
+and the lateness is a log line
+([ADR 0133](./adr/0133-a-route-can-say-how-long-it-has.md)). `deadline(0)` is a
+compile error.
+
 ## `nilo.accept`
 
 What the request's `Accept` header says about one media type. One call, no
@@ -1356,6 +1465,7 @@ a handler with two things to serve asks it twice.
 | `max_file_bytes` | `8 * 1024 * 1024` |
 | `max_total_bytes` | `64 * 1024 * 1024` |
 | `dotfiles` | `false` |
+| `reload` | `false` — hold nothing, open every file per request |
 
 `spa_fallback_for` decides which requests the fallback answers: `.navigations`
 is a request naming `text/html`, or one that named nothing and has no file
@@ -1368,6 +1478,17 @@ read, and each request opens it and sends it from the disk — no gzipped copy, 
 ETag made of the modification time and the size, and one file descriptor for as
 long as the response takes. `max_total_bytes` counts held bytes only. See
 [Static files](./guide/static-files.md#files-too-big-to-hold).
+
+Both the length and the ETag of a spilled file come from one look at the
+descriptor whose bytes are about to go out, so editing a file under a running
+server cannot serve a stale length under a stale tag
+([ADR 0125](./adr/0125-a-file-is-described-by-the-descriptor-being-sent.md)).
+
+**`reload = true` is `max_file_bytes = 0` with a name**: nothing is held, every
+file is opened per request, and editing one works without a restart. For
+development — it gives up the in-memory copy and the gzipped one — and a file
+that did not exist at startup still needs a restart, because the list of names
+comes from the walk.
 
 ## OpenAPI options
 

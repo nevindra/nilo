@@ -23,6 +23,14 @@ pub const Peer = struct {
     _text: [max_text]u8 = @splat(0),
     _len: u8 = 0,
     port: u16 = 0,
+    /// This connection came in over a unix socket, so it has no address at
+    /// all and nothing remote could have opened it.
+    ///
+    /// Both halves matter to `Ctx.clientIp`. There is no address to return,
+    /// and the machine on the other end is this one — which is what the
+    /// named-network rules are trying to establish about a proxy over
+    /// loopback, and can establish here without a rule at all (ADR 0130).
+    local: bool = false,
 
     /// `ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255` — the longest an IP
     /// address gets in text.
@@ -43,6 +51,12 @@ pub const Peer = struct {
         var self: Peer = .{ ._len = @intCast(text.len) };
         @memcpy(self._text[0..text.len], text);
         return self;
+    }
+
+    /// The Peer a connection over a unix socket gets: no address, and known
+    /// to be this machine.
+    pub fn overUnixSocket() Peer {
+        return .{ .local = true };
     }
 
     pub fn format(self: Peer, w: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -684,6 +698,192 @@ pub fn releaseIdleStack() void {
     std.posix.madvise(ptr, floor - start, std.posix.MADV.DONTNEED) catch {};
 }
 
+/// `"unix:"` in front of `Options.address` means the rest of it is a
+/// filesystem path to listen on rather than an IP address.
+///
+/// A prefix rather than a second field, and a prefix nothing else can be
+/// mistaken for: no IPv4 or IPv6 address starts with a letter followed by a
+/// colon, so nothing that used to work is read differently now.
+const unix_prefix = "unix:";
+
+fn unixPathIn(address: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, address, unix_prefix)) return null;
+    return address[unix_prefix.len..];
+}
+
+/// The listener for an `address`/`port` pair, or null with `why` set and the
+/// reason already said out loud.
+fn listenOnIp(options: anytype, why: *StartupFailure) ?zio.net.Server {
+    const addr = zio.net.IpAddress.parseIp(options.address, options.port) catch |err| {
+        std.log.err(
+            "\"{s}\" is not an address nilo can listen on ({s}). It wants an IP address, " ++
+                "not a host name: \"127.0.0.1\" or \"::1\" for this machine only, " ++
+                "\"0.0.0.0\" or \"::\" for every interface. A path goes in as " ++
+                "\"unix:/run/nilo.sock\".",
+            .{ options.address, @errorName(err) },
+        );
+        why.* = .bad_address;
+        return null;
+    };
+
+    return addr.listen(.{ .reuse_address = options.reuse_address }) catch |err| {
+        why.* = classifyListenFailure(@errorName(err));
+        switch (why.*) {
+            .in_use => std.log.err(
+                "port {d} is already in use — something else is listening on {s}:{d}. " ++
+                    "Stop it, or pass `.port = …` to listen() with a free one.",
+                .{ options.port, options.address, options.port },
+            ),
+            .not_permitted => std.log.err(
+                "not allowed to listen on port {d}. Ports below 1024 need root; " ++
+                    "8080 or 8787 do not.",
+                .{options.port},
+            ),
+            .unavailable => std.log.err(
+                "no interface on this machine has the address {s}, so nothing can listen " ++
+                    "on it. \"127.0.0.1\" reaches this machine only, \"0.0.0.0\" every " ++
+                    "interface.",
+                .{options.address},
+            ),
+            else => std.log.err(
+                "could not listen on {s}:{d}: {s}",
+                .{ options.address, options.port, @errorName(err) },
+            ),
+        }
+        return null;
+    };
+}
+
+/// The same for a path. `port` is not read at all — there is nowhere for a
+/// port to go on a unix socket, and pretending otherwise would put a number
+/// in the log line that means nothing.
+fn listenOnUnix(
+    gpa: std.mem.Allocator,
+    path: []const u8,
+    reuse_address: bool,
+    why: *StartupFailure,
+) ?zio.net.Server {
+    if (!zio.net.has_unix_sockets) {
+        std.log.err(
+            "this platform has no unix sockets, so \"{s}{s}\" cannot be listened on — " ++
+                "an address and a port can.",
+            .{ unix_prefix, path },
+        );
+        why.* = .bad_address;
+        return null;
+    }
+    if (path.len == 0) {
+        std.log.err(
+            "\"{s}\" has nothing after the colon. It wants a path to put the socket at: " ++
+                "\"unix:/run/nilo.sock\".",
+            .{unix_prefix},
+        );
+        why.* = .bad_address;
+        return null;
+    }
+
+    const addr = zio.net.UnixAddress.init(path) catch {
+        std.log.err(
+            "the socket path \"{s}\" is {d} bytes and the operating system takes at most {d}. " ++
+                "This is a limit on the path itself, not on the file name — a shorter " ++
+                "directory is the usual answer.",
+            .{ path, path.len, zio.net.UnixAddress.max_len },
+        );
+        why.* = .bad_address;
+        return null;
+    };
+
+    // A socket file outlives the process that made it, so a server that was
+    // killed leaves one behind and the next bind is `AddressInUse` — which
+    // during development is every restart, the same case `reuse_address` is
+    // on by default for. What is taken away is narrow on purpose: only a
+    // path that is a socket, and only when connecting to it is refused.
+    // A regular file, a directory, or a socket something is still listening
+    // on is left exactly as it is, and the bind below then fails with a
+    // sentence about it.
+    if (reuse_address) clearStaleSocket(gpa, path);
+
+    return addr.listen(.{}) catch |err| {
+        why.* = classifyListenFailure(@errorName(err));
+        switch (why.*) {
+            .in_use => std.log.err(
+                "something is already listening on \"{s}\". Stop it, or pass a different " ++
+                    "path to listen().",
+                .{path},
+            ),
+            .not_permitted => std.log.err(
+                "not allowed to create a socket at \"{s}\" — the directory it goes in has " ++
+                    "to be writable by the user this server runs as.",
+                .{path},
+            ),
+            else => std.log.err(
+                "could not listen on \"{s}\": {s}. The directory has to exist already; " ++
+                    "nilo does not create one.",
+                .{ path, @errorName(err) },
+            ),
+        }
+        return null;
+    };
+}
+
+/// Take away a socket file left behind by a process that is gone.
+///
+/// Two questions, and both have to answer yes. Is it a socket — because
+/// unlinking whatever happens to be at a path the caller wrote is how a
+/// typo deletes somebody's file. And is it dead — asked the only way it can
+/// be asked, by connecting: a live server accepts, a stale path refuses.
+fn clearStaleSocket(gpa: std.mem.Allocator, path: []const u8) void {
+    if (!isStaleSocket(gpa, path)) return;
+
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    std.Io.Dir.cwd().deleteFile(threaded.io(), path) catch |err| std.log.warn(
+        "the socket at \"{s}\" is left over from a server that is gone, and it could not be " ++
+            "removed ({s}) — listening is about to fail. Remove it by hand.",
+        .{ path, @errorName(err) },
+    );
+}
+
+/// Both halves of that question.
+///
+/// **The probe goes through zio rather than through std**, which needs a
+/// Runtime to be up — it is, `serve` makes one before it binds — and is not a
+/// nicety: `std.Io.net.UnixAddress.ConnectError` does not list
+/// `ConnectionRefused`, so std answers the refusal this is *looking for* with
+/// `error.Unexpected` and a stack trace on stderr. That would print at every
+/// ordinary restart, which is precisely the case this exists to make quiet.
+fn isStaleSocket(gpa: std.mem.Allocator, path: []const u8) bool {
+    if (!looksLikeSocket(gpa, path)) return false;
+
+    const addr = zio.net.UnixAddress.init(path) catch return false;
+    if (addr.connect(.{})) |live| {
+        // Somebody is behind it. Not ours to remove, and the bind that
+        // follows says so.
+        live.close();
+        return false;
+    } else |_| {}
+    return true;
+}
+
+/// Is there a socket at this path? No zio, so the safety half — the half that
+/// decides whether a file somebody typed the wrong path for survives — is
+/// answerable from a test with no runtime at all.
+fn looksLikeSocket(gpa: std.mem.Allocator, path: []const u8) bool {
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+
+    const info = std.Io.Dir.cwd().statFile(threaded.io(), path, .{}) catch return false;
+    return info.kind == .unix_domain_socket;
+}
+
+/// Give the path back when the server stops. Nothing else will: a unix
+/// socket is a file, and closing the descriptor leaves it there.
+fn removeSocket(gpa: std.mem.Allocator, path: []const u8) void {
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    std.Io.Dir.cwd().deleteFile(threaded.io(), path) catch {};
+}
+
 /// Run `handler(state, in, out, clocks, wake, peer)` for every accepted
 /// connection, each in its own fiber, until that connection is done. The
 /// Reader/Writer are already buffered; the handler does not need to know
@@ -728,47 +928,22 @@ pub fn serve(
     // business, in a crash log least of all).
     var why: StartupFailure = .other;
 
-    const maybe_addr: ?zio.net.IpAddress =
-        zio.net.IpAddress.parseIp(options.address, options.port) catch |err| bad: {
-            std.log.err(
-                "\"{s}\" is not an address nilo can listen on ({s}). It wants an IP address, " ++
-                    "not a host name: \"127.0.0.1\" or \"::1\" for this machine only, " ++
-                    "\"0.0.0.0\" or \"::\" for every interface.",
-                .{ options.address, @errorName(err) },
-            );
-            why = .bad_address;
-            break :bad null;
-        };
-    const addr = maybe_addr orelse return why.toError();
+    // A path rather than a port: `.address = "unix:/run/nilo.sock"`. One
+    // more spelling of the field that already says what to listen on, rather
+    // than a field beside it — two fields would leave a third state, both
+    // set, that means nothing (ADR 0130).
+    const unix_path = unixPathIn(options.address);
 
-    const maybe_server: ?zio.net.Server =
-        addr.listen(.{ .reuse_address = options.reuse_address }) catch |err| failed: {
-            why = classifyListenFailure(@errorName(err));
-            switch (why) {
-                .in_use => std.log.err(
-                    "port {d} is already in use — something else is listening on {s}:{d}. " ++
-                        "Stop it, or pass `.port = …` to listen() with a free one.",
-                    .{ options.port, options.address, options.port },
-                ),
-                .not_permitted => std.log.err(
-                    "not allowed to listen on port {d}. Ports below 1024 need root; " ++
-                        "8080 or 8787 do not.",
-                    .{options.port},
-                ),
-                .unavailable => std.log.err(
-                    "no interface on this machine has the address {s}, so nothing can listen " ++
-                        "on it. \"127.0.0.1\" reaches this machine only, \"0.0.0.0\" every " ++
-                        "interface.",
-                    .{options.address},
-                ),
-                else => std.log.err(
-                    "could not listen on {s}:{d}: {s}",
-                    .{ options.address, options.port, @errorName(err) },
-                ),
-            }
-            break :failed null;
-        };
+    const maybe_server: ?zio.net.Server = if (unix_path) |path|
+        listenOnUnix(gpa, path, options.reuse_address, &why)
+    else
+        listenOnIp(options, &why);
     const server = maybe_server orelse return why.toError();
+
+    // Registered before the close, so it runs after it: the socket file is
+    // this process's to take away, and one left behind is what makes the
+    // next start fail.
+    defer if (unix_path) |path| removeSocket(gpa, path);
     defer server.close();
 
     var group: zio.Group = .init;
@@ -827,9 +1002,19 @@ pub fn serve(
             defer capacity.give();
             defer stream.close();
 
+            // A unix socket has no address, and nothing remote could have
+            // opened it. Both of those matter below.
+            const over_ip = stream.socket.address.getType() == .ip;
+
             // One response = one flush = one segment; Nagle would only add
             // latency without saving anything, so it is turned off.
-            stream.socket.setNoDelay(true) catch {};
+            //
+            // TCP only. On a unix socket the option is `EOPNOTSUPP`, and zio
+            // answers an errno it does not recognise with a stack trace and an
+            // invitation to file a bug — which `catch {}` does not swallow,
+            // because it is printed before the error is returned. Once per
+            // connection (ADR 0130).
+            if (over_ip) stream.socket.setNoDelay(true) catch {};
 
             // Allocated rather than put on the fiber stack, so the sizes can
             // be an option instead of a constant. Twice per connection, not
@@ -865,7 +1050,10 @@ pub fn serve(
 
             // `accept` already returned who this is, so this costs no
             // syscall — only the formatting, once per connection.
-            var peer: Peer = .{ .port = portOf(stream.socket.address) };
+            var peer: Peer = .{
+                .port = portOf(stream.socket.address),
+                .local = !over_ip,
+            };
             peer._len = writePeer(&peer._text, stream.socket.address);
 
             handler(st, &reader.interface, &writer.interface, &clocks, &wake, peer);
@@ -1076,12 +1264,34 @@ pub const Dir = struct {
     }
 };
 
+/// What a file is, as of one look at its descriptor.
+///
+/// Declared here beside `Peer` rather than in the Bulkhead, for the reason
+/// `Peer` is: it never reaches a user, so nothing about it is part of what
+/// swapping the Engine would change under one.
+pub const Stat = struct {
+    size: u64,
+    /// Nanoseconds since the epoch, and signed because a clock is allowed to
+    /// say anything — including a time before 1970.
+    mtime_ns: i64,
+};
+
 /// One open file.
 pub const File = struct {
     _file: zio.File,
 
-    pub fn size(self: File) !u64 {
-        return self._file.size();
+    /// What this descriptor says the file is right now — its length and when
+    /// it last changed. One call rather than a `size` and a second question
+    /// later, because the two numbers are only worth anything together: the
+    /// caller writing a `Content-Length` is also writing the ETag beside it,
+    /// and two calls could describe two different files (ADR 0125).
+    ///
+    /// Everything the caller wants is already in the one `statx` the kernel
+    /// answers with, so asking for both costs exactly what asking for the
+    /// size alone used to.
+    pub fn stat(self: File) !Stat {
+        const info = try self._file.stat();
+        return .{ .size = info.size, .mtime_ns = info.mtime };
     }
 
     pub fn close(self: File) void {
@@ -1212,6 +1422,92 @@ test "an IPv6 address is written the way RFC 5952 says to write it" {
         "2001::1:0:0:5:6",
         ip6Text(&buf, .{ 0x2001, 0, 0, 1, 0, 0, 5, 6 }),
     );
+}
+
+test "a path is read as a path only when it says unix:" {
+    try testing.expectEqualStrings("/run/nilo.sock", unixPathIn("unix:/run/nilo.sock").?);
+    // Nothing that used to work is read differently: no IPv4 or IPv6 address
+    // starts with a letter and a colon.
+    try testing.expect(unixPathIn("127.0.0.1") == null);
+    try testing.expect(unixPathIn("::1") == null);
+    try testing.expect(unixPathIn("0.0.0.0") == null);
+    // Said, rather than guessed at: an empty path is refused by `listenOnUnix`
+    // with a sentence, not treated as an address.
+    try testing.expectEqualStrings("", unixPathIn("unix:").?);
+}
+
+test "only a socket is ever taken away" {
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const dir = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(dir);
+
+    // A regular file. This is the case that decides the shape: unlinking
+    // whatever happens to be at a path somebody typed is how a server deletes
+    // their database.
+    const file_path = try std.fmt.allocPrint(gpa, "{s}/not-a-socket", .{dir});
+    defer gpa.free(file_path);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "not-a-socket", .data = "keep me" });
+    try testing.expect(!isStaleSocket(gpa, file_path));
+
+    // A directory.
+    try testing.expect(!isStaleSocket(gpa, dir));
+
+    // Nothing at all — the ordinary first start.
+    const absent = try std.fmt.allocPrint(gpa, "{s}/never-existed", .{dir});
+    defer gpa.free(absent);
+    try testing.expect(!isStaleSocket(gpa, absent));
+
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const sock_path = try std.fmt.allocPrint(gpa, "{s}/live.sock", .{dir});
+    defer gpa.free(sock_path);
+    const addr = try std.Io.net.UnixAddress.init(sock_path);
+
+    // And a socket, which is the only thing that gets as far as the second
+    // question.
+    var live = try addr.listen(io, .{});
+    try testing.expect(looksLikeSocket(gpa, sock_path));
+    live.socket.close(io);
+    // Closing the descriptor does not remove the path. That is the whole of
+    // the problem this solves.
+    try testing.expect(looksLikeSocket(gpa, sock_path));
+
+    std.Io.Dir.cwd().deleteFile(io, sock_path) catch {};
+}
+
+test "a socket somebody is listening on is left where it is" {
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const sock_path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/busy.sock", .{tmp.sub_path});
+    defer gpa.free(sock_path);
+
+    // The second question needs the loop, because the only way to ask whether
+    // a socket is alive is to connect to it. `serve` has a Runtime up by the
+    // time it asks; this stands one up for the same reason.
+    const rt = try zio.Runtime.init(gpa, .{ .executors = .exact(1) });
+    defer rt.deinit();
+
+    const addr = try zio.net.UnixAddress.init(sock_path);
+    const live = try addr.listen(.{});
+    // Two servers pointed at one path is a mistake worth being told about,
+    // not one to resolve by taking the socket off whoever got there first.
+    try testing.expect(!isStaleSocket(gpa, sock_path));
+
+    // With nobody behind it, the same path is a leftover — every restart
+    // during development.
+    live.close();
+    try testing.expect(isStaleSocket(gpa, sock_path));
+
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    std.Io.Dir.cwd().deleteFile(threaded.io(), sock_path) catch {};
 }
 
 test "a full server refuses, and takes the next connection once one closes" {

@@ -11,26 +11,29 @@
 //! (ADR 0004): a rule the type system cannot hold, held instead by something
 //! that watches at run time and says so in words.
 //!
-//! What it measures is **elapsed time minus time the fiber spent parked**.
-//! Parked time is not guessed at — it is reported by the six things a request
-//! waits on that are not the handler's own code:
+//! What it measures is **the longest stretch the fiber ran without parking**
+//! ([ADR 0132](../docs/adr/0132-what-is-watched-is-one-unparked-stretch.md)).
+//! A stretch ends wherever the request waits on something that is not the
+//! handler's own code, and every one of those says so:
 //!
 //! - `nilo.blocking`, `nilo.sleep`, `nilo.Mutex.lock`, `randomSecure`
 //!   (`bulkhead.zig`)
 //! - reading the request body, and writing the response (`ctx.zig`, `app.zig`)
+//! - a stream's writes, a body reader's reads, and a WebSocket's park
+//!   (`stream.zig`, `body.zig`, `websocket.zig`)
 //!
-//! Whatever is left is the handler running, and a handler that ran for a
-//! quarter of a second without yielding once is either blocking or doing CPU
-//! work it should have handed to `nilo.blocking` — which is the same advice
-//! either way, so both are worth saying.
+//! Whatever is between two of those is the handler running, and a handler that
+//! ran for a quarter of a second without yielding once is either blocking or
+//! doing CPU work it should have handed to `nilo.blocking` — which is the same
+//! advice either way, so both are worth saying.
 //!
-//! ## What it does not see
-//!
-//! A request that takes the connection over — a stream, a body reader, a
-//! WebSocket — is excused entirely. Those hold their fiber for as long as they
-//! like, legitimately, and most of that time is socket I/O nothing here
-//! accounts for. A blocking call inside a WebSocket loop is real and is not
-//! reported. That is a stated gap, not an oversight.
+//! **This used to be elapsed time minus parked time, summed over the whole
+//! request, and that is why a stream, a body reader and a WebSocket had to be
+//! excused entirely.** A sum has no upper bound on a connection that is open
+//! for an hour: a WebSocket answering a thousand messages a second accumulates
+//! seconds of perfectly correct handler time and would have been reported for
+//! it. One stretch has the same meaning on a request that lasts a millisecond
+//! and on a connection that lasts a day, which is what let the exemption go.
 
 const std = @import("std");
 const bulkhead = @import("bulkhead.zig");
@@ -39,14 +42,20 @@ const bulkhead = @import("bulkhead.zig");
 /// is reachable from anywhere the request is — including from inside a
 /// blocking call, which is where half the reports come from.
 pub const Watch = struct {
-    /// When the middleware chain started, as a `monotonicNanos` reading.
-    /// Zero means nobody is watching this request, which is what turns the
-    /// whole thing off: every function below leaves immediately.
+    /// When the stretch now running began, as a `coarseNanos` reading. Zero
+    /// means the fiber is parked — or that this request is not watched at
+    /// all, which `warn_ns` is what tells apart.
     from_ns: u64 = 0,
-    /// How much of that span the fiber spent parked rather than running.
-    waited_ns: u64 = 0,
-    /// What counts as too long.
+    /// What counts as too long. Zero means nobody is watching this request,
+    /// which is what turns the whole thing off: every function below leaves
+    /// immediately.
     warn_ns: u64 = 0,
+    /// What to call the request in the report. Kept here rather than looked
+    /// up, because the report can now fire from inside `waiting`, which has
+    /// no Ctx to ask — `fail.InFlight` holds the same two, and a `Watch`
+    /// living outside one is a thing a test is allowed to build.
+    method: []const u8 = "",
+    path: []const u8 = "",
 };
 
 /// How many requests have been caught holding their thread since the process
@@ -57,63 +66,80 @@ pub const Watch = struct {
 /// asserts on, since the suite runs with warnings turned off.
 pub var caught: std.atomic.Value(u64) = .init(0);
 
-/// Start the clock. `warn_ms` of 0 turns the detector off for this request.
-pub fn begin(w: *Watch, warn_ms: u32) void {
+/// Start the first stretch. `warn_ms` of 0 turns the detector off for this
+/// request.
+pub fn begin(w: *Watch, warn_ms: u32, method: []const u8, path: []const u8) void {
     // A connection serves many requests and the Watch outlives each of them,
     // so both branches clear it rather than only the one that goes on to use
-    // it — `waited_ns` left over from the previous request would otherwise
-    // be forgiveness this one did not earn.
+    // it.
     if (warn_ms == 0) {
         w.* = .{};
         return;
     }
     w.* = .{
-        // `| 1` because zero is how `from_ns` says "not watching". A clock
-        // reading of exactly zero is not going to happen, and a detector
-        // that silently switches itself off if it ever did is worse than a
+        // `| 1` because zero is how `from_ns` says "parked". A clock reading
+        // of exactly zero is not going to happen, and a detector that
+        // silently forgives a stretch if it ever did is worse than a
         // nanosecond of error.
         .from_ns = bulkhead.coarseNanos() | 1,
         .warn_ns = @as(u64, warn_ms) * std.time.ns_per_ms,
+        .method = method,
+        .path = path,
     };
 }
 
-/// Stop the clock and report if what is left after the waiting is too long.
+/// Close the last stretch and report if it was too long.
 ///
-/// `excused` is for a request that took the connection over. `method` and
-/// `path` are only read if there is something to say.
-pub fn finish(w: *Watch, method: []const u8, path: []const u8, excused: bool) void {
+/// There is no `excused` any more. A request that takes the connection over
+/// is watched like any other, because what is measured is one stretch rather
+/// than a total — see the header.
+pub fn finish(w: *Watch) void {
     const from = w.from_ns;
-    if (from == 0) return;
-    w.from_ns = 0;
-    if (excused) return;
+    reportIfTooLong(w, from);
+    w.* = .{};
+}
 
-    const held = (bulkhead.coarseNanos() -| from) -| w.waited_ns;
+/// The end of a stretch: report it if the handler ran too long, and leave the
+/// watch parked.
+fn reportIfTooLong(w: *Watch, from: u64) void {
+    if (w.warn_ns == 0 or from == 0) return;
+    const held = bulkhead.coarseNanos() -| from;
     if (held < w.warn_ns) return;
 
     _ = caught.fetchAdd(1, .monotonic);
-    report(method, path, held / std.time.ns_per_ms);
+    report(w.method, w.path, held / std.time.ns_per_ms);
 }
 
-/// The start of a wait that is not the handler holding the thread. Pairs with
-/// `waited`, and the token is 0 when nobody is watching — which is the whole
-/// cost of this on a server that has the detector turned off.
+/// The start of a wait that is not the handler holding the thread. **This is
+/// where a stretch ends**, and where the report fires if it was too long.
+/// Pairs with `waited`, and the token is 0 when nobody is watching — which is
+/// the whole cost of this on a server that has the detector turned off.
 ///
 /// ```zig
 /// const w = watchdog.waiting(c._watch);
 /// defer watchdog.waited(c._watch, w);
 /// ```
+///
+/// **Nested pairs are safe and cost nothing.** The inner one finds the watch
+/// already parked, returns 0, and its `waited` does nothing — so the stretch
+/// is reopened by the outermost `waited` and by that one only. `nilo.sleep`
+/// inside `Ctx.body` is exactly that shape.
 pub fn waiting(w: ?*Watch) u64 {
     const watch = w orelse return 0;
-    if (watch.from_ns == 0) return 0;
-    return bulkhead.coarseNanos() | 1;
+    if (watch.warn_ns == 0) return 0;
+    const from = watch.from_ns;
+    if (from == 0) return 0;
+    watch.from_ns = 0;
+    reportIfTooLong(watch, from);
+    return 1;
 }
 
-/// Close a wait opened by `waiting`, adding it to what this request is
-/// forgiven.
+/// Close a wait opened by `waiting`: the fiber is running again, so a new
+/// stretch starts here.
 pub fn waited(w: ?*Watch, token: u64) void {
     if (token == 0) return;
     const watch = w orelse return;
-    watch.waited_ns += bulkhead.coarseNanos() -| token;
+    watch.from_ns = bulkhead.coarseNanos() | 1;
 }
 
 /// The same pair for code with no Ctx to hand — `nilo.blocking` and
@@ -187,90 +213,119 @@ const testing = std.testing;
 /// Drive a Watch by hand, so the arithmetic can be checked without spending
 /// the wall-clock time it is measuring. The integration tests in `app.zig`
 /// pay for real milliseconds; these do not.
-fn spent(elapsed_ms: u64, waited_ms: u64, warn_ms: u32) u64 {
+fn quiet() std.log.Level {
     // The warning is the behaviour under test, not news, and on the test
     // runner's stderr it makes a passing suite print `failed command`.
     const previous = testing.log_level;
     testing.log_level = .err;
-    defer testing.log_level = previous;
+    return previous;
+}
+
+/// A watch whose current stretch started `elapsed_ms` ago.
+fn running(elapsed_ms: u64, warn_ms: u32) Watch {
+    return .{
+        .from_ns = (bulkhead.coarseNanos() -| (elapsed_ms * std.time.ns_per_ms)) | 1,
+        .warn_ns = @as(u64, warn_ms) * std.time.ns_per_ms,
+        .method = "GET",
+        .path = "/x",
+    };
+}
+
+test "a stretch that ran the whole time is reported" {
+    const noisy = quiet();
+    defer testing.log_level = noisy;
 
     const before = caught.load(.monotonic);
-    var w = Watch{
-        .from_ns = 1,
-        .waited_ns = waited_ms * std.time.ns_per_ms,
-        .warn_ns = @as(u64, warn_ms) * std.time.ns_per_ms,
-    };
-    // Held constant by pretending the span started `elapsed_ms` before now.
-    w.from_ns = (bulkhead.coarseNanos() -| (elapsed_ms * std.time.ns_per_ms)) | 1;
-    finish(&w, "GET", "/x", false);
-    return caught.load(.monotonic) - before;
+    var w = running(50, 10);
+    finish(&w);
+    try testing.expectEqual(before + 1, caught.load(.monotonic));
 }
 
-test "a handler that ran the whole time is reported" {
-    try testing.expectEqual(@as(u64, 1), spent(50, 0, 10));
+test "a stretch under the limit is not" {
+    const before = caught.load(.monotonic);
+    var w = running(1, 10);
+    finish(&w);
+    try testing.expectEqual(before, caught.load(.monotonic));
 }
 
-test "a handler that spent the time parked is not" {
-    // The same 50ms, all of it waiting on something that yielded. This is
-    // the case the detector exists to keep quiet about: `nilo.blocking`
-    // done right must never look like `nilo.blocking` skipped.
-    try testing.expectEqual(@as(u64, 0), spent(50, 50, 10));
+test "a wait ends the stretch, and the next one starts from there" {
+    const noisy = quiet();
+    defer testing.log_level = noisy;
+
+    // 50ms of handler, then a wait. The wait is where the report fires —
+    // that is what lets a handler which never returns be watched at all.
+    const before = caught.load(.monotonic);
+    var w = running(50, 10);
+    const token = waiting(&w);
+    try testing.expectEqual(before + 1, caught.load(.monotonic));
+    try testing.expect(token != 0);
+    // Parked: nothing is being timed.
+    try testing.expectEqual(@as(u64, 0), w.from_ns);
+
+    // Running again, from now rather than from where the first stretch
+    // began. `finish` on the fresh one has nothing to say.
+    waited(&w, token);
+    try testing.expect(w.from_ns != 0);
+    finish(&w);
+    try testing.expectEqual(before + 1, caught.load(.monotonic));
 }
 
-test "waiting longer than the span does not wrap around into a report" {
-    // The two clock readings are taken at different moments by different
-    // pieces of code, so `waited_ns` above `elapsed` is arithmetic that has
-    // to be survivable rather than a state that cannot happen.
-    try testing.expectEqual(@as(u64, 0), spent(10, 500, 10));
+test "a nested wait neither reports twice nor reopens early" {
+    const noisy = quiet();
+    defer testing.log_level = noisy;
+
+    // `nilo.sleep` inside `Ctx.body` is this shape, and the inner pair must
+    // not restart the clock while the outer one is still parked.
+    const before = caught.load(.monotonic);
+    var w = running(50, 10);
+    const outer = waiting(&w);
+    try testing.expectEqual(before + 1, caught.load(.monotonic));
+
+    const inner = waiting(&w);
+    try testing.expectEqual(@as(u64, 0), inner);
+    waited(&w, inner);
+    try testing.expectEqual(@as(u64, 0), w.from_ns);
+    try testing.expectEqual(before + 1, caught.load(.monotonic));
+
+    waited(&w, outer);
+    try testing.expect(w.from_ns != 0);
 }
 
 test "a request nobody is watching costs nothing and says nothing" {
     var w = Watch{};
     const before = caught.load(.monotonic);
-    finish(&w, "GET", "/x", false);
+    finish(&w);
     try testing.expectEqual(before, caught.load(.monotonic));
 
     // And the pair a call site uses is a pair of no-ops, not a pair of
     // clock reads whose result is thrown away.
-    begin(&w, 0);
+    begin(&w, 0, "GET", "/x");
     try testing.expectEqual(@as(u64, 0), w.from_ns);
     try testing.expectEqual(@as(u64, 0), waiting(&w));
 }
 
 test "begin sets a clock that is not zero" {
     var w = Watch{};
-    begin(&w, 250);
+    begin(&w, 250, "GET", "/x");
     try testing.expect(w.from_ns != 0);
     try testing.expectEqual(250 * std.time.ns_per_ms, w.warn_ns);
+    try testing.expectEqualStrings("/x", w.path);
 }
 
-test "an excused request is measured and then let go" {
-    const before = caught.load(.monotonic);
-    var w = Watch{
-        .from_ns = (bulkhead.coarseNanos() -| (500 * std.time.ns_per_ms)) | 1,
-        .warn_ns = std.time.ns_per_ms,
-    };
-    finish(&w, "GET", "/events", true);
-    try testing.expectEqual(before, caught.load(.monotonic));
-    // Still stopped, so a second call cannot report the same span twice.
-    try testing.expectEqual(@as(u64, 0), w.from_ns);
-}
-
-test "a second request on the same connection does not inherit the first one's forgiveness" {
-    // The Watch lives on the InFlight, which lives for the whole connection.
-    // `waited_ns` from a request that spent its life in `nilo.blocking`
-    // would otherwise excuse the next one on that connection for free.
+test "a second request on the same connection starts from nothing" {
+    // The Watch lives on the InFlight, which lives for the whole connection,
+    // so a request that left a stretch open or a limit behind would decide
+    // what the next one on that connection is measured against.
     var w = Watch{};
-    begin(&w, 10);
-    waited(&w, waiting(&w));
-    w.waited_ns += 500 * std.time.ns_per_ms;
-
-    begin(&w, 10);
-    try testing.expectEqual(@as(u64, 0), w.waited_ns);
+    begin(&w, 10, "GET", "/first");
+    finish(&w);
+    try testing.expectEqual(@as(u64, 0), w.from_ns);
+    try testing.expectEqual(@as(u64, 0), w.warn_ns);
 
     // And the same when the detector is switched off, which is the branch
-    // that used to leave it behind.
-    w.waited_ns = 500 * std.time.ns_per_ms;
-    begin(&w, 0);
-    try testing.expectEqual(@as(u64, 0), w.waited_ns);
+    // that used to leave state behind.
+    w = running(500, 1);
+    begin(&w, 0, "GET", "/second");
+    try testing.expectEqual(@as(u64, 0), w.from_ns);
+    try testing.expectEqual(@as(u64, 0), w.warn_ns);
 }

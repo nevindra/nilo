@@ -379,6 +379,144 @@ Lower the rate rather than raising the timeout; `body_min_rate = 0` restores the
 old behaviour exactly. `c.bodyStream()` and a WebSocket are untouched — nothing
 is being held on the client's behalf there.
 
+#### `.address = "unix:/run/nilo.sock"` — a path instead of a port
+
+```zig
+try app.listen(.{ .address = "unix:/run/nilo.sock" });
+```
+
+`port` is not read then. The proxy in front no longer has to reach the server
+over loopback TCP: a unix socket is a file, and the answer to "who may connect"
+is the answer to "who may write to this directory".
+
+A socket left behind by a server that was killed is removed before binding —
+which is what `reuse_address` means here, and it is narrow on purpose: only a
+path that is a socket, and only when connecting to it is refused. A file, a
+directory, or a socket something is still listening on is left exactly as it is.
+This server removes its own path when it stops.
+
+A request that arrives that way has no client address, so `Ctx.peer()` is
+empty. `clientIp()` reads `X-Forwarded-For` when `.trusted_proxies` is set,
+because nothing remote can open a unix socket
+([ADR 0130](./docs/adr/0130-a-path-is-an-address-to-listen-on.md)).
+
+#### `listen(.{ .trusted_proxies = &.{"private"} })` — which proxy, not how many
+
+`.trusted_hops` counts entries from the right of `X-Forwarded-For` and cannot
+say anything about *which* machine is in front. Add a CDN in front of the load
+balancer and the count is one short from that afternoon on, and `clientIp()`
+goes on returning something that looks like an address.
+
+Each entry is a CIDR (`10.0.0.0/8`, `fd00::/8`), a bare address meaning that
+host alone, or one of two names — `"private"` for the RFC 1918 ranges plus
+carrier-grade NAT, link-local, unique-local v6 and the loopback, and
+`"loopback"` for the loopback alone. The header is not read at all unless the
+connection came from one of them; entries written by one of them are skipped
+from the right; the first one left is the client. **Nothing depends on how many
+proxies there are.**
+
+A v4 rule matches a client that arrived v4-mapped, so the rule is written once.
+A rule that is not an address stops the server at `listen()` with a sentence
+naming it. `.trusted_hops` still works and still means what it meant; when both
+are set, the description wins
+([ADR 0129](./docs/adr/0129-a-proxy-is-trusted-by-which-one-it-is.md)).
+
+#### `app.with(mw)` — a middleware on one route
+
+```zig
+try app.with(adminOnly).delete("/users/:id", removeUser);
+```
+
+The other direction of [`without`](./docs/adr/0080-a-route-can-say-it-is-not-covered.md),
+and the same shape: it hands back a group, so there is no second way to
+register a route. The two compose. A carried middleware runs innermost, and it
+is matched on the joined pattern **and the method**, so renaming the route moves
+the middleware with it and a `DELETE` guard does not cover the `GET` beside it
+([ADR 0126](./docs/adr/0126-a-route-can-say-what-covers-it.md)).
+
+#### `c.url(pattern, args)` and `app.routes()`
+
+```zig
+const where = try c.url("/users/:id/posts/:slug", .{ .id = user.id, .slug = title });
+try c.redirect(303, where.view());
+
+std.log.info("serving {d} routes:\n{f}", .{ app.routes().len(), app.routes() });
+```
+
+The pattern is the name: it is already a compile-time literal and already what
+every error message quotes back, so there is no route name to keep in step with
+it. A param with no value, a value with no param, a value a path segment cannot
+carry and a `*` catch-all are all compile errors naming the field. Every value
+is percent-encoded, so a value out of a form cannot decide which route the URL
+lands in. `url.into(buf, …)` is the same call with a caller's buffer and no
+allocation ([ADR 0127](./docs/adr/0127-a-route-pattern-is-the-name-of-its-url.md)).
+
+#### `c.streamWith(…, .{ .length = n })` — a stream that knows its length
+
+A handler moving bytes out of something that had already counted them — an S3
+object, an upstream response — sent them with no `Content-Length`, so a browser
+showed no progress and a `Range` could not be answered. With a length the head
+carries it, the pieces go out unframed, and HTTP/1.0 gets keep-alive back.
+
+Writing past the promise is refused before a byte of the overrun goes out, for
+the reason [a WebSocket frame that lies about its length is refused](./docs/adr/0097-a-frame-that-lies-about-its-length-is-not-sent.md).
+Finishing short cannot be refused — the head has gone — so the connection
+closes and the log says both numbers
+([ADR 0128](./docs/adr/0128-a-stream-that-knows-its-length-says-so.md)).
+
+#### `allowance.keyed(f, …)` — an allowance on something the application knows
+
+```zig
+fn account(c: *nilo.Ctx) ?nilo.Str {
+    const who = c.session(Account) orelse return null;
+    return who.id;
+}
+
+try app.useOn("/api", nilo.allowance.keyed(account, .{
+    .per_window = 1000,
+    .on_null = .reject,
+}));
+```
+
+`allowance.with` counts against the address, which is right for a scraper and
+wrong for everything else: ten accounts behind one office NAT shared an
+allowance, and one account on ten machines got ten.
+
+The key's bytes are not kept — they live in the request arena — so what goes in
+the table is a 64-bit tag from a keyed hash, in a word of its own beside the
+counters. `on_null` has no default: `keyed(signedInAccount, …)` on a sign-in
+route with a silent skip leaves every *failed* sign-in uncounted, which is the
+attack the route exists to stop. `.reject` answers 403, not 429 — nothing was
+rated. `per_window` goes to 65,535 here, where the address table stops at 1023
+([ADR 0131](./docs/adr/0131-a-key-the-application-knows-is-a-word-of-its-own.md)).
+
+#### `nilo.deadline(ms)` — how long a route gets
+
+```zig
+try app.with(nilo.deadline(2000)).get("/report", buildReport);
+```
+
+`listen()`'s four deadlines bound one operation each and none of them bounds the
+request. This clamps every wait nilo owns — the body, the write, a stream's
+pieces, a WebSocket's silence — to whichever comes first.
+
+**A running handler is not interrupted**, and deliberately is not: a cancel that
+fires mid-handler is a cancel every handler, every `nilo.Mutex` and every
+Service has to survive. A loop doing its own work asks `c.overdue()`, and
+`c.timeLeftMs()` is the same answer as a number for a budget to pass on. Both
+answer safely on a route with no deadline. A handler that fails while overdue
+with nothing sent gets a 503 naming the budget; one that finishes late still
+answers, and the lateness is a log line
+([ADR 0133](./docs/adr/0133-a-route-can-say-how-long-it-has.md)).
+
+#### `staticWith(.{ .reload = true })` — a directory that is not held
+
+Every file is left on disk and opened per request, so editing one under a
+running server works. It is the spill threshold set to zero and nothing else —
+no fiber, no swap of a Set under live readers. A file that did not exist at
+startup still needs a restart
+([ADR 0125](./docs/adr/0125-a-file-is-described-by-the-descriptor-being-sent.md)).
+
 #### Smaller
 
 - **`union(enum)` as a request body**, which used to be a compile error on the
@@ -403,6 +541,25 @@ is being held on the client's behalf there.
   `python3 bench/mem.py --hold`.
 
 ### Changed
+
+- **The blocking detector measures one unparked stretch rather than a total,
+  and nothing is excused from it any more.** `block_warning_ms` used to compare
+  elapsed-minus-parked, summed over the whole request — which has no upper
+  bound on a connection that stays open, so a stream, a body reader and a
+  WebSocket had to be excused entirely and a blocking call inside a WebSocket
+  loop was never reported. That is where it costs the most: a stalled fiber
+  there holds its executor against every other socket that executor serves.
+
+  What is measured now is the longest stretch the fiber ran without parking,
+  which means the same thing on a request that lasts a millisecond and on a
+  connection that lasts a day, so the exemption is gone
+  ([ADR 0132](./docs/adr/0132-what-is-watched-is-one-unparked-stretch.md)).
+  Two things read differently if you had it switched on: **a handler that
+  yields between short stretches is no longer reported** — ten 30ms stretches
+  with a `nilo.blocking` between each pair summed to 300ms and were caught, and
+  a handler that yields every 30ms has already taken the advice — and **a
+  handler that blocks twice is now reported twice**, under the same one-a-second
+  rate limit as before.
 
 - **A request body under a `Content-Encoding` other than `identity` is now a
   415.** nilo decodes none of them, so a client sending `Content-Encoding: gzip`
@@ -540,6 +697,26 @@ is being held on the client's behalf there.
   unchanged.
 
 ### Fixed
+
+- **A spilled static file that grew on disk served a stale length under a stale
+  ETag.** A file over `max_file_bytes` had its size, mtime and ETag recorded by
+  the directory walk and its bytes opened per request, so editing one under a
+  running server sent the first recorded-length bytes of a file that had moved
+  on — a complete, correct-looking response carrying a prefix. Worse, a client
+  that kept the old ETag was answered 304, so a cache in front went on serving
+  the old bytes indefinitely.
+
+  The head is now written from one look at the descriptor whose bytes are about
+  to go out, so the length and the tag cannot disagree
+  ([ADR 0125](./docs/adr/0125-a-file-is-described-by-the-descriptor-being-sent.md)).
+  Shrinking was already caught. The Bulkhead's `File.size` became `File.stat`,
+  which matters only if you wrote an Engine.
+
+- **A `without` exemption freed a route from a middleware on every method at
+  that path, not just its own.** `app.group("/v1").without(requireSession).post("/sign-up", …)`
+  also freed a `GET /v1/sign-up` registered beside it, silently. Exemptions are
+  matched on the method as well as the pattern now. `with` was written against
+  the same record and would have had the identical bug.
 
 - **A nilo compile error could rename your own type into one of nilo's.** An
   application with `src/room.zig` holding a `pub const Room`, or

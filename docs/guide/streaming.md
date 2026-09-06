@@ -79,6 +79,28 @@ source.addEventListener("token", (e) => output.append(e.data));
 A browser reconnecting sends `Last-Event-ID`, which is an ordinary request
 header: `c.header("Last-Event-ID")`.
 
+## When you already know how long it is
+
+A handler moving bytes out of something that has already counted them — an S3
+object, an upstream response — should say so:
+
+```zig
+var body = try c.streamWith(200, object.content_type, .{ .length = object.len });
+```
+
+The head then carries `Content-Length` and no `Transfer-Encoding`, and the
+pieces go out unframed. What that buys is not framing overhead: a browser
+downloading a chunked response has nothing to draw a progress bar against, and
+a `Range` against it cannot be answered at all — which is exactly the request a
+large download makes when it resumes.
+
+**A stream with a length is held to it.** Writing past the promise fails with
+`error.WriteFailed` before a byte of the overrun goes out, because a client
+reading a `Content-Length` stops there and everything after it is read as the
+beginning of the next response. Finishing short cannot be refused — the head
+has already gone — so the connection closes and the log names both numbers
+([ADR 0128](../adr/0128-a-stream-that-knows-its-length-says-so.md)).
+
 ## Ending, on purpose and otherwise
 
 `live()` is the one to know about. It goes false when the server has been asked

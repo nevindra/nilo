@@ -190,7 +190,11 @@ it, answered from a slice. Three things change above it.
   rather than a hash of the contents. It is strong, and it is what nginx has
   served by default for twenty years. Hashing would mean reading the whole file
   at startup, and the weak tag that is the other alternative would make
-  `If-Range` unusable for exactly the large downloads that get resumed.
+  `If-Range` unusable for exactly the large downloads that get resumed. Both
+  numbers come from one look at the descriptor whose bytes are about to go out,
+  so a file that changed on disk cannot be sent with a length and a tag that
+  describe different versions of it
+  ([ADR 0125](../adr/0125-a-file-is-described-by-the-descriptor-being-sent.md)).
 - **One file descriptor is held for as long as the response takes.** One per
   request in flight, which `max_connections` already bounds — the number an
   operator was already multiplying.
@@ -216,19 +220,26 @@ nilo: loaded 12 static file(s) (48211 bytes held, 9022 of them gzipped copies)
 A handler can answer with a file the same way — see
 [Responses](./responses.md#files).
 
+## While you are working on it
+
+`staticWith(.{ .reload = true })` holds nothing: every file is left on disk and
+opened per request, so editing one under a running server works.
+
+It is `max_file_bytes = 0` with a name — every file takes the path above, and
+there is no fiber watching anything and no swap of a set under live readers.
+What you give up is what holding buys: the in-memory copy, the gzipped one, and
+one open and one stat per request. It says so in the log once at startup, so a
+release binary that was built with it on is not silent about it.
+
+**A file that did not exist at startup still needs a restart.** The list of
+names comes from the directory walk, and resolving a request-carried string
+into a filename is the traversal the design refuses.
+
 ## The limits
 
-The set is loaded once, at startup. There is no reload — changing a file means
-restarting the process, which is what a deploy does anyway.
-
-For a file over the line, that is a stronger instruction than it used to be. Its
-length and its ETag were recorded at load and its bytes are read per request, so
-editing one underneath a running server splits what used to be one consistent
-copy. Shrinking it is caught: fewer bytes arrive than the head promised, so the
-connection is closed rather than letting the client read the next response as
-the rest of this body. Growing it is not — the first recorded-length bytes go
-out under the old ETag, which is a complete, correct-looking response carrying a
-prefix of a file that has moved on.
+The set of *names* is fixed at startup. Without `.reload`, so are the bytes:
+changing a file means restarting the process, which is what a deploy does
+anyway.
 
 Static files are not middleware: the set holds state, so it is a terminal handler
 that the middleware chain wraps like any other. Your logger sees them, and CORS
