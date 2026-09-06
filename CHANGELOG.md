@@ -72,17 +72,26 @@ The window slides, so a hundred at 11:59:59 and a hundred at 12:00:00 is not two
 hundred through. An IPv6 client is a `/64` by default, because a `/128` is one
 of the addresses a customer was handed rather than the customer.
 
-Two things it does on purpose: a table with no room left forgets whichever
-address has been quiet longest rather than making two share one allowance, and a
-slot two requests reach at the same instant lets both through. **Behind a proxy,
-set `.trusted_hops` on `listen`** — leave it at zero and every request looks
-like it came from the proxy, which is one slot for the world. A refusal that
-finds an `X-Forwarded-For` on a request counted against the connection's own
-address says so in the log once.
+**Where it is loose is deliberate and where it is strict is too.** A table with
+no room left forgets whichever address has been quiet longest rather than making
+two share one allowance, and two requests racing to *claim* a slot both get
+through — refusing there would refuse a stranger who has made no requests. But
+once the slot is unambiguously yours, contention on it is your own traffic and
+the request is refused. The index is hashed with a per-process secret, so the
+bucket an address lands in cannot be worked out offline and a slot cannot be
+aimed at.
 
-It is not a defence against a flood; that is still `max_connections`. And it can
-only be keyed on the address today — an allowance per account or per API key is
-in the roadmap.
+**Behind a proxy, set `.trusted_hops` on `listen`** — leave it at zero and every
+request looks like it came from the proxy, which is one slot for the world. A
+refusal that finds an `X-Forwarded-For` on a request counted against the
+connection's own address says so in the log once.
+
+Two things it is not. It is not a defence against a flood; that is still
+`max_connections`. And a fixed table cannot hold unbounded clients — at 100,000
+addresses through the default 16,384 slots every bucket is full and a client can
+lose its slot to newcomers, so size `.slots` for the clients you expect and read
+it as a shaper rather than a guarantee. Keying on an account or an API key
+instead of an address is in the roadmap.
 
 #### `testing.Conversation` — driving a WebSocket route from a test
 

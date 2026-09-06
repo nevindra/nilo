@@ -391,15 +391,41 @@ NAT share an allowance they should not, and one account with ten machines gets
 ten. The table, the sliding window and the eviction are all built and none of
 them cares what the key is
 ([ADR 0114](./adr/0114-an-allowance-is-a-table-sized-while-compiling.md)) — what
-is missing is `allowance.keyed(fn (*Ctx) []const u8, .{ … })`, where returning
+is missing is `allowance.keyed(fn (*Ctx) ?[]const u8, .{ … })`, where returning
 nothing means "not counted".
 
-**Waiting on: a design** for what the key's bytes are allowed to be. A `Str` out
-of the request arena is gone by the next request, which is fine for a hash and
-not for the fingerprint, so either the fingerprint has to be enough on its own —
-it is 34 bits at the default ceiling and 28 at the widest, and a collision hands
-somebody else's allowance to a *named account* rather than to an address — or a key has to be copied into the slot,
-which is a different table.
+The shape is decided and the arithmetic behind it has been done. A `Str` out of
+the request arena is gone by the next request, so the key's bytes cannot be
+kept — but they do not need to be. **A separate 64-bit tag from a keyed hash is
+what this wants**, not the inline copy of the key that looked like the only
+alternative: the bytes only have to live long enough to compute the tag, there
+is no key-length policy to invent, no account id sits in `.bss`, and 4,096 slots
+cost 32 KB rather than the 128 KB of 32-byte copies.
+
+The packed fingerprint is not enough here and the reason is not the one this
+entry used to give. A targeted collision has to match the index *and* the
+fingerprint, so it is `2^(b+f)` — `2^46` at the default, and still `2^46` at the
+widest ceiling, because the bits the fingerprint loses the index gains. `2^46`
+is out of reach for a server-generated opaque account id. It is **not** out of
+reach for a username or a tenant slug, which an attacker grinds offline and then
+registers the winner of: hours at a billion tries a second.
+
+Two things have to be settled with it. **A fingerprint mismatch needs a policy
+and both obvious ones are attacks** under a guessable mapping — evicting the
+occupant is an allowance reset, refusing the newcomer locks the victim out, and
+both cost about `2^12` offline candidates. The per-process seed
+([ADR 0114](./adr/0114-an-allowance-is-a-table-sized-while-compiling.md)) is
+what defuses them, so `keyed` inherits it rather than solving it again. And
+**`null` cannot quietly mean "not counted"**: `keyed(authenticatedAccount, …)`
+on a sign-in route leaves every *failed* sign-in uncounted, which is the attack
+the route exists to stop. The null policy has to be written by the caller —
+`.on_null = .skip | .reject`, or two constructors — and the key on a sign-in
+route is the *claimed* username rather than the authenticated account, composed
+with an address-keyed allowance.
+
+**Waiting on: a caller.** Nothing above is unknown any more; what is missing is
+an application that wants it, to say whether the tag is 64 bits or 128 and
+whether the compact and strong forms are two modes or two functions.
 
 **2. Reloading without a restart: static files, then the server.** A development
 annoyance rather than a design hole, because a deploy restarts anyway. The static

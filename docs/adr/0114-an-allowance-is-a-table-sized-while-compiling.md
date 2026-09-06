@@ -51,11 +51,26 @@ they are not the same size:
 - **Somebody is let through.** The limit is looser than it says for one window.
 
 So a full bucket **evicts its stalest way** — the one whose window is oldest —
-and the arriving address gets a whole allowance of its own. Contention loses the
-same way: four failed compare-and-swaps in a row let the request through, rather
-than turning a busy moment into an outage for whoever happened to arrive during
-it. **It fails open, on purpose, and that is the sentence to disagree with if
-you want to argue with this design.**
+and the arriving address gets a whole allowance of its own.
+
+**Contention is where this shipped wrong**, and the correction is worth stating
+rather than quietly making. Four failed compare-and-swaps in a row let the
+request through, on the same reasoning: better loose than an outage for whoever
+happened to arrive during a busy moment. That reasoning is right for
+*insertion*, where the competition is between an arriving address and a stranger
+already in the bucket. It is wrong once the fingerprint has matched, because
+then the contention is **this client's own traffic against itself** — there is no
+stranger to protect, and letting it through is not caution.
+
+The cost of getting that wrong was not "slightly loose": with a matched slot
+failing open, the ceiling became *how many requests the server can run at once*
+rather than `per_window`. A synchronised wave from one address walks past the
+limit, and can do it again — no botnet, no address range, no hash work. A
+password guesser holding requests in flight produces exactly that pattern and so
+does an ordinary retry storm.
+
+So the rule is now split where the argument actually splits: **fail open while
+the slot is ambiguous, fail closed once it is unambiguously yours.**
 
 The eviction is also why a slot carries a fingerprint at all. Without one, an
 address that hashes into a taken bucket would read somebody else's counters as
@@ -71,9 +86,28 @@ window by how far into the current one the request arrived, which costs no
 memory at all (both counters were already in the same word) and about fifteen
 lines of arithmetic.
 
-The window number is a `u16`, so it wraps every 65,536 windows — 45 days at
-sixty seconds. Age is read as a wrapping subtraction, so what a wrap costs is
-one returning client, inside a two-window band, after a month and a half.
+The window number is a `u16`, so it wraps every 65,536 windows — 45.5 days at
+sixty seconds. Age is read as a wrapping subtraction, and the honest account of
+what that costs is wider than the one this ADR first gave ("one returning
+client, inside a two-window band"):
+
+- At exactly 65,536 windows the modular difference is **zero**, so a 45-day-old
+  slot is read as belonging to the current window and its counters survive
+  intact. The window after that, the difference is one, so the stale count
+  becomes `prev` and is carried again. **Stale state can therefore affect a
+  client for up to two full windows** — about two minutes, once every 45.5 days.
+- It is not one client. **Every** retained slot whose modular age happens to
+  alias is affected, and a quiet table can hold many.
+- `window -% was.window` stops being an age ordering at all once entries can
+  survive a whole wrap: true ages of 65,535, 65,536 and 65,537 windows read as
+  65,535, 0 and 1. Eviction then picks the largest residue rather than the
+  oldest slot.
+
+Left as it is, deliberately. Widening the field to 24 or 32 bits would remove it
+and would cost bits the counters and the fingerprint are using; two minutes
+every month and a half, in a structure that is already documented as
+approximate, is not worth that trade. It is written down here so the next person
+finds a decision rather than a surprise.
 
 ## An IPv6 client is a prefix
 
@@ -82,11 +116,41 @@ Keyed on the whole 128 bits, an IPv6 limit is not a limit: the customer has
 masked to `/64` before it is hashed, which is one customer's allocation, and
 `.ipv6_prefix` moves it.
 
-An IPv4 address is hashed as the text it arrived as. The kernel and every proxy
-write it canonically, so there is nothing to parse and nothing to normalise —
-and anything that does not parse as an address at all is hashed as text too,
-which is the safe way to be wrong: two clients that would have shared a slot get
+**An IPv4 address is parsed too, and the version that shipped did not.** The
+argument for hashing it as text was that the kernel and every proxy write it
+canonically. That is true of the kernel and false of `X-Forwarded-For`, where
+the text is written by whatever is upstream — and behind a misconfigured
+`trusted_hops`, by the client. `10.0.0.1`, `010.0.0.1` and `::ffff:10.0.0.1` are
+one address and were three keys, so a client had as many allowances as it had
+spellings. Both families are now parsed to their bytes and tagged by family
+before hashing, and a leading zero is read as decimal rather than octal — not
+because decimal is more correct, but because a spelling nobody agrees about is
+one an attacker gets to pick.
+
+Anything that does not parse as an address at all is still hashed as text, which
+is the safe way to be wrong: two clients that would have shared a slot get
 separate ones.
+
+## The index is secret
+
+The seed the address is hashed with is drawn once per process, from
+`getrandom` where there is one.
+
+A fixed seed makes the whole mapping computable offline, and two attacks fall
+out of that without touching the fingerprint at all. Finding a key that lands in
+a chosen victim's bucket costs about 4,096 tries — twelve bits — so an attacker
+grinds one, sends a single request, evicts the victim's slot, and the victim's
+count restarts at one. Repeat whenever the victim approaches the ceiling and the
+victim has no limit. The mirror image is to sit in the victim's bucket and keep
+it warm so the victim is the one evicted.
+
+Both need the *index*, and the index is cheap; neither needs the fingerprint,
+which is not. A secret the attacker cannot read turns every one of those tries
+into an online probe against a mapping that the next restart reshuffles.
+
+This is what makes the eviction policy defensible rather than merely documented.
+Eviction is still how a full bucket makes room — that has not changed — but it
+can no longer be aimed.
 
 ## The mistake it is most likely to be deployed with
 
@@ -116,6 +180,36 @@ the application knows things the proxy cannot: which account signed in, which
 API key was presented, whether this route is the expensive one. `with()` is the
 address-shaped half; a `keyed()` that takes the key from the request is the
 obvious next thing and is not built.
+
+## What a review changed, and what it did not
+
+The design above was put to an outside reviewer after it shipped, with the four
+judgements it rests on named as things to attack. Three of them did not survive
+and are corrected in place above: the blanket fail-open, the IPv4 text key, and
+the too-narrow account of the `u16` wrap. The seed came from the same reading.
+
+Two survived, and they are worth recording because they were the ones most
+likely to be wrong:
+
+- **The ordering of the two failure modes holds.** A fingerprint collision at
+  the default 34 bits is about one event per tens of thousands of
+  hundred-thousand-address windows, so it is not the main source of
+  innocent-neighbour interference.
+- **The two-counter window is not the weak choice it looked like.** A decaying
+  counter in the same 64 bits is *not* strictly better: interpolation can
+  undercharge a burst placed late in the previous window by nearly the whole
+  limit, and decay undercharges a burst immediately and then keeps charging it
+  after an exact window would have forgotten it. Neither dominates. That closes
+  a question the roadmap had open.
+
+One thing the review changed that is *not* in the code: **eviction is the
+dominant loss, not collision.** At 100,000 distinct addresses through a
+16,384-slot table the mean bucket has seen 24 arrivals, every bucket is
+effectively full, and roughly 84,000 of those insertions displace somebody. A
+client can lose its slot to unrelated newcomers and restart at one without
+anybody targeting it. That is the honest shape of this structure under load, and
+it is why the module header calls it a shaper rather than an enforcement
+mechanism.
 
 ## What it costs
 

@@ -1732,3 +1732,56 @@ is a claim with an expiry date, and a merge is when it expires** — so the line
 worth writing beside one is its closing condition. "Delete this when `pages`
 names every page below and `snippets` is green" survives a merge; "three marks,
 at these line numbers" cannot.
+
+## A design nobody attacked was three defects wide
+
+The Allowance shipped with its trade written down and argued for
+([ADR 0114](./adr/0114-an-allowance-is-a-table-sized-while-compiling.md)), the
+four axes measured, 1,186 tests green, and five refusals holding the
+misconfigurations. Then it was put to an outside reviewer with its four load-
+bearing judgements named as things to attack, and three of them fell.
+
+The one worth the entry is not any of the three. It is **which** three:
+
+- **The blanket fail-open.** "Four failed compare-and-swaps let the request
+  through" was written as caution and reasoned about as one case. It is two.
+  Losing the race while *claiming* a slot is contention with a stranger, and
+  letting it through protects somebody who has made no requests. Losing it on a
+  slot that already matches your fingerprint is your own traffic against
+  itself — and the shipped code treated them the same, which made the ceiling
+  *the server's concurrency* rather than `per_window`. A synchronised wave from
+  one address walked past the limit, repeatedly, with no botnet and no hash
+  work.
+- **The IPv4 fast path.** "The kernel writes it canonically, so hash the text"
+  is true of the kernel and false of `X-Forwarded-For`. `10.0.0.1`,
+  `010.0.0.1` and `::ffff:10.0.0.1` were three keys for one address.
+- **A fixed hash seed.** Nobody had asked what the *index* costs to guess. It is
+  twelve bits: grind a key into the victim's bucket, send one request, and their
+  count restarts. The fingerprint was sized against collision and was never the
+  thing under attack.
+
+The pattern behind all three is the same, and it is the lesson: **each was a
+sentence that had been reasoned about once, at the level of the whole feature,
+and never re-read against a case that splits it.** "It fails open on purpose" is
+a decision about one situation applied to two. "IPv4 arrives canonical" is a
+fact about one source applied to every source. "The fingerprint is 34 bits" is a
+defence against the wrong half of the key. Every one reads as settled, and the
+ADR made them harder to re-examine rather than easier, because writing the
+reason down is what makes a claim look finished.
+
+So: **the four axes cannot tell you a feature is right, only that it is
+affordable.** ADR 0018's budget was satisfied throughout — the defects cost
+nothing and changed no number. What found them was handing the design to
+somebody with no stake in it and asking for the attack rather than the opinion,
+which took one prompt and about ten minutes, against roughly a day of building.
+Two of the four judgements did survive, and knowing which two is worth as much
+as the corrections: the fingerprint-versus-eviction ordering holds, and a
+decaying counter is **not** strictly better than two counters in the same 64
+bits, which closes a question the roadmap had open.
+
+The correction that is not in the code belongs here too, because it is about
+reading the structure honestly rather than fixing it: **eviction is the dominant
+loss, not collision.** At 100,000 addresses through 16,384 slots every bucket is
+full and about 84,000 insertions displace somebody. "Your neighbour used your
+allowance" was the failure this design was built to avoid, and it arrives anyway
+through the front door.

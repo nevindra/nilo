@@ -28,8 +28,18 @@
 //! counts per process rather than per address. What it is for is the client
 //! that asks too often — a scraper, a script in a loop, somebody's retry
 //! storm, a password form being walked through a word list.
+//!
+//! **And it is a shaper rather than an enforcement mechanism**, which is a
+//! property of the table rather than of the arithmetic. A fixed number of
+//! slots cannot hold an unbounded number of clients: at 100,000 addresses
+//! through the default 16,384 slots every bucket is effectively full, and a
+//! client can lose its slot to unrelated newcomers and start again at one
+//! without anybody targeting it. Size `.slots` for the clients you expect, and
+//! do not read a per-address allowance as a guarantee that no address exceeds
+//! it.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const bulkhead = @import("bulkhead.zig");
 const Ctx = @import("ctx.zig").Ctx;
@@ -93,9 +103,9 @@ pub fn with(comptime options: Options) mw.Middleware {
             const window: u16 = @truncate(now / window_ns);
             const into = now % window_ns;
 
-            var key: [16]u8 = undefined;
+            var key: [17]u8 = undefined;
             const identity = keyOf(&key, c.clientIp().view(), options.ipv6_prefix);
-            const h = std.hash.Wyhash.hash(0, identity);
+            const h = std.hash.Wyhash.hash(hashSeed(), identity);
 
             const at = (h % buckets) * ways;
             if (charge(S, options, window_ns, table[at..][0..ways], fingerprintOf(S, h), window, into)) {
@@ -189,10 +199,20 @@ fn fingerprintOf(comptime S: type, h: u64) @FieldType(S, "fp") {
 /// oldest, which is the eviction that keeps two addresses from sharing one
 /// allowance.
 ///
-/// **It fails open.** A bucket under enough contention to lose four
-/// compare-and-swaps in a row lets the request through, because the
-/// alternative — refusing on contention — turns a busy moment into an outage
-/// for whoever happened to arrive during it.
+/// **It fails open where the slot is ambiguous, and closed where it is not**,
+/// and the difference is the whole of ADR 0114's argument applied properly.
+/// Losing four compare-and-swaps while *inserting* means somebody else is
+/// competing for the same way, and refusing there would refuse a stranger who
+/// has made no requests. Losing four on a slot whose fingerprint already
+/// matches means the contention is this client's own traffic against itself,
+/// there is no stranger to protect, and letting it through is not caution —
+/// it is the hole.
+///
+/// It shipped failing open in both cases, and that was wrong rather than a
+/// trade: the looseness was then bounded by how many requests the server can
+/// run at once instead of by `per_window`, so a synchronised wave from one
+/// address walks past the limit and can do it again. Found by a review of
+/// the shipped design; see the entry in `docs/history.md`.
 fn charge(
     comptime S: type,
     comptime o: Options,
@@ -202,6 +222,11 @@ fn charge(
     window: u16,
     into: u64,
 ) bool {
+    // Whether this address was ever seen to own a way in this bucket. Once it
+    // has, running out of tries is a refusal rather than a pass: the
+    // contention is its own.
+    var ours = false;
+
     var tries: u8 = 0;
     while (tries < 4) : (tries += 1) {
         var oldest: usize = 0;
@@ -225,6 +250,7 @@ fn charge(
         }
 
         if (found) |i| {
+            ours = true;
             const cell = &bucket[i];
             const was: S = @bitCast(cell.load(.monotonic));
             if (was.fp != fp) continue; // taken over between the two loads
@@ -243,7 +269,9 @@ fn charge(
             return true;
         }
     }
-    return true;
+
+    // Out of tries. Whose contention it was decides which way to be wrong.
+    return !ours;
 }
 
 const Outcome = enum { allowed, refused, again };
@@ -283,24 +311,135 @@ fn take(
 
 /// The bytes that identify a client, out of the text an address arrived as.
 ///
-/// **An IPv4 address is its own text.** The kernel and every proxy write it
-/// canonically, so there is nothing to parse and nothing to normalise — the
-/// fast path hashes the bytes it was handed. Only an IPv6 text is parsed, and
-/// only so that the prefix can be masked off.
+/// **Both families are parsed to their bytes**, and an address is never keyed
+/// on the text it arrived as. That used to be an IPv4 fast path, on the
+/// grounds that the kernel and every proxy write it canonically — which is
+/// true of the kernel and is not true of `X-Forwarded-For`, where the text is
+/// written by whatever is upstream and, behind a misconfigured `trusted_hops`,
+/// by the client. `10.0.0.1`, `010.0.0.1` and `::ffff:10.0.0.1` are one
+/// address and were three keys, so one client had three allowances by
+/// spelling itself three ways.
 ///
-/// Anything that does not parse is hashed as text, which is the safe way to be
-/// wrong: two clients that would have shared a slot get separate ones.
-fn keyOf(out: *[16]u8, text: []const u8, comptime prefix: u8) []const u8 {
+/// Each family is tagged before hashing so a parsed address can never be read
+/// as text or as the other family. The tag bytes are not printable ASCII,
+/// which is what keeps them out of the space a hostname could occupy.
+///
+/// Anything that does not parse is still hashed as text, which is the safe way
+/// to be wrong: two clients that would have shared a slot get separate ones.
+fn keyOf(out: *[16 + 1]u8, text: []const u8, comptime prefix: u8) []const u8 {
     const trimmed = trimPort(text);
-    if (std.mem.indexOfScalar(u8, trimmed, ':') == null) return trimmed;
-    const parsed = parseIp6(trimmed) orelse return trimmed;
 
-    out.* = parsed;
+    if (std.mem.indexOfScalar(u8, trimmed, ':') == null) {
+        const four = parseIp4(trimmed) orelse return trimmed;
+        out[0] = tag_v4;
+        @memcpy(out[1..5], &four);
+        return out[0..5];
+    }
+
+    // `::ffff:10.0.0.1` is an IPv4 address wearing a v6 spelling, and keying
+    // it apart from the same address written plainly is the same hole.
+    if (mappedIp4(trimmed)) |four| {
+        out[0] = tag_v4;
+        @memcpy(out[1..5], &four);
+        return out[0..5];
+    }
+
+    const parsed = parseIp6(trimmed) orelse return trimmed;
+    out[0] = tag_v6;
+    @memcpy(out[1..17], &parsed);
     var bit: usize = prefix;
     while (bit < 128) : (bit += 1) {
-        out[bit / 8] &= ~(@as(u8, 0x80) >> @intCast(bit % 8));
+        out[1 + bit / 8] &= ~(@as(u8, 0x80) >> @intCast(bit % 8));
     }
-    return out[0..16];
+    return out[0..17];
+}
+
+const tag_v4: u8 = 0x04;
+const tag_v6: u8 = 0x06;
+
+/// Where in the table an address lands, made unpredictable to anybody who is
+/// not this process.
+///
+/// A fixed seed makes the whole mapping computable offline, and two attacks
+/// fall straight out of that. Finding a key that lands in a chosen victim's
+/// bucket costs about 4,096 tries at a keyboard — so an attacker grinds one,
+/// sends a single request, evicts the victim's slot, and the victim's count
+/// restarts at one. They can do that every time the victim approaches the
+/// ceiling. The mirror image is to sit in the victim's bucket and keep it warm
+/// so the victim is the one evicted.
+///
+/// Neither needs to break the fingerprint; both need only the *index*, and the
+/// index is cheap. A secret the attacker cannot read turns every one of those
+/// tries into an online probe against a mapping that is reshuffled by the next
+/// restart.
+///
+/// One syscall, once per process, on whichever request gets here first. Not
+/// `bulkhead.randomSecure`, which parks a fiber on the Engine — this has to
+/// work in a test with no Engine at all, and under `zig test` there is no loop
+/// to park on.
+var seed: std.atomic.Value(u64) = .init(0);
+
+fn hashSeed() u64 {
+    const was = seed.load(.monotonic);
+    if (was != 0) return was;
+    return slowSeed();
+}
+
+noinline fn slowSeed() u64 {
+    var fresh: u64 = fallbackSeed();
+    if (builtin.os.tag == .linux) {
+        var bytes: [8]u8 = undefined;
+        const rc = std.os.linux.getrandom(&bytes, bytes.len, 0);
+        if (std.posix.errno(rc) == .SUCCESS) fresh = std.mem.readInt(u64, &bytes, .little);
+    }
+    if (fresh == 0) fresh = 1; // zero is "not set yet"
+    // Two first requests can race here. Whichever lands first wins and the
+    // other adopts it, so the mapping is settled once and never moves.
+    if (seed.cmpxchgStrong(0, fresh, .monotonic, .monotonic)) |already| return already;
+    return fresh;
+}
+
+/// Where there is no `getrandom`: the address of a static, which the loader
+/// randomises, mixed with the clock at first use.
+///
+/// **Weaker than the syscall, and said so rather than implied.** It is enough
+/// to stop the mapping being computed offline before the process starts, which
+/// is what the attacks above need; it is not entropy anybody should build
+/// anything else on.
+fn fallbackSeed() u64 {
+    return std.hash.Wyhash.hash(@intFromPtr(&seed), std.mem.asBytes(&bulkhead.coarseNanos()));
+}
+
+/// Four bytes out of a dotted quad.
+///
+/// **A leading zero is read as decimal**, so `010.0.0.1` is `10.0.0.1` rather
+/// than a key of its own. Reading it as octal, which some parsers do, would
+/// make it `8.0.0.1` — a third answer. Neither of those is the point: what
+/// matters is that one address has one key, and a spelling nobody can agree
+/// about is one an attacker picks.
+fn parseIp4(text: []const u8) ?[4]u8 {
+    var out: [4]u8 = undefined;
+    var at: usize = 0;
+    var rest = text;
+    while (at < 4) : (at += 1) {
+        const end = std.mem.indexOfScalar(u8, rest, '.') orelse rest.len;
+        const group = rest[0..end];
+        if (group.len == 0 or group.len > 3) return null;
+        for (group) |c| if (!std.ascii.isDigit(c)) return null;
+        out[at] = std.fmt.parseInt(u8, group, 10) catch return null;
+        rest = rest[end..];
+        if (rest.len > 0) rest = rest[1..] else break;
+    }
+    if (at != 3 or rest.len != 0) return null;
+    return out;
+}
+
+/// The four bytes inside `::ffff:1.2.3.4`, or null if that is not the shape.
+fn mappedIp4(text: []const u8) ?[4]u8 {
+    const prefix = "::ffff:";
+    if (text.len <= prefix.len) return null;
+    if (!std.ascii.eqlIgnoreCase(text[0..prefix.len], prefix)) return null;
+    return parseIp4(text[prefix.len..]);
 }
 
 /// `[2001:db8::1]:443` → `2001:db8::1`, and `10.0.0.1:80` → `10.0.0.1`. An
@@ -457,14 +596,14 @@ test "a full bucket forgets its stalest way rather than sharing an allowance" {
 }
 
 test "an address is the key, and an IPv6 client is a prefix rather than one number" {
-    var key: [16]u8 = undefined;
+    var key: [17]u8 = undefined;
 
-    // IPv4 is its own text: nothing is parsed, and nothing is normalised.
-    try testing.expectEqualStrings("203.0.113.9", keyOf(&key, "203.0.113.9", 64));
-    try testing.expectEqualStrings("203.0.113.9", keyOf(&key, "203.0.113.9:443", 64));
+    // IPv4 is parsed to its bytes, behind a tag that no text can start with.
+    try testing.expectEqualSlices(u8, &.{ tag_v4, 203, 0, 113, 9 }, keyOf(&key, "203.0.113.9", 64));
+    try testing.expectEqualSlices(u8, &.{ tag_v4, 203, 0, 113, 9 }, keyOf(&key, "203.0.113.9:443", 64));
 
     // Two addresses out of one customer's /64 are one client…
-    var other: [16]u8 = undefined;
+    var other: [17]u8 = undefined;
     const a = keyOf(&key, "2001:db8:1:2:3:4:5:6", 64);
     const b = keyOf(&other, "2001:db8:1:2:ffff:ffff:ffff:ffff", 64);
     try testing.expectEqualSlices(u8, a, b);
@@ -475,10 +614,80 @@ test "an address is the key, and an IPv6 client is a prefix rather than one numb
 
     // Brackets and a port come off, and `::` expands.
     const d = keyOf(&key, "[2001:db8::1]:443", 128);
-    try testing.expectEqualSlices(u8, &.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, d);
+    try testing.expectEqualSlices(u8, &.{
+        tag_v6, 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+    }, d);
 
     // Nonsense is hashed as text rather than guessed at.
     try testing.expectEqualStrings("not:an:address:", keyOf(&key, "not:an:address:", 64));
+}
+
+test "one address spelled three ways is one client" {
+    var key: [17]u8 = undefined;
+    var other: [17]u8 = undefined;
+
+    // The plain form is what the socket gives. The other two are what an
+    // `X-Forwarded-For` can carry, and each used to be an allowance of its
+    // own — so a client had as many allowances as it had spellings.
+    const plain = keyOf(&key, "10.0.0.1", 64);
+
+    // A leading zero is decimal here, not octal and not a separate client.
+    try testing.expectEqualSlices(u8, plain, keyOf(&other, "010.0.0.1", 64));
+
+    // The v6 spelling of a v4 address is the v4 address.
+    try testing.expectEqualSlices(u8, plain, keyOf(&other, "::ffff:10.0.0.1", 64));
+    try testing.expectEqualSlices(u8, plain, keyOf(&other, "[::FFFF:10.0.0.1]:443", 64));
+
+    // What is not an address is still not one. `1.2.3.4.5` and `256.0.0.1`
+    // both fall back to text, which keeps them apart rather than folding them
+    // onto something they are not.
+    try testing.expectEqualStrings("1.2.3.4.5", keyOf(&key, "1.2.3.4.5", 64));
+    try testing.expectEqualStrings("256.0.0.1", keyOf(&key, "256.0.0.1", 64));
+    try testing.expectEqualStrings("10.0.0.", keyOf(&key, "10.0.0.", 64));
+}
+
+test "contention on a slot that is already yours does not let the request through" {
+    const o: Options = .{ .per_window = 2, .window_s = 60 };
+    const S = Slot(o);
+    const window_ns: u64 = 60 * std.time.ns_per_s;
+
+    var bucket: [ways]std.atomic.Value(u64) = @splat(.init(0));
+    const mine = fingerprintOf(S, 0x5555_0000_0000_0000);
+
+    // Spend the allowance, so the slot is unambiguously this address's.
+    try testing.expect(charge(S, o, window_ns, &bucket, mine, 4, 0));
+    try testing.expect(charge(S, o, window_ns, &bucket, mine, 4, 0));
+    try testing.expect(!charge(S, o, window_ns, &bucket, mine, 4, 0));
+
+    // This is what the four-failed-CAS path used to do, and it is the whole
+    // hole: it walked past a full allowance rather than refusing. There is no
+    // way to lose a compare-and-swap deterministically in a single-threaded
+    // test, so what is asserted here is the decision the loop makes when it
+    // runs out of tries — `ours` is set the moment a matching way is seen, and
+    // a matched slot refuses.
+    //
+    // A synchronised wave from one address is what reached it: every request
+    // that lost four rounds was admitted uncounted, so the ceiling was the
+    // server's concurrency rather than `per_window`.
+    try testing.expect(!charge(S, o, window_ns, &bucket, mine, 4, 0));
+
+    // The other half of the same decision: an address with no slot yet is
+    // still let through, because refusing there would refuse a stranger who
+    // has made no requests at all.
+    const stranger = fingerprintOf(S, 0x9999_0000_0000_0000);
+    try testing.expect(charge(S, o, window_ns, &bucket, stranger, 4, 0));
+}
+
+test "the table's mapping is not the same in two processes" {
+    // Not a property of one run, so what is checked here is the mechanism: a
+    // seed that is set once, is never zero, and does not move afterwards.
+    // Without it the index is computable offline, and finding a key in a
+    // chosen victim's bucket costs about 4,096 tries — one request then
+    // resets that victim's count, over and over.
+    const first = hashSeed();
+    try testing.expect(first != 0);
+    try testing.expectEqual(first, hashSeed());
+    try testing.expectEqual(first, slowSeed());
 }
 
 fn allowanceOk(_: *Ctx) anyerror!void {}

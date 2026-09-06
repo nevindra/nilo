@@ -112,10 +112,12 @@ The allowance row is a zero of the third kind on this table, and the only one
 checked by *removing* the feature: `pub const allowance` was taken out of
 `http/http.zig` and both examples rebuilt byte-for-byte identical, because Zig
 never analyses a `pub` namespace nothing references. An application that does
-call it pays **+5,712 bytes** on `hello` and **+5,584** on `rest`, and
-`bench/main.zig` a third figure 48 bytes from the first — three programs
+call it pays **+7,200 bytes** on `hello` and **+7,088** on `rest` — two programs
 agreeing that closely is what says the number is the feature rather than a
-generic it woke up. None of those figures include the table: 131,072 bytes of
+generic it woke up. Both figures were **+1,500 lower** before a review of the
+shipped design found three defects; parsing IPv4 to bytes, tagging the address
+family and seeding the hash per process is what the difference bought. Neither
+figure includes the table: 131,072 bytes of
 `.bss` is `NOBITS` in the ELF, so it is 128 KiB of RSS and nothing on disk.
 Those rows were taken on a different machine from the rest of this table (a
 2-core Xeon rather than the Ryzen), which does not matter for a delta measured

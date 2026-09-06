@@ -1292,12 +1292,22 @@ each:
 
 | | without | with | delta |
 |---|---|---|---|
-| `example-hello` | 902,928 | 908,640 | **+5,712 B** |
-| `example-rest` | 1,043,424 | 1,049,008 | **+5,584 B** |
-| `bench/main.zig` | 910,000 | 915,760 | **+5,760 B** |
+| `example-hello` | 902,928 | 910,128 | **+7,200 B** |
+| `example-rest` | 1,043,424 | 1,050,512 | **+7,088 B** |
 
-Three programs agreeing within 128 bytes says the figure is the feature rather
+Two programs agreeing within 112 bytes says the figure is the feature rather
 than whatever generic it woke up, which is the mistake ADR 0018 opens with.
+
+**Both rows moved after the first measurement, and the movement is the useful
+part.** The same three binaries first came out at +5,712, +5,584 and +5,760
+(`bench/main.zig` was the third and was not retaken). Then a review of the
+shipped design found three defects, and fixing them cost about **1,500 bytes**:
+an IPv4 parser and an IPv4-mapped-IPv6 check where there had been a slice of
+text, a tag byte per address family, and a per-process hash seed. That is 0.16%
+of `hello` for the difference between a limiter whose table can be aimed at
+offline and one whose cannot — recorded here rather than folded into the total,
+because a number that moves is worth more than a number that was right first
+time.
 
 **The table is not in that number**, and that is worth saying plainly: 131,072
 bytes of `.bss` is `NOBITS` in the ELF, so it costs nothing on disk and 128 KiB
