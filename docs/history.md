@@ -1704,3 +1704,22 @@ not active** — no existing site needs changing, and the one that needs to know
 is the next one written. A hazard nobody is standing on is a paragraph; a
 hazard fifteen files are standing on is a change to two modules, and picking
 between them by reasoning would have been the expensive kind of wrong.
+
+## The paragraph was believed instead of the file it describes
+
+Two sessions gated one merge by running seven module steps by hand, because
+`CLAUDE.md` lists each of them as its own command and never said that `test-all`
+depends on all of them. It does: `build.zig:1989` and `:2018`. One grep of the
+file the paragraph describes would have settled it, and neither reading of the
+paragraph produced one — the second even arrived with a mechanism attached
+("the module is behind `-Dsql`"), which is what makes a reader stop checking.
+
+**A mechanism asserted is worse than a conclusion asserted**, for the reason
+[ADR 0063](./adr/0063-a-handlers-stack-is-per-connection.md)'s last section
+gives: it reads as the work of checking, already done.
+
+This is the same shape as `connect_on_init`, documented in three files and never
+implemented ([ADR 0062](./adr/0062-a-pool-that-dialled-itself-whatever-it-was-told.md)),
+and as five `<!-- compiles -->` marks on pages no build step opened. Each time,
+**the documentation was believed and the thing it documents was not opened.**
+The fix here was to the paragraph, not the build.
