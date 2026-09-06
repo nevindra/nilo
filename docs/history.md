@@ -1616,3 +1616,90 @@ that today", which is a sentence about a union's arms rather than about a slow
 client. That one planned against an unchecked premise, this one against an
 over-specified goal; the rule both of them fell to is in ADR 0063's last
 section, and that is the canonical copy from here.
+## The whole write half of a dialect had never been compiled
+
+Five gaps in `nilo_sql` closed at once, and three of them were one gap wearing
+three faces: **a method on a generic struct is analysed only where it is
+called, so `DbOf(sqlite.Wire, …)`'s write path had never been compiled by
+anything on `zig build test`.** `sql.Sqlite`'s only caller was `bench/sql.zig`,
+which is not on `test`; `sql/live.zig` is Postgres only; `sql/sqlite.zig`
+drives the Wire and not `db.zig`. So `.in`, a `Json(T)` column and an enum
+column were each a `@compileError` four frames inside zqlite, and `.in` was
+documented as working in three places
+([ADR 0119](./adr/0119-the-sqlite-write-path-is-compiled.md)).
+
+**A generic that is never instantiated is not tested, it is not even parsed for
+meaning — and a green suite says nothing about it.** `touchEverything` exists
+in this repository precisely because somebody knew that; it had simply never
+been pointed at the second Wire. The lesson is narrower than "write more
+tests": when a type is generic over a seam, the *number of seams the tests
+instantiate* is the coverage figure that matters, and it is not the one any
+tool reports.
+
+**Two of the five were hidden by the fixture that was supposed to prove them.**
+The suite's SQLite schema-check test declared `id INTEGER PRIMARY KEY
+AUTOINCREMENT NOT NULL`; the redundant `NOT NULL` walked around the fact that
+nilo read a rowid alias as nullable and refused to start on the table every
+SQLite tutorial writes
+([ADR 0115](./adr/0115-an-integer-primary-key-is-the-rowid.md)). And
+`streamAndClose` closed a result set twice — the exact provocation — while
+asserting only on a Debug-only counter, so in ReleaseSafe it ran the buggy path
+and checked nothing
+([ADR 0117](./adr/0117-a-guard-against-double-release-is-not-a-debug-trap.md)).
+**A fixture written in a spelling nobody uses tests a path nobody takes**, and
+**an assertion behind `if (traps_enabled)` is not an assertion in the mode
+people deploy in.**
+
+**A stuck build has a third cause, and it looks like the two already written
+down.** CLAUDE.md says to take a stuck build's CPU time before believing it is
+slow, because `etime` high with `cputime` near zero is a deadlock. It happened
+here — a test hung — and the first two hypotheses were both wrong before the
+right one: the box had three `zig build test-all` runs on two cores, and
+`2>&1 | tail` buffers everything until the pipe closes, so a live run and a
+dead one both show an empty output file. Three readings all pointed at an OOM
+kill that never happened. **`ps --ppid <pid>` is the reading that settles it**:
+the parent is in `do_wait` either way, and only the child's own `cputime` says
+whether anything is running. Redirect to a file rather than piping to `tail`,
+or the log is invisible until the end.
+
+**And there is a fourth signature, which is the dangerous one because it does
+not look like a failure at all: a green run about a tree that no longer
+exists.** A build reads each file when its step starts, so editing while one is
+in flight produces a pass that validated bytes nobody has. It happened twice
+here on a box where a suite takes forty minutes — the edit window is wide
+enough to walk through without noticing — and the second time the reported-green
+run was thrown away and re-run on the frozen tree rather than believed. So the
+three readings that all look like "the build is being slow" are now four:
+
+| what you see | what it is |
+|---|---|
+| `etime` high, `cputime` near zero | a deadlock |
+| both high, `free` near zero | an OOM kill |
+| empty output file | `2>&1 \| tail` holding the log until the pipe closes |
+| green | possibly about a tree you have since edited |
+
+**Stop editing, then run, then commit** — in that order, and the discipline is
+worth more the slower the box is.
+
+The hang itself was real and was in the new test rather than in the code under
+it. **`std.Io.Threaded`'s default `async_limit` is one less than the number of
+logical cores, and past that limit `io.async` runs the task inline on the
+caller's thread** — documented behaviour, not a fallback for an error. On a
+two-core box that is one, so a test wanting two parked fibers deadlocks in a
+way that looks exactly like the bug it was written to catch
+([ADR 0116](./adr/0116-a-queue-per-question-not-one-condition-for-two.md)).
+
+**That claim was then checked rather than believed, and the checking is the
+part worth copying.** A reader pointed out that fifteen files construct a
+`std.Io.Threaded` with default options and the suite is green, so either the
+hazard was latent or the reading was wrong — two findings of very different
+size. Ten lines of `zig test` settled the first half: `cpuCount = 2`,
+`async_limit = 1`, and a second outstanding `io.async` reporting **the main
+thread's** id. Counting the call sites settled the second: every `io.async`
+here is one per test body, sixteen in `fetch/live.zig` and fourteen in
+`s3/canned.zig`, all of them "stand a canned server up, then be the client",
+and the files named as most at risk turned out to have none at all. **Latent,
+not active** — no existing site needs changing, and the one that needs to know
+is the next one written. A hazard nobody is standing on is a paragraph; a
+hazard fifteen files are standing on is a change to two modules, and picking
+between them by reasoning would have been the expensive kind of wrong.

@@ -69,7 +69,7 @@ other module's.
 | [`nilo_pw`](#nilo_pw-hashing-a-password) | needs no loop | a Cost floor that weighs the wrong half, and a patch `std` should have |
 | [`nilo_fetch`](#nilo_fetch-calling-somebody-elses-api) | borrows the loop | 4,139 bytes of stack per idle connection, and nothing measured through TLS |
 | [`nilo_http`](#nilo_http-the-server) | owns the loop | an allowance that can only be keyed on the address, nothing that reads a `Forwarded` header, and a long tail |
-| [`nilo_sql`](#nilo_sql-postgres-and-sqlite) | borrows the loop | a schema check that refuses the most ordinary SQLite table there is, four things the SQLite half cannot do that three documents say it can, and where migrations live |
+| [`nilo_sql`](#nilo_sql-postgres-and-sqlite) | borrows the loop | a `Timestamp` the two halves of SQLite disagree about, a pool option dropped without a word, and where migrations live |
 | [`nilo_s3`](#nilo_s3-object-storage) | borrows the loop | nothing measured through TLS, and no `LIST`, `COPY` or multipart |
 
 Everything that is about the repository rather than one module stays whole at
@@ -1131,137 +1131,7 @@ half and printing them puts credentials and personal data in a log, which is
 the thing [ADR 0025](./adr/0025-every-failure-answers-with-the-same-json-body.md)
 is careful about one layer up.
 
-**4. Compile every `Db` call against the SQLite Wire.** `sql.Sqlite` has one
-caller in the repository and it is `bench/sql.zig`, which calls `db.find` on a
-Row of `i64`, `Str` and `i32` and nothing else — and which is not on
-`zig build test`. `sql/live.zig` is Postgres only, and `sql/sqlite.zig` drives
-`run`, `exec` and `begin` on the Wire rather than through `db.zig`. A method on
-a generic struct is analysed only where it is called, so the SQLite arms of
-`WireWrite`, `forWire` and `Values` have never been compiled at all.
-
-That is not one gap among the several below, it is the reason for four of them:
-`.in`, a `Json` column, an enum column and a `Timestamp` are each a write path
-nothing has ever asked the compiler about. `db.zig`'s own `touchEverything` is
-the shape — one handler naming every call — over
-`sql.Sqlite(.{ .threading = .in_fiber })` on a shared in-memory database, which
-`sql/sqlite.zig`'s tests already know how to open.
-
-**Waiting on: ready.** The four below are what it finds on the first run, and
-nothing says they are the last of them.
-
 ### Known gaps
-
-**`id INTEGER PRIMARY KEY` fails the schema check on SQLite, so a correct table
-stops the server starting.** SQLite reports `notnull = 0` in `pragma_table_info`
-for an `INTEGER PRIMARY KEY`, because that column is an alias for the rowid
-rather than a constraint — and `dialect.SQLite.introspect` reads anything that is
-not `notnull = 1` as nullable. `schema.compare` then reports `unexpected_null`
-against a Row whose `id` is `i64`, and `schema_mismatch_is_fatal` defaults to
-**true**, so `nilo_start` returns `error.SchemaMismatch`. Run against the two
-spellings side by side:
-
-```
-INTEGER PRIMARY KEY            -> 1 problem(s)
-INTEGER PRIMARY KEY NOT NULL   -> 0 problem(s)
-nilo_sql: nilo: Event.id is not optional, but events.id may be null
-```
-
-The first spelling is what every SQLite tutorial, every migration tool and the
-SQLite documentation itself writes. `dialect.zig` twice calls a check that fails
-on a correct schema "the fastest way to teach somebody to switch it off", and
-this is one. It survived because `sql/db.zig`'s own SQLite fixture is
-`id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL` — the redundant `NOT NULL` walks
-around the bug, so the suite's one SQLite schema-check test passes.
-
-A non-integer primary key is a different case and the current answer is right
-there: SQLite really does allow NULLs in a `TEXT PRIMARY KEY`, which is its own
-long-standing quirk.
-
-**Waiting on: ready.** `pragma_table_info` carries a `pk` column; a column with
-`pk = 1` whose declared type has INTEGER affinity, on a table that is not
-`WITHOUT ROWID`, is the rowid and cannot be null.
-
-**`.in` and `.not_in` do not compile on SQLite, and three places say they do.**
-`dialect.SQLite.list_form` is `.json_each` and `where.zig` writes
-`"id" IN (SELECT value FROM json_each(?1))` for it — and **nothing anywhere
-turns the list into the JSON text that statement reads.** `WireWrite` in
-`sql/db.zig` maps a list column to a native Zig slice whatever the Dialect is;
-it branches on `D.uuid_form` and on nothing else. zqlite binds a slice whose
-element is not `u8` by refusing to compile:
-
-```
-zig-pkg/zqlite-…/src/conn.zig:430:9: error: cannot bind value of type []const i64
-referenced by: _bind__anon → bind__anon → … → db.select
-```
-
-That is a compile error four frames inside somebody else's driver, on the
-operator every real schema uses, and it is the failure this module refuses
-everywhere else. The claim that it works is in `sql/dialect.zig`'s header, in
-[ADR 0061](./adr/0061-the-second-dialect-is-the-test-of-the-seam.md), and in the
-five-row table of *what SQLite will not do* in
-[the guide](./guide/sql.md#what-sqlite-will-not-do), which does not list it.
-It survived because the only tests are over the SQL *text*
-(`sql/statement.zig`), `sql/live.zig` has no SQLite arm at all, and no example
-or benchmark binds one.
-
-Two ways out, and they are different sizes. Write the JSON — one branch in
-`forWire` keyed on the Dialect, into the request arena, at one allocation per
-`.in` on SQLite. Or make it a Refusal and correct the three documents, which is
-what `.lock`, `insertMany` and `tx.deadline` already do.
-
-**Waiting on: ready**, either way. What is not acceptable is the third state it
-is in now, which is a promise with a driver's compile error behind it.
-
-**A `Json` column and an enum column cannot be written on SQLite either, for the
-same reason `.in` cannot.** `WireWrite` in `sql/db.zig` hands the driver the
-`Json(T)` wrapper struct and the Zig enum itself, and zqlite's `_bind` takes an
-integer, a float, a bool, a `[]const u8` and its own `Blob` — everything else is
-`cannot bind value of type …` from inside the driver. Both columns *read*
-correctly, because `WireRead` maps them to `[]const u8` and the text path works,
-so a Row carrying one compiles for `db.select` and stops compiling at
-`db.insert`. `acceptsSqlite` answers `TEXT` for both, so the startup check says
-they are fine.
-
-They are the rest of the hole `.in` is in: the SQLite write path has only ever
-been compiled for scalars and text, which is what Next 4 is for.
-
-**Waiting on: ready.** A branch keyed on the Dialect — the document written into
-the request arena, the tag taken with `@tagName` — which is the mirror of what
-`uuid_form` already does for a `Uuid`
-([ADR 0078](./adr/0078-a-uuid-is-whatever-the-database-stores.md)).
-
-**The SQLite pool wakes one waiter for two different questions.**
-`sqlite.Wire.release` ends with `free.signal(io)`, and `takeWriter` and
-`takeReader` both wait on that one `std.Io.Condition` while testing different
-predicates. So a reader coming back can wake the fiber that is waiting for the
-*writer*, which re-tests `conns[0].busy`, finds it still true and waits again —
-and the fiber that wanted a reader is never woken at all, though the connection
-it asked for is sitting free. It sleeps until some later release happens to pick
-it, which under a load that both reads and writes is a request that stalls with
-nothing in the log and nothing holding it.
-
-This is separate from the missing `timeout_ms` below: a deadline would turn the
-stall into a `TimedOut` rather than stop it happening.
-
-**Waiting on: ready.** `broadcast` instead of `signal` is one word; a condition
-per predicate is two more fields and is the version that does not wake
-everybody to send most of them back to sleep.
-
-**A NULL in a column the Row says is not optional is an error on Postgres and a
-zero on SQLite.** pg.zig's safe row refuses it and `postgres.read` turns that
-into `QueryFailed`. `sqlite.read` tests `columnType(col) == .null` only inside
-the branch it takes for an optional field, so a non-optional `i64` reads `0` and
-a non-optional text reads `""` — zqlite's `text` answers the empty string
-whenever `sqlite3_column_bytes` is zero, which is what a NULL gives it. The
-startup check catches the case where the table declares the column nullable, and
-cannot catch a view, which answers `UNKNOWN` and is skipped by design
-([ADR 0056](./adr/0056-a-view-is-a-table-that-cannot-say-what-is-not-null.md)).
-
-A wrong answer that looks like a right one is what the same function already
-refuses for an integer too wide for its field, in a test that says so.
-
-**Waiting on: ready.** The null test moves out of the optional branch and
-answers `QueryFailed` for a field that cannot hold one.
 
 **A `Timestamp` is written to SQLite as an integer and checked against a TEXT
 column.** `WireWrite` answers `i64` whatever the Dialect is, and `acceptsSqlite`
@@ -1279,25 +1149,6 @@ it; this is the second row that table needs.
 **Waiting on: a design** — a `time_form` beside `uuid_form`, or an
 `acceptsSqlite` that answers `INTEGER` for the one declared column type this
 module does not send as text.
-
-**A `Streamed` closed twice releases its connection twice outside Debug.**
-`Streamed.close` in `sql/db.zig` guards re-entry inside `if (traps_enabled)`,
-and `traps_enabled` is `builtin.mode == .Debug` — so in ReleaseSafe the guard
-is compiled out and the `w.drain(&self.rows)` under it runs both times. On the
-Postgres Wire that is `result.deinit()` twice and `conn.release()` twice, which
-hands the pool a connection it is already holding. The field's own doc names
-the case ("`close` being called twice through two copies would take the count
-below zero") and only counts it.
-
-`rows.close()` early plus the `defer rows.close()` the doc comment recommends
-on the line above is exactly two calls, so this is reachable from the shape the
-API teaches. The SQLite Wire's own `Rows.closed` is an unconditional `bool` and
-does not have it, which is what makes this look like an oversight rather than a
-trade.
-
-**Waiting on: ready.** The `closed` flag becomes a plain `bool` and the guard
-moves outside the `if`; the *counter* stays Debug-only, which is the part that
-was meant to be.
 
 **`db.raw` reads by position and nothing checks how many columns came back.**
 `fill` walks the Row's fields and asks the Wire for column `i` of each, and
@@ -2057,6 +1908,51 @@ against Zig 0.16 rather than believed. `docs/history.md` has the run.
 
 **Waiting on: a design** that makes it a rule rather than two comments, or an
 upstream way to read a bound port.
+
+**A `<!-- compiles -->` on a page nobody added to a list is silent, and it looks
+exactly like one that is checked.** `zig build snippets` does not scan the
+documentation; it reads a `pages` list in `build.zig`. A block marked on a page
+that is not in that list is never compiled and never complained about, so the
+mark means "somebody believed this" rather than "a build step read this" — and
+the two are indistinguishable from the page.
+
+That is this repository's own stated failure, a rule nobody runs wearing the
+costume of a rule that does. **What makes it a class rather than an oversight is
+that it propagates by being read.** The way to find out how a block is marked
+here is to open a neighbouring guide page and copy what is above the fence — and
+a dead mark is copied exactly as readily as a live one, because from the page
+they are the same three words. So the defect reproduces through the ordinary,
+correct habit of matching the surrounding code, and "somebody forgot to join the
+list" understates it: more care does not help a reader who cannot tell the two
+apart.
+
+What would end it is **the step finding its pages by looking for marks** rather
+than reading a list. Then a mark cannot be written anywhere the step will not
+read it, and imitation stops being able to carry a dead one. The cost is a
+directory walk at build time, on a step that already caches.
+
+*The instance, which is separable from the class. **Delete this paragraph when
+`pages` in `build.zig` names every page below and `zig build snippets` is
+green** — that condition is checkable against the tree in front of you, which
+is the point: a paragraph whose closing condition is somebody's word is the
+same defect as a mark whose guarantee is somebody's belief.* `pages` holds four
+entries — `README.md`, `docs/reference.md`, `docs/guide/sessions.md`,
+`docs/guide/config.md` — against twenty-four pages carrying 206 Zig blocks.
+Three marks are live but unread: `docs/guide/metrics.md:8`, `:129` and
+`docs/guide/responses.md:186`. Most other blocks are merely unmarked, which is
+honest, since a mark is opt-in per block and an unmarked one claims nothing.
+
+`docs/guide/sql.md` is the page this matters most for and the one furthest from
+fixed: 48 Zig blocks, more than the README and the reference together, and not
+one of them marked.
+
+**Waiting on: ready** for the instance, which is an afternoon rather than a
+line — adding a page to `pages` compiles nothing until a block on it is marked,
+and the marking is the work.
+[ADR 0083](./adr/0083-the-guide-is-the-source-of-its-own-snippets.md) records
+that doing it to one five-line example found seven mistakes. **The class is
+`Waiting on: a design`**, and it is the half worth keeping when the instance
+closes.
 
 **A fail function in spawned work is safe only because of where a threadlocal
 gets written.** `bulkhead.slot()` falls back to a threadlocal when a fiber has

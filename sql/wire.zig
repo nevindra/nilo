@@ -304,6 +304,11 @@ pub const Fake = struct {
     marked: usize = 0,
     undone: usize = 0,
     kept: usize = 0,
+    /// How many times a result set was given back. **Counted rather than
+    /// flagged**, because `Rows.drained` cannot tell one drain from two and
+    /// the second one is the whole subject of ADR 0117: on a real Wire it is
+    /// a pool connection released twice.
+    drains: usize = 0,
 
     pub const Rows = struct {
         left: usize = 0,
@@ -384,7 +389,7 @@ pub const Fake = struct {
     }
 
     pub fn drain(self: *Fake, rows: *Rows) void {
-        _ = self;
+        self.drains += 1;
         rows.left = 0;
         rows.drained = true;
     }

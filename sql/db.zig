@@ -1128,10 +1128,31 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 db: *Self,
                 w: *W,
                 rows: W.Rows,
-                /// Debug only: whether `close` has run. A `Streamed` is a
-                /// value the handler holds, so `close` being called twice
-                /// through two copies would take the count below zero.
-                closed: if (traps_enabled) bool else void = if (traps_enabled) false else {},
+                /// Whether `close` has run.
+                ///
+                /// **A plain `bool` rather than a Debug-only one, and that is
+                /// the fix rather than a tidying** (ADR 0117). This used to be
+                /// `if (traps_enabled) bool else void`, so in ReleaseSafe the
+                /// guard under it compiled away and the whole of `close` ran
+                /// twice: on the Postgres Wire that is `result.deinit()` twice
+                /// and `conn.release()` twice, which hands the pool a
+                /// connection it is already holding.
+                ///
+                /// Reachable from the shape this API teaches. `rows.close()`
+                /// early plus the `defer rows.close()` the doc comment on
+                /// `stream` recommends is exactly two calls, and a `Streamed`
+                /// is a value the handler holds, so two copies close twice as
+                /// readily as one does. The SQLite Wire's own `Rows.closed` is
+                /// an unconditional `bool` and never had it, which is what
+                /// made this an oversight rather than a trade.
+                ///
+                /// The **counter** stays Debug-only, which is the part that
+                /// was meant to be: `open_streams` watches a result set nobody
+                /// closed, and paying for it in a release build would be a
+                /// trap running where nothing reads it. What this costs
+                /// instead is one byte on the stack of a handler that streams,
+                /// and nothing at all to one that does not.
+                closed: bool = false,
 
                 const Rows = @This();
 
@@ -1150,11 +1171,9 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 /// Give the connection back. Wanted on every path out,
                 /// including the ones that stopped reading early.
                 pub fn close(self: *Rows) void {
-                    if (traps_enabled) {
-                        if (self.closed) return;
-                        self.closed = true;
-                        self.db.hold(&self.db.open_streams, .Sub);
-                    }
+                    if (self.closed) return;
+                    self.closed = true;
+                    if (traps_enabled) self.db.hold(&self.db.open_streams, .Sub);
                     self.w.drain(&self.rows);
                 }
             };
@@ -1473,7 +1492,16 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         ) !Values(D, Row, @TypeOf(options), stmt) {
             var out: Values(D, Row, @TypeOf(options), stmt) = undefined;
             inline for (stmt.paths, 0..) |path, i| {
-                out[i] = try forWire(@TypeOf(out[i]), where_mod.valueAt(options, path), c);
+                const param = comptime stmt.params[i];
+                const value = where_mod.valueAt(options, path);
+                // The one parameter that is not one value: a list the Dialect
+                // wants as JSON text rather than as an array (ADR 0119).
+                if (comptime param.list and D.list_form == .json_each) {
+                    const Item = comptime WireWrite(D, row_mod.ColumnType(Row, param.column));
+                    out[i] = try jsonList(Item, value, c);
+                } else {
+                    out[i] = try forWire(@TypeOf(out[i]), value, c);
+                }
             }
             return out;
         }
@@ -1653,7 +1681,14 @@ fn Values(
             // of them. `distinct_from` is the mirror: one value, which may be
             // null even on a column that may not, because the comparison is
             // null-safe and the statement says so either way (`where.zig`).
-            fields[i] = if (param.list) []const F else if (param.nullable) Maybe(F) else F;
+            //
+            // **Unless the Dialect reads its list out of JSON**, which is what
+            // SQLite does: `json_each(?1)` takes one text parameter holding
+            // the whole array, so the parameter is bytes rather than a list
+            // (ADR 0119). `jsonList` is what fills it.
+            fields[i] = if (param.list)
+                (if (D.list_form == .json_each) []const u8 else []const F)
+            else if (param.nullable) Maybe(F) else F;
         }
         const frozen = fields;
         break :blk std.meta.Tuple(&frozen);
@@ -1901,6 +1936,24 @@ fn WireWrite(comptime D: type, comptime F: type) type {
         // asked for here. `.tags = &.{ "urgent", "billing" }` is the shape
         // everybody writes, and it coerces to this and not to `[]const Str`.
         if (types.listElement(F) != null) return WireList(F);
+        // **A document and a tag, on a Dialect whose driver takes neither**
+        // (ADR 0119). `WireRead` has always answered `[]const u8` for both, so
+        // a Row carrying one read correctly and stopped compiling at the first
+        // write — inside zqlite, four frames down, about a Zig type it has
+        // never heard of. Which way each goes is the Dialect's to say, the
+        // same arrangement `uuid_form` already makes.
+        if (D.json_form == .text) {
+            if (types.jsonPayload(F) != null) return []const u8;
+            if (@typeInfo(F) == .optional and types.jsonPayload(@typeInfo(F).optional.child) != null) {
+                return ?[]const u8;
+            }
+        }
+        if (D.enum_form == .text) {
+            if (@typeInfo(F) == .@"enum") return []const u8;
+            if (@typeInfo(F) == .optional and @typeInfo(@typeInfo(F).optional.child) == .@"enum") {
+                return ?[]const u8;
+            }
+        }
         return F;
     }
 }
@@ -1942,7 +1995,54 @@ fn forWire(comptime To: type, value: anytype, c: anytype) !To {
         }
         return V.nilo_write(value, c.arena());
     }
+    // A document and a tag, when the Dialect asked for them as text. Which of
+    // the two `To` is was `WireWrite`'s decision, read back off the type here
+    // — the same arrangement `Uuid` above makes, and the reason the Dialect is
+    // not threaded into this function (ADR 0119).
+    //
+    // Keyed on `To` rather than on the Dialect, these also fire in one case
+    // that has nothing to do with SQLite: a `Json(T)` or an enum *value*
+    // written into a column whose own type is text, on either Wire. That used
+    // to be a raw Zig type error from inside this function and is now the
+    // document or the tag, which is the only thing it could reasonably mean.
+    if (comptime types.jsonPayload(V) != null) {
+        if (comptime To == []const u8) return jsonBytes(value, c);
+    }
+    if (comptime @typeInfo(V) == .optional and types.jsonPayload(@typeInfo(V).optional.child) != null) {
+        if (comptime To == ?[]const u8) {
+            const held = value orelse return null;
+            return try jsonBytes(held, c);
+        }
+    }
+    // `@tagName` rather than a copy: the name is a comptime constant in the
+    // binary, so a tag costs no allocation on either Wire.
+    if (comptime @typeInfo(V) == .@"enum") {
+        if (comptime To == []const u8) return @tagName(value);
+    }
+    if (comptime @typeInfo(V) == .optional and @typeInfo(@typeInfo(V).optional.child) == .@"enum") {
+        if (comptime To == ?[]const u8) return if (value) |tag| @tagName(tag) else null;
+    }
     return value;
+}
+
+/// The list behind an `.in` or a `.not_in`, as the JSON array text
+/// `json_each` reads (`dialect.ListForm.json_each`).
+///
+/// **This is the one allocation a statement makes on SQLite, and it is per
+/// `.in` rather than per row.** `where.zig` has written
+/// `"id" IN (SELECT value FROM json_each(?1))` since the second Dialect
+/// landed and nothing anywhere turned the list into the text that statement
+/// reads, so `.in` was a compile error from inside zqlite on the operator
+/// every real schema uses (ADR 0119). Three documents said it worked.
+///
+/// The elements go through `forWire` first, so a list of `Str`, of `Uuid` or
+/// of tags is written as what its column holds rather than as whatever Zig
+/// struct the caller had. `F` is the element's *wire* type, which is what
+/// makes that true — `Values` works it out from the Dialect.
+fn jsonList(comptime F: type, values: anytype, c: anytype) ![]const u8 {
+    const converted = c.arena().alloc(F, values.len) catch return error.QueryFailed;
+    for (values, converted) |item, *slot| slot.* = try forWire(F, item, c);
+    return std.json.Stringify.valueAlloc(c.arena(), converted, .{}) catch error.QueryFailed;
 }
 
 /// A connection URL with the password taken out, for the one log line that
@@ -2428,6 +2528,9 @@ test "what a transaction is begun with travels down to the wire" {
 /// second `close` is the subject: a `Streamed` is a value the handler holds,
 /// so nothing stops one being closed twice, and a counter that went down
 /// twice would underflow and take the process with it.
+///
+/// It is also the shape this API teaches — an early `close` on a path that
+/// stops reading, plus the `defer rows.close()` on the line above it.
 fn streamAndClose(db: *FakeDb, c: *nilo.Ctx) !void {
     var rows = try db.stream(Person, c, .{});
     if (traps_enabled) try testing.expectEqual(@as(usize, 1), db.open_streams);
@@ -2435,7 +2538,7 @@ fn streamAndClose(db: *FakeDb, c: *nilo.Ctx) !void {
     rows.close();
 }
 
-test "a result set that is closed is not still counted as held" {
+test "a result set closed twice is drained once, in both optimize modes" {
     var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
     defer db.deinit();
     db.wire = .{ .answers = 2 };
@@ -2449,6 +2552,13 @@ test "a result set that is closed is not still counted as held" {
     defer client.deinit();
     const answer = try client.get(&app, "/stream");
     try testing.expectEqual(@as(u16, 200), answer.status);
+
+    // **The assertion that is not behind `traps_enabled`, and that is the
+    // point** (ADR 0117). The guard used to be Debug-only, so this handler
+    // drained twice in the mode people deploy in — on the Postgres Wire,
+    // `result.deinit()` twice and `conn.release()` twice, handing the pool a
+    // connection it was already holding.
+    try testing.expectEqual(@as(usize, 1), db.wire.?.drains);
 
     // Zero rather than "not one": `deinit` panics on anything else, and the
     // trap exists because an abandoned result set holds a pool connection
@@ -3205,6 +3315,332 @@ test "the schema check agrees with the wire about a uuid column" {
 
     try testing.expectEqual(@as(usize, 0), try db.checkSchema(&.{SqliteAccount}));
 }
+
+// -- every call, against the SQLite Wire ----------------------------------
+//
+// `touchEverything` above is the same idea against the Fake, and it is not
+// enough: a method on a generic struct is analysed only where it is called,
+// so `DbOf(sqlite.Wire, dialect.SQLite, …)`'s methods had **never been
+// compiled at all**. `sql.Sqlite`'s only caller in the repository was
+// `bench/sql.zig`, which reads a Row of `i64`, `Str` and `i32` and is not on
+// `zig build test`; `sql/live.zig` is Postgres only; `sql/sqlite.zig` drives
+// the Wire rather than `db.zig`.
+//
+// That is not one gap, it is the reason for three of them, and this is what
+// found them (ADR 0119): a `Json` column, an enum column and `.in` were each
+// a write path nothing had ever asked the compiler about, and each was a
+// compile error four frames inside zqlite.
+
+/// A tag, which SQLite has no type for and stores as its name.
+const Grade = enum { bronze, silver, gold };
+
+/// The payload of a document column.
+const Prefs = struct { theme: []const u8, rows: u32 };
+
+/// Every column type that binds as something other than itself, in one Row.
+/// A list column is left out because SQLite has no array type at all, which
+/// `dialect.acceptsSqlite` and `sqlite.readList` both say before this does.
+const Everything = struct {
+    pub const nilo_table = .{ .name = "everything", .key = .id };
+
+    id: i64,
+    email: nilo.Str,
+    nickname: ?nilo.Str,
+    age: i32,
+    public: types.Uuid,
+    made_at: types.Timestamp,
+    prefs: types.Json(Prefs),
+    grade: Grade,
+};
+
+/// The same table without the document, because a streamed row cannot hold
+/// one — `assertStreamable` says so, and says why.
+const Streamable = struct {
+    pub const nilo_table = .{ .name = "everything", .key = .id };
+
+    id: i64,
+    email: nilo.Str,
+    grade: Grade,
+};
+
+/// `made_at` is `TEXT` rather than `INTEGER`, and that is a **standing gap
+/// rather than a choice**: `WireWrite` answers `i64` for a `Timestamp`
+/// whatever the Dialect, while `acceptsSqlite` routes every type carrying a
+/// declared column name to TEXT. So the column that matches what is bound
+/// fails the startup check and the column that passes it stores microseconds
+/// as digits, where `ORDER BY` sorts them as text. Declared the way that
+/// passes, so that this test is about the paths it is about; the disagreement
+/// is its own roadmap entry and wants a `time_form` beside `uuid_form`.
+const everything_ddl =
+    \\CREATE TABLE everything (
+    \\  id       INTEGER PRIMARY KEY,
+    \\  email    TEXT NOT NULL,
+    \\  nickname TEXT,
+    \\  age      INTEGER NOT NULL,
+    \\  public   TEXT NOT NULL,
+    \\  made_at  TEXT NOT NULL,
+    \\  prefs    TEXT NOT NULL,
+    \\  grade    TEXT NOT NULL
+    \\)
+;
+
+fn aRow(email: []const u8, age: i32, grade: Grade) struct {
+    email: []const u8,
+    nickname: ?[]const u8,
+    age: i32,
+    public: types.Uuid,
+    made_at: types.Timestamp,
+    prefs: types.Json(Prefs),
+    grade: Grade,
+} {
+    return .{
+        .email = email,
+        .nickname = null,
+        .age = age,
+        .public = types.Uuid.nil,
+        .made_at = .{ .micros = 1_700_000_000_000_000 },
+        .prefs = .{ .value = .{ .theme = "dark", .rows = 25 } },
+        .grade = grade,
+    };
+}
+
+test "every call this module offers is compiled against the SQLite wire too" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    var db: SqliteDb = .init(
+        testing.allocator,
+        "file:everything?mode=memory&cache=shared",
+        .{ .size = 2 },
+    );
+    defer db.deinit();
+    try db.nilo_start(threaded.io());
+
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    _ = try db.exec(&run, everything_ddl, .{});
+
+    // The startup check agrees with all eight columns, which is the half that
+    // was already true — every one of these reads correctly, and it is the
+    // write half that had never been compiled.
+    try testing.expectEqual(@as(usize, 0), try db.checkSchema(&.{Everything}));
+
+    const key = try types.Uuid.parse("01a01077-5ce8-7932-b42b-a05431a5c4c8");
+    var first = aRow("wati@example.dev", 30, .gold);
+    first.public = key;
+    const made = try db.insert(Everything, &run, first);
+    try testing.expectEqualStrings("wati@example.dev", made.email.view());
+    try testing.expectEqual(Grade.gold, made.grade);
+    try testing.expectEqual(@as(u32, 25), made.prefs.value.rows);
+    try testing.expectEqualSlices(u8, &key.bytes, &made.public.bytes);
+
+    _ = try db.insert(Everything, &run, aRow("budi@example.dev", 20, .silver));
+
+    // Every read, and each one names a column that binds as something else.
+    _ = try db.select(Everything, &run, .{ .where = .{ .age = .{ .gte = @as(i32, 18) } } });
+    _ = try db.one(Everything, &run, .{ .where = .{ .id = made.id } });
+    _ = try db.find(Everything, &run, made.id);
+    try testing.expectEqual(@as(usize, 2), try db.count(Everything, &run, .{}));
+    try testing.expect(try db.exists(Everything, &run, .{ .where = .{ .grade = Grade.gold } }));
+    _ = try db.raw(
+        Everything,
+        &run,
+        "SELECT id, email, nickname, age, public, made_at, prefs, grade FROM everything",
+        .{},
+    );
+
+    // Every write.
+    _ = try db.update(Everything, &run, .{
+        .set = .{ .age = @as(i32, 31), .grade = Grade.bronze, .prefs = types.Json(Prefs){
+            .value = .{ .theme = "light", .rows = 50 },
+        } },
+        .where = .{ .id = made.id },
+    });
+    const back = (try db.find(Everything, &run, made.id)).?;
+    try testing.expectEqual(Grade.bronze, back.grade);
+    try testing.expectEqualStrings("light", back.prefs.value.theme);
+
+    _ = try db.updateReturning(Everything, &run, .{
+        .set = .{ .age = @as(i32, 32) },
+        .where = .{ .id = made.id },
+    });
+    _ = try db.deleteReturning(Everything, &run, .{ .where = .{ .email = "nobody@example.dev" } });
+    _ = try db.delete(Everything, &run, .{ .where = .{ .email = "nobody@example.dev" } });
+
+    // A stream, on the Row that may be streamed.
+    var rows = try db.stream(Streamable, &run, .{ .order = .{ .id = .asc } });
+    defer rows.close();
+    var seen: usize = 0;
+    while (try rows.next()) |_| seen += 1;
+    try testing.expectEqual(@as(usize, 2), seen);
+
+    // And a transaction, with everything that is not a Refusal here. `.lock`,
+    // `insertMany`, `updateMany` and `tx.deadline` are all compile errors on
+    // this Dialect and stay that way — the seam refusing rather than lying
+    // (ADR 0061).
+    var tx = try db.begin(&run, .{});
+    errdefer tx.rollback();
+    _ = try tx.select(Everything, &run, .{ .where = .{ .id = made.id } });
+    _ = try tx.one(Everything, &run, .{ .where = .{ .id = made.id } });
+    _ = try tx.find(Everything, &run, made.id);
+    _ = try tx.count(Everything, &run, .{});
+    _ = try tx.exists(Everything, &run, .{});
+    _ = try tx.insert(Everything, &run, aRow("tx@example.dev", 40, .bronze));
+    _ = try tx.update(Everything, &run, .{
+        .set = .{ .grade = Grade.silver },
+        .where = .{ .id = made.id },
+    });
+    _ = try tx.updateReturning(Everything, &run, .{
+        .set = .{ .grade = Grade.gold },
+        .where = .{ .id = made.id },
+    });
+    _ = try tx.deleteReturning(Everything, &run, .{ .where = .{ .email = "tx@example.dev" } });
+    _ = try tx.delete(Everything, &run, .{ .where = .{ .email = "gone@example.dev" } });
+    _ = try tx.raw(Everything, &run, "SELECT id, email, nickname, age, public, made_at, prefs, grade FROM everything", .{});
+    _ = try tx.exec(&run, "DELETE FROM everything WHERE email = 'never@example.dev'", .{});
+
+    var kept = try tx.savepoint();
+    try kept.release();
+    var undone = try tx.savepoint();
+    undone.rollback();
+    try tx.commit();
+}
+
+test "an `in` on SQLite is the JSON array json_each reads, and it matches" {
+    // **`.in` and `.not_in` did not compile here at all**, and three documents
+    // said they did: `dialect.zig`'s header, ADR 0061, and the guide's table
+    // of what SQLite will not do, which does not list them. `where.zig` writes
+    // `"age" IN (SELECT value FROM json_each(?1))` for `list_form = .json_each`
+    // and nothing anywhere turned the list into the text that statement reads,
+    // so `WireWrite` handed zqlite a `[]const i64` and zqlite refused to
+    // compile (ADR 0119).
+    //
+    // It survived because the only tests were over the SQL *text*, `live.zig`
+    // has no SQLite arm, and no example or benchmark binds one.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    var db: SqliteDb = .init(
+        testing.allocator,
+        "file:in-list?mode=memory&cache=shared",
+        .{ .size = 2 },
+    );
+    defer db.deinit();
+    try db.nilo_start(threaded.io());
+
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    _ = try db.exec(&run, everything_ddl, .{});
+
+    const key = try types.Uuid.parse("01a01077-5ce8-7932-b42b-a05431a5c4c8");
+    var one = aRow("wati@example.dev", 30, .gold);
+    one.public = key;
+    _ = try db.insert(Everything, &run, one);
+    _ = try db.insert(Everything, &run, aRow("budi@example.dev", 20, .silver));
+    _ = try db.insert(Everything, &run, aRow("sari@example.dev", 44, .bronze));
+
+    // A number, which is the case the compile error was on.
+    const twenties = try db.select(Everything, &run, .{
+        .where = .{ .age = .{ .in = &[_]i32{ 20, 30 } } },
+    });
+    try testing.expectEqual(@as(usize, 2), twenties.len);
+
+    // And the mirror, so the JSON is not merely accepted but read: three rows
+    // less the two above.
+    const rest = try db.select(Everything, &run, .{
+        .where = .{ .age = .{ .not_in = &[_]i32{ 20, 30 } } },
+    });
+    try testing.expectEqual(@as(usize, 1), rest.len);
+    try testing.expectEqualStrings("sari@example.dev", rest[0].email.view());
+
+    // Text, where the elements are strings in the array rather than numbers.
+    const named = try db.select(Everything, &run, .{
+        .where = .{ .email = .{ .in = &[_][]const u8{ "wati@example.dev", "sari@example.dev" } } },
+    });
+    try testing.expectEqual(@as(usize, 2), named.len);
+
+    // A tag, which is written through `forWire` — so the array holds the
+    // names the column holds, not whatever a Zig enum would stringify as.
+    const top = try db.select(Everything, &run, .{
+        .where = .{ .grade = .{ .in = &[_]Grade{ .gold, .silver } } },
+    });
+    try testing.expectEqual(@as(usize, 2), top.len);
+
+    // And a `Uuid`, which is the thirty-six characters here rather than
+    // sixteen bytes — the element goes through the same conversion a scalar
+    // does, which is the whole reason `jsonList` converts before it writes.
+    const byKey = try db.select(Everything, &run, .{
+        .where = .{ .public = .{ .in = &[_]types.Uuid{key} } },
+    });
+    try testing.expectEqual(@as(usize, 1), byKey.len);
+    try testing.expectEqualStrings("wati@example.dev", byKey[0].email.view());
+
+    // An empty list matches nothing rather than failing, which is what
+    // `json_each('[]')` does and what `= ANY('{}')` does on Postgres.
+    const none = try db.select(Everything, &run, .{
+        .where = .{ .age = .{ .in = &[_]i32{} } },
+    });
+    try testing.expectEqual(@as(usize, 0), none.len);
+}
+
+test "an INTEGER PRIMARY KEY is the rowid, so a correct table no longer stops the server" {
+    // The spelling every SQLite tutorial, every migration tool and SQLite's
+    // own documentation writes. SQLite reports `notnull = 0` for it because
+    // the column is an *alias for the rowid* rather than a constraint, and
+    // reading that as nullable made `nilo_start` refuse to start over a table
+    // that is right (ADR 0115).
+    //
+    // This never showed up because `accounts_ddl` above says `INTEGER PRIMARY
+    // KEY AUTOINCREMENT NOT NULL` — the redundant `NOT NULL` walks around the
+    // bug, so the one SQLite schema-check test there was passed.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    var db: SqliteDb = .init(
+        testing.allocator,
+        "file:rowid-alias?mode=memory&cache=shared",
+        .{ .size = 1 },
+    );
+    defer db.deinit();
+    try db.nilo_start(threaded.io());
+
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+
+    _ = try db.exec(&run,
+        \\CREATE TABLE events (
+        \\  id    INTEGER PRIMARY KEY,
+        \\  label TEXT NOT NULL
+        \\)
+    , .{});
+    // The same column named by the tuple form rather than inline, which is
+    // still the alias.
+    _ = try db.exec(&run,
+        \\CREATE TABLE notes (
+        \\  id    INTEGER,
+        \\  label TEXT NOT NULL,
+        \\  PRIMARY KEY (id)
+        \\)
+    , .{});
+
+    const Event = struct {
+        pub const nilo_table = .{ .name = "events", .key = .id };
+        id: i64,
+        label: nilo.Str,
+    };
+    const Note = struct {
+        pub const nilo_table = .{ .name = "notes", .key = .id };
+        id: i64,
+        label: nilo.Str,
+    };
+    try testing.expectEqual(@as(usize, 0), try db.checkSchema(&.{ Event, Note }));
+}
+
+// The other direction — the spellings SQLite does *not* turn into the rowid,
+// which have to keep answering that they may be null — is checked one layer
+// down, in `sqlite.zig`, against `columnsOf` itself. Not here, because
+// `checkSchema` reports a problem with `std.log.err` and the test runner
+// counts that as a failure: the same reason `wireOf` warns rather than errs.
 
 test "db.exec answers with the rows it changed and needs no Row to do it" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});

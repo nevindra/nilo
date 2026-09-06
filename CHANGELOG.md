@@ -430,6 +430,14 @@ is being held on the client's behalf there.
   longer answers `/assets/app.css` from its own `index.html` when the directory
   holding that file was mounted after it.
 
+- **A Dialect now owes `json_form` and `enum_form` beside `uuid_form`.**
+  Nothing to do unless you wrote a Dialect of your own, which nothing outside
+  this repository is known to have done; if you did, `assertDialect` names the
+  missing declaration. Both answer `.native` or `.text` and say how the database
+  stores a document and a tag — Postgres has a type for each and SQLite has
+  neither
+  ([ADR 0119](./docs/adr/0119-the-sqlite-write-path-is-compiled.md)).
+
 - **`c.body()` no longer commits the announced `Content-Length` before reading
   a byte of it.** A client that promised a megabyte and sent one byte a minute
   used to hold the megabyte for as long as it kept trickling — 1,852,080 bytes
@@ -862,6 +870,57 @@ is being held on the client's behalf there.
   unchanged, and the tests hold nilo's output against `std.json`'s value by
   value. [`bench/result/http.md`](./bench/result/http.md) has the run and the
   controls.
+
+- **`id INTEGER PRIMARY KEY` stopped a SQLite server from starting.** The
+  spelling every SQLite tutorial writes was reported as a schema mismatch, and
+  `schema_mismatch_is_fatal` defaults to true, so `nilo_start` refused a table
+  that was correct. SQLite reports `notnull = 0` for that column because it is
+  an alias for the rowid rather than a constraint — it means *there is no NOT
+  NULL clause here*, not *this may be null*. Nothing to change on your side; if
+  you added a redundant `NOT NULL` to get past it, it is still correct and no
+  longer needed. `INT PRIMARY KEY` and a composite `PRIMARY KEY (a, b)` keep
+  reporting, because SQLite really does accept a NULL in both
+  ([ADR 0115](./docs/adr/0115-an-integer-primary-key-is-the-rowid.md)).
+
+- **`.in` and `.not_in` did not compile against SQLite at all**, and three
+  documents said they did. `where.zig` had been writing
+  `IN (SELECT value FROM json_each(?1))` since the second dialect landed and
+  nothing turned the list into the text that statement reads, so the failure was
+  `cannot bind value of type []const i64` from four frames inside zqlite, on the
+  operator every real schema uses. It binds the list as one JSON array now, at
+  one arena allocation per condition on SQLite and nothing on Postgres.
+
+  **A `sql.Json(T)` column and an enum column could not be written there
+  either**, for the same reason and found by the same run: both *read*
+  correctly, so a Row carrying one compiled for `db.select` and stopped
+  compiling at `db.insert`. All three are the SQLite write path never having
+  been compiled by anything on `zig build test`
+  ([ADR 0119](./docs/adr/0119-the-sqlite-write-path-is-compiled.md)).
+
+- **A `Streamed` closed twice released its pool connection twice, in
+  ReleaseSafe only.** The re-entry guard was inside `if (traps_enabled)`, which
+  is Debug — so in the mode you deploy in, `result.deinit()` and
+  `conn.release()` both ran a second time and the pool was handed a connection
+  it was already holding. `rows.close()` on an early return plus the
+  `defer rows.close()` the doc comment recommends is exactly two calls, so this
+  was reachable from the shape the API teaches. Costs one byte on the stack of a
+  handler that streams
+  ([ADR 0117](./docs/adr/0117-a-guard-against-double-release-is-not-a-debug-trap.md)).
+
+- **A NULL read into a field that cannot hold one was a `0` on SQLite and an
+  error on Postgres.** The null test only ran for optional fields, so a
+  non-optional `i64` read `0` and a non-optional text read `""`. It is
+  `error.QueryFailed` on both Wires now, with a warning naming the column. The
+  startup check cannot catch this for a view, which is where it bit
+  ([ADR 0118](./docs/adr/0118-a-null-is-refused-by-both-wires-or-by-neither.md)).
+
+- **A SQLite request could stall on a free connection, with nothing in the log
+  and nothing holding it.** `takeWriter` and `takeReader` waited on one
+  `std.Io.Condition` while testing different predicates, woken with `signal`, so
+  a returning reader could wake the fiber queued for the writer — which went
+  back to sleep — while the fiber that wanted a reader was never woken. One
+  queue per predicate now, woken with `broadcast`
+  ([ADR 0116](./docs/adr/0116-a-queue-per-question-not-one-condition-for-two.md)).
 
 ## 0.2.0
 
