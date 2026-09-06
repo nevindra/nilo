@@ -328,7 +328,7 @@ fn throughTheModule(gpa: std.mem.Allocator, io: std.Io, url: []const u8) !void {
 fn findRounds(gpa: std.mem.Allocator, io: std.Io, url: []const u8, prepared: bool) !u64 {
     var db = sql.Db.init(gpa, url, .{ .size = 1, .connect_on_init = 1, .prepared = prepared });
     defer db.deinit();
-    try db.nilo_start(io);
+    try db.nilo_start(io, .off);
 
     var run = nilo.Run.init(gpa);
     defer run.deinit();
@@ -408,19 +408,23 @@ const sqlite_insert_sql =
 const write_rounds = 500;
 const write_warmup = 50;
 
-/// The Row, and **`created_at` is an `i64` here where the Postgres one is a
-/// `sql.Timestamp`**. That is not an oversight and it is not free: a
-/// `timestamptz` is TEXT on SQLite (`dialect.SQLite.accepts`), so the two
-/// columns are read differently and the last of the four is an integer here
-/// against a conversion there. It is the one place the two `db.find` lines
-/// below are not the same work, and it is stated rather than buried.
+/// The Row, and `created_at` is a `sql.Timestamp` on both arms now.
+///
+/// It was an `i64` here, which made the last of the four columns an integer
+/// on this side against a conversion on the other — the one place the two
+/// `db.find` lines below were not the same work. The reason was that
+/// `acceptsSqlite` judged a `Timestamp` as TEXT while `WireWrite` bound an
+/// integer, so the honest column failed the startup check
+/// ([ADR 0136](../docs/adr/0136-a-timestamp-is-checked-against-the-column-it-is-bound-into.md)).
+/// Both arms read the same shape out of the same integer column now, so the
+/// two numbers below compare what they say they compare.
 const SqlitePerson = struct {
     pub const nilo_table = .{ .name = table, .key = .id };
 
     id: i64,
     email: nilo.Str,
     age: i32,
-    created_at: i64,
+    created_at: sql.Timestamp,
 };
 
 fn sqliteArm(gpa: std.mem.Allocator, io: std.Io) !void {
@@ -558,7 +562,7 @@ fn sqliteThroughTheModule(gpa: std.mem.Allocator, io: std.Io) !void {
 fn sqliteFindRounds(gpa: std.mem.Allocator, io: std.Io, prepared: bool) !u64 {
     var db = SqliteDb.init(gpa, sqlite_db, .{ .size = 2, .prepared = prepared });
     defer db.deinit();
-    try db.nilo_start(io);
+    try db.nilo_start(io, .off);
 
     var run = nilo.Run.init(gpa);
     defer run.deinit();

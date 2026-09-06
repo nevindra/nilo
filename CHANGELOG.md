@@ -30,6 +30,10 @@ account of why is in the ADR it links.
   browser, a proxy or an HTTP library sends changes.
 - **If you serve WebSockets, take this one for the shutdown fix alone** — a
   server that had served any usually did not come back from a SIGTERM.
+- **`db.nilo_start(io)` is now `db.nilo_start(io, limits)`.** Only a program
+  that starts a `Db` itself — a CLI, a migration, a test — writes that line at
+  all; pass `.off`, which is what `nilo_fetch` and `nilo_s3` already take.
+  `app.listen()` is unchanged and passes the Engine's.
 
 Three more answers change with nothing for you to do: a client sending
 `Expect: 100-continue` now gets one and stops waiting out its own timer, an
@@ -180,6 +184,26 @@ than a split response. All three are under Fixed.
   refused outright, and `cors.with` is untouched
   ([ADR 0110](./docs/adr/0110-an-origin-is-a-fact-about-the-deployment.md)).
 
+#### `nilo_sql`
+
+- **`db.watching(f)` — the statements a request sent.** One line per request
+  says a page is slow; nothing said what was slow in it, in Debug or otherwise.
+  `f` is called with a `sql.Sent` after every statement: the text, the plan
+  name it is kept prepared under, how long the database took, how many rows
+  moved, and whether it failed. `sql.logging` is a ready-made one that writes a
+  debug line, so `db.watching(sql.logging)` is the whole of the common case
+  ([ADR 0137](./docs/adr/0137-a-statement-can-be-watched.md)).
+
+  **Not the values it bound**, which are as often a password as an id — that is
+  the decision rather than the first version, and a log is read by more people
+  than a response is. A `Db` nobody watches pays one null test per statement;
+  a watched one pays two clock reads at 15ns.
+
+- **`nilo.monotonicMicros()`** — microseconds since an arbitrary point, for
+  measuring how long something took. `nowMicros` is the wall clock and is
+  allowed to step; the reference had been telling people to use a
+  `monotonicNanos` that was never public.
+
 #### Testing
 
 - **`testing.Conversation`** — a WebSocket route driven through the public API,
@@ -303,6 +327,15 @@ than a split response. All three are under Fixed.
   held 1,852,080 bytes of anonymous mapping per stuck connection, now 316,080.
   A body that arrives is the same one allocation it always was
   ([ADR 0105](./docs/adr/0105-a-body-is-taken-as-it-arrives.md)).
+
+- **`Db.nilo_start` takes the Engine's `Limits` beside the loop**, because a
+  Wire cannot bound a wait on its own — `std.Io.Condition` has no timed wait,
+  and what stops a parked fiber is the Engine's timer reaching it
+  ([ADR 0135](./docs/adr/0135-a-wait-for-a-connection-has-a-bound.md)). It is
+  the signature `nilo_fetch` and `nilo_s3` already have. `app.listen()` and
+  `app.start(io)` are unchanged; a program that starts a `Db` by hand writes
+  `db.nilo_start(io, .off)`. A Wire of your own gains `width(rows)` and a
+  `limits` field on `OpenOpts`, both listed at the top of `sql/wire.zig`.
 
 - **A Dialect owes `json_form` and `enum_form` beside `uuid_form`.** Nothing to
   do unless you wrote a Dialect of your own; `assertDialect` names the missing
@@ -472,6 +505,53 @@ than a split response. All three are under Fixed.
 
 #### `nilo_sql`
 
+- **A `db.raw` whose `SELECT` list was shorter than its Row read past the end
+  of the driver's own array.** `fill` asks for column `i` of each field and
+  pg.zig's `Row.get` is `self.values[col]` with no bound on `col`, so a column
+  dropped from a hand-written join was a panic in ReleaseSafe — the whole
+  process, for one request — and undefined in ReleaseFast. The width of the
+  result is now compared against the Row's on the first row, and a short list
+  is a `QueryFailed` naming both numbers
+  ([ADR 0134](./docs/adr/0134-a-select-list-shorter-than-the-row-is-refused.md)).
+  A list *wider* than the Row is unchanged and still read: that is what
+  `SELECT *` into a narrow Row means. One compare per statement.
+
+- **A number written out beside a value the caller was holding did not
+  compile.** `db.update(User, c, .{ .set = .{ .age = 31 }, .where = .{ .id =
+  found.id } })` — the most ordinary write there is — stopped with `unable to
+  resolve comptime value` naming `options`, a parameter nobody wrote. A
+  literal has no type of its own, so reading it made the read of the *whole*
+  options struct a comptime one, which then could not reach the runtime `id`.
+  The column's type is asked for by name now, which is the coercion that was
+  going to happen a line later anyway. The same applied to a `null` and to an
+  enum name written out.
+
+- **A `Timestamp` was checked against a TEXT column on SQLite and bound as an
+  integer.** So `created_at INTEGER` — the column that matches what is
+  actually sent — failed the startup check and stopped the server, while the
+  column that passed stored microseconds as digits in a text column, where
+  `ORDER BY` sorts them as text and no date function reads them. It is checked
+  against `INTEGER`, `INT`, `BIGINT`, `NUMERIC`, `DATETIME` or `TIMESTAMP` now,
+  all of which keep an integer an integer
+  ([ADR 0136](./docs/adr/0136-a-timestamp-is-checked-against-the-column-it-is-bound-into.md)).
+  **A SQLite schema whose timestamp column is `TEXT` is now refused at
+  startup**, and the digits in it were already sorting wrongly; the fix is
+  `INTEGER` and a migration reading them back out. Postgres is unaffected.
+
+- **A SQLite request could wait for a connection forever, and `timeout_ms` did
+  not bound it.** `sqlite.Wire.open` read `size` and dropped the rest, and
+  `takeWriter` waited on a `std.Io.Condition` with no deadline — so a handler
+  holding a `tx` that then sent a statement through `db` rather than `tx`
+  queued for the one writer it was itself holding, with nothing in the log.
+  The wait is bounded now, by the Engine's timer through `core.Limits`, and
+  the message names the mistake it is most often going to be
+  ([ADR 0135](./docs/adr/0135-a-wait-for-a-connection-has-a-bound.md)). The
+  timer is armed only by a fiber that is actually going to queue, so a
+  statement that finds its connection free pays nothing; a handler that
+  reaches SQLite pays 192 bytes of stack, which is per connection
+  ([ADR 0063](./docs/adr/0063-a-handlers-stack-is-per-connection.md)).
+  Postgres is untouched — pg.zig's pool always honoured the number.
+
 - **`id INTEGER PRIMARY KEY` stopped a SQLite server from starting** — the
   spelling every tutorial writes was reported as a schema mismatch, and
   `schema_mismatch_is_fatal` defaults to true. SQLite reports `notnull = 0`
@@ -527,6 +607,14 @@ than a split response. All three are under Fixed.
   premise had gone stale too: `deploying.md` told you to turn `read_buffer` and
   `write_buffer` down for a server holding many connections open, and since
   ADR 0071 an idle connection gives both buffers back.
+- **The SQL guide's snippets are compiled now** — 37 of its 51 blocks, against
+  17 marked across the eight pages before it
+  ([ADR 0083](./docs/adr/0083-the-guide-is-the-source-of-its-own-snippets.md)).
+  Marking them found the `db.update` bug above, two examples handing `db.raw` a
+  struct that is not a Row, and a running `User` missing the two columns its
+  own examples set. A page may have a prelude of its own now, a block of
+  statements is given the shapes the page declared above it, and a local the
+  snippet does not read is discarded for it rather than in it.
 - **`Message.data`'s documented lifetime was backwards** — the type said the
   bytes were the caller's. They are borrowed from the executor's free list and
   the loan ends at the next `receive`, sooner if the connection falls quiet.

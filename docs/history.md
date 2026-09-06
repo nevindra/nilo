@@ -1899,3 +1899,63 @@ there; `waiting`/`waited` were doing the wrong arithmetic with it.
 question about the measurement rather than about the feature.** This one had
 been stated three times, in three files, always as "what should a per-message
 watch bracket".
+
+## Two numbers from other people's code, and only one of them meant what it said
+
+Both halves of this cycle's SQLite work turned on a fact taken from a
+dependency without opening it.
+
+**`pg.Result.number_of_columns` meant what it says.** So the width check for
+`db.raw` ([ADR 0134](./adr/0134-a-select-list-shorter-than-the-row-is-refused.md))
+was written to ask before pulling a row, which is where a check belongs.
+
+**zqlite's `columnCount` did not.** It is `sqlite3_data_count`, which answers
+`0` until the statement has been stepped onto a row — where
+`sqlite3_column_count`, the one the name suggests, is settled by preparing. The
+check refused eight of the module's own tests on the first run, all of them
+generated `INSERT … RETURNING`s against a result set that had not started. The
+fix was to ask on the first row, which is the one moment both drivers can
+answer and costs nothing to be at: a result set with no rows has no column for
+anybody to read past.
+
+It cost one build to find because both Wires are compiled by `zig build
+test-sql` ([ADR 0119](./adr/0119-the-sqlite-write-path-is-compiled.md)). Before
+that ADR it would have compiled, passed, and been wrong only on SQLite.
+
+**And the second half's stated fix named a mechanism that does not exist.** The
+roadmap said honouring `timeout_ms` in the two `take` calls was "the small
+half" — but `std.Io.Condition` has `wait` and `waitUncancelable` and **no timed
+wait**, so there was nothing small to do. What there was instead sat one layer
+down and was already carrying two other modules: `core.Limits`, the Engine's
+timer reaching a parked fiber as a cancellation
+([ADR 0135](./adr/0135-a-wait-for-a-connection-has-a-bound.md)).
+
+That is the second time a roadmap entry's *mechanism* has been the wrong half
+of it while the *gap* stayed true — the first is
+[above](#the-mechanism-the-roadmap-named-was-the-one-thing-it-got-wrong), and
+the rule it produced applies unchanged: an entry that names a shape should say
+whether the shape was tried.
+
+## The page that teaches a thing is the page whose examples fit nothing
+
+Marking `docs/guide/sql.md` for `zig build snippets` took 37 of its 51 blocks
+and cost four changes to the machinery, none of which was foreseen from the
+eight pages already marked
+([ADR 0083](./adr/0083-the-guide-is-the-source-of-its-own-snippets.md)). What
+they have in common is the same cause: the shared prelude works for a page that
+*uses* a `User` and not for the page that *teaches* one.
+
+The lesson that generalises is about what the marking then found. **Three of
+the four findings were in the running example rather than in a snippet.** The
+guide's `User` had no `name` column and no `orders` column, and two examples
+four screens below it set both. `db.raw` was shown twice with a struct that is
+not a Row, which does not compile and never did. And the one real bug —
+`.set = .{ .age = 31 }` beside a runtime `id` failing to compile — was reachable
+from the most ordinary line on the page.
+
+**A page's examples drift from each other before any single one of them is
+wrong**, which is exactly what no reviewer catches: each block reads correctly
+on its own screen. Compiling them against one world is what makes the drift a
+build failure. This is the same failure mode as
+[a number that was stated and never held](#a-number-that-was-stated-and-never-held),
+one layer over: a second copy that nothing checks.

@@ -77,6 +77,44 @@ pub fn nowMillis() i64 {
     return @divFloor(nowMicros(), std.time.us_per_ms);
 }
 
+/// Microseconds since an arbitrary point, for measuring **how long something
+/// took**. The number means nothing on its own; two of them subtracted mean
+/// exactly one thing.
+///
+/// A second clock rather than a second use of `nowMicros`, because the wall
+/// clock is allowed to move: NTP steps it, an operator sets it, and a
+/// `timedatectl` in the middle of a query would otherwise be reported as a
+/// query that took an hour or as one that finished before it started. The
+/// duration a watcher is shown is a fact about the database
+/// ([ADR 0137](../docs/adr/0137-a-statement-can-be-watched.md)), so it is
+/// taken from the clock that only goes forwards.
+///
+/// Same cost as `nowMicros` and by the same route — `CLOCK_MONOTONIC` is in
+/// the same vDSO page — which is what keeps this Core's rather than the
+/// Bulkhead's. `http/bulkhead.zig` reads the same clock for the same reason
+/// and cannot import this file; that duplication is the layering, not an
+/// oversight.
+pub fn monotonicMicros() i64 {
+    if (builtin.os.tag == .windows) @compileError(
+        "nilo: nilo_core cannot read the monotonic clock on Windows.\n" ++
+            "  The rest of this module works there; this call is one of the two that" ++
+            " need an operating system, and Windows is not a platform nilo's Engine" ++
+            " supports either (ADR 0045).",
+    );
+
+    var ts: std.posix.timespec = undefined;
+    switch (std.posix.errno(std.posix.system.clock_gettime(.MONOTONIC, &ts))) {
+        .SUCCESS => {},
+        // The same argument `nowMicros` makes: a valid pointer at a clock
+        // POSIX requires leaves no failure to handle, so this is a broken
+        // kernel rather than a condition.
+        else => |e| std.debug.panic("nilo: the monotonic clock could not be read ({s})", .{@tagName(e)}),
+    }
+
+    return @as(i64, @intCast(ts.sec)) * std.time.us_per_s +
+        @divFloor(@as(i64, @intCast(ts.nsec)), std.time.ns_per_us);
+}
+
 // -- tests ---------------------------------------------------------------
 
 const testing = std.testing;
@@ -101,6 +139,21 @@ test "milliseconds are the same moment, a thousand at a time" {
     // Read one after the other, so they may straddle a millisecond. What
     // is being checked is the unit, not the instant.
     try testing.expect(@abs(millis - @divFloor(micros, std.time.us_per_ms)) <= 1);
+}
+
+test "the monotonic clock measures a duration, and only that" {
+    const first = monotonicMicros();
+    const second = monotonicMicros();
+    // Forwards, always — that is the whole of what this clock promises, and
+    // the reason a statement's duration is taken from it rather than from
+    // `nowMicros` (ADR 0137).
+    try testing.expect(second >= first);
+
+    // And it is a different origin from the wall clock's, which is what says
+    // it is a second clock rather than a second name for the first. Two
+    // machines could disagree, so the assertion is that they are not the same
+    // number rather than anything about the gap.
+    try testing.expect(monotonicMicros() != nowMicros());
 }
 
 test "the clock does not go backwards between two reads" {

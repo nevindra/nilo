@@ -1208,6 +1208,7 @@ section that does not itself wait; `lock()` is still the one to reach for.
 |---|---|
 | `nilo.nowMicros()` | `i64` — microseconds since the epoch. What `sql.Timestamp` counts |
 | `nilo.nowMillis()` | `i64` — milliseconds. What a UUID v7 puts in its first six bytes |
+| `nilo.monotonicMicros()` | `i64` — microseconds since an arbitrary point. Two of them subtracted is how long something took |
 
 Plain functions rather than calls on a `Ctx` or a `Run`: reading the wall clock
 needs no event loop and nobody owns the time, so there is nothing for a Scope to
@@ -1215,8 +1216,10 @@ be the holder of
 ([ADR 0045](./adr/0045-core-knows-what-time-it-is.md)). They are `nilo_core`'s,
 so a program with no server in it has them too. 15ns a call.
 
-**Use `monotonicNanos` for a duration, never these.** A wall clock moves when an
-operator moves it, so two readings a second apart can come back in either order.
+**Use `monotonicMicros` for a duration, never the other two.** A wall clock
+moves when an operator moves it or when NTP steps it, so two readings a second
+apart can come back in either order. It is the clock `db.watching` times a
+statement with ([ADR 0137](./adr/0137-a-statement-can-be-watched.md)).
 
 A handler that waits on the operating system without going through one of these
 holds the thread every other request on it is being served by. nilo notices and
@@ -1230,9 +1233,12 @@ nilo.blocking (ADR 0014).
 
 It fires on the first request, with nobody else waiting, which is the point —
 under `curl` the mistake is otherwise invisible. `block_warning_ms` is the
-threshold and `0` turns it off. A stream, a body reader and a WebSocket are not
-watched at all: holding the connection is what they are for. See
-[ADR 0034](./adr/0034-the-thing-a-handler-holds-is-watched-at-run-time.md).
+threshold and `0` turns it off. What is measured is the longest stretch the
+fiber ran **without parking**, so a stream, a body reader and a WebSocket are
+watched on the same terms as anything else — a blocking call inside a WebSocket
+loop is where it costs the most
+([ADR 0034](./adr/0034-the-thing-a-handler-holds-is-watched-at-run-time.md),
+[ADR 0132](./adr/0132-what-is-watched-is-one-unparked-stretch.md)).
 
 `spawn` starts `f` in a fiber the server owns: counted while it runs, cut off
 when the shutdown grace period ends. `error.NoServer` if nothing is listening.
@@ -1611,8 +1617,20 @@ const User = struct {
 var db = sql.Db.init(gpa, "postgres://…", .{});
 defer db.deinit();
 db.checking(&.{ User, Order });   // optional
+db.watching(sql.logging);         // optional
 try app.provide(&db);
 ```
+
+`db.watching(f)` calls `f` with a `sql.Sent` after every statement — the text,
+the plan name it is kept under, how long the database took, how many rows moved
+and whether it failed. **Not the values it bound**, which are somebody's
+password as often as they are an id
+([ADR 0137](./adr/0137-a-statement-can-be-watched.md)). `sql.logging` is a
+ready-made one that writes a debug line. A `Db` nobody watches pays one null
+test per statement.
+
+`db.nilo_start(io, limits)` is what `listen()` calls; a program starting a `Db`
+by hand passes `.off` and the pool's waits are bounded by nothing.
 
 `init` opens nothing. The pool is built by `listen()`, which is the only
 moment there is an event loop to dial through — so a server starts with its
@@ -1629,7 +1647,7 @@ the socket, with p99 halved ([`bench/result/sql.md`](../bench/result/sql.md)).
 |---|---|
 | `size` | connections held open. Default 10. The knob with a real curve behind it: 8 → 133k req/s, 16 → 148k, 32 → 180k, 64 → 206k, with p99 best at 32. Each one is a Postgres backend and a slot against `max_connections` |
 | `connect_on_init` | how many to dial during `listen()`. Default 0 — set it to `size` when driving a `Db` from a `std.Io.Threaded` ([ADR 0062](./adr/0062-a-pool-that-dialled-itself-whatever-it-was-told.md)) |
-| `timeout_ms` | how long a caller waits for a free connection. Default 10,000 |
+| `timeout_ms` | how long a caller waits for a free connection. Default 10,000. Bounded on SQLite too since [ADR 0135](./adr/0135-a-wait-for-a-connection-has-a-bound.md), where it needs the Engine to enforce it |
 | `schema_mismatch_is_fatal` | whether a Row that disagrees with its table stops startup. Default true |
 | `prepared` | whether a statement is kept prepared on the connection it went down. Default true |
 

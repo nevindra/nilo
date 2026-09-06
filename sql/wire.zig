@@ -43,6 +43,21 @@
 //!   `SELECT` list itself and therefore already knows the order at compile
 //!   time; a name lookup would be paying at run time for something that
 //!   stopped being a question while compiling (ADR 0039).
+//! - `width(rows)` — how many columns the row `next` stopped on has. Asked
+//!   **once per statement, on the first row**, so that a `SELECT` list
+//!   shorter than the Row is an error rather than an index past the end of
+//!   the driver's own array. pg.zig's `Row.get` is `self.values[col]` with no
+//!   bound on `col`, which is a panic in ReleaseSafe and undefined in
+//!   ReleaseFast — the failure ADR 0008 says nilo cannot recover from, for
+//!   one request's mistake (ADR 0134).
+//!
+//!   On the first row rather than on the result set, and that is the two
+//!   drivers disagreeing rather than a preference: zqlite's `columnCount` is
+//!   `sqlite3_data_count`, which answers `0` until the statement has been
+//!   stepped onto a row, where pg.zig has the count from the
+//!   `RowDescription` before any row is pulled. Asking after the first `next`
+//!   is the one moment both can answer, and a set with no rows in it has no
+//!   column for anybody to read past.
 //! - `readList(rows, T, col, arena)` — one column that holds an array, as a
 //!   `[]T` in the arena. **The one read that takes an allocator**, and it has
 //!   to: an array arrives as a length and a run of length-prefixed elements,
@@ -124,6 +139,7 @@
 //! including the ones nobody wrote.
 
 const std = @import("std");
+const core = @import("nilo_core");
 
 /// What a Wire may fail with. Deliberately short: this module turns these
 /// into errors a handler can read, and a long list here would be a long list
@@ -219,7 +235,25 @@ pub const OpenOpts = struct {
     /// created without reaching the database at all, which is what lets a
     /// server boot with Postgres switched off (ADR 0039).
     connect_on_init: u16 = 0,
+    /// How long a caller may wait for a connection out of the pool before it
+    /// gives up with `TimedOut`. Zero is no bound at all.
+    ///
+    /// **It is about the queue rather than about the statement.** Postgres
+    /// hands it to pg.zig's own pool; SQLite has to bound its own wait, and
+    /// until ADR 0135 it did not bound it at all — `takeWriter` waited on a
+    /// `std.Io.Condition` with no deadline, so a fiber queueing for the one
+    /// writer waited for as long as the process lived.
     timeout_ms: u32 = 10 * std.time.ms_per_s,
+    /// What can stop a fiber that is waiting, or `.off` when there is no
+    /// Engine under this program.
+    ///
+    /// A Wire cannot bound a wait on its own: `std.Io.Condition` has no timed
+    /// wait, and the way nilo stops a fiber is the Engine's timer wheel
+    /// reaching it as a cancellation (`core/limits.zig`, ADR 0065). So the
+    /// bound arrives the same way `fetch`'s does, and under
+    /// `std.Io.Threaded` — a test with no server around it — there is nothing
+    /// that can cancel a fiber and the wait is unbounded exactly as it was.
+    limits: core.Limits = .off,
 };
 
 /// One column as the database describes it, for the schema comparison. Read
@@ -250,9 +284,9 @@ pub const Column = struct {
 pub fn assertWire(comptime W: type) void {
     comptime {
         const owed = [_][]const u8{
-            "open", "close",     "run",   "exec",
-            "next", "read",      "drain", "begin",
-            "Tx",   "columnsOf", "readList",
+            "open", "close",     "run",      "exec",
+            "next", "read",      "drain",    "begin",
+            "Tx",   "columnsOf", "readList", "width",
         };
         for (owed) |decl| {
             if (!@hasDecl(W, decl)) @compileError(
@@ -285,6 +319,11 @@ pub const Fake = struct {
     /// same way — this exists to drive the filling code, not to stand in
     /// for a database.
     answers: usize = 0,
+    /// How many columns a result set says it has, or **null for as many as
+    /// the Row asks for**. Null rather than a number so that a Fake set up
+    /// before this existed goes on answering every Row it is given; a test
+    /// that wants the short `SELECT` list of ADR 0134 names the number.
+    columns_back: ?usize = null,
     /// What every text column answers with. A field rather than a literal
     /// because a column whose bytes have to *mean* something — an enum's tag
     /// name — cannot be tested against a fixed `"fake"`, which is exactly the
@@ -346,6 +385,14 @@ pub const Fake = struct {
         if (rows.left == 0) return false;
         rows.left -= 1;
         return true;
+    }
+
+    /// As many columns as the caller wanted, unless the test said otherwise.
+    /// A Fake reads every column out of one field, so there is nothing here
+    /// that a number could disagree with except the check itself.
+    pub fn width(self: *Fake, rows: *const Rows) usize {
+        _ = rows;
+        return self.columns_back orelse std.math.maxInt(usize);
     }
 
     /// A value of the right type, and nothing more. Text points at a

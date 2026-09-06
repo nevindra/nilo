@@ -38,6 +38,7 @@ pub const checkScope = scope_mod.check;
 
 pub const nowMicros = clock_mod.nowMicros;
 pub const nowMillis = clock_mod.nowMillis;
+pub const monotonicMicros = clock_mod.monotonicMicros;
 
 /// A namespace rather than flat names, because it is the one thing here with
 /// two directions and a set to pick: `percent.encode…`, `percent.decode…`.

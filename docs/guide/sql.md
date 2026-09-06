@@ -37,13 +37,16 @@ five things SQLite refuses.
 
 ## A table is a struct
 
+<!-- compiles -->
 ```zig
 const User = struct {
     pub const nilo_table = .{ .name = "users", .key = .id };
 
     id: i64,
     email: nilo.Str,
+    name: nilo.Str,
     age: i32,
+    orders: i32,
     created_at: sql.Timestamp,
 };
 ```
@@ -65,6 +68,7 @@ there is a field called that.
 
 `sql.Decimal` reads a `numeric` column, and it holds **text**:
 
+<!-- compiles: body -->
 ```zig
 const Invoice = struct {
     pub const nilo_table = .{ .name = "invoices", .key = .id };
@@ -73,6 +77,7 @@ const Invoice = struct {
     total: sql.Decimal,        // numeric
 };
 
+const invoice = (try db.find(Invoice, c, 1)).?;
 const total = invoice.total.text;                    // "1234.56"
 _ = try db.insert(Invoice, c, .{ .total = sql.Decimal{ .text = "9.99" } });
 ```
@@ -102,6 +107,7 @@ Unlike `sql.Json(T)` it **streams**: in a `Borrowed` row the field is a plain
 
 An array column is a plain Zig slice, with nothing wrapped round it:
 
+<!-- compiles -->
 ```zig
 const Ticket = struct {
     pub const nilo_table = .{ .name = "tickets", .key = .id };
@@ -110,14 +116,21 @@ const Ticket = struct {
     tags: []const nilo.Str,    // text[]
     scores: ?[]const i32,      // integer[], and the column may be null
 };
+```
 
-for (ticket.tags) |tag| { … tag.view() … }
+Reading one is a Zig `for` and nothing else:
+
+<!-- compiles: body -->
+```zig
+const ticket = (try db.find(Ticket, c, 1)).?;
+for (ticket.tags) |tag| std.log.info("{s}", .{tag.view()});
 ```
 
 `[]const u8` is text and was spoken for long before arrays were, so a list of
 text is `[]const Str` or `[]const []const u8` and never `[]const u8`. Writing
 one is the shape you would write anyway:
 
+<!-- compiles: body -->
 ```zig
 _ = try db.insert(Ticket, c, .{ .tags = &.{ "urgent", "billing" }, .scores = null });
 ```
@@ -145,6 +158,7 @@ The types above are the ones this module chose to know about, and Postgres has
 hundreds more — `interval`, `inet`, `money`, `tsvector`, everything an
 extension installs. The list is not closed:
 
+<!-- compiles: body -->
 ```zig
 const Money = sql.AsText("money");
 
@@ -155,6 +169,7 @@ const Sale = struct {
     amount: Money,           // money
 };
 
+const sale = (try db.find(Sale, c, 1)).?;
 const shown = sale.amount.text;    // "$1,234.56", as Postgres printed it
 ```
 
@@ -195,6 +210,7 @@ always had.
 
 ## The query is a constant
 
+<!-- compiles -->
 ```zig
 fn listAdults(db: *sql.Db, c: *nilo.Ctx) ![]User {
     return db.select(User, c, .{
@@ -302,6 +318,7 @@ plain `[]const u8` is an ordinary condition, and so is every `.set` and every
 
 ## Wiring it up
 
+<!-- compiles -->
 ```zig
 pub fn main() !void {
     const gpa = std.heap.smp_allocator;
@@ -336,6 +353,7 @@ production, that is usually what you want.
 This is the largest performance number in the whole module and it is a
 connection string rather than anything in your code:
 
+<!-- compiles: body -->
 ```zig
 // 458,000 req/s with a real query per request
 var db = sql.Db.init(gpa,
@@ -361,6 +379,7 @@ directory; `sql/docker-compose.yml` shows the other direction.
 
 Swap two lines and the rest of this page is unchanged:
 
+<!-- compiles: body -->
 ```zig
 const Db = sql.Sqlite(.{ .threading = .{ .hop = nilo } });
 
@@ -509,6 +528,7 @@ measured, so lowering `cache_kib` is close to free for a service that scans.
 
 ## Reading
 
+<!-- compiles: body -->
 ```zig
 const all   = try db.select(User, c, .{ .where = .{ .age = .{ .gt = 18 } } });
 const maybe = try db.one(User, c, .{ .where = .{ .id = id } });
@@ -525,6 +545,7 @@ compile error: the ceiling belongs to the call.
 
 A lookup by key is the same thing with the condition already filled in:
 
+<!-- compiles -->
 ```zig
 fn show(db: *sql.Db, c: *nilo.Ctx, id: i64) !?User {
     return db.find(User, c, id);
@@ -542,6 +563,7 @@ carries them, and nothing is freed by hand.
 
 ## Counting
 
+<!-- compiles: body -->
 ```zig
 const total = try db.count(User, c, .{ .where = .{ .age = .{ .gt = 18 } } });
 const taken = try db.exists(User, c, .{ .where = .{ .email = email } });
@@ -560,6 +582,7 @@ The condition goes through the same walker `select` uses, which is the point:
 a page and its total are one condition written once, and a column misspelled
 in either is the same compile error.
 
+<!-- compiles: body -->
 ```zig
 const where = .{ .status = "open" };
 const total = try db.count(Order, c, .{ .where = where });
@@ -589,6 +612,7 @@ what it takes is a **Scope**, and a `*Ctx` is one
 is no request there is `nilo.Run`, which owns an arena and a lifetime of its
 own:
 
+<!-- compiles: body -->
 ```zig
 var run = nilo.Run.init(gpa);
 defer run.deinit();
@@ -604,10 +628,11 @@ pool is opened by `nilo_start`, and until something calls it every query answers
 than the snippet above
 ([ADR 0079](../adr/0079-there-is-a-phase-before-the-server.md)):
 
+<!-- compiles: body -->
 ```zig
 var threaded: std.Io.Threaded = .init(gpa, .{});   // std's own, not the Engine
 defer threaded.deinit();
-try db.nilo_start(threaded.io());                  // the pool is open from here
+try db.nilo_start(threaded.io(), .off);                  // the pool is open from here
 
 var run = nilo.Run.init(gpa);
 defer run.deinit();
@@ -616,6 +641,7 @@ defer run.deinit();
 Inside a program that also serves, `app.start(io)` is the same thing for every
 service the App holds at once — the phase after the pool and before the server:
 
+<!-- compiles: body -->
 ```zig
 var threaded: std.Io.Threaded = .init(gpa, .{});
 defer threaded.deinit();
@@ -636,6 +662,7 @@ machine has to do it.
 
 ## Writing
 
+<!-- compiles: body -->
 ```zig
 const made = try db.insert(User, c, .{ .email = "a@b.c", .age = 30 });
 // made.id is the generated key
@@ -669,6 +696,7 @@ error: nilo: an update on User with no condition.
 A loop of `db.insert` is a round trip per row, and inside a transaction it is
 a round trip per row holding a pool connection. `insertMany` is one statement:
 
+<!-- compiles -->
 ```zig
 const Line = struct { sku: nilo.Str, qty: i32 };
 
@@ -736,6 +764,7 @@ A `PATCH` endpoint changes a row and answers with it. Written with `update`
 that is two round trips, and the second one may read what somebody else
 changed in between:
 
+<!-- compiles -->
 ```zig
 fn rename(db: *sql.Db, c: *nilo.Ctx, id: i64, body: Rename) !?User {
     const changed = try db.updateReturning(User, c, .{
@@ -767,6 +796,7 @@ That is two round trips, and there is a window between them: two requests can
 both fail the insert, both run the update, and the second one wins whatever
 order they arrive in. `ON CONFLICT` is one statement and has no window.
 
+<!-- compiles: body -->
 ```zig
 // Leave the row that is there alone. `null` means it was already there.
 const made = try db.insertOrIgnore(User, c, .{ .email = email }, .email);
@@ -808,6 +838,7 @@ error: nilo: `db.insertOrUpdate` on User has nothing to set.
 
 ## Transactions
 
+<!-- compiles: body -->
 ```zig
 var tx = try db.begin(c, .{});
 defer tx.deinit();                  // rolls back unless committed
@@ -832,6 +863,7 @@ Forgetting it is caught in Debug by a counter checked at `db.deinit()`.
 the moment you get one, so a query that turns out to be expensive runs until
 somebody notices. `tx.deadline` bounds the statements themselves:
 
+<!-- compiles: body -->
 ```zig
 var tx = try db.begin(c, .{});
 defer tx.deinit();
@@ -863,6 +895,7 @@ ALTER ROLE app SET statement_timeout = '30s';
 
 ### Saying what the transaction is, on the `BEGIN`
 
+<!-- compiles: body -->
 ```zig
 var tx = try db.begin(c, .{ .isolation = .serializable, .read_only = true });
 ```
@@ -883,6 +916,7 @@ of quietly happening.
 The read-modify-write every service ends up writing is a race unless the read
 holds what it matched:
 
+<!-- compiles: body -->
 ```zig
 var tx = try db.begin(c, .{});
 defer tx.deinit();
@@ -910,6 +944,7 @@ Four locks, and they are four jobs:
 `.update_skip_locked` is how a work queue is written. Several workers run the
 same statement and no two of them ever get the same row:
 
+<!-- compiles: body -->
 ```zig
 const batch = try tx.select(Job, c, .{
     .where = .{ .state = .pending },
@@ -939,15 +974,16 @@ A statement that fails inside a transaction aborts **all** of it: everything
 after it answers `25P02` until somebody rolls the whole thing back. A
 savepoint is the way to try something and carry on.
 
+<!-- compiles: body -->
 ```zig
 var tx = try db.begin(c, .{});
 defer tx.deinit();
 
-for (tags) |name| {
+for (tags) |tag| {
     var sp = try tx.savepoint();
     defer sp.deinit();                       // undoes it, unless released
 
-    if (tx.insert(Tag, c, .{ .name = name })) |_| {
+    if (tx.insert(Tag, c, .{ .name = tag })) |_| {
         try sp.release();                    // keep it
     } else |err| switch (err) {
         error.AlreadyExists => sp.rollback(), // that tag was there; next one
@@ -974,6 +1010,7 @@ no longer has, so nesting them is safe to write.
 
 ## Streaming a result set too big to hold
 
+<!-- compiles -->
 ```zig
 fn exportUsers(db: *sql.Db, c: *nilo.Ctx) !void {
     var s = try c.stream(200, "text/csv");
@@ -1017,8 +1054,17 @@ Joins, aggregates, subqueries, `HAVING`, window functions, CTEs — none of
 them. The line is one sentence, **one table, conditions that filter rows**,
 and past it the answer is `raw`:
 
+<!-- compiles: body -->
 ```zig
-const tally = try db.raw(Report, c,
+const Tally = struct {
+    // A view. `raw` never reads the name, but a Row names a relation.
+    pub const nilo_table = .{ .name = "country_tally" };
+
+    country: nilo.Str,
+    n: i64,
+};
+
+const tally = try db.raw(Tally, c,
     "SELECT u.country, count(*)::bigint AS n FROM users u " ++
     "JOIN orders o ON o.user_id = u.id GROUP BY u.country",
     .{},
@@ -1028,6 +1074,11 @@ const tally = try db.raw(Report, c,
 `raw` still fills your struct, still uses the arena, still follows the `Str`
 rule. It gives up the compile-time column check and nothing else; the
 `SELECT` list has to line up with the struct's fields by position.
+
+It is still a **Row**, so it still carries a `nilo_table` — `raw` never reads
+the name, because it did not write the statement, but the type is the same one
+every other call takes and there is no second kind of struct to learn. A join
+that answers with a shape no table has is what a view is for.
 
 ### A statement that answers with nothing
 
@@ -1096,8 +1147,15 @@ waiting fiber frees its thread
 Where several statements really do have to land together, SQL already does it
 in one round trip and `db.raw` reaches it:
 
+<!-- compiles: body -->
 ```zig
-_ = try db.raw(struct { id: i64 }, c,
+const Revoked = struct {
+    pub const nilo_table = .{ .name = "audit", .key = .id };
+
+    id: i64,
+};
+
+_ = try db.raw(Revoked, c,
     "WITH gone AS (DELETE FROM sessions WHERE user_id = $1 RETURNING id) " ++
     "INSERT INTO audit (kind, ref) SELECT 'session_revoked', id FROM gone " ++
     "RETURNING ref AS id",
@@ -1111,6 +1169,7 @@ statement.
 
 ## When a Row and its table disagree
 
+<!-- compiles: body -->
 ```zig
 db.checking(&.{ User, Order });
 ```
@@ -1161,6 +1220,7 @@ something the query did.
 The Service registry is keyed by type, so `*sql.Db` is *the* database and a
 second one had nowhere to live. `sql.Named` gives it a type of its own:
 
+<!-- compiles -->
 ```zig
 const Replica = sql.Named("replica");
 
@@ -1169,7 +1229,7 @@ fn listing(rdb: *Replica, c: *nilo.Ctx) ![]Product {     // may be stale
 }
 
 fn buy(db: *sql.Db, c: *nilo.Ctx) !Order {               // must not be
-    return db.insert(Order, c, .{ … });
+    return db.insert(Order, c, .{ .user_id = 1, .total = 4200 });
 }
 ```
 
@@ -1214,6 +1274,7 @@ so there is no bound on how many names there would be.
 
 **Turn it off behind pgbouncer in transaction mode.**
 
+<!-- compiles: body -->
 ```zig
 var db = sql.Db.init(gpa, url, .{ .prepared = false });
 ```
@@ -1222,6 +1283,37 @@ A transaction-mode pooler hands out a different server connection per
 transaction, so a statement prepared on one is missing on the next. The
 failure is loud — Postgres says the prepared statement does not exist — which
 is why the default is the fast one rather than the safe one.
+
+### Seeing the statements a request sent
+
+One line per request tells you a page is slow. What was slow *in* it is the
+statements, and `db.watching` is how they are shown:
+
+<!-- compiles: body -->
+```zig
+db.watching(sql.logging);       // one debug line per statement
+```
+
+Set it before `listen()`. `sql.logging` writes the duration, the row count and
+the text at debug level; anything narrower is a function of your own:
+
+<!-- compiles -->
+```zig
+fn slowOnes(sent: sql.Sent) void {
+    if (sent.micros < 50_000) return;
+    std.log.warn("slow query: {d}us, {s}", .{ sent.micros, sent.sql });
+}
+```
+
+`db.watching(slowOnes)`, and nothing else changes. A `sql.Sent` carries the
+statement, the name it is kept prepared under, how long the database took, how
+many rows moved, and whether it failed. **Not the
+values it bound** — those are the interesting half and they are also somebody's
+password, so putting them in a log is a decision rather than a default
+([ADR 0137](../adr/0137-a-statement-can-be-watched.md)).
+
+A `Db` nobody is watching pays one null test per statement, and a watched one
+pays two clock reads at 15ns each.
 
 ### Views, and the one thing a check cannot know
 
@@ -1241,6 +1333,7 @@ An identity key, a sequence default and a generated column all work with
 nothing said about them, because an insert names a **subset** of the Row's
 columns and `RETURNING` is not optional:
 
+<!-- compiles: body -->
 ```zig
 const Auto = struct {
     pub const nilo_table = .{ .name = "auto", .key = .id };
@@ -1284,6 +1377,7 @@ an HTTP answer at all; on a table used to win a race it is the expected
 outcome. The module does not know which request it is inside, so it hands you
 an error that reads and lets you decide:
 
+<!-- compiles: body -->
 ```zig
 const made = db.insert(User, c, .{ .email = email }) catch |err| switch (err) {
     error.AlreadyExists => return nilo.fail.conflict("{s} is already taken", .{email}),

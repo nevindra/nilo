@@ -179,6 +179,41 @@ pub fn valueAt(where: anytype, comptime path: Path) ValueAt(@TypeOf(where), path
     return valueAt(@field(where, path[0]), path[1..]);
 }
 
+/// The same value, coerced to `T` on the way out.
+///
+/// Necessary rather than convenient, and the reason is one Zig rule:
+/// **a function whose return type is comptime-only is evaluated at comptime,
+/// whole.** `ValueAt` of `.{ .set = .{ .age = 31 } }` is `comptime_int`, so
+/// `valueAt` on that path is a comptime call — and a comptime call cannot read
+/// the rest of an options struct that also carries a runtime value. The line
+/// that hit it is the most ordinary one on the page:
+///
+/// ```zig
+/// _ = try db.update(User, c, .{ .set = .{ .age = 31 }, .where = .{ .id = made.id } });
+/// ```
+///
+/// which stopped with `unable to resolve comptime value` naming `options`,
+/// three functions in and about a parameter the caller never wrote. Naming
+/// the wanted type makes this an ordinary function whose *leaf* coerces, and
+/// the coercion was going to happen one line later anyway (`db.valuesOf`).
+///
+/// `valueAt` above is kept for the callers that have a concrete value and
+/// want its own type — the tests, and `each`.
+pub fn valueAtAs(comptime T: type, where: anytype, comptime path: Path) T {
+    if (path.len == 0) return where;
+    return valueAtAs(T, @field(where, path[0]), path[1..]);
+}
+
+/// Whether a value of this type can only exist at comptime — a literal
+/// number, a `null`, an enum name. These are the ones a caller writes and
+/// the column gives a type to; everything else already has one.
+pub fn comptimeOnly(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .comptime_int, .comptime_float, .null, .undefined, .enum_literal, .type => true,
+        else => false,
+    };
+}
+
 /// The type at the end of a path. Public because the parameter tuple a
 /// statement is run with is built out of these, one per placeholder, and
 /// that tuple's type has to exist before any of it is read (`db.zig`).

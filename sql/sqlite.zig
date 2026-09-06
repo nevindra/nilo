@@ -35,6 +35,7 @@
 //! designs fail by being slow or by being wrong.
 
 const std = @import("std");
+const core = @import("nilo_core");
 const zqlite = @import("zqlite");
 
 const wire = @import("wire.zig");
@@ -211,6 +212,17 @@ pub fn Wire(comptime opts_in: Options) type {
         /// a path that is by definition already waiting.
         free_writer: std.Io.Condition = .init,
         free_reader: std.Io.Condition = .init,
+        /// How long a fiber may queue for a connection before it gives up,
+        /// out of `Db.Opts.timeout_ms`. Zero is no bound.
+        ///
+        /// **`open` used to read `size` and drop the rest**, so the option a
+        /// caller set to bound a queue was silently ignored here while it was
+        /// honoured on Postgres (ADR 0135).
+        queue_timeout_ms: u32,
+        /// What can reach a waiting fiber to stop it. `.off` in a program
+        /// with no Engine, where nothing can cancel a fiber and the wait is
+        /// unbounded — see `wire.OpenOpts.limits`.
+        limits: core.Limits,
 
         /// One connection and the statements kept prepared on it.
         ///
@@ -424,7 +436,13 @@ pub fn Wire(comptime opts_in: Options) type {
                 try prime(conn.handle, i == 0);
             }
 
-            return .{ .gpa = gpa, .io = io, .conns = conns };
+            return .{
+                .gpa = gpa,
+                .io = io,
+                .conns = conns,
+                .queue_timeout_ms = open_opts.timeout_ms,
+                .limits = open_opts.limits,
+            };
         }
 
         /// The pragmas every connection gets, in the order they have to be in:
@@ -488,27 +506,90 @@ pub fn Wire(comptime opts_in: Options) type {
         /// gives its turn up rather than holding it. The name is right for
         /// what the handler has to decide — this statement is not going to
         /// run.
+        ///
+        /// **The queue is bounded by `timeout_ms`, and the timer is armed
+        /// only by a fiber that is actually going to wait** (ADR 0135). A
+        /// statement that finds the writer free pays nothing at all: arming
+        /// is the Engine registering a timer, and doing that per statement
+        /// would put the cost on the path that is never in trouble. The
+        /// `Bound` costs `core.Limits.slot_size` bytes of this frame either
+        /// way, which is stack a handler touches and therefore per
+        /// connection (ADR 0063).
         fn takeWriter(self: *Self) wire.Error!usize {
             self.lock.lock(self.io) catch return error.TimedOut;
             defer self.lock.unlock(self.io);
+
+            if (!self.conns[0].busy) {
+                self.conns[0].busy = true;
+                return 0;
+            }
+
+            var bound: core.Limits.Bound = .idle;
+            defer bound.release();
+            bound.arm(self.limits, self.queue_timeout_ms);
+
             while (self.conns[0].busy) self.free_writer.wait(self.io, &self.lock) catch
-                return error.TimedOut;
+                return self.gaveUp(&bound, .writer);
             self.conns[0].busy = true;
             return 0;
         }
 
-        /// Any free reader, or wait for one.
+        /// Any free reader, or wait for one — bounded the same way, and armed
+        /// only once every reader has turned out to be busy.
         fn takeReader(self: *Self) wire.Error!usize {
             self.lock.lock(self.io) catch return error.TimedOut;
             defer self.lock.unlock(self.io);
+
+            var bound: core.Limits.Bound = .idle;
+            defer bound.release();
+
             while (true) {
                 for (self.conns[1..], 1..) |*conn, i| {
                     if (conn.busy) continue;
                     conn.busy = true;
                     return i;
                 }
-                self.free_reader.wait(self.io, &self.lock) catch return error.TimedOut;
+                if (!bound.armed) bound.arm(self.limits, self.queue_timeout_ms);
+                self.free_reader.wait(self.io, &self.lock) catch
+                    return self.gaveUp(&bound, .reader);
             }
+        }
+
+        /// What a wait that ended without a connection means, and the one
+        /// line an operator gets for it.
+        ///
+        /// The `Bound` is the authority rather than the error, for the reason
+        /// `core/limits.zig` gives: a cancellation reaching a caller through
+        /// somebody else's fixed error set arrives wearing another name. Here
+        /// there are only two ways in — this Wire's own timer, or the server
+        /// shutting the fiber down — and only the first is worth a line.
+        ///
+        /// **The writer's message names the mistake that produces it most
+        /// often.** There is exactly one writer, so a handler holding a `tx`
+        /// and then sending a statement through `db` rather than `tx` queues
+        /// for a connection it is itself holding. What this cannot do is
+        /// *say* that is what happened: telling it apart from an honestly
+        /// busy database means knowing which fiber holds the writer, and
+        /// `std.Io` hands a Service no fiber identity to hold it by
+        /// (ADR 0135).
+        fn gaveUp(self: *Self, bound: *core.Limits.Bound, want: enum { writer, reader }) wire.Error {
+            if (!bound.fired()) return error.TimedOut;
+            switch (want) {
+                .writer => std.log.warn(
+                    "nilo_sql: a statement waited {d}ms for the writer connection and gave up. " ++
+                        "There is one writer, so either the database is busy or this fiber is " ++
+                        "queueing for a connection it already holds — a `db.…` call inside a " ++
+                        "handler holding a `tx` waits for itself. `timeout_ms` is the bound.",
+                    .{self.queue_timeout_ms},
+                ),
+                .reader => std.log.warn(
+                    "nilo_sql: a statement waited {d}ms for a reader connection and gave up, " ++
+                        "with all {d} of them busy. Raise `size`, or shorten what a request " ++
+                        "holds one for. `timeout_ms` is the bound.",
+                    .{ self.queue_timeout_ms, self.conns.len - 1 },
+                ),
+            }
+            return error.TimedOut;
         }
 
         /// Uncancelable, and it has to be: this runs from `Rows.close` and
@@ -658,6 +739,23 @@ pub fn Wire(comptime opts_in: Options) type {
             const stmt = rows.stmt;
             return onThread(zqlite.Stmt.step, .{stmt}) catch |err|
                 translate(self.conns[rows.at].handle, err);
+        }
+
+        /// How many columns the row `next` just stopped on has.
+        ///
+        /// **Only answerable once a row is under it**, which is what decides
+        /// where `fill` asks (ADR 0134): zqlite's `columnCount` is
+        /// `sqlite3_data_count`, and that is `0` on a prepared statement
+        /// nobody has stepped, on one that has run off the end, and on one
+        /// that answers with no rows at all. `sqlite3_column_count` is the
+        /// one settled by preparing, and zqlite does not expose it — asking
+        /// SQLite for it directly would be reaching past the driver for a
+        /// number the caller can get by pulling the row it was going to pull
+        /// anyway.
+        pub fn width(self: *Self, rows: *const Rows) usize {
+            _ = self;
+            const n = rows.stmt.columnCount();
+            return if (n < 0) 0 else @intCast(n);
         }
 
         /// Column `col` of the row `next` just stopped on, as `T`.

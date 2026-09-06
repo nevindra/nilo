@@ -101,10 +101,68 @@ itself is fixed.
 ## What it costs
 
 Nothing at run time — no snippet is in the shipped library. On `zig build test`
-it is six object compilations, and **they cache**, which is the whole
+it is one object compilation per marked block — 54 of them — and **they cache**, which is the whole
 difference from `refusals/`: a compilation that succeeds leaves something
 behind, so a warm run is ~30ms each and only a changed page is re-analysed. All
 46 refusals cost ~12.8s every run because a failed compilation leaves nothing.
 
 That asymmetry is why this can afford to grow and why the refusals cannot.
 `-Dsql=false` skips the step, because the running example has a database in it.
+
+## The SQL guide, and what four small rules bought
+
+Amended after `docs/guide/sql.md` was marked: 37 of its 51 blocks, against 17
+across the eight pages before it. Nothing above changes; four things were
+added, each because the page could not be checked without it.
+
+**A page may have a prelude of its own.** `pages` is a list of
+`Page { path, types, values }` now, and the SQL guide points at
+`docs/snippets/sql_types.zig`. It is the page that *teaches* tables: its
+`User` has an `age`, an `orders` counter and a `created_at` the sign-in
+example next door has no use for, and it needs an `Order`, an `Item` and five
+more besides — seven types of noise in front of a snippet about a cookie. A
+page whose types are the subject gets to own them.
+
+**A block of statements is given the shapes the page declared, but not its
+functions.** `<!-- compiles -->` blocks already accumulated, so that a page
+could show its struct once; a body block got only the prelude, which meant a
+guide could not show a `User` and then write a statement about it. The reason
+was real but narrower than the rule: a `fn rename(db, c, …)` cannot sit in
+front of the file-scope `db` and `c` the statements need. So the accumulator
+is split — declarations that introduce no function of their own reach a body
+block too, and the SQL guide declares its `User` in the first marked block on
+the page rather than in a prelude that would be a second copy of it.
+
+**A value the snippet declares for itself is not also handed to it.**
+`var tx = try db.begin(c, .{});` opens five snippets in the transactions
+section, and `tx` is the name the sixth uses without opening anything. Both
+are how a person writes it, and Zig refuses a local that shadows a
+declaration. The prelude carries every name and the ones a block introduces
+are dropped on the way in.
+
+**A local the snippet does not read is discarded for it.** `const all = try
+db.select(…);` is the line a page is teaching, and Zig refuses a local nobody
+reads. The alternative was `_ = all;` published under it, which is this build
+step leaking into the documentation — the one thing this ADR was careful not
+to do. The generated `_ = &name;` is the same trick the `export fn` above
+already plays for functions.
+
+### What marking the page found
+
+Two of them are documentation and one is not:
+
+- **`db.update(User, c, .{ .set = .{ .age = 31 }, .where = .{ .id = made.id } })`
+  did not compile.** A literal has no type of its own, so `where.valueAt` on
+  that path returned `comptime_int` — and a function with a comptime-only
+  return type is evaluated at comptime, whole, which then cannot reach the
+  runtime `id` in the same options struct. The message named `options`, a
+  parameter the caller never wrote, three functions in. It is the most
+  ordinary line on the page and it is fixed here (`where.valueAtAs`), along
+  with the two other values that have no type of their own: a `null` and an
+  enum name.
+- **`db.raw` takes a Row, and the guide passed it a bare struct twice.** A
+  Row names a relation; `raw` never reads the name, because it did not write
+  the statement. The page says so now and its examples name a view.
+- **The running `User` was missing two columns its own examples set.**
+  `.set = .{ .name = … }` and `.set = .{ .orders = user.orders + 1 }` were
+  both written against a struct four screens up that had neither.

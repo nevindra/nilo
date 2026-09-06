@@ -845,23 +845,43 @@ const Snippets = struct {
     /// what is checked should be a decision somebody made.
     ///
     /// **These cache, and the refusals do not.** A compilation that succeeds
-    /// leaves something behind, so a warm run of all six is ~30ms each and
+    /// leaves something behind, so a warm run of all 54 is ~30ms each and
     /// only a page that changed is re-analysed. That is the opposite of
-    /// `refusals/` (ADR 0027) and it is why this can afford to grow.
-    const pages = [_][]const u8{
-        "README.md",
-        "docs/reference.md",
-        "docs/guide/sessions.md",
-        "docs/guide/config.md",
-        "docs/guide/forms.md",
+    /// `refusals/` (ADR 0027) and it is why this can afford to grow — and it
+    /// did: marking `docs/guide/sql.md` more than tripled the table.
+    const pages = [_]Page{
+        .{ .path = "README.md" },
+        .{ .path = "docs/reference.md" },
+        .{ .path = "docs/guide/sessions.md" },
+        .{ .path = "docs/guide/config.md" },
+        .{ .path = "docs/guide/forms.md" },
         // These three were carrying `<!-- compiles -->` marks that nothing
         // read, which is worse than an unmarked block: an unmarked block
         // claims nothing, and a marked one claims a build step checked it.
         // Five blocks across the three, two of them written the same day this
         // list was found to be short.
-        "docs/guide/metrics.md",
-        "docs/guide/middleware.md",
-        "docs/guide/responses.md",
+        .{ .path = "docs/guide/metrics.md" },
+        .{ .path = "docs/guide/middleware.md" },
+        .{ .path = "docs/guide/responses.md" },
+        .{
+            .path = "docs/guide/sql.md",
+            .types = "docs/snippets/sql_types.zig",
+            .values = "docs/snippets/sql_values.zig",
+        },
+    };
+
+    /// A page, and the world its snippets are compiled against.
+    ///
+    /// The default world is the running example every other page shares. The
+    /// SQL guide has one of its own because it is the page that *teaches*
+    /// tables: its `User` has an `age` and a `created_at` the sign-in
+    /// example has no use for, and it introduces an `Order`, an `Item` and a
+    /// `Product` that would be seven types of noise in front of a snippet
+    /// about a cookie. A page whose types are the subject gets to own them.
+    const Page = struct {
+        path: []const u8,
+        types: []const u8 = "docs/snippets/types.zig",
+        values: []const u8 = "docs/snippets/values.zig",
     };
 
     const opens = "<!-- compiles";
@@ -873,23 +893,28 @@ const Snippets = struct {
     };
 
     /// Every marked block in every page, ready to compile.
-    fn collect(b: *std.Build, types: []const u8, values: []const u8) []const Block {
-        const io = b.graph.io;
+    fn collect(b: *std.Build) []const Block {
         var found: std.ArrayList(Block) = .empty;
 
         for (pages) |page| {
-            const text = b.build_root.handle.readFileAlloc(
-                io,
-                page,
-                b.allocator,
-                .limited(4 << 20),
-            ) catch @panic("cannot read a documentation page");
+            const text = read(b, page.path);
+            const types = read(b, page.types);
+            const values = read(b, page.values);
 
             // What the marked declaration blocks on this page have declared
             // so far. A page is read top to bottom, so a block naming a type
             // the block above it introduced is right rather than incomplete —
             // and it is what lets the guide show the struct once.
             var declared: std.ArrayList(u8) = .empty;
+
+            // The half of that a block of *statements* can also have: the
+            // declarations which introduced no function of their own. A
+            // function the page declared cannot be pasted in front of the
+            // values, because its `c` parameter and the file-scope `c` the
+            // statements need cannot both exist — but the `const User =
+            // struct { … }` above it can, and that is the one the statements
+            // are usually about.
+            var shapes: std.ArrayList(u8) = .empty;
 
             var lines = std.mem.splitScalar(u8, text, '\n');
             var at: usize = 0;
@@ -917,13 +942,18 @@ const Snippets = struct {
 
                 at += 1;
                 found.append(b.allocator, .{
-                    .name = b.fmt("{s}_{d}", .{ slug(b, page), at }),
+                    .name = b.fmt("{s}_{d}", .{ slug(b, page.path), at }),
                     // A block of statements deliberately does *not* get the
                     // declarations above it: a `fn signIn(c: *nilo.Ctx, …)`
                     // and the `c` such a block says cannot both exist, and
                     // the statements are the ones that need `c`.
                     .source = if (is_body)
-                        b.fmt("{s}\n{s}\n{s}\n", .{ types, values, wrapped(b, block.items) })
+                        b.fmt("{s}\n{s}\n{s}\n{s}\n", .{
+                            types,
+                            shapes.items,
+                            without(b, values, block.items),
+                            wrapped(b, block.items),
+                        })
                     else
                         b.fmt("{s}\n{s}\n{s}\n{s}\n", .{
                             types,
@@ -936,11 +966,38 @@ const Snippets = struct {
                 if (!is_body) {
                     declared.appendSlice(b.allocator, block.items) catch @panic("OOM");
                     declared.append(b.allocator, '\n') catch @panic("OOM");
+                    if (!declaresFn(block.items)) {
+                        shapes.appendSlice(b.allocator, block.items) catch @panic("OOM");
+                        shapes.append(b.allocator, '\n') catch @panic("OOM");
+                    }
                 }
             }
         }
 
         return found.items;
+    }
+
+    /// A page or a prelude, read once per call and small enough not to care.
+    fn read(b: *std.Build, path: []const u8) []const u8 {
+        return b.build_root.handle.readFileAlloc(
+            b.graph.io,
+            path,
+            b.allocator,
+            .limited(4 << 20),
+        ) catch @panic("cannot read a documentation page or its prelude");
+    }
+
+    /// Whether this block introduces a function of its own — which is what
+    /// keeps it out of `shapes`. Column 0 is the whole test: a `pub fn` that
+    /// is indented is a method inside a struct, and a method's parameters
+    /// shadow nothing.
+    fn declaresFn(block: []const u8) bool {
+        var lines = std.mem.splitScalar(u8, block, '\n');
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "fn ")) return true;
+            if (std.mem.startsWith(u8, line, "pub fn ")) return true;
+        }
+        return false;
     }
 
     /// Whether this line is a snippet naming a module the prelude has named.
@@ -957,9 +1014,72 @@ const Snippets = struct {
     fn wrapped(b: *std.Build, block: []const u8) []const u8 {
         return b.fmt(
             "export fn snippet() void {{ statements() catch {{}}; }}\n" ++
-                "fn statements() anyerror!void {{\n{s}\n}}\n",
-            .{block},
+                "fn statements() anyerror!void {{\n{s}\n{s}\n}}\n",
+            .{ block, discarding(b, block) },
         );
+    }
+
+    /// `_ = &x;` for every name a block of statements introduced.
+    ///
+    /// Zig refuses to compile a local nobody reads, and a snippet is written
+    /// to be read by a person rather than to use what it names: `const all =
+    /// try db.select(…);` is the line the page is teaching, and the page
+    /// should not have to carry a discard beside it to keep this step happy.
+    /// A published snippet with `_ = all;` in it is this file leaking into
+    /// the documentation, which is the one thing ADR 0083 was careful not to
+    /// do. Taking the address rather than the value also settles a `var`
+    /// nothing mutates, which is the same complaint under another name.
+    ///
+    /// Column 0 only: a name introduced inside a `for` or an `if` is out of
+    /// scope by the time these run.
+    fn discarding(b: *std.Build, block: []const u8) []const u8 {
+        var out: std.ArrayList(u8) = .empty;
+        var lines = std.mem.splitScalar(u8, block, '\n');
+        while (lines.next()) |line| {
+            const name = named(line, "const ") orelse named(line, "var ") orelse continue;
+            out.appendSlice(b.allocator, b.fmt("    _ = &{s};\n", .{name})) catch @panic("OOM");
+        }
+        return out.items;
+    }
+
+    /// The values a snippet did not introduce for itself.
+    ///
+    /// `var tx = try db.begin(c, .{});` is the line five snippets in the
+    /// transactions section open with, and `tx` is also the name the sixth
+    /// one uses without opening anything. Both are how a person would write
+    /// it, and a file-scope `tx` in front of the first five would make each
+    /// of them a local shadowing a declaration, which Zig refuses. So the
+    /// prelude carries every name and the ones the block declares itself are
+    /// dropped on the way in.
+    fn without(b: *std.Build, values: []const u8, block: []const u8) []const u8 {
+        var out: std.ArrayList(u8) = .empty;
+        var lines = std.mem.splitScalar(u8, values, '\n');
+        while (lines.next()) |line| {
+            if (named(line, "pub var ")) |name| {
+                if (introduces(block, name)) continue;
+            }
+            out.appendSlice(b.allocator, line) catch @panic("OOM");
+            out.append(b.allocator, '\n') catch @panic("OOM");
+        }
+        return out.items;
+    }
+
+    /// The name a line introduces, if it opens with `prefix` at column 0.
+    fn named(line: []const u8, prefix: []const u8) ?[]const u8 {
+        if (!std.mem.startsWith(u8, line, prefix)) return null;
+        const after = line[prefix.len..];
+        const end = std.mem.indexOfAny(u8, after, " :=") orelse return null;
+        return if (end == 0) null else after[0..end];
+    }
+
+    /// Whether this block declares `name` at the top level of its own body.
+    fn introduces(block: []const u8, name: []const u8) bool {
+        var lines = std.mem.splitScalar(u8, block, '\n');
+        while (lines.next()) |line| {
+            const found = named(line, "const ") orelse named(line, "var ") orelse continue;
+            if (std.mem.eql(u8, found, name)) return true;
+        }
+        return false;
     }
 
     /// The same, for a block that declares functions: one exported function
@@ -1282,6 +1402,16 @@ const Layering = struct {
 
     fn permits(layer: Layer, named: []const u8) bool {
         if (std.mem.eql(u8, named, "std") or std.mem.eql(u8, named, "builtin")) return true;
+        // A module may name itself, which is neither upward nor sideways.
+        // `sql/deadline.zig` is a test root of its own rather than a file
+        // inside `nilo_sql`, so it reaches the module the way a caller does
+        // — and the build hands it the same instance, so there is no second
+        // copy of the module for a type to disagree about. `fetch` reached
+        // the same place by importing `fetch.zig` as a file, which the line
+        // below already allows; a module whose deps are two drivers and a
+        // generated options file cannot be rebuilt that cheaply.
+        if (std.mem.startsWith(u8, named, "nilo_") and
+            std.mem.eql(u8, named["nilo_".len..], layer.root)) return true;
         // A file rather than a module. `..` is how one would reach out of
         // its own directory, which is importing sideways by another name.
         if (std.mem.endsWith(u8, named, ".zig"))
@@ -2404,6 +2534,27 @@ pub fn build(b: *std.Build) void {
         under_test.addOptions("live_config", live_config);
         const sql_tests = b.addTest(.{ .root_module = under_test });
         test_sql_step.dependOn(&b.addRunArtifact(sql_tests).step);
+
+        // The pool's own deadline, watched firing. A root of its own for the
+        // reason `fetch/deadline.zig` is one: only the Engine can cancel a
+        // fiber, so this is the one test here that needs a running server —
+        // and putting it in `sql/sql.zig`'s test block would make
+        // `zig build test-sql` need one too (ADR 0135).
+        //
+        // Hung off `test-sql` rather than `test`, because `test` deliberately
+        // does not build this module or fetch its drivers (ADR 0075).
+        const deadline_root = b.createModule(.{
+            .root_source_file = b.path("sql/deadline.zig"),
+            .target = target,
+            .optimize = mode,
+            .imports = &.{
+                .{ .name = "nilo_core", .module = core_mod },
+                .{ .name = "nilo_http", .module = framework },
+                .{ .name = "nilo_sql", .module = under_test },
+            },
+        });
+        const deadline_tests = b.addTest(.{ .root_module = deadline_root });
+        test_sql_step.dependOn(&b.addRunArtifact(deadline_tests).step);
     }
 
     for (test_modes) |mode| {
@@ -2531,24 +2682,10 @@ pub fn build(b: *std.Build) void {
         "Compile the snippets the documentation publishes",
     );
     if (want_sql) {
-        const io = b.graph.io;
-        const types = b.build_root.handle.readFileAlloc(
-            io,
-            "docs/snippets/types.zig",
-            b.allocator,
-            .limited(64 << 10),
-        ) catch @panic("cannot read docs/snippets/types.zig");
-        const values = b.build_root.handle.readFileAlloc(
-            io,
-            "docs/snippets/values.zig",
-            b.allocator,
-            .limited(64 << 10),
-        ) catch @panic("cannot read docs/snippets/values.zig");
-
         // Written into the cache rather than into the tree: the snippet's
         // one copy is the one in the page.
         const written = b.addWriteFiles();
-        for (Snippets.collect(b, types, values)) |snippet| {
+        for (Snippets.collect(b)) |snippet| {
             const module = b.createModule(.{
                 .root_source_file = written.add(
                     b.fmt("{s}.zig", .{snippet.name}),

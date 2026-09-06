@@ -446,6 +446,18 @@ pub const Wire = struct {
         return true;
     }
 
+    /// How many columns came back, out of the `RowDescription` pg.zig has
+    /// already read.
+    ///
+    /// A property of the result set here, so the row `next` stopped on makes
+    /// no difference to it — the answer would be the same before the first
+    /// one. `fill` asks after the first `next` regardless, because SQLite
+    /// cannot answer any earlier (ADR 0134).
+    pub fn width(self: *Wire, rows: *const Rows) usize {
+        _ = self;
+        return rows.result.number_of_columns;
+    }
+
     /// Column `col` of the row `next` just handed back, as `T`.
     ///
     /// A `[]const u8` here points into the read buffer and dies at the next

@@ -125,6 +125,67 @@ pub fn Named(comptime name: []const u8) type {
 /// the body never mentions gives back the same type twice. `db_name` below
 /// is where it is kept, and the trap messages read it — which is the reason
 /// it is not merely a marker.
+/// One statement that has run, as the thing watching it is told about it
+/// ([ADR 0137](../docs/adr/0137-a-statement-can-be-watched.md)).
+///
+/// **The values are not in it, and that is the decision rather than the first
+/// version.** They are the interesting half and they are a password, an email
+/// address and a card's last four digits — which is what
+/// [ADR 0025](../docs/adr/0025-every-failure-answers-with-the-same-json-body.md)
+/// is careful about one layer up, where a failure's message never reaches the
+/// client. A log line is read by more people than a response is.
+///
+/// What is here is enough to answer *which statement is slow*, which is the
+/// question somebody opens this for: the text, the plan name it was kept
+/// under, how long it took, and how many rows it moved.
+pub const Sent = struct {
+    /// The statement, exactly as it went to the database. A comptime constant
+    /// for everything this module writes, and the caller's own text for
+    /// `db.raw` and `db.exec`.
+    sql: []const u8,
+    /// The name it is kept prepared under, or null for a statement that is
+    /// not kept — which is `db.raw`, `db.exec`, and every statement on a `Db`
+    /// with `prepared = false` (ADR 0057).
+    plan: ?[]const u8,
+    /// How long the database took, from the call going out to the rows being
+    /// in hand. Taken from the monotonic clock, so an operator moving the
+    /// wall clock mid-query cannot produce a query that took an hour.
+    ///
+    /// For `db.stream` it is how long the statement took to *open*: the rows
+    /// are pulled by the handler afterwards, and nothing here sees the end.
+    micros: u64,
+    /// Rows filled, or rows changed for a statement that answers with a
+    /// count. Null when nobody can say yet — a stream, or a statement that
+    /// failed.
+    rows: ?usize,
+    /// Whether the database refused it. The error itself is not here: the
+    /// caller is about to be handed it, and a watcher that has to switch on
+    /// an error set is a watcher that breaks when the set grows.
+    failed: bool,
+};
+
+/// What `db.watching` takes. A plain function pointer rather than an
+/// interface: everything a watcher needs is in the `Sent`, and a nilo Service
+/// is shared across every request in flight — so anything it closed over
+/// would need a lock this module cannot see.
+pub const Watcher = *const fn (Sent) void;
+
+/// A ready-made watcher: one `std.log.debug` line per statement, in the
+/// module's own scope.
+///
+/// It exists because it is what everybody writes first, and because writing it
+/// once here means the guide can show `db.watching(sql.logging)` rather than
+/// eleven lines somebody has to get right. Debug level, so a release build
+/// with the default log level pays the branch and prints nothing.
+pub fn logging(sent: Sent) void {
+    const how = if (sent.failed) " failed" else "";
+    if (sent.rows) |n| {
+        std.log.scoped(.nilo_sql).debug("{d}us{s}, {d} row(s): {s}", .{ sent.micros, how, n, sent.sql });
+    } else {
+        std.log.scoped(.nilo_sql).debug("{d}us{s}: {s}", .{ sent.micros, how, sent.sql });
+    }
+}
+
 pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type {
     comptime wire_mod.assertWire(W);
     comptime dialect.assertDialect(D);
@@ -152,6 +213,10 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// The schema check, with the Row list baked in by `checking`. Null
         /// when nobody asked for one.
         check: ?*const fn (*Self) anyerror!usize = null,
+        /// Who to tell about each statement, or null for nobody — which is
+        /// the default and costs one null test per statement
+        /// ([ADR 0137](../docs/adr/0137-a-statement-can-be-watched.md)).
+        watch: ?Watcher = null,
         /// Debug only: transactions begun and not yet ended. A leak here is
         /// a connection that never goes back, so the count is asserted at
         /// `deinit` — see `begin`.
@@ -304,14 +369,98 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             }.run;
         }
 
+        /// Be told about every statement this `Db` sends
+        /// ([ADR 0137](../docs/adr/0137-a-statement-can-be-watched.md)).
+        ///
+        /// ```zig
+        /// db.watching(sql.logging);   // one debug line per statement
+        /// ```
+        ///
+        /// The text, the plan name, how long it took and how many rows moved
+        /// — and **not the values**, for the reason `Sent` gives. Set it
+        /// before `listen()`: it is read on every statement from every fiber,
+        /// and nothing here locks it.
+        ///
+        /// One watcher rather than a list. A second one is a function that
+        /// calls two, which is a line the caller writes and not a registry
+        /// this module has to grow.
+        pub fn watching(self: *Self, f: Watcher) void {
+            self.watch = f;
+        }
+
+        /// The clock, read only when somebody is listening. Null means
+        /// nobody is, and `told` below does nothing for it.
+        fn timing(self: *const Self) ?i64 {
+            return if (self.watch == null) null else core.monotonicMicros();
+        }
+
+        /// Tell the watcher what happened, if there is one.
+        fn told(
+            self: *const Self,
+            started: ?i64,
+            sql: []const u8,
+            plan: ?[]const u8,
+            rows: ?usize,
+            failed: bool,
+        ) void {
+            const f = self.watch orelse return;
+            const at = started orelse return;
+            const took = core.monotonicMicros() - at;
+            f(.{
+                .sql = sql,
+                .plan = plan,
+                // A monotonic clock does not go backwards, so this cannot be
+                // negative — the clamp is what makes that a fact about this
+                // line rather than a fact about the kernel.
+                .micros = if (took < 0) 0 else @intCast(took),
+                .rows = rows,
+                .failed = failed,
+            });
+        }
+
+        /// A statement that answers with a count rather than rows, timed.
+        /// The one funnel for `exec`, so that a watcher sees an `UPDATE` that
+        /// returns nothing on the same terms as a `SELECT`.
+        fn execTold(
+            self: *Self,
+            tx: ?*W.Tx,
+            c: anytype,
+            sql: []const u8,
+            plan: ?[]const u8,
+            values: anytype,
+        ) !usize {
+            const started = self.timing();
+            const w = try self.wireOf();
+            const changed = if (tx) |t|
+                t.exec(c.arena(), sql, values, plan) catch |err| {
+                    self.told(started, sql, plan, null, true);
+                    return err;
+                }
+            else
+                w.exec(c.arena(), sql, values, plan) catch |err| {
+                    self.told(started, sql, plan, null, true);
+                    return err;
+                };
+            self.told(started, sql, plan, changed, false);
+            return changed;
+        }
+
         /// Finish building, now that there is an event loop to dial
         /// through. Called by `listen()` before the first connection is
         /// accepted (ADR 0040).
-        pub fn nilo_start(self: *Self, io: std.Io) !void {
+        ///
+        /// **`limits` is what can stop a fiber that is waiting**, and it is
+        /// taken for the same reason `nilo_fetch` and `nilo_s3` take one: the
+        /// Engine owns the timer and a Service owns the number
+        /// (`core/limits.zig`). A `Db` no App holds — a CLI, a migration, a
+        /// test — passes `.off` and is bounded by nothing, which is what it
+        /// was before ADR 0135 either way.
+        pub fn nilo_start(self: *Self, io: std.Io, limits: core.Limits) !void {
             self.wire = W.open(io, self.gpa, self.url, .{
                 .size = self.opts.size,
                 .connect_on_init = self.opts.connect_on_init,
                 .timeout_ms = self.opts.timeout_ms,
+                .limits = limits,
             }) catch |err| {
                 // Two failures reach here and they want different sentences.
                 // Before ADR 0062 the pool dialled itself whatever
@@ -378,7 +527,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 "Begin one and ask there: `var tx = try db.begin(c, .{}); defer tx.deinit();` " ++
                     "and then `tx.select(…)`.");
             const stmt = comptime statement.select(D, Row, @TypeOf(options));
-            return fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
+            return fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
         }
 
         /// The first row matching `options`, or null.
@@ -395,7 +544,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 "Begin one and ask there: `var tx = try db.begin(c, .{}); defer tx.deinit();` " ++
                     "and then `tx.one(…)`.");
             const stmt = comptime statement.one(D, Row, @TypeOf(options));
-            const found = try fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
+            const found = try fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
             return if (found.len == 0) null else found[0];
         }
 
@@ -416,7 +565,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         pub fn find(self: *Self, comptime Row: type, c: anytype, key: anytype) !?Row {
             comptime core.checkScope(@TypeOf(c), "db.find");
             const stmt = comptime statement.find(D, Row, @TypeOf(key));
-            const found = try fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, key, c));
+            const found = try fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, key, c));
             return if (found.len == 0) null else found[0];
         }
 
@@ -429,7 +578,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         pub fn count(self: *Self, comptime Row: type, c: anytype, options: anytype) !usize {
             comptime core.checkScope(@TypeOf(c), "db.count");
             const stmt = comptime statement.count(D, Row, @TypeOf(options));
-            const n = try only(i64, try self.wireOf(), null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
+            const n = try only(i64, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
             // `count(*)` is a `bigint` and never negative. A negative one
             // would mean the column read as something else entirely.
             if (n < 0) return error.QueryFailed;
@@ -444,7 +593,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         pub fn exists(self: *Self, comptime Row: type, c: anytype, options: anytype) !bool {
             comptime core.checkScope(@TypeOf(c), "db.exists");
             const stmt = comptime statement.exists(D, Row, @TypeOf(options));
-            return only(bool, try self.wireOf(), null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
+            return only(bool, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
         }
 
         /// Rows read one at a time, for a result set too big to hold.
@@ -473,7 +622,17 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                     "what comes back.");
             const stmt = comptime statement.select(D, Row, @TypeOf(options));
             const w = try self.wireOf();
-            const rows = try w.run(c.arena(), stmt.sql, try valuesOf(stmt, Row, options, c), self.planOf(stmt));
+            const started = self.timing();
+            const rows = w.run(c.arena(), stmt.sql, try valuesOf(stmt, Row, options, c), self.planOf(stmt)) catch |err| {
+                self.told(started, stmt.sql, self.planOf(stmt), null, true);
+                return err;
+            };
+            // **What a watcher is told here is the statement opening**, with
+            // no row count: the rows are pulled by the handler afterwards and
+            // nothing in this call sees the last one. A stream that is slow to
+            // *open* is the half worth reporting, and it is the half this can
+            // report honestly (ADR 0137).
+            self.told(started, stmt.sql, self.planOf(stmt), null, false);
             // Counted only once the statement is away, so a `stream` that
             // never opened is not a `stream` that was never closed.
             if (traps_enabled) self.hold(&self.open_streams, .Add);
@@ -498,7 +657,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             comptime core.checkScope(@TypeOf(c), "db.raw");
             // No ceiling: this module did not write the statement and so has
             // nothing to say about how many rows it can answer with.
-            return fill(Row, null, try self.wireOf(), null, c, sql, null, values);
+            return fill(Row, null, self, null, c, sql, null, values);
         }
 
         /// A statement that answers with **nothing**, and the number of rows
@@ -531,8 +690,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// pool, the Scope and the seven errors.
         pub fn exec(self: *Self, c: anytype, sql: []const u8, values: anytype) !usize {
             comptime core.checkScope(@TypeOf(c), "db.exec");
-            const w = try self.wireOf();
-            return w.exec(c.arena(), sql, values, null);
+            return self.execTold(null, c, sql, null, values);
         }
 
         // -- writing ---------------------------------------------------------
@@ -548,7 +706,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             const stmt = comptime statement.insert(D, Row, @TypeOf(values));
             // `RETURNING` on a successful insert answers with exactly one
             // row, so the list is sized for one and never grows.
-            const back = try fill(Row, 1, try self.wireOf(), null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, values, c));
+            const back = try fill(Row, 1, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, values, c));
             // `RETURNING` on a successful insert answers with exactly one
             // row. Reaching here with none would mean the driver and
             // Postgres disagree about what happened, which is not something
@@ -584,7 +742,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             return fill(
                 Row,
                 items.len,
-                try self.wireOf(),
+                self,
                 null,
                 c,
                 stmt.sql,
@@ -620,7 +778,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             return fill(
                 Row,
                 items.len,
-                try self.wireOf(),
+                self,
                 null,
                 c,
                 stmt.sql,
@@ -659,7 +817,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         ) !?Row {
             comptime core.checkScope(@TypeOf(c), "db.insertOrIgnore");
             const stmt = comptime statement.insertOrIgnore(D, Row, @TypeOf(values), on);
-            const back = try fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, values, c));
+            const back = try fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, values, c));
             return if (back.len == 0) null else back[0];
         }
 
@@ -691,7 +849,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         ) !Row {
             comptime core.checkScope(@TypeOf(c), "db.insertOrUpdate");
             const stmt = comptime statement.insertOrUpdate(D, Row, @TypeOf(values), on);
-            const back = try fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, values, c));
+            const back = try fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, values, c));
             // `DO UPDATE` always touches a row, so an empty answer here means
             // the driver and Postgres disagree — the same reasoning as
             // `insert`, and the reason this one is not an optional.
@@ -707,8 +865,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         pub fn update(self: *Self, comptime Row: type, c: anytype, options: anytype) !usize {
             comptime core.checkScope(@TypeOf(c), "db.update");
             const stmt = comptime statement.update(D, Row, @TypeOf(options));
-            const w = try self.wireOf();
-            return w.exec(c.arena(), stmt.sql, try valuesOf(stmt, Row, options, c), self.planOf(stmt));
+            return self.execTold(null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
         }
 
         /// Change every row matching `.where` and give back what the database
@@ -726,15 +883,14 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         pub fn updateReturning(self: *Self, comptime Row: type, c: anytype, options: anytype) ![]Row {
             comptime core.checkScope(@TypeOf(c), "db.updateReturning");
             const stmt = comptime statement.updateReturning(D, Row, @TypeOf(options));
-            return fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
+            return fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
         }
 
         /// Delete every row matching `options`, and say how many there were.
         pub fn delete(self: *Self, comptime Row: type, c: anytype, options: anytype) !usize {
             comptime core.checkScope(@TypeOf(c), "db.delete");
             const stmt = comptime statement.delete(D, Row, @TypeOf(options));
-            const w = try self.wireOf();
-            return w.exec(c.arena(), stmt.sql, try valuesOf(stmt, Row, options, c), self.planOf(stmt));
+            return self.execTold(null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
         }
 
         /// The same, answering with the rows that were removed.
@@ -746,7 +902,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         pub fn deleteReturning(self: *Self, comptime Row: type, c: anytype, options: anytype) ![]Row {
             comptime core.checkScope(@TypeOf(c), "db.deleteReturning");
             const stmt = comptime statement.deleteReturning(D, Row, @TypeOf(options));
-            return fill(Row, stmt.reserve, try self.wireOf(), null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
+            return fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
         }
 
         // -- transactions ----------------------------------------------------
@@ -975,27 +1131,27 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             pub fn select(self: *Tx, comptime Row: type, c: anytype, options: anytype) ![]Row {
                 comptime core.checkScope(@TypeOf(c), "tx.select");
                 const stmt = comptime statement.select(D, Row, @TypeOf(options));
-                return fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
+                return fill(Row, stmt.reserve, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
             }
 
             pub fn one(self: *Tx, comptime Row: type, c: anytype, options: anytype) !?Row {
                 comptime core.checkScope(@TypeOf(c), "tx.one");
                 const stmt = comptime statement.one(D, Row, @TypeOf(options));
-                const found = try fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
+                const found = try fill(Row, stmt.reserve, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
                 return if (found.len == 0) null else found[0];
             }
 
             pub fn find(self: *Tx, comptime Row: type, c: anytype, key: anytype) !?Row {
                 comptime core.checkScope(@TypeOf(c), "tx.find");
                 const stmt = comptime statement.find(D, Row, @TypeOf(key));
-                const found = try fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, key, c));
+                const found = try fill(Row, stmt.reserve, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, key, c));
                 return if (found.len == 0) null else found[0];
             }
 
             pub fn count(self: *Tx, comptime Row: type, c: anytype, options: anytype) !usize {
                 comptime core.checkScope(@TypeOf(c), "tx.count");
                 const stmt = comptime statement.count(D, Row, @TypeOf(options));
-                const n = try only(i64, self.w, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
+                const n = try only(i64, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
                 if (n < 0) return error.QueryFailed;
                 return @intCast(n);
             }
@@ -1003,7 +1159,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             pub fn exists(self: *Tx, comptime Row: type, c: anytype, options: anytype) !bool {
                 comptime core.checkScope(@TypeOf(c), "tx.exists");
                 const stmt = comptime statement.exists(D, Row, @TypeOf(options));
-                return only(bool, self.w, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
+                return only(bool, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
             }
 
             pub fn insert(self: *Tx, comptime Row: type, c: anytype, values: anytype) !Row {
@@ -1011,7 +1167,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 const stmt = comptime statement.insert(D, Row, @TypeOf(values));
                 // `RETURNING` on a successful insert answers with exactly one
                 // row, so the list is sized for one and never grows.
-                const back = try fill(Row, 1, self.w, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, values, c));
+                const back = try fill(Row, 1, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, values, c));
                 if (back.len == 0) return error.QueryFailed;
                 return back[0];
             }
@@ -1024,7 +1180,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 return fill(
                     Row,
                     items.len,
-                    self.w,
+                    self.db,
                     &self.inner,
                     c,
                     stmt.sql,
@@ -1041,7 +1197,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 return fill(
                     Row,
                     items.len,
-                    self.w,
+                    self.db,
                     &self.inner,
                     c,
                     stmt.sql,
@@ -1059,7 +1215,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             ) !?Row {
                 comptime core.checkScope(@TypeOf(c), "tx.insertOrIgnore");
                 const stmt = comptime statement.insertOrIgnore(D, Row, @TypeOf(values), on);
-                const back = try fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, values, c));
+                const back = try fill(Row, stmt.reserve, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, values, c));
                 return if (back.len == 0) null else back[0];
             }
 
@@ -1072,7 +1228,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             ) !Row {
                 comptime core.checkScope(@TypeOf(c), "tx.insertOrUpdate");
                 const stmt = comptime statement.insertOrUpdate(D, Row, @TypeOf(values), on);
-                const back = try fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, values, c));
+                const back = try fill(Row, stmt.reserve, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, values, c));
                 if (back.len == 0) return error.QueryFailed;
                 return back[0];
             }
@@ -1080,25 +1236,25 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             pub fn update(self: *Tx, comptime Row: type, c: anytype, options: anytype) !usize {
                 comptime core.checkScope(@TypeOf(c), "tx.update");
                 const stmt = comptime statement.update(D, Row, @TypeOf(options));
-                return self.inner.exec(c.arena(), stmt.sql, try valuesOf(stmt, Row, options, c), self.db.planOf(stmt));
+                return self.db.execTold(&self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
             }
 
             pub fn updateReturning(self: *Tx, comptime Row: type, c: anytype, options: anytype) ![]Row {
                 comptime core.checkScope(@TypeOf(c), "tx.updateReturning");
                 const stmt = comptime statement.updateReturning(D, Row, @TypeOf(options));
-                return fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
+                return fill(Row, stmt.reserve, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
             }
 
             pub fn delete(self: *Tx, comptime Row: type, c: anytype, options: anytype) !usize {
                 comptime core.checkScope(@TypeOf(c), "tx.delete");
                 const stmt = comptime statement.delete(D, Row, @TypeOf(options));
-                return self.inner.exec(c.arena(), stmt.sql, try valuesOf(stmt, Row, options, c), self.db.planOf(stmt));
+                return self.db.execTold(&self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
             }
 
             pub fn deleteReturning(self: *Tx, comptime Row: type, c: anytype, options: anytype) ![]Row {
                 comptime core.checkScope(@TypeOf(c), "tx.deleteReturning");
                 const stmt = comptime statement.deleteReturning(D, Row, @TypeOf(options));
-                return fill(Row, stmt.reserve, self.w, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
+                return fill(Row, stmt.reserve, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
             }
 
             pub fn raw(
@@ -1109,14 +1265,14 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 values: anytype,
             ) ![]Row {
                 comptime core.checkScope(@TypeOf(c), "tx.raw");
-                return fill(Row, null, self.w, &self.inner, c, sql, null, values);
+                return fill(Row, null, self.db, &self.inner, c, sql, null, values);
             }
 
             /// `db.exec` inside the transaction: a statement that answers with
             /// nothing, and the rows it changed (ADR 0078).
             pub fn exec(self: *Tx, c: anytype, sql: []const u8, values: anytype) !usize {
                 comptime core.checkScope(@TypeOf(c), "tx.exec");
-                return self.inner.exec(c.arena(), sql, values, null);
+                return self.db.execTold(&self.inner, c, sql, null, values);
             }
         };
 
@@ -1239,7 +1395,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 "nilo_sql: {s} has no pool, so this query has nothing to run on. " ++
                     "The pool is opened by `nilo_start`, which `app.listen()` calls for every " ++
                     "provided service — outside a server, or before one, `app.start(io)` does " ++
-                    "it, and `db.nilo_start(io)` does it for a `Db` no App holds. " ++
+                    "it, and `db.nilo_start(io, .off)` does it for a `Db` no App holds. " ++
                     "A `nilo.Run` is an arena and a lifetime; it is not a connection.",
                 .{whoami},
             );
@@ -1275,7 +1431,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         fn fill(
             comptime Row: type,
             reserve: ?usize,
-            w: *W,
+            db: *Self,
             tx: ?*W.Tx,
             c: anytype,
             sql: []const u8,
@@ -1284,26 +1440,82 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         ) ![]Row {
             comptime row_mod.assertRow(Row);
             const arena = c.arena();
+            // The Db rather than the Wire, so that the one funnel every read
+            // goes through is also the one place a watcher is told about it
+            // (ADR 0137). Inside a transaction this is the same `*W` the `Tx`
+            // is holding, because the `Tx` took it from here.
+            const w = try db.wireOf();
+            const started = db.timing();
 
             var rows = if (tx) |t|
-                try t.run(arena, sql, values, plan)
+                t.run(arena, sql, values, plan) catch |err| {
+                    db.told(started, sql, plan, null, true);
+                    return err;
+                }
             else
-                try w.run(arena, sql, values, plan);
+                w.run(arena, sql, values, plan) catch |err| {
+                    db.told(started, sql, plan, null, true);
+                    return err;
+                };
             // Whatever happens below, the connection goes back usable —
             // including a handler's own error on the way past (`wire.zig`).
             defer w.drain(&rows);
 
             var out: std.ArrayList(Row) = .empty;
             if (reserve) |ceiling| try out.ensureTotalCapacityPrecise(arena, ceiling);
-            while (try w.next(&rows)) {
-                var filled: Row = undefined;
-                inline for (comptime row_mod.columnsOf(Row), 0..) |column, i| {
-                    const F = comptime row_mod.ColumnType(Row, column);
-                    @field(filled, column) = try readColumn(w, &rows, F, i, c);
+
+            // The first row is pulled out of the loop so the width is asked
+            // **once per statement** rather than once per row, and asked at
+            // the first moment both drivers can answer it (ADR 0134).
+            if (try w.next(&rows)) {
+                wideEnough(Row, w, &rows) catch |err| {
+                    db.told(started, sql, plan, null, true);
+                    return err;
+                };
+                while (true) {
+                    var filled: Row = undefined;
+                    inline for (comptime row_mod.columnsOf(Row), 0..) |column, i| {
+                        const F = comptime row_mod.ColumnType(Row, column);
+                        @field(filled, column) = readColumn(w, &rows, F, i, c) catch |err| {
+                            db.told(started, sql, plan, null, true);
+                            return err;
+                        };
+                    }
+                    try out.append(arena, filled);
+                    if (!try w.next(&rows)) break;
                 }
-                try out.append(arena, filled);
             }
+            db.told(started, sql, plan, out.items.len, false);
             return out.toOwnedSlice(arena);
+        }
+
+        /// Refuse a result set that has fewer columns than the Row reads by
+        /// position.
+        ///
+        /// **`db.raw` gives up the compile-time column check and nothing
+        /// else** — it does not give up being answerable (ADR 0134). A
+        /// `SELECT` list shorter than the Row otherwise reaches
+        /// `pg.Row.get`, which is `self.values[col]` with no bound on `col`:
+        /// a panic in ReleaseSafe, taking the whole process down for one
+        /// request's mistake, and undefined in ReleaseFast. That is the
+        /// failure ADR 0008 says nilo cannot recover from, and this module
+        /// already refuses two others of the same kind — `enumOf` and
+        /// `arrayFits`.
+        ///
+        /// A list *longer* than the Row is not refused: reading the first N
+        /// columns of a wider result is what `SELECT *` into a narrow Row
+        /// means, and nothing about it is out of range.
+        fn wideEnough(comptime Row: type, w: *W, rows: *const W.Rows) !void {
+            const wanted = comptime row_mod.columnsOf(Row).len;
+            const answered = w.width(rows);
+            if (answered >= wanted) return;
+            std.log.warn(
+                "nilo_sql: a statement answered with {d} column(s), and {s} reads {d} " ++
+                    "by position. A `SELECT` list has to name at least the Row's columns, " ++
+                    "in the Row's order.",
+                .{ answered, @typeName(Row), wanted },
+            );
+            return error.QueryFailed;
         }
 
         /// Run a statement that answers with one row of one column, and read
@@ -1314,7 +1526,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// `live.zig` had to do back when `db.raw` was the only way to ask.
         fn only(
             comptime T: type,
-            w: *W,
+            db: *Self,
             tx: ?*W.Tx,
             c: anytype,
             sql: []const u8,
@@ -1322,17 +1534,37 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             values: anytype,
         ) !T {
             const arena = c.arena();
+            const w = try db.wireOf();
+            const started = db.timing();
+
             var rows = if (tx) |t|
-                try t.run(arena, sql, values, plan)
+                t.run(arena, sql, values, plan) catch |err| {
+                    db.told(started, sql, plan, null, true);
+                    return err;
+                }
             else
-                try w.run(arena, sql, values, plan);
+                w.run(arena, sql, values, plan) catch |err| {
+                    db.told(started, sql, plan, null, true);
+                    return err;
+                };
             defer w.drain(&rows);
 
             // An aggregate answers with exactly one row. None would mean the
             // driver and Postgres disagree about what was sent, which is not
             // something to paper over with a zero.
-            if (!try w.next(&rows)) return error.QueryFailed;
-            return w.read(&rows, T, 0);
+            if (!try w.next(&rows)) {
+                db.told(started, sql, plan, null, true);
+                return error.QueryFailed;
+            }
+            const answer = w.read(&rows, T, 0) catch |err| {
+                db.told(started, sql, plan, null, true);
+                return err;
+            };
+            // One row, which is what an aggregate is — the count in it is the
+            // answer rather than the number of rows, and a watcher reading
+            // `rows` gets what a `SELECT` would have given it.
+            db.told(started, sql, plan, 1, false);
+            return answer;
         }
 
         /// One column, with the borrow ended if there was one.
@@ -1493,14 +1725,30 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             var out: Values(D, Row, @TypeOf(options), stmt) = undefined;
             inline for (stmt.paths, 0..) |path, i| {
                 const param = comptime stmt.params[i];
-                const value = where_mod.valueAt(options, path);
                 // The one parameter that is not one value: a list the Dialect
                 // wants as JSON text rather than as an array (ADR 0119).
                 if (comptime param.list and D.list_form == .json_each) {
                     const Item = comptime WireWrite(D, row_mod.ColumnType(Row, param.column));
+                    const value = where_mod.valueAt(options, path);
                     out[i] = try jsonList(Item, value, c);
                 } else {
-                    out[i] = try forWire(@TypeOf(out[i]), value, c);
+                    // `valueAtAs` and not `valueAt` for the values that have
+                    // no type of their own — a literal, a `null`, an enum
+                    // name. Read as themselves they make this a comptime
+                    // call, which cannot then reach the runtime half of the
+                    // same options struct (`where.valueAtAs`). Asked for as
+                    // the column's type they are ordinary values, and the
+                    // coercion is the one `forWire` was about to do anyway.
+                    const Given = comptime where_mod.ValueAt(@TypeOf(options), path);
+                    const Wanted = comptime if (where_mod.comptimeOnly(Given))
+                        row_mod.ColumnType(Row, param.column)
+                    else
+                        Given;
+                    out[i] = try forWire(
+                        @TypeOf(out[i]),
+                        where_mod.valueAtAs(Wanted, options, path),
+                        c,
+                    );
                 }
             }
             return out;
@@ -2840,6 +3088,38 @@ test "a Run is a Scope, so a query needs no request around it" {
     }
 }
 
+test "a literal beside a value the caller is holding still compiles" {
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = 1 };
+
+    // The most ordinary line anybody writes: a number written out in `.set`,
+    // and an id that came from somewhere. Nothing about it is unusual, and
+    // for a stage it did not compile — `31` has no type of its own, so
+    // reading it made the whole read of `options` a comptime one, which then
+    // could not reach `id`. The message named a parameter the caller never
+    // wrote, three functions in.
+    var id: i64 = 7;
+    _ = &id;
+    _ = try db.update(Person, &run, .{ .set = .{ .age = 31 }, .where = .{ .id = id } });
+    try testing.expectEqualStrings(
+        "UPDATE \"people\" SET \"age\" = $1 WHERE \"id\" = $2",
+        db.wire.?.last_sql,
+    );
+
+    // The same shape on the way in, and the two other values that have no
+    // type of their own: a `null` and an enum name are written the same way.
+    _ = try db.insert(Person, &run, .{
+        .email = "a@b.c",
+        .age = 30,
+        .nickname = null,
+        .id = id,
+    });
+}
+
 test "a deadline reaches the transaction, and only a transaction has one" {
     var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
     defer db.deinit();
@@ -3116,6 +3396,158 @@ test "a statement whose text arrives at run time is never prepared" {
     try testing.expectEqual(@as(?[]const u8, null), db.wire.?.last_plan);
 }
 
+/// What the watcher below was told, and how often.
+///
+/// A file-scope variable because a `Watcher` is a plain function pointer with
+/// nowhere to put a capture — which is the API's own argument
+/// ([ADR 0137](../docs/adr/0137-a-statement-can-be-watched.md)), and testing it
+/// means living with it.
+var watched: struct {
+    count: usize = 0,
+    sql: []const u8 = "",
+    plan: ?[]const u8 = null,
+    rows: ?usize = null,
+    failed: bool = false,
+    micros: u64 = 0,
+} = .{};
+
+fn recordSent(sent: Sent) void {
+    watched.count += 1;
+    watched.sql = sent.sql;
+    watched.plan = sent.plan;
+    watched.rows = sent.rows;
+    watched.failed = sent.failed;
+    watched.micros = sent.micros;
+}
+
+test "a watcher is told the statement, the plan and how many rows it moved" {
+    watched = .{};
+
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = 2 };
+    db.watching(recordSent);
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    _ = try db.select(Person, &run, .{ .where = .{ .age = .{ .gt = 18 } } });
+
+    try testing.expectEqual(@as(usize, 1), watched.count);
+    // The constant the comptime half produced, which is the whole reason this
+    // costs nothing to hand over: there is no text to assemble.
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"email\", \"nickname\", \"age\" FROM \"people\" WHERE \"age\" > $1",
+        watched.sql,
+    );
+    try testing.expect(watched.plan != null);
+    try testing.expectEqual(@as(?usize, 2), watched.rows);
+    try testing.expect(!watched.failed);
+}
+
+test "a statement that failed is reported as failed, with no row count to give" {
+    const was = std.testing.log_level;
+    defer std.testing.log_level = was;
+    std.testing.log_level = .err;
+
+    watched = .{};
+
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    // The short `SELECT` list of ADR 0134, which is a failure this module
+    // raises itself rather than one the driver reports — so it also pins that
+    // a refusal on the way past still reaches the watcher.
+    db.wire = .{ .answers = 1, .columns_back = 2 };
+    db.watching(recordSent);
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    try testing.expectError(error.QueryFailed, db.raw(Person, &run, "SELECT id, email FROM people", .{}));
+
+    try testing.expectEqual(@as(usize, 1), watched.count);
+    try testing.expect(watched.failed);
+    try testing.expectEqual(@as(?usize, null), watched.rows);
+    // `db.raw`'s text arrives at run time, so it is never kept prepared and
+    // there is no name to report (ADR 0057).
+    try testing.expectEqual(@as(?[]const u8, null), watched.plan);
+}
+
+test "a statement that answers with a count reports the rows it changed" {
+    watched = .{};
+
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = 3 };
+    db.watching(recordSent);
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    _ = try db.update(Person, &run, .{ .where = .{ .id = @as(i64, 7) }, .set = .{ .age = @as(i32, 31) } });
+
+    try testing.expectEqual(@as(usize, 1), watched.count);
+    try testing.expectEqual(@as(?usize, 3), watched.rows);
+    try testing.expect(!watched.failed);
+}
+
+test "a Db nobody is watching tells nobody anything" {
+    watched = .{};
+
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = 1 };
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    _ = try db.select(Person, &run, .{});
+    _ = try db.count(Person, &run, .{});
+
+    // The default, and what every program written before this pays: one null
+    // test per statement and no clock read at all.
+    try testing.expectEqual(@as(usize, 0), watched.count);
+}
+
+test "a raw SELECT list shorter than the Row is refused, not read past the end" {
+    // The refusal logs, which is the point of it. Turned down so a passing
+    // run is not painted red — `src/test_root.zig` explains why.
+    const was = std.testing.log_level;
+    defer std.testing.log_level = was;
+    std.testing.log_level = .err;
+
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    // Two columns came back and `Person` reads four. Without the check the
+    // third `read` is `values[2]` on an array of two, which pg.zig does not
+    // bound: a panic in ReleaseSafe rather than an answer (ADR 0134).
+    db.wire = .{ .answers = 1, .columns_back = 2 };
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    try testing.expectError(error.QueryFailed, db.raw(
+        Person,
+        &run,
+        "SELECT id, email FROM people",
+        .{},
+    ));
+}
+
+test "a raw SELECT list wider than the Row is read, because the extra columns are nobody's" {
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = 1, .columns_back = 9 };
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    // `SELECT *` into a narrow Row is an ordinary thing to write and nothing
+    // about it is out of range, so only the short list is refused.
+    const found = try db.raw(Person, &run, "SELECT * FROM people", .{});
+    try testing.expectEqual(@as(usize, 1), found.len);
+}
+
 test "a Db told to keep no plans sends none, whatever the statement is" {
     // The escape hatch for a pooler in transaction mode. It has to reach the
     // wire as an absent name rather than as a name the driver ignores,
@@ -3258,7 +3690,7 @@ test "a uuid column is written and read back on the SQLite Wire" {
         .{ .size = 2 },
     );
     defer db.deinit();
-    try db.nilo_start(threaded.io());
+    try db.nilo_start(threaded.io(), .off);
 
     var run: nilo.Run = .init(testing.allocator);
     defer run.deinit();
@@ -3307,7 +3739,7 @@ test "the schema check agrees with the wire about a uuid column" {
         .{ .size = 1 },
     );
     defer db.deinit();
-    try db.nilo_start(threaded.io());
+    try db.nilo_start(threaded.io(), .off);
 
     var run: nilo.Run = .init(testing.allocator);
     defer run.deinit();
@@ -3363,14 +3795,12 @@ const Streamable = struct {
     grade: Grade,
 };
 
-/// `made_at` is `TEXT` rather than `INTEGER`, and that is a **standing gap
-/// rather than a choice**: `WireWrite` answers `i64` for a `Timestamp`
-/// whatever the Dialect, while `acceptsSqlite` routes every type carrying a
-/// declared column name to TEXT. So the column that matches what is bound
-/// fails the startup check and the column that passes it stores microseconds
-/// as digits, where `ORDER BY` sorts them as text. Declared the way that
-/// passes, so that this test is about the paths it is about; the disagreement
-/// is its own roadmap entry and wants a `time_form` beside `uuid_form`.
+/// `made_at` is `INTEGER`, which is the column a `Timestamp` is actually bound
+/// into: `WireWrite` answers `i64` whatever the Dialect is. It used to be
+/// declared `TEXT` here to get past a startup check that judged it by its
+/// Postgres name — the column that matched what was bound was the one being
+/// refused, and the one that passed stored microseconds as digits
+/// ([ADR 0136](../docs/adr/0136-a-timestamp-is-checked-against-the-column-it-is-bound-into.md)).
 const everything_ddl =
     \\CREATE TABLE everything (
     \\  id       INTEGER PRIMARY KEY,
@@ -3378,7 +3808,7 @@ const everything_ddl =
     \\  nickname TEXT,
     \\  age      INTEGER NOT NULL,
     \\  public   TEXT NOT NULL,
-    \\  made_at  TEXT NOT NULL,
+    \\  made_at  INTEGER NOT NULL,
     \\  prefs    TEXT NOT NULL,
     \\  grade    TEXT NOT NULL
     \\)
@@ -3414,7 +3844,7 @@ test "every call this module offers is compiled against the SQLite wire too" {
         .{ .size = 2 },
     );
     defer db.deinit();
-    try db.nilo_start(threaded.io());
+    try db.nilo_start(threaded.io(), .off);
 
     var run: nilo.Run = .init(testing.allocator);
     defer run.deinit();
@@ -3526,7 +3956,7 @@ test "an `in` on SQLite is the JSON array json_each reads, and it matches" {
         .{ .size = 2 },
     );
     defer db.deinit();
-    try db.nilo_start(threaded.io());
+    try db.nilo_start(threaded.io(), .off);
 
     var run: nilo.Run = .init(testing.allocator);
     defer run.deinit();
@@ -3602,7 +4032,7 @@ test "an INTEGER PRIMARY KEY is the rowid, so a correct table no longer stops th
         .{ .size = 1 },
     );
     defer db.deinit();
-    try db.nilo_start(threaded.io());
+    try db.nilo_start(threaded.io(), .off);
 
     var run: nilo.Run = .init(testing.allocator);
     defer run.deinit();
@@ -3652,7 +4082,7 @@ test "db.exec answers with the rows it changed and needs no Row to do it" {
         .{ .size = 1 },
     );
     defer db.deinit();
-    try db.nilo_start(threaded.io());
+    try db.nilo_start(threaded.io(), .off);
 
     var run: nilo.Run = .init(testing.allocator);
     defer run.deinit();

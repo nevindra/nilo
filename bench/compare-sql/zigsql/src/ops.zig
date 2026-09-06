@@ -350,7 +350,7 @@ pub fn main(init: std.process.Init) !void {
 
     var db = sql.Db.init(gpa, url, .{ .size = 1, .connect_on_init = 1, .prepared = true });
     defer db.deinit();
-    try db.nilo_start(io);
+    try db.nilo_start(io, .off);
 
     var run = nilo.Run.init(gpa);
     defer run.deinit();

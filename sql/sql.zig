@@ -114,6 +114,23 @@ pub const db = @import("db.zig");
 /// rather than after (ADR 0006).
 pub const Db = db.Db;
 
+/// One statement that has run, as `db.watching`'s function is told about it
+/// ([ADR 0137](../docs/adr/0137-a-statement-can-be-watched.md)). The text,
+/// the plan name, how long it took and how many rows moved — and not the
+/// values, which is the decision rather than the first version.
+pub const Sent = db.Sent;
+
+/// What `db.watching` takes: `fn (sql.Sent) void`.
+pub const Watcher = db.Watcher;
+
+/// A watcher that writes one `std.log.debug` line per statement, for the
+/// nine programs in ten that want exactly that.
+///
+/// ```zig
+/// db.watching(sql.logging);
+/// ```
+pub const logging = db.logging;
+
 /// A second database, told apart from the first by its name — a read
 /// replica, a reporting warehouse, a database somebody else owns.
 ///

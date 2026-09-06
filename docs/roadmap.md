@@ -1020,58 +1020,37 @@ constant.
 number is obvious; concatenation, `coalesce` and array append are each a
 dialect disagreement, and a set of one operator is not worth a mechanism.
 
-**3. Nothing shows the statements a request sent.** `logger.zig` writes one
-line per request and there is no way to see the SQL underneath it — not in
-Debug, not behind an option, not on a slow query. Every other framework has
-this because it is the first thing anybody reaches for when a page is slow, and
-here it is cheaper than anywhere else: the text is a comptime constant, the
-plan name is already derived from it (`statement.planName`), and the parameter
-tuple is already built. So a hook on `Wire.run`/`Wire.exec` costs a branch on a
-null function pointer per statement.
+**3. A watched statement cannot say which request it came from.**
+`db.watching` shows the text, the plan, the duration and the rows
+([ADR 0137](./adr/0137-a-statement-can-be-watched.md)), so *which statement is
+slow* is answerable. *Slow on which page* is not: a `Sent` carries no request
+id and no route, and the one thing that knows both is the fiber the statement
+is running on.
 
-**Waiting on: a design** for what it is given. The values are the interesting
-half and printing them puts credentials and personal data in a log, which is
-the thing [ADR 0025](./adr/0025-every-failure-answers-with-the-same-json-body.md)
-is careful about one layer up.
+**Waiting on: a design.** `fail`'s message box is bound to the fiber
+([ADR 0007](./adr/0007-failure-box-bound-to-the-fiber.md)) and reaching the
+same threadlocal from a Service is the arrangement the standing risk about
+`bulkhead.slot()` is already about. Handing the watcher the Scope is the other
+answer and costs the plain function pointer.
+
+**The values a statement bound are not shown, and that is the decision rather
+than the gap.** What would close it honestly is a second flag whose name says
+it puts personal data in a log, which is a thing to design rather than a thing
+to default.
 
 ### Known gaps
 
-**A `Timestamp` is written to SQLite as an integer and checked against a TEXT
-column.** `WireWrite` answers `i64` whatever the Dialect is, and `acceptsSqlite`
-routes every type carrying a declared column name to `TEXT`, `VARCHAR` or
-`CLOB`. So `created_at INTEGER` — the column that matches what is actually
-bound, and the one anybody would write — fails the startup check, while the
-column that passes it stores microseconds as digits in a text column, where
-`ORDER BY` sorts them as text and no SQLite date function reads them as a time.
+**SQLite stores a `Timestamp` as an integer, and there is no way to ask for
+text.** The check and the write agree now
+([ADR 0136](./adr/0136-a-timestamp-is-checked-against-the-column-it-is-bound-into.md)),
+so the column that matches what is bound is the one that passes. What is not
+there is the choice: a database file whose times are readable as RFC 3339 is
+what many SQLite schemas hold, and reaching it means `sql.AsText("timestamptz")`
+and a conversion the caller writes.
 
-`bench/sql.zig` already works around it by declaring its column `i64` rather
-than `sql.Timestamp`, and says so in a comment: the symptom recorded and the
-cause left alone. `Uuid` had exactly this disagreement and `uuid_form` closed
-it; this is the second row that table needs.
-
-**Waiting on: a design** — a `time_form` beside `uuid_form`, or an
-`acceptsSqlite` that answers `INTEGER` for the one declared column type this
-module does not send as text.
-
-**`db.raw` reads by position and nothing checks how many columns came back.**
-`fill` walks the Row's fields and asks the Wire for column `i` of each, and
-pg.zig's `Row.get` is `const value = self.values[col]` with no bound on `col`
-(`zig-pkg/pg-…/src/result.zig:266`). A `SELECT` list shorter than the Row —
-a column dropped from a hand-written join, a `RETURNING` that lost a field — is
-therefore an out-of-range index rather than an error: a panic in ReleaseSafe,
-which takes the whole process down for one request, and undefined in
-ReleaseFast. This is the mode of failure
-[ADR 0008](./adr/0008-no-recover-middleware.md) says nilo cannot recover from,
-and the module already refuses to let the driver panic in two other places —
-`enumOf` for a tag the Zig enum lacks, and `arrayFits` for an array shape
-pg.zig asserts on.
-
-`db.raw` gives up the *compile-time* column check and nothing else, which is
-what its doc says; it should not also give up being answerable.
-
-**Waiting on: ready.** `pg.Result` carries `number_of_columns`, so this is one
-comparison per statement against `columnsOf(Row).len`, in `fill`, with a
-message naming both numbers.
+**Waiting on: a caller.** A `time_form` beside `uuid_form` is the shape, and it
+needs an RFC 3339 *parser* — `Timestamp` can only write one today — for a
+column this module already round-trips exactly.
 
 **A Row column of a type no Dialect knows fails in pg.zig's words, not nilo's.**
 `dialect.accepts` answers `null` for any struct it does not recognise, and
@@ -1096,21 +1075,18 @@ nor one of the protocols in `types.zig`, naming the field and the four ways to
 make it readable (`AsText`, `Json`, an enum with `nilo_column`, or leaving it
 out of the Row).
 
-**`Db.Opts.timeout_ms` does nothing on SQLite, and a fiber that asks for the
-writer twice parks forever.** `sqlite.Wire.open` reads `open_opts.size` and
-ignores the rest; `connect_on_init` is documented as meaningless there and
-`timeout_ms` is not, so the option a caller sets to bound a queue is silently
-dropped. `takeWriter` then waits on a `std.Io.Condition` with no deadline at
-all. There is one writer, so a handler holding a `Tx` that calls `db.exec` —
-`db`, not `tx`, which is a one-character mistake — waits on a connection it is
-itself holding, with nothing to time it out and nothing in the log. On Postgres
-the same code takes a second pool connection and merely runs outside the
-transaction.
+**A fiber that queues for the SQLite writer it already holds is told it might
+be, rather than that it is.** The wait is bounded now
+([ADR 0135](./adr/0135-a-wait-for-a-connection-has-a-bound.md)), so the
+one-character mistake — `db.exec` inside a handler holding a `tx` — ends in a
+`TimedOut` and a line naming the likely cause instead of parking for the life
+of the process. What is left is telling that apart from an honestly busy
+database, which needs to know *which fiber* holds the writer.
 
-**Waiting on: a design.** Honouring `timeout_ms` in the two `take` calls is the
-small half. The self-deadlock wants either a `Locked` when the asking fiber is
-already the writer, which means knowing which fiber holds it, or a Refusal that
-cannot be written — and neither is obviously right.
+**Waiting on: upstream (`std.Io`)**, or a design that identifies a fiber
+without it. `std.Io` hands a Service no fiber identity, and a flag on the Wire
+cannot stand in: two fibers, one holding the `Tx` and one calling `db.exec`,
+set the same flag and only one of them is a mistake.
 
 **The batch Refusal on SQLite blames the column type, and a batch update calls
 itself an insert.** `noArrayForm` in `sql/statement.zig` is reached from both
@@ -1329,6 +1305,19 @@ widest Row a `Db` can ever read is known before the program runs.
 **Waiting on: ready.** It is small next to the stack finding
 ([ADR 0063](./adr/0063-a-handlers-stack-is-per-connection.md)) and it is free,
 which is the only reason it is written down.
+
+**A `db.raw` Row has to name a relation it never reads.** `raw` did not write
+the statement, so the table name in the Row's `nilo_table` is never used — but
+`fill` calls `assertRow`, so the marker has to be there. The shape a join
+answers with is usually not a table, and the guide's own two examples had to be
+pointed at a view before they compiled
+([ADR 0083](./adr/0083-the-guide-is-the-source-of-its-own-snippets.md)).
+
+**Waiting on: a design.** Dropping the assert is one line and the wrong one:
+`columnsOf` makes the same call, and a Row is the one shape this module takes
+everywhere. What is wanted is a name for *the struct a `SELECT` list fills*
+that is not a Row, and the cost of a second such shape is what has to be
+weighed.
 
 **`db.raw` is routed by its first keyword.** Exact for everything the module
 generates, because the module wrote the text. A guess for `db.raw`, where the

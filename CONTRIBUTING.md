@@ -176,9 +176,17 @@ it is a run of statements rather than declarations — and `zig build snippets`
 extracts it, puts [`docs/snippets/types.zig`](./docs/snippets/types.zig) in
 front of it and compiles it. The block in the page stays the only copy. Writing
 that step found seven mistakes in one five-line example, including a
-`db.acquire()` that has never existed
-([ADR 0083](./docs/adr/0083-the-guide-is-the-source-of-its-own-snippets.md)),
-and unlike the refusals these cache, so marking one more costs almost nothing.
+`db.acquire()` that has never existed; marking the SQL guide later found a
+`db.update` with a number written out in it that did not compile at all
+([ADR 0083](./docs/adr/0083-the-guide-is-the-source-of-its-own-snippets.md)).
+Unlike the refusals these cache, so marking one more costs almost nothing.
+
+A page whose own types are the subject may carry a prelude of its own — see
+`Snippets.pages` in `build.zig`, where `docs/guide/sql.md` points at
+[`docs/snippets/sql_types.zig`](./docs/snippets/sql_types.zig). Two things the
+step does for you, so that a published snippet reads like one: a declaration
+block's types reach the blocks of statements below it, and a local nothing
+reads is discarded outside the page rather than with an `_ =` inside it.
 
 **A benchmark that changed a decision gets written down where it can be
 re-run.** `bench/result/http.md` is the server, `bench/result/sql.md` is the

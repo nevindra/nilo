@@ -690,9 +690,27 @@ pub const SQLite = struct {
 
         if (Inner == core.Str) return &.{ "TEXT", "VARCHAR", "CLOB", "CHARACTER" };
 
+        // **A `Timestamp` is bound as an integer, so it is checked against
+        // one** (ADR 0136). It declares `timestamptz` like the rest and is the
+        // one declared column type this module does not send as text:
+        // `WireWrite` answers `i64` whatever the Dialect is. Judging it as
+        // TEXT is what made `created_at INTEGER` — the column that matches
+        // what is actually bound — fail the startup check, while the column
+        // that passed stored microseconds as digits in a TEXT column, where
+        // `ORDER BY` sorts them as text and no date function reads them.
+        //
+        // Every name here keeps an integer an integer: INTEGER affinity for
+        // the three carrying `INT`, and NUMERIC for the rest — which is what
+        // `DATETIME` and `TIMESTAMP` are, and they are what somebody writing
+        // the table by hand reaches for.
+        if (Inner == types.Timestamp) return &.{
+            "INTEGER", "INT", "BIGINT", "NUMERIC", "DATETIME", "TIMESTAMP",
+        };
+
         // A type that declared its Postgres column name declared a Postgres
-        // one. `timestamptz` and `jsonb` are both TEXT here, which is what
-        // SQLite stores them as and what every SQLite date function reads.
+        // one. `jsonb` and `uuid` are both TEXT here, which is what SQLite
+        // stores them as and what `json_form`, `enum_form` and `uuid_form`
+        // all send.
         if (types.declaredColumn(Inner) != null) return &.{ "TEXT", "VARCHAR", "CLOB" };
 
         // No array type at all, so a list column has nowhere to live and
@@ -865,6 +883,38 @@ test "the three column types the two databases store differently each say so" {
     // was already true and the half the write side used to contradict.
     try testing.expectEqualStrings("TEXT", SQLite.accepts(types.Json(struct { a: u8 })).?[0]);
     try testing.expectEqualStrings("TEXT", SQLite.accepts(enum { a, b }).?[0]);
+}
+
+test "a Timestamp is checked against the column it is actually bound into" {
+    // The fourth disagreement, and the one that pointed the other way: every
+    // type above is *sent* as text on SQLite, and a `Timestamp` is sent as an
+    // `i64` on both Wires. Judging it by its declared Postgres name put it
+    // with the other three, so the column that matches what is bound —
+    // `created_at INTEGER` — failed the startup check while a TEXT column
+    // passed it and stored microseconds as digits (ADR 0136).
+    const accepts = SQLite.accepts(types.Timestamp).?;
+    try testing.expectEqualStrings("INTEGER", accepts[0]);
+
+    var found_text = false;
+    for (accepts) |name| {
+        if (std.mem.eql(u8, name, "TEXT")) found_text = true;
+    }
+    try testing.expect(!found_text);
+
+    // `DATETIME` and `TIMESTAMP` are NUMERIC affinity, so an integer stays an
+    // integer in one — and they are what somebody writing the table by hand
+    // reaches for.
+    var found_datetime = false;
+    for (accepts) |name| {
+        if (std.mem.eql(u8, name, "DATETIME")) found_datetime = true;
+    }
+    try testing.expect(found_datetime);
+
+    // Optional or not is the same question, since the check strips it.
+    try testing.expectEqualStrings("INTEGER", SQLite.accepts(?types.Timestamp).?[0]);
+
+    // Postgres is untouched: there the declared name is a real column type.
+    try testing.expectEqualStrings("timestamptz", Postgres.accepts(types.Timestamp).?[0]);
 }
 
 test "a numeric column is asked for as text, and everything else as itself" {
