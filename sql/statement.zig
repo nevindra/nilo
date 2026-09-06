@@ -784,7 +784,14 @@ fn upserting(
         // means "change the primary key of the row that is already there".
         // Postgres would do it, quietly, and take every foreign key pointing
         // at that row with it.
-        const key = row_mod.keyOf(Row);
+        //
+        // **`DO NOTHING` writes no `SET` clause, so it has no key to leave
+        // out** — and asking for one refused a pure join table, which has a
+        // composite primary key and no `id` at all
+        // ([ADR 0143](../docs/adr/0143-do-nothing-has-no-key-to-leave-out.md)).
+        // The comptime `if` prunes the call, so the Row never has to answer a
+        // question this statement does not ask.
+        const key = if (action == .update) row_mod.keyOf(Row) else "";
         var sets: []const u8 = "";
         var written: usize = 0;
         for (@typeInfo(V).@"struct".fields) |f| {
@@ -1507,6 +1514,32 @@ test "an upsert that ignores a conflict adds four words and no parameters" {
     try testing.expectEqual(
         comptime insert(Pg, User, values).paramCount(),
         found.paramCount(),
+    );
+}
+
+test "a join table with no id can still be inserted-or-ignored" {
+    // A pure join table has a composite primary key and no `id`, so it has
+    // nothing to answer `keyOf` with — and `DO NOTHING` never asks, because
+    // it writes no `SET` clause (ADR 0143). The conflict target was given
+    // explicitly, which is the only identity this statement needs.
+    const Capability = struct {
+        pub const nilo_table = .{ .name = "partner_capabilities" };
+
+        partner_id: i64,
+        capability: []const u8,
+    };
+
+    const found = comptime insertOrIgnore(
+        Pg,
+        Capability,
+        @TypeOf(.{ .partner_id = 1, .capability = "supplies" }),
+        .{ .partner_id, .capability },
+    );
+    try testing.expectEqualStrings(
+        "INSERT INTO \"partner_capabilities\" (\"partner_id\", \"capability\") VALUES ($1, $2)" ++
+            " ON CONFLICT (\"partner_id\", \"capability\") DO NOTHING" ++
+            " RETURNING \"partner_id\", \"capability\"",
+        found.sql,
     );
 }
 

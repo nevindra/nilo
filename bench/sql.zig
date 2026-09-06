@@ -488,7 +488,7 @@ fn fixture(comptime W: type, w: *W, a: std.mem.Allocator) !void {
     while (it.next()) |raw| {
         const statement = std.mem.trim(u8, raw, " \n\r\t");
         if (statement.len == 0) continue;
-        _ = try w.exec(a, statement, .{}, null);
+        _ = try w.exec(a, statement, .{}, null, null);
     }
 }
 
@@ -535,9 +535,9 @@ fn sqliteWalk(
         _ = arena.reset(.retain_capacity);
         const a = arena.allocator();
         var rows = switch (shape) {
-            .key => try w.run(a, text, .{@as(i64, @intCast((i % 1000) + 1))}, plan),
-            .page => try w.run(a, text, .{ @as(i32, 20), "p%" }, plan),
-            .empty => try w.run(a, text, .{}, plan),
+            .key => try w.run(a, text, .{@as(i64, @intCast((i % 1000) + 1))}, plan, null),
+            .page => try w.run(a, text, .{ @as(i32, 20), "p%" }, plan, null),
+            .empty => try w.run(a, text, .{}, plan, null),
         };
         errdefer rows.close();
         while (try w.next(&rows)) {}
@@ -659,5 +659,5 @@ fn oneInsert(comptime W: type, w: *W, a: std.mem.Allocator, id: i64, plan: []con
         "written@example.dev",
         @as(i32, 33),
         @as(i64, 1755000000),
-    }, plan);
+    }, plan, null);
 }

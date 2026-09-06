@@ -323,6 +323,87 @@ test "a presigned URL works in something that did not sign it" {
     }.run);
 }
 
+test "a presigned POST is a form a real server accepts" {
+    try withStore(struct {
+        fn run(store: *Store) !void {
+            var live = try Live.open(store);
+            defer live.deinit();
+
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            // A key of this test's own, because `zig build test-s3` runs the
+            // Debug and the ReleaseSafe binary **at the same time** against one
+            // server. Every other test here shares a key across the two and
+            // gets away with it; this one does not, because a POST through a
+            // fresh connection is slow enough that the other binary's
+            // `delete` lands between this one's POST and its read. It failed
+            // that way twice out of two under `zig build` and passed both
+            // binaries standalone, which is what said where to look.
+            const key = "live/posted-" ++ @tagName(@import("builtin").mode) ++ ".txt";
+            defer live.delete(&scope, key) catch {};
+
+            const posted = try live.presignPost(&scope, key, .{
+                .seconds = 900,
+                .content_type = "text/plain",
+                .max_bytes = 1 << 20,
+            });
+
+            // Every field, then the file, in that order. `canned.zig` can say
+            // the policy is the document that was signed; only a real server
+            // can say the document is one S3 agrees to, and this is the whole
+            // reason the test is here rather than there.
+            const boundary = "nilotestboundary8c1f";
+            var body: std.Io.Writer.Allocating = .init(testing.allocator);
+            defer body.deinit();
+
+            for (posted.fields) |field| {
+                try body.writer.print(
+                    "--" ++ boundary ++ "\r\n" ++
+                        "Content-Disposition: form-data; name=\"{s}\"\r\n\r\n{s}\r\n",
+                    .{ field.name, field.value },
+                );
+            }
+            try body.writer.print(
+                "--" ++ boundary ++ "\r\n" ++
+                    "Content-Disposition: form-data; name=\"file\"; filename=\"posted.txt\"\r\n" ++
+                    "Content-Type: text/plain\r\n\r\n{s}\r\n" ++
+                    "--" ++ boundary ++ "--\r\n",
+                .{"a browser put this here"},
+            );
+
+            // A plain client carrying no credentials at all, which is the
+            // whole claim a POST policy makes.
+            var plain: std.http.Client = .{
+                .allocator = testing.allocator,
+                .io = store.client.inner.io,
+            };
+            defer plain.deinit();
+
+            var answer: std.Io.Writer.Allocating = .init(testing.allocator);
+            defer answer.deinit();
+
+            const result = try plain.fetch(.{
+                .location = .{ .url = posted.url },
+                .method = .POST,
+                .payload = body.written(),
+                .headers = .{ .content_type = .{
+                    .override = "multipart/form-data; boundary=" ++ boundary,
+                } },
+                .response_writer = &answer.writer,
+            });
+
+            // S3 answers 204 to a POST with no `success_action_status`.
+            try testing.expect(result.status == .no_content or result.status == .ok);
+
+            // And the object is there, with the bytes the browser sent.
+            const object = try live.get(&scope, key);
+            try testing.expectEqualStrings("a browser put this here", object.bytes.view());
+            try testing.expectEqualStrings("text/plain", object.content_type.view());
+        }
+    }.run);
+}
+
 test "a bucket that is not there is a NotFound rather than a crash" {
     try withStore(struct {
         fn run(store: *Store) !void {

@@ -345,7 +345,39 @@ pub const App = struct {
     /// try v1.use(requireOperator);
     /// try v1.with(auditLog).post("/orders", place);
     /// ```
-    pub fn with(self: *App, comptime middleware: mw.Middleware) GroupWith("", &.{}, &.{middleware}) {
+    pub fn with(self: *App, comptime middleware: mw.Middleware) GroupWith("", &.{}, &.{middleware}, null) {
+        return .{ .app = self };
+    }
+
+    /// The App, with the next route registered through what this hands back
+    /// carrying `name` as its `operationId`
+    /// ([ADR 0149](../docs/adr/0149-a-route-can-say-its-own-name.md)).
+    ///
+    /// ```zig
+    /// try app.named("addPartnerCapability")
+    ///     .put("/api/partners/:id/capabilities/:cap", addCapability);
+    /// ```
+    ///
+    /// **This says what the route is called and nothing about what it does.**
+    /// The document still describes the endpoint from the signature, which is
+    /// the whole of ADR 0017 and is not being reopened. What a derived name
+    /// cannot be is a *key*: `putApiPartnersIdCapabilitiesCapability` is not a
+    /// word anybody chose, and it changes when the path moves — which is
+    /// exactly wrong for a consumer holding a default-deny table with one
+    /// entry per operation.
+    ///
+    /// It composes like the rest of the vocabulary, so a group's prefix and a
+    /// route's own middleware still apply:
+    ///
+    /// ```zig
+    /// const api = app.group("/api");
+    /// try api.named("listPartners").get("/partners", listPartners);
+    /// ```
+    ///
+    /// Two routes with the same name stop the process at registration, for the
+    /// reason a duplicate route does: the document would carry the same key
+    /// twice and whichever consumer read it would see one of them.
+    pub fn named(self: *App, comptime name: []const u8) GroupWith("", &.{}, &.{}, name) {
         return .{ .app = self };
     }
 
@@ -555,9 +587,21 @@ pub const App = struct {
         comptime pattern: []const u8,
         comptime handler: anytype,
     ) !void {
+        return self.routeNamed(null, method, pattern, handler);
+    }
+
+    /// `route`, with the `operationId` the route was given by `app.named(…)`.
+    /// Called by the group methods; `route` is this with no name (ADR 0149).
+    pub fn routeNamed(
+        self: *App,
+        comptime name: ?[]const u8,
+        method: http1.Method,
+        comptime pattern: []const u8,
+        comptime handler: anytype,
+    ) !void {
         comptime typed.check(pattern, handler);
-        self.tryRoute(method, pattern, handler) catch |err| {
-            if (err == error.DuplicateRoute) std.process.exit(1);
+        self.tryRouteNamed(name, method, pattern, handler) catch |err| {
+            if (err == error.DuplicateRoute or err == error.DuplicateName) std.process.exit(1);
             return err;
         };
     }
@@ -572,7 +616,19 @@ pub const App = struct {
         comptime pattern: []const u8,
         comptime handler: anytype,
     ) !void {
+        return self.tryRouteNamed(null, method, pattern, handler);
+    }
+
+    /// `tryRoute`, with the `operationId` the route was given (ADR 0149).
+    pub fn tryRouteNamed(
+        self: *App,
+        comptime name: ?[]const u8,
+        method: http1.Method,
+        comptime pattern: []const u8,
+        comptime handler: anytype,
+    ) !void {
         comptime typed.check(pattern, handler);
+        comptime if (name) |given| checkName(given);
 
         // Registering the same path twice is not a small mistake: the
         // second handler never runs, and nothing about the running server
@@ -595,9 +651,40 @@ pub const App = struct {
         // description of an endpoint and the code that serves it cannot
         // drift apart (ADR 0017). Comptime data, so what is appended here is
         // one struct of slices pointing at read-only memory.
+        // A name given twice is the document carrying the same key twice,
+        // and whichever consumer read it would see one of the two. Caught
+        // here, where both routes can be named (ADR 0149).
+        if (name) |given| {
+            if (self.nameTaken(given)) |existing| {
+                std.log.err(
+                    "the route \"{s} {s}\" is named `{s}`, and so is \"{s} {s}\". An " ++
+                        "operationId is the key a generated client and an authorisation " ++
+                        "table are written against, so two routes cannot share one.",
+                    .{ @tagName(method), pattern, given, @tagName(existing.method), existing.pattern },
+                );
+                return error.DuplicateName;
+            }
+        }
+
         var op = comptime typed.operation(pattern, handler);
         op.method = method;
+        op.name = name;
         try self.operations.append(self.gpa, op);
+    }
+
+    /// The route already carrying this `operationId`, if one does.
+    ///
+    /// A function rather than a loop inside `tryRouteNamed` so that the check
+    /// can be tested without provoking the `std.log.err` registration writes
+    /// — a logged error is a failed test run, and the noise would sit in
+    /// `zig build test` forever. This is the shape `router.conflicting`
+    /// already has, for the same reason (ADR 0149).
+    fn nameTaken(self: *const App, given: []const u8) ?openapi.Operation {
+        for (self.operations.items) |existing| {
+            const taken = existing.name orelse continue;
+            if (std.mem.eql(u8, taken, given)) return existing;
+        }
+        return null;
     }
 
     /// Serve a description of this API, worked out from the handler
@@ -1093,8 +1180,9 @@ pub const App = struct {
         if (written == 0) return;
 
         std.log.info(
-            "{d} of {d} routes write their own response, so the API description does not " ++
-                "describe what they answer",
+            "{d} of {d} routes hold the Ctx and return nothing, so the API description " ++
+                "cannot say what they answer — a handler that means \"200, empty\" says so " ++
+                "by returning `Status(200, void)` (ADR 0150)",
             .{ written, self.operations.items.len },
         );
     }
@@ -1679,7 +1767,7 @@ pub fn Group(comptime prefix: []const u8) type {
 /// is what puts something in it, and what comes back is a different type, so
 /// which routes carry an exception is decided while compiling.
 pub fn GroupOf(comptime prefix: []const u8, comptime excluded: []const mw.Middleware) type {
-    return GroupWith(prefix, excluded, &.{});
+    return GroupWith(prefix, excluded, &.{}, null);
 }
 
 /// The same, plus the middlewares the routes registered through it carry of
@@ -1695,8 +1783,10 @@ pub fn GroupWith(
     comptime prefix: []const u8,
     comptime excluded: []const mw.Middleware,
     comptime attached: []const mw.Middleware,
+    comptime route_name: ?[]const u8,
 ) type {
     comptime checkPrefix(prefix);
+    comptime if (route_name) |name| checkName(name);
 
     return struct {
         const Self = @This();
@@ -1713,7 +1803,7 @@ pub fn GroupWith(
 
         /// A group inside this one. `app.group("/api").group("/v1")` and
         /// `app.group("/api/v1")` are the same thing.
-        pub fn group(self: Self, comptime sub: []const u8) GroupWith(prefix ++ sub, excluded, attached) {
+        pub fn group(self: Self, comptime sub: []const u8) GroupWith(prefix ++ sub, excluded, attached, route_name) {
             return .{ .app = self.app };
         }
 
@@ -1724,6 +1814,7 @@ pub fn GroupWith(
             prefix,
             excluded ++ &[_]mw.Middleware{middleware},
             attached,
+            route_name,
         ) {
             return .{ .app = self.app };
         }
@@ -1735,7 +1826,15 @@ pub fn GroupWith(
             prefix,
             excluded,
             attached ++ &[_]mw.Middleware{middleware},
+            route_name,
         ) {
+            return .{ .app = self.app };
+        }
+
+        /// This group, with the next route registered through what comes back
+        /// carrying `name` as its `operationId` — see `App.named`, which is
+        /// the same call at the top level (ADR 0149).
+        pub fn named(self: Self, comptime name: []const u8) GroupWith(prefix, excluded, attached, name) {
             return .{ .app = self.app };
         }
 
@@ -1782,49 +1881,49 @@ pub fn GroupWith(
             comptime typed.check(joined(prefix, pattern), handler);
             try self.excepting(pattern, .GET);
             try self.attaching(pattern, .GET);
-            return self.app.get(comptime joined(prefix, pattern), handler);
+            return self.app.routeNamed(route_name, .GET, comptime joined(prefix, pattern), handler);
         }
 
         pub fn post(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
             comptime typed.check(joined(prefix, pattern), handler);
             try self.excepting(pattern, .POST);
             try self.attaching(pattern, .POST);
-            return self.app.post(comptime joined(prefix, pattern), handler);
+            return self.app.routeNamed(route_name, .POST, comptime joined(prefix, pattern), handler);
         }
 
         pub fn put(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
             comptime typed.check(joined(prefix, pattern), handler);
             try self.excepting(pattern, .PUT);
             try self.attaching(pattern, .PUT);
-            return self.app.put(comptime joined(prefix, pattern), handler);
+            return self.app.routeNamed(route_name, .PUT, comptime joined(prefix, pattern), handler);
         }
 
         pub fn delete(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
             comptime typed.check(joined(prefix, pattern), handler);
             try self.excepting(pattern, .DELETE);
             try self.attaching(pattern, .DELETE);
-            return self.app.delete(comptime joined(prefix, pattern), handler);
+            return self.app.routeNamed(route_name, .DELETE, comptime joined(prefix, pattern), handler);
         }
 
         pub fn patch(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
             comptime typed.check(joined(prefix, pattern), handler);
             try self.excepting(pattern, .PATCH);
             try self.attaching(pattern, .PATCH);
-            return self.app.patch(comptime joined(prefix, pattern), handler);
+            return self.app.routeNamed(route_name, .PATCH, comptime joined(prefix, pattern), handler);
         }
 
         pub fn head(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
             comptime typed.check(joined(prefix, pattern), handler);
             try self.excepting(pattern, .HEAD);
             try self.attaching(pattern, .HEAD);
-            return self.app.head(comptime joined(prefix, pattern), handler);
+            return self.app.routeNamed(route_name, .HEAD, comptime joined(prefix, pattern), handler);
         }
 
         pub fn options(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
             comptime typed.check(joined(prefix, pattern), handler);
             try self.excepting(pattern, .OPTIONS);
             try self.attaching(pattern, .OPTIONS);
-            return self.app.options(comptime joined(prefix, pattern), handler);
+            return self.app.routeNamed(route_name, .OPTIONS, comptime joined(prefix, pattern), handler);
         }
 
         pub fn route(
@@ -1836,7 +1935,7 @@ pub fn GroupWith(
             comptime typed.check(joined(prefix, pattern), handler);
             try self.excepting(pattern, method);
             try self.attaching(pattern, method);
-            return self.app.route(method, comptime joined(prefix, pattern), handler);
+            return self.app.routeNamed(route_name, method, comptime joined(prefix, pattern), handler);
         }
 
         pub fn tryRoute(
@@ -1848,7 +1947,7 @@ pub fn GroupWith(
             comptime typed.check(joined(prefix, pattern), handler);
             try self.excepting(pattern, method);
             try self.attaching(pattern, method);
-            return self.app.tryRoute(method, comptime joined(prefix, pattern), handler);
+            return self.app.tryRouteNamed(route_name, method, comptime joined(prefix, pattern), handler);
         }
 
         pub fn static(self: Self, comptime url_prefix: []const u8, dir_path: []const u8) !void {
@@ -1877,6 +1976,29 @@ pub fn GroupWith(
             return self.app.tryStaticWith(comptime joined(prefix, url_prefix), dir_path, opts);
         }
     };
+}
+
+/// A route's own `operationId` is a word a client generator turns into a
+/// method name, so it has to be one (ADR 0149). Letters, digits and `_`,
+/// starting with a letter or `_`.
+fn checkName(comptime name: []const u8) void {
+    comptime {
+        if (name.len == 0) @compileError(
+            "nilo: `app.named(\"\")` is a route with no name, which is `app` with extra steps.\n" ++
+                "  Give it the name the generated client and your own authorisation table " ++
+                "will use: `app.named(\"addPartnerCapability\")`.",
+        );
+        for (name, 0..) |ch, i| {
+            const ok = std.ascii.isAlphanumeric(ch) or ch == '_';
+            const starts = std.ascii.isAlphabetic(ch) or ch == '_';
+            if (!ok or (i == 0 and !starts)) @compileError(
+                "nilo: the route name \"" ++ name ++ "\" is not something a client generator " ++
+                    "can turn into a method.\n" ++
+                    "  An operationId is letters, digits and `_`, starting with a letter or " ++
+                    "`_`: `addPartnerCapability`, not \"" ++ name ++ "\".",
+            );
+        }
+    }
 }
 
 /// A group prefix has a leading slash, no trailing one, and no catch-all.
@@ -5980,7 +6102,7 @@ test "a handler that writes its own answer says so, instead of promising an empt
     // The one that streams answers 202 with a CSV, and its signature says
     // none of that. Claiming "200, empty" — which is what reading the return
     // type alone produces — would be a document that is wrong twice.
-    try testing.expect(std.mem.indexOf(u8, json, "writes its own response") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "may write its own response") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"an empty response\"") == null);
 
     // ...and holding a `*Ctx` is not itself the disqualification. This one
@@ -6122,6 +6244,56 @@ test "the document is valid JSON, all of it" {
         "A \"quoted\" name",
         parsed.value.object.get("info").?.object.get("title").?.string,
     );
+}
+
+test "a route that says its own name gets it as the operationId" {
+    var db = Db{ .rows = &.{} };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    app.docs(.{});
+
+    try app.named("showUser").get("/users/:id", docGetUser);
+    // The derived name is still what a route that said nothing gets.
+    try app.get("/users", docListUsers);
+    // And it composes with a group's prefix and with `with`.
+    const api = app.group("/api");
+    try api.named("createUser").post("/users", docCreateUser);
+
+    const json = try docsFor(&app);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+    defer parsed.deinit();
+
+    const paths = parsed.value.object.get("paths").?.object;
+    try testing.expectEqualStrings(
+        "showUser",
+        paths.get("/users/{id}").?.object.get("get").?.object.get("operationId").?.string,
+    );
+    try testing.expectEqualStrings(
+        "getUsers",
+        paths.get("/users").?.object.get("get").?.object.get("operationId").?.string,
+    );
+    try testing.expectEqualStrings(
+        "createUser",
+        paths.get("/api/users").?.object.get("post").?.object.get("operationId").?.string,
+    );
+}
+
+test "two routes cannot share a name" {
+    var db = Db{ .rows = &.{} };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+
+    try app.named("showUser").tryRoute(.GET, "/users/:id", docGetUser);
+
+    // The check, not the registration that runs it: registering the second
+    // one writes a `std.log.err`, which the test runner counts as a failed
+    // run whatever `testing.log_level` says. So this pins what the second
+    // registration would find, the way `router.zig` pins `conflicting`.
+    const taken = app.nameTaken("showUser") orelse return error.NameNotFound;
+    try testing.expectEqualStrings("/users/:id", taken.pattern);
+    try testing.expectEqual(@as(?openapi.Operation, null), app.nameTaken("listUsers"));
 }
 
 test "docs can be asked for before or after the routes, and both pages appear" {

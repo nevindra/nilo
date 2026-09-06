@@ -429,6 +429,13 @@ pub const Postgres = struct {
         // a `Str` and a `[]const u8` are the same bytes to a reader.
         if (Bare == core.Str) return &.{ "_text", "_varchar" };
 
+        // `uuid[]`, which is what `WHERE id = ANY($1::uuid[])` needs and the
+        // one array type a modern schema has as many of as it has ids
+        // ([ADR 0145](../docs/adr/0145-a-raw-parameter-is-converted-the-way-a-rows-is.md)).
+        // Postgres's own name for it is `_uuid`, the same underscore prefix
+        // every other array type here carries.
+        if (Bare == types.Uuid) return &.{"_uuid"};
+
         return switch (@typeInfo(Bare)) {
             .bool => &.{"_bool"},
             .float => |f| switch (f.bits) {
@@ -955,6 +962,12 @@ test "a list column reads out of the array of what it holds" {
     try testing.expectEqualStrings("_int8", Postgres.accepts([]const i64).?[0]);
     try testing.expectEqualStrings("_bool", Postgres.accepts([]const bool).?[0]);
     try testing.expectEqualStrings("_float8", Postgres.accepts([]const f64).?[0]);
+    // `uuid[]`, which had no case at all and fell to the `else` — so a Row
+    // reading one was refused at startup by the check rather than by anything
+    // that had looked at the column (ADR 0145).
+    try testing.expectEqualStrings("_uuid", Postgres.accepts([]const types.Uuid).?[0]);
+    try testing.expectEqualStrings("_uuid", Postgres.accepts([]const ?types.Uuid).?[0]);
+    try testing.expectEqualStrings("_uuid", Postgres.accepts(?[]const types.Uuid).?[0]);
 }
 
 test "an array is judged exactly, where a scalar is judged by what will hold it" {

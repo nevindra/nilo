@@ -170,6 +170,20 @@ pub const Uuid = struct {
         return out;
     }
 
+    /// The same reading, said the way a request asks for it: null rather than
+    /// an error, because a path param that will not parse is a 400 and nilo
+    /// has nothing to do with `error.InvalidUuid` (ADR 0142).
+    ///
+    /// This is what makes `fn show(id: sql.Uuid)` a route: the HTTP module
+    /// looks for the declaration by name and never learns this module exists,
+    /// exactly as `jsonStringify` and `nilo_openapi` above let it write a
+    /// `Uuid` into a response without importing one (ADR 0046). A tool module
+    /// imports nothing, so a shape checked by name is the only kind of
+    /// contract it can offer.
+    pub fn nilo_parse(text: []const u8) ?Uuid {
+        return parse(text) catch null;
+    }
+
     pub fn jsonStringify(self: Uuid, jw: anytype) !void {
         const text = self.toText();
         try jw.write(&text);
@@ -187,6 +201,11 @@ pub const Uuid = struct {
     /// ([ADR 0076](../docs/adr/0076-a-type-that-writes-its-own-json-says-so.md)),
     /// and it is plain data on purpose: a tool module imports nothing, so it
     /// cannot name a `Schema` to say this any other way.
+    /// What a nilo compile error and a 400 call this type (ADR 0122). Bare
+    /// rather than qualified, because both `id.Uuid` and `sql.Uuid` are real
+    /// import lines for the same declaration and neither is the reader's.
+    pub const nilo_type_name = "Uuid";
+
     pub const nilo_openapi = .{ .type = "string", .format = "uuid" };
 
     /// The six bits every layout sets the same way: four saying which
@@ -294,6 +313,17 @@ test "the nil uuid is sixteen zeroes and knows it" {
     try testing.expect(Uuid.nil.isNil());
     try testing.expect(!Uuid.v4(seeded(Uuid.v4_entropy, 10)).isNil());
     try testing.expectEqualStrings("00000000-0000-0000-0000-000000000000", &Uuid.nil.toText());
+}
+
+test "a Uuid reads itself from request text, and says no rather than erroring" {
+    const text = "550e8400-e29b-41d4-a716-446655440000";
+    try testing.expectEqualStrings(text, &Uuid.nilo_parse(text).?.toText());
+
+    // Null is the whole of what nilo needs: it becomes the same 400 a path
+    // param that is not a number gets (ADR 0142).
+    try testing.expectEqual(@as(?Uuid, null), Uuid.nilo_parse("550e8400"));
+    try testing.expectEqual(@as(?Uuid, null), Uuid.nilo_parse("not-a-uuid"));
+    try testing.expectEqual(@as(?Uuid, null), Uuid.nilo_parse(""));
 }
 
 test "a Uuid leaves a JSON body as its text rather than as sixteen numbers" {

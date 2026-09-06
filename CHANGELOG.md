@@ -12,6 +12,20 @@ account of why is in the ADR it links.
 
 ### New
 
+- **`nilo_jwt`, the tenth module: checking somebody else's signed token**
+  ([ADR 0140](./docs/adr/0140-nilo-verifies-a-token-and-does-not-fetch-one.md)).
+  A tool module — it imports nothing, needs no event loop, and
+  `zig test jwt/jwt.zig` runs the whole of it. `jwt.parseKeys(gpa, jwks_bytes)`
+  reads a JWKS document; `jwt.verify(Claims, gpa, token, .{ … })` checks an
+  RS256 signature and reads the payload into a struct of your own. The three
+  things easiest to get wrong are not options: the algorithm is nilo's constant
+  rather than the token's `alg`, so `{"alg":"none"}` and an HMAC signed with
+  your published modulus are both refused; nothing in the payload is read until
+  the signature has passed; and `exp` is required. **Fetching the key set is
+  still yours** — it is an HTTPS GET, which `nilo_fetch` already sends, and
+  holding it is `nilo_cache`. Nothing to change: nothing imports it unless you
+  do, and a program that does not link no RSA.
+
 - **`nilo_cache`, the ninth module: an expiring cache in this process**
   ([ADR 0138](./docs/adr/0138-a-cache-holds-its-bytes-under-a-lock-it-can-spin-on.md),
   [ADR 0139](./docs/adr/0139-an-in-process-cache-and-a-redis-client-are-two-modules.md)).
@@ -25,9 +39,23 @@ account of why is in the ADR it links.
 
 ### Read this before deploying
 
-- **`cors.Options.origin` is now `origins` and takes a list.** The one breaking
-  change. Nothing to do if you never called `cors.with` — `cors.permissive` is
-  unchanged.
+- **`cors.Options.origin` is now `origins` and takes a list.** Nothing to do if
+  you never called `cors.with` — `cors.permissive` is unchanged.
+- **`db.raw` and `tx.raw` take a `comptime` statement.** Text assembled at run
+  time cannot be passed any more, and there is no replacement call. What you
+  get for it: the `SELECT` list is counted against the Row's fields while
+  compiling, each column that plainly has a name is checked against the field
+  in its position, and the statement is kept prepared like every other one —
+  worth about 12 µs a query. A statement built at run time becomes a `switch`
+  over the orderings the application actually supports, which is also the shape
+  that stops an injection nobody meant to allow
+  ([ADR 0148](./docs/adr/0148-a-raw-statement-is-counted-while-compiling.md)).
+  `db.exec` is unchanged and still takes its text at run time.
+- **A Wire of your own takes one more argument.** `run` and `exec`, on the Wire
+  and on its `Tx`, end in `problem: ?*?sql.Problem`. Pass `null` from a caller
+  that does not want the text, and fill it from a driver that has some
+  ([ADR 0146](./docs/adr/0146-a-statement-that-failed-says-what-the-database-said.md)).
+  Nothing to do unless you wrote a Wire.
 - **A WebSocket served to a page on another host now needs `.origins` naming
   that page**, or the handshake is a 403.
 - **Sessions expire now.** Everybody holding one signs in again on the deploy
@@ -57,6 +85,26 @@ than a split response. All three are under Fixed.
 ### Added
 
 #### Serving
+
+- **`app.named("addPartnerCapability")`** — a route says its own
+  `operationId` instead of taking the one derived from the method and the
+  path. The derived name is a good default and a poor key: it is not a word
+  anybody chose, and it changes when the route moves path, which is wrong for
+  anything written against it — a generated client's method names, or a
+  default-deny authorisation table with one entry per operation. It composes
+  with groups and with `with`, a name that is not a word a generator can use
+  is refused while compiling, and two routes sharing one stop the process at
+  registration
+  ([ADR 0149](./docs/adr/0149-a-route-can-say-its-own-name.md)).
+- **A path param can be a type that parses itself.** Give a type
+  `pub fn nilo_parse(text: []const u8) ?Self` and it becomes a path param like
+  a number or an enum: `fn show(id: sql.Uuid) !?User` is a route, a malformed
+  id is a 400 before the handler runs, and the generated document says
+  `{"type":"string","format":"uuid"}` rather than a bare string. `nilo_id`'s
+  `Uuid` carries the declaration, so `sql.Uuid` works with nothing to do on
+  your side. Null means "not one of these" and nothing else. A `nilo_parse` of
+  the wrong shape is a compile error naming the shape it must have
+  ([ADR 0142](./docs/adr/0142-a-path-param-can-parse-itself.md)).
 
 - **`nilo.deadline(ms)`** — how long a route gets, clamping every wait nilo owns
   (the body, the write, a stream's pieces, a WebSocket's silence) to whichever
@@ -217,6 +265,25 @@ than a split response. All three are under Fixed.
   allowed to step; the reference had been telling people to use a
   `monotonicNanos` that was never public.
 
+#### `nilo_s3`
+
+- **`bucket.presignPost(c, key, .{ .seconds = 900 })` gives a browser a form it
+  posts straight to the bucket.** `presign` hands out a link to fetch; this hands out
+  `url`, `fields` and `expires_at`, so a receipt or an attachment never passes
+  through your server. `.content_type` pins what the browser may send,
+  `.prefix = true` lets it pick the filename, and `.max_bytes` is **clamped to
+  the bucket's `max_bytes` and defaults to it**. A form with no ceiling is not
+  something this call hands out, and an object over `max_bytes` is one `get`
+  refuses for the rest of its life. Life is clamped the three ways `presign`'s
+  is, and `expires_at` is the true number
+  ([ADR 0141](./docs/adr/0141-a-browser-uploads-with-a-form-rather-than-a-link.md)).
+
+  It is in nilo because the alternative is writing SigV4 twice: the policy is
+  signed with the key derived once a day
+  ([ADR 0069](./docs/adr/0069-a-signing-key-changes-once-a-day.md)), and two
+  implementations of that disagree at 00:00 UTC. Nothing to change; it touches
+  no socket, and a program that does not call it links none of it.
+
 #### Testing
 
 - **`testing.Conversation`** — a WebSocket route driven through the public API,
@@ -362,6 +429,27 @@ than a split response. All three are under Fixed.
 ### Fixed
 
 #### Serving
+
+- **`/users/{id}` in a route pattern was five literal characters** and nothing
+  said so. `{}` is what OpenAPI writes, what nilo's own document prints, and
+  what every framework a porter is arriving from spells, so a path copied out
+  of an existing document registered a route that answered nothing. On a route
+  whose handler asked for the param it was already a compile error; on one that
+  did not, the only symptom was a 404 on a URL the document promised. It is now
+  refused while compiling, naming `:name`
+  ([ADR 0147](./docs/adr/0147-a-pattern-written-the-way-the-document-prints-it.md)).
+- **The refusal for a handler taking two structs by value sent you to
+  `app.provide`** even when the argument was meant to be a path parameter. It
+  now names the third possibility when the route has a path-param slot nothing
+  has claimed.
+- **A handler holding a `*Ctx` and returning nothing was described as writing
+  its own response, and nilo does not know that.** It may have written one, or
+  it may have taken the Ctx to read a header and left nilo to send 200 with an
+  empty body. The document and the `listen()` line now say what is true — the
+  signature does not settle what the route answers — and both name the way out,
+  which is returning `Status(200, void)` and has always been there. No
+  behaviour changed
+  ([ADR 0150](./docs/adr/0150-a-ctx-handler-that-returns-nothing-may-have-written-it.md)).
 
 - **A server that had served WebSockets usually did not come back from a
   SIGTERM** — the process never exited and one executor thread spun at 100%, so
@@ -517,6 +605,84 @@ than a split response. All three are under Fixed.
   ([ADR 0095](./docs/adr/0095-the-name-table-is-checked-against-the-exports.md)).
 
 #### `nilo_sql`
+
+- **`db.raw` was the one call in the module the compiler did not check**, and
+  it fills the Row by position. Two columns of the same type in the wrong order
+  decode cleanly and answer wrong, with no run-time symptom at all — which on a
+  schema of 145 `uuid` columns is the mistake worth catching. Its text is
+  `comptime` now: the `SELECT` list is counted against the Row's fields, each
+  column that plainly has a name is checked against the field in its position,
+  and the statement is kept prepared like every other. A `*`, and a statement
+  with no `SELECT` and no `RETURNING`, are counted as "not counted" rather than
+  guessed at
+  ([ADR 0148](./docs/adr/0148-a-raw-statement-is-counted-while-compiling.md)).
+  **It refuses rather than reordering**: binding by name would silently repair
+  a statement that is wrong and the reader would never learn the two disagree.
+  Types are still not checked, because a comptime pass has no schema — that
+  half is `db.checking`'s.
+
+- **A statement that failed says what the database said.**
+  `error.QueryFailed` was the whole debugging surface for one, and the
+  reference's "logged, never sent" was true only on the path with a database
+  behind it: when the driver refused the statement before it left the process,
+  nothing was logged anywhere and Postgres had never seen it. `sql.Problem`
+  now carries the message, the SQLSTATE `code`, `severity`, `detail`, `hint`
+  and the `constraint` that was violated, on `Sent.problem` where
+  `db.watching` can reach it, and `sql.logging` prints it
+  ([ADR 0146](./docs/adr/0146-a-statement-that-failed-says-what-the-database-said.md)).
+  `message` is never empty — a driver refusal reports the Zig error's name,
+  which is the missing word this was built for. Fields a database cannot answer
+  are empty rather than null; SQLite has no SQLSTATE and does not invent one.
+  It lives in the request's arena and **never reaches the client**, which
+  [ADR 0025](./docs/adr/0025-every-failure-answers-with-the-same-json-body.md)
+  has not changed.
+
+- **A `sql.Uuid` could not be a parameter to `db.raw` or `db.exec`.** Every
+  statement this module writes takes one; a hand-written statement sent it to
+  the driver untouched, which is `error.QueryFailed` at run time on Postgres
+  and a compile error from inside zqlite on SQLite. The workaround was sending
+  the thirty-six characters and writing `$1::text::uuid`, at an arena
+  allocation per id. Raw parameters now go through the same conversion a Row's
+  do — a `Uuid`, a `Str`, a `Timestamp`, a `Json(T)`, an enum, and a literal
+  or a `null` written at the call site
+  ([ADR 0145](./docs/adr/0145-a-raw-parameter-is-converted-the-way-a-rows-is.md)).
+  **A call where nothing needs converting hands your own tuple straight to the
+  driver**, which is most of them. A named struct of values is left alone,
+  because that is zqlite's `:name` binding and has no position to convert
+  against; passing one that holds a type nilo would have converted is now a
+  compile error saying to use a tuple.
+
+- **There was no array of `Uuid`, in either direction.** `[]const sql.Uuid` is
+  `uuid[]` now — read, written, and as an `.in` list, which is what stops an
+  N+1 on a page that attaches children to its rows. Before, one way was Zig's
+  own `cannot cast` from inside `db.zig` and the other was a `@compileError`
+  from inside pg.zig; neither named a nilo concept. A Row with a `uuid[]`
+  column also **passed the startup check without anything having looked at the
+  column**, because the Dialect had no case for the type and an unknown answer
+  reads as *accept anything* (ADR 0145).
+
+- **`db.checking` did nothing on default options, and said nothing about it.**
+  `connect_on_init` is 0 by default, so a `Db` written `.{}` reached the schema
+  check with an empty pool, the check answered `Disconnected`, and the server
+  started behind a warning that read like a database being down. The point of
+  checking at boot is that a Row disagreeing with its table stops a deploy; on
+  defaults it stopped nothing and the deploy was green. A `Db` that has a check
+  to run now dials one connection for it
+  ([ADR 0144](./docs/adr/0144-a-check-dials-the-connection-it-needs.md)).
+  **What does not change is that a database which is merely down still lets the
+  server start**: a dial that fails falls back to the pool you asked for and
+  says in one line that the check is not happening. A `Db` with no check, or one
+  that set `connect_on_init` itself, is untouched.
+
+- **`db.insertOrIgnore` demanded a key from a table that has none.** A pure
+  join table is a composite primary key and no `id`, and it did not compile —
+  "has no column `id`, so its nilo_table has to say which column identifies a
+  row". It was asking for a key to leave out of a `SET` clause that
+  `DO NOTHING` never writes. The conflict target given at the call site is the
+  only identity the statement needs
+  ([ADR 0143](./docs/adr/0143-do-nothing-has-no-key-to-leave-out.md)).
+  `db.insertOrUpdate` still asks for one, and still should — `SET id =
+  EXCLUDED.id` is a primary key change Postgres will make quietly.
 
 - **A `db.raw` whose `SELECT` list was shorter than its Row read past the end
   of the driver's own array.** `fill` asks for column `i` of each field and

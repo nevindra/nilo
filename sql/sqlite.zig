@@ -294,10 +294,13 @@ pub fn Wire(comptime opts_in: Options) type {
                 sql: []const u8,
                 values: anytype,
                 plan: ?[]const u8,
+                problem: ?*?wire.Problem,
             ) wire.Error!Rows {
-                _ = arena;
                 if (self.done) return error.QueryFailed;
-                const stmt, const kept = try self.wire.stmtOn(self.at, sql, plan, values);
+                const stmt, const kept = self.wire.stmtOn(self.at, sql, plan, values) catch |err| {
+                    self.wire.said(self.at, err, arena, problem);
+                    return err;
+                };
                 return .{
                     .wire = self.wire,
                     .at = self.at,
@@ -313,10 +316,13 @@ pub fn Wire(comptime opts_in: Options) type {
                 sql: []const u8,
                 values: anytype,
                 plan: ?[]const u8,
+                problem: ?*?wire.Problem,
             ) wire.Error!usize {
-                _ = arena;
                 if (self.done) return error.QueryFailed;
-                return self.wire.execOn(self.at, sql, plan, values);
+                return self.wire.execOn(self.at, sql, plan, values) catch |err| {
+                    self.wire.said(self.at, err, arena, problem);
+                    return err;
+                };
             }
 
             /// **Refused, and the dialect is named.**
@@ -714,11 +720,14 @@ pub fn Wire(comptime opts_in: Options) type {
             sql: []const u8,
             values: anytype,
             plan: ?[]const u8,
+            problem: ?*?wire.Problem,
         ) wire.Error!Rows {
-            _ = arena;
             const at = if (wantsWriter(sql)) try self.takeWriter() else try self.takeReader();
             errdefer self.release(at);
-            const stmt, const kept = try self.stmtOn(at, sql, plan, values);
+            const stmt, const kept = self.stmtOn(at, sql, plan, values) catch |err| {
+                self.said(at, err, arena, problem);
+                return err;
+            };
             return .{ .wire = self, .at = at, .stmt = stmt, .kept = kept };
         }
 
@@ -728,11 +737,46 @@ pub fn Wire(comptime opts_in: Options) type {
             sql: []const u8,
             values: anytype,
             plan: ?[]const u8,
+            problem: ?*?wire.Problem,
         ) wire.Error!usize {
-            _ = arena;
             const at = try self.takeWriter();
             defer self.release(at);
-            return self.execOn(at, sql, plan, values);
+            return self.execOn(at, sql, plan, values) catch |err| {
+                self.said(at, err, arena, problem);
+                return err;
+            };
+        }
+
+        /// What SQLite said about the statement that just failed, left where a
+        /// program can read it rather than only in the log
+        /// ([ADR 0146](../docs/adr/0146-a-statement-that-failed-says-what-the-database-said.md)).
+        ///
+        /// **Three of `Problem`'s fields stay empty here, and that is said
+        /// rather than guessed at.** SQLite has no SQLSTATE, no severity word
+        /// and no separate hint — `sqlite3_errmsg` is the whole of what it
+        /// offers — so inventing a code would be this module making something
+        /// up in a field whose only value is that it came from the database.
+        ///
+        /// The text is copied into the arena because it points at memory the
+        /// connection owns and the connection goes back to the pool on the
+        /// next line. `"not an error"` is what `errmsg` answers when the
+        /// failure never reached SQLite at all — a bind zqlite refused, which
+        /// is the case this whole seam exists for — so that answer is dropped
+        /// for the Zig error's name, which does say something.
+        fn said(
+            self: *Self,
+            at: usize,
+            err: wire.Error,
+            arena: std.mem.Allocator,
+            problem: ?*?wire.Problem,
+        ) void {
+            const slot = problem orelse return;
+            const text = std.mem.span(self.conns[at].handle.lastError());
+            if (text.len == 0 or std.mem.eql(u8, text, "not an error")) {
+                slot.* = .{ .message = @errorName(err) };
+                return;
+            }
+            slot.* = .{ .message = arena.dupe(u8, text) catch @errorName(err) };
         }
 
         pub fn next(self: *Self, rows: *Rows) wire.Error!bool {
@@ -935,7 +979,10 @@ pub fn Wire(comptime opts_in: Options) type {
                 break :blk buf[0 .. written + tail.len];
             } else query;
 
-            var rows = try self.run(arena, text, .{table}, null);
+            // No problem slot: this runs once per Row while the server is
+            // starting, and the one caller already has a sentence for a check
+            // it could not run.
+            var rows = try self.run(arena, text, .{table}, null, null);
             defer rows.close();
 
             var found: std.ArrayList(wire.Column) = .empty;
@@ -1111,16 +1158,17 @@ test "a row written through the writer is read back through a reader" {
             defer w.close();
             const gpa = testing.allocator;
 
-            _ = try w.exec(gpa, "CREATE TABLE t(id INTEGER PRIMARY KEY, s TEXT)", .{}, null);
+            _ = try w.exec(gpa, "CREATE TABLE t(id INTEGER PRIMARY KEY, s TEXT)", .{}, null, null);
             const changed = try w.exec(
                 gpa,
                 "INSERT INTO t(id, s) VALUES (?1, ?2)",
                 .{ @as(i64, 7), "wati" },
                 null,
+                null,
             );
             try testing.expectEqual(@as(usize, 1), changed);
 
-            var rows = try w.run(gpa, "SELECT id, s FROM t WHERE id = ?1", .{@as(i64, 7)}, null);
+            var rows = try w.run(gpa, "SELECT id, s FROM t WHERE id = ?1", .{@as(i64, 7)}, null, null);
             defer rows.close();
 
             // The select went to a reader, which is the half a
@@ -1141,10 +1189,10 @@ test "a NULL reads as null, and an integer too wide for the field is refused not
             defer w.close();
             const gpa = testing.allocator;
 
-            _ = try w.exec(gpa, "CREATE TABLE t(a INTEGER, b INTEGER, s TEXT)", .{}, null);
-            _ = try w.exec(gpa, "INSERT INTO t(a, b, s) VALUES (NULL, 70000, NULL)", .{}, null);
+            _ = try w.exec(gpa, "CREATE TABLE t(a INTEGER, b INTEGER, s TEXT)", .{}, null, null);
+            _ = try w.exec(gpa, "INSERT INTO t(a, b, s) VALUES (NULL, 70000, NULL)", .{}, null, null);
 
-            var rows = try w.run(gpa, "SELECT a, b, s FROM t", .{}, null);
+            var rows = try w.run(gpa, "SELECT a, b, s FROM t", .{}, null, null);
             defer rows.close();
             try testing.expect(try w.next(&rows));
 
@@ -1255,7 +1303,7 @@ test "the introspection query reads the rowid alias as not-null, and its near mi
                 "CREATE TABLE untyped (id INTEGER PRIMARY KEY, whatever)",
                 "CREATE VIEW as_view AS SELECT id, label FROM alias",
             };
-            for (ddl) |text| _ = try w.exec(gpa, text, .{}, null);
+            for (ddl) |text| _ = try w.exec(gpa, text, .{}, null, null);
 
             var scratch = std.heap.ArenaAllocator.init(gpa);
             defer scratch.deinit();
@@ -1303,8 +1351,8 @@ test "a statement given a plan name is prepared once, and one without a name is 
             defer w.close();
             const gpa = testing.allocator;
 
-            _ = try w.exec(gpa, "CREATE TABLE t(id INTEGER PRIMARY KEY)", .{}, null);
-            _ = try w.exec(gpa, "INSERT INTO t(id) VALUES (1), (2)", .{}, null);
+            _ = try w.exec(gpa, "CREATE TABLE t(id INTEGER PRIMARY KEY)", .{}, null, null);
+            _ = try w.exec(gpa, "INSERT INTO t(id) VALUES (1), (2)", .{}, null, null);
 
             for (0..3) |_| {
                 var rows = try w.run(
@@ -1312,6 +1360,7 @@ test "a statement given a plan name is prepared once, and one without a name is 
                     "SELECT id FROM t WHERE id = ?1",
                     .{@as(i64, 1)},
                     "nilo_t_find",
+                    null,
                 );
                 defer rows.close();
                 try testing.expect(try w.next(&rows));
@@ -1327,7 +1376,7 @@ test "a statement given a plan name is prepared once, and one without a name is 
 
             // And a statement with no plan leaves nothing behind, which is
             // what stops `db.raw` growing a cache with traffic.
-            var raw = try w.run(gpa, "SELECT id FROM t", .{}, null);
+            var raw = try w.run(gpa, "SELECT id FROM t", .{}, null, null);
             raw.close();
             kept = 0;
             for (w.conns) |conn| kept += conn.kept.count();
@@ -1343,13 +1392,13 @@ test "a result set nobody finished reading leaves its connection usable" {
             defer w.close();
             const gpa = testing.allocator;
 
-            _ = try w.exec(gpa, "CREATE TABLE t(id INTEGER PRIMARY KEY)", .{}, null);
-            _ = try w.exec(gpa, "INSERT INTO t(id) VALUES (1), (2), (3)", .{}, null);
+            _ = try w.exec(gpa, "CREATE TABLE t(id INTEGER PRIMARY KEY)", .{}, null, null);
+            _ = try w.exec(gpa, "INSERT INTO t(id) VALUES (1), (2), (3)", .{}, null, null);
 
             // Read one of three and walk away, which is an ordinary thing to
             // write.
             {
-                var rows = try w.run(gpa, "SELECT id FROM t", .{}, "nilo_t_all");
+                var rows = try w.run(gpa, "SELECT id FROM t", .{}, "nilo_t_all", null);
                 defer w.drain(&rows);
                 try testing.expect(try w.next(&rows));
             }
@@ -1358,7 +1407,7 @@ test "a result set nobody finished reading leaves its connection usable" {
             // top rather than from where the last caller stopped. Without the
             // reset in `Rows.close` this would answer 2 — which is the shape
             // ADR 0033 asks for: a guard seen to fail.
-            var again = try w.run(gpa, "SELECT id FROM t", .{}, "nilo_t_all");
+            var again = try w.run(gpa, "SELECT id FROM t", .{}, "nilo_t_all", null);
             defer again.close();
             try testing.expect(try w.next(&again));
             try testing.expectEqual(@as(i64, 1), try w.read(&again, i64, 0));
@@ -1378,8 +1427,9 @@ test "a unique violation is AlreadyExists and every other constraint is not" {
                 "CREATE TABLE t(id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE)",
                 .{},
                 null,
+                null,
             );
-            _ = try w.exec(gpa, "INSERT INTO t(id, email) VALUES (1, 'a@b')", .{}, null);
+            _ = try w.exec(gpa, "INSERT INTO t(id, email) VALUES (1, 'a@b')", .{}, null, null);
 
             // The one error with a default answer — 409 — and SQLite's
             // extended result codes are what let it be told apart without
@@ -1389,6 +1439,7 @@ test "a unique violation is AlreadyExists and every other constraint is not" {
                 "INSERT INTO t(id, email) VALUES (2, 'a@b')",
                 .{},
                 null,
+                null,
             ));
 
             // A NOT NULL is a constraint too, and it is not a 409: it usually
@@ -1397,6 +1448,7 @@ test "a unique violation is AlreadyExists and every other constraint is not" {
                 gpa,
                 "INSERT INTO t(id, email) VALUES (3, NULL)",
                 .{},
+                null,
                 null,
             ));
         }
@@ -1410,17 +1462,17 @@ test "a transaction commits, rolls back, and gives its connection back either wa
             defer w.close();
             const gpa = testing.allocator;
 
-            _ = try w.exec(gpa, "CREATE TABLE t(id INTEGER PRIMARY KEY)", .{}, null);
+            _ = try w.exec(gpa, "CREATE TABLE t(id INTEGER PRIMARY KEY)", .{}, null, null);
 
             {
                 var tx = try w.begin(gpa, .{});
                 errdefer tx.rollback();
-                _ = try tx.exec(gpa, "INSERT INTO t(id) VALUES (1)", .{}, null);
+                _ = try tx.exec(gpa, "INSERT INTO t(id) VALUES (1)", .{}, null, null);
                 try tx.commit();
             }
             {
                 var tx = try w.begin(gpa, .{});
-                _ = try tx.exec(gpa, "INSERT INTO t(id) VALUES (2)", .{}, null);
+                _ = try tx.exec(gpa, "INSERT INTO t(id) VALUES (2)", .{}, null, null);
                 tx.rollback();
             }
 
@@ -1430,7 +1482,7 @@ test "a transaction commits, rolls back, and gives its connection back either wa
             var tx = try w.begin(gpa, .{});
             try tx.commit();
 
-            var rows = try w.run(gpa, "SELECT count(*) FROM t", .{}, null);
+            var rows = try w.run(gpa, "SELECT count(*) FROM t", .{}, null, null);
             defer rows.close();
             try testing.expect(try w.next(&rows));
             try testing.expectEqual(@as(i64, 1), try w.read(&rows, i64, 0));
@@ -1445,18 +1497,18 @@ test "a savepoint undoes part of a transaction without ending it" {
             defer w.close();
             const gpa = testing.allocator;
 
-            _ = try w.exec(gpa, "CREATE TABLE t(id INTEGER PRIMARY KEY)", .{}, null);
+            _ = try w.exec(gpa, "CREATE TABLE t(id INTEGER PRIMARY KEY)", .{}, null, null);
 
             var tx = try w.begin(gpa, .{});
             errdefer tx.rollback();
-            _ = try tx.exec(gpa, "INSERT INTO t(id) VALUES (1)", .{}, null);
+            _ = try tx.exec(gpa, "INSERT INTO t(id) VALUES (1)", .{}, null, null);
             try tx.savepoint(gpa, .mark, 1);
-            _ = try tx.exec(gpa, "INSERT INTO t(id) VALUES (2)", .{}, null);
+            _ = try tx.exec(gpa, "INSERT INTO t(id) VALUES (2)", .{}, null, null);
             try tx.savepoint(gpa, .undo, 1);
-            _ = try tx.exec(gpa, "INSERT INTO t(id) VALUES (3)", .{}, null);
+            _ = try tx.exec(gpa, "INSERT INTO t(id) VALUES (3)", .{}, null, null);
             try tx.commit();
 
-            var rows = try w.run(gpa, "SELECT id FROM t ORDER BY id", .{}, null);
+            var rows = try w.run(gpa, "SELECT id FROM t ORDER BY id", .{}, null, null);
             defer rows.close();
             try testing.expect(try w.next(&rows));
             try testing.expectEqual(@as(i64, 1), try w.read(&rows, i64, 0));
@@ -1474,7 +1526,7 @@ test "a read-only transaction takes a reader, so a report does not stop the writ
             defer w.close();
             const gpa = testing.allocator;
 
-            _ = try w.exec(gpa, "CREATE TABLE t(id INTEGER PRIMARY KEY)", .{}, null);
+            _ = try w.exec(gpa, "CREATE TABLE t(id INTEGER PRIMARY KEY)", .{}, null, null);
 
             var report = try w.begin(gpa, .{ .read_only = true });
             defer report.rollback();
@@ -1482,7 +1534,7 @@ test "a read-only transaction takes a reader, so a report does not stop the writ
 
             // The writer is untouched while the report is open, which is what
             // the flag buys on this dialect and does not buy on the other.
-            _ = try w.exec(gpa, "INSERT INTO t(id) VALUES (1)", .{}, null);
+            _ = try w.exec(gpa, "INSERT INTO t(id) VALUES (1)", .{}, null, null);
         }
     }.run);
 }
@@ -1519,7 +1571,7 @@ test "a reader refuses a write, which is what makes routing safe to get wrong" {
             const gpa = testing.allocator;
 
             try testing.expectEqual(@as(usize, 4), w.conns.len);
-            _ = try w.exec(gpa, "CREATE TABLE t(id INTEGER PRIMARY KEY)", .{}, null);
+            _ = try w.exec(gpa, "CREATE TABLE t(id INTEGER PRIMARY KEY)", .{}, null, null);
 
             // ADR 0074's backstop, seen to fail rather than assumed to work
             // (ADR 0033).
@@ -1534,7 +1586,7 @@ test "a reader refuses a write, which is what makes routing safe to get wrong" {
             // in-memory database answers `memory` to the same pragma without
             // failing, so a pool tested only in memory has never once run in
             // the journal mode it ships in (check 3 of the same spike).
-            var rows = try w.run(gpa, "PRAGMA journal_mode", .{}, null);
+            var rows = try w.run(gpa, "PRAGMA journal_mode", .{}, null, null);
             defer rows.close();
             try testing.expect(try w.next(&rows));
             try testing.expectEqualStrings("wal", try w.read(&rows, []const u8, 0));

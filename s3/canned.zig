@@ -932,6 +932,261 @@ test "a presigned URL carries its own signature, and a life that is true" {
     }.run);
 }
 
+/// The value of one form field, by name.
+fn fieldOfForm(posted: bucket_mod.Posted, name: []const u8) ?[]const u8 {
+    for (posted.fields) |f| {
+        if (std.mem.eql(u8, f.name, name)) return f.value;
+    }
+    return null;
+}
+
+test "a presigned POST is a form, and its policy decodes to the document that was signed" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var buf: [64]u8 = undefined;
+            var store = try started(io, &canned, &buf);
+            defer store.deinit();
+
+            var files = try Files.open(&store);
+            defer files.deinit();
+
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            const posted = try files.presignPost(&scope, "receipts/2026/09.pdf", .{
+                .seconds = 900,
+                .content_type = "application/pdf",
+                // Asked for 50 MiB against a bucket whose `max_bytes` is one,
+                // so one is what the policy says.
+                .max_bytes = 50 << 20,
+            });
+
+            // The form posts to the bucket, not to the key. A browser that had
+            // to post to the key could not pick its own filename.
+            var action: [64]u8 = undefined;
+            try testing.expectEqualStrings(
+                try std.fmt.bufPrint(&action, "http://127.0.0.1:{d}/files", .{canned.port}),
+                posted.url,
+            );
+
+            const policy = fieldOfForm(posted, "policy").?;
+            const date = fieldOfForm(posted, "x-amz-date").?;
+            const credential = fieldOfForm(posted, "x-amz-credential").?;
+
+            // What the browser sends is base64, so the document itself is only
+            // reachable by decoding it, which is what S3 does and therefore the
+            // only reading of it worth asserting on.
+            const decoder = std.base64.standard.Decoder;
+            const doc = try scope.arena().alloc(u8, try decoder.calcSizeForSlice(policy));
+            try decoder.decode(doc, policy);
+
+            // Built from the two timestamps the form itself carries rather
+            // than from a second clock read, so this cannot fail on a second
+            // boundary. It also means a policy disagreeing with its own
+            // `x-amz-date` field, which is a 403 that reads like a signing
+            // bug, fails here.
+            const dies: sign.Stamp = .at(posted.expires_at);
+            var expiry: [sign.Stamp.expiration_len]u8 = undefined;
+
+            var expected: [512]u8 = undefined;
+            try testing.expectEqualStrings(try std.fmt.bufPrint(
+                &expected,
+                "{{\"expiration\":\"{s}\",\"conditions\":[" ++
+                    "{{\"bucket\":\"files\"}}," ++
+                    "[\"eq\",\"$key\",\"receipts/2026/09.pdf\"]," ++
+                    "{{\"x-amz-algorithm\":\"AWS4-HMAC-SHA256\"}}," ++
+                    "{{\"x-amz-credential\":\"{s}\"}}," ++
+                    "{{\"x-amz-date\":\"{s}\"}}," ++
+                    "[\"eq\",\"$Content-Type\",\"application/pdf\"]," ++
+                    "[\"content-length-range\",0,1048576]" ++
+                    "]}}",
+                .{ dies.expiration(&expiry), credential, date },
+            ), doc);
+
+            // Asked for fifteen minutes and the bucket allows an hour, so
+            // fifteen minutes is what comes back.
+            try testing.expectEqual(@divFloor(core.nowMillis(), 1000) + 900, posted.expires_at);
+
+            // The fields, in the order a form is written against. No token,
+            // because these credentials are a static pair.
+            try testing.expectEqual(@as(usize, 7), posted.fields.len);
+            try testing.expectEqualStrings("key", posted.fields[0].name);
+            try testing.expectEqualStrings("receipts/2026/09.pdf", posted.fields[0].value);
+            try testing.expectEqualStrings("x-amz-algorithm", posted.fields[1].name);
+            try testing.expectEqualStrings("AWS4-HMAC-SHA256", posted.fields[1].value);
+            try testing.expectEqualStrings("x-amz-credential", posted.fields[2].name);
+            try testing.expectEqualStrings("x-amz-date", posted.fields[3].name);
+            try testing.expectEqualStrings("Content-Type", posted.fields[4].name);
+            try testing.expectEqualStrings("application/pdf", posted.fields[4].value);
+            try testing.expectEqualStrings("policy", posted.fields[5].name);
+            // Last, because everything before it is what the signature covers.
+            try testing.expectEqualStrings("x-amz-signature", posted.fields[6].name);
+
+            // A credential is the key id and the day's scope, joined the way
+            // S3 reads it back.
+            var scoped: [128]u8 = undefined;
+            try testing.expectEqualStrings(try std.fmt.bufPrint(
+                &scoped,
+                akid ++ "/{s}/us-east-1/s3/aws4_request",
+                .{date[0..8]},
+            ), credential);
+        }
+    }.run);
+}
+
+test "a POST policy is signed with the day's key, and nothing more" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var buf: [64]u8 = undefined;
+            var store = try started(io, &canned, &buf);
+            defer store.deinit();
+
+            var files = try Files.open(&store);
+            defer files.deinit();
+
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            const posted = try files.presignPost(&scope, "receipts/one.pdf", .{ .seconds = 900 });
+            const policy = fieldOfForm(posted, "policy").?;
+            const date = fieldOfForm(posted, "x-amz-date").?;
+
+            // The four HMACs and the fifth, written out longhand. Calling
+            // `sign.derive` and `sign.signature` here would be the code under
+            // test checking itself: this is the specification, typed again.
+            const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
+            var key: [32]u8 = undefined;
+            Hmac.create(&key, date[0..8], "AWS4" ++ secret);
+            Hmac.create(&key, "us-east-1", &key);
+            Hmac.create(&key, "s3", &key);
+            Hmac.create(&key, "aws4_request", &key);
+
+            // The signature is one HMAC of the **base64**, not of the document
+            // and not of a canonical request. Signing the decoded bytes is the
+            // mistake that produces a perfectly formed 403.
+            var mac: [32]u8 = undefined;
+            Hmac.create(&mac, policy, &key);
+
+            var hex: [64]u8 = undefined;
+            _ = try std.fmt.bufPrint(&hex, "{x}", .{&mac});
+            try testing.expectEqualStrings(&hex, fieldOfForm(posted, "x-amz-signature").?);
+        }
+    }.run);
+}
+
+test "a prefix policy says starts-with, so the browser picks the filename" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var buf: [64]u8 = undefined;
+            var store = try started(io, &canned, &buf);
+            defer store.deinit();
+
+            var files = try Files.open(&store);
+            defer files.deinit();
+
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            // Asked for a day against a `presign_max` of an hour, so an hour
+            // is the life, exactly as `presign` clamps it.
+            const posted = try files.presignPost(&scope, "attachments/42/", .{
+                .seconds = 86_400,
+                .prefix = true,
+            });
+            try testing.expectEqual(@divFloor(core.nowMillis(), 1000) + 3600, posted.expires_at);
+
+            const policy = fieldOfForm(posted, "policy").?;
+            const decoder = std.base64.standard.Decoder;
+            const doc = try scope.arena().alloc(u8, try decoder.calcSizeForSlice(policy));
+            try decoder.decode(doc, policy);
+
+            try testing.expect(std.mem.indexOf(
+                u8,
+                doc,
+                "[\"starts-with\",\"$key\",\"attachments/42/\"]",
+            ) != null);
+
+            // No content type was asked for, so nothing constrains it: an
+            // attachment box takes a PDF and a screenshot on one form.
+            try testing.expect(std.mem.indexOf(u8, doc, "Content-Type") == null);
+            try testing.expectEqual(@as(?[]const u8, null), fieldOfForm(posted, "Content-Type"));
+
+            // And the ceiling is there even though nobody asked for one,
+            // because a form with no ceiling is not something this call hands
+            // out. `Files` is a mebibyte.
+            try testing.expect(std.mem.indexOf(u8, doc, "[\"content-length-range\",0,1048576]") != null);
+
+            // The `key` field is what the form extends, so it goes out as it
+            // was given rather than as a completed key.
+            try testing.expectEqualStrings("attachments/42/", fieldOfForm(posted, "key").?);
+        }
+    }.run);
+}
+
+test "temporary credentials put their token in the form and in the policy" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var buf: [64]u8 = undefined;
+            var store = try Store.open(testing.allocator, .{
+                .endpoint = try canned.endpoint(&buf),
+                .region = "us-east-1",
+                .credentials = .{ .static = .{
+                    .access_key_id = akid,
+                    .secret_access_key = secret,
+                    .session_token = "FQoGZXIvYXdzEBYaDN0EXAMPLETOKEN",
+                    // Ten minutes left, against a form asking for an hour: the
+                    // credentials are the smallest of the three, so they are
+                    // what `expires_at` reports.
+                    .expires_at = @divFloor(core.nowMillis(), 1000) + 600,
+                } },
+            });
+            defer store.deinit();
+            try store.nilo_start(io, .off);
+
+            const Temp = bucket_mod.Bucket("temp", .{ .style = .path, .session_token_max = 2048 });
+            var temp = try Temp.open(&store);
+            defer temp.deinit();
+
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            const posted = try temp.presignPost(&scope, "one.pdf", .{ .seconds = 3600 });
+            try testing.expectEqual(@divFloor(core.nowMillis(), 1000) + 600, posted.expires_at);
+
+            try testing.expectEqualStrings(
+                "FQoGZXIvYXdzEBYaDN0EXAMPLETOKEN",
+                fieldOfForm(posted, "x-amz-security-token").?,
+            );
+
+            const policy = fieldOfForm(posted, "policy").?;
+            const decoder = std.base64.standard.Decoder;
+            const doc = try scope.arena().alloc(u8, try decoder.calcSizeForSlice(policy));
+            try decoder.decode(doc, policy);
+
+            // Sent and signed. A token in the form that the policy does not
+            // name is a 403, and a policy naming one the form does not send is
+            // the same 403 from the other side.
+            try testing.expect(std.mem.indexOf(
+                u8,
+                doc,
+                "{\"x-amz-security-token\":\"FQoGZXIvYXdzEBYaDN0EXAMPLETOKEN\"}",
+            ) != null);
+        }
+    }.run);
+}
+
 test "two buckets over one store are two types and one connection pool" {
     try withIo(struct {
         fn run(io: std.Io) !void {

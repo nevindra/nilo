@@ -14,6 +14,7 @@
 //! | `*Ctx`                | the raw request — the way out when you need full control |
 //! | `*Db`, `*const Cfg`   | a service, matched by its type             |
 //! | `u32`, `Str`, `bool`, a float, an enum | a path param, in the order `:name` (and a trailing `*`) appears in the pattern |
+//! | a type carrying `nilo_parse` | a path param the type reads itself — `sql.Uuid` (ADR 0142) |
 //! | `Query(T)`            | the query string, read into a struct of yours |
 //! | `Form(T)`             | the body as an HTML form, into a struct of yours (ADR 0031) |
 //! | `std.mem.Allocator`   | the request arena, freed when the request ends |
@@ -404,6 +405,16 @@ pub fn requirements(comptime pattern: []const u8, comptime f: anytype) []const s
 /// Everything else is settled while compiling.
 pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Operation {
     comptime {
+        // Reading a signature and describing it are one comptime evaluation
+        // sharing one branch budget, and the default 1,000 was already nearly
+        // spent: most of it goes on `openapi.nameOf` walking a type name
+        // character by character to decide what to file the shape under. The
+        // marker check ADR 0142 added per argument is what took the `orders`
+        // example over, and the cost is a compile that stops rather than one
+        // that is slow. Raised here because this is where the whole of the
+        // work is asked for; the loop that spends it is two files away.
+        @setEvalBranchQuota(20_000);
+
         const Fn = fnTypeOf(pattern, @TypeOf(f));
         const params = @typeInfo(Fn).@"fn".params;
         const roles = rolesOf(pattern, params);
@@ -475,6 +486,18 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
         };
 
         var answer = answerOf(Fn);
+        // **This is the one thing about a handler nilo cannot read off the
+        // signature** ([ADR 0150](../docs/adr/0150-a-ctx-handler-that-returns-nothing-may-have-written-it.md)).
+        // A handler holding a `*Ctx` and returning nothing may have written a
+        // response itself, or may have taken the Ctx to read a header and left
+        // nilo to send 200 with an empty body. Both are ordinary and Zig has
+        // no way to tell them apart.
+        //
+        // So the document says it does not know, which fails in the safe
+        // direction: over-claiming an empty 200 on a route that streams a
+        // file would be a document that lies. A handler that wants the second
+        // one described says so in its return type — `Status(204, void)`, or
+        // `Status(200, void)` — and gets a described response with no body.
         answer.written = wants_ctx and returnsNothing(Fn);
 
         return .{
@@ -679,7 +702,8 @@ fn rolesOf(
                             " is a " ++ naming.of(P) ++ " — and a request only has one body.\n" ++
                             "  A value is request data and a pointer is a service, so whichever of " ++
                             "the two is not read from the body is asked for as a pointer: `*" ++
-                            naming.of(params[first].type.?) ++ "`.",
+                            naming.of(params[first].type.?) ++ "`." ++
+                            orMeantAsAParam(param_names, used),
                     );
                     body_at = i;
                 },
@@ -808,6 +832,12 @@ fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Rol
     // it: a resolved value is a struct too, and the marker is what tells the
     // two apart (ADR 0016).
     if (comptime resolve.isResolved(P)) return .resolved;
+    // Before the switch entirely, and not only before `.@"struct" => .body`:
+    // a type that says it can parse itself is a path param whatever kind it
+    // is, and what a type says about itself wins over what its kind would
+    // otherwise have meant (ADR 0142). Reading the marker is also what checks
+    // its shape, so a `nilo_parse` written wrong is refused here.
+    if (comptime converting.parsesItself(P)) return .{ .param = 0 };
 
     return switch (@typeInfo(P)) {
         .int, .float, .bool, .@"enum" => .{ .param = 0 },
@@ -851,8 +881,9 @@ fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Rol
             "nilo: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
                 "\" is a " ++ naming.of(P) ++ ", which nilo does not recognise.\n" ++
                 "  What you can ask for: `*Ctx`, a pointer to a service (`*Db`), a path param " ++
-                "(`u32`, `nilo.Str`, `bool`, an enum), `nilo.Query(T)` for the query string, " ++
-                "a `std.mem.Allocator` for the request arena, or one struct for the request body.",
+                "(`u32`, `nilo.Str`, `bool`, an enum, or a type carrying `nilo_parse`), " ++
+                "`nilo.Query(T)` for the query string, a `std.mem.Allocator` for the request " ++
+                "arena, or one struct for the request body.",
         ),
     };
 }
@@ -889,6 +920,26 @@ fn checkQueryFields(comptime pattern: []const u8, comptime T: type, comptime i: 
             );
         }
     }
+}
+
+/// The third thing an unplaceable struct can be, said only on a route that
+/// still has a slot going spare.
+///
+/// The two-bodies message assumed a struct nilo cannot place is a service,
+/// and told somebody with a `Uuid` argument to write `*Uuid` — which is a
+/// database connection's shape, not a uuid's. That was the only answer there
+/// was before a type could parse itself. Now there is a second one, and a
+/// route with an unclaimed `:id` is exactly where it is the right one
+/// (ADR 0142). Empty on a route with every param taken, because there the
+/// sentence above is still the whole truth.
+fn orMeantAsAParam(
+    comptime param_names: []const []const u8,
+    comptime used: usize,
+) []const u8 {
+    if (used >= param_names.len) return "";
+    return "\n  Or, if it is meant to be the path param `:" ++ param_names[used] ++
+        "`: a path param is a number, a `nilo.Str`, a `bool`, an enum, or a type carrying " ++
+        "`pub fn nilo_parse(text: []const u8) ?Self`.";
 }
 
 fn tooFewPatternParams(
@@ -1082,4 +1133,100 @@ fn hasNamedDecl(comptime T: type, comptime name: []const u8) bool {
         .@"struct", .@"union", .@"enum", .@"opaque" => @hasDecl(T, name),
         else => false,
     };
+}
+
+// ---- tests ----
+
+const testing = std.testing;
+
+/// A type of the reader's own carrying all three declarations `sql.Uuid`
+/// carries: it reads itself out of request text, writes its own JSON, and
+/// says what that JSON looks like. `http/` may not import `nilo_id`, and each
+/// of the three is a declaration read by name precisely so that it need not
+/// (ADR 0042, ADR 0076, ADR 0142).
+const Ticket = struct {
+    number: u32,
+
+    pub fn nilo_parse(text: []const u8) ?Ticket {
+        if (text.len == 0 or text[0] != 'T') return null;
+        return .{ .number = std.fmt.parseInt(u32, text[1..], 10) catch return null };
+    }
+
+    pub fn jsonStringify(self: Ticket, jw: anytype) !void {
+        var buf: [16]u8 = undefined;
+        try jw.write(std.fmt.bufPrint(&buf, "T{d}", .{self.number}) catch unreachable);
+    }
+
+    pub const nilo_openapi = .{ .type = "string", .format = "ticket" };
+};
+
+fn showTicket(id: Ticket) Ticket {
+    return id;
+}
+
+test "a type that says it can parse itself is a path param, not the request body" {
+    // The whole of the bug ADR 0142 closes: a struct by value used to be the
+    // request body whatever it said about itself, so a route could not take
+    // one as its `:id` at all.
+    const roles = comptime rolesOf("/tickets/:id", @typeInfo(@TypeOf(showTicket)).@"fn".params);
+    try testing.expect(roles[0] == .param);
+    try testing.expectEqual(@as(usize, 0), roles[0].param);
+}
+
+test "the third answer is offered only where there is a slot for it" {
+    // The sentence itself, because a Refusal can only pin the first line of a
+    // message and this one is the third. What it guards is the mistake
+    // ADR 0142 found: the old wording told everybody to write `*Uuid`.
+    try testing.expectEqualStrings(
+        "\n  Or, if it is meant to be the path param `:sku`: a path param is a number, " ++
+            "a `nilo.Str`, a `bool`, an enum, or a type carrying " ++
+            "`pub fn nilo_parse(text: []const u8) ?Self`.",
+        comptime orMeantAsAParam(&.{"sku"}, 0),
+    );
+
+    // A route with no params, and one whose only param is already claimed.
+    // Both leave the old two-sentence message exactly as it was.
+    try testing.expectEqualStrings("", comptime orMeantAsAParam(&.{}, 0));
+    try testing.expectEqualStrings("", comptime orMeantAsAParam(&.{"id"}, 1));
+}
+
+test "a path param that parses itself is described by what the type says, not by its fields" {
+    var op = comptime operation("/tickets/:id", showTicket);
+    op.method = .GET;
+
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try openapi.write(&w, &.{op}, .{});
+    const doc = buf[0..w.end];
+
+    // `number: u32` is what reflecting the struct would have published, and
+    // it is not what arrives on the wire.
+    try testing.expect(std.mem.indexOf(u8, doc, "\"name\":\"id\",\"in\":\"path\"," ++
+        "\"required\":true,\"schema\":{\"type\":\"string\",\"format\":\"ticket\"}") != null);
+    try testing.expect(std.mem.indexOf(u8, doc, "\"number\"") == null);
+
+    // And nilo can now refuse the request before the handler runs, which is
+    // the other half of what the reporter was after.
+    try testing.expect(std.mem.indexOf(u8, doc, "\"400\"") != null);
+}
+
+test "a Str path param is still a bare string, so nothing was widened by accident" {
+    const showName = struct {
+        fn showName(name: Str) Str {
+            return name;
+        }
+    }.showName;
+
+    var op = comptime operation("/people/:name", showName);
+    op.method = .GET;
+
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try openapi.write(&w, &.{op}, .{});
+    const doc = buf[0..w.end];
+
+    try testing.expect(std.mem.indexOf(u8, doc, "\"name\":\"name\",\"in\":\"path\"," ++
+        "\"required\":true,\"schema\":{\"type\":\"string\"}") != null);
+    // Nothing to convert, so nothing to refuse.
+    try testing.expect(std.mem.indexOf(u8, doc, "\"400\"") == null);
 }

@@ -479,6 +479,19 @@ pub fn validatePattern(comptime pattern: []const u8) void {
                     "\".",
             );
 
+            // `{id}` is what OpenAPI writes, what nilo's own document emits,
+            // and what every framework a porter arrives from spells. Without
+            // this it is five literal characters and the only symptom is a
+            // 404 on a URL the generated document promises (ADR 0147).
+            if (std.mem.indexOfScalar(u8, seg, '{') != null or
+                std.mem.indexOfScalar(u8, seg, '}') != null) @compileError(
+                "nilo: the segment \"" ++ seg ++ "\" of route \"" ++ pattern ++ "\" is written " ++
+                    "with braces, and nilo matches it as literal text.\n" ++
+                    "  A path param is written `:name`: \"/users/:id\", not \"/users/{id}\". " ++
+                    "The `{}` form is what the OpenAPI document prints, so a path copied out of " ++
+                    "one arrives spelled that way and has to be turned back.",
+            );
+
             if (seg.len > 0 and seg[0] == ':') {
                 if (seg.len == 1) @compileError(
                     "nilo: the route pattern \"" ++ pattern ++ "\" has a `:` with no name after " ++

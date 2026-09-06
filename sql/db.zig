@@ -29,6 +29,14 @@
 //! it is the only one whose meaning does not change with the request around
 //! it. A handler that wants a 503 here says so with a fail function.
 //!
+//! **A `Db` with a `checking` list dials one anyway** (ADR 0144). A pool of
+//! nothing has nothing for the check to borrow, so on `.{}` the check
+//! answered `Disconnected` and the server started with a warning — a second
+//! way to have no schema check while believing there is one, and the one you
+//! get by writing the defaults. The dial is still allowed to fail: the
+//! server starts, and the line it prints says the check is not happening
+//! rather than that it passed.
+//!
 //! ## Where `Str` stops
 //!
 //! Text handed back by the driver is valid only until the next row is
@@ -73,6 +81,7 @@ const nilo = @import("nilo_http");
 
 const dialect = @import("dialect.zig");
 const postgres = @import("postgres.zig");
+const rawcheck = @import("rawcheck.zig");
 const row_mod = @import("row.zig");
 const schema = @import("schema.zig");
 const statement = @import("statement.zig");
@@ -162,6 +171,22 @@ pub const Sent = struct {
     /// caller is about to be handed it, and a watcher that has to switch on
     /// an error set is a watcher that breaks when the set grows.
     failed: bool,
+    /// What the database said about refusing it, when it said anything —
+    /// null on a statement that worked and on one nobody could get a word out
+    /// of ([ADR 0146](../docs/adr/0146-a-statement-that-failed-says-what-the-database-said.md)).
+    ///
+    /// **This is not the reasoning above read backwards.** That paragraph is
+    /// about the *Zig error*, which is a set that grows and breaks a switch;
+    /// this is the server's own text, which is data. Leaving it out meant the
+    /// whole debugging surface for a failed statement was the word
+    /// `QueryFailed` — the message went to `std.log.err` and nowhere a program
+    /// could reach, so an operator with a log reader had it and the code did
+    /// not.
+    ///
+    /// It lives in the Scope's arena, so a watcher that wants to keep one past
+    /// the request has to copy it — the same rule a `Str` follows. And it
+    /// still never reaches the client (ADR 0025).
+    problem: ?wire_mod.Problem = null,
 };
 
 /// What `db.watching` takes. A plain function pointer rather than an
@@ -179,6 +204,22 @@ pub const Watcher = *const fn (Sent) void;
 /// with the default log level pays the branch and prints nothing.
 pub fn logging(sent: Sent) void {
     const how = if (sent.failed) " failed" else "";
+    // The database's own words, when there are any (ADR 0146). A watcher that
+    // prints the statement and not the reason is the shape this module already
+    // shipped once, and it is the one that costs somebody an afternoon.
+    if (sent.problem) |said| {
+        if (said.code.len == 0) {
+            std.log.scoped(.nilo_sql).debug("{d}us failed ({s}): {s}", .{ sent.micros, said.message, sent.sql });
+        } else {
+            std.log.scoped(.nilo_sql).debug("{d}us failed ({s} [{s}]): {s}", .{
+                sent.micros,
+                said.message,
+                said.code,
+                sent.sql,
+            });
+        }
+        return;
+    }
     if (sent.rows) |n| {
         std.log.scoped(.nilo_sql).debug("{d}us{s}, {d} row(s): {s}", .{ sent.micros, how, n, sent.sql });
     } else {
@@ -263,6 +304,12 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             /// `unreachable`. Under the engine it is fine, because zio parks
             /// across threads; this is a constraint on a test harness rather
             /// than on a server.
+            ///
+            /// **Zero and a `checking` list means one, not zero** (ADR
+            /// 0144). The check has to borrow a connection, and a pool that
+            /// dialled none had nothing to lend it, so the check that was
+            /// meant to stop a bad deploy became a warning. The dial is
+            /// still allowed to fail — the server starts either way.
             connect_on_init: u16 = 0,
             /// How long a caller waits for a free connection.
             timeout_ms: u32 = 10 * std.time.ms_per_s,
@@ -325,13 +372,22 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// `Db` was told not to keep any (`Opts.prepared`).
         ///
         /// The name is comptime and the branch is one load and a test, which
-        /// is what a 12 µs saving is being bought with. `db.raw` does not
-        /// come through here at all: its text arrives at run time, so there
-        /// is no comptime name to derive and no bound on how many there
-        /// would be (ADR 0057).
+        /// is what a 12 µs saving is being bought with.
         fn planOf(self: *Self, comptime stmt: statement.Statement) ?[]const u8 {
             if (!self.opts.prepared) return null;
             return comptime statement.planName(stmt.sql);
+        }
+
+        /// The same, for a statement this module did not write.
+        ///
+        /// `db.raw` used to be the one call that was never prepared, on
+        /// ADR 0057's reasoning that its text arrived at run time and there
+        /// was no bound on how many names there would be. Its text is
+        /// comptime now, so both halves of that stopped being true and the
+        /// same 12 µs applies ([ADR 0148](../docs/adr/0148-a-raw-statement-is-counted-while-compiling.md)).
+        fn rawPlanOf(self: *Self, comptime sql: []const u8) ?[]const u8 {
+            if (!self.opts.prepared) return null;
+            return comptime statement.planName(sql);
         }
 
         /// One of the Debug-only counters, read the way it is written. Both
@@ -395,6 +451,10 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         }
 
         /// Tell the watcher what happened, if there is one.
+        ///
+        /// `problem` is what the Wire left in the slot the caller handed it,
+        /// which is null on every path that did not fail and on the failures
+        /// nobody could get a word out of (ADR 0146).
         fn told(
             self: *const Self,
             started: ?i64,
@@ -402,6 +462,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             plan: ?[]const u8,
             rows: ?usize,
             failed: bool,
+            problem: ?wire_mod.Problem,
         ) void {
             const f = self.watch orelse return;
             const at = started orelse return;
@@ -415,6 +476,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 .micros = if (took < 0) 0 else @intCast(took),
                 .rows = rows,
                 .failed = failed,
+                .problem = problem,
             });
         }
 
@@ -431,17 +493,18 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         ) !usize {
             const started = self.timing();
             const w = try self.wireOf();
+            var problem: ?wire_mod.Problem = null;
             const changed = if (tx) |t|
-                t.exec(c.arena(), sql, values, plan) catch |err| {
-                    self.told(started, sql, plan, null, true);
+                t.exec(c.arena(), sql, values, plan, &problem) catch |err| {
+                    self.told(started, sql, plan, null, true, problem);
                     return err;
                 }
             else
-                w.exec(c.arena(), sql, values, plan) catch |err| {
-                    self.told(started, sql, plan, null, true);
+                w.exec(c.arena(), sql, values, plan, &problem) catch |err| {
+                    self.told(started, sql, plan, null, true, problem);
                     return err;
                 };
-            self.told(started, sql, plan, changed, false);
+            self.told(started, sql, plan, changed, false, null);
             return changed;
         }
 
@@ -456,12 +519,52 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// test — passes `.off` and is bounded by nothing, which is what it
         /// was before ADR 0135 either way.
         pub fn nilo_start(self: *Self, io: std.Io, limits: core.Limits) !void {
-            self.wire = W.open(io, self.gpa, self.url, .{
+            // **A check with nothing to check against never ran**
+            // ([ADR 0144](../docs/adr/0144-a-check-dials-the-connection-it-needs.md)).
+            // `connect_on_init` is 0 by default, so a `Db` written `.{}`
+            // reached the schema check with an empty pool, the check
+            // answered `Disconnected`, and the server started with a
+            // warning. The point of checking at boot is that a Row
+            // disagreeing with its table stops a deploy; on defaults it
+            // stopped nothing, and the deploy was green.
+            //
+            // So a `Db` that has a check to run dials one connection for
+            // it. What does not change is ADR 0039's promise that a
+            // database which is merely down does not stop the server: a
+            // dial that fails here falls back to the pool the caller asked
+            // for and says in one line that the check is not happening.
+            const dialing_for_check = self.check != null and self.opts.connect_on_init == 0;
+            var check_dial_failed = false;
+
+            var opened = W.open(io, self.gpa, self.url, .{
                 .size = self.opts.size,
-                .connect_on_init = self.opts.connect_on_init,
+                .connect_on_init = if (dialing_for_check) 1 else self.opts.connect_on_init,
                 .timeout_ms = self.opts.timeout_ms,
                 .limits = limits,
-            }) catch |err| {
+            });
+            if (dialing_for_check) if (opened) |_| {} else |err| {
+                // A URL nilo cannot read will not become readable on a
+                // second attempt, so that one goes straight to the message
+                // written for it.
+                if (!isUrlProblem(err)) {
+                    std.log.warn(
+                        "nilo could not dial the database to check the schema against it " ++
+                            "({s}), so it is starting without the check. `connect_on_init` " ++
+                            "is 0, which is what asks for a server that starts while its " ++
+                            "database is down.",
+                        .{@errorName(err)},
+                    );
+                    check_dial_failed = true;
+                    opened = W.open(io, self.gpa, self.url, .{
+                        .size = self.opts.size,
+                        .connect_on_init = 0,
+                        .timeout_ms = self.opts.timeout_ms,
+                        .limits = limits,
+                    });
+                }
+            };
+
+            self.wire = opened catch |err| {
                 // Two failures reach here and they want different sentences.
                 // Before ADR 0062 the pool dialled itself whatever
                 // `connect_on_init` said, so *both* of them got the one
@@ -490,12 +593,15 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 return err;
             };
 
+            // Already said above, in the sentence that names the dial.
+            if (check_dial_failed) return;
+
             const check = self.check orelse return;
-            // A schema check needs a connection, and the whole point of
-            // `connect_on_init = 0` is that there may not be one. A
-            // database that is merely not running is not a mistake anybody
-            // can fix by reading a stack trace, so it is said plainly and
-            // startup carries on.
+            // A schema check needs a connection, and a caller who set
+            // `connect_on_init` themselves may have set it to 0. A database
+            // that is merely not running is not a mistake anybody can fix by
+            // reading a stack trace, so it is said plainly and startup
+            // carries on.
             const problems = check(self) catch |err| {
                 std.log.warn(
                     "nilo could not check the schema ({s}). The tables will be checked by " ++
@@ -623,8 +729,15 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             const stmt = comptime statement.select(D, Row, @TypeOf(options));
             const w = try self.wireOf();
             const started = self.timing();
-            const rows = w.run(c.arena(), stmt.sql, try valuesOf(stmt, Row, options, c), self.planOf(stmt)) catch |err| {
-                self.told(started, stmt.sql, self.planOf(stmt), null, true);
+            var problem: ?wire_mod.Problem = null;
+            const rows = w.run(
+                c.arena(),
+                stmt.sql,
+                try valuesOf(stmt, Row, options, c),
+                self.planOf(stmt),
+                &problem,
+            ) catch |err| {
+                self.told(started, stmt.sql, self.planOf(stmt), null, true, problem);
                 return err;
             };
             // **What a watcher is told here is the statement opening**, with
@@ -632,7 +745,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             // nothing in this call sees the last one. A stream that is slow to
             // *open* is the half worth reporting, and it is the half this can
             // report honestly (ADR 0137).
-            self.told(started, stmt.sql, self.planOf(stmt), null, false);
+            self.told(started, stmt.sql, self.planOf(stmt), null, false, null);
             // Counted only once the statement is away, so a `stream` that
             // never opened is not a `stream` that was never closed.
             if (traps_enabled) self.hold(&self.open_streams, .Add);
@@ -651,13 +764,20 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             self: *Self,
             comptime Row: type,
             c: anytype,
-            sql: []const u8,
+            comptime sql: []const u8,
             values: anytype,
         ) ![]Row {
             comptime core.checkScope(@TypeOf(c), "db.raw");
+            comptime rawcheck.assertList(Row, sql, "db.raw");
             // No ceiling: this module did not write the statement and so has
             // nothing to say about how many rows it can answer with.
-            return fill(Row, null, self, null, c, sql, null, values);
+            //
+            // The values still go through the same conversion a Row's do
+            // (ADR 0145). This module did not write the *statement*; it is
+            // still the one holding a `Uuid`, a `Str` and a `Timestamp`, and a
+            // parameter that meant something different here than in
+            // `db.select` would be two rules for one type.
+            return fill(Row, null, self, null, c, sql, self.rawPlanOf(sql), try rawValuesOf(values, c));
         }
 
         /// A statement that answers with **nothing**, and the number of rows
@@ -690,7 +810,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// pool, the Scope and the seven errors.
         pub fn exec(self: *Self, c: anytype, sql: []const u8, values: anytype) !usize {
             comptime core.checkScope(@TypeOf(c), "db.exec");
-            return self.execTold(null, c, sql, null, values);
+            return self.execTold(null, c, sql, null, try rawValuesOf(values, c));
         }
 
         // -- writing ---------------------------------------------------------
@@ -1261,18 +1381,19 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 self: *Tx,
                 comptime Row: type,
                 c: anytype,
-                sql: []const u8,
+                comptime sql: []const u8,
                 values: anytype,
             ) ![]Row {
                 comptime core.checkScope(@TypeOf(c), "tx.raw");
-                return fill(Row, null, self.db, &self.inner, c, sql, null, values);
+                comptime rawcheck.assertList(Row, sql, "tx.raw");
+                return fill(Row, null, self.db, &self.inner, c, sql, self.db.rawPlanOf(sql), try rawValuesOf(values, c));
             }
 
             /// `db.exec` inside the transaction: a statement that answers with
             /// nothing, and the rows it changed (ADR 0078).
             pub fn exec(self: *Tx, c: anytype, sql: []const u8, values: anytype) !usize {
                 comptime core.checkScope(@TypeOf(c), "tx.exec");
-                return self.db.execTold(&self.inner, c, sql, null, values);
+                return self.db.execTold(&self.inner, c, sql, null, try rawValuesOf(values, c));
             }
         };
 
@@ -1446,15 +1567,16 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             // is holding, because the `Tx` took it from here.
             const w = try db.wireOf();
             const started = db.timing();
+            var problem: ?wire_mod.Problem = null;
 
             var rows = if (tx) |t|
-                t.run(arena, sql, values, plan) catch |err| {
-                    db.told(started, sql, plan, null, true);
+                t.run(arena, sql, values, plan, &problem) catch |err| {
+                    db.told(started, sql, plan, null, true, problem);
                     return err;
                 }
             else
-                w.run(arena, sql, values, plan) catch |err| {
-                    db.told(started, sql, plan, null, true);
+                w.run(arena, sql, values, plan, &problem) catch |err| {
+                    db.told(started, sql, plan, null, true, problem);
                     return err;
                 };
             // Whatever happens below, the connection goes back usable —
@@ -1469,7 +1591,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             // the first moment both drivers can answer it (ADR 0134).
             if (try w.next(&rows)) {
                 wideEnough(Row, w, &rows) catch |err| {
-                    db.told(started, sql, plan, null, true);
+                    db.told(started, sql, plan, null, true, null);
                     return err;
                 };
                 while (true) {
@@ -1477,7 +1599,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                     inline for (comptime row_mod.columnsOf(Row), 0..) |column, i| {
                         const F = comptime row_mod.ColumnType(Row, column);
                         @field(filled, column) = readColumn(w, &rows, F, i, c) catch |err| {
-                            db.told(started, sql, plan, null, true);
+                            db.told(started, sql, plan, null, true, null);
                             return err;
                         };
                     }
@@ -1485,7 +1607,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                     if (!try w.next(&rows)) break;
                 }
             }
-            db.told(started, sql, plan, out.items.len, false);
+            db.told(started, sql, plan, out.items.len, false, null);
             return out.toOwnedSlice(arena);
         }
 
@@ -1536,15 +1658,16 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             const arena = c.arena();
             const w = try db.wireOf();
             const started = db.timing();
+            var problem: ?wire_mod.Problem = null;
 
             var rows = if (tx) |t|
-                t.run(arena, sql, values, plan) catch |err| {
-                    db.told(started, sql, plan, null, true);
+                t.run(arena, sql, values, plan, &problem) catch |err| {
+                    db.told(started, sql, plan, null, true, problem);
                     return err;
                 }
             else
-                w.run(arena, sql, values, plan) catch |err| {
-                    db.told(started, sql, plan, null, true);
+                w.run(arena, sql, values, plan, &problem) catch |err| {
+                    db.told(started, sql, plan, null, true, problem);
                     return err;
                 };
             defer w.drain(&rows);
@@ -1553,17 +1676,17 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             // driver and Postgres disagree about what was sent, which is not
             // something to paper over with a zero.
             if (!try w.next(&rows)) {
-                db.told(started, sql, plan, null, true);
+                db.told(started, sql, plan, null, true, null);
                 return error.QueryFailed;
             }
             const answer = w.read(&rows, T, 0) catch |err| {
-                db.told(started, sql, plan, null, true);
+                db.told(started, sql, plan, null, true, null);
                 return err;
             };
             // One row, which is what an aggregate is — the count in it is the
             // answer rather than the number of rows, and a watcher reading
             // `rows` gets what a `SELECT` would have given it.
-            db.told(started, sql, plan, 1, false);
+            db.told(started, sql, plan, 1, false, null);
             return answer;
         }
 
@@ -1641,6 +1764,12 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         ///
         /// A `Str` cannot be made below this layer at all: the marker comes
         /// from the Scope, and a Wire has none.
+        ///
+        /// A `Uuid` element takes the same second walk and for a different
+        /// reason: the driver hands back the sixteen bytes and the sixteen
+        /// bytes are not the type (ADR 0145). That walk allocates nothing
+        /// extra beyond the `[]Uuid` itself, because a `Uuid` is a value
+        /// rather than a view of a buffer.
         fn keptList(
             comptime F: type,
             w: *W,
@@ -1658,10 +1787,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
 
             const bytes = if (comptime optional) (answered orelse return null) else answered;
             const out = try c.arena().alloc(Item, bytes.len);
-            for (out, bytes) |*item, b| item.* = if (comptime @typeInfo(Item) == .optional)
-                (if (b) |text| c.str(text) else null)
-            else
-                c.str(b);
+            for (out, bytes) |*item, b| item.* = try keptElement(Item, b, c);
             return out;
         }
 
@@ -1754,6 +1880,43 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             return out;
         }
 
+        /// The values behind a statement **this module did not write**, in the
+        /// same shapes a statement it did write would have sent
+        /// ([ADR 0145](../docs/adr/0145-a-raw-parameter-is-converted-the-way-a-rows-is.md)).
+        ///
+        /// `db.raw` and `db.exec` have no Statement and no Row, so there was
+        /// nothing to look a parameter's column up in and the tuple went to the
+        /// driver untouched. That is fine for an `i64` and wrong for every type
+        /// this module has a word for: a `Uuid` reached pg.zig as a Zig struct
+        /// and came back `error.QueryFailed` at run time, and zqlite refused it
+        /// while compiling. The workaround was to send thirty-six characters
+        /// and write `$1::text::uuid`, which costs an arena allocation per id
+        /// and twenty bytes on the wire.
+        ///
+        /// **No Row is needed, because `forWire` never wanted one.** It
+        /// switches on the *value's* type and `WireWrite` takes a Dialect and a
+        /// bare type — so the mapping a Row's parameter goes through is exactly
+        /// the mapping available here, and the only thing missing was somebody
+        /// calling it.
+        ///
+        /// **A call where nothing needs converting hands the caller's own
+        /// tuple straight to the driver**, which is most calls and is what
+        /// keeps this free. When something does, `RawWrite` says what each
+        /// field becomes — including the ones that were only ever comptime,
+        /// because a tuple the driver reads at run time cannot hold a
+        /// `comptime_int`.
+        fn rawValuesOf(values: anytype, c: anytype) !RawValues(D, @TypeOf(values)) {
+            const V = @TypeOf(values);
+            const Out = RawValues(D, V);
+            if (comptime Out == V) return values;
+
+            var out: Out = undefined;
+            inline for (@typeInfo(V).@"struct".fields, 0..) |f, i| {
+                out[i] = try forWire(@TypeOf(out[i]), @field(values, f.name), c);
+            }
+            return out;
+        }
+
         /// The same tuple, filled the other way round: one field per column,
         /// each holding that column's value out of every row.
         ///
@@ -1771,7 +1934,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         ) !BatchValues(D, Row, stmt) {
             var out: BatchValues(D, Row, stmt) = undefined;
             inline for (stmt.params, 0..) |param, i| {
-                const Column = comptime BatchWrite(D, row_mod.ColumnType(Row, param.column));
+                const Column = comptime ArrayElement(D, row_mod.ColumnType(Row, param.column));
                 const gathered = try c.arena().alloc(Column, items.len);
                 // By pointer, because two of the conversions below hand back a
                 // slice of the value rather than a copy of it — and what they
@@ -1797,35 +1960,44 @@ fn Maybe(comptime T: type) type {
 /// however many rows there are.
 ///
 /// Not `Values` with `.list` set, though it is nearly that, and the difference
-/// is `BatchWrite` — two column types travel differently in an array than they
+/// is `ArrayElement` — two column types travel differently in an array than they
 /// do alone. Sharing the type would have meant a `WireWrite` that answered
 /// differently depending on who was asking, which is worse than two functions.
 fn BatchValues(comptime D: type, comptime Row: type, comptime stmt: statement.Statement) type {
     return comptime blk: {
         var fields: [stmt.params.len]type = undefined;
         for (stmt.params, 0..) |param, i| {
-            fields[i] = []const BatchWrite(D, row_mod.ColumnType(Row, param.column));
+            fields[i] = []const ArrayElement(D, row_mod.ColumnType(Row, param.column));
         }
         const frozen = fields;
         break :blk std.meta.Tuple(&frozen);
     };
 }
 
-/// What a column binds as **inside a batch** — `WireWrite`, with two
-/// differences, both of them forced by what the driver can encode an array of.
+/// What a column binds as **inside an array parameter** — `WireWrite`, with
+/// two differences, both of them forced by what the driver can encode an array
+/// of.
 ///
 /// - A `Uuid` binds as a slice of its bytes rather than as the array of them.
 ///   A single insert cannot do that: the tuple is all the driver has to read
 ///   from, and a slice would point at the copy `where.valueAt` just returned.
-///   A batch has somewhere better to point — the caller's own slice of rows,
-///   which is alive for the whole call by definition. pg.zig has no encoder
-///   for an array of `[16]u8` and does have one for `uuid[]` given text.
+///   An array has somewhere better to point — the caller's own list, which is
+///   alive for the whole call by definition. pg.zig has no encoder for an
+///   array of `[16]u8` and does have one for `uuid[]` given a slice.
 /// - A `Json(T)` binds as the document, written out here, because pg.zig
 ///   encodes a `jsonb[]` element from bytes and will not take a struct. **That
 ///   is one allocation per row for that column** — the same cost reading one
 ///   already has, and the only place a batch pays per row rather than per
 ///   column.
-fn BatchWrite(comptime D: type, comptime F: type) type {
+///
+/// **Two callers, and the second is why it is not called `BatchWrite` any
+/// more** (ADR 0145). A batch sends one array per column; an `.in` sends one
+/// array of the values being matched. Both are `= ANY($1)`-shaped as far as
+/// the driver is concerned, and both had a `Uuid` in them that did not
+/// compile — the batch's was fixed when batches landed and the `.in`'s was
+/// still `cannot bind value of type *const []const [16]u8`, from inside
+/// pg.zig, on the operator that stops an N+1.
+fn ArrayElement(comptime D: type, comptime F: type) type {
     comptime {
         if (F == types.Uuid) return []const u8;
         if (F == ?types.Uuid) return ?[]const u8;
@@ -1930,17 +2102,115 @@ fn Values(
             // null even on a column that may not, because the comparison is
             // null-safe and the statement says so either way (`where.zig`).
             //
+            // **The element is `ArrayElement` rather than `WireWrite`, and a
+            // `Uuid` is the whole reason** (ADR 0145). A scalar one binds as
+            // `[16]u8`; `[]const [16]u8` is `cannot bind value of type` from
+            // inside pg.zig, which is a dependency's compile error reaching a
+            // reader who never chose the dependency. Inside an array it is the
+            // sixteen bytes as a slice, pointing into the caller's own list.
+            //
             // **Unless the Dialect reads its list out of JSON**, which is what
             // SQLite does: `json_each(?1)` takes one text parameter holding
             // the whole array, so the parameter is bytes rather than a list
             // (ADR 0119). `jsonList` is what fills it.
             fields[i] = if (param.list)
-                (if (D.list_form == .json_each) []const u8 else []const F)
+                (if (D.list_form == .json_each)
+                    []const u8
+                else
+                    []const ArrayElement(D, row_mod.ColumnType(Row, param.column)))
             else if (param.nullable) Maybe(F) else F;
         }
         const frozen = fields;
         break :blk std.meta.Tuple(&frozen);
     };
+}
+
+/// The tuple `db.raw` and `db.exec` actually send: the caller's own, with each
+/// field mapped through `WireWrite` ([ADR 0145](../docs/adr/0145-a-raw-parameter-is-converted-the-way-a-rows-is.md)).
+///
+/// **It answers `V` itself when nothing needs converting**, which is most calls
+/// and is what keeps this free: `rawValuesOf` then hands the caller's tuple
+/// straight to the driver, the way it always did.
+///
+/// **It has to stay a tuple, and that is a fact about both drivers rather than
+/// a preference.** pg.zig binds with `inline for (values)`, which takes a
+/// tuple and nothing else; zqlite branches on `is_tuple` and binds a plain
+/// struct's fields *by name*, so a rebuilt non-tuple would silently bind
+/// nothing to `?1`. A named struct is therefore left exactly as it arrived,
+/// which is what it was before this existed.
+fn RawValues(comptime D: type, comptime V: type) type {
+    comptime {
+        const info = @typeInfo(V);
+        // Not a struct at all: leave it to the driver, whose message is about
+        // the shape of `values` rather than about any one field.
+        if (info != .@"struct") return V;
+        const given = info.@"struct".fields;
+
+        if (!info.@"struct".is_tuple) {
+            // A named struct is zqlite's `:name` binding and is left alone —
+            // but a value nilo would have converted cannot be, because
+            // rebuilding it as a tuple is what would go wrong quietly.
+            for (given) |f| {
+                if (WireWrite(D, f.type) != f.type) @compileError(
+                    "nilo: `db.raw` was given `" ++ @typeName(f.type) ++ "` in a struct with " ++
+                        "named fields, and nilo converts a parameter by position.\n" ++
+                        "  Pass the values as a tuple — `.{ id, tag }` — which is what a " ++
+                        "numbered placeholder binds against. A named struct binds by " ++
+                        "`:name`, which only sqlite has and which this cannot convert into.",
+                );
+            }
+            return V;
+        }
+        var fields: [given.len]type = undefined;
+        var moved = false;
+        for (given, 0..) |f, i| {
+            fields[i] = RawWrite(D, f.type);
+            if (fields[i] != f.type) moved = true;
+        }
+        if (!moved) return V;
+
+        const frozen = fields;
+        return std.meta.Tuple(&frozen);
+    }
+}
+
+/// What one `db.raw` parameter travels as: `WireWrite`, plus the two things
+/// only a hand-written call carries (ADR 0145).
+///
+/// - **A list written where it is used is `&.{ … }`**, a pointer to an array
+///   rather than the slice a column is declared as, so `WireWrite` — which
+///   answers about columns — does not see one at all. `= ANY($1)` is the whole
+///   reason anybody writes a list here.
+/// - **A value with no runtime representation cannot be a tuple field.**
+///   `.{ 1, 1.5, null }` is three comptime fields, and the tuple this builds
+///   is a value the driver reads from at run time. Each becomes the type both
+///   drivers already bind the same way, which is why nothing about the bytes
+///   changes: pg.zig's `.comptime_int` and `.int` arms are the same switch,
+///   and its `.null` and `.optional`-holding-null arms write the same four
+///   bytes whatever the column is.
+///
+/// An enum *literal* is the fourth of those and the one that gets better
+/// rather than merely surviving: zqlite refuses one while compiling, and
+/// `@tagName` is how both drivers send an enum anyway.
+fn RawWrite(comptime D: type, comptime F: type) type {
+    comptime {
+        // Not through an optional: `?[]const T` is a shape `WireWrite` already
+        // reads correctly, and unwrapping it here would drop the `?`.
+        if (@typeInfo(F) != .optional) {
+            if (givenElement(F)) |Item| return []const ArrayElement(D, Item);
+        }
+        const To = WireWrite(D, F);
+        return switch (@typeInfo(To)) {
+            .comptime_int => i64,
+            .comptime_float => f64,
+            // The type is never read: both drivers write a null without
+            // consulting the column, so what matters is only that this is an
+            // optional and that it fits in a tuple.
+            .null => ?u8,
+            .enum_literal => []const u8,
+            else => To,
+        };
+    }
 }
 
 /// What the Wire is asked for when a column's declared type is not the shape
@@ -1981,10 +2251,28 @@ fn WireRead(comptime F: type) type {
 }
 
 /// What the Wire is asked for when a column is a list: `WireRead`'s rule
-/// applied to the element type, and only `Str` moves. Everything else a
+/// applied to the element type. Two element types move and everything else a
 /// Dialect will accept in an array is already a type the driver decodes into,
 /// so for those this is `F` itself and `keptList` hands the slice straight
 /// back.
+///
+/// **A `Uuid` element is `[]const u8` in both directions, and that is not the
+/// scalar answer** ([ADR 0145](../docs/adr/0145-a-raw-parameter-is-converted-the-way-a-rows-is.md)).
+/// A scalar `Uuid` binds on Postgres as `[16]u8` — the array rather than a
+/// slice — because the parameter tuple is all the driver has to read from and
+/// a slice would point at a copy `where.valueAt` just returned. An array
+/// parameter has somewhere better to point: the caller's own list, which is
+/// alive for the whole call. It also has no choice — pg.zig's `UUIDArray`
+/// encoder reads `[]const u8` elements and takes either sixteen bytes or
+/// thirty-six characters, and `[]const [16]u8` is `cannot bind value of type`
+/// four frames inside the driver. `ArrayElement` reached the same answer for a
+/// batch, for the same two reasons.
+///
+/// No Dialect is threaded in for it. A list column is Postgres-only — SQLite
+/// has no array type, `dialect.acceptsSqlite` says so and `sqlite.readList` is
+/// a Refusal — so there is no second answer for a parameter to choose between,
+/// and the `.in` list on a Dialect that reads its lists out of JSON goes
+/// through `jsonList` rather than through here.
 fn WireList(comptime F: type) type {
     comptime {
         const optional = @typeInfo(F) == .optional;
@@ -1993,11 +2281,30 @@ fn WireList(comptime F: type) type {
         const OnWire = switch (Item) {
             core.Str => []const u8,
             ?core.Str => ?[]const u8,
+            types.Uuid => []const u8,
+            ?types.Uuid => ?[]const u8,
             else => Item,
         };
         if (OnWire == Item) return F;
         return if (optional) ?[]const OnWire else []const OnWire;
     }
+}
+
+/// One element of a list column, built out of what the Wire handed back.
+///
+/// `kept`'s job for a scalar, and deliberately much smaller: the two element
+/// types that move are the two `WireList` moves, and everything else arrives
+/// as itself. A document or a text column inside an array is not here because
+/// no Dialect will accept one — `dialect.listAccepts` declines both, so
+/// `checking` refuses the column before a row is ever read.
+fn keptElement(comptime Item: type, raw: anytype, c: anytype) !Item {
+    if (comptime @typeInfo(Item) == .optional) {
+        const Inner = comptime @typeInfo(Item).optional.child;
+        return if (raw) |held| try keptElement(Inner, held, c) else null;
+    }
+    if (Item == core.Str) return c.str(raw);
+    if (Item == types.Uuid) return uuidOf(raw);
+    return raw;
 }
 
 /// A column's answer read as a `Uuid`, in either of the two shapes a database
@@ -2232,6 +2539,14 @@ fn forWire(comptime To: type, value: anytype, c: anytype) !To {
         const held = value orelse return null;
         return if (To == ?[]const u8) try uuidText(held, c) else held.bytes;
     }
+    // A **list** of them, which is the one list whose elements are not
+    // themselves on the wire (ADR 0145). `WireList` says why the element is a
+    // slice rather than the array a scalar binds as; this is where the slices
+    // are made, and each one points into the caller's own list rather than at
+    // a copy.
+    if (comptime givenElement(V)) |Item| {
+        if (comptime Item == types.Uuid or Item == ?types.Uuid) return uuidList(To, value, c);
+    }
     // A text column writes itself. The arena is here for one that has to
     // build its text rather than hold it; the ones this module ships hold it
     // and never touch the allocator, which is why nothing extra is allocated
@@ -2270,7 +2585,73 @@ fn forWire(comptime To: type, value: anytype, c: anytype) !To {
     if (comptime @typeInfo(V) == .optional and @typeInfo(@typeInfo(V).optional.child) == .@"enum") {
         if (comptime To == ?[]const u8) return if (value) |tag| @tagName(tag) else null;
     }
+    // A bare `.admin` written into a `db.exec`, which has no enum type behind
+    // it and therefore no runtime representation at all (ADR 0145). The name
+    // is what both drivers send for an enum anyway, and zqlite refused the
+    // literal outright while compiling.
+    if (comptime @typeInfo(V) == .enum_literal) {
+        if (comptime To == []const u8) return @tagName(value);
+    }
     return value;
+}
+
+/// The element type of a value that is a list, or null when it is not one.
+///
+/// `types.listElement` asks the same question about a *column*, and this asks
+/// it about what somebody wrote at the call site — which is one shape wider,
+/// because `&.{ a, b }` is a pointer to an array rather than a slice and is
+/// what everybody writes. Text is not a list here for the reason it is not one
+/// there: `[]const u8` was spoken for first.
+fn givenElement(comptime V: type) ?type {
+    return switch (@typeInfo(V)) {
+        .optional => |o| givenElement(o.child),
+        .pointer => |p| switch (p.size) {
+            .slice => if (p.child == u8) null else p.child,
+            .one => switch (@typeInfo(p.child)) {
+                .array => |a| if (a.child == u8) null else a.child,
+                else => null,
+            },
+            else => null,
+        },
+        else => null,
+    };
+}
+
+/// A list of `Uuid` as the list of slices the driver's array encoder reads
+/// (ADR 0145).
+///
+/// **One allocation, for the slice headers, and none for the bytes.** Each
+/// element points at the sixteen bytes sitting in the caller's own list, which
+/// is alive for the whole call — the same thing `forBatch` does with a row of
+/// a batch and for the same reason. Copying them would be a second allocation
+/// for no gain.
+fn uuidList(comptime To: type, value: anytype, c: anytype) !To {
+    const given = if (comptime @typeInfo(@TypeOf(value)) == .optional)
+        (value orelse return null)
+    else
+        value;
+
+    const Slice = comptime if (@typeInfo(To) == .optional) @typeInfo(To).optional.child else To;
+    const Element = comptime @typeInfo(Slice).pointer.child;
+
+    // **Read off what the caller wrote rather than off the column**, and the
+    // difference is not hypothetical: `.in` on a nullable column asks for
+    // `[]const ?[]const u8` — the element carries the column's `?` — while the
+    // list somebody writes at the call site is `&.{ a, b }` of plain ids. Both
+    // shapes arrive here and only the first has a null to test for.
+    const Given = comptime givenElement(@TypeOf(given)).?;
+
+    const out = c.arena().alloc(Element, given.len) catch return error.QueryFailed;
+    // By pointer, because what each slice points at has to be the caller's
+    // list rather than a loop variable that stops existing.
+    if (comptime @typeInfo(Given) == .optional) {
+        for (given, out) |*item, *slot| {
+            slot.* = if (item.* == null) null else &item.*.?.bytes;
+        }
+    } else {
+        for (given, out) |*item, *slot| slot.* = &item.bytes;
+    }
+    return out;
 }
 
 /// The list behind an `.in` or a `.not_in`, as the JSON array text
@@ -2515,6 +2896,113 @@ test "the three types Zig has no word for are taken apart for the wire" {
     try testing.expectEqual(i32, WireWrite(dialect.Postgres, i32));
 }
 
+test "a list of uuids travels as slices, because an array of them is not a shape the driver takes" {
+    // Neither direction compiled before this (ADR 0145). Reading one stopped
+    // in `forWire` with `expected type '…![]const [16]u8'`; writing one
+    // stopped inside pg.zig with `cannot bind value of type
+    // *const []const [16]u8` — a dependency's compile error reaching a reader
+    // who never chose the dependency.
+    try testing.expectEqual([]const []const u8, WireList([]const types.Uuid));
+    try testing.expectEqual(?[]const []const u8, WireList(?[]const types.Uuid));
+    // A list that may hold a NULL among its elements keeps the `?` on the
+    // element, which is where Postgres keeps it too.
+    try testing.expectEqual([]const ?[]const u8, WireList([]const ?types.Uuid));
+
+    // The column, written: the same answer, because a Row's list column and
+    // the Wire's list are the same array.
+    try testing.expectEqual([]const []const u8, WireWrite(dialect.Postgres, []const types.Uuid));
+
+    // And the other lists, which did not move.
+    try testing.expectEqual([]const i32, WireList([]const i32));
+    try testing.expectEqual([]const []const u8, WireList([]const core.Str));
+}
+
+test "an `in` over uuids is one parameter of slices rather than of arrays" {
+    const Keyed = struct {
+        pub const nilo_table = .{ .name = "keyed", .key = .id };
+
+        id: types.Uuid,
+        label: []const u8,
+    };
+
+    // `WHERE id = ANY($1::uuid[])` is what stops an N+1 on every list that
+    // attaches children to its rows, and it is the call that did not compile.
+    const options = .{ .where = .{ .id = .{ .in = &[_]types.Uuid{types.Uuid.nil} } } };
+    const stmt = comptime statement.select(dialect.Postgres, Keyed, @TypeOf(options));
+    const fields = @typeInfo(Values(dialect.Postgres, Keyed, @TypeOf(options), stmt)).@"struct".fields;
+
+    try testing.expectEqual(@as(usize, 1), fields.len);
+    try testing.expectEqual([]const []const u8, fields[0].type);
+
+    // A scalar one is still the array, and that is not an inconsistency: the
+    // tuple is all the driver has to read from, so a lone `Uuid` has nothing
+    // to point at and a list points into the caller's own slice.
+    const one = .{ .where = .{ .id = types.Uuid.nil } };
+    const single = comptime statement.select(dialect.Postgres, Keyed, @TypeOf(one));
+    try testing.expectEqual(
+        [types.Uuid.byte_len]u8,
+        @typeInfo(Values(dialect.Postgres, Keyed, @TypeOf(one), single)).@"struct".fields[0].type,
+    );
+}
+
+test "a raw parameter is taken apart the way a Row's is" {
+    // The defect: `db.raw` and `db.exec` have no Statement and no Row, so
+    // their tuple went to the driver untouched — and pg.zig answered
+    // `error.CannotBindStruct` at run time for the most ordinary key in a
+    // modern schema, with nothing logged anywhere (ADR 0145). The type is what
+    // is pinned here, because it is what the driver switches on.
+    const bare = .{types.Uuid.nil};
+    try testing.expectEqual(
+        [types.Uuid.byte_len]u8,
+        @typeInfo(RawValues(dialect.Postgres, @TypeOf(bare))).@"struct".fields[0].type,
+    );
+    // And the other Wire, which stores the thirty-six characters — the one
+    // place the two disagree (ADR 0078), and it is the same disagreement
+    // `WireWrite` already knew about.
+    try testing.expectEqual(
+        []const u8,
+        @typeInfo(RawValues(dialect.SQLite, @TypeOf(bare))).@"struct".fields[0].type,
+    );
+
+    // A `Str` and a `Timestamp` are the same story, and both were the same
+    // run-time refusal.
+    const held = .{ types.Timestamp{ .micros = 1 }, types.Uuid.nil };
+    const two = @typeInfo(RawValues(dialect.Postgres, @TypeOf(held))).@"struct".fields;
+    try testing.expectEqual(i64, two[0].type);
+    try testing.expectEqual([types.Uuid.byte_len]u8, two[1].type);
+}
+
+test "a raw tuple with nothing to convert is the caller's own, which is most of them" {
+    // The whole of what this costs a call that did not need it: the tuple that
+    // reaches the driver is the identical type it always was.
+    const plain = .{ @as(i64, 7), "wati@example.dev" };
+    try testing.expectEqual(@TypeOf(plain), RawValues(dialect.Postgres, @TypeOf(plain)));
+
+    // A tuple with nothing in it, which is what every `CREATE TABLE` passes.
+    try testing.expectEqual(@TypeOf(.{}), RawValues(dialect.Postgres, @TypeOf(.{})));
+
+    // And a plain struct is left alone on purpose: zqlite binds one *by name*
+    // rather than by position, so rebuilding it as a tuple would silently
+    // bind nothing at all.
+    const named = struct { a: i64 }{ .a = 1 };
+    try testing.expectEqual(@TypeOf(named), RawValues(dialect.Postgres, @TypeOf(named)));
+}
+
+test "a literal beside a value that has to be converted still reaches the driver" {
+    // The mixed tuple, which is the shape an ordinary `INSERT … VALUES ($1,$2)`
+    // has: something nilo converts, and something written out. A `1` and a
+    // `null` have no runtime representation at all, so the rebuilt tuple gives
+    // each the type both drivers already bind the same way (ADR 0145).
+    const mixed = .{ types.Uuid.nil, 42, 1.5, null, "cap" };
+    const fields = @typeInfo(RawValues(dialect.Postgres, @TypeOf(mixed))).@"struct".fields;
+
+    try testing.expectEqual([types.Uuid.byte_len]u8, fields[0].type);
+    try testing.expectEqual(i64, fields[1].type);
+    try testing.expectEqual(f64, fields[2].type);
+    try testing.expectEqual(?u8, fields[3].type);
+    try testing.expectEqual(*const [3:0]u8, fields[4].type);
+}
+
 test "a uuid column that is not sixteen bytes is refused rather than trimmed" {
     try testing.expectError(error.QueryFailed, uuidOf("short"));
     const ok = try uuidOf(&[_]u8{0xab} ** types.Uuid.byte_len);
@@ -2571,7 +3059,7 @@ fn touchEverything(db: *FakeDb, c: *nilo.Ctx) !void {
     _ = try db.updateReturning(Person, c, .{ .set = .{ .age = @as(i32, 2) }, .where = .{ .id = @as(i64, 1) } });
     _ = try db.delete(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
     _ = try db.deleteReturning(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
-    _ = try db.raw(Person, c, "SELECT 1", .{});
+    _ = try db.raw(Person, c, "SELECT id, email, nickname, age FROM people", .{});
 
     // The condition shapes the guide shows and nothing else compiles.
     // `.nickname = null` is the literal, which is `IS NULL`; a `?[]const u8`
@@ -2608,7 +3096,7 @@ fn touchEverything(db: *FakeDb, c: *nilo.Ctx) !void {
     _ = try tx.updateReturning(Person, c, .{ .set = .{ .age = @as(i32, 3) }, .where = .{ .id = @as(i64, 1) } });
     _ = try tx.delete(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
     _ = try tx.deleteReturning(Person, c, .{ .where = .{ .id = @as(i64, 1) } });
-    _ = try tx.raw(Person, c, "SELECT 1", .{});
+    _ = try tx.raw(Person, c, "SELECT id, email, nickname, age FROM people", .{});
 
     // Every lock, and both ways out of a savepoint.
     _ = try tx.select(Person, c, .{ .where = .{ .id = @as(i64, 1) }, .lock = .update });
@@ -3258,21 +3746,21 @@ test "the two column types that travel differently in a batch say so" {
     // a temporary; in a batch it points at the caller's row, which lives for
     // the whole call — and pg.zig has no encoder for an array of `[16]u8`.
     try testing.expectEqual([types.Uuid.byte_len]u8, WireWrite(dialect.Postgres, types.Uuid));
-    try testing.expectEqual([]const u8, BatchWrite(dialect.Postgres, types.Uuid));
-    try testing.expectEqual(?[]const u8, BatchWrite(dialect.Postgres, ?types.Uuid));
+    try testing.expectEqual([]const u8, ArrayElement(dialect.Postgres, types.Uuid));
+    try testing.expectEqual(?[]const u8, ArrayElement(dialect.Postgres, ?types.Uuid));
 
     // A `Json(T)` is handed to the driver whole when it is alone and written
     // out here when it is in a batch, which is the one place a batch pays per
     // row rather than per column.
     const Settings = types.Json(struct { theme: []const u8 });
     try testing.expectEqual(Settings, WireWrite(dialect.Postgres, Settings));
-    try testing.expectEqual([]const u8, BatchWrite(dialect.Postgres, Settings));
-    try testing.expectEqual(?[]const u8, BatchWrite(dialect.Postgres, ?Settings));
+    try testing.expectEqual([]const u8, ArrayElement(dialect.Postgres, Settings));
+    try testing.expectEqual(?[]const u8, ArrayElement(dialect.Postgres, ?Settings));
 
     // Everything else is the same both ways.
-    try testing.expectEqual(i64, BatchWrite(dialect.Postgres, i64));
-    try testing.expectEqual(i64, BatchWrite(dialect.Postgres, types.Timestamp));
-    try testing.expectEqual([]const u8, BatchWrite(dialect.Postgres, core.Str));
+    try testing.expectEqual(i64, ArrayElement(dialect.Postgres, i64));
+    try testing.expectEqual(i64, ArrayElement(dialect.Postgres, types.Timestamp));
+    try testing.expectEqual([]const u8, ArrayElement(dialect.Postgres, core.Str));
 }
 
 /// A Row with a list column of each kind: text, which has to be rebuilt as
@@ -3380,7 +3868,7 @@ test "the name a statement is prepared under is the one that reaches the wire" {
     try testing.expect(!std.mem.eql(u8, first, db.wire.?.last_plan.?));
 }
 
-test "a statement whose text arrives at run time is never prepared" {
+test "a statement this module did not write is prepared too, because its text is comptime" {
     var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
     defer db.deinit();
     db.wire = .{ .answers = 1 };
@@ -3388,11 +3876,30 @@ test "a statement whose text arrives at run time is never prepared" {
     var run = nilo.Run.init(testing.allocator);
     defer run.deinit();
 
-    // `db.raw` is the one call this module did not write the text for, so
-    // there is no comptime name to derive and no bound on how many there
-    // would be. A cache that grew with traffic is the thing ADR 0057 says
-    // this design avoids, and this is where that claim is held.
+    // `db.raw` used to be the one call that was never prepared, on the
+    // reasoning that its text arrived at run time and a cache keyed on a
+    // string built per request would grow with traffic (ADR 0057). Its text
+    // is comptime now, so the name is derived the same way every other
+    // statement's is and the set of them is still fixed when the binary is
+    // built ([ADR 0148](../docs/adr/0148-a-raw-statement-is-counted-while-compiling.md)).
     _ = try db.raw(Person, &run, "SELECT * FROM people WHERE id = $1", .{@as(i64, 7)});
+    const plan = db.wire.?.last_plan orelse return error.NoPlanName;
+    try testing.expectEqualStrings(statement.planName("SELECT * FROM people WHERE id = $1"), plan);
+}
+
+test "a Db told to keep no plans keeps none for a raw statement either" {
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{ .prepared = false });
+    defer db.deinit();
+    db.wire = .{ .answers = 1 };
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    // The escape hatch for a pooler in transaction mode has to cover the
+    // statement that only just started being prepared, or a caller behind
+    // pgbouncer gets a "prepared statement does not exist" out of the one
+    // call the option looked like it did not apply to.
+    _ = try db.raw(Person, &run, "SELECT * FROM people", .{});
     try testing.expectEqual(@as(?[]const u8, null), db.wire.?.last_plan);
 }
 
@@ -3409,6 +3916,7 @@ var watched: struct {
     rows: ?usize = null,
     failed: bool = false,
     micros: u64 = 0,
+    problem: ?wire_mod.Problem = null,
 } = .{};
 
 fn recordSent(sent: Sent) void {
@@ -3418,6 +3926,7 @@ fn recordSent(sent: Sent) void {
     watched.rows = sent.rows;
     watched.failed = sent.failed;
     watched.micros = sent.micros;
+    watched.problem = sent.problem;
 }
 
 test "a watcher is told the statement, the plan and how many rows it moved" {
@@ -3457,20 +3966,25 @@ test "a statement that failed is reported as failed, with no row count to give" 
     // The short `SELECT` list of ADR 0134, which is a failure this module
     // raises itself rather than one the driver reports — so it also pins that
     // a refusal on the way past still reaches the watcher.
+    //
+    // **`SELECT *`, because a written-out short list no longer compiles**
+    // (ADR 0148). That is not a weaker test: `*` is the shape the run-time
+    // check still exists for, since how many columns it stands for is the
+    // database's answer and no comptime pass can have it.
     db.wire = .{ .answers = 1, .columns_back = 2 };
     db.watching(recordSent);
 
     var run = nilo.Run.init(testing.allocator);
     defer run.deinit();
 
-    try testing.expectError(error.QueryFailed, db.raw(Person, &run, "SELECT id, email FROM people", .{}));
+    try testing.expectError(error.QueryFailed, db.raw(Person, &run, "SELECT * FROM people", .{}));
 
     try testing.expectEqual(@as(usize, 1), watched.count);
     try testing.expect(watched.failed);
     try testing.expectEqual(@as(?usize, null), watched.rows);
-    // `db.raw`'s text arrives at run time, so it is never kept prepared and
-    // there is no name to report (ADR 0057).
-    try testing.expectEqual(@as(?[]const u8, null), watched.plan);
+    // And the name it was kept prepared under, which `db.raw` has had since
+    // its text became comptime (ADR 0148).
+    try testing.expect(watched.plan != null);
 }
 
 test "a statement that answers with a count reports the rows it changed" {
@@ -3489,6 +4003,74 @@ test "a statement that answers with a count reports the rows it changed" {
     try testing.expectEqual(@as(usize, 1), watched.count);
     try testing.expectEqual(@as(?usize, 3), watched.rows);
     try testing.expect(!watched.failed);
+}
+
+test "a statement that failed says what the database said, not only that it failed" {
+    watched = .{};
+
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    // What Postgres actually answers a duplicate insert with, which used to
+    // reach `std.log.err` and nowhere a program could read it (ADR 0146).
+    db.wire = .{ .refuses = .{
+        .message = "duplicate key value violates unique constraint \"people_email_key\"",
+        .code = "23505",
+        .severity = "ERROR",
+        .detail = "Key (email)=(ada@example.dev) already exists.",
+        .constraint = "people_email_key",
+    } };
+    db.watching(recordSent);
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    try testing.expectError(error.QueryFailed, db.select(Person, &run, .{}));
+
+    try testing.expectEqual(@as(usize, 1), watched.count);
+    try testing.expect(watched.failed);
+    const said = watched.problem orelse return error.NoProblemReported;
+    try testing.expectEqualStrings("23505", said.code);
+    try testing.expectEqualStrings("ERROR", said.severity);
+    try testing.expectEqualStrings("people_email_key", said.constraint);
+    try testing.expect(std.mem.indexOf(u8, said.message, "unique constraint") != null);
+}
+
+test "a statement that answers with a count reports its failure the same way" {
+    watched = .{};
+
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    // The other funnel: `execTold` rather than `fill`, which is the half a
+    // test over `select` alone would not have covered.
+    db.wire = .{ .refuses = .{ .message = "CannotBindStruct" } };
+    db.watching(recordSent);
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    try testing.expectError(error.QueryFailed, db.exec(&run, "DELETE FROM people", .{}));
+
+    try testing.expect(watched.failed);
+    try testing.expectEqualStrings("CannotBindStruct", watched.problem.?.message);
+    // Nothing invented where the driver had nothing to say: SQLite has no
+    // SQLSTATE, and neither does a bind the driver refused.
+    try testing.expectEqualStrings("", watched.problem.?.code);
+}
+
+test "a statement that worked carries no problem, which is what makes one mean something" {
+    watched = .{};
+
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = 1 };
+    db.watching(recordSent);
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    _ = try db.select(Person, &run, .{});
+    try testing.expect(!watched.failed);
+    try testing.expectEqual(@as(?wire_mod.Problem, null), watched.problem);
 }
 
 test "a Db nobody is watching tells nobody anything" {
@@ -3521,6 +4103,10 @@ test "a raw SELECT list shorter than the Row is refused, not read past the end" 
     // Two columns came back and `Person` reads four. Without the check the
     // third `read` is `values[2]` on an array of two, which pg.zig does not
     // bound: a panic in ReleaseSafe rather than an answer (ADR 0134).
+    //
+    // `SELECT *` is what a short list is written as now: counting the list
+    // while compiling catches the written-out case before this ever runs
+    // (ADR 0148), and `*` is the half no comptime pass can count.
     db.wire = .{ .answers = 1, .columns_back = 2 };
 
     var run = nilo.Run.init(testing.allocator);
@@ -3529,7 +4115,7 @@ test "a raw SELECT list shorter than the Row is refused, not read past the end" 
     try testing.expectError(error.QueryFailed, db.raw(
         Person,
         &run,
-        "SELECT id, email FROM people",
+        "SELECT * FROM people",
         .{},
     ));
 }
@@ -3724,6 +4310,64 @@ test "a uuid column is written and read back on the SQLite Wire" {
     const as_text = try db.raw(Text, &run, "SELECT id, public FROM accounts", .{});
     try testing.expectEqual(@as(usize, 1), as_text.len);
     try testing.expectEqualStrings("01a01077-5ce8-7932-b42b-a05431a5c4c8", as_text[0].public.view());
+}
+
+test "a uuid bound bare to db.exec and db.raw reaches the database" {
+    // The report this came from: `db.exec(c, "INSERT … VALUES ($1,$2)",
+    // .{ partner_id, tag })` compiled and answered `error.QueryFailed` at run
+    // time on Postgres, and did not compile at all here — zqlite refuses a Zig
+    // struct while compiling. The workaround was thirty-six characters and
+    // `$1::text::uuid`, which costs an arena allocation per id (ADR 0145).
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    var db: SqliteDb = .init(
+        testing.allocator,
+        "file:raw-uuid?mode=memory&cache=shared",
+        .{ .size = 2 },
+    );
+    defer db.deinit();
+    try db.nilo_start(threaded.io(), .off);
+
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    _ = try db.exec(&run, accounts_ddl, .{});
+
+    const key = try types.Uuid.parse("01a01077-5ce8-7932-b42b-a05431a5c4c8");
+
+    // A `Uuid` and a literal in the same tuple, which is the ordinary shape:
+    // the id needs converting and `42` has no runtime type at all.
+    try testing.expectEqual(@as(usize, 1), try db.exec(
+        &run,
+        "INSERT INTO accounts (id, public, email) VALUES (?1, ?2, ?3)",
+        .{ 42, key, "wati@example.dev" },
+    ));
+
+    // Read back *by* the id, so the write and the condition agree about what
+    // the column holds rather than merely being consistent with each other.
+    const Found = struct {
+        pub const nilo_table = .{ .name = "accounts", .key = .id };
+        id: i64,
+        email: nilo.Str,
+    };
+    const found = try db.raw(
+        Found,
+        &run,
+        "SELECT id, email FROM accounts WHERE public = ?1",
+        .{key},
+    );
+    try testing.expectEqual(@as(usize, 1), found.len);
+    try testing.expectEqual(@as(i64, 42), found[0].id);
+    try testing.expectEqualStrings("wati@example.dev", found[0].email.view());
+
+    // And inside a transaction, which is the other pair of call sites.
+    var tx = try db.begin(&run, .{});
+    errdefer tx.rollback();
+    _ = try tx.exec(&run, "DELETE FROM accounts WHERE public = ?1", .{key});
+    _ = try tx.raw(Found, &run, "SELECT id, email FROM accounts WHERE public = ?1", .{key});
+    try tx.commit();
+
+    try testing.expectEqual(@as(usize, 0), try db.count(SqliteAccount, &run, .{}));
 }
 
 test "the schema check agrees with the wire about a uuid column" {

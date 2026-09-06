@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-**nilo is a toolkit for Zig 0.16 — nine modules, of which the largest is an HTTP
+**nilo is a toolkit for Zig 0.16 — ten modules, of which the largest is an HTTP
 server.** It is not a framework with parts bolted beside it, and that
 distinction decides where new work goes. What the modules share is one idea:
 **your types are the contract, and the compiler is the check.** A plain Zig
@@ -34,11 +34,11 @@ and the way a Service reaches request-lifetime memory is a Scope, not a `Ctx`.
 ADR 0070 built the layer for.
 
 **The bottom layer holds more than one module** (ADR 0042). `core/` is the
-vocabulary and sits under the rest of it; `id/`, `config/`, `pw/` and `cache/`
-are **tool modules** — one job, no event loop, imports nothing above them. A Service may
+vocabulary and sits under the rest of it; `id/`, `config/`, `pw/`, `cache/` and
+`jwt/` are **tool modules** — one job, no event loop, imports nothing above them. A Service may
 import a tool module, which is downward. **The rule is a build step, not a
 paragraph**: `zig build layering` reads the `@import`s under `core/`, `id/`,
-`config/`, `pw/`, `cache/`, `fetch/`, `sql/` and `s3/` and refuses one that is
+`config/`, `pw/`, `cache/`, `jwt/`, `fetch/`, `sql/` and `s3/` and refuses one that is
 not in that module's row of the `layers` table in `build.zig`. Adding a module means adding
 a row — there and in `shipped_roots`, and in `.paths` in `build.zig.zon`.
 
@@ -69,7 +69,7 @@ Three files carry context this one deliberately does not repeat:
 - **`CONTEXT.md`** — the project's vocabulary, and the words it refuses to use
   (Ctx not "Context", Str not "string", keep not "dupe", Refusal not "negative
   test"). Match it in code, comments, docs and commit messages.
-- **`docs/adr/`** — 133 binding decisions, each naming the alternative it
+- **`docs/adr/`** — 150 binding decisions, each naming the alternative it
   rejected. Check here before proposing a design change; "why not X?" usually
   already has an answer on file. **ADR 0041 decides which module new work goes
   in and ADR 0042 decides what that module may import**, and they are the two
@@ -89,7 +89,7 @@ goes in an ADR, a number goes in `docs/history.md`, a rule goes in a build step.
 
 Two of those rules are build steps rather than paragraphs, and they are the ones
 to lean on: `zig build layering` refuses an import that goes upward or sideways,
-and the six `refusals` steps check the wording of 169 error messages. Prefer making
+and the six `refusals` steps check the wording of 179 error messages. Prefer making
 a new rule enforceable that way over writing it down here — a paragraph nobody
 runs is the thing that rots.
 
@@ -112,12 +112,13 @@ zig build test-id      # only nilo_id, the same way
 zig build test-config  # only nilo_config, the same way, plus its refusals
 zig build test-pw      # only nilo_pw, the same way, plus its refusals
 zig build test-cache   # only nilo_cache, the same way, plus its refusals
+zig build test-jwt     # only nilo_jwt, both modes — no Engine, no module graph
 zig build test-fetch   # only nilo_fetch, both modes — a real socket, no Engine
 zig build test-fetch-engine  # an outbound deadline firing against a real port; on `test`
 zig build test-s3      # only nilo_s3, both modes, plus its refusals
 zig build layering     # check that no module imports upward or sideways
-zig build refusals     # the framework's 98 compile-error checks — NOT the others
-zig build refusals-sql # nilo_sql's 44; also run by test-sql
+zig build refusals     # the framework's 105 compile-error checks — NOT the others
+zig build refusals-sql # nilo_sql's 47; also run by test-sql
 zig build refusals-config  # nilo_config's 9, and refusals-pw for nilo_pw's 3
 zig build refusals-cache   # nilo_cache's 5; also run by test-cache
 zig build refusals-s3  # nilo_s3's 10; also run by test-s3
@@ -157,7 +158,8 @@ re-analysed every run. They stay on `test` on purpose (ADR 0027).
 
 **`test-all` is the whole gate, and the list below is a list of *narrower* runs
 rather than of things it misses.** It carries every module's own step —
-`test-core`, `test-id`, `test-config`, `test-pw`, `test-cache`, `test-fetch`,
+`test-core`, `test-id`, `test-config`, `test-pw`, `test-cache`, `test-jwt`,
+`test-fetch`,
 `test-fetch-engine`, `test-s3`, `test-sql` and the refusal tables under those —
 plus `layering` and `snippets`. This is worth stating because two readers of
 this file concluded the opposite in one evening and gated a merge by running
@@ -208,11 +210,13 @@ zig test id/id.zig                      # nilo_id, likewise
 zig test config/config.zig              # nilo_config, likewise
 zig test pw/pw.zig                      # nilo_pw, likewise
 zig test cache/cache.zig                # nilo_cache, likewise
+zig test jwt/jwt.zig                    # nilo_jwt, likewise
 zig build test-core                     # the same, both optimize modes
 zig build test-id
 zig build test-config
 zig build test-pw
 zig build test-cache
+zig build test-jwt
 ```
 
 A Fitting cannot quite do that — it borrows the loop — but it comes one step
@@ -257,7 +261,7 @@ Bottom to top. Each layer knows nothing about the one above it.
 | Layer | Files | What it is |
 |---|---|---|
 | **Core** | `core/` | `Str`, the Scope, the clock and percent coding. The vocabulary every layer agrees about, and no IO at all — a separate module (`nilo_core`) that names no Engine, so `zig test core/core.zig` runs the whole of it (ADR 0041). A file gets in by being needed by two layers, which is how `percent` arrived (ADR 0066). |
-| **Tools** | `id/`, `config/`, `pw/`, `cache/` | one job each, no event loop, and `nilo_core` is the most they may import. All four import nothing at all (ADR 0042, ADR 0043, ADR 0048, ADR 0138). **`cache/` is where the language decided the design**: `std.Io.Mutex.lock` takes an `Io` this layer has none of, so its lock spins — and nothing that waits may ever go inside a critical section. |
+| **Tools** | `id/`, `config/`, `pw/`, `cache/`, `jwt/` | one job each, no event loop, and `nilo_core` is the most they may import. All five import nothing at all (ADR 0042, ADR 0043, ADR 0048, ADR 0138, ADR 0140). **`jwt/` is where the bar was argued rather than met**: a caller *can* write RS256 verification on `std.crypto.Certificate.rsa`, and the reason it ships anyway is that getting it subtly wrong runs perfectly and leaves the endpoint open. **`cache/` is where the language decided the design**: `std.Io.Mutex.lock` takes an `Io` this layer has none of, so its lock spins — and nothing that waits may ever go inside a critical section. |
 | **Fitting** | `fetch/` | borrows the loop, owns no destination — an HTTP client for calling somebody else's API. Imports `nilo_core` and nothing else; its tests run under `std.Io.Threaded` with no Engine, which is the entry condition for the layer (ADR 0070). |
 | **Services** | `sql/`, `s3/` | borrow the loop and hold a named system — a Postgres pool, a SQLite file, an object store's endpoint and credentials. **A SQLite statement is the one thing down here that blocks with nothing to wait on**, which is why `sqlite.Options.threading` has no default (ADR 0073). `s3/` is the only module that imports a Fitting, which is downward and is what the layer was built for (ADR 0072). Neither may name `nilo_http`. |
 | **Engine** | `http/engine/zio.zig` | accept, read, write. **The only file in the repo allowed to name zio** (ADR 0002). |

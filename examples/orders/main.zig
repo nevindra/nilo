@@ -1179,7 +1179,8 @@ test "the document names every shape that has a name, and the paths that have pa
     try testing.expect(std.mem.indexOf(u8, document, "\"204\"") != null);
     try testing.expect(std.mem.indexOf(u8, document, "\"404\"") != null);
 
-    // And the route that writes its own response says so, rather than
-    // claiming the empty 200 its return type would otherwise imply.
-    try testing.expect(std.mem.indexOf(u8, document, "writes its own response") != null);
+    // And the route holding the Ctx says the document cannot settle what it
+    // answers, rather than claiming the empty 200 its return type implies
+    // (ADR 0150).
+    try testing.expect(std.mem.indexOf(u8, document, "may write its own response") != null);
 }

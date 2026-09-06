@@ -20,12 +20,12 @@
 //!   through the given event loop, and take it down. The `std.Io` is the
 //!   whole reason a `Db` is built in two halves: it does not exist until
 //!   `listen()` has started the loop (ADR 0040).
-//! - `run(arena, sql, values, plan)` — a statement and its parameters, in
-//!   placeholder order, giving back something rows can be pulled from one
-//!   at a time. The arena is the request's, and is where the driver reads
-//!   into when a row does not fit its own buffer — so a big row costs the
-//!   request arena rather than the general allocator, and is freed by the
-//!   reset that ends the request (ADR 0004).
+//! - `run(arena, sql, values, plan, problem)` — a statement and its
+//!   parameters, in placeholder order, giving back something rows can be
+//!   pulled from one at a time. The arena is the request's, and is where the
+//!   driver reads into when a row does not fit its own buffer — so a big row
+//!   costs the request arena rather than the general allocator, and is freed
+//!   by the reset that ends the request (ADR 0004).
 //!
 //!   `plan` is the name to keep this statement prepared under on the
 //!   connection, or **null for do not keep it**. Null is not a hint: it is
@@ -33,6 +33,14 @@
 //!   cached it anyway would grow a map with traffic instead of with the
 //!   program (ADR 0057). Everything else hands over a name derived from the
 //!   statement, which is a comptime constant and therefore so is the name.
+//!
+//!   `problem` is where the failure's own words go — a `?*?Problem`, filled
+//!   only when the statement fails and only when somebody passed a slot for
+//!   it ([ADR 0146](../docs/adr/0146-a-statement-that-failed-says-what-the-database-said.md)).
+//!   An out-parameter rather than a richer error, because the error set is
+//!   what a handler switches on and a set that grows breaks every switch:
+//!   the seven stay, and the text rides beside them. Null is what a caller
+//!   with nothing to tell passes, and it costs one branch.
 //! - `next(rows)` — advance to the next row, or false at the end. **The
 //!   text in a row is valid only until the next call.** That is not a rule
 //!   invented here; it is pg.zig's own, and passing it along unwrapped is
@@ -69,10 +77,11 @@
 //!   destroys the connection and dials a new one. Leaving rows unread is
 //!   therefore a correctness-safe, expensive mistake, and it is this module's
 //!   job not to make it.
-//! - `exec(arena, sql, values, plan)` — a statement that answers with a count
-//!   rather than with rows, giving the count back. "Did that update
+//! - `exec(arena, sql, values, plan, problem)` — a statement that answers with
+//!   a count rather than with rows, giving the count back. "Did that update
 //!   anything" has no other answer, and Postgres sends the number in
-//!   `CommandComplete` rather than as a result set.
+//!   `CommandComplete` rather than as a result set. `problem` is the same
+//!   out-parameter `run` takes and means the same thing.
 //! - `begin(arena, opts)` — a transaction, **holding one connection for its
 //!   whole life**. That is not a detail: every statement in a transaction has
 //!   to go down the same connection, and a Wire whose `run` takes a fresh one
@@ -177,6 +186,49 @@ pub const Error = error{
     /// The database said no in a way this module does not translate. The text
     /// is logged; it does not reach the client (ADR 0025).
     QueryFailed,
+};
+
+/// What the database said about a statement it refused
+/// ([ADR 0146](../docs/adr/0146-a-statement-that-failed-says-what-the-database-said.md)).
+///
+/// **The error set above is what a handler switches on, and this is the half
+/// no program could reach.** `error.QueryFailed` was the whole debugging
+/// surface for a failed statement: the text went to `std.log.err` and nowhere
+/// else, so an operator with a log reader had it and a program did not. A
+/// watcher gets one of these on `Sent.problem`; it still never reaches the
+/// client, which is ADR 0025's rule and this does not move it.
+///
+/// **Every field is copied into the arena the statement ran with**, because
+/// the strings come off the driver's connection and the connection goes
+/// straight back to the pool. So one of these lives exactly as long as the
+/// request that produced it — the same rule every `Str` here follows, and the
+/// reason a watcher that wants to keep one has to copy it.
+///
+/// Empty rather than optional for what a given database cannot answer. SQLite
+/// has no SQLSTATE and no severity, and `""` reads the same way in a log line
+/// as a `null` would without making every reader unwrap.
+pub const Problem = struct {
+    /// What the database said, in its own words — and **never empty**. When
+    /// the driver refused the statement before it left the process there is no
+    /// server message, so the Zig error's name goes here instead. That is the
+    /// case this exists for: a `Uuid` bound to `db.exec` came back
+    /// `QueryFailed` with nothing logged anywhere, and the missing word was
+    /// `CannotBindStruct`.
+    message: []const u8,
+    /// SQLSTATE — `23505`, `42P01`. Empty when the driver has no such code,
+    /// which is SQLite and is said rather than invented.
+    code: []const u8 = "",
+    /// `ERROR`, `FATAL`, `PANIC` — Postgres's own word for how bad it was.
+    severity: []const u8 = "",
+    /// What else the server knew. `detail` is usually the values that
+    /// collided, so a watcher that logs it is logging data a request supplied
+    /// — which is the reason `Sent` does not carry the parameters and the
+    /// reason this is worth naming rather than folding into `message`.
+    detail: []const u8 = "",
+    hint: []const u8 = "",
+    /// The constraint that was violated, which is the one field that names the
+    /// thing to go and fix.
+    constraint: []const u8 = "",
 };
 
 /// What a transaction sees of everything else running beside it. The
@@ -348,6 +400,13 @@ pub const Fake = struct {
     /// the second one is the whole subject of ADR 0117: on a real Wire it is
     /// a pool connection released twice.
     drains: usize = 0,
+    /// What this Fake refuses every statement with, or null to answer them.
+    ///
+    /// The one thing a Fake can say about a failure that a real database
+    /// cannot be made to say on demand: *the driver said this*. It is what
+    /// lets the path from a Wire's `problem` out-parameter to `Sent.problem`
+    /// be tested with nothing installed (ADR 0146).
+    refuses: ?Problem = null,
 
     pub const Rows = struct {
         left: usize = 0,
@@ -372,11 +431,16 @@ pub const Fake = struct {
         sql: []const u8,
         values: anytype,
         plan: ?[]const u8,
+        problem: ?*?Problem,
     ) Error!Rows {
         _ = arena;
         _ = values;
         self.last_sql = sql;
         self.last_plan = plan;
+        if (self.refuses) |said| {
+            if (problem) |slot| slot.* = said;
+            return error.QueryFailed;
+        }
         return .{ .left = self.answers };
     }
 
@@ -447,11 +511,16 @@ pub const Fake = struct {
         sql: []const u8,
         values: anytype,
         plan: ?[]const u8,
+        problem: ?*?Problem,
     ) Error!usize {
         _ = arena;
         _ = values;
         self.last_sql = sql;
         self.last_plan = plan;
+        if (self.refuses) |said| {
+            if (problem) |slot| slot.* = said;
+            return error.QueryFailed;
+        }
         return self.answers;
     }
 
@@ -464,8 +533,9 @@ pub const Fake = struct {
             sql: []const u8,
             values: anytype,
             plan: ?[]const u8,
+            problem: ?*?Problem,
         ) Error!Rows {
-            return self.wire.run(arena, sql, values, plan);
+            return self.wire.run(arena, sql, values, plan, problem);
         }
 
         pub fn exec(
@@ -474,8 +544,9 @@ pub const Fake = struct {
             sql: []const u8,
             values: anytype,
             plan: ?[]const u8,
+            problem: ?*?Problem,
         ) Error!usize {
-            return self.wire.exec(arena, sql, values, plan);
+            return self.wire.exec(arena, sql, values, plan, problem);
         }
 
         /// The number rather than the statement it becomes. What the SQL

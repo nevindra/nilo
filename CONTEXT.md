@@ -1,6 +1,6 @@
 # nilo
 
-A toolkit for Zig — nine modules for the ordinary jobs, of which the largest is an HTTP server. It puts the comfort of writing code first, with performance as a consequence rather than the other way round. It is aimed at people who are used to Go or Node and are giving Zig a try.
+A toolkit for Zig — ten modules for the ordinary jobs, of which the largest is an HTTP server. It puts the comfort of writing code first, with performance as a consequence rather than the other way round. It is aimed at people who are used to Go or Node and are giving Zig a try.
 
 ## Language
 
@@ -323,3 +323,16 @@ _Avoid_: capacity, limit, quota, max size, high water mark
 **Eviction**:
 Not something that runs. Writing an entry is what forgets an older one, either by lapping it in the Ring or by displacing the stalest of the eight ways when a key's line is full. A cache is allowed to miss, and this one says how often it did.
 _Avoid_: expiry, reaping, sweeping, LRU, purge
+### Tokens
+
+**Token**:
+A JWT somebody else signed and this program has to believe or refuse. The word is only ever about a credential that arrived from outside — a Google ID token, an Auth0 access token. A Session is not a token, never call it one, and nilo signs none of its own.
+_Avoid_: JWT as a verb, bearer, credential, ticket, id token
+
+**Key set**:
+An issuer's public keys, as they come back from its JWKS endpoint, read into the ones RS256 can be checked against. Keys of another type in the same document are skipped rather than refused, because an issuer adding a key type is not a reason to stop signing people in. Fetching it and deciding when it is stale are the caller's.
+_Avoid_: JWKS as a noun on its own, keyring, key store, certificate
+
+**Claims**:
+A struct of the caller's own, one field per thing the application wants out of a token. Fields the token carries and the struct does not name are ignored. Separate from the registered claims — `iss`, `aud`, `exp`, `nbf` — which nilo checks whether or not the struct mentions them.
+_Avoid_: payload, body, subject, principal, identity

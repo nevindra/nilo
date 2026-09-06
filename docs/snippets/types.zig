@@ -29,6 +29,7 @@ pub const config = @import("nilo_config");
 pub const fetch = @import("nilo_fetch");
 pub const s3 = @import("nilo_s3");
 pub const cache = @import("nilo_cache");
+pub const jwt = @import("nilo_jwt");
 
 pub const Str = nilo.Str;
 pub const Redirect = nilo.Redirect;

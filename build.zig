@@ -11,7 +11,7 @@ const std = @import("std");
 /// **Adding a module means adding a row here as well as to `.paths`.** Core
 /// shipped for a whole session with neither, and nothing noticed, because a
 /// list that does not name a directory cannot check it.
-const shipped_roots = [_][]const u8{ "core", "id", "config", "pw", "cache", "fetch", "http", "sql", "s3" };
+const shipped_roots = [_][]const u8{ "core", "id", "config", "pw", "cache", "jwt", "fetch", "http", "sql", "s3" };
 
 comptime {
     const manifest = @embedFile("build.zig.zon");
@@ -70,6 +70,7 @@ const layers = [_]Layer{
     // have. Both of those are the layer deciding the design rather than the
     // other way round, which is why the row is empty.
     .{ .root = "cache", .may_import = &.{} },
+    .{ .root = "jwt", .may_import = &.{} },
     // The first Fitting (ADR 0070): it borrows the loop and owns no
     // destination. That is what puts it below a Service and above a tool
     // module — `zig test fetch/fetch.zig` needs `nilo_core` and so needs the
@@ -230,6 +231,18 @@ const sql_refusals = [_]Refusal{
     .{
         .name = "streamed_list",
         .says = "streamed_list.Ticket reads `tags` as a list column, and a streamed row cannot hold one.",
+    },
+    .{
+        .name = "raw_named_struct_of_values",
+        .says = "`db.raw` was given `uuid.Uuid` in a struct with named fields, and nilo converts a parameter by position.",
+    },
+    .{
+        .name = "raw_select_list_short",
+        .says = "the statement handed to `db.raw` selects 2 columns, and raw_select_list_short.Person has 3 fields.",
+    },
+    .{
+        .name = "raw_column_in_another_fields_place",
+        .says = "column 1 of the statement handed to `db.raw` is named `owner_id`, and field 1 of raw_column_in_another_fields_place.Person is `id`.",
     },
     .{
         .name = "half_a_column_type",
@@ -518,6 +531,10 @@ const refusals = [_]Refusal{
         .says = "`Bound(Bound(…))` — a binding is already a binding.",
     },
     .{
+        .name = "braces_where_a_colon_goes",
+        .says = "the segment \"{id}\" of route \"/users/{id}\" is written with braces, and nilo matches it as literal text.",
+    },
+    .{
         .name = "colon_mid_segment",
         .says = "the segment \"id:id\" of route \"/users/id:id\" has a `:` in the middle of it, so it is matched as literal text.",
     },
@@ -694,6 +711,26 @@ const refusals = [_]Refusal{
         .says = "the route pattern \"/users/:\" has a `:` with no name after it.",
     },
     .{
+        .name = "parse_marker_is_generic",
+        .says = "`parse_marker_is_generic.Sku`'s `nilo_parse` is still generic, so nilo cannot tell what it takes.",
+    },
+    .{
+        .name = "parse_marker_not_a_function",
+        .says = "`parse_marker_not_a_function.Sku`'s `nilo_parse` is a comptime_int, not a function.",
+    },
+    .{
+        .name = "parse_marker_wrong_argument",
+        .says = "`parse_marker_wrong_argument.Sku`'s `nilo_parse` takes a u32 rather than the text that arrived.",
+    },
+    .{
+        .name = "parse_marker_wrong_arity",
+        .says = "`parse_marker_wrong_arity.Sku`'s `nilo_parse` takes 2 arguments rather than one.",
+    },
+    .{
+        .name = "parse_marker_wrong_return",
+        .says = "`parse_marker_wrong_return.Sku`'s `nilo_parse` answers parse_marker_wrong_return.Sku rather than `?parse_marker_wrong_return.Sku`.",
+    },
+    .{
         .name = "patch_as_an_argument",
         .says = "argument 2 of the handler for route \"/users/:id\" is a `Patch(…)`, which is a field of a request body rather than an argument of its own.",
     },
@@ -758,6 +795,10 @@ const refusals = [_]Refusal{
         .says = "Response headers have to be written out where they are set — .of(&.{.{ .name = \"Location\", .value = where }}) — and this is a []nilo.Header.",
     },
     .{
+        .name = "route_name_that_is_not_a_word",
+        .says = "the route name \"add partner-capability\" is not something a client generator can turn into a method.",
+    },
+    .{
         .name = "session_field_is_a_slice",
         .says = "`[]const u8` cannot be part of a session, because it is not something a session can carry.",
     },
@@ -796,6 +837,10 @@ const refusals = [_]Refusal{
     .{
         .name = "two_bodies",
         .says = "the handler for route \"/orders\" takes two structs by value — argument 1 is a two_bodies.Store and argument 2 is a two_bodies.NewOrder — and a request only has one body.",
+    },
+    .{
+        .name = "two_bodies_on_a_route_with_a_param",
+        .says = "the handler for route \"/orders/:sku\" takes two structs by value — argument 1 is a two_bodies_on_a_route_with_a_param.Sku and argument 2 is a two_bodies_on_a_route_with_a_param.NewOrder — and a request only has one body.",
     },
     .{
         .name = "two_forms",
@@ -1292,6 +1337,22 @@ fn cacheFor(
     });
 }
 
+/// A copy of `nilo_jwt` for one optimize mode (ADR 0140).
+///
+/// Self contained the way `pwFor` and `cacheFor` are: it names nothing, so
+/// there is no shared type to keep the two modes agreeing about.
+fn jwtFor(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    mode: std.builtin.OptimizeMode,
+) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("jwt/jwt.zig"),
+        .target = target,
+        .optimize = mode,
+    });
+}
+
 /// A copy of `nilo_fetch` for one optimize mode (ADR 0070).
 ///
 /// The first Fitting, and the first module down here that is not self
@@ -1743,6 +1804,18 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // The fifth tool module: checking somebody else's signed token
+    // (ADR 0140). It imports nothing at all, which `zig build layering`
+    // checks, and `nilo_http` does not name it — a program that signs nobody
+    // in with Google links no RSA. A project that wants one writes
+    // `@import("nilo_jwt")`. The fetch of the key set is not in here: that is
+    // an HTTPS GET, which `nilo_fetch` already sends.
+    const nilo_jwt = b.addModule("nilo_jwt", .{
+        .root_source_file = b.path("jwt/jwt.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // The first Fitting: it borrows the loop and owns no destination
     // (ADR 0070). `nilo_http` does **not** name it — a program that calls
     // nobody else's API links no HTTP client, no TLS and no certificate
@@ -2051,6 +2124,20 @@ pub fn build(b: *std.Build) void {
     }
     test_cache_step.dependOn(refusals_cache_step);
     test_step.dependOn(test_cache_step);
+
+    // And the fifth (ADR 0140). `zig test jwt/jwt.zig` is this without
+    // `build.zig` at all: the module names nothing, and a token check needs
+    // no socket and no clock — the key set arrives as bytes and the time
+    // arrives as a number.
+    const test_jwt_step = b.step(
+        "test-jwt",
+        "Run nilo_jwt's tests — no Engine, no module graph",
+    );
+    for (test_modes) |mode| {
+        const tests = b.addTest(.{ .root_module = jwtFor(b, target, mode) });
+        test_jwt_step.dependOn(&b.addRunArtifact(tests).step);
+    }
+    test_step.dependOn(test_jwt_step);
 
     // The Fitting layer's entry condition, as something that runs (ADR 0070).
     // A Tool module proves its layer under a plain `zig test`; a Fitting
@@ -2767,13 +2854,13 @@ pub fn build(b: *std.Build) void {
     // take them off `test` and leave them on `test-all` — not to stop
     // checking.
     // Named for the framework rather than for all of them, because it only
-    // runs the framework's 56. The other three tables hang off their own
+    // runs the framework's 105. The other five tables hang off their own
     // module's test step (ADR 0027) and have their own `refusals-*` steps —
     // and a name that over-promised sent one reader to run this, watch it
     // pass, and believe a `sql/refusals/` file had been checked.
     const refusals_step = b.step(
         "refusals",
-        "Check the framework's 56 compile errors — see refusals-sql, -config, -pw for the rest",
+        "Check the framework's 105 compile errors — see refusals-sql, -s3, -config, -pw, -cache for the rest",
     );
     for (refusals) |refusal| {
         const module = b.createModule(.{
@@ -2817,6 +2904,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "nilo_fetch", .module = nilo_fetch },
                     .{ .name = "nilo_s3", .module = nilo_s3 },
                     .{ .name = "nilo_cache", .module = nilo_cache },
+                    .{ .name = "nilo_jwt", .module = nilo_jwt },
                 },
             });
             const compiled = b.addObject(.{ .name = snippet.name, .root_module = module });

@@ -7,6 +7,12 @@
 //! `"age" has to be a whole number, not "soon"` differ in the label and in
 //! nothing else.
 //!
+//! A fifth kind arrives the same way and is not on that list: **a type that
+//! says it can parse itself**, by declaring `nilo_parse` (ADR 0142). A `uuid`
+//! is the one everybody has — `sql.Uuid` is a path param now instead of text
+//! the handler parses by hand — and nilo's part of it is small on purpose. It
+//! calls the function, and null is the same 400 a bad number gets.
+//!
 //! `label` is comptime, so the message is assembled while compiling and the
 //! failure path formats one runtime value.
 //!
@@ -43,6 +49,10 @@ pub const Reason = enum {
     not_a_number,
     not_true_or_false,
     not_a_choice,
+    /// A type that parses itself said no. nilo does not know what the type
+    /// wanted, so the sentence names the type and quotes what arrived —
+    /// which is the whole of what it is entitled to say (ADR 0142).
+    not_that_type,
     /// The value is the wrong kind of thing altogether — a list where an
     /// object was wanted. Only a JSON body can produce this: a path param, a
     /// query value and a form field all arrive as text, so there is no other
@@ -81,12 +91,89 @@ pub const Outcome = struct {
     kind: []const u8 = "",
 };
 
+/// The declaration a type parses itself with (ADR 0142):
+///
+/// ```zig
+/// pub fn nilo_parse(text: []const u8) ?Uuid { … }
+/// ```
+///
+/// Null means "that is not one of these", and nilo turns it into the same 400
+/// a bad number gets.
+///
+/// **Named rather than sniffed for.** Reaching for any type with a `parse`
+/// method would promote somebody's existing struct into a path param without
+/// asking, and change what a program that already compiles means. A
+/// declaration nobody writes by accident is what keeps that from happening —
+/// the same reason `nilo_resolve` and `nilo_form` are spelled the way they
+/// are.
+pub const parse_marker = "nilo_parse";
+
+/// Whether `T` says it can turn request text into itself.
+///
+/// **Reading the marker is what checks it**, which is the rule
+/// `openapi.schemaWithin` already follows for `nilo_openapi` (ADR 0085): a
+/// `nilo_parse` of the wrong shape is refused here, where the type is named,
+/// rather than surfacing as a message from three frames down inside
+/// `tryConvert` about a line of nilo's (ADR 0015).
+pub fn parsesItself(comptime T: type) bool {
+    comptime {
+        const says = switch (@typeInfo(T)) {
+            .@"struct", .@"union", .@"enum", .@"opaque" => @hasDecl(T, parse_marker),
+            else => false,
+        };
+        if (says) checkParse(T);
+        return says;
+    }
+}
+
+/// Everything that has to be true of a `nilo_parse` before nilo will call it.
+fn checkParse(comptime T: type) void {
+    comptime {
+        const F = @TypeOf(@field(T, parse_marker));
+        const info = switch (@typeInfo(F)) {
+            .@"fn" => |f| f,
+            else => wrongParse(T, "is a " ++ naming.of(F) ++ ", not a function"),
+        };
+        if (info.is_generic or info.is_var_args) wrongParse(
+            T,
+            "is still generic, so nilo cannot tell what it takes",
+        );
+        if (info.params.len != 1) wrongParse(
+            T,
+            std.fmt.comptimePrint("takes {d} arguments rather than one", .{info.params.len}),
+        );
+        if (info.params[0].type != []const u8) wrongParse(
+            T,
+            "takes a " ++ naming.of(info.params[0].type.?) ++ " rather than the text that arrived",
+        );
+        if (info.return_type != ?T) wrongParse(
+            T,
+            "answers " ++ naming.of(info.return_type.?) ++ " rather than `?" ++ naming.of(T) ++ "`",
+        );
+    }
+}
+
+fn wrongParse(comptime T: type, comptime wrong: []const u8) noreturn {
+    @compileError(
+        "nilo: `" ++ naming.of(T) ++ "`'s `" ++ parse_marker ++ "` " ++ wrong ++ ".\n" ++
+            "  A type that turns request text into itself declares `pub fn " ++ parse_marker ++
+            "(text: []const u8) ?" ++ naming.of(T) ++ "`, answering null for text that is not one.",
+    );
+}
+
 /// Whether request text can become a `T` at all — a `Str`, a number, a
 /// `bool`, an enum, or any of those wrapped in `?`.
 ///
-/// Asked while compiling, by whoever is about to promise a field can be
+/// Asked while compiling, by whoever is about to promise a **field** can be
 /// filled from a request. Answering here rather than at each call site is
 /// what keeps `Query(T)` and `Form(T)` agreeing on what a field may be.
+///
+/// A type that parses itself is deliberately not on this list, and the gap is
+/// where it stops rather than what it is: `nilo_parse` makes a type a path
+/// param (ADR 0142), and a path param does not come through here — `roleOf`
+/// gates it and `paramValue` calls `convert` straight. Widening this would
+/// also let one into a `Query(T)`, a `Form(T)` and a JSON body, and the last
+/// of those is a different question — `std.json` fills a body, not this file.
 pub fn convertible(comptime T: type) bool {
     const Inner = switch (@typeInfo(T)) {
         .optional => |o| o.child,
@@ -115,6 +202,13 @@ pub fn tryConvert(comptime P: type, comptime slot: Slot, s: Str, out: *P) ?Reaso
     }
 
     const text = s.view();
+    // Before the switch, because a type that parses itself may be an enum as
+    // readily as a struct, and what a type says about itself wins over what
+    // its kind would otherwise have meant (ADR 0142).
+    if (comptime parsesItself(P)) {
+        out.* = P.nilo_parse(text) orelse return .not_that_type;
+        return null;
+    }
     switch (@typeInfo(P)) {
         // The shape is checked before the value, because `std.fmt` reads Zig
         // source rather than request text and takes three spellings nobody
@@ -138,6 +232,7 @@ pub fn tryConvert(comptime P: type, comptime slot: Slot, s: Str, out: *P) ?Reaso
 /// will not become a `u32` is always `.not_a_number` — which is also why
 /// `sayWhy` does not need to be told the reason to word it.
 pub fn reasonFor(comptime P: type) Reason {
+    if (comptime parsesItself(P)) return .not_that_type;
     return switch (@typeInfo(P)) {
         .int, .float => .not_a_number,
         .bool => .not_true_or_false,
@@ -161,6 +256,13 @@ pub fn sayWhy(
     w: *std.Io.Writer,
 ) !void {
     const text = arrived.view();
+    // The type is the only thing that knows what it takes, so the sentence
+    // names it and stops there. `names.of` is what puts the reader's own
+    // import line in front of the name rather than a file of nilo's
+    // (ADR 0122).
+    if (comptime parsesItself(P)) {
+        return w.print(label ++ " has to be a " ++ naming.of(P) ++ ", not \"{s}\"", .{text});
+    }
     switch (@typeInfo(P)) {
         .int => try w.print(label ++ " has to be a whole number, not \"{s}\"", .{text}),
         .float => try w.print(label ++ " has to be a number, not \"{s}\"", .{text}),
@@ -295,6 +397,81 @@ const bulkhead = @import("bulkhead.zig");
 
 fn given(bytes: []const u8) Str {
     return Str.static(bytes);
+}
+
+/// A type of the reader's own that parses itself, standing in for `sql.Uuid`.
+/// `http/` may not import `nilo_id`, and the protocol is a declaration read by
+/// name precisely so that it need not (ADR 0042, ADR 0142).
+const Sku = struct {
+    letters: [3]u8,
+
+    pub fn nilo_parse(text: []const u8) ?Sku {
+        if (text.len != 3) return null;
+        for (text) |ch| if (!std.ascii.isUpper(ch)) return null;
+        return .{ .letters = text[0..3].* };
+    }
+};
+
+test "a type that parses itself becomes the value it made of the text" {
+    const previous = bulkhead.setFallbackSlot(null);
+    defer _ = bulkhead.setFallbackSlot(previous);
+
+    var sku: Sku = undefined;
+    try testing.expectEqual(@as(?Reason, null), tryConvert(Sku, .query, given("ABC"), &sku));
+    try testing.expectEqualStrings("ABC", &sku.letters);
+}
+
+test "a type that parses itself answering null is the same 400 a bad number is" {
+    const previous = bulkhead.setFallbackSlot(null);
+    defer _ = bulkhead.setFallbackSlot(previous);
+
+    var sku: Sku = undefined;
+    // Too short, and the right length in the wrong alphabet. The type decides
+    // both; nilo only reads the null.
+    try testing.expectEqual(Reason.not_that_type, tryConvert(Sku, .query, given("AB"), &sku).?);
+    try testing.expectEqual(Reason.not_that_type, tryConvert(Sku, .query, given("abc"), &sku).?);
+    try testing.expectEqual(Reason.not_that_type, comptime reasonFor(Sku));
+}
+
+test "the sentence for a type that parses itself names the type and quotes the text" {
+    var in_flight = fail.InFlight{};
+    in_flight.startRequest("GET", "/x");
+    const previous = bulkhead.setFallbackSlot(&in_flight);
+    defer _ = bulkhead.setFallbackSlot(previous);
+
+    try testing.expectError(error.Failed, convert(Sku, .query, given("abc"), ":sku"));
+    try testing.expectEqualStrings(
+        ":sku has to be a " ++ @typeName(Sku) ++ ", not \"abc\"",
+        in_flight.failure.message(),
+    );
+    // Failing with the sentence and handing it back word it the same way,
+    // exactly as every other reason does.
+    try testing.expectEqualStrings(said(Sku, .query, "abc", ":sku"), in_flight.failure.message());
+}
+
+test "a marker on an enum wins over what the enum would have meant" {
+    const previous = bulkhead.setFallbackSlot(null);
+    defer _ = bulkhead.setFallbackSlot(previous);
+
+    // The same three letters an enum value could have been named, read by the
+    // type's own function instead. A type says what it is; its kind does not.
+    const Grade = enum {
+        a,
+        b,
+
+        pub fn nilo_parse(text: []const u8) ?@This() {
+            if (std.mem.eql(u8, text, "top")) return .a;
+            if (std.mem.eql(u8, text, "rest")) return .b;
+            return null;
+        }
+    };
+
+    var grade: Grade = undefined;
+    try testing.expectEqual(@as(?Reason, null), tryConvert(Grade, .query, given("top"), &grade));
+    try testing.expectEqual(Grade.a, grade);
+    // The Zig field name is not the wire spelling any more, and that is the
+    // marker doing exactly what it was asked to.
+    try testing.expectEqual(Reason.not_that_type, tryConvert(Grade, .query, given("a"), &grade).?);
 }
 
 test "the types request text can become" {

@@ -35,8 +35,26 @@ decides what to pass in:
 | `!?T` | the 200 schema **and a 404** |
 | `!Status(201, T)` | a `"201"` response, named |
 | `!Response(T)` | `default` — the status is picked at runtime |
-| a `*Ctx` and no return value | `default` — the handler writes its own answer |
+| a `*Ctx` and no return value | `default` — nilo cannot tell whether the handler wrote an answer of its own |
 | anything nilo can refuse first | a 400 |
+
+## The name of an operation
+
+`operationId` is derived from the method and the path — `getUsersId` above —
+which is a good default and a poor key. It is not a word anybody chose, and it
+changes when the route moves path. If something on your side is written against
+it, a route can say its own:
+
+```zig
+try app.named("addPartnerCapability")
+    .put("/partners/:id/capabilities/:capability", addCapability);
+```
+
+That composes with groups and with `with`, and two routes sharing a name stop
+the process at registration
+([ADR 0149](../adr/0149-a-route-can-say-its-own-name.md)). It says what the
+route is *called* and nothing about what it does — everything else in the
+document still comes from the signature, which is the point of the whole page.
 
 ## Named shapes
 
@@ -150,25 +168,34 @@ and the document still calls the shape `Filing_Str` — the name comes from the
 compiler's name for the instantiation, and a Zig alias creates no new one. Write
 the struct out if the client's type name matters.
 
-**Answers it cannot see.** A handler that takes a `*Ctx` and returns nothing has
-sent its answer itself, somewhere in its body, and no reading of its signature
-will find out what. The document says so:
+**Answers it cannot see.** A handler that takes a `*Ctx` and returns nothing
+*may* have sent its answer itself, somewhere in its body, and no reading of its
+signature will find out whether it did. The document says exactly that:
 
 ```json
-"responses": {"default": {"description": "this endpoint writes its own response,
-                                          so its signature does not describe it"}}
+"responses": {"default": {"description": "this endpoint holds the Ctx and returns
+                                          nothing, so it may write its own response
+                                          — its signature does not settle what it
+                                          answers"}}
 ```
 
 and `listen()` says how many there are, once, at the moment somebody is looking:
 
 ```
-info: 1 of 12 routes write their own response, so the API description does not
-      describe what they answer
+info: 1 of 12 routes hold the Ctx and return nothing, so the API description
+      cannot say what they answer — a handler that means "200, empty" says so by
+      returning `Status(200, void)` (ADR 0150)
 ```
 
 Holding a `*Ctx` is not itself the disqualification — a handler that reads a
 header and then returns its answer is described like any other. Returning
 nothing while holding one is.
+
+**A handler that really does mean "200, empty" says so.** `Status(200, void)` is
+the return type for it, and the document then carries the 200 rather than the
+`default`. nilo cannot tell the two apart from the signature, which is why the
+wording hedges rather than guesses
+([ADR 0150](../adr/0150-a-ctx-handler-that-returns-nothing-may-have-written-it.md)).
 
 That is the trade the whole feature rests on: a document that under-promises is
 useful, and one that guesses is worse than none

@@ -208,6 +208,10 @@ pub const Operation = struct {
     /// validate. Not a guess: it is exactly the set of routes with a typed
     /// param, a query struct, or a body.
     can_reject: bool,
+    /// The `operationId`, when the route was given one with `app.named(…)`.
+    /// Null is the derived name below
+    /// ([ADR 0149](../docs/adr/0149-a-route-can-say-its-own-name.md)).
+    name: ?[]const u8 = null,
 };
 
 pub const Info = struct {
@@ -917,8 +921,9 @@ fn writeAnswer(w: *std.Io.Writer, components: *const Components, answer: Answer)
     // "200, empty" that reading the return type alone would produce for a
     // handler that in fact streams a CSV.
     if (answer.written) {
-        try w.writeAll("\"default\":{\"description\":\"this endpoint writes its own response, " ++
-            "so its signature does not describe it\"}");
+        try w.writeAll("\"default\":{\"description\":\"this endpoint holds the Ctx and returns " ++
+            "nothing, so it may write its own response — its signature does not settle what " ++
+            "it answers\"}");
         return;
     }
 
@@ -962,7 +967,20 @@ fn writeAnswer(w: *std.Io.Writer, components: *const Components, answer: Answer)
 /// `getUsersId` — a name for the endpoint that a client generator can turn
 /// into a method. Built from the verb and the path so that it is stable
 /// across runs and unique wherever the routes are.
+///
+/// **Unless the route said its own** (ADR 0149). The derived name is a good
+/// default and a poor key: it is not a word anybody chose, and it changes when
+/// the path moves. A consumer keying an authorisation table off it wants both
+/// of those the other way round, so `app.named("addPartnerCapability")` puts
+/// the name in the route's own hands.
 fn writeOperationId(w: *std.Io.Writer, op: Operation) !void {
+    if (op.name) |given| {
+        try w.writeByte('"');
+        try w.writeAll(given);
+        try w.writeByte('"');
+        return;
+    }
+
     try w.writeByte('"');
     for (@tagName(op.method)) |ch| try w.writeByte(std.ascii.toLower(ch));
 

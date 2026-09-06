@@ -524,12 +524,7 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
             const signing = self.store.keyFor(io, now_ms, &token_buf) catch |err|
                 return blame(err);
 
-            var expires = @min(wanted_seconds, settings.presign_max);
-            if (signing.expires_at) |dies_at| {
-                const left = dies_at - now_s;
-                if (left <= 0) return error.Rejected;
-                expires = @min(expires, std.math.lossyCast(u32, left));
-            }
+            const expires = try life(wanted_seconds, signing, now_s);
 
             const stamp: sign.Stamp = .at(now_s);
             var query_buf: [sign.presign_query_max]u8 = undefined;
@@ -569,6 +564,170 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
                 .url = c.str(w.buffered()),
                 .expires_at = now_s + expires,
             };
+        }
+
+        /// A form a browser can post straight to the bucket, and the moment it
+        /// stops working.
+        ///
+        /// `presign` signs a request nilo has described. This signs the
+        /// conditions a request the browser has not made yet has to meet, so it
+        /// touches no socket either and the two share everything but the last
+        /// step: the signature is one HMAC of the base64 policy with the day's
+        /// key rather than one over a canonical request (ADR 0141). It is in
+        /// nilo rather than in an application because the alternative puts
+        /// ADR 0069's daily key derivation in two places that have to agree
+        /// about a rotation, and the first anybody hears of a disagreement is
+        /// every upload failing at 00:00 UTC.
+        ///
+        /// Life is clamped by `life` below, exactly as `presign`'s is, and
+        /// `expires_at` is the true number rather than the one asked for.
+        ///
+        /// **Size is clamped to the bucket's `max_bytes`, and defaults to it.**
+        /// A `content-length-range` condition is therefore always in the
+        /// policy, and a form with no ceiling is not something this call can
+        /// hand out. The reason is what `max_bytes` means: it is the largest
+        /// object this bucket deals in, a browser POST is the one path that
+        /// could put a bigger one there without nilo seeing a byte, and an
+        /// object over it is one `get` refuses for the rest of its life. A
+        /// caller who wants more raises `max_bytes`, which is the same lever
+        /// they would pull to read it back.
+        ///
+        /// Everything in the answer is the Scope's memory, in one allocation
+        /// for the text and one for the list. The text is 2,449 bytes for an
+        /// ordinary key on static credentials and 15,949 with a 900-byte
+        /// session token, both at the ceiling rather than at what was used;
+        /// `presign` already allocates about 9 KiB in the second case, so this
+        /// is the same order rather than a new cost. The stack is 366 bytes of
+        /// named buffers plus `session_token_max`, which is less than
+        /// `presign`'s, and deliberately: the policy is arena and by ADR 0063
+        /// a stack buffer is held per *connection* (ADR 0018's second axis).
+        pub fn presignPost(self: *Self, c: anytype, key: []const u8, post: Post) Error!Posted {
+            comptime core.checkScope(@TypeOf(c), "bucket.presignPost");
+            if (key.len > settings.key_max) return error.Rejected;
+
+            const io = self.store.client.inner.io;
+            const now_ms = core.nowMillis();
+            const now_s = @divFloor(now_ms, 1000);
+
+            var token_buf: [settings.session_token_max]u8 = undefined;
+            const signing = self.store.keyFor(io, now_ms, &token_buf) catch |err|
+                return blame(err);
+
+            const expires = try life(post.seconds, signing, now_s);
+            const expires_at = now_s + expires;
+
+            const stamp: sign.Stamp = .at(now_s);
+            const dies: sign.Stamp = .at(expires_at);
+            var expiry_buf: [sign.Stamp.expiration_len]u8 = undefined;
+
+            var cred_buf: [sign.akid_max + 1 + sign.scope_max]u8 = undefined;
+            const credential = std.fmt.bufPrint(&cred_buf, "{s}/{s}", .{
+                signing.keyed.akid(),
+                signing.keyed.credentialScope(),
+            }) catch unreachable; // both halves are capped by `sign`
+
+            const policy: sign.Policy = .{
+                .bucket = name,
+                .key = key,
+                .prefix = post.prefix,
+                .expiration = dies.expiration(&expiry_buf),
+                .credential = credential,
+                .date = stamp.iso(),
+                .token = signing.token,
+                .content_type = post.content_type,
+                .max_bytes = @min(post.max_bytes orelse settings.max_bytes, settings.max_bytes),
+            };
+
+            // One allocation, holding the document, the base64 of it, the
+            // signature and every field value. The policy is up to 3 KiB with a
+            // long key, and by ADR 0063 a stack buffer that size is held per
+            // *connection*, so it goes in the arena the way `presign`'s URL
+            // does. The ceiling is taken and the used part handed back: the
+            // arena is reset whole per request, so a second pass to measure
+            // first would save nothing.
+            const doc_room = sign.policySize(policy);
+            const encoder = std.base64.standard.Encoder;
+            const total = doc_room + encoder.calcSize(doc_room) + 64 +
+                self.base.len + self.prefix.len + credential.len +
+                stamp.iso().len + key.len +
+                sign.textLen(post.content_type) + sign.textLen(signing.token);
+
+            const room = try c.arena().alloc(u8, total);
+            var at: usize = 0;
+
+            var pw = std.Io.Writer.fixed(room[at..]);
+            sign.writePolicy(&pw, policy) catch unreachable; // `policySize` is the ceiling
+            const doc = pw.buffered();
+            at += doc.len;
+
+            // What the browser posts, and what is signed. Standard base64
+            // rather than the URL-safe alphabet: a policy travels in a form
+            // field, not in a query.
+            const encoded = encoder.encode(room[at..][0..encoder.calcSize(doc.len)], doc);
+            at += encoded.len;
+
+            const signed = sign.signature(signing.keyed.key, encoded);
+            const hex = std.fmt.bufPrint(room[at..], "{x}", .{&signed}) catch unreachable;
+            at += hex.len;
+
+            // The form's action is the bucket, not the key: a POST policy
+            // posts to the bucket and says the key in a field.
+            var uw = std.Io.Writer.fixed(room[at..]);
+            uw.writeAll(self.base) catch unreachable;
+            uw.writeAll(self.prefix) catch unreachable;
+            const url = uw.buffered();
+            at += url.len;
+
+            // The order is fixed, because a form is written against it. The
+            // file input goes after all of these: S3 ignores whatever follows
+            // the file part, so a `policy` sent after it is one S3 never reads.
+            var fields: [8]Field = undefined;
+            var n: usize = 0;
+            fields[n] = .{ .name = "key", .value = cut(room, &at, key) };
+            n += 1;
+            // The one value that needs no copy, because it is a constant in the
+            // binary rather than anything belonging to this request.
+            fields[n] = .{ .name = "x-amz-algorithm", .value = sign.algorithm };
+            n += 1;
+            fields[n] = .{ .name = "x-amz-credential", .value = cut(room, &at, credential) };
+            n += 1;
+            fields[n] = .{ .name = "x-amz-date", .value = cut(room, &at, stamp.iso()) };
+            n += 1;
+            if (signing.token) |t| {
+                fields[n] = .{ .name = "x-amz-security-token", .value = cut(room, &at, t) };
+                n += 1;
+            }
+            if (post.content_type) |ct| {
+                fields[n] = .{ .name = "Content-Type", .value = cut(room, &at, ct) };
+                n += 1;
+            }
+            fields[n] = .{ .name = "policy", .value = encoded };
+            n += 1;
+            fields[n] = .{ .name = "x-amz-signature", .value = hex };
+            n += 1;
+
+            const kept = try c.arena().alloc(Field, n);
+            @memcpy(kept, fields[0..n]);
+
+            return .{ .url = url, .fields = kept, .expires_at = expires_at };
+        }
+
+        /// How long a presigned anything actually lives: the smallest of what
+        /// was asked for, what the bucket allows, and what the credentials have
+        /// left.
+        ///
+        /// One place rather than two. `presign` and `presignPost` both hand
+        /// back a number somebody will store in a database, and two copies of
+        /// this arithmetic is two chances to clamp against a different pair
+        /// (ADR 0141).
+        fn life(wanted_seconds: u32, signing: Store.Signing, now_s: i64) Error!u32 {
+            var expires = @min(wanted_seconds, settings.presign_max);
+            if (signing.expires_at) |dies_at| {
+                const left = dies_at - now_s;
+                if (left <= 0) return error.Rejected;
+                expires = @min(expires, std.math.lossyCast(u32, left));
+            }
+            return expires;
         }
 
         // ---- the shared middle ----
@@ -798,6 +957,52 @@ pub const Presigned = struct {
     expires_at: i64,
 };
 
+/// What one presigned POST asks for. Run time rather than compile time, unlike
+/// a bucket's own options, because a form is built per request and the key it
+/// is built around is data (ADR 0068).
+pub const Post = struct {
+    /// How long the form is good for, clamped the way `presign`'s seconds are.
+    seconds: u32,
+    /// Refuse anything the browser does not label exactly this. Null lets the
+    /// browser say what it likes, which is what a box taking receipts and
+    /// screenshots and PDFs wants.
+    content_type: ?[]const u8 = null,
+    /// The upload's ceiling in bytes, clamped to the bucket's `max_bytes` and
+    /// defaulted to it. `presignPost` says why.
+    max_bytes: ?u64 = null,
+    /// Treat `key` as the start of a key rather than the whole of one, which is
+    /// what a browser picking its own filename needs. The policy condition
+    /// becomes `starts-with`, and the `key` field is what the form extends.
+    prefix: bool = false,
+};
+
+/// One field of the form, and its value.
+///
+/// The names are S3's, spelled the way S3 reads them back: `Content-Type` keeps
+/// its capitals because the condition signed over it is `$Content-Type`, and a
+/// browser that sends the field under any other spelling gets a 403 that reads
+/// like a signing bug.
+pub const Field = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+/// Everything a browser needs to upload straight to the bucket: where to post,
+/// what to send beside the file, and when the whole thing stops working.
+///
+/// The fields go into the form in the order they are in here, and the file
+/// input goes after all of them. S3 ignores whatever follows the file part, so
+/// a `policy` written after it is a `policy` S3 never reads.
+pub const Posted = struct {
+    /// The bucket, not the key. A POST policy posts to the bucket and says the
+    /// key in a field, which is what lets the browser pick the filename.
+    url: []const u8,
+    fields: []const Field,
+    /// Unix seconds, and the same three-way minimum `Presigned.expires_at`
+    /// reports.
+    expires_at: i64,
+};
+
 /// The headers that go out beside a signature. A fixed array because the set
 /// is fixed (ADR 0068), so there is nothing to allocate and nothing to sort.
 const Headers = struct {
@@ -816,6 +1021,16 @@ const Headers = struct {
 
 fn keepIn(c: anytype, text: []const u8) ![]const u8 {
     return c.arena().dupe(u8, text);
+}
+
+/// Copy `text` into what is left of `room` and hand back the copy, moving `at`
+/// past it. The Scope owns the one buffer, so a field's value is a slice of it
+/// rather than an allocation of its own. It is the shape `store.zig` uses for
+/// the strings a Store holds for the life of the process.
+fn cut(room: []u8, at: *usize, text: []const u8) []const u8 {
+    @memcpy(room[at.*..][0..text.len], text);
+    defer at.* += text.len;
+    return room[at.*..][0..text.len];
 }
 
 /// A `Str` or a plain slice, as a slice. Both spellings arrive here: a form

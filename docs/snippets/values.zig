@@ -21,3 +21,8 @@ pub var app: nilo.App = undefined;
 // The cache a snippet about reading one says without opening one.
 pub var store: cache.Store = undefined;
 pub var carts: Carts = undefined;
+
+// The outbound client and the Scope a snippet that calls somebody else says
+// without building either — what the JWKS fetch on the `nilo_jwt` page needs.
+pub var client: fetch.Client = undefined;
+pub var run: nilo.Run = undefined;

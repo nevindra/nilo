@@ -138,6 +138,7 @@ pub const Wire = struct {
             sql: []const u8,
             values: anytype,
             plan: ?[]const u8,
+            problem: ?*?wire.Problem,
         ) wire.Error!Rows {
             if (self.done) return error.QueryFailed;
             self.fresh();
@@ -145,7 +146,7 @@ pub const Wire = struct {
                 .allocator = arena,
                 .cache_name = plan,
             }) catch |err| {
-                return translate(self.conn, err);
+                return reported(self.conn, err, arena, problem);
             };
             return .{ .conn = self.conn, .result = result, .owns_conn = false };
         }
@@ -156,6 +157,7 @@ pub const Wire = struct {
             sql: []const u8,
             values: anytype,
             plan: ?[]const u8,
+            problem: ?*?wire.Problem,
         ) wire.Error!usize {
             if (self.done) return error.QueryFailed;
             self.fresh();
@@ -163,7 +165,7 @@ pub const Wire = struct {
                 .allocator = arena,
                 .cache_name = plan,
             }) catch |err| {
-                return translate(self.conn, err);
+                return reported(self.conn, err, arena, problem);
             };
             return @intCast(count orelse 0);
         }
@@ -419,6 +421,7 @@ pub const Wire = struct {
         sql: []const u8,
         values: anytype,
         plan: ?[]const u8,
+        problem: ?*?wire.Problem,
     ) wire.Error!Rows {
         var conn = self.pool.acquire() catch return error.Disconnected;
         errdefer conn.release();
@@ -427,7 +430,7 @@ pub const Wire = struct {
             .allocator = arena,
             .cache_name = plan,
         }) catch |err| {
-            return translate(conn, err);
+            return reported(conn, err, arena, problem);
         };
         return .{ .conn = conn, .result = result };
     }
@@ -569,6 +572,7 @@ pub const Wire = struct {
         sql: []const u8,
         values: anytype,
         plan: ?[]const u8,
+        problem: ?*?wire.Problem,
     ) wire.Error!usize {
         var conn = self.pool.acquire() catch return error.Disconnected;
         defer conn.release();
@@ -576,7 +580,7 @@ pub const Wire = struct {
             .allocator = arena,
             .cache_name = plan,
         }) catch |err| {
-            return translate(conn, err);
+            return reported(conn, err, arena, problem);
         };
         return @intCast(count orelse 0);
     }
@@ -593,8 +597,10 @@ pub const Wire = struct {
         table: []const u8,
     ) wire.Error![]const wire.Column {
         // No plan: this runs once per Row while the server starts, so a kept
-        // plan would be memory held for a statement nothing sends again.
-        var rows = try self.run(arena, query, .{ schema, table }, null);
+        // plan would be memory held for a statement nothing sends again. And
+        // no problem slot: nobody is watching a startup query, and the one
+        // caller already has a sentence for a check it could not run.
+        var rows = try self.run(arena, query, .{ schema, table }, null, null);
         defer rows.close();
 
         var found: std.ArrayList(wire.Column) = .empty;
@@ -653,8 +659,68 @@ fn translate(conn: *pg.Conn, err: anyerror) wire.Error {
     }
     return switch (err) {
         error.ConnectionBusy, error.ConnectionResetByPeer, error.BrokenPipe => error.Disconnected,
-        else => error.QueryFailed,
+        // **Named rather than silent, and that is the fix**
+        // ([ADR 0146](../docs/adr/0146-a-statement-that-failed-says-what-the-database-said.md)).
+        // `conn.err` is null whenever the statement never left the process —
+        // pg.zig refusing to bind a value is the ordinary way there — so this
+        // branch used to log nothing at all and hand back `QueryFailed`. The
+        // caller then had one word for a failure Postgres had never seen, and
+        // Postgres had nothing to say either because nothing arrived. The
+        // error's own name is the whole of what was missing: `CannotBindStruct`
+        // is three iterations of somebody's afternoon.
+        else => {
+            std.log.err(
+                "nilo_sql: the driver refused a statement before it reached the database " ++
+                    "({s}). The server said nothing because nothing arrived.",
+                .{@errorName(err)},
+            );
+            return error.QueryFailed;
+        },
     };
+}
+
+/// `translate`, plus the server's own words left where a program can read
+/// them (ADR 0146).
+///
+/// The copy is not optional: `server.message` points into memory pg.zig owns
+/// per connection, and the connection goes back to the pool on the next line.
+/// The arena is the request's, so what a watcher holds dies with the request
+/// that produced it — the rule `db.zig` already applies to every column it
+/// reads.
+///
+/// An allocation failure here is *not* an error: this runs on a path that is
+/// already failing, and turning "the statement was refused" into "we ran out
+/// of memory telling you so" would lose the answer the caller came for. What
+/// cannot be copied is left empty.
+fn reported(
+    conn: *pg.Conn,
+    err: anyerror,
+    arena: std.mem.Allocator,
+    problem: ?*?wire.Problem,
+) wire.Error {
+    if (problem) |slot| {
+        if (conn.err) |server| {
+            slot.* = .{
+                .message = keepText(arena, server.message),
+                .code = keepText(arena, server.code),
+                .severity = keepText(arena, server.severity),
+                .detail = keepText(arena, server.detail orelse ""),
+                .hint = keepText(arena, server.hint orelse ""),
+                .constraint = keepText(arena, server.constraint orelse ""),
+            };
+        } else {
+            // No server answer, so the driver's own error name is the message
+            // — `@errorName` points into the binary and needs no copy.
+            slot.* = .{ .message = @errorName(err) };
+        }
+    }
+    return translate(conn, err);
+}
+
+/// One of the server's strings, in the arena, or empty when it will not fit.
+fn keepText(arena: std.mem.Allocator, text: []const u8) []const u8 {
+    if (text.len == 0) return "";
+    return arena.dupe(u8, text) catch "";
 }
 
 /// How many connections the pool has thrown away rather than taken back,

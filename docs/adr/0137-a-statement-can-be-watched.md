@@ -65,7 +65,7 @@ pointer, because the `Tx` took it from there.
 
 **A plain function pointer, not an interface.** Everything a watcher needs is
 in the `Sent`. A `Db` is a Service, shared by every request in flight
-([ADR 0011](0011-a-service-is-shared-and-a-handler-may-not-write-to-one.md)),
+([ADR 0011](0011-shared-services-need-a-lock-from-the-bulkhead.md)),
 so anything a watcher closed over would need a lock this module cannot see —
 and the two things people actually write, a log line and a counter, need
 neither.

@@ -93,7 +93,7 @@ read as the next response. There is no version of this that is only a log line.
 **Working the length out ourselves by buffering the whole body first.** That is
 `send`, and it is already there. The point of a stream is that the body does
 not have to exist in memory at once
-([ADR 0020](0020-a-response-can-be-written-in-pieces.md)).
+([ADR 0020](0020-a-request-that-lasts-is-still-one-request.md)).
 
 **A trailer.** HTTP/1.1 can put a length in a trailer after a chunked body, and
 almost nothing reads trailers. It would answer neither of the two things this

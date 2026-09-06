@@ -95,6 +95,11 @@ pub fn open(gpa: std.mem.Allocator, options: Options) store.OpenError!Store {
 pub const Object = bucket.Object;
 pub const Meta = bucket.Meta;
 pub const Presigned = bucket.Presigned;
+/// A browser's own upload: what to ask for, and the form that comes back
+/// (ADR 0141).
+pub const Post = bucket.Post;
+pub const Posted = bucket.Posted;
+pub const Field = bucket.Field;
 pub const Range = bucket.Range;
 pub const Style = bucket.Style;
 pub const Sse = bucket.Sse;

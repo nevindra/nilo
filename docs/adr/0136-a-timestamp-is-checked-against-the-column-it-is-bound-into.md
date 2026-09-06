@@ -44,7 +44,7 @@ effect.
 The other three types the two databases store differently are all *sent* as
 text on SQLite, and each says so with a form declaration the write path reads:
 `uuid_form`, `json_form` and `enum_form`
-([ADR 0078](0078-a-uuid-is-sixteen-bytes-or-thirty-six-characters.md),
+([ADR 0078](0078-a-uuid-is-whatever-the-database-stores.md),
 [ADR 0119](0119-the-sqlite-write-path-is-compiled.md)). A user type reached
 through `nilo_column`/`nilo_read`/`nilo_write` is text by definition
 ([ADR 0055](0055-a-column-type-can-come-from-outside-this-module.md)).

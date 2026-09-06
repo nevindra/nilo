@@ -209,6 +209,15 @@ pub const AsText = types.AsText;
 pub const Column = wire.Column;
 pub const Error = wire.Error;
 
+/// What the database said about a statement it refused, as `Sent.problem`
+/// carries it ([ADR 0146](../docs/adr/0146-a-statement-that-failed-says-what-the-database-said.md)).
+///
+/// `Error` is what a handler switches on; this is the text behind it, and
+/// before it existed the whole of that text was a `std.log.err` line no
+/// program could reach. It lives in the Scope's arena, so a watcher keeping
+/// one past the request copies it.
+pub const Problem = wire.Problem;
+
 /// What a transaction is begun with, and what a read holds on to. Both are
 /// written as literals at the call — `db.begin(c, .{ .isolation = .serializable })`,
 /// `.lock = .update` — so naming either type is for a caller keeping one in a

@@ -5,7 +5,7 @@ The whole surface, as a list. For what any of it is *for*, see
 
 ## The modules
 
-Nine ship, and a project links only what it imports
+Ten ship, and a project links only what it imports
 ([ADR 0041](./adr/0041-a-module-sits-where-the-loop-puts-it.md),
 [ADR 0042](./adr/0042-the-bottom-layer-holds-more-than-one-module.md)).
 
@@ -18,6 +18,7 @@ Nine ship, and a project links only what it imports
 | `nilo_config` | settings out of the environment | [below](#nilo_config) |
 | `nilo_pw` | password hashing | [below](#nilo_pw) |
 | `nilo_cache` | an expiring cache in this process | [below](#nilo_cache) |
+| `nilo_jwt` | checking somebody else's signed token | [below](#nilo_jwt) |
 | `nilo_fetch` | calling somebody else's HTTP API | [below](#nilo_fetch) |
 | `nilo_core` | `Str`, the [Scope](#scope) and [percent coding](#nilo_corepercent), shared by the rest | [below](#run) |
 
@@ -29,6 +30,7 @@ const id = @import("nilo_id");        // only if you make identifiers
 const config = @import("nilo_config");// only if you read settings
 const pw = @import("nilo_pw");        // only if you hash passwords
 const cache = @import("nilo_cache");  // only if you cache something
+const jwt = @import("nilo_jwt");      // only if you verify somebody else's tokens
 ```
 
 **There is no module called `nilo`.** The word names the project — the `nilo: `
@@ -60,6 +62,7 @@ pub const panic = nilo.panic;                     // optional: name the request 
 | `app.useOn(prefix, mw)` | middleware, under a path prefix |
 | `app.without(mw)` | the same App with `mw` off for the routes registered through what comes back — how a sign-up route sits inside a guarded prefix ([ADR 0080](./adr/0080-a-route-can-say-it-is-not-covered.md)) |
 | `app.with(mw)` | the other direction: the same App with `mw` **on** for the routes registered through what comes back, so one endpoint can be guarded where its neighbours are not ([ADR 0126](./adr/0126-a-route-can-say-what-covers-it.md)) |
+| `app.named("listPartners")` | the same App with the next route registered through what comes back carrying that as its `operationId`, instead of the one derived from the method and the path ([ADR 0149](./adr/0149-a-route-can-say-its-own-name.md)) |
 | `app.group(prefix)` | a group — see below |
 | `app.get / post / put / delete / patch / head / options (pattern, handler)` | a route |
 | `app.route(method, pattern, handler)` | any other method |
@@ -173,6 +176,7 @@ series at all. See [Metrics](./guide/metrics.md).
 | `*Ctx` | the request itself |
 | `*Db`, `*const Config` | a service, by type |
 | `u32`, `f64`, `Str`, `bool`, an enum | a path param, positionally |
+| a type with `nilo_parse` | a path param too — `sql.Uuid` is one |
 | `Query(T)` | the query string as a struct |
 | `Form(T)` | the body as an HTML form — urlencoded or multipart |
 | `Bound(W)` | any of the three above, with its failures instead of a 400 |
@@ -184,6 +188,27 @@ series at all. See [Metrics](./guide/metrics.md).
 A body field may be `Patch(T)`, which tells "not sent" from "sent as null":
 `.absent`, `.cleared`, `.value`. Give it `= .absent` as its default;
 `.orNull()` collapses the two empty cases.
+
+**A path param may also be a type that parses itself.** Give a type
+`pub fn nilo_parse(text: []const u8) ?Self` and nilo calls it with the segment,
+answering 400 when it returns null — so a malformed uuid is refused at the
+router instead of in every handler. `sql.Uuid` already carries it:
+
+<!-- compiles -->
+```zig
+fn showDoc(db: *Db, c: *nilo.Ctx, doc_id: sql.Uuid) !?Doc {
+    return db.find(Doc, c, doc_id);
+}
+```
+
+on `/docs/:doc_id` is the whole of it. What the document says about the param comes
+from the type as well: a `Uuid` publishes `{"type":"string","format":"uuid"}`
+through its `nilo_openapi`, so a generated client gets the format rather than a
+bare string. The declaration is looked for by name and never imported, which is
+what lets a module in the bottom layer offer it
+([ADR 0142](./adr/0142-a-path-param-can-parse-itself.md)). This is for a path
+param; a `Query(T)` or `Form(T)` field is still a `Str`, a number, a `bool` or
+an enum.
 
 `Form(T)` and a plain struct are the same slot — a form *is* the body — so
 asking for both is a compile error. A `Form(T)` field is a `Str`, a number, a
@@ -240,6 +265,14 @@ Redirect(303).to("/welcome")                               // written `return .t
 Redirect(303).with("/welcome", .of(&.{…}))                 // …with headers of its own
 FileBody{ .dir = files.dir, .name = name }                 // `?FileBody` — null is a 404
 ```
+
+**A handler that also takes a `*Ctx` and returns `void` is the one case the
+document cannot describe.** It sends 200 with an empty body if the handler
+wrote nothing, and whatever the handler wrote if it did, and nilo has no way to
+tell which from the signature — so the description says it does not know, and
+`listen()` says how many routes are in that state. A handler that means "200,
+empty" says so by returning `Status(200, void)` and is described like anything
+else ([ADR 0150](./adr/0150-a-ctx-handler-that-returns-nothing-may-have-written-it.md)).
 
 `Redirect` takes 301, 302, 303, 307 or 308; anything else is a compile error.
 303 is the one a form POST wants.
@@ -750,8 +783,35 @@ Store twice is a no-op.
 | `bucket.delete(c, key)` | |
 | `bucket.head(c, key)` | `Meta` — `len`, `content_type`, `etag` |
 | `bucket.presign(c, key, seconds)` | `Presigned` — `url` and `expires_at`. No socket |
+| `bucket.presignPost(c, key, .{ .seconds = 900 })` | `Posted` — `url`, `fields` and `expires_at`, for a browser uploading straight to the bucket. No socket |
 
 `c` is a Scope, the same as everywhere else.
+
+**A presigned POST is a form rather than a link.** `presign` gives somebody a URL
+to fetch; `presignPost` gives a browser everything it needs to upload without the
+bytes passing through your server. `url` is the bucket, not the key, and `fields`
+go into the form in the order they come back, with the file input **last**. S3
+ignores whatever follows the file part.
+
+| `s3.Post` | Default | |
+|---|---|---|
+| `seconds` | — | clamped to `presign_max` and to what the credentials have left, the same three ways `presign` is |
+| `content_type` | null | an `eq` condition on `$Content-Type`. Null lets the browser send what it likes |
+| `max_bytes` | the bucket's `max_bytes` | **clamped to it, and defaulted to it**, so a form with no ceiling is not something this hands out |
+| `prefix` | false | `key` is the start of a key rather than the whole of one, so the browser picks the filename. The condition becomes `starts-with` |
+
+```html
+<form action="{url}" method="post" enctype="multipart/form-data">
+  <!-- one hidden input per field, in order -->
+  <input type="file" name="file">   <!-- last -->
+</form>
+```
+
+The reason it is here rather than in your application is one line of SigV4: the
+policy is signed with the key ADR 0069 derives once a day, and a second
+implementation of that outside nilo is two places that have to agree about a
+rotation. They disagree at 00:00 UTC, and the symptom is uploads failing with a
+403 that says nothing.
 
 **`s3.Options`**, given to `open`:
 
@@ -1119,6 +1179,91 @@ rows where go-cache is between a third and three times faster, and why).
 have two caches that do not agree, neither survives a restart, and nothing here
 reaches a network. That is the trade the module is for; ADR 0139 argues it, and
 names `nilo_redis` as the other answer nobody has needed yet.
+
+## `nilo_jwt`
+
+Checking somebody else's signed token, and nothing that needs a loop
+([ADR 0140](./adr/0140-nilo-verifies-a-token-and-does-not-fetch-one.md)). A
+tool module: it imports nothing, so `zig test jwt/jwt.zig` runs the whole of
+it.
+
+<!-- compiles -->
+```zig
+const jwt = @import("nilo_jwt");
+
+const Claims = struct {
+    sub: []const u8,
+    email: []const u8,
+    email_verified: bool,
+};
+
+fn signIn(gpa: std.mem.Allocator, keys: *const jwt.Keys, id_token: []const u8) !Claims {
+    return jwt.verify(Claims, gpa, id_token, .{
+        .keys = keys,
+        .issuer = "https://accounts.google.com",
+        .audience = "…apps.googleusercontent.com",
+        .now_s = @divFloor(nilo.nowMillis(), 1000),
+    });
+}
+```
+
+| | |
+|---|---|
+| `jwt.parseKeys(gpa, bytes)` | `!Keys` — a JWKS document read into the keys it can verify with |
+| `keys.deinit()` | frees the lot |
+| `keys.find(kid)` | `?Key`. A set with one key answers for a token that named none |
+| `jwt.verify(Claims, gpa, token, opts)` | `!Claims` — the whole check, then the payload |
+| `jwt.key_sizes` | the modulus lengths that have a branch: 256, 384, 512 bytes |
+
+`Options`:
+
+| | |
+|---|---|
+| `.keys` | `*const Keys`, the issuer's |
+| `.issuer` | refuse a token whose `iss` is not this. Null skips it |
+| `.audience` | refuse a token whose `aud` does not carry this. Null skips it |
+| `.now_s` | seconds since the epoch. An argument, not a clock |
+| `.leeway_s` | how far the two clocks may disagree, both ways. `0` |
+
+**Fetching the key set is yours.** It is an HTTPS GET, which `nilo_fetch`
+already sends, and holding the answer is `nilo_cache`. What this module does
+is the half where being wrong is silent.
+
+<!-- compiles: body -->
+```zig
+const res = try client.get(&run, "https://www.googleapis.com/oauth2/v3/certs", .{});
+var keys = try jwt.parseKeys(gpa, res.body.view());
+defer keys.deinit();
+```
+
+**Three things are not options**, because each of them is a way to write a
+verifier that passes every test and is open:
+
+- **The algorithm is nilo's constant, never the token's `alg`.**
+  `{"alg":"none"}` and an HMAC signed with the RSA modulus you published are
+  both refused before a key is looked up.
+- **Nothing in the payload is read until the signature has passed.** An `exp`
+  off an unverified token is a number somebody chose.
+- **`exp` is required.** A credential with no end is not one.
+
+Strings in the returned claims point into the allocator you passed. Hand it
+`c.arena()` and there is nothing to free.
+
+| what it answers instead | when |
+|---|---|
+| `error.NotAToken` | not three base64url segments, or the header is not JSON |
+| `error.WrongAlgorithm` | the header says anything but `RS256`, `none` included |
+| `error.NoSuchKey` | the `kid` is not in the set, or none was named and the set has more than one key |
+| `error.BadSignature` | the key is right and the signature is not |
+| `error.NoExpiry` / `error.Expired` / `error.NotYetValid` | `exp` missing, `exp` passed, `nbf` not arrived |
+| `error.WrongIssuer` / `error.WrongAudience` | `iss` or `aud` is not what you named |
+| `error.ClaimsNotReadable` | the signature passed and the payload does not fit your struct |
+| `error.KeySizeNotSupported` | a modulus that is not 2048, 3072 or 4096 bits |
+
+**What it will not do**: HS256 and the EC families, encrypted tokens, signing,
+discovery, PKCE and the nonce. Signing is absent because a server issuing its
+own sessions has [`Session(T)`](#sessiont) and needs no token; the rest is the
+sign-in flow, which is yours.
 
 ## `Dir`
 
@@ -1736,6 +1881,18 @@ password as often as they are an id
 ready-made one that writes a debug line. A `Db` nobody watches pays one null
 test per statement.
 
+A statement that failed also carries `sent.problem`: the database's own
+`message`, its SQLSTATE `code`, `severity`, `detail`, `hint` and the
+`constraint` that was violated
+([ADR 0146](./adr/0146-a-statement-that-failed-says-what-the-database-said.md)).
+Fields a given database does not answer are empty rather than null — SQLite has
+no SQLSTATE and does not invent one. When the driver refused the statement
+before it left the process, `message` is the Zig error's name, which is the case
+this exists for: `error.QueryFailed` used to be the whole of what a program
+could see. It lives in the request's arena, so a watcher keeping one past the
+request copies it, and it still never reaches the client
+([ADR 0025](./adr/0025-every-failure-answers-with-the-same-json-body.md)).
+
 `db.nilo_start(io, limits)` is what `listen()` calls; a program starting a `Db`
 by hand passes `.off` and the pool's waits are bounded by nothing.
 
@@ -1770,7 +1927,8 @@ Every statement this module sends is a comptime constant, so it is kept
 prepared on its connection under a name derived from its own text — worth
 **30% of a key lookup and 14% of a page with a sort**, ~12 µs either way
 ([ADR 0057](./adr/0057-a-statement-that-is-a-constant-can-be-prepared-once.md)).
-`db.raw` is never prepared, because its text arrives at run time. Set
+`db.raw` is prepared too, since its text is comptime
+([ADR 0148](./adr/0148-a-raw-statement-is-counted-while-compiling.md)). Set
 `.prepared = false` behind a **connection pooler in transaction mode**
 (pgbouncer), which hands out a different server connection per transaction.
 
@@ -1910,7 +2068,7 @@ request ([ADR 0041](./adr/0041-a-module-sits-where-the-loop-puts-it.md)).
 | `db.delete(User, c, .{ .where = … })` | `!usize` — rows deleted. `.where` required |
 | `db.deleteReturning(User, c, .{ .where = … })` | `![]User` — the rows that were removed |
 | `db.stream(User, c, .{ … })` | rows one at a time; see below |
-| `db.raw(User, c, sql, .{ … })` | `![]User` — a statement this module will not write |
+| `db.raw(User, c, sql, .{ … })` | `![]User` — a statement this module will not write. `sql` is **comptime**: the `SELECT` list is counted against the Row's fields and each column that plainly has a name is checked against the field in its position, and the statement is kept prepared like every other ([ADR 0148](./adr/0148-a-raw-statement-is-counted-while-compiling.md)) |
 | `db.exec(c, sql, .{ … })` | `!usize` — a statement that answers with *nothing*, and the rows it changed. `CREATE TABLE`, `CREATE INDEX`, `PRAGMA`, `VACUUM`. No Row, because none is being filled ([ADR 0078](./adr/0078-a-uuid-is-whatever-the-database-stores.md)) |
 | `db.begin(c, .{})` | `!Tx`. `.{ .isolation = …, .read_only = … }` rides on the `BEGIN`; see below |
 
@@ -2135,7 +2293,7 @@ than asking the server to release a mark it no longer has.
 | `sql.Decimal` | a `numeric`, held as its digits. `.text` is the value; there is no arithmetic. Writes itself into JSON as a **string**, so a consumer's `JSON.parse` cannot round it into an `f64` ([ADR 0050](./adr/0050-a-numeric-is-digits-and-a-string-in-json.md)) |
 | `sql.Interval`, `sql.Inet` | an `interval` and an `inet`, held as the text Postgres prints. `.text` is the value |
 | `sql.AsText("money")` | any Postgres type at all, held as its text — the door out of this table. A column type of your own is any struct or enum with `nilo_column`, `nilo_read(text, arena)` and `nilo_write(arena)`; see below |
-| a slice | an array column, with no wrapper: `[]const Str` is `text[]`, `[]const i32` is `int4[]`, `?[]const i32` a nullable one, `[]const ?i32` one whose elements may be NULL ([ADR 0051](./adr/0051-an-array-is-a-slice-and-a-slice-is-one-deep.md)). `[]const u8` is text, so a list of text is `[]const Str` or `[]const []const u8`. Not available in `db.stream` |
+| a slice | an array column, with no wrapper: `[]const Str` is `text[]`, `[]const i32` is `int4[]`, `?[]const i32` a nullable one, `[]const ?i32` one whose elements may be NULL ([ADR 0051](./adr/0051-an-array-is-a-slice-and-a-slice-is-one-deep.md)). `[]const u8` is text, so a list of text is `[]const Str` or `[]const []const u8`. `[]const sql.Uuid` is `uuid[]`, in both directions and as an `.in` list ([ADR 0145](./adr/0145-a-raw-parameter-is-converted-the-way-a-rows-is.md)). Not available in `db.stream` |
 | an enum | read out of `text`, a `varchar` or a Postgres enum. A value the Zig enum does not have fails the request. Add `pub const nilo_column = "user_role"` to it and the column is checked at startup — and can be batched |
 
 #### A column type of your own
@@ -2183,4 +2341,4 @@ than the process.
 | `error.Disconnected` | the database went away, or was never there |
 | `error.TimedOut` | a statement ran past `tx.deadline`. No default status — what a deadline means is the handler's to decide |
 | `error.Locked` | a `.lock = .update_nowait` found a row somebody else is holding. No default status — a held row is a 409, a 503 or a retry depending on the endpoint |
-| `error.QueryFailed` | anything else. The server's text is logged, never sent |
+| `error.QueryFailed` | anything else. The server's own words are on `Sent.problem` for a watcher and in the log; they never reach the client ([ADR 0146](./adr/0146-a-statement-that-failed-says-what-the-database-said.md)) |

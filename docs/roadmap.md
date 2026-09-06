@@ -68,6 +68,7 @@ other module's.
 | [`nilo_config`](#nilo_config-settings) | needs no loop | reading a name the field is not called |
 | [`nilo_pw`](#nilo_pw-hashing-a-password) | needs no loop | a Cost floor that weighs the wrong half, and a patch `std` should have |
 | [`nilo_cache`](#nilo_cache-an-expiring-cache-in-this-process) | needs no loop | a read that costs two cache misses where a Go map costs one |
+| [`nilo_jwt`](#nilo_jwt-checking-somebody-elses-token) | needs no loop | no number against a verification, and only RS256 |
 | [`nilo_fetch`](#nilo_fetch-calling-somebody-elses-api) | borrows the loop | 4,139 bytes of stack per idle connection, and nothing measured through TLS |
 | [`nilo_http`](#nilo_http-the-server) | owns the loop | a megabyte of request arena held per connection, nothing that reads a `Forwarded` header, and a long tail |
 | [`nilo_sql`](#nilo_sql-postgres-and-sqlite) | borrows the loop | a `Timestamp` the two halves of SQLite disagree about, a pool option dropped without a word, and where migrations live |
@@ -370,6 +371,58 @@ saves.
 
 **What would settle it:** the retention curve and the read cost, both swept
 across ways, on a machine where the read cost is not mostly memory latency.
+
+---
+
+## `nilo_jwt`: checking somebody else's token
+
+RS256 and a JWKS document, and nothing else
+([ADR 0140](./adr/0140-nilo-verifies-a-token-and-does-not-fetch-one.md)). The
+arithmetic is `std.crypto.Certificate.rsa`'s; what this adds is the order the
+checks happen in and the switch over key sizes. It imports nothing, so
+`zig test jwt/jwt.zig` is the whole of its suite.
+
+### Next
+
+Nothing queued.
+
+### Known gaps
+
+**A verification has no number against it.** Nobody knows what one costs, so
+nobody knows whether a sign-in endpoint should cache the answer or just do it.
+An RSA modular exponentiation at 2048 bits is the whole of the work and it is
+not small, which is the reason to expect the number to matter.
+
+**Waiting on: a number**, and a row in [`bench/result/`](../bench/result/) to
+put it in.
+
+**Only RS256, and only 2048, 3072 and 4096 bits.** A key size with no branch
+is `error.KeySizeNotSupported` rather than a best effort, which is the right
+refusal and is still a refusal. The EC families are what an issuer moves to
+when it moves.
+
+**Waiting on: a caller** who has an issuer this cannot read.
+
+**HS256 is absent on purpose and that is not free.** A shared-secret token is
+what a service issues to itself, and the reason it is not here is that a
+module verifying both algorithms has to be careful about the confusion attack
+that a module verifying one cannot commit. A caller who needs it has to write
+four lines of `HmacSha256` beside this module and get the constant-time
+compare right on their own, which is the shape of mistake this module exists
+to prevent.
+
+**Waiting on: a caller.**
+
+### Not decided
+
+**Whether nilo should hold the key set as well as read it.** Today the caller
+fetches with `nilo_fetch`, holds with `nilo_cache`, and decides when a `kid`
+miss means "refetch" rather than "refuse". That is three lines and one real
+decision, and every one of them is visible. A `Jwks.fetch(url)` that did all
+three would be one line and would hide the decision.
+
+**What would settle it:** two callers writing the same refresh policy. One
+caller writing one is a caller, not a pattern.
 
 ---
 
@@ -690,7 +743,10 @@ because the header is a line of Zig inside the resolver rather than something
 in a type.
 
 **Waiting on: a design** that does not become a second thing to keep in step
-with the resolver. That drift is what the generated document exists to avoid.
+with the resolver. That drift is what the generated document exists to avoid. A
+consumer has now turned up who generates a frontend client from the document
+and is not blocked by the omission, which is worth knowing: this is a gap in
+what the document says rather than in what it is usable for.
 
 **The API description names one failure, and endpoints have several.** `!?T`
 puts a 404 in the document because the signature settles it
@@ -778,7 +834,9 @@ hundreds of them.
 
 **Waiting on: a number.** The numbers no longer point at it urgently. `zig
 build profile` is the harness for the day they do, and two attempts that lost
-are written up in [`history.md`](./history.md) so they are not repeated.
+are written up in [`history.md`](./history.md) so they are not repeated. An
+application with 203 routes now exists, against a threshold measured at about
+40, and has said it will report a number rather than ask for the work.
 
 **A 404 or a 405 with middleware registered costs one allocation.** Routes and
 static files have their chains resolved at `listen()`, so neither pays for the
@@ -1150,6 +1208,12 @@ catching it is why arrays are judged — the same fix was never applied to the
 scalar case, which is the one a first-time reader hits by writing a plain struct
 field.
 
+One of these was closed the hard way rather than by the general fix: `uuid[]`
+had no case in `listAccepts` at all, so a Row reading one passed the check and
+failed on the first read. It answers `_uuid` now
+([ADR 0145](./adr/0145-a-raw-parameter-is-converted-the-way-a-rows-is.md)), and
+the gap that let it through is untouched.
+
 **Waiting on: ready.** `assertStreamable` is the shape: a comptime walk over the
 Row's fields at the top of `fill`, refusing a type that is neither a Dialect's
 nor one of the protocols in `types.zig`, naming the field and the four ways to
@@ -1226,6 +1290,11 @@ nothing to derive the list from; what there *is* is the fact that a `Db` with
 `checking` on is one line and is also noise for a program that meant it; an
 explicit `db.checking(&.{})` to say so is a second way to spell nothing.
 
+What is left here is only the forgetting. The *second* way to end up without a
+check — calling `checking` and getting a warning because the default pool had
+dialled nothing — is closed
+([ADR 0144](./adr/0144-a-check-dials-the-connection-it-needs.md)).
+
 **A key is one column, so a composite key has no `find` and no batch update.**
 `row.keyOf` answers a single name, `statement.find` writes one `=` against it,
 and `updateMany` joins on it. A table keyed by `(tenant_id, id)` — which is what
@@ -1234,8 +1303,12 @@ and has no batch update at all. `.key = .{ .tenant_id, .id }` is the spelling
 the rest of the module already uses for a tuple of columns, since
 `conflictColumns` reads exactly that shape for an upsert target.
 
-**Waiting on: a caller.** The `find` half is small; `updateMany` joining on two
-columns is a second `AND` in the fragment and nothing else.
+**Waiting on: ready.** A caller has now reached it, on a schema whose join
+tables are keyed `(partner_id, capability)`. The `find` half is small;
+`updateMany` joining on two columns is a second `AND` in the fragment and
+nothing else. The third thing the same shape used to cost — `insertOrIgnore`
+demanding a key `DO NOTHING` never writes — was separable and is closed
+([ADR 0143](./adr/0143-do-nothing-has-no-key-to-leave-out.md)).
 
 **An upsert cannot name a constraint or a partial index.** `ON CONFLICT` takes
 only a column tuple, so a unique constraint by name
@@ -1259,8 +1332,11 @@ bound parameter — but a search box wired straight to `.like` is wrong in a way
 that only shows up on the input nobody tried. Every caller ends up writing the
 same escape.
 
-**Waiting on: a design.** The fix everybody wants is `contains`, `starts_with`
-and `ends_with`, which build the pattern *and* escape it — and that means an
+**Waiting on: a design.** A caller with a search box on most of its list
+endpoints has confirmed it, and confirmed that the design problem is the real
+part: they will write the escape at each call site meanwhile. The fix everybody
+wants is `contains`, `starts_with` and `ends_with`, which build the pattern
+*and* escape it — and that means an
 allocation per condition in a module whose whole claim is that a statement costs
 none, plus an `ESCAPE` clause the two Dialects spell the same way but SQLite
 applies differently to `LIKE` on a `BLOB`.

@@ -2068,3 +2068,160 @@ this one because measuring it had been made to look optional.
 Rows in [`bench/result/http.md`](../bench/result/http.md). The rule: **an entry
 may state a number or state that nobody has taken one. Guessing at it in the
 entry is what stops it being taken.**
+
+## Both optimize modes are one gate and two processes
+
+The live test for `presignPost` failed twice out of two under `zig build test-s3`
+and passed both of its own binaries when run by hand. It was not a signature
+problem and not a MinIO problem: `test-s3` builds Debug and ReleaseSafe and runs
+them **at the same time**, against one server, and both were writing and deleting
+`live/posted.txt`. The other binary's cleanup landed between this one's POST and
+its read.
+
+Every other test in `s3/live.zig` shares a key across the two and gets away with
+it, which is why nobody had met this. The POST is the slow one: a multipart body
+through a fresh connection with no pool behind it, and that is enough window.
+The key now carries `@tagName(builtin.mode)`.
+
+The rule is about reading the failure rather than about S3. **"Both optimize
+modes matter" means two processes, and shared external state is shared between
+them.** A test that passes standalone and fails under `zig build` has said which
+kind of bug it is, and it is never the one being tested.
+
+## The check that could not run was the one you get by writing `.{}`
+
+`db.checking(&.{ … })` exists so that a Row disagreeing with its table stops a
+deploy. On the defaults it stopped nothing: `connect_on_init` is 0, so the pool
+reached the check having dialled no connection, `pool.acquire()` answered
+`Disconnected`, and startup carried on with a warning
+([ADR 0144](./adr/0144-a-check-dials-the-connection-it-needs.md)). Not a race.
+Every cold boot, on every program that took the defaults and did everything
+else right.
+
+The roadmap already carried "the schema check is opt-in and forgetting it is
+silent". This is the other one, and it is worse, because forgetting is at least
+something a person did.
+
+**It is the second time in this file that a behaviour survived because its only
+evidence was an absence.** ADR 0062 closed on exactly that warning after
+`connect_on_init` turned out never to have worked, and named the reason: every
+test in the suite has a database, so the *absence* of one is never exercised.
+The same sentence covers this one. A check that cannot run and a check that
+passes look identical in a log nobody reads and in a green deploy.
+
+The generalisation worth carrying: **an option whose default disables a feature
+somewhere else is not visible from either place.** `connect_on_init = 0` is
+correct where it is written, `checking` is correct where it is written, and the
+interaction between them was in neither file.
+
+## A search that stopped at the filename
+
+A survey of `std.crypto` for RSA looked for `rsa.zig` under `lib/std/crypto/`,
+found none, and concluded that RSA is not in the standard library — so RS256
+would have to be written from scratch or vendored, and probably refused.
+
+`std.crypto.Certificate.rsa` is public. `PublicKey.fromBytes`,
+`PKCS1v1_5Signature.verify` and the DigestInfo prefix table are all there, in
+`Certificate.zig`, because that is the code that verifies a TLS certificate
+chain. The whole module was a switch over key sizes on top of it.
+
+The person who filed the request had read the file and cited the line. The
+survey had grepped the directory listing.
+
+**A public API is not filed where its name says.** When the question is "does
+this exist", the answer is in the declarations, not in the filenames — and a
+"no" reached by listing a directory is not an answer, it is a search that has
+not finished. This is the same shape as the four blockers in this file that had
+already gone, and it cost less only because somebody else had done the reading.
+
+## A framework's own output is a spelling somebody hands back
+
+nilo's path param is `:id`. Its generated OpenAPI document prints `/users/{id}`,
+because that is what OpenAPI writes. A caller with 203 paths had every one of
+them spelled that way, pasted them into route registrations, and got 203 routes
+matching five literal characters
+([ADR 0147](./adr/0147-a-pattern-written-the-way-the-document-prints-it.md)).
+
+On a route whose handler asked for the param it was already a compile error and
+a good one. On a route whose handler did not, there was no error at all, and
+the symptom was a 404 on a URL nilo's own document promised.
+
+**Anything the framework emits will come back as input**, from a person copying
+it or a tool generating from it. Every such spelling is worth one refusal, and
+the message is worth naming where the reader got it from rather than only what
+the rule is — "the `{}` form is what the OpenAPI document prints" is the
+sentence that stops them thinking they misread the guide.
+
+## The converter was there; one path had never called it
+
+`db.raw` and `db.exec` could not take a `sql.Uuid`. On Postgres that is
+`error.QueryFailed` at run time; on SQLite it is a `@compileError` from inside
+zqlite. Every statement this module writes takes one without complaint.
+
+The obvious reading is that a raw statement has no Row, so there is nothing to
+look the parameter up in. It is wrong. `forWire` switches on the **value's**
+type and `WireWrite` takes a Dialect and a bare type — neither has ever
+consulted a Row. The conversion a `db.select` parameter goes through was
+already available on the raw path
+([ADR 0145](./adr/0145-a-raw-parameter-is-converted-the-way-a-rows-is.md)), and
+the whole fix is one walk over the tuple.
+
+The same shape, twice more in the same afternoon. `[]const Uuid` did not bind,
+because the helper that knew a `Uuid` is a slice inside an array was called
+`BatchWrite` and a batch was its only caller — an `.in` list is the identical
+problem and nobody looked at a function named after somebody else's feature. And
+`dialect.Postgres.accepts` had no case for `uuid[]` at all, so it answered null,
+which `schema.Expectation.accepted` reads as *accept anything*: a Row with that
+column passed the startup check without anything having looked at the column.
+
+**A gap that looks like a missing feature is worth ten minutes as a missing
+call.** All three cost more to report than to fix, and the reason all three
+survived is that each one was correct in the file it was written in.
+
+## Nothing was logged, and the sentence saying otherwise was half true
+
+The reference said the server's text for a failed statement is "logged, never
+sent". A caller got `error.QueryFailed`, found nothing at any level they could
+switch on, found nothing in Postgres's log either, and pasted the same SQL into
+`psql`, where it ran.
+
+`translate` logged inside `if (conn.err) |server|`. `conn.err` is set by an
+ErrorResponse, so it is null whenever the statement never left the process — a
+value pg.zig refuses to bind is the ordinary way there. The `else` arm returned
+`error.QueryFailed` and dropped `@errorName(err)` on the floor. The missing word
+was `CannotBindStruct`.
+
+So the documented sentence was true on the path with a database behind it and
+false on the path without one, and every test in the suite has a database. The
+fix is two things and the second is the general one: the server's own words now
+ride on `Sent.problem` where a program can read them
+([ADR 0146](./adr/0146-a-statement-that-failed-says-what-the-database-said.md)),
+and the catch-all arm names the error instead of swallowing it.
+
+**A `switch` arm that turns an error into a coarser one deletes the only
+information the failure had**, and the deletion is invisible, because what would
+have shown it is a log line nobody wrote. This is the third time in this file
+that a behaviour survived because its only evidence was an absence.
+
+## The first thing a new comptime check catches is your own code
+
+Turning on the `SELECT`-list count for `db.raw`
+([ADR 0148](./adr/0148-a-raw-statement-is-counted-while-compiling.md)) refused
+four call sites in this repository, after the ADR had said none would have to
+change. Two were placeholders — `db.raw(Person, c, "SELECT 1", .{})`, written
+to make a call compile rather than to mean anything — and two were tests
+asserting the behaviour the ADR reverses.
+
+The fifth was a bug in the check, and it was found by a published snippet.
+`WITH gone AS (DELETE … RETURNING id) INSERT INTO audit (…) SELECT 'x', id
+FROM gone RETURNING ref AS id` has a `SELECT` and a `RETURNING` at depth zero.
+The scanner took the first word it found, read the insert's *source* list, and
+refused a statement that works. **A check that refuses working code is the one
+failure this kind of check cannot have**, and the guide is where the hardest
+statement in the repository lives — because the guide is written to show the
+hard case.
+
+So the rule to carry: **a comptime check ships with `zig build snippets`, not
+after it.** ADR 0083 made the guide compile so it could not drift; the second
+thing it buys is a corpus of deliberately awkward real statements, and it is
+the only one this repository has.

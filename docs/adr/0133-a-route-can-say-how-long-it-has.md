@@ -1,6 +1,6 @@
 # A route can say how long it has
 
-[ADR 0023](0023-a-request-that-waits-forever-is-a-request-that-holds-a-fiber.md)
+[ADR 0023](0023-a-deadline-belongs-to-an-operation-not-to-a-request.md)
 gave the Engine four deadlines, and every one of them bounds an *operation*: a
 head, one read of a body, one write, a gap between requests. None of them
 bounds the **request**. A handler that reads a body slowly, calls two services

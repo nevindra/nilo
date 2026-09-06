@@ -180,16 +180,23 @@ const setup =
     "CREATE TABLE " ++ list_table ++ " (" ++
     "  id bigint PRIMARY KEY," ++
     "  tags text[] NOT NULL," ++
-    "  scores integer[]" ++
+    "  scores integer[]," ++
+    // `uuid[]` is the array a schema of 145 uuid columns has as many of as it
+    // has parent tables, and it is the one the module had no case for at all
+    // (ADR 0145). Nullable, so the four rows written before it still say what
+    // they meant.
+    "  owners uuid[]" ++
     ");" ++
     // Row 1 is the ordinary case, row 2 the two edge cases an array has that
     // nothing else does — empty, and null — and rows 3 and 4 are the two
     // shapes Postgres allows and a Zig slice cannot hold.
-    "INSERT INTO " ++ list_table ++ " (id, tags, scores) VALUES" ++
-    "  (1, ARRAY['urgent','billing'], ARRAY[10,20,30])," ++
-    "  (2, ARRAY[]::text[], NULL)," ++
-    "  (3, ARRAY['solo',NULL], NULL)," ++
-    "  (4, ARRAY['deep'], ARRAY[[1,2],[3,4]]);" ++
+    "INSERT INTO " ++ list_table ++ " (id, tags, scores, owners) VALUES" ++
+    "  (1, ARRAY['urgent','billing'], ARRAY[10,20,30]," ++
+    "     ARRAY['550e8400-e29b-41d4-a716-446655440000'," ++
+    "           '550e8400-e29b-41d4-a716-446655440001']::uuid[])," ++
+    "  (2, ARRAY[]::text[], NULL, ARRAY[]::uuid[])," ++
+    "  (3, ARRAY['solo',NULL], NULL, NULL)," ++
+    "  (4, ARRAY['deep'], ARRAY[[1,2],[3,4]], NULL);" ++
     "DROP SCHEMA IF EXISTS " ++ other_schema ++ " CASCADE;" ++
     "CREATE SCHEMA " ++ other_schema ++ ";" ++
     "CREATE TABLE " ++ scoped_table ++ " (" ++
@@ -255,7 +262,7 @@ const Live = struct {
         while (it.next()) |raw| {
             const statement = std.mem.trim(u8, raw, " \n\r\t");
             if (statement.len == 0) continue;
-            var rows = try wire.run(arena.allocator(), statement, .{}, null);
+            var rows = try wire.run(arena.allocator(), statement, .{}, null, null);
             wire.drain(&rows);
         }
 
@@ -278,7 +285,7 @@ test "a select the comptime half wrote comes back from a real Postgres" {
     const options = .{ .where = .{ .age = .{ .gt = 18 } }, .order = .{ .id = .asc } };
     const stmt = comptime @import("statement.zig").select(dialect.Postgres, Person, @TypeOf(options));
 
-    var rows = try live.wire.run(live.arena.allocator(), stmt.sql, .{@as(i32, 18)}, null);
+    var rows = try live.wire.run(live.arena.allocator(), stmt.sql, .{@as(i32, 18)}, null, null);
     defer live.wire.drain(&rows);
 
     var seen: usize = 0;
@@ -303,6 +310,7 @@ test "a null column reads as null and a present one does not" {
         live.arena.allocator(),
         "SELECT \"handle\" FROM \"" ++ table ++ "\" ORDER BY \"id\"",
         .{},
+        null,
         null,
     );
     defer live.wire.drain(&rows);
@@ -398,6 +406,7 @@ test "a unique violation is AlreadyExists rather than a message nobody translate
         "INSERT INTO \"" ++ table ++ "\" (id, email, age) VALUES ($1, $2, $3)",
         .{ @as(i64, 1), @as([]const u8, "dup@example.dev"), @as(i32, 30) },
         null,
+        null,
     );
     try testing.expectError(error.AlreadyExists, err);
 }
@@ -415,12 +424,12 @@ test "a connection comes back usable after a result set is left unread" {
     // would run out or reconnect its way through the pool.
     var round: usize = 0;
     while (round < 6) : (round += 1) {
-        var rows = try live.wire.run(arena, all, .{}, null);
+        var rows = try live.wire.run(arena, all, .{}, null, null);
         try testing.expect(try live.wire.next(&rows));
         live.wire.drain(&rows);
     }
 
-    var rows = try live.wire.run(arena, all, .{}, null);
+    var rows = try live.wire.run(arena, all, .{}, null, null);
     defer live.wire.drain(&rows);
     var seen: usize = 0;
     while (try live.wire.next(&rows)) : (seen += 1) {}
@@ -2241,6 +2250,173 @@ test "an array goes out to a column and comes back the same array" {
     });
     try testing.expectEqual(@as(usize, 0), empty.tags.len);
     try testing.expectEqual(@as(?[]const i32, null), empty.scores);
+}
+
+// -- a uuid, bound by hand and read in bulk -------------------------------
+
+/// The same table read for its `uuid[]` column. `tags` is here because it is
+/// `NOT NULL` and this Row writes as well as reads.
+const Owned = struct {
+    pub const nilo_table = .{ .name = list_table, .key = .id };
+
+    id: i64,
+    tags: []const nilo.Str,
+    owners: ?[]const types.Uuid,
+};
+
+test "a uuid bound bare to db.exec reaches the column without a text cast" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    // What the report was: this compiled and answered `error.QueryFailed`,
+    // with nothing logged at any level and nothing in Postgres's own log
+    // because the statement never arrived (ADR 0145, ADR 0146). The workaround
+    // was sending thirty-six characters and writing `$1::text::uuid`, which
+    // costs an arena allocation per id and twenty bytes on the wire.
+    const token = try types.Uuid.parse("550e8400-e29b-41d4-a716-446655440009");
+    const changed = try stack.db.exec(
+        &run,
+        "UPDATE \"" ++ table ++ "\" SET token = $1 WHERE id = $2",
+        .{ token, @as(i64, 2) },
+    );
+    try testing.expectEqual(@as(usize, 1), changed);
+
+    // Read back through `db.raw` with the id bound bare as well, so both
+    // halves of the fix are on one path.
+    const Token = struct {
+        pub const nilo_table = .{ .name = table, .key = .id };
+        id: i64,
+        token: ?types.Uuid,
+    };
+    const back = try stack.db.raw(
+        Token,
+        &run,
+        "SELECT id, token FROM \"" ++ table ++ "\" WHERE token = $1",
+        .{token},
+    );
+    try testing.expectEqual(@as(usize, 1), back.len);
+    try testing.expectEqual(@as(i64, 2), back[0].id);
+    try testing.expectEqualSlices(u8, &token.bytes, &back[0].token.?.bytes);
+}
+
+test "a uuid array goes out to a column and comes back the same array" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const one = try types.Uuid.parse("550e8400-e29b-41d4-a716-446655440000");
+    const two = try types.Uuid.parse("550e8400-e29b-41d4-a716-446655440001");
+
+    const read = (try stack.db.find(Owned, &run, @as(i64, 1))).?;
+    try testing.expectEqual(@as(usize, 2), read.owners.?.len);
+    try testing.expectEqualSlices(u8, &one.bytes, &read.owners.?[0].bytes);
+    try testing.expectEqualSlices(u8, &two.bytes, &read.owners.?[1].bytes);
+
+    // Written, which is the half that stopped inside pg.zig: `[]const [16]u8`
+    // is `cannot bind value of type`, four frames down and about a type the
+    // caller never wrote (ADR 0145).
+    const made = try stack.db.insert(Owned, &run, .{
+        .id = @as(i64, 810),
+        .tags = &.{"written"},
+        .owners = @as(?[]const types.Uuid, &.{ two, one }),
+    });
+    try testing.expectEqualSlices(u8, &two.bytes, &made.owners.?[0].bytes);
+
+    // And the two edge cases every array column has.
+    const empty = (try stack.db.find(Owned, &run, @as(i64, 2))).?;
+    try testing.expectEqual(@as(usize, 0), empty.owners.?.len);
+    // Row 4 rather than row 3 for the null: row 3's `tags` holds a NULL among
+    // its elements, which this Row deliberately cannot read and which has a
+    // test of its own.
+    const absent = (try stack.db.find(Owned, &run, @as(i64, 4))).?;
+    try testing.expectEqual(@as(?[]const types.Uuid, null), absent.owners);
+}
+
+test "an `in` over uuids is the one statement that stops an N+1" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const Tokened = struct {
+        pub const nilo_table = .{ .name = table, .key = .id };
+        id: i64,
+        token: ?types.Uuid,
+    };
+
+    const ada = try types.Uuid.parse("550e8400-e29b-41d4-a716-446655440000");
+    const kid = try types.Uuid.parse("550e8400-e29b-41d4-a716-446655440001");
+
+    // `WHERE token = ANY($1)`, which is what a list that attaches children to
+    // its rows needs and what did not compile at all.
+    const found = try stack.db.select(Tokened, &run, .{
+        .where = .{ .token = .{ .in = &[_]types.Uuid{ ada, kid } } },
+        .order = .{ .id = .asc },
+    });
+    try testing.expectEqual(@as(usize, 2), found.len);
+    try testing.expectEqual(@as(i64, 1), found[0].id);
+    try testing.expectEqual(@as(i64, 3), found[1].id);
+
+    // An empty list matches nothing rather than failing, which is what
+    // `= ANY('{}')` does.
+    const none = try stack.db.select(Tokened, &run, .{
+        .where = .{ .token = .{ .in = &[_]types.Uuid{} } },
+    });
+    try testing.expectEqual(@as(usize, 0), none.len);
+}
+
+// -- what a failed statement says -----------------------------------------
+
+/// What the watcher below was told. A file-scope variable because a `Watcher`
+/// is a plain function pointer with nowhere to put a capture, which is
+/// [ADR 0137](../docs/adr/0137-a-statement-can-be-watched.md)'s own argument.
+var said: ?db_mod.Sent = null;
+
+fn recordSent(sent: db_mod.Sent) void {
+    said = sent;
+}
+
+test "a failed statement carries what Postgres said, not only that it failed" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    said = null;
+    stack.db.watching(recordSent);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    // A duplicate key, which is the failure with a name of its own — and the
+    // one this test can take, because the failures `translate` cannot name
+    // reach `std.log.err` and the test runner counts a logged `err` as a
+    // failed run (`http/test_root.zig`). What is being pinned is the same slot
+    // either way: `error.AlreadyExists` used to be the whole of what a program
+    // could see, and the constraint that was violated is the field that names
+    // the thing to go and fix (ADR 0146).
+    try testing.expectError(error.AlreadyExists, stack.db.exec(
+        &run,
+        "INSERT INTO \"" ++ table ++ "\" (id, email, age) VALUES ($1, $2, $3)",
+        .{ @as(i64, 1), "dup@example.dev", @as(i32, 30) },
+    ));
+
+    const sent = said orelse return error.NothingWatched;
+    try testing.expect(sent.failed);
+    const problem = sent.problem orelse return error.NoProblemReported;
+    try testing.expectEqualStrings("23505", problem.code);
+    try testing.expectEqualStrings("ERROR", problem.severity);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "duplicate key") != null);
+    try testing.expect(problem.constraint.len != 0);
+    try testing.expect(problem.detail.len != 0);
 }
 
 test "the schema comparison judges an array by the array it holds" {

@@ -197,10 +197,14 @@ pub const Hashing = struct {
 
 // ---- time ----
 
-/// The two spellings of one instant that SigV4 wants: `20260817T014233Z` for
-/// `x-amz-date`, and its first eight characters for the credential scope.
+/// The three spellings of one instant that SigV4 wants: `20260817T014233Z` for
+/// `x-amz-date`, its first eight characters for the credential scope, and
+/// `2026-08-17T01:42:33Z` for a POST policy's `expiration`.
 pub const Stamp = struct {
     text: [16]u8,
+
+    /// `2026-08-17T01:42:33Z` is twenty bytes.
+    pub const expiration_len = 20;
 
     pub fn at(unix_seconds: i64) Stamp {
         const secs: u64 = @intCast(@max(unix_seconds, 0));
@@ -228,6 +232,21 @@ pub const Stamp = struct {
 
     pub fn date(self: *const Stamp) *const [8]u8 {
         return self.text[0..8];
+    }
+
+    /// The one place SigV4 writes a moment the long way. A POST policy's
+    /// `expiration` is ISO 8601 with its separators; every other field in the
+    /// specification is the compact form above.
+    ///
+    /// It is the same sixteen characters with four punctuation marks put back,
+    /// so it is a reshuffle rather than a second date calculation. That is the
+    /// whole point: one place in this module can be wrong about what day it is
+    /// instead of two (ADR 0141).
+    pub fn expiration(self: *const Stamp, out: *[expiration_len]u8) []const u8 {
+        const t = &self.text;
+        return std.fmt.bufPrint(out, "{s}-{s}-{s}T{s}:{s}:{s}Z", .{
+            t[0..4], t[4..6], t[6..8], t[9..11], t[11..13], t[13..15],
+        }) catch unreachable; // twenty bytes into twenty bytes
     }
 };
 
@@ -496,6 +515,136 @@ pub fn presignQuery(
     return w.buffered();
 }
 
+// ---- a POST policy ----
+
+/// What a browser's own upload is signed over (ADR 0141).
+///
+/// A presigned URL signs a request nilo has described. A POST policy signs the
+/// **conditions** a request nobody has made yet has to meet, so there is no
+/// canonical request here and no string to sign: the signature is one HMAC of
+/// the base64 policy with the key `derive` already made for the day. That is
+/// why this is one writer rather than a second signer, and it is the reason the
+/// call belongs in nilo at all. Written in an application, the daily key
+/// derivation of ADR 0069 would exist in two places that have to agree about a
+/// rotation, and the first anybody hears of a disagreement is uploads failing
+/// at 00:00 UTC.
+///
+/// Every field here is text somebody else will read back. The bucket, the key,
+/// the credential, the token and the content type are escaped as JSON strings
+/// on the way out, because a key may hold a `"` and S3 answers a broken
+/// document with `MalformedPOSTRequest` and nothing about which byte did it.
+pub const Policy = struct {
+    bucket: []const u8,
+    key: []const u8,
+    /// `key` is the start of a key rather than the whole of one, which is what
+    /// a browser picking its own filename needs. The condition becomes
+    /// `starts-with` instead of `eq`.
+    prefix: bool = false,
+    /// `2026-09-06T12:00:00Z`, from `Stamp.expiration`.
+    expiration: []const u8,
+    /// `AKIA…/20260906/ap-southeast-1/s3/aws4_request`, already joined.
+    credential: []const u8,
+    /// `20260906T120000Z`, from `Stamp.iso`.
+    date: []const u8,
+    token: ?[]const u8 = null,
+    content_type: ?[]const u8 = null,
+    /// The ceiling of a `content-length-range` condition, whose floor is zero.
+    max_bytes: ?u64 = null,
+};
+
+/// The punctuation of every condition, each in the longer of its two shapes.
+const policy_frame =
+    "{\"expiration\":\"\",\"conditions\":[".len +
+    "{\"bucket\":\"\"},".len +
+    "[\"starts-with\",\"$key\",\"\"],".len +
+    "{\"x-amz-algorithm\":\"\"},".len +
+    "{\"x-amz-credential\":\"\"},".len +
+    "{\"x-amz-date\":\"\"},".len +
+    "{\"x-amz-security-token\":\"\"},".len +
+    "[\"eq\",\"$Content-Type\",\"\"],".len +
+    "[\"content-length-range\",0,]".len +
+    "]}".len;
+
+/// The most bytes `writePolicy` can write, so one buffer is sized once.
+///
+/// Six bytes are counted for every byte of somebody else's text, because a
+/// control character in a key is written as a six-byte escape. That is
+/// generous by a factor of six on the ordinary key, and costs nothing worth
+/// naming: the policy is built in a Scope, and a Scope is reset whole. A stack
+/// buffer is what ADR 0063 says not to size this way.
+pub fn policySize(p: Policy) usize {
+    return policy_frame + Stamp.expiration_len + algorithm.len + p.date.len +
+        // `content-length-range`'s ceiling, as decimal.
+        20 +
+        6 * (p.bucket.len + p.key.len + p.credential.len +
+            textLen(p.token) + textLen(p.content_type));
+}
+
+/// How long a condition's text is, or nothing when the condition is not there.
+pub fn textLen(text: ?[]const u8) usize {
+    return if (text) |t| t.len else 0;
+}
+
+/// The policy document: compact JSON, no spaces anywhere.
+///
+/// The conditions go out in the order S3's own examples use. Order does not
+/// change what S3 accepts, because a policy is read as a set. It changes the
+/// bytes, and the bytes are what is signed, so the order is fixed here rather
+/// than left to whoever edits this next.
+pub fn writePolicy(w: *std.Io.Writer, p: Policy) std.Io.Writer.Error!void {
+    try w.writeAll("{\"expiration\":\"");
+    try w.writeAll(p.expiration);
+    try w.writeAll("\",\"conditions\":[{\"bucket\":\"");
+    try writeJsonText(w, p.bucket);
+
+    try w.writeAll("\"},[\"");
+    try w.writeAll(if (p.prefix) "starts-with" else "eq");
+    try w.writeAll("\",\"$key\",\"");
+    try writeJsonText(w, p.key);
+
+    try w.writeAll("\"],{\"x-amz-algorithm\":\"" ++ algorithm ++ "\"},{\"x-amz-credential\":\"");
+    try writeJsonText(w, p.credential);
+
+    try w.writeAll("\"},{\"x-amz-date\":\"");
+    try w.writeAll(p.date);
+    try w.writeAll("\"}");
+
+    if (p.token) |t| {
+        try w.writeAll(",{\"x-amz-security-token\":\"");
+        try writeJsonText(w, t);
+        try w.writeAll("\"}");
+    }
+
+    // `$Content-Type` keeps its capitals: the condition names the form field,
+    // and a browser posting `Content-Type` against a policy that said
+    // `content-type` is a 403 that reads like a signing bug.
+    if (p.content_type) |ct| {
+        try w.writeAll(",[\"eq\",\"$Content-Type\",\"");
+        try writeJsonText(w, ct);
+        try w.writeAll("\"]");
+    }
+
+    if (p.max_bytes) |max| try w.print(",[\"content-length-range\",0,{d}]", .{max});
+
+    try w.writeAll("]}");
+}
+
+/// A JSON string body: no quotes round it, and every byte that cannot stand as
+/// itself escaped.
+///
+/// A byte at a time, which is the right shape for something that runs once per
+/// presigned form over at most a couple of kilobytes. `\u00xx` covers the
+/// control characters; everything else above them is UTF-8 and goes through
+/// untouched, because a JSON string carries UTF-8 as it stands.
+fn writeJsonText(w: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
+    for (text) |ch| switch (ch) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        0x00...0x1f => try w.print("\\u{x:0>4}", .{ch}),
+        else => try w.writeByte(ch),
+    };
+}
+
 // -- tests ---------------------------------------------------------------
 //
 // Every expected value below is AWS's own, from *Examples: Signature
@@ -531,15 +680,18 @@ test "the empty payload hash is the constant every example carries" {
     try testing.expectEqualStrings(empty_payload, &hex);
 }
 
-test "a stamp is the two spellings of one instant" {
+test "a stamp is the three spellings of one instant" {
     // 2013-05-24T00:00:00Z, the instant every AWS example is signed at.
     const stamp: Stamp = .at(1369353600);
+    var out: [Stamp.expiration_len]u8 = undefined;
     try testing.expectEqualStrings("20130524T000000Z", stamp.iso());
     try testing.expectEqualStrings("20130524", stamp.date());
+    try testing.expectEqualStrings("2013-05-24T00:00:00Z", stamp.expiration(&out));
 
     // And one that is not midnight, so the time half is doing something.
     const later: Stamp = .at(1369353600 + 3661);
     try testing.expectEqualStrings("20130524T010101Z", later.iso());
+    try testing.expectEqualStrings("2013-05-24T01:01:01Z", later.expiration(&out));
 }
 
 test "the signing key is the four HMACs, and nothing else" {
@@ -751,4 +903,130 @@ test "the hashing writer agrees with hashing the bytes" {
     hashing.interface.writeAll(text[20..]) catch unreachable;
 
     try testing.expectEqualSlices(u8, &direct, &hashing.final());
+}
+
+fn writtenPolicy(buf: []u8, p: Policy) []const u8 {
+    var w = std.Io.Writer.fixed(buf);
+    writePolicy(&w, p) catch unreachable;
+    return w.buffered();
+}
+
+test "a POST policy is compact JSON, and its conditions are in one order" {
+    var buf: [1024]u8 = undefined;
+    const p: Policy = .{
+        .bucket = "receipts",
+        .key = "2026/09/receipt.pdf",
+        .expiration = "2026-09-06T12:00:00Z",
+        .credential = "AKIAIOSFODNN7EXAMPLE/20260906/us-east-1/s3/aws4_request",
+        .date = "20260906T120000Z",
+    };
+
+    // Every byte, because these bytes are what gets signed. A test that only
+    // looked for substrings would pass over a stray space, and a stray space
+    // is a policy S3 accepts and a signature it does not.
+    try testing.expectEqualStrings(
+        "{\"expiration\":\"2026-09-06T12:00:00Z\",\"conditions\":[" ++
+            "{\"bucket\":\"receipts\"}," ++
+            "[\"eq\",\"$key\",\"2026/09/receipt.pdf\"]," ++
+            "{\"x-amz-algorithm\":\"AWS4-HMAC-SHA256\"}," ++
+            "{\"x-amz-credential\":\"AKIAIOSFODNN7EXAMPLE/20260906/us-east-1/s3/aws4_request\"}," ++
+            "{\"x-amz-date\":\"20260906T120000Z\"}" ++
+            "]}",
+        writtenPolicy(&buf, p),
+    );
+}
+
+test "the four conditions that are only there when they were asked for" {
+    var buf: [1024]u8 = undefined;
+    var p: Policy = .{
+        .bucket = "receipts",
+        .key = "uploads/",
+        .prefix = true,
+        .expiration = "2026-09-06T12:00:00Z",
+        .credential = "AKIA/scope",
+        .date = "20260906T120000Z",
+        .token = "FQoGZXIvYXdzEBYaDN0EXAMPLETOKEN",
+        .content_type = "application/pdf",
+        .max_bytes = 5 << 20,
+    };
+
+    try testing.expectEqualStrings(
+        "{\"expiration\":\"2026-09-06T12:00:00Z\",\"conditions\":[" ++
+            "{\"bucket\":\"receipts\"}," ++
+            "[\"starts-with\",\"$key\",\"uploads/\"]," ++
+            "{\"x-amz-algorithm\":\"AWS4-HMAC-SHA256\"}," ++
+            "{\"x-amz-credential\":\"AKIA/scope\"}," ++
+            "{\"x-amz-date\":\"20260906T120000Z\"}," ++
+            "{\"x-amz-security-token\":\"FQoGZXIvYXdzEBYaDN0EXAMPLETOKEN\"}," ++
+            "[\"eq\",\"$Content-Type\",\"application/pdf\"]," ++
+            "[\"content-length-range\",0,5242880]" ++
+            "]}",
+        writtenPolicy(&buf, p),
+    );
+
+    // And the same policy with all four dropped, so that nothing above is
+    // being carried by a condition that is always written.
+    p.prefix = false;
+    p.token = null;
+    p.content_type = null;
+    p.max_bytes = null;
+    const bare = writtenPolicy(&buf, p);
+    try testing.expect(std.mem.indexOf(u8, bare, "starts-with") == null);
+    try testing.expect(std.mem.indexOf(u8, bare, "security-token") == null);
+    try testing.expect(std.mem.indexOf(u8, bare, "Content-Type") == null);
+    try testing.expect(std.mem.indexOf(u8, bare, "content-length-range") == null);
+}
+
+test "a key with a quote in it is escaped rather than closing the string" {
+    // S3 allows both of these bytes in a key. Written raw, the first ends the
+    // JSON string early and the second eats the byte after it, and either way
+    // S3 answers `MalformedPOSTRequest` with nothing about which byte did it.
+    var buf: [1024]u8 = undefined;
+    const p: Policy = .{
+        .bucket = "receipts",
+        .key = "he said \"hi\"\\then\tleft",
+        .expiration = "2026-09-06T12:00:00Z",
+        .credential = "AKIA/scope",
+        .date = "20260906T120000Z",
+    };
+
+    const doc = writtenPolicy(&buf, p);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        doc,
+        "[\"eq\",\"$key\",\"he said \\\"hi\\\"\\\\then\\u0009left\"]",
+    ) != null);
+
+    // And the document is still JSON a parser reads back to the same key.
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, doc, .{});
+    defer parsed.deinit();
+    const conditions = parsed.value.object.get("conditions").?.array;
+    try testing.expectEqualStrings("he said \"hi\"\\then\tleft", conditions.items[1].array.items[2].string);
+}
+
+test "policySize is a ceiling rather than an estimate" {
+    // `writePolicy` is called with `catch unreachable` against a buffer sized
+    // by `policySize`, so being one byte short is a panic in production rather
+    // than an error. The worst case is every byte of every runtime part
+    // needing a six-byte escape.
+    const worst = "\x01" ** 64;
+    const p: Policy = .{
+        .bucket = worst,
+        .key = worst,
+        .prefix = true,
+        .expiration = "2026-09-06T12:00:00Z",
+        .credential = worst,
+        .date = "20260906T120000Z",
+        .token = worst,
+        .content_type = worst,
+        .max_bytes = std.math.maxInt(u64),
+    };
+
+    const room = policySize(p);
+    const buf = try testing.allocator.alloc(u8, room);
+    defer testing.allocator.free(buf);
+    try testing.expect(writtenPolicy(buf, p).len <= room);
+
+    // Every escape at six bytes, which is what the factor is for.
+    try testing.expect(std.mem.indexOf(u8, writtenPolicy(buf, p), "\\u0001") != null);
 }

@@ -50,6 +50,7 @@
         "config",
         "pw",
         "cache",
+        "jwt",
         "fetch",
         "http",
         "sql",

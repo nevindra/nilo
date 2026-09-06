@@ -38,8 +38,8 @@ with a vibe.
 zig build test         # the loop: the suite in Debug, plus the refusals
 zig build test-all     # the above plus the same suite in ReleaseSafe. This is what CI runs
 zig build layering     # check that no module imports upward or sideways
-zig build refusals     # the framework's 98 compile-error checks — NOT the others
-zig build refusals-sql # nilo_sql's 44; refusals-config, -pw, -cache and -s3 for the rest
+zig build refusals     # the framework's 105 compile-error checks — NOT the others
+zig build refusals-sql # nilo_sql's 47; refusals-config, -pw, -cache and -s3 for the rest
 zig build snippets     # the documentation's marked snippets, which must compile
 zig build examples     # build all nine examples
 
@@ -48,6 +48,7 @@ zig build test-id      # only nilo_id, the same way
 zig build test-config  # only nilo_config, the same way, plus its refusals
 zig build test-pw      # only nilo_pw, the same way, plus its refusals
 zig build test-cache   # only nilo_cache, the same way, plus its refusals
+zig build test-jwt     # only nilo_jwt, both modes — no Engine, no module graph
 zig build test-fetch   # only nilo_fetch, both modes — a real socket, no Engine
 zig build test-s3      # only nilo_s3, both modes, plus its refusals
 

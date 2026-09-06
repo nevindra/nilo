@@ -115,6 +115,7 @@ const Ticket = struct {
     id: i64,
     tags: []const nilo.Str,    // text[]
     scores: ?[]const i32,      // integer[], and the column may be null
+    owners: []const sql.Uuid,  // uuid[]
 };
 ```
 
@@ -146,6 +147,10 @@ Two things about arrays that Postgres allows and a Zig slice cannot hold:
 
 Both used to take the process down inside the driver
 ([ADR 0051](../adr/0051-an-array-is-a-slice-and-a-slice-is-one-deep.md)).
+
+`[]const sql.Uuid` is `uuid[]`, and it reads, writes and works as an `.in`
+list — which is what stops an N+1 on a page that attaches children to its rows
+([ADR 0145](../adr/0145-a-raw-parameter-is-converted-the-way-a-rows-is.md)).
 
 An array is judged **exactly** at startup: an `int4[]` column reads into a
 `[]const i32`, and not into a `[]const i64` the way a scalar `int4` reads into
@@ -1269,8 +1274,8 @@ a sort and a range
 A fixed saving, so the cheap queries a service runs most of are the ones it
 helps most. Nothing in your code changes.
 
-`db.raw` is the one exception, and it has to be: its text arrives at run time,
-so there is no bound on how many names there would be.
+`db.raw` is in it too. Its text is comptime, so its name is derived the same
+way ([ADR 0148](../adr/0148-a-raw-statement-is-counted-while-compiling.md)).
 
 **Turn it off behind pgbouncer in transaction mode.**
 
@@ -1311,6 +1316,31 @@ many rows moved, and whether it failed. **Not the
 values it bound** — those are the interesting half and they are also somebody's
 password, so putting them in a log is a decision rather than a default
 ([ADR 0137](../adr/0137-a-statement-can-be-watched.md)).
+
+A statement that failed carries one thing more: `sent.problem`, which is what
+the database said about refusing it.
+
+<!-- compiles -->
+```zig
+fn whyItFailed(sent: sql.Sent) void {
+    const said = sent.problem orelse return;
+    std.log.warn("{s} [{s}] on {s}: {s}", .{
+        said.message, said.code, said.constraint, sent.sql,
+    });
+}
+```
+
+`message` always says something. When the driver refused the statement before
+it left the process — a value it will not bind — there is no server message, so
+the Zig error's own name goes there instead. `code` is the SQLSTATE, `23505`
+for a duplicate key; `severity`, `detail`, `hint` and `constraint` are the rest
+of what Postgres knew. Fields a database does not answer are empty rather than
+null, because SQLite has no SQLSTATE and does not invent one
+([ADR 0146](../adr/0146-a-statement-that-failed-says-what-the-database-said.md)).
+
+It lives in the request's arena, so keeping one past the request means copying
+it. **`detail` is usually the values that collided**, which is worth knowing
+before you log it. None of it ever reaches the client.
 
 A `Db` nobody is watching pays one null test per statement, and a watched one
 pays two clock reads at 15ns each.

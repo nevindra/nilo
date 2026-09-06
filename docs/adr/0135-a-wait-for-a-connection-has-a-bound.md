@@ -101,7 +101,7 @@ code had.
 transaction and then writes `db.exec`, and asserts `TimedOut` comes back. It is
 the shape `fetch/deadline.zig` established and it hangs off `test-sql` rather
 than `test`, because `test` deliberately does not build this module
-([ADR 0075](0075-a-dependency-a-dependent-does-not-import-is-not-downloaded.md)).
+([ADR 0075](0075-a-lazy-dependency-is-a-request.md)).
 
 **It coordinates no port.** The server asks for port 0 and nothing connects: the
 work under test is a spawned fiber (ADR 0086), so the three loopback ranges the
