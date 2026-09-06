@@ -1957,18 +1957,6 @@ than reading a list. Then a mark cannot be written anywhere the step will not
 read it, and imitation stops being able to carry a dead one. The cost is a
 directory walk at build time, on a step that already caches.
 
-*The instance, which is separable from the class. **Delete this paragraph when
-`pages` in `build.zig` names every page below and `zig build snippets` is
-green** — that condition is checkable against the tree in front of you, which
-is the point: a paragraph whose closing condition is somebody's word is the
-same defect as a mark whose guarantee is somebody's belief.* `pages` holds five
-entries — `README.md`, `docs/reference.md`, `docs/guide/sessions.md`,
-`docs/guide/config.md`, `docs/guide/forms.md` — against twenty-four pages
-carrying 216 Zig blocks. Five marks are live but unread:
-`docs/guide/metrics.md:8`, `:129`, `docs/guide/middleware.md:146`, `:159` and
-`docs/guide/responses.md:186`. Most other blocks are merely unmarked, which is
-honest, since a mark is opt-in per block and an unmarked one claims nothing.
-
 `docs/guide/sql.md` is the page this matters most for and the one furthest from
 fixed: 48 Zig blocks, more than the README and the reference together, and not
 one of them marked.
