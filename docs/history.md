@@ -2044,3 +2044,27 @@ filled the cache with the values the row was not going to read.
 Written down in [`bench/result/cache.md`](../bench/result/cache.md) with the
 rule they produce: **when a benchmark row is faster than expected, find out
 why before keeping it.**
+
+## An entry that guesses at its own answer stops anybody taking the number
+
+`service.Registry.get` scans a list on the request path. The roadmap said it
+"may well be nothing", named `zig build profile` as exactly the harness for the
+question, and then sat at `Waiting on: a number` for a cycle. Adding the row was
+an afternoon.
+
+It is 1.2ns an entry, flatly linear. Four services is 4.5ns, 1.6% of a 289ns
+request; thirty-two is 38.8ns and 13.4%, the wrong side of ADR 0001's bar. So
+the answer was neither of the two the entry could hold: **it is a threshold, and
+"it may well be nothing" has no room in it for one.** Five runs agreed within
+4%. Nothing hard was ever in the way.
+
+The part worth keeping is why it sat there. A hedge reads as though somebody has
+already half-decided, so nobody picks it up to decide it — and unlike a wrong
+number, it never gets contradicted by anything, because it never said enough to
+be wrong. This is the quiet cousin of the four premises this repository has
+already been wrong about: those decayed because nobody re-measured them, and
+this one because measuring it had been made to look optional.
+
+Rows in [`bench/result/http.md`](../bench/result/http.md). The rule: **an entry
+may state a number or state that nobody has taken one. Guessing at it in the
+entry is what stops it being taken.**

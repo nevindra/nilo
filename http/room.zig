@@ -213,9 +213,25 @@ pub const Room = struct {
     backlog: usize,
     full: Full = .drop_oldest,
 
-    /// Guards taking and giving up a seat. Not held while posting: `say`
-    /// reads the roll under it, then works seat by seat under each seat's own
-    /// lock, so one slow reader's lock is never on the path of another's.
+    /// Guards taking and giving up a seat, and **held for the whole of a
+    /// broadcast**: `handOut` takes it, walks the roll's taken half under it,
+    /// and takes each seat's own lock inside that. So `join` and `leave` queue
+    /// behind whatever is being posted.
+    ///
+    /// What that hold does *not* cost is the thing worth having. A post is
+    /// pushed into a seat's ring and a bell is rung; the bytes reach the wire
+    /// on the connection's own fiber, outside every lock in this file. A
+    /// client that has stopped reading holds nothing here, so one slow reader
+    /// is never on another's path (ADR 0029).
+    ///
+    /// Releasing the roster before the loop is not the small change it looks
+    /// like. `leave` drains a seat under this lock and `takeSeat` does not
+    /// drain before handing one out, so a post landing between the two would
+    /// be delivered to whoever sits down next. Nothing catches it: `put` reads
+    /// no era, and `take` reads the *new* occupant's, which matches. Making
+    /// the shorter hold correct means draining in `takeSeat` as well, and
+    /// showing the contention was real first. Nothing measures a Room under
+    /// load yet.
     roster: bulkhead.Mutex = .{},
     /// How many seats are taken, which is also how much of `roll` is the
     /// taken half. Atomic so that `count()` is a plain read rather than a

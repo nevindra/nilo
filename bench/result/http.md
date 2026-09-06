@@ -1501,6 +1501,64 @@ The ASCII rows have no headroom worth chasing: 10ns for 365 bytes is already
 the vector path, and the only way past it is not to ask the question, which is
 what the bug was.
 
+## What finding a service costs per request
+
+Run to settle a roadmap entry that had carried "it may well be nothing" for a
+cycle with no number under it. `service.Registry.get` walks `entries` comparing
+type names — a pointer compare, with a content compare behind it that never
+fires because `@typeName` hands back the same literal — once per service
+argument per request. `listen()` has already checked every one of those
+arguments before the first request is served, so the question was whether work
+that a startup pass could index is worth indexing.
+
+`zig build profile`'s new **finding one service out of several** row.
+ReleaseFast, best of five rounds of 1,000,000 lookups, warmed first, and the
+whole profiler run five times. AMD Ryzen 7 9700X, kernel 7.0.0-30-generic, Zig
+0.16.0, commit `95286b6`. In process, so no loopback, no client, and none of the
+caveats the throughput tables carry.
+
+The wanted service is registered **last**, so the scan runs to the end every
+time. That is the ceiling for a given count rather than the average, which is
+about half of it.
+
+| services registered | ns per lookup | of the 289ns request |
+|---:|---:|---:|
+| 1 | 0.3 | 0.1% |
+| 4 | 4.5 | 1.6% |
+| 8 | 10.3 | 3.6% |
+| 16 | 16.7 | 5.8% |
+| 32 | 38.8 | 13.4% |
+
+Five runs agreed within 4% on every row, which is the tightest spread anything
+in this file has: it is a loop over 40-byte structs in L1 with a perfectly
+predicted branch, and there is nothing in it for the scheduler to disturb.
+
+**It is not nothing, and the entry does not close.** Past the first service the
+cost is flatly linear at **1.2ns an entry**, which is a dependent load, a
+compare and a branch that nothing unrolls. What the number changes is that
+"probably free" was only ever true for small apps: at four services the lookup
+is 1.6% of a request, comfortably under
+[ADR 0001](../../docs/adr/0001-dx-wins-below-the-10-percent-threshold.md)'s 10%
+bar, and at thirty-two it is 13.4%, over it. **And it is per service argument,
+not per request** — a handler taking a database and a cache pays twice.
+
+So the shape of the answer is a threshold rather than a yes or a no. Somewhere
+between sixteen and thirty-two registered services, in the worst-case ordering,
+this stops being noise.
+
+### Can it be pushed further
+
+To zero, and the shape was already named in the roadmap before the run: which
+services a route needs is settled while compiling and checked at `listen()`, so
+the pointers could be resolved into the route once at startup and the request
+path would do no lookup at all. Nobody has built it and this run is not the
+justification for building it today — four services is what the apps in
+`examples/` have, and 4.5ns is not where the 289ns goes.
+
+What the run is good for is that the next person arrives at a threshold instead
+of at "it may well be nothing", which is a sentence that cannot be acted on in
+either direction.
+
 ## What is still missing
 
 - **A quiet machine, and a second one to generate load from.** Both readings

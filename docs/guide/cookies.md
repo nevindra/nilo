@@ -22,12 +22,43 @@ nilo does not decode a cookie value. RFC 6265 makes it opaque bytes, and every
 framework layers its own encoding on top — percent, base64, signed-then-base64
 — so guessing would corrupt the ones that guessed otherwise.
 
-If you are coming from Node, this is the one habit that does not transfer:
-`cookie-parser` percent-decodes and this does not. Encode on the way in and
-decode on the way out, in whatever your application uses.
-
 The one thing that is stripped is surrounding quotes, because RFC 6265 allows
 `name="value"` and some writers use it.
+
+### If your front end encoded it, you decode it
+
+This is the habit that does not transfer. Node's `cookie-parser`
+percent-decodes, and so do Gin's `c.Cookie` and Fiber's `c.Cookies`. nilo does
+not, and **nothing anywhere reports the difference** — you get a string, it is
+just not the string the browser was holding.
+
+The way it bites is a page that wrote the cookie itself:
+
+```js
+document.cookie = `name=${encodeURIComponent("Ana Wijaya")}`;
+```
+
+JavaScript reads `Ana Wijaya` back through `decodeURIComponent`. Zig reads
+`Ana%20Wijaya`, and a comparison against the name in your database quietly
+fails.
+
+If your cookie is encoded, decode it yourself. It is one call, and it allocates
+only when there is something to decode:
+
+```zig
+fn me(c: *nilo.Ctx, arena: std.mem.Allocator) !?Profile {
+    const raw = c.cookie("name") orelse return null;
+    const name = try nilo.percent.decode(arena, raw, false);
+    ...
+}
+```
+
+The last argument is whether `+` means a space. For a cookie it does not — that
+is a form-encoding rule — so pass `false`.
+
+A session token does not need any of this. Base64 and hex go through untouched,
+which is why the sessions in [`examples/forms`](../../examples/forms/main.zig)
+never call this.
 
 ## Setting one
 

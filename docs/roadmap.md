@@ -509,27 +509,24 @@ Keiser–Lemire shape runs at about a byte a cycle whatever the input.
 **Waiting on: a caller** whose payloads are mostly not ASCII. Every payload in
 `bench/` is English.
 
-**A `Room`'s roster lock is held across the whole broadcast, and the field says
-it is not.** `Room.roster`'s doc says it guards taking and giving up a seat and
-is "not held while posting". `Room.handOut` takes it and holds it for the whole
-loop over the roll, so `join` and `leave` queue behind every broadcast.
+**`join` and `leave` queue behind a whole broadcast, and nothing says whether
+that costs anything.** `Room.handOut` takes the roster lock and holds it for the
+entire loop over the roll. The field says so now; it used to claim the opposite,
+which is the half of this that is closed.
 
-What is there is correct, and the doc is the half that is wrong, but it cannot
-simply be rewritten to match. `Room.leave`'s own comment ("a `say` already past
-the roster may be pushing into this ring right now") is written for the design
-the doc describes, and `takeSeat` does not drain a seat's ring before handing it
-out. Release the roster before the loop and a post landing between `leave`'s
-drain and the next `takeSeat` is delivered to whoever sits down next, because
-the era check passes.
+Shortening the hold is not the small change it reads as. `leave` drains a seat
+under that lock and `takeSeat` does not drain before handing one out, so
+releasing the roster before the loop would deliver a post to whoever sits down
+next — `put` reads no era, and `take` reads the new occupant's, which matches.
+Making it correct means draining in `takeSeat` as well, and showing the
+contention was real first.
 
-So there are two ways out and they are not the same size. Correcting the doc is
-a paragraph. Making the code match it means draining in `takeSeat` too, and then
-showing the contention was real.
-
-**Waiting on: a harness.** Nothing measures a Room at all. `bench/ws_server.zig`
-runs the chat loop from `examples/chat/` with the room deliberately taken out,
-so every WebSocket number in [`bench/result/http.md`](../bench/result/http.md)
-is a socket that joined nothing.
+**Waiting on: a harness.** Nothing measures a Room under load at all.
+`bench/ws_server.zig` runs the chat loop from `examples/chat/` with the room
+deliberately taken out, so every WebSocket number in
+[`bench/result/http.md`](../bench/result/http.md) is a socket that joined
+nothing, and `zig build profile`'s `room: say to 8 of 1,000 seats` is one fiber
+with nobody contending for the lock.
 
 **The two arms of static-file serving live in two files, and the rule they share
 lives in a third.** `App.serveHeldFile` answers a file read at startup,
@@ -551,17 +548,25 @@ copied into both files as it stands, four lines each.
 to be worth the diff. The next change to either `If-Range` arm is the caller.
 
 **A service is found by scanning the registry on every request that wants one.**
-`service.Registry.get` walks `entries` comparing type names, with a pointer
-compare first and a content compare behind it, once per service argument per
-request. Which services a route needs is settled while compiling and `listen`
-already checks every one of them, so this is work repeated at request time that
-a startup pass could turn into an index.
+`service.Registry.get` walks `entries` comparing type names once per service
+argument per request. Which services a route needs is settled while compiling
+and `listen` already checks every one of them, so this is work at request time
+that a startup pass could resolve into the route and remove entirely.
 
-It may well be nothing. An app with four services and a handler taking one is
-four pointer compares. It is written down because it is on the request path and
-because `zig build profile` is exactly the harness for the question.
+**It costs 1.2ns an entry, flatly linear, which makes it a threshold rather than
+a yes or a no.** Four services is 4.5ns, 1.6% of a 289ns request and well under
+[ADR 0001](./adr/0001-dx-wins-below-the-10-percent-threshold.md)'s bar;
+thirty-two is 38.8ns and 13.4%, over it. And it is per service *argument*, so a
+handler taking a database and a cache pays it twice. The rows are in
+[`bench/result/http.md`](../bench/result/http.md), worst-case ordering, five
+runs inside 4% of each other.
 
-**Waiting on: a number.**
+This entry used to say "it may well be nothing", which is a sentence nobody can
+act on in either direction. Measuring it cost one afternoon and a row in the
+profiler.
+
+**Waiting on: a caller** with more than about sixteen services. Nothing in
+`examples/` has four.
 
 **An internally tagged union is read four times, and the module says the marker
 costs nothing per request.** `jsonmark.zig`'s header says "Nothing per request
@@ -694,8 +699,11 @@ puts a 404 in the document because the signature settles it
 invisible. That is the rule rather than a gap, since the document promises what
 the signature settles, but it is the rule that costs the most.
 
-**Waiting on: a way to state a failure in a type** without inventing an
-annotation.
+**Waiting on: accepted.** The document promises what the signature settles, and
+that is the whole of ADR 0024. Widening it means a second place to write a
+failure down, which is an annotation wearing another name and is the one thing
+this framework does not ask for. It is here so nobody re-derives it as a gap. A
+shape that states a failure *in the type* would reopen it; wanting one does not.
 
 **The linker cannot drop what nobody uses.** The API description costs +14 KB
 on the hello example and +34 KB on rest whether or not `docs()` is called,
@@ -709,8 +717,10 @@ known now and the objection is only about the size. One line in a
 `b.dependency` call is a fair price for 11 MB of driver nobody downloads and a
 poor one for 14 KB of binary nobody notices.
 
-**Waiting on: a second option landing for another reason**, which this would
-ride along with.
+**Waiting on: accepted.** The last sentence above is the decision rather than a
+step towards one: 14 KB does not buy a line in every dependent's `build.zig`. If
+a third build option ever lands for a reason of its own this rides along with it
+for nothing, which is a bonus and not a plan.
 
 **`describeBadBody` walks eight levels and then stops.** Deeper than that the
 400 says the ceiling was reached rather than which field is wrong

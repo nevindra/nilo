@@ -24,6 +24,7 @@ const stream_mod = @import("stream.zig");
 const body_mod = @import("body.zig");
 const range = @import("range.zig");
 const router_mod = @import("router.zig");
+const service_mod = @import("service.zig");
 
 const rounds = 300_000;
 const arena_keep = 16 * 1024;
@@ -192,8 +193,66 @@ pub fn main() !void {
 
     try longLived(gpa);
     try routerScale(gpa);
+    try serviceScale(gpa);
 
     if (sink == 0) unreachable; // keeps the work from being optimised away
+}
+
+// ---- one service out of several ----
+//
+// `Registry.get` walks `entries` comparing type names, once per service
+// argument per request, and it is on the request path. The roadmap carried
+// "it may well be nothing" on it with nothing under the sentence, which is
+// the shape this repository has been wrong about before, so it gets a number
+// rather than a reading.
+//
+// The wanted service is registered **last**, so the scan runs to the end
+// every time. That is the worst case on purpose — the number to beat, not the
+// number to quote. `sameName` compares the pointers first and `@typeName`
+// hands back the same literal, so the content compare behind it never fires
+// here either, which is also what a real app gets.
+
+const service_rounds = 1_000_000;
+const service_counts = [_]usize{ 1, 4, 8, 16, 32 };
+
+/// A family of distinct types, because the registry holds one of each and
+/// rejects a second of the same (ADR 0003).
+fn Svc(comptime n: usize) type {
+    return struct { v: usize = n };
+}
+
+fn serviceScale(gpa: std.mem.Allocator) !void {
+    std.debug.print("\n---- finding one service out of several ----\n\n", .{});
+    std.debug.print("  {s:<12}{s:>8}{s:>8}{s:>8}{s:>8}{s:>8}\n", .{ "", "1", "4", "8", "16", "32" });
+    std.debug.print("  {s:<12}", .{"registry.get"});
+    inline for (service_counts) |n| std.debug.print("{d:>6.1}ns", .{try oneServiceScale(gpa, n)});
+    std.debug.print("\n", .{});
+}
+
+fn oneServiceScale(gpa: std.mem.Allocator, comptime n: usize) !f64 {
+    var r = service_mod.Registry.init(gpa);
+    defer r.deinit();
+
+    // One backing value per service. The registry stores the pointer and
+    // never reads through it, but a distinct object each is what a real app
+    // has and costs nothing to give it here. Every `Svc` is one `usize`, so
+    // the cast is size- and alignment-exact.
+    var backing: [n]usize = @splat(0);
+    inline for (0..n) |i| try r.add(@as(*Svc(i), @ptrCast(&backing[i])));
+
+    const Wanted = Svc(n - 1);
+
+    for (0..service_rounds / 4) |_| sink += @intFromPtr(r.get(*Wanted).?);
+    var best: u64 = std.math.maxInt(u64);
+    for (0..reps) |_| {
+        const started = clock();
+        for (0..service_rounds) |_| sink += @intFromPtr(r.get(*Wanted).?);
+        const took = clock() - started;
+        if (took < best) best = took;
+    }
+    // A float, unlike the router's row: the whole question is whether this is
+    // one nanosecond or ten, and integer division would answer it by rounding.
+    return @as(f64, @floatFromInt(best)) / @as(f64, @floatFromInt(service_rounds));
 }
 
 // ---- one route out of many ----

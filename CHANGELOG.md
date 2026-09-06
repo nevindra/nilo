@@ -632,6 +632,22 @@ than a split response. All three are under Fixed.
   bytes were the caller's. They are borrowed from the executor's free list and
   the loan ends at the next `receive`, sooner if the connection falls quiet.
   `docs/reference.md` always had this right. Copy before you keep.
+- **`Room.roster` said its lock is "not held while posting", and it is held.**
+  `handOut` takes it and keeps it for the whole loop over the roll, so `join`
+  and `leave` queue behind a broadcast. The field says that now, with why
+  shortening the hold is not a one-line change: `leave` drains a seat under that
+  lock and `takeSeat` does not drain before handing one out. The guarantee that
+  matters is unchanged — a post only fills a ring and rings a bell, and the
+  bytes reach the wire on the connection's own fiber, so a client that has
+  stopped reading is still on nobody else's path.
+- **The cookie guide now says what to do about a cookie your front end
+  encoded.** Node, Gin and Fiber all percent-decode on the way in; nilo does
+  not, and that is the design
+  ([ADR 0030](./docs/adr/0030-a-cookie-is-a-header-and-set-cookie-is-the-one-that-repeats.md)).
+  What was missing is that nothing reports the difference: a page writing
+  `encodeURIComponent` reads one string from JavaScript and another from Zig,
+  and a comparison just fails. The guide names the symptom and the one call,
+  `nilo.percent.decode(arena, raw, false)`.
 
 ## 0.2.0
 
