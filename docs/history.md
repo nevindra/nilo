@@ -1709,8 +1709,9 @@ between them by reasoning would have been the expensive kind of wrong.
 
 Two sessions gated one merge by running seven module steps by hand, because
 `CLAUDE.md` lists each of them as its own command and never said that `test-all`
-depends on all of them. It does: `build.zig:1989` and `:2018`. One grep of the
-file the paragraph describes would have settled it, and neither reading of the
+depends on all of them. It does: `build.zig` has `test_all_step.dependOn(test_sql_step)`
+and `test_sql_step.dependOn(refusals_sql_step)`. One grep of the file the
+paragraph describes would have settled it, and neither reading of the
 paragraph produced one — the second even arrived with a mechanism attached
 ("the module is behind `-Dsql`"), which is what makes a reader stop checking.
 
@@ -1731,7 +1732,10 @@ more marks, and the sentence went stale without anybody touching it. **A count
 is a claim with an expiry date, and a merge is when it expires** — so the line
 worth writing beside one is its closing condition. "Delete this when `pages`
 names every page below and `snippets` is green" survives a merge; "three marks,
-at these line numbers" cannot.
+at these line numbers" cannot. This entry proved it on itself inside two hours:
+it cited those two `dependOn` calls as `:1989` and `:2018`, and the next batch
+to land moved them to `:1997` and `:2026`. A line number is a count. **Cite what
+a line says, not where it sits.**
 
 ## A design nobody attacked was three defects wide
 
