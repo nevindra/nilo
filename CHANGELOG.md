@@ -7,624 +7,223 @@ What was measured and what was got wrong on the way is in
 
 ## Unreleased
 
-**Two source changes may be needed to move a 0.2.0 program to this**, and one
-of them only if you serve WebSockets. `cors.Options.origin` is now `origins` and
-takes a list; if you never called `cors.with` — `cors.permissive` is unchanged —
-there is nothing to do. And **a WebSocket served from a different host to the
-page that opens it now needs `.origins` naming that page**, or the handshake is
-a 403. Needs Zig 0.16, as 0.2.0 does.
+Needs Zig 0.16, as 0.2.0 does. Each entry says what you have to change; the
+account of why is in the ADR it links.
 
-**If you serve WebSockets, take this one for the shutdown fix alone.** A server
-that had served any usually did not come back from a SIGTERM, which is a deploy
-that hangs and a core that spins. Nothing to change on your side; it is the
-first entry in Fixed.
+### Read this before deploying
 
-**Two requests that used to be answered are now refused with a 400**, and both
-are shapes the proxy in front of you already rejects: an HTTP/1.1 request with
-no `Host` or with two of them, and a `Transfer-Encoding` whose last coding is
-not `chunked`. Nothing a browser, a proxy or an HTTP library sends changes. A
-hand-written test client that spoke to the server directly and never bothered
-with `Host` will need one.
+- **`cors.Options.origin` is now `origins` and takes a list.** The one breaking
+  change. Nothing to do if you never called `cors.with` — `cors.permissive` is
+  unchanged.
+- **A WebSocket served to a page on another host now needs `.origins` naming
+  that page**, or the handshake is a 403.
+- **Sessions expire now.** Everybody holding one signs in again on the deploy
+  that picks this up, and a session cookie with no `max_age` lasts a day rather
+  than forever.
+- **A slow upload can be refused.** A body nilo buffers has to arrive at
+  8 KiB/s once ten seconds of grace have gone, or the request is a 408 — which
+  will also refuse an honest client on a bad link. `body_min_rate = 0` turns it
+  off.
+- **Four request shapes that used to be answered are now refused**: no `Host`
+  or two of them, a `Transfer-Encoding` not ending in `chunked`, a body framed
+  twice, and a body under a `Content-Encoding` nilo cannot read. Nothing a
+  browser, a proxy or an HTTP library sends changes.
+- **If you serve WebSockets, take this one for the shutdown fix alone** — a
+  server that had served any usually did not come back from a SIGTERM.
 
-**A slow upload can now be refused**, and it is the one change here to read
-before deploying rather than after. A body nilo reads into the arena has to
-arrive at 8 KiB/s once ten seconds of grace have gone by, or the request is a
-408 — which closes a hole a client could hold a connection open with
-indefinitely, and which will also refuse an honest client uploading from
-somewhere slower than that. `body_min_rate = 0` turns it off; the entry under
-Added has the rest.
-
-**Six more things behave differently at run time, and all six are in Fixed
-below.**
-Sessions now carry an expiry, so everybody holding one is signed out on the
-deploy that picks this up, and a session cookie that used to last indefinitely
-now lasts a day unless `max_age` says otherwise. A response header value holding
-a control byte is refused rather than written, which is a 500 on a handler that
-was writing a header it should not have been able to. A request whose body is
-framed two ways at once is a 400 rather than a guess.
-
-The other three are new answers to headers nilo already read. A client sending
-`Expect: 100-continue` now gets one, and stops waiting out its own timer; a
-request refused before its body is read gets the refusal without the body. An
-`If-Range` carrying a weak tag or a `*` now gets the whole file rather than a
-range, which is a bigger download in place of a possibly corrupt one. And a
-multipart part naming its file only with `filename*` is a 400 rather than a text
-field full of upload bytes.
+Three more answers change with nothing for you to do: a client sending
+`Expect: 100-continue` now gets one and stops waiting out its own timer, an
+`If-Range` carrying a weak tag or a `*` gets the whole file rather than a range,
+and a handler setting a header value with a control byte in it gets a 500 rather
+than a split response. All three are under Fixed.
 
 ### Added
 
-#### `allowance.with` — how many requests one address may make
-
-```zig
-try app.useOn("/api", nilo.allowance.with(.{ .per_window = 100, .window_s = 60 }));
-```
-
-The hundred-and-first request from that address inside the minute is a 429 with
-a `Retry-After`, and the handler never runs. Nothing had ever called
-`fail.tooManyRequests`, so this is the first thing in nilo that refuses a client
-for asking too often.
-
-The table it counts in is **sized while compiling and lives in `.bss`**: no
-allocation per request, none at startup, 131,072 bytes at the default
-`.slots = 16 * 1024`, and nothing at all in a program that does not use it
-([ADR 0114](./docs/adr/0114-an-allowance-is-a-table-sized-while-compiling.md)).
-The window slides, so a hundred at 11:59:59 and a hundred at 12:00:00 is not two
-hundred through. An IPv6 client is a `/64` by default, because a `/128` is one
-of the addresses a customer was handed rather than the customer.
-
-**Where it is loose is deliberate and where it is strict is too.** A table with
-no room left forgets whichever address has been quiet longest rather than making
-two share one allowance, and two requests racing to *claim* a slot both get
-through — refusing there would refuse a stranger who has made no requests. But
-once the slot is unambiguously yours, contention on it is your own traffic and
-the request is refused. The index is hashed with a per-process secret, so the
-bucket an address lands in cannot be worked out offline and a slot cannot be
-aimed at.
-
-**Behind a proxy, set `.trusted_hops` on `listen`** — leave it at zero and every
-request looks like it came from the proxy, which is one slot for the world. A
-refusal that finds an `X-Forwarded-For` on a request counted against the
-connection's own address says so in the log once.
-
-Two things it is not. It is not a defence against a flood; that is still
-`max_connections`. And a fixed table cannot hold unbounded clients — at 100,000
-addresses through the default 16,384 slots every bucket is full and a client can
-lose its slot to newcomers, so size `.slots` for the clients you expect and read
-it as a shaper rather than a guarantee. Keying on an account or an API key
-instead of an address is in the roadmap.
-
-#### `testing.Conversation` — driving a WebSocket route from a test
-
-```zig
-var chat: nilo.testing.Conversation = try .init(testing.allocator, .{});
-defer chat.deinit();
-
-try chat.text("hello");
-try chat.close(1000, "bye");
-
-const talk = try chat.open(&app, "/chat");
-try testing.expectEqualStrings("hello", talk.at(0).?.bytes);
-try testing.expectEqual(@as(u16, 1000), talk.closedWith().?);
-```
-
-A handler that upgrades has no answer for `testing.Client` to read, so a
-WebSocket route could not be tested through the public API at all — nilo's own
-suite wrote masked frames as hex escapes and indexed into the response
-([ADR 0113](./docs/adr/0113-a-websocket-route-can-be-driven-from-a-test.md)).
-`text`, `binary`, `ping`, `pong`, `close`, `fragments` and `raw` are what you
-send; `at(n)`, `first(kind)` and `closedWith()` are what came back, decoded by
-a reader that shares no code with the encoder it is checking.
-
-Two things it does not do: the frames are queued before the server runs, so a
-test cannot answer what the server just said, and a conversation between two
-sockets — a `Room` broadcast — needs two connections and is out of reach.
-
-#### `c.queries()`, `c.queryString()`, `c.host()`, `c.scheme()`
-
-Four ways to read a request past the parts a handler names
-([ADR 0112](./docs/adr/0112-a-request-can-be-read-past-the-parts-a-handler-names.md)).
-
-```zig
-var it = c.queries();                       // every parameter, in arrival order
-while (it.next()) |q| log("{f}={f}", .{ q.name, q.value });
-
-const back = try std.fmt.allocPrint(c.arena(), "{f}://{f}/done", .{ c.scheme(), c.host() });
-```
-
-`query(name)` answers about a name you already knew, so a filter whose names are
-data — `?filter[status]=open` — and a name sent twice were both unreachable
-without touching an underscore field. `queryString()` is the bytes as they
-arrived, still encoded, for a signature or a proxy.
-
-`host()` and `scheme()` are what a handler writes a URL to its own service
-with. nilo does not speak TLS, so `scheme()` is `"http"` unless
-`listen(.{ .trusted_hops = … })` says a proxy stands in front — then
-`X-Forwarded-Proto` and `X-Forwarded-Host` are read, on exactly the terms
-`X-Forwarded-For` already is. A forwarded host that is not host-shaped is
-dropped rather than used: that value ends up in a link somebody clicks.
-
-#### `cors.reading` — CORS origins that come from the environment
-
-```zig
-var origins: nilo.cors.Origins = .empty;
-try origins.setSplit(&buf, settings.web_origins);   // "https://a.com,https://b.com"
-try app.use(nilo.cors.reading(&origins, .{ .credentials = true }));
-```
-
-`cors.with` settles its list while compiling, so the same binary could not
-serve staging and production — and the front end's address is a fact about the
-deployment, not about the program. This is the same middleware reading its list
-from a variable you fill before `listen()`
-([ADR 0110](./docs/adr/0110-an-origin-is-a-fact-about-the-deployment.md)).
-Everything else stays compile-time, `with` is untouched and still the measured
-path, and **a cross-origin response still allocates nothing**: the list is
-borrowed rather than copied, so the matched origin goes out as static text.
-`set` and `setSplit` refuse at startup what `with` refuses at build time, `"*"`
-is refused outright — that is `cors.permissive` — and a list nobody filled says
-so in the log once.
-
-#### `nilo.accept` — what an `Accept` header says about one type
-
-```zig
-if (nilo.accept.asks(c.header("Accept"), "text/html") == .named) …
-```
-
-Four answers rather than a `bool`, because a client that sent no `Accept` has
-not asked for HTML and has not ruled it out, and those are different: `.named`,
-`.anything`, `.unsaid`, `.refused`. Quality values are read, so
-`text/html;q=0, */*` refuses HTML and accepts everything else. Nothing is
-allocated and nothing is collected — it answers about the one type you name.
-It exists because the single-page fallback needed it
-([ADR 0109](./docs/adr/0109-a-fallback-answers-a-navigation-not-a-missing-asset.md))
-and is exported because a handler serving two content types wants the same
-question answered.
-
-#### Metrics — `app.metrics(.{})`
-
-Counters, which nilo has never had. One call puts a Prometheus page on
-`/metrics`: how many requests each route answered, at what status class, how
-long they took, which exact codes the service is returning, and how many
-requests are in flight.
-
-**Counted per route, not per path.** `/users/1` and `/users/2` are both
-`/users/:id`, because the counter is the route's index in the table rather than
-a string somebody hashed — so a crawler cannot make you a million series, and a
-counted request still allocates nothing. The budget test that holds
-[ADR 0018](./docs/adr/0018-the-trade-budget-has-three-axes.md)'s hard invariant
-runs a second time with metrics on and still reads one allocation.
-
-`app.expose("orders_placed", .counter, &orders_placed)` publishes a
-`std.atomic.Value(u64)` of your own on the same page. There is no registry you
-can add a name to at run time, deliberately: you own the counter and increment
-it, nilo reads it once per scrape.
-
-Four interleaved benchmark pairs put the throughput cost inside the noise — the
-sign changed twice — so it is reported as unchanged rather than as a figure. An
-application that never calls `metrics()` pays 1,984 bytes of binary; one that
-does pays 17,416 more.
-[Metrics](./docs/guide/metrics.md),
-[ADR 0100](./docs/adr/0100-the-route-table-is-the-registry.md).
-
-#### `listen(.{ .arena_keep = … })` — for a server whose responses are large
-
-A response bigger than what the request arena keeps between requests was **a
-page fault per 4 KiB, every request**: the arena hands the block back on reset
-and the next request takes fresh pages the kernel has to zero. On a route
-answering a megabyte that is 257 minor faults a request, and setting the option
-past the response took it from 7,908 req/s to 11,069
-([ADR 0096](./docs/adr/0096-a-response-larger-than-the-arena-keep-is-a-page-fault-per-page.md)).
-
-```zig
-try app.listen(.{ .port = 8080, .arena_keep = 1 << 20 });
-```
-
-**The default is unchanged at 16 KiB and no existing server moves**, because
-the memory is held per connection: a megabyte of keep across ten thousand
-connections is ten gigabytes. Set it just past the largest response a route
-assembles in the arena, and only where the connection count is known.
-
-#### `app.spawn(f, args)` — somewhere to start work that is not a request
-
-`nilo.spawn` needs a running server and `listen()` never returns, so a ticker
-or a batching exporter was reachable only from inside a request handler.
-`app.spawn` registers the same fiber before the server and starts it once there
-is one, after the port is taken and before the first connection is accepted
-([ADR 0086](./docs/adr/0086-work-that-is-not-a-request-belongs-to-the-server.md)):
-
-```zig
-try app.provide(&exporter);
-try app.spawn(flushEvery, .{&exporter});
-try app.listen(.{ .port = 8080 });
-```
-
-```zig
-fn flushEvery(exporter: *Exporter) void {
-    while (true) {
-        nilo.sleep(60_000) catch return;   // Canceled — the server is going
-        exporter.flush() catch |err| std.log.err("flush: {t}", .{err});
-    }
-}
-```
-
-The fiber is owned by the server exactly as a connection is: counted while it
-runs, cut off when the shutdown grace period ends. It is registered on the App
-rather than declared on a Service because a Service's `nilo_start` runs in the
-phase after the pool and before the socket, and a program that migrates before
-it serves runs that phase with no server in it at all
-([ADR 0079](./docs/adr/0079-there-is-a-phase-before-the-server.md)) — so work
-spawned there would answer `error.NoServer` and never be asked again.
-`app.spawn` does not care which of the two startup orders you used.
-
-`nilo.spawn` is unchanged and stays the right call from inside a handler.
-
-#### `nilo_json` — a type can say how its JSON is spelled
-
-`std.json` writes a union one way — `{"metrics":{…}}`, one object with one key.
-Most REST APIs use the other one, and there was no way to ask for it short of a
-hand-written `jsonStringify` and `jsonParse` per type
-([ADR 0085](./docs/adr/0085-a-type-says-how-its-json-is-spelled.md)):
-
-```zig
-const Condition = union(enum) {
-    pub const nilo_json = .{ .tag = "signal", .rename_all = .lowercase };
-    pub const jsonParse = nilo.jsonParseFor(@This());
-
-    metrics: MetricCondition,
-    logs: LogCondition,
-};
-```
-
-```json
-{"signal":"metrics","metric_name":"system.cpu.utilization","threshold":0.9}
-```
-
-`.tag` is the discriminator's key. `.rename_all` spells a variant's name or an
-enum's tag the way the wire wants it, and takes `.lowercase`, `.UPPERCASE`,
-`.camelCase`, `.PascalCase`, `.SCREAMING_SNAKE_CASE` and `.@"kebab-case"`. It
-does not touch field names. A variant carrying nothing is the tag on its own.
-
-The second line is only needed for a type that *arrives* in a request. Sending
-needs nothing, because nilo makes that call and reads the marker itself; reading
-is `std.json`'s call, and nothing can add a declaration to a type you wrote.
-
-#### `c.headers()` — every header a request sent
-
-`c.header(name)` answers with the first of that name and nothing could read the
-rest, so a middleware that does not know the names in advance — a signing proxy,
-somebody else's tracing header, a `Forwarded` reader — had to reach into
-`c._head`, which is nilo's to change.
-
-```zig
-var it = c.headers();
-while (it.next()) |h| { … }   // h.name and h.value are both Str
-```
-
-A wrapper over the walk `header` already does: no list is built, nothing is
-allocated, and a request that never calls it pays nothing. Both halves are `Str`
-because the head is usually borrowed from the connection's read buffer
-([ADR 0107](./docs/adr/0107-every-header-without-handing-out-the-head.md)).
-
-#### A test client that can be a client
-
-`testing.Client` wrote `Host: test` and nothing else, so a test of a route
-behind `Authorization`, behind CORS or behind a session had to hand-assemble
-the raw request text — the one place in this framework where the ordinary thing
-was harder than the raw thing.
-
-```zig
-try client.setHeader("Authorization", "Bearer t");   // every request from now on
-
-const answer = try client.sendRequest(&app, .{
-    .method = "PUT",
-    .path = "/settings",
-    .headers = &.{.{ .name = "X-Trace", .value = "abc" }},
-    .content_type = "application/json",
-    .body = "{}",
-});
-```
-
-And `Client.init(gpa, .{ .cookies = true })` keeps what the answers set and
-sends it back, so a sign-in followed by a request *as* that user is two calls
-rather than a `Set-Cookie` copied by hand. **The jar is off by default** so that
-a suite written before it existed keeps asserting what it always asserted
-([ADR 0108](./docs/adr/0108-the-test-client-can-do-what-a-client-does.md)).
-
-`send(&app, raw)` is unchanged and applies neither: the bytes are yours.
-
-#### `Upload.saveTo(dir, name)` — an uploaded file reaching a disk
-
-```zig
-fn setAvatar(uploads: *Uploads, account: u32, incoming: nilo.Form(Avatar)) !nilo.Status(201, void) {
-    var buf: [32]u8 = undefined;
-    const name = try std.fmt.bufPrint(&buf, "{d}.png", .{account});
-    try incoming.value.image.saveTo(uploads.dir, name);
-    return .{};
-}
-```
-
-An `Upload` used to hand over the bytes and stop there, so every upload handler
-ended in the same four lines of `std.fs` — which block the executor thread and
-every other connection it is serving, and which resolve
-`../../etc/cron.d/anything` if the name came from `u.filename`. `saveTo` refuses
-that name by the same check `sendFile` makes on the way out, and the fiber parks
-for the write instead of the thread blocking
-([ADR 0123](./docs/adr/0123-a-file-is-written-by-the-engine.md)).
-
-**The file is replaced or it is not touched.** The bytes go to a temporary name
-beside it and one rename puts them in place, which matters because the directory
-an application uploads into is usually the one it serves out of: a request
-reading that name mid-write gets the old file rather than a truncated one.
-`nilo.Dir` gained the operation under it, `d.writeFileAtomic(name, bytes)`.
-
-#### `body_min_rate` — a body that arrives too slowly to be worth waiting for
-
-```zig
-try app.listen(.{ .body_min_rate = 8 * 1024, .body_grace_ms = 10_000 });  // the defaults
-```
-
-**A client sending one byte every twenty-nine seconds was inside the
-thirty-second `body_timeout_ms` forever**, holding a fiber, a step of the arena
-and a connection slot for as long as it liked. Every one of those bytes arrived
-on time, which is what a per-read limit asks for.
-
-A body nilo assembles in the arena — `c.body()`, and the `Form`, JSON and
-`Bound` handlers built on it — now has a deadline worked out from the length the
-client announced: `body_grace_ms` plus what those bytes need at `body_min_rate`.
-A megabyte gets 138 seconds at the defaults; a client below the rate is a **408**
-rather than a 500, because the request never finished arriving
-([ADR 0124](./docs/adr/0124-a-buffered-body-arrives-at-a-rate.md)).
-
-**This is an admission policy and may refuse an honest client on a bad link.**
-Lower the rate rather than raising the timeout; `body_min_rate = 0` restores the
-old behaviour exactly. `c.bodyStream()` and a WebSocket are untouched — nothing
-is being held on the client's behalf there.
-
-#### `.address = "unix:/run/nilo.sock"` — a path instead of a port
-
-```zig
-try app.listen(.{ .address = "unix:/run/nilo.sock" });
-```
-
-`port` is not read then. The proxy in front no longer has to reach the server
-over loopback TCP: a unix socket is a file, and the answer to "who may connect"
-is the answer to "who may write to this directory".
-
-A socket left behind by a server that was killed is removed before binding —
-which is what `reuse_address` means here, and it is narrow on purpose: only a
-path that is a socket, and only when connecting to it is refused. A file, a
-directory, or a socket something is still listening on is left exactly as it is.
-This server removes its own path when it stops.
-
-A request that arrives that way has no client address, so `Ctx.peer()` is
-empty. `clientIp()` reads `X-Forwarded-For` when `.trusted_proxies` is set,
-because nothing remote can open a unix socket
-([ADR 0130](./docs/adr/0130-a-path-is-an-address-to-listen-on.md)).
-
-#### `listen(.{ .trusted_proxies = &.{"private"} })` — which proxy, not how many
-
-`.trusted_hops` counts entries from the right of `X-Forwarded-For` and cannot
-say anything about *which* machine is in front. Add a CDN in front of the load
-balancer and the count is one short from that afternoon on, and `clientIp()`
-goes on returning something that looks like an address.
-
-Each entry is a CIDR (`10.0.0.0/8`, `fd00::/8`), a bare address meaning that
-host alone, or one of two names — `"private"` for the RFC 1918 ranges plus
-carrier-grade NAT, link-local, unique-local v6 and the loopback, and
-`"loopback"` for the loopback alone. The header is not read at all unless the
-connection came from one of them; entries written by one of them are skipped
-from the right; the first one left is the client. **Nothing depends on how many
-proxies there are.**
-
-A v4 rule matches a client that arrived v4-mapped, so the rule is written once.
-A rule that is not an address stops the server at `listen()` with a sentence
-naming it. `.trusted_hops` still works and still means what it meant; when both
-are set, the description wins
-([ADR 0129](./docs/adr/0129-a-proxy-is-trusted-by-which-one-it-is.md)).
-
-#### `app.with(mw)` — a middleware on one route
-
-```zig
-try app.with(adminOnly).delete("/users/:id", removeUser);
-```
-
-The other direction of [`without`](./docs/adr/0080-a-route-can-say-it-is-not-covered.md),
-and the same shape: it hands back a group, so there is no second way to
-register a route. The two compose. A carried middleware runs innermost, and it
-is matched on the joined pattern **and the method**, so renaming the route moves
-the middleware with it and a `DELETE` guard does not cover the `GET` beside it
-([ADR 0126](./docs/adr/0126-a-route-can-say-what-covers-it.md)).
-
-#### `c.url(pattern, args)` and `app.routes()`
-
-```zig
-const where = try c.url("/users/:id/posts/:slug", .{ .id = user.id, .slug = title });
-try c.redirect(303, where.view());
-
-std.log.info("serving {d} routes:\n{f}", .{ app.routes().len(), app.routes() });
-```
-
-The pattern is the name: it is already a compile-time literal and already what
-every error message quotes back, so there is no route name to keep in step with
-it. A param with no value, a value with no param, a value a path segment cannot
-carry and a `*` catch-all are all compile errors naming the field. Every value
-is percent-encoded, so a value out of a form cannot decide which route the URL
-lands in. `url.into(buf, …)` is the same call with a caller's buffer and no
-allocation ([ADR 0127](./docs/adr/0127-a-route-pattern-is-the-name-of-its-url.md)).
-
-#### `c.streamWith(…, .{ .length = n })` — a stream that knows its length
-
-A handler moving bytes out of something that had already counted them — an S3
-object, an upstream response — sent them with no `Content-Length`, so a browser
-showed no progress and a `Range` could not be answered. With a length the head
-carries it, the pieces go out unframed, and HTTP/1.0 gets keep-alive back.
-
-Writing past the promise is refused before a byte of the overrun goes out, for
-the reason [a WebSocket frame that lies about its length is refused](./docs/adr/0097-a-frame-that-lies-about-its-length-is-not-sent.md).
-Finishing short cannot be refused — the head has gone — so the connection
-closes and the log says both numbers
-([ADR 0128](./docs/adr/0128-a-stream-that-knows-its-length-says-so.md)).
-
-#### `allowance.keyed(f, …)` — an allowance on something the application knows
-
-```zig
-fn account(c: *nilo.Ctx) ?nilo.Str {
-    const who = c.session(Account) orelse return null;
-    return who.id;
-}
-
-try app.useOn("/api", nilo.allowance.keyed(account, .{
-    .per_window = 1000,
-    .on_null = .reject,
-}));
-```
-
-`allowance.with` counts against the address, which is right for a scraper and
-wrong for everything else: ten accounts behind one office NAT shared an
-allowance, and one account on ten machines got ten.
-
-The key's bytes are not kept — they live in the request arena — so what goes in
-the table is a 64-bit tag from a keyed hash, in a word of its own beside the
-counters. `on_null` has no default: `keyed(signedInAccount, …)` on a sign-in
-route with a silent skip leaves every *failed* sign-in uncounted, which is the
-attack the route exists to stop. `.reject` answers 403, not 429 — nothing was
-rated. `per_window` goes to 65,535 here, where the address table stops at 1023
-([ADR 0131](./docs/adr/0131-a-key-the-application-knows-is-a-word-of-its-own.md)).
-
-#### `nilo.deadline(ms)` — how long a route gets
-
-```zig
-try app.with(nilo.deadline(2000)).get("/report", buildReport);
-```
-
-`listen()`'s four deadlines bound one operation each and none of them bounds the
-request. This clamps every wait nilo owns — the body, the write, a stream's
-pieces, a WebSocket's silence — to whichever comes first.
-
-**A running handler is not interrupted**, and deliberately is not: a cancel that
-fires mid-handler is a cancel every handler, every `nilo.Mutex` and every
-Service has to survive. A loop doing its own work asks `c.overdue()`, and
-`c.timeLeftMs()` is the same answer as a number for a budget to pass on. Both
-answer safely on a route with no deadline. A handler that fails while overdue
-with nothing sent gets a 503 naming the budget; one that finishes late still
-answers, and the lateness is a log line
-([ADR 0133](./docs/adr/0133-a-route-can-say-how-long-it-has.md)).
-
-#### `staticWith(.{ .reload = true })` — a directory that is not held
-
-Every file is left on disk and opened per request, so editing one under a
-running server works. It is the spill threshold set to zero and nothing else —
-no fiber, no swap of a Set under live readers. A file that did not exist at
-startup still needs a restart
-([ADR 0125](./docs/adr/0125-a-file-is-described-by-the-descriptor-being-sent.md)).
+#### Serving
+
+- **`nilo.deadline(ms)`** — how long a route gets, clamping every wait nilo owns
+  (the body, the write, a stream's pieces, a WebSocket's silence) to whichever
+  comes first. A running handler is **not** interrupted; it asks `c.overdue()`
+  or `c.timeLeftMs()` itself. Failing while overdue with nothing sent is a 503
+  naming the budget; finishing late still answers, and is a log line
+  ([ADR 0133](./docs/adr/0133-a-route-can-say-how-long-it-has.md)).
+- **`allowance.with(.{ .per_window = 100, .window_s = 60 })`** — the
+  hundred-and-first request from one address inside the minute is a 429 with a
+  `Retry-After`, and the handler never runs. The window slides; the table is
+  sized while compiling and lives in `.bss` (131,072 bytes at the default
+  `.slots = 16 * 1024`, nothing in a program that does not use it); an IPv6
+  client is a `/64`. **Behind a proxy set `.trusted_hops`**, or every request
+  looks like it came from the proxy. Read it as a shaper rather than a
+  guarantee — a flood is still `max_connections`
+  ([ADR 0114](./docs/adr/0114-an-allowance-is-a-table-sized-while-compiling.md)).
+- **`allowance.keyed(f, .{ .per_window = 1000, .on_null = .reject })`** — the
+  same table keyed on what the application knows, because an address gave ten
+  accounts behind one office NAT a single allowance. The key's bytes are not
+  kept, only a 64-bit tag; `on_null` has no default, and `.reject` answers 403
+  rather than 429. `per_window` goes to 65,535 here
+  ([ADR 0131](./docs/adr/0131-a-key-the-application-knows-is-a-word-of-its-own.md)).
+- **`app.metrics(.{})`** — counters, which nilo has never had: a Prometheus page
+  on `/metrics` with requests per route, status class, duration and how many are
+  in flight. **Counted per route, not per path**, so a crawler cannot make you a
+  million series and a counted request still allocates nothing.
+  `app.expose("orders_placed", .counter, &orders_placed)` puts a counter of your
+  own on the page. Throughput cost is inside the noise; the binary pays 17,416
+  bytes if you call it. [Metrics](./docs/guide/metrics.md),
+  [ADR 0100](./docs/adr/0100-the-route-table-is-the-registry.md).
+- **`app.spawn(f, args)`** — a ticker or a batching exporter registered before
+  `listen()` and started once there is a server, owned by it exactly as a
+  connection is. `nilo.spawn` needs a running server, so this work used to be
+  reachable only from inside a handler
+  ([ADR 0086](./docs/adr/0086-work-that-is-not-a-request-belongs-to-the-server.md)).
+- **`.address = "unix:/run/nilo.sock"`** — a path instead of a port, so the
+  proxy in front no longer reaches the server over loopback TCP and "who may
+  connect" is "who may write to this directory". `port` is not read, a stale
+  socket is removed before binding, this server removes its own, and `c.peer()`
+  is empty
+  ([ADR 0130](./docs/adr/0130-a-path-is-an-address-to-listen-on.md)).
+- **`.trusted_proxies = &.{"private"}`** — which machine is in front rather than
+  how many hops, so adding a CDN does not leave `.trusted_hops` one short and
+  `clientIp()` quietly wrong. Each entry is a CIDR, a bare address, `"private"`
+  or `"loopback"`; the header is not read unless the connection came from one.
+  `.trusted_hops` still means what it meant, and the description wins when both
+  are set
+  ([ADR 0129](./docs/adr/0129-a-proxy-is-trusted-by-which-one-it-is.md)).
+- **`listen(.{ .arena_keep = 1 << 20 })`** — a response larger than the arena
+  keeps was a page fault per 4 KiB, every request: 257 of them on a route
+  answering a megabyte, and 7,908 req/s where setting this gives 11,069. **The
+  default is unchanged at 16 KiB** because the memory is held per connection
+  ([ADR 0096](./docs/adr/0096-a-response-larger-than-the-arena-keep-is-a-page-fault-per-page.md)).
+- **`body_min_rate` and `body_grace_ms`** — the admission policy above, on
+  `c.body()` and the `Form`, JSON and `Bound` handlers over it. A megabyte gets
+  138 seconds at the defaults. `c.bodyStream()` and a WebSocket are untouched
+  ([ADR 0124](./docs/adr/0124-a-buffered-body-arrives-at-a-rate.md)).
+- **`app.with(mw)`** — a middleware on one route, the other direction of
+  `without` and the same shape: it hands back a group. It runs innermost and is
+  matched on the pattern **and the method**, so a `DELETE` guard does not cover
+  the `GET` beside it
+  ([ADR 0126](./docs/adr/0126-a-route-can-say-what-covers-it.md)).
+
+#### Reading a request
+
+- **`c.queries()`, `c.queryString()`, `c.host()`, `c.scheme()`** — every
+  parameter in arrival order (a name sent twice, or `?filter[status]=open`,
+  needed an underscore field before), the bytes still encoded for a signature,
+  and what a handler writes a URL to its own service with. `X-Forwarded-Proto`
+  and `-Host` are read only behind `.trusted_hops`, on the terms
+  `X-Forwarded-For` already is, and a forwarded host that is not host-shaped is
+  dropped rather than put in a link somebody clicks
+  ([ADR 0112](./docs/adr/0112-a-request-can-be-read-past-the-parts-a-handler-names.md)).
+- **`c.headers()`** — every header a request sent, name and value both `Str`,
+  for a middleware that does not know the names in advance. A wrapper over the
+  walk `header` already does: nothing built, nothing allocated
+  ([ADR 0107](./docs/adr/0107-every-header-without-handing-out-the-head.md)).
+- **`nilo.accept.asks(c.header("Accept"), "text/html")`** — `.named`,
+  `.anything`, `.unsaid` or `.refused`, because a client that sent no `Accept`
+  has neither asked for HTML nor ruled it out. Quality values are read; nothing
+  is allocated or collected
+  ([ADR 0109](./docs/adr/0109-a-fallback-answers-a-navigation-not-a-missing-asset.md)).
+- **A `union(enum)` can be a request body**, which used to be a compile error on
+  the grounds that nothing in the type said which arm arrived. `nilo_json`'s
+  `.tag` is the type saying it.
+
+#### Responses and files
+
+- **`nilo_json` — a type can say how its JSON is spelled.** `std.json` writes a
+  union one way and most REST APIs use the other; this needed a hand-written
+  `jsonStringify` and `jsonParse` per type
+  ([ADR 0085](./docs/adr/0085-a-type-says-how-its-json-is-spelled.md)):
+
+  ```zig
+  const Condition = union(enum) {
+      pub const nilo_json = .{ .tag = "signal", .rename_all = .lowercase };
+      pub const jsonParse = nilo.jsonParseFor(@This());   // only if it arrives
+
+      metrics: MetricCondition,
+      logs: LogCondition,
+  };
+  ```
+
+  `.tag` is the discriminator's key; `.rename_all` spells a variant or an enum
+  tag the way the wire wants it (`.lowercase`, `.UPPERCASE`, `.camelCase`,
+  `.PascalCase`, `.SCREAMING_SNAKE_CASE`, `.@"kebab-case"`) and does not touch
+  field names. Sending needs no `jsonParse` line — nilo makes that call itself.
+- **`Upload.saveTo(dir, name)`** — the four lines of `std.fs` every upload
+  handler ended in, without blocking the executor thread and without resolving
+  `../../etc/cron.d/anything` out of `u.filename`. The bytes go to a temporary
+  name and one rename puts them in place, so a request reading that name
+  mid-write gets the old file rather than a truncated one; `nilo.Dir` gained
+  `writeFileAtomic` under it
+  ([ADR 0123](./docs/adr/0123-a-file-is-written-by-the-engine.md)).
+- **`c.streamWith(…, .{ .length = n })`** — bytes out of something that had
+  already counted them went with no `Content-Length`, so a browser showed no
+  progress and a `Range` could not be answered. With a length the pieces go out
+  unframed and HTTP/1.0 gets keep-alive back. Writing past the promise is
+  refused before a byte of the overrun goes out; finishing short closes the
+  connection and logs both numbers
+  ([ADR 0128](./docs/adr/0128-a-stream-that-knows-its-length-says-so.md)).
+- **`c.url(pattern, args)` and `app.routes()`** — the pattern is the name, so
+  there is no route name to keep in step with it. A missing param, a spare
+  value, a value a path segment cannot carry and a `*` catch-all are compile
+  errors naming the field, and every value is percent-encoded so a form value
+  cannot pick the route. `url.into(buf, …)` is the same call with no allocation
+  ([ADR 0127](./docs/adr/0127-a-route-pattern-is-the-name-of-its-url.md)).
+- **`staticWith(.{ .reload = true })`** — every file left on disk and opened per
+  request, so editing one under a running server works. It is the spill
+  threshold set to zero and nothing else; a file that did not exist at startup
+  still needs a restart
+  ([ADR 0125](./docs/adr/0125-a-file-is-described-by-the-descriptor-being-sent.md)).
+- **`cors.reading(&origins, .{ … })`** — the same middleware reading its list
+  from a variable you fill before `listen()`, because the front end's address is
+  a fact about the deployment: `origins.setSplit(&buf, settings.web_origins)`
+  and one binary serves staging and production. The list is borrowed rather than
+  copied, so **a cross-origin response still allocates nothing**; `"*"` is
+  refused outright, and `cors.with` is untouched
+  ([ADR 0110](./docs/adr/0110-an-origin-is-a-fact-about-the-deployment.md)).
+
+#### Testing
+
+- **`testing.Conversation`** — a WebSocket route driven through the public API,
+  where a handler that upgrades leaves `testing.Client` nothing to read.
+  `text`, `binary`, `ping`, `pong`, `close`, `fragments` and `raw` are what you
+  send; `at(n)`, `first(kind)` and `closedWith()` are what came back, decoded by
+  a reader sharing no code with the encoder it checks. The frames are queued
+  before the server runs, so a test cannot answer what the server just said, and
+  a `Room` broadcast needs two connections and is out of reach
+  ([ADR 0113](./docs/adr/0113-a-websocket-route-can-be-driven-from-a-test.md)).
+- **`testing.Client` can be a client.** `setHeader` applies to every request
+  from then on, `sendRequest` takes a method, headers, a content type and a
+  body, and `Client.init(gpa, .{ .cookies = true })` keeps what the answers set
+  and sends it back — so a sign-in followed by a request *as* that user is two
+  calls. **The jar is off by default** so an existing suite keeps asserting what
+  it asserted; `send(&app, raw)` applies neither
+  ([ADR 0108](./docs/adr/0108-the-test-client-can-do-what-a-client-does.md)).
 
 #### Smaller
 
-- **`union(enum)` as a request body**, which used to be a compile error on the
-  grounds that nothing in the type said which arm arrived. `.tag` is the type
-  saying it.
-- **Twelve refusals** covering the ways of writing the marker wrong, taking the
-  framework's table from 63 to 75 and the five tables from 129 to 141. The one
-  worth knowing is a `.tag` whose name a variant already uses as a field: the
-  only mistake here that would corrupt the wire rather than fail.
+- **Twelve refusals** covering the ways of writing the `nilo_json` marker wrong,
+  taking the framework's table from 63 to 75 and the five tables from 129 to
+  141. The one worth knowing is a `.tag` whose name a variant already uses as a
+  field: the only mistake here that corrupts the wire rather than failing.
 - **[Work that is not a request](./docs/guide/background.md)** in the guide, and
   a ninth example — `zig build run-scheduled`.
-- **The WebSocket has been run against Autobahn**, the suite every
-  implementation of RFC 6455 is measured by: **294 OK, 4 NON-STRICT, 0 FAILED**
-  of 301 cases. `bash bench/autobahn/run.sh` is the run and
-  [`bench/result/http.md`](./bench/result/http.md) is what it said. Nothing in
-  the framework changed; what changed is that the framing rules have now been
-  seen by something that did not write them.
-- **What a held-open stream costs, measured**: 21,058 bytes, against 4,674 for
-  an idle connection, plus your handler's stack byte for byte. The
-  [streaming guide](./docs/guide/streaming.md) carries the number again instead
-  of a warning that it was unmeasured. `bench/stream_server.zig` and
-  `python3 bench/mem.py --hold`.
+- **The WebSocket has been run against Autobahn**: **294 OK, 4 NON-STRICT, 0
+  FAILED** of 301 cases. Nothing in the framework changed; the framing rules
+  have now been seen by something that did not write them.
+  `bash bench/autobahn/run.sh`, [`bench/result/http.md`](./bench/result/http.md).
+- **What a held-open stream costs, measured**: 21,058 bytes against 4,674 for an
+  idle connection, plus your handler's stack byte for byte. The
+  [streaming guide](./docs/guide/streaming.md) carries the number instead of a
+  warning that it was unmeasured.
 
 ### Changed
 
-- **The blocking detector measures one unparked stretch rather than a total,
-  and nothing is excused from it any more.** `block_warning_ms` used to compare
-  elapsed-minus-parked, summed over the whole request — which has no upper
-  bound on a connection that stays open, so a stream, a body reader and a
-  WebSocket had to be excused entirely and a blocking call inside a WebSocket
-  loop was never reported. That is where it costs the most: a stalled fiber
-  there holds its executor against every other socket that executor serves.
-
-  What is measured now is the longest stretch the fiber ran without parking,
-  which means the same thing on a request that lasts a millisecond and on a
-  connection that lasts a day, so the exemption is gone
-  ([ADR 0132](./docs/adr/0132-what-is-watched-is-one-unparked-stretch.md)).
-  Two things read differently if you had it switched on: **a handler that
-  yields between short stretches is no longer reported** — ten 30ms stretches
-  with a `nilo.blocking` between each pair summed to 300ms and were caught, and
-  a handler that yields every 30ms has already taken the advice — and **a
-  handler that blocks twice is now reported twice**, under the same one-a-second
-  rate limit as before.
-
-- **A request body under a `Content-Encoding` other than `identity` is now a
-  415.** nilo decodes none of them, so a client sending `Content-Encoding: gzip`
-  had its gzip stream handed to `c.json` and got back a 400 saying the body was
-  malformed — true of the bytes, and useless to whoever sent them. The 415
-  names the header
-  ([ADR 0111](./docs/adr/0111-a-body-under-an-encoding-nilo-cannot-read-is-refused.md)).
-  The header on a request with no body is still ignored, so nothing that was
-  being answered stops being answered unless it really was sending a body nilo
-  could not read.
-
-- **A single-page fallback now answers a navigation rather than every path
-  under its prefix.** `staticWith(.{ .spa_fallback = "index.html" })` used to
-  answer 200 with the page for anything that named no file, so a build whose
-  hash had moved on handed a browser HTML where it asked for
-  `app.abc123.js` — a syntax error on line 1 of something that was never
-  JavaScript, with the missing file named nowhere. A request that names
-  `text/html`, or that says nothing and has no file extension in its last
-  segment, still gets the page; everything else gets a 404 saying which path
-  ([ADR 0109](./docs/adr/0109-a-fallback-answers-a-navigation-not-a-missing-asset.md)).
-
-  ```zig
-  try app.staticWith("/", "public", .{
-      .spa_fallback = "index.html",
-      .spa_fallback_for = .any_path,     // what shipped before, if you need it
-  });
-  ```
-
-  A `fetch()` sending `*/*` to a path with no extension is unchanged and still
-  gets the page: it is indistinguishable from a deep link at this layer, and
-  saying `Accept: application/json` is what separates them. **A second ordering
-  change comes with it** — every directory is asked for the file before any
-  directory is asked for its fallback, so a single-page app mounted at `/` no
-  longer answers `/assets/app.css` from its own `index.html` when the directory
-  holding that file was mounted after it.
-
-- **A Dialect now owes `json_form` and `enum_form` beside `uuid_form`.**
-  Nothing to do unless you wrote a Dialect of your own, which nothing outside
-  this repository is known to have done; if you did, `assertDialect` names the
-  missing declaration. Both answer `.native` or `.text` and say how the database
-  stores a document and a tag — Postgres has a type for each and SQLite has
-  neither
-  ([ADR 0119](./docs/adr/0119-the-sqlite-write-path-is-compiled.md)).
-
-- **`c.body()` no longer commits the announced `Content-Length` before reading
-  a byte of it.** A client that promised a megabyte and sent one byte a minute
-  used to hold the megabyte for as long as it kept trickling — 1,852,080 bytes
-  of anonymous mapping per stuck connection, now 316,080. Nothing changes for a
-  body that arrives: it is the same one allocation it always was, and a body
-  over the step pays one more
-  ([ADR 0105](./docs/adr/0105-a-body-is-taken-as-it-arrives.md)).
-
-- **A number in a path param, a query value or a form field is no longer read
-  as a Zig literal.** `/users/+7` was user 7, `?page=1_0` was page ten, and
-  `?ratio=nan` was a `f64` that loses every comparison it is in. All four are a
-  400 now. A leading `-` on a signed field, a leading zero and an exponent's
-  sign are all still accepted
-  ([ADR 0106](./docs/adr/0106-a-number-in-a-request-is-not-a-zig-literal.md)).
-  A client that was relying on any of the four gets the 400 the value always
-  deserved.
-
-- **`cors.Options.origin` is now `origins`, and takes a list.** The one
-  breaking change in this release. A single compile-time string meant an
-  application with a production front end and a staging one could not use the
-  middleware at all and wrote its own.
+- **`cors.Options.origin` is now `origins`, and takes a list** — the one
+  breaking change, because a single compile-time string meant an application
+  with a production front end and a staging one could not use the middleware at
+  all. `Access-Control-Allow-Origin` carries one value, so the request's
+  `Origin` is compared against the list and the match is what goes out
+  ([ADR 0099](./docs/adr/0099-one-allow-origin-header-means-the-list-is-matched-not-formatted.md)).
+  The compare is unrolled while compiling and allocates nothing.
 
   ```zig
   try app.use(nilo.cors.with(.{
@@ -633,480 +232,305 @@ startup still needs a restart
   }));
   ```
 
-  `Access-Control-Allow-Origin` carries one value, so the request's `Origin` is
-  compared against the list and the one that matched is what goes out
-  ([ADR 0099](./docs/adr/0099-one-allow-origin-header-means-the-list-is-matched-not-formatted.md)).
-  The compare is unrolled while compiling: one `mem.eql` per entry against a
-  literal, nothing allocated. `cors.permissive` is unchanged, and an
-  application on `&.{"*"}` does not compile the matching branch at all.
-
-  **Two things behave differently for a named origin.** It is now sent only to
-  a request whose `Origin` matched — the single string went out on every
-  response, including requests that never asked — and an origin you did not
-  name gets an ordinary response with no allow header on it, which is the
-  browser's refusal to make rather than the server's. `Vary: Origin` goes out
-  either way, so a cache cannot hand one origin's answer to another.
-
-  Three new build-time refusals go with it: an empty list, `*` beside a name it
-  already covers, and an origin with a capital letter in it — a browser
-  lowercases the scheme and host before sending them, so that one could never
-  have matched.
-
-- **The generated API description follows whichever encoding the type asked
-  for**, so a client generated from it reads what the server actually sends. A
-  tagged union is `oneOf` with `discriminator`; an untagged union is still `{}`.
+  **Two things behave differently for a named origin**: it goes out only to a
+  request whose `Origin` matched, where the single string went out on every
+  response, and an origin you did not name gets an ordinary response with no
+  allow header — the browser's refusal to make rather than the server's. `Vary:
+  Origin` goes out either way. Three refusals come with it: an empty list, `*`
+  beside a name it already covers, and an origin with a capital letter, which a
+  browser lowercases before sending and so could never have matched.
 
 - **A WebSocket handshake is same-origin unless the route says otherwise.** A
   browser applies no CORS to a WebSocket — no preflight, and it ignores
-  `Access-Control-Allow-Origin` — so a `cors.with` in front of an upgrade route
+  `Access-Control-Allow-Origin` — so `cors.with` in front of an upgrade route
   set headers nobody enforced and the socket opened anyway, **carrying the
-  session cookie**, because the handshake is an ordinary GET. An application
-  with `Session(T)` and `c.upgrade` on the same server was open to any page on
-  any origin reading and writing that user's socket.
-
-  A handshake carrying an `Origin` that does not name the authority its `Host`
-  named is now a 403. A request with no `Origin` at all — `curl`, `wstest`, a
-  native client — is unaffected, because the ambient cookie this guards is a
-  browser's.
-
-  ```zig
-  return c.upgradeWith(chatLoop, room, .{
-      .origins = &.{"https://app.example.com"},  // the page, on another host
-  });
-  ```
-
-  `&.{"*"}` allows anybody, for a public socket carrying nothing worth
-  stealing. The scheme is not compared, because TLS is terminated in front and
-  nilo never learns which one the browser used
+  session cookie**. An application with `Session(T)` and `c.upgrade` on the same
+  server was open to any page on any origin. A handshake whose `Origin` does not
+  name the authority its `Host` named is now a 403; a request with no `Origin`
+  at all — curl, wstest, a native client — is unaffected, because the ambient
+  cookie this guards is a browser's. Say
+  `c.upgradeWith(chatLoop, room, .{ .origins = &.{"https://app.example.com"} })`
+  for a page on another host, or `&.{"*"}` for a public socket. One compare on
+  the handshake, nothing per message
   ([ADR 0102](./docs/adr/0102-a-websocket-handshake-is-same-origin-unless-the-route-says-otherwise.md)).
-  Nothing per request and nothing per connection: one compare, on the
-  handshake.
 
-- **An HTTP/1.1 request with no `Host`, or with two, is a 400.** RFC 9112 §3.2
-  requires it, and the front end nilo assumes is there already refuses both — so
-  answering them was nilo agreeing to read a request nobody else agreed to. A
-  repeat is refused even when the two agree, which is stricter than
-  `Content-Length`. HTTP/1.0 is unaffected
+- **The blocking detector measures one unparked stretch rather than a total, and
+  nothing is excused any more.** The old sum over a whole request had no upper
+  bound on a connection that stays open, so streams, body readers and WebSockets
+  were exempt — and a blocking call inside a WebSocket loop, where a stalled
+  fiber holds its executor against every other socket, was never reported. Two
+  things read differently: a handler that yields between short stretches is no
+  longer reported, and a handler that blocks twice is now reported twice
+  ([ADR 0132](./docs/adr/0132-what-is-watched-is-one-unparked-stretch.md)).
+
+- **A request body under a `Content-Encoding` other than `identity` is a 415.**
+  nilo decodes none of them, so a gzip stream reached `c.json` and came back as
+  a 400 about a malformed body — true of the bytes and useless to the sender.
+  The header on a request with no body is still ignored
+  ([ADR 0111](./docs/adr/0111-a-body-under-an-encoding-nilo-cannot-read-is-refused.md)).
+
+- **An HTTP/1.1 request with no `Host`, or with two, is a 400**, as RFC 9112
+  §3.2 requires and as the front end nilo assumes is there already does. A
+  repeat is refused even when the two agree. HTTP/1.0 is unaffected
   ([ADR 0101](./docs/adr/0101-a-request-nobody-else-would-answer-is-refused.md)).
 
 - **A `Transfer-Encoding` whose last coding is not `chunked` is a 400.** It used
-  to be served as a request with **no body at all** — no error, no framing —
-  leaving the bytes the client sent still in the read buffer for the next turn
-  of the connection loop to parse as a second request. RFC 9112 §6.1 makes it a
-  400, and nilo can decode exactly one coding. `Transfer-Encoding: chunked` is
-  unchanged.
+  to be served as a request with **no body at all**, leaving the bytes the
+  client sent in the read buffer for the next turn of the connection loop to
+  parse as a second request. `Transfer-Encoding: chunked` is unchanged.
+
+- **A number in a path param, a query value or a form field is no longer read as
+  a Zig literal.** `/users/+7` was user 7, `?page=1_0` was page ten, and
+  `?ratio=nan` was an `f64` that loses every comparison it is in; all four are a
+  400. A leading `-` on a signed field, a leading zero and an exponent's sign
+  are still accepted
+  ([ADR 0106](./docs/adr/0106-a-number-in-a-request-is-not-a-zig-literal.md)).
+
+- **A single-page fallback answers a navigation rather than every path under its
+  prefix.** It used to answer 200 with the page for anything that named no file,
+  so a build whose hash had moved on handed a browser HTML where it asked for
+  `app.abc123.js` — a syntax error on line 1, with the missing file named
+  nowhere. A request naming `text/html`, or saying nothing and carrying no
+  extension in its last segment, still gets the page; everything else gets a 404
+  saying which path, and `.spa_fallback_for = .any_path` restores what shipped
+  ([ADR 0109](./docs/adr/0109-a-fallback-answers-a-navigation-not-a-missing-asset.md)).
+  **A second ordering change comes with it**: every directory is asked for the
+  file before any directory is asked for its fallback, so an app mounted at `/`
+  no longer answers `/assets/app.css` from its own `index.html`.
+
+- **`c.body()` no longer commits the announced `Content-Length` before reading a
+  byte of it.** A client that promised a megabyte and sent one byte a minute
+  held 1,852,080 bytes of anonymous mapping per stuck connection, now 316,080.
+  A body that arrives is the same one allocation it always was
+  ([ADR 0105](./docs/adr/0105-a-body-is-taken-as-it-arrives.md)).
+
+- **A Dialect owes `json_form` and `enum_form` beside `uuid_form`.** Nothing to
+  do unless you wrote a Dialect of your own; `assertDialect` names the missing
+  declaration. Both answer `.native` or `.text`
+  ([ADR 0119](./docs/adr/0119-the-sqlite-write-path-is-compiled.md)).
+
+- **The generated API description follows whichever encoding the type asked
+  for**, so a client generated from it reads what the server sends: a tagged
+  union is `oneOf` with `discriminator`, an untagged one is still `{}`.
 
 ### Fixed
 
-- **A spilled static file that grew on disk served a stale length under a stale
-  ETag.** A file over `max_file_bytes` had its size, mtime and ETag recorded by
-  the directory walk and its bytes opened per request, so editing one under a
-  running server sent the first recorded-length bytes of a file that had moved
-  on — a complete, correct-looking response carrying a prefix. Worse, a client
-  that kept the old ETag was answered 304, so a cache in front went on serving
-  the old bytes indefinitely.
-
-  The head is now written from one look at the descriptor whose bytes are about
-  to go out, so the length and the tag cannot disagree
-  ([ADR 0125](./docs/adr/0125-a-file-is-described-by-the-descriptor-being-sent.md)).
-  Shrinking was already caught. The Bulkhead's `File.size` became `File.stat`,
-  which matters only if you wrote an Engine.
-
-- **A `without` exemption freed a route from a middleware on every method at
-  that path, not just its own.** `app.group("/v1").without(requireSession).post("/sign-up", …)`
-  also freed a `GET /v1/sign-up` registered beside it, silently. Exemptions are
-  matched on the method as well as the pattern now. `with` was written against
-  the same record and would have had the identical bug.
-
-- **A nilo compile error could rename your own type into one of nilo's.** An
-  application with `src/room.zig` holding a `pub const Room`, or
-  `src/session.zig` holding a `Session`, was told its type was `nilo.Room` or
-  `nilo.Session` — and sent looking for a type it never imported. The name
-  table matched on a file name, and `@typeName` spells a type as its path from
-  its own module's root, so an app rooted at `src/main.zig` produces exactly
-  the string nilo produces for its own type.
-
-  nilo's types now say their own name with a `pub const nilo_type_name`, which
-  yours cannot accidentally have
-  ([ADR 0122](./docs/adr/0122-a-type-says-its-own-name.md)). `session`, `room`,
-  `body`, `stream`, `form`, `cookie` and `app` are all ordinary file names, so
-  this is worth taking if you have any of them. Nothing at run time and nothing
-  in the binary.
-
-- **`GET http://example.com/users/7 HTTP/1.1` was a 404 on a route that plainly
-  exists.** The whole target went to the router as a path, which split it into
-  `http:`, ``, `example.com`, `users` and `7` and matched nothing. RFC 9112
-  §3.2.2 says a server must accept that form, and a client talking to what it
-  believes is a proxy sends it. The authority is taken off and the path is
-  routed
-  ([ADR 0120](./docs/adr/0120-a-target-is-read-in-the-form-it-arrived-in.md)).
-
-  Two things follow that you may notice. `c.host()` answers from the target
-  when a request arrived that way, because RFC 9112 §3.2 gives an origin server
-  no choice about that — a trusted `X-Forwarded-Host` still outranks both. And
-  such a request no longer needs a `Host` header to escape a 400, since it
-  named its host on the first line. Two absolute-form shapes are now a 400
-  rather than a 404: one carrying userinfo (`http://a@b/`), and one with no
-  path but a query (`http://example.com?a=1`). `OPTIONS *` and `CONNECT` are
-  unchanged. One byte compare on the request path, nothing per connection.
-
-- **A `[]const u8` holding a byte that is not text went out as a JSON string,
-  and the response was not valid JSON.** `{"name":"\xff"}` — quoted, escaped
-  for nothing, and unparseable by whoever asked for it. `std.json` validates
-  UTF-8 first and writes `{"name":[255]}` instead, which is now what nilo
-  writes
-  ([ADR 0121](./docs/adr/0121-a-byte-that-is-not-text-is-not-a-string.md)).
-  It was the last place where this module's stated contract — the output is
-  byte-for-byte what `std.json` would have written — was untrue.
-
-- **A `[:0]const u8` went out as a JSON array of byte values while the generated
-  document said it was a string.** `{"name":[104,101,108,108,111]}` where
-  `std.json` writes `{"name":"hello"}`, and where `openapi.json` — reading the
-  same type correctly — promised a generated client a string. The response was
-  also labelled `application/json` where a `[]const u8` would have been
-  `text/plain`.
-
-  A sentinel-terminated slice is not exotic: it is what `@tagName` returns, what
-  `allocPrintSentinel` returns, and what any field crossing a C boundary is
-  spelled as. Three files asked whether a type was a run of bytes and one of
-  them got it right; there is one predicate now and the other two call it
-  ([ADR 0103](./docs/adr/0103-one-file-decides-what-counts-as-text.md)). Nothing
-  at run time either way.
-
-- **A type holding a list of its own type could not reach a response at all.** A
-  comment with replies, a category with children — the walk that decides which
-  writer to use recursed with no floor, so it failed to *compile*, with a
-  message in nilo's own file whose advice was to raise the branch quota. It
-  stops at eight now, the same ceiling the schema walker has, and sends the
-  value to `std.json`, which writes it correctly.
-
-- **A connection cancelled while leaving a `Room` kept its seat and its bell.**
-  `Room.leave` gave up on `error.Canceled` — what a fiber gets when the server
-  is shutting down — before releasing the seat, so a later broadcast pushed a
-  message into the ring of a handler that had ended and rang a waker pointing
-  into its `Socket`. It needs a broadcast in flight at the moment the connection
-  is cancelled, so it is narrow, and it is a use-after-free.
-
-  Both locks on that path are now uninterruptible: a cleanup path has nowhere to
-  put a failure ([ADR 0104](./docs/adr/0104-a-cleanup-path-is-not-cancellable.md)).
-  `nilo.Mutex.lockUncancelable` is new and is what a Service with its own
-  cleanup path should reach for. Nothing per connection, nothing per message.
+#### Serving
 
 - **A server that had served WebSockets usually did not come back from a
-  SIGTERM.** The process never exited and one executor thread spun at 100% for
-  as long as anybody let it, so a deploy got a container that would not stop and
-  a core that never went idle. Nothing was wrong with plain request serving:
-  only a WebSocket reaches the code that caused it.
-
-  The Engine's `Wake` handed two completions to the event loop every time a
-  connection parked and never took them back, so when the connection's fiber
-  returned, the loop was left writing into a frame that had been handed on. It
-  gives them back now, and the fiber does not return until the loop has let go
+  SIGTERM** — the process never exited and one executor thread spun at 100%, so
+  a deploy got a container that would not stop. The Engine's `Wake` handed two
+  completions to the event loop every time a connection parked and never took
+  them back, so the loop was left writing into a frame that had been handed on.
+  `python3 bench/shutdown.py` at 24 connections: **23 of 25 SIGTERMs hung
+  before, 0 of 25 after**. Nothing per connection, nothing on any message path
   ([ADR 0098](./docs/adr/0098-a-completion-the-loop-holds-outlives-the-frame-that-submitted-it.md)).
-
-  `python3 bench/shutdown.py` at 24 connections a run: **23 of 25 SIGTERMs hung
-  before, 0 of 25 after.** Nothing per connection, nothing on any message path —
-  the call happens once, on a connection that is already closing, and only if it
-  ever parked.
-
-- **`socket.print` and `socket.json` could put a length on the wire that their
-  bytes did not match, and nothing noticed.** Both run the format twice — once
-  to count, once to write — and the doc has always said to pass values rather
-  than a window onto memory another fiber is writing. Nothing enforced it, and a
-  WebSocket frame whose length is wrong by one leaves the reader at the wrong
-  offset for the life of the connection.
-
-  The two passes are now held to each other. A disagreement **closes the
-  connection with 1011 and returns `error.WriteFailed`** rather than sending the
-  frame, and usually the frame is still in the write buffer and never leaves at
-  all. A close rather than an assert, because an assert in `ReleaseSafe` takes
-  the whole process down for one bad connection
+- **A connection cancelled while leaving a `Room` kept its seat and its bell**,
+  so a later broadcast pushed into the ring of a handler that had ended and rang
+  a waker pointing into its `Socket` — narrow, and a use-after-free. Both locks
+  on that path are uninterruptible now, and `nilo.Mutex.lockUncancelable` is
+  what a Service with its own cleanup path should reach for
+  ([ADR 0104](./docs/adr/0104-a-cleanup-path-is-not-cancellable.md)).
+- **`socket.print` and `socket.json` could put a length on the wire their bytes
+  did not match.** Both format twice, and a frame whose length is wrong by one
+  leaves the reader at the wrong offset for the life of the connection. The two
+  passes are held to each other; a disagreement closes with 1011 and returns
+  `error.WriteFailed` rather than sending, usually before the frame leaves the
+  buffer. A subtraction and a compare per call; `send` is untouched
   ([ADR 0097](./docs/adr/0097-a-frame-that-lies-about-its-length-is-not-sent.md)).
-
-  Costs a subtraction and a compare per call, in every optimize mode. `send` is
-  untouched. A message larger than the connection's write buffer is still
-  unchecked, and ADR 0097 says why.
-
-- **`Expect: 100-continue` was never answered, so curl waited a second before
-  every upload.** Nothing under `http/` read the header. A client that sends it
-  holds its body back until the server says something; curl's fallback timer is
-  one second, and it was paid on every upload past its threshold.
-
-  nilo now answers `100 Continue` at the moment it commits to reading the body
-  ([ADR 0094](./docs/adr/0094-a-header-is-answered-as-asked-or-refused.md)) —
-  which is what buys the better half of RFC 9110 §10.1.1 for nothing. **A request
-  refused before that line is answered with its final status and the body is
-  never sent at all**: a body over `max_body`, a 404, a 405, or a handler that
-  never asks. A rejected 20 MB upload now costs the bytes of the 413.
-
-  Nothing sends an interim response to an HTTP/1.0 client, to a request already
-  answered, or where `Content-Length: 0` says the client is holding nothing back.
-  A connection whose body was never collected answers and then closes, because
-  the request is unfinished. `100-continue` is the only expectation read; any
-  other is ignored rather than met with a 417.
-
-- **`If-Range` accepted a weak validator, which is the one comparison the RFC
-  says must be strong.** `static.etagMatches` strips a `W/` prefix and honours
-  `*` — right for `If-None-Match`, wrong for `If-Range`, where RFC 9110 §13.1.5
-  asks for strong comparison. A weak tag means "close enough to reuse", and a
-  resumed download staples the bytes it gets onto a prefix it already holds.
-
-  `If-Range` now uses `etagMatchesStrong`: no `W/`, no `*`, one tag rather than a
-  list. `If-None-Match` is unchanged. A second, narrower half went with it —
-  `sendfile.send` guarded against a bare `*` standing in for a comparison that
-  never happened and `App.serveHeldFile` did not, while `serveHeldFile`'s doc
-  claimed there was exactly one copy of each rule. There is now.
-
-  **Reachable only from a client that wraps a tag it was given in `W/`**, since
-  nilo writes strong tags. Latent rather than live, and the failure mode is a
-  corrupt file.
-
-- **A multipart part naming its file only with `filename*` was read as a text
-  field.** `parameterOf` compares the key exactly, so `filename*` never matched
-  `filename` and the part fell through to the text arm — holding the raw bytes of
-  the upload, while the `Upload` the endpoint asked for was reported missing. So
-  the 400 named the wrong thing.
-
-  It is now a 400 naming the part. nilo still does not read RFC 6266's encoding;
-  it stops pretending the part was something else, which is the call ADR 0081
-  makes about a ceiling. Browsers send both `filename` and `filename*` and are
-  unaffected.
-
-- **Fifteen types printed a nilo file name in nilo's own compile errors.**
-  `http/names.zig` rewrites `str.Str` to `nilo.Str` so a message names the module
-  the reader imported, and its table had fallen fifteen types behind `http.zig`'s
-  exports — `Socket`, `Room`, `Stream`, `Session`, `Bound` and ten more. A
-  WebSocket loop with the wrong first argument was told it should be
-  `*nilo.Socket` and that what it had was a `*ctx.Ctx`.
-
-  The table is filled in, and `jsonmark.zig` and `websocket.zig` now ask it
-  rather than calling `@typeName` directly. **What holds it is a test that walks
-  the module's exports** rather than the paragraph that was supposed to
-  ([ADR 0095](./docs/adr/0095-the-name-table-is-checked-against-the-exports.md)):
-  a type added to `http.zig` and forgotten fails the suite the day it lands.
-
-- **A gzipped static file behind a named-origin CORS lost its `Vary: Origin`.**
-  `setHeader` replaced, on the grounds that setting a header twice is somebody
-  changing their mind — which is true inside one function and not true of
-  `Vary`, where the CORS middleware and the static-file handler each name a
-  different axis of the same response. Middleware runs first, so it was always
-  CORS's that went.
-
-  `Vary` now repeats rather than replaces, and the response carries both lines
-  ([ADR 0089](./docs/adr/0089-two-layers-can-each-name-a-vary-axis.md)). Two
-  lines rather than one comma-joined value because joining means building a
-  string, and that would put an allocation on the static-file path. An exact
-  duplicate — same name and same value — is still dropped, so two middlewares
-  that both depend on the origin do not produce two identical lines.
-
-  `inline_headers` went from six to seven with it: the shape above sets seven
-  headers, and the seventh was spilling to the arena. That is measured — the new
-  budget test failed with `expected 0, found 1` before the constant moved, and
-  asserts zero allocations after. The 32 bytes sit on a frame that is unwound
-  before the connection waits, so an idle connection is unchanged: four
-  interleaved runs, two per side, put this release and 0.2.0 at the same figure
-  with a one-byte spread across the four
-  ([`bench/result/http.md`](./bench/result/http.md)).
-
-- **A session never expired, whatever `max_age` said.** The only thing bounding
-  one was `Max-Age` on the cookie, which is an instruction to a *browser* — so a
-  copy of the cookie taken out of a proxy log or a backup went on opening
-  forever, and the only way to stop it was rotating the secret, which signs out
-  everybody. The guide meanwhile offered `.max_age = 30 * 24 * 60 * 60` under
-  *Staying signed in* and said three paragraphs later that a copied cookie still
-  opens; both sentences were true and they described different behaviour.
-
-  The seal now carries the moment it stops opening, under the AEAD tag where a
-  client cannot reach it
-  ([ADR 0088](./docs/adr/0088-an-expiry-a-client-can-ignore-is-not-one.md)).
-  `max_age` sets the cookie attribute and the sealed expiry from one number.
-  Leaving it null is still a session cookie and now also seals
-  `nilo.session.default_max_age` — **24 hours** — because null cannot safely
-  mean forever. An expired session reads as `null`, like every other unreadable
-  cookie.
-
-  **Two things to know before deploying.** The plaintext layout moved, so every
-  session already out there is ignored and those people sign in again — the same
-  thing adding a field to the session struct has always done. And a session
-  cookie that was living indefinitely now stops at a day; if you were relying on
-  that, say `.max_age`. `nilo.session.openAt(T, cookie, key, when)` is public so
-  a test can reach the boundary without a wall clock. Costs one 15ns clock read
-  on a request that carries a session cookie, nothing on one that does not, and
-  12 bytes on the wire.
-
+- **`Expect: 100-continue` was never answered, so curl waited out its one-second
+  fallback timer before every upload.** nilo answers at the moment it commits to
+  reading the body, and **a request refused before that line gets its final
+  status with the body never sent** — a rejected 20 MB upload now costs the
+  bytes of the 413. Nothing interim goes to HTTP/1.0 or where `Content-Length:
+  0` says nothing is held back; no other expectation is read
+  ([ADR 0094](./docs/adr/0094-a-header-is-answered-as-asked-or-refused.md)).
+- **`GET http://example.com/users/7 HTTP/1.1` was a 404 on a route that plainly
+  exists** — the whole target went to the router as a path. RFC 9112 §3.2.2 says
+  a server must accept that form, and a client that believes it is talking to a
+  proxy sends it. The authority is taken off and the path routed; `c.host()`
+  answers from the target, and such a request needs no `Host` header. Two shapes
+  become a 400 rather than a 404: userinfo (`http://a@b/`), and no path with a
+  query (`http://example.com?a=1`). One byte compare on the request path
+  ([ADR 0120](./docs/adr/0120-a-target-is-read-in-the-form-it-arrived-in.md)).
+- **A request whose body was framed twice was read rather than refused** — four
+  ways a `Content-Length` could disagree with the proxy in front, all now a 400:
+  a value that is not plain digits (`+5`, `1_0`, `-0`), a repeat with a
+  different value, `Content-Length` beside `Transfer-Encoding: chunked` in
+  either order, and a second `Transfer-Encoding` after chunked. `chunked` is
+  read as the last coding rather than as a substring, so `xchunked` no longer
+  counts
+  ([ADR 0090](./docs/adr/0090-a-body-framed-twice-is-refused.md)).
 - **A response header value was never checked, so a handler could split its own
-  response.** A header is `name: value\r\n` and there is no escaping in that
-  grammar, so a value carrying a newline does not make a broken header — it
-  makes a **second** one, and two of them end the head and start a second
-  response. Every path that sets a response header now goes through one check
-  ([ADR 0087](./docs/adr/0087-a-header-value-cannot-end-its-own-line.md)): the
-  name has to be a token, and the value may not hold a control byte. Two
-  narrower versions of this check already existed — `c.setCookie` refuses a `;`,
-  and `c.requestId` refuses a forged `X-Request-Id` — and neither covered
-  `c.setHeader`, a `Response`'s `.headers`, or a `Redirect`'s. The shape most
-  likely to have been reached is the one in the guide, where a `Redirect`'s
-  destination comes out of a database.
-
-  A refused header is now a 500 naming the header and the rule it broke, where
-  the reserved-header refusal used to reach the client as `"internal server
-  error"`. `error.ReservedHeader` is gone with it; it was never a documented
-  name, and setting `Content-Length` is refused exactly as before. The value
-  itself is never quoted back in the message. Costs nothing on any of the four
-  axes, binary size included — the ADR has the four measurements.
-
-- **A `rename_all` that put two names on one was accepted silently.**
-  `.lowercase` and `.UPPERCASE` join the words rather than keeping the
-  underscore, so an enum with `not_found` and `notfound` sent both as
-  `"notfound"` — and a reader took whichever variant the `inline for` reached
-  first, which is declaration order. Reordering two variants would have quietly
-  changed which one a request parsed into. It is now a compile error naming
-  both names and saying which cases keep them apart
-  ([ADR 0093](./docs/adr/0093-two-renamed-names-that-collide-are-refused.md)).
-
-  Nothing to change unless you had the bug. `.lowercase` and `.UPPERCASE` are
-  unchanged for every type whose names stay distinct under them. Two refusals
-  cover it, taking the framework's table from 75 to 77 and the five tables from
-  141 to 143.
-
-- **A checkbox did not bind to a `bool`.** A ticked HTML checkbox posts `on`,
-  and `bool` took `true` and `false` and nothing else — so `newsletter: bool =
-  false` inside a `Form(T)` was a 400 the first time somebody ticked the box,
-  while the unticked half worked because an absent field takes its default. A
-  form now reads `on` as well
-  ([ADR 0092](./docs/adr/0092-a-checkbox-is-a-bool-in-a-form-and-nowhere-else.md)),
-  and a form field that fits none of the three says so: `"newsletter" has to be
-  true, false or on, not "maybe"`.
-
-  **Only a form.** The same field in a `Query(T)` or a JSON body still takes
-  `true` and `false` alone, because `on` is a fact about HTML rather than about
-  booleans. `off` is accepted nowhere — no browser sends it. Costs 0 bytes of
-  binary, with the four example binaries coming out byte-identical, because the
-  slot is settled while compiling.
-
-  `docs/guide/forms.md` and `examples/forms` both worked around this with a
-  `Str` and now say `bool`.
-
-- **"About 9 KB a connection" was still quoted in six places, and the number is
-  4,669.** ADR 0071 took an idle connection to 4,669 bytes and an idle WebSocket
-  to 5,183; `zio.zig`'s capacity warning, `docs/guide/deploying.md`,
-  `docs/guide/websocket.md`, `docs/reference.md` and `http/bulkhead.zig` were
-  not updated with it, and `deploying.md` also still carried an older ~21 KB
-  from two rounds before that. The log line an operator reads at the connection
-  limit now says `an idle connection costs 4,669 bytes, plus whatever stack the
-  handler touches` — the second half because 4,669 is a floor and not a total
-  ([ADR 0063](./docs/adr/0063-a-handlers-stack-is-per-connection.md)), which
-  none of the six said.
-
-  The premise underneath had gone stale too: `deploying.md` told you to turn
-  `read_buffer` and `write_buffer` down for a server holding many connections
-  open, and since ADR 0071 an idle connection gives both buffers back, so they
-  no longer affect what it holds. And `docs/guide/streaming.md`'s ~21 KB per
-  open stream is a v1 figure that predates both findings — it now says so
-  rather than quoting a number, and the measurement is on the roadmap.
-
-- **A request whose body was framed twice was read rather than refused.** Four
-  ways a `Content-Length` could disagree with the reverse proxy in front of
-  nilo, all now a `400`
-  ([ADR 0090](./docs/adr/0090-a-body-framed-twice-is-refused.md)): a value that
-  is not plain digits (`+5` used to read as 5, `1_0` as 10, `-0` as 0), a
-  repeated `Content-Length` with a different value (the same value is fine),
-  `Content-Length` beside `Transfer-Encoding: chunked` in either order, and a
-  second `Transfer-Encoding` line once chunked has been seen. `chunked` is also
-  read as the last coding in the list rather than as a substring anywhere in it,
-  so `xchunked` is no longer taken for chunked framing.
-
-  Nothing to change: every request refused here is one a proxy in front would
-  very likely have refused already.
-
-- **`fetch` retried a reaped connection only when the peer's close landed
-  first.** If your request lands first instead, the peer closes a socket with an
-  unread request in it, the kernel sends an RST rather than a FIN, and
-  `std.http` reports `ReadFailed` where the retry was bounded to
-  `HttpConnectionClosing`
-  ([ADR 0091](./docs/adr/0091-a-reaped-connection-arrives-two-ways.md)). Same
-  reaped connection, same nothing answered, and which one you got was a race
-  nobody runs. A call against a service that reaps idle connections now retries
-  under the same bounds as before: only a replayable body, only inside the same
-  permit and deadline, at most one attempt per connection the pool could hold. A
-  reset partway through a response head is still a failure, because something
-  did come back.
-
+  response**: there is no escaping in `name: value\r\n`, so a value carrying a
+  newline makes a *second* header, and two of them end the head and start a
+  second response. Every path that sets one now goes through one check — the
+  name a token, the value free of control bytes — and a refusal is a 500 naming
+  the header and the rule, where the reserved-header refusal used to reach the
+  client as `"internal server error"`. `error.ReservedHeader` is gone; the value
+  is never quoted back
+  ([ADR 0087](./docs/adr/0087-a-header-value-cannot-end-its-own-line.md)).
+- **A session never expired, whatever `max_age` said.** The only bound was
+  `Max-Age` on the cookie, which is an instruction to a *browser*, so a copy out
+  of a proxy log went on opening forever unless you rotated the secret and
+  signed everybody out. The seal now carries the moment it stops opening, under
+  the AEAD tag. Leaving `max_age` null is still a session cookie and now seals
+  `nilo.session.default_max_age` — **24 hours**. The plaintext layout moved, so
+  every session out there is ignored; `session.openAt(T, cookie, key, when)` is
+  public for a test. One 15ns clock read on a request that carries a session,
+  and 12 bytes on the wire
+  ([ADR 0088](./docs/adr/0088-an-expiry-a-client-can-ignore-is-not-one.md)).
+- **A `without` exemption freed a route from a middleware on every method at
+  that path**, so `.without(requireSession).post("/sign-up", …)` silently freed
+  the `GET` beside it. Exemptions are matched on the method as well as the
+  pattern now; `with` was written against the same record and would have had the
+  identical bug.
 - **Two ceilings were reached in silence**, both
   [ADR 0081](./docs/adr/0081-a-ceiling-that-is-reached-is-said-out-loud.md)
-  applied where it had not been. A multipart form with more than
-  `form.max_parts` (256) parts is a `400` naming the ceiling, where it used to
-  read the first 256 and walk past the rest — which a handler cannot tell apart
-  from fields the browser never sent. And a `422` from `Bound(T)` that runs out
-  of `fail.max_message` ends with `; and N more` instead of stopping mid-word.
+  applied where it had not been: a multipart form over `form.max_parts` (256) is
+  a 400 naming the ceiling rather than reading the first 256 and walking past
+  the rest, and a `422` from `Bound(T)` that runs out of `fail.max_message` ends
+  with `; and N more` instead of stopping mid-word.
+- **A checkbox did not bind to a `bool`.** A ticked HTML checkbox posts `on`, so
+  `newsletter: bool = false` inside a `Form(T)` was a 400 the first time
+  somebody ticked the box while the unticked half worked. A form reads `on` now,
+  and anything else says `"newsletter" has to be true, false or on, not
+  "maybe"`. **Only a form** — `Query(T)` and a JSON body still take `true` and
+  `false` alone, and `off` is accepted nowhere. 0 bytes of binary
+  ([ADR 0092](./docs/adr/0092-a-checkbox-is-a-bool-in-a-form-and-nowhere-else.md)).
 
-- **`Message.data`'s documented lifetime was backwards.** Documentation only,
-  and worth reading if you hold a WebSocket message past the `receive` that
-  produced it. The type said the bytes were "the caller's memory and lives
-  exactly as long as the caller decides". They are borrowed from the executor's
-  free list and the loan ends at the next `receive`, sooner if the connection
-  falls quiet, at which point another connection may be filling the same pages.
-  `docs/reference.md` always had this right. Copy before you keep.
+#### Static files
 
+- **A spilled static file that grew on disk served a stale length under a stale
+  ETag** — the walk recorded size, mtime and ETag while the bytes were opened
+  per request, so a complete, correct-looking response carried a prefix, and a
+  client holding the old ETag was answered 304 forever. The head is written from
+  one look at the descriptor whose bytes are going out. The Bulkhead's
+  `File.size` became `File.stat`, which matters only if you wrote an Engine
+  ([ADR 0125](./docs/adr/0125-a-file-is-described-by-the-descriptor-being-sent.md)).
+- **`If-Range` accepted a weak validator**, which is the one comparison RFC 9110
+  §13.1.5 says must be strong — a resumed download staples the bytes it gets
+  onto a prefix it already holds. It uses `etagMatchesStrong` now: no `W/`, no
+  `*`, one tag. `If-None-Match` is unchanged. Reachable only from a client that
+  wraps a tag it was given in `W/`, so latent rather than live, and the failure
+  mode is a corrupt file.
+- **A gzipped static file behind a named-origin CORS lost its `Vary: Origin`**,
+  because `setHeader` replaced and the CORS middleware runs before the static
+  handler names its own axis of the same response. `Vary` repeats rather than
+  replaces now — two lines rather than one joined value, since joining would put
+  an allocation on the static path — and an exact duplicate is still dropped
+  ([ADR 0089](./docs/adr/0089-two-layers-can-each-name-a-vary-axis.md)).
+  `inline_headers` went from six to seven with it, measured; an idle connection
+  is unchanged.
+- **A multipart part naming its file only with `filename*` was read as a text
+  field**, holding the raw upload bytes while the `Upload` the endpoint asked
+  for was reported missing — so the 400 named the wrong thing. It is a 400
+  naming the part now. nilo still does not read RFC 6266's encoding; browsers
+  send both and are unaffected.
+
+#### Types, JSON and compile errors
+
+- **A `[]const u8` holding a byte that is not text went out as a JSON string**,
+  so `{"name":"\xff"}` was unparseable by whoever asked for it. nilo writes
+  `{"name":[255]}` as `std.json` does — the last place this module's stated
+  contract was untrue
+  ([ADR 0121](./docs/adr/0121-a-byte-that-is-not-text-is-not-a-string.md)).
+- **A `[:0]const u8` went out as an array of byte values while `openapi.json`
+  promised a string**, and was labelled `application/json` where a `[]const u8`
+  is `text/plain`. Three files asked whether a type is a run of bytes and one
+  got it right; there is one predicate now
+  ([ADR 0103](./docs/adr/0103-one-file-decides-what-counts-as-text.md)).
+- **A type holding a list of its own type could not reach a response at all** —
+  the walk deciding which writer to use recursed with no floor, so it failed to
+  *compile*, advising you to raise the branch quota. It stops at eight now, the
+  ceiling the schema walker has.
 - **Responses carrying a union were two to three times slower than they had to
-  be.** `covers` decides while compiling which types nilo's own JSON writer may
-  touch, and it is answered for the **whole** value — it did not recognise a
-  `union(enum)` at all, so one union field anywhere sent the entire response to
-  `std.json`, every string in it included. On a 374-byte payload with a union in
-  it that is **2.8× to 3.2×**, and 3.4× to 3.5× on a 104-byte one. The bytes are
-  unchanged, and the tests hold nilo's output against `std.json`'s value by
-  value. [`bench/result/http.md`](./bench/result/http.md) has the run and the
-  controls.
+  be**: `covers` did not recognise a `union(enum)`, so one union field anywhere
+  sent the whole response to `std.json`, every string included. **2.8× to 3.2×**
+  on a 374-byte payload, 3.4× to 3.5× on a 104-byte one. The bytes are unchanged
+  ([`bench/result/http.md`](./bench/result/http.md)).
+- **A `rename_all` that put two names on one was accepted silently** —
+  `not_found` and `notfound` both sent `"notfound"`, and a reader took whichever
+  variant declaration order reached first, so reordering two variants quietly
+  changed which one a request parsed into. It is a compile error naming both
+  names now
+  ([ADR 0093](./docs/adr/0093-two-renamed-names-that-collide-are-refused.md)).
+- **A nilo compile error could rename your own type into one of nilo's.** An app
+  with `src/room.zig` holding a `pub const Room` was told its type was
+  `nilo.Room` and sent looking for something it never imported, because the name
+  table matched on a file name. nilo's types say their own name with a
+  `pub const nilo_type_name` now, which yours cannot accidentally have —
+  `session`, `room`, `body`, `stream`, `form`, `cookie` and `app` are all
+  ordinary file names. Nothing at run time
+  ([ADR 0122](./docs/adr/0122-a-type-says-its-own-name.md)).
+- **Fifteen types printed a nilo file name in nilo's own compile errors** —
+  `Socket`, `Room`, `Stream`, `Session`, `Bound` and ten more, so a WebSocket
+  loop with the wrong first argument was told it had a `*ctx.Ctx`. The table is
+  filled in, and **what holds it is a test that walks the module's exports**
+  rather than the paragraph that was supposed to
+  ([ADR 0095](./docs/adr/0095-the-name-table-is-checked-against-the-exports.md)).
 
-- **`id INTEGER PRIMARY KEY` stopped a SQLite server from starting.** The
-  spelling every SQLite tutorial writes was reported as a schema mismatch, and
-  `schema_mismatch_is_fatal` defaults to true, so `nilo_start` refused a table
-  that was correct. SQLite reports `notnull = 0` for that column because it is
-  an alias for the rowid rather than a constraint — it means *there is no NOT
-  NULL clause here*, not *this may be null*. Nothing to change on your side; if
-  you added a redundant `NOT NULL` to get past it, it is still correct and no
-  longer needed. `INT PRIMARY KEY` and a composite `PRIMARY KEY (a, b)` keep
-  reporting, because SQLite really does accept a NULL in both
+#### `nilo_sql`
+
+- **`id INTEGER PRIMARY KEY` stopped a SQLite server from starting** — the
+  spelling every tutorial writes was reported as a schema mismatch, and
+  `schema_mismatch_is_fatal` defaults to true. SQLite reports `notnull = 0`
+  there because the column is an alias for the rowid. `INT PRIMARY KEY` and a
+  composite `PRIMARY KEY (a, b)` keep reporting, because SQLite really does
+  accept a NULL in both
   ([ADR 0115](./docs/adr/0115-an-integer-primary-key-is-the-rowid.md)).
-
 - **`.in` and `.not_in` did not compile against SQLite at all**, and three
-  documents said they did. `where.zig` had been writing
-  `IN (SELECT value FROM json_each(?1))` since the second dialect landed and
-  nothing turned the list into the text that statement reads, so the failure was
-  `cannot bind value of type []const i64` from four frames inside zqlite, on the
-  operator every real schema uses. It binds the list as one JSON array now, at
-  one arena allocation per condition on SQLite and nothing on Postgres.
-
-  **A `sql.Json(T)` column and an enum column could not be written there
-  either**, for the same reason and found by the same run: both *read*
-  correctly, so a Row carrying one compiled for `db.select` and stopped
-  compiling at `db.insert`. All three are the SQLite write path never having
-  been compiled by anything on `zig build test`
+  documents said they did: the failure was `cannot bind value of type
+  []const i64` from inside zqlite, on the operator every real schema uses. The
+  list binds as one JSON array now, at one arena allocation per condition. **A
+  `sql.Json(T)` column and an enum column could not be written there either**,
+  found by the same run — all three are the SQLite write path never having been
+  compiled by anything on `zig build test`
   ([ADR 0119](./docs/adr/0119-the-sqlite-write-path-is-compiled.md)).
-
-- **A `Streamed` closed twice released its pool connection twice, in
-  ReleaseSafe only.** The re-entry guard was inside `if (traps_enabled)`, which
-  is Debug — so in the mode you deploy in, `result.deinit()` and
-  `conn.release()` both ran a second time and the pool was handed a connection
-  it was already holding. `rows.close()` on an early return plus the
-  `defer rows.close()` the doc comment recommends is exactly two calls, so this
-  was reachable from the shape the API teaches. Costs one byte on the stack of a
-  handler that streams
+- **A `Streamed` closed twice released its pool connection twice, in ReleaseSafe
+  only** — the re-entry guard was inside `if (traps_enabled)`, which is Debug.
+  `rows.close()` on an early return plus the `defer rows.close()` the doc
+  comment recommends is exactly two calls, so this was reachable from the shape
+  the API teaches. One byte on the stack of a handler that streams
   ([ADR 0117](./docs/adr/0117-a-guard-against-double-release-is-not-a-debug-trap.md)).
-
 - **A NULL read into a field that cannot hold one was a `0` on SQLite and an
-  error on Postgres.** The null test only ran for optional fields, so a
-  non-optional `i64` read `0` and a non-optional text read `""`. It is
-  `error.QueryFailed` on both Wires now, with a warning naming the column. The
+  error on Postgres.** The null test only ran for optional fields. It is
+  `error.QueryFailed` on both Wires now, with a warning naming the column; the
   startup check cannot catch this for a view, which is where it bit
   ([ADR 0118](./docs/adr/0118-a-null-is-refused-by-both-wires-or-by-neither.md)).
-
-- **A SQLite request could stall on a free connection, with nothing in the log
-  and nothing holding it.** `takeWriter` and `takeReader` waited on one
-  `std.Io.Condition` while testing different predicates, woken with `signal`, so
-  a returning reader could wake the fiber queued for the writer — which went
-  back to sleep — while the fiber that wanted a reader was never woken. One
-  queue per predicate now, woken with `broadcast`
+- **A SQLite request could stall on a free connection**, with nothing in the log
+  and nothing holding it: `takeWriter` and `takeReader` waited on one
+  `std.Io.Condition` while testing different predicates, so a returning reader
+  could wake the fiber queued for the writer. One queue per predicate now, woken
+  with `broadcast`
   ([ADR 0116](./docs/adr/0116-a-queue-per-question-not-one-condition-for-two.md)).
+
+#### `nilo_fetch`
+
+- **`fetch` retried a reaped connection only when the peer's close landed
+  first.** If your request lands first, the kernel sends an RST rather than a
+  FIN and `std.http` reports `ReadFailed`, where the retry was bounded to
+  `HttpConnectionClosing` — same reaped connection, and which one you got was a
+  race nobody runs. The retry bounds are otherwise unchanged: only a replayable
+  body, only inside the same permit and deadline, at most one attempt per
+  connection the pool could hold
+  ([ADR 0091](./docs/adr/0091-a-reaped-connection-arrives-two-ways.md)).
+
+#### Documentation
+
+- **"About 9 KB a connection" was still quoted in six places, and the number is
+  4,669** (5,183 for an idle WebSocket), with `deploying.md` carrying an older
+  ~21 KB from two rounds before that. The capacity warning an operator reads now
+  says `an idle connection costs 4,669 bytes, plus whatever stack the handler
+  touches`, because it is a floor rather than a total
+  ([ADR 0063](./docs/adr/0063-a-handlers-stack-is-per-connection.md)). The
+  premise had gone stale too: `deploying.md` told you to turn `read_buffer` and
+  `write_buffer` down for a server holding many connections open, and since
+  ADR 0071 an idle connection gives both buffers back.
+- **`Message.data`'s documented lifetime was backwards** — the type said the
+  bytes were the caller's. They are borrowed from the executor's free list and
+  the loan ends at the next `receive`, sooner if the connection falls quiet.
+  `docs/reference.md` always had this right. Copy before you keep.
 
 ## 0.2.0
 
