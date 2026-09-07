@@ -46,6 +46,25 @@ drop loop reads the same list, so a Row that stops being managed would otherwise
 look exactly like a Row that was deleted, and the plan would drop somebody
 else's table.
 
+## What the port did with it, which is more than this asked for
+
+Every Row in it is `.managed = false`, not only the external ones, because that
+is the truth: another tool owns all 59 tables and the binary builds none. That
+much was expected. What was not is the table it then declared **for the first
+time** — `staff`, two columns of ten, with no statement writing it and no
+migration wanting it, purely so `db.checking` would hold them against the live
+schema. `full_name` is read by name in seven statements and nothing had ever
+checked it existed. They proved it by misspelling the column and watching the
+boot refuse, naming the field and the table.
+
+**So the word buys a check that could not previously exist.** Before it, a Row
+was a claim to build a table, so declaring one for a table you only read meant
+volunteering to create it; the only way to read a column safely was to not
+declare it and hope. A Row that says it builds nothing is a way to say *these
+columns must be there* about somebody else's table — which is a better argument
+for this ADR than the one it was written with, and is recorded here in the
+caller's terms rather than in the ones that were guessed.
+
 ## What adoption still costs
 
 A table that goes from `.managed = false` to managed produces no `CREATE TABLE`
