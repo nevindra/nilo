@@ -2520,3 +2520,28 @@ reported was an `expectError` finding a payload, which an equality helper cannot
 help with at all. **Check the fix against the instance that was reported, not
 against the category it was filed under.**
 
+## A workaround needs a test for the reason it exists
+
+`nilo.testing.show` exists because `std.testing` prints with `{any}` and `{any}`
+skips a type's own formatter. Its first test asserted that `show` renders
+readably, which is the obvious half and is not enough: if `{any}` ever started
+honouring custom formatters, `show` would become dead weight with **every test
+still green** — nothing failing, just nothing left to justify it.
+
+So the test asserts both sides. That `show` calls the type's rendering, and that
+`{any}` prints `"wati"` as `119, 97, 116, 105`. The second is what makes the
+first worth having, and it is the half that is usually missing.
+
+**Any code that exists to work around something else needs a test for the
+something else.** Otherwise the day it stops being true is silent, and the
+workaround outlives its reason — which in a repository whose rule is that
+nothing load-bearing may live only in somebody's head is the same failure in a
+different costume.
+
+The same round's other lesson is smaller and came from the same test failing
+first: it named `Uuid`, which `http/` may not import (ADR 0042). The fix was not
+a different import. **A test should hold the property, not an instance of it** —
+a local type with a `jsonStringify` of its own holds "a value that knows how to
+write itself gets to", where the `Uuid` version would have stayed green while
+the property broke for every other type.
+
