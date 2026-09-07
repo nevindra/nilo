@@ -55,6 +55,13 @@ returning `[]const []const u8` can say neither.
 - **A value containing a comma cannot be sent.** That is the cost of the
   separator, it is the cost the comma-joined contract has everywhere, and it is
   why the alternative below was weighed rather than assumed away.
+- **"Not sent" and "sent empty" are the same thing**, and there is no spelling
+  that separates them. `?[]const Str` is the shape somebody reaching for the
+  difference will try, and it does not buy it: nothing found is null whether the
+  parameter was absent or arrived as `?tag=`. It only changes what nothing is
+  called. Telling the two apart would mean a second sentinel on the wire for a
+  distinction no filter has yet wanted; the port that asked said both mean the
+  same to it, which is the answer this expects to keep giving.
 
 ## What it costs
 

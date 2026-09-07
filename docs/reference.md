@@ -275,6 +275,12 @@ list holding one empty string — which is also why a list field wants `= &.{}`
 rather than being required, and why it is never `required` in the document.
 That is the cost of the separator: a value with a comma in it cannot be sent.
 
+**"Not sent" and "sent empty" cannot be told apart**, and `?[]const Str` is not
+the way out: it compiles, and it answers null for both. What an optional list
+changes is only what *nothing* is spelled as — null instead of `&.{}` — not
+which nothing it was. Every filter written against a list has so far meant the
+same thing by either, which is why there is no second spelling for it.
+
 The element converts exactly like a scalar field would, so `[]const Kind` for an
 enum refuses `?kind=nope` with the same sentence a single `kind` gets, and under
 `Bound(Query(T))` it is the **first** bad value that is reported. A list of
