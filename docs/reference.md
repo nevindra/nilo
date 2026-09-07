@@ -445,6 +445,7 @@ value is not.
 | `c.formCollecting(T, &outcomes)` | `!T` — as `form`, recording why each field failed |
 | `c.requestId()` | `Str` — this request's id, from `X-Request-Id` or generated |
 | `c.entropy(n)` | `![n]u8` — unguessable bytes from the OS, off the event loop. `n` is comptime |
+| `c.entropyInto(buf)` | `!void` — the same, at a width nobody said while compiling |
 | `c.hashPassword(gpa, text)` | `!pw.Hash` — argon2id, salted, off the loop and behind the Gate |
 | `c.hashPasswordWith(cost, gpa, text)` | the same, at a `pw.Cost` of your own |
 | `c.verifyPassword(gpa, stored, text)` | `!bool` — `stored` is `?[]const u8`; null means no such account |
@@ -637,7 +638,10 @@ const rows = try db.select(User, &run, .{ .where = .{ .age = .{ .gt = 18 } } });
 | `run.arena()` | `std.mem.Allocator` — memory that lasts as long as this tick |
 | `run.str(bytes)` | `Str` — text you allocated from `run.arena()`, stamped with this tick |
 | `run.entropy(n)` | `![n]u8` from the operating system. `error.NoIo` on a Run built by `init` |
-| `run.reset()` | end the tick: the memory goes back, the pages stay, and every `Str` from it goes stale |
+| `run.entropyInto(buf)` | `!void` — the same, at a width nobody said while compiling |
+| `run.give(V, value)` | hand this tick a value for something below to ask for |
+| `run.resolve(V)` | `!V` — what `give` put there. `error.NotGiven` if nothing did |
+| `run.reset()` | end the tick: the memory goes back, what was given goes with it, and every `Str` from it goes stale |
 
 `entropy` is spelled the same as [`Ctx.entropy`](#reading), so one function body
 compiles under both — which is what "pass the `*Ctx`, or a `nilo.Run` if there
@@ -670,6 +674,52 @@ element and says nothing true about a literal:
 ```zig
 const types: []const Str = &.{ .static("DealValueChanged"), .static("DealWon") };
 ```
+
+### A value that reaches the bottom
+
+`nilo_resolve` works a value out once per request, and it arrives as a **handler
+argument** — which is the top of the call stack. What needs it is often the
+bottom: an audit row assembled sixty call sites down, where every function in
+between would have to carry a value it has no business knowing about
+([ADR 0165](./adr/0165-a-value-that-reaches-the-bottom.md)).
+
+Both scopes answer `resolve`, so one function body reaches it either way:
+
+```zig
+fn record(db: *Db, scope: anytype, what: Event) !void {
+    const actor = try scope.resolve(Actor);   // a *Ctx or a *Run
+    _ = try db.insert(AuditRow, scope, .{ .agent = actor.agent, … });
+}
+```
+
+**Where the value comes from is what differs, and that is the point.** Under a
+server, `Actor` carries `nilo_resolve` and is worked out from the request — so
+"is it set?" is answered while compiling, and no middleware has to remember
+anything (ADR 0016). A seed or a CLI has no request to work it out from, so it
+is told once at the top:
+
+```zig
+var run = nilo.Run.initIo(gpa, io);
+defer run.deinit();
+try run.give(Actor, .{ .agent = "nightly-import" });
+```
+
+`run.resolve` answers `error.NotGiven` rather than null, for the same reason
+`entropy` answers `error.NoIo`: a value nobody set has to be louder than a value
+nobody read — the failure this exists for is an audit column that is quietly
+NULL. What was given is copied into the tick's arena, so `reset` clears it, and
+giving the same type twice replaces it.
+
+**Given-as-null is given.** `give` records the type whatever the value, so a
+`Caller { agent: ?Uuid }` handed over with `agent = null` resolves to that, and
+`error.NotGiven` means only that nobody called `give`. The three states stay
+apart, which matters when one of them — nobody wired it up — is a bug and
+another — no agent, an ordinary human session — is most of your traffic.
+
+A request never needs `give`: a value read off the request is a `nilo_resolve`,
+and declaring it removes the third state entirely, because the resolver does not
+depend on the route and a route asking for the value does not compile without
+it.
 
 ## Scope
 
@@ -1885,6 +1935,46 @@ pub const nilo_openapi = .{ .type = "string", .format = "uuid" };
 `Timestamp`, `Decimal`, `Interval`, `Inet`). One with a custom writer and no
 marker gets `{}` and a description saying so.
 
+### The document without a server
+
+`app.writeOpenApi(w)` writes the same bytes `/openapi.json` serves, to any
+writer, with **no port, no database and no network**
+([ADR 0167](./adr/0167-the-document-is-a-build-artefact.md)):
+
+<!-- compiles -->
+```zig
+fn listUsers() ![]const User {
+    return &.{};
+}
+
+pub fn writeTheDocument(gpa: std.mem.Allocator) ![]u8 {
+    var app = nilo.App.init(gpa);
+    defer app.deinit();
+    try app.get("/users", listUsers);
+    app.docs(.{ .title = "Orders", .version = "2.1.0" });
+
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try app.writeOpenApi(&out.writer);
+    return gpa.dupe(u8, out.written());
+}
+```
+
+Call it after the routes are registered and before `listen`. The operations are
+collected as each route is registered, so nothing has to have started.
+
+**This is what makes the document a build artefact rather than a thing you
+curl.** A checked-in `openapi.json` is how a typed frontend client is generated
+and how a breaking change shows up in review; producing it by booting a server
+means `listen`, which means `db.checking`, which means a migrated database — so
+a file describing a set of types ends up needing Postgres. `zig build openapi >
+openapi.json` needs none of it.
+
+The title and version come from `app.docs(.{ … })` if it was called, and are
+`"API"` / `"1.0.0"` if it was not, so a program that serves no document can
+still write one. The served copy goes through this same call, which is what
+stops a checked-in file and a running server describing two different APIs.
+
 ## Testing
 
 | | |
@@ -2403,6 +2493,13 @@ try tx.commit();
 `updateReturning`, `delete`, `deleteReturning` and `raw` — all down the one
 connection it holds. Forgetting the `defer` is caught in Debug by a counter
 asserted at `db.deinit()`.
+
+**The type is spelled `sql.Db.Tx`**, which only matters when a function of
+yours *takes* one — `fn append(self: *Bus, tx: *sql.Db.Tx, …)`. Every example
+here starts with `var tx = try db.begin(…)` and infers it, so the name never
+had to be written down until something wanted to be handed a transaction
+somebody else opened. It hangs off `Db` rather than off the module because a
+transaction belongs to the pool it came out of; `sql.Tx` does not exist.
 
 | | |
 |---|---|

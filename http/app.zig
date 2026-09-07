@@ -930,6 +930,43 @@ pub const App = struct {
         return chains;
     }
 
+    /// Write the API description to `w`, with no server and no port
+    /// ([ADR 0167](../docs/adr/0167-the-document-is-a-build-artefact.md)).
+    ///
+    /// ```zig
+    /// var app = nilo.App.init(gpa);
+    /// defer app.deinit();
+    /// try routes.register(&app);
+    ///
+    /// var out = std.Io.Writer.Allocating.init(gpa);
+    /// defer out.deinit();
+    /// try app.writeOpenApi(&out.writer);
+    /// ```
+    ///
+    /// **The document was only ever reachable from a listening server**, and
+    /// that made a file every frontend compiles against depend on booting
+    /// one — which on a real project means a migrated database, because
+    /// `listen` runs `db.checking`. A contract that describes a set of types
+    /// should not need Postgres to be written down. Called after the routes
+    /// are registered and before `listen`, this is `zig build openapi >
+    /// openapi.json`: no port, no database, no network.
+    ///
+    /// The title and version come from `app.docs(.{ … })` when it was
+    /// called, and are `Info`'s defaults when it was not — a build step that
+    /// serves no document still names one.
+    ///
+    /// Same bytes as `/openapi.json`, from the same call on the same
+    /// operations, which is what stops a checked-in file and a running
+    /// server from describing two different APIs.
+    pub fn writeOpenApi(self: *const App, w: *std.Io.Writer) !void {
+        const info: openapi.Info = if (self.docs_options) |opts| .{
+            .title = opts.title,
+            .version = opts.version,
+            .description = opts.description,
+        } else .{};
+        try openapi.write(w, self.operations.items, info);
+    }
+
     /// Turn the collected operations into the document and its reader page.
     /// Here rather than in `docs()` because every route has to be registered
     /// first, and here rather than on the request path because the answer
@@ -943,11 +980,10 @@ pub const App = struct {
 
         var document: std.Io.Writer.Allocating = .init(self.gpa);
         defer document.deinit();
-        try openapi.write(&document.writer, self.operations.items, .{
-            .title = opts.title,
-            .version = opts.version,
-            .description = opts.description,
-        });
+        // Through the public door rather than beside it: a checked-in file
+        // and a served one that came from two calls are two things to keep
+        // in step (ADR 0167).
+        try self.writeOpenApi(&document.writer);
 
         var page: std.Io.Writer.Allocating = .init(self.gpa);
         defer page.deinit();
@@ -4053,6 +4089,49 @@ test "a sentinel-terminated string is text, and inside a struct it is a JSON str
     const doc = h.send(&app, "GET /openapi.json HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, doc.response, "\"type\":\"string\"") != null);
     try testing.expect(std.mem.indexOf(u8, doc.response, "text/plain") != null);
+}
+
+test "the document can be written with no server, and is the same bytes the server serves" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/held", sentinelInside);
+    app.docs(.{ .title = "t", .version = "1" });
+
+    // Before anything listens, before any chain is resolved: the operations
+    // are collected at registration, which is the whole claim (ADR 0167).
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try app.writeOpenApi(&out.writer);
+    const written = out.written();
+
+    try testing.expect(std.mem.startsWith(u8, written, "{\"openapi\":\"3.1.0\","));
+    try testing.expect(std.mem.indexOf(u8, written, "\"title\":\"t\"") != null);
+    try testing.expect(std.mem.indexOf(u8, written, "/held") != null);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    // The served copy and the written one come from one call now, and this
+    // is what says so — a checked-in file that disagreed with the running
+    // server is the failure the build step exists to prevent.
+    const doc = h.send(&app, "GET /openapi.json HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, doc.response, written) != null);
+}
+
+test "a document written without app.docs still names itself" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/held", sentinelInside);
+
+    // No `app.docs`, so nothing is served and there is no title to borrow.
+    // A build step that only ever writes the file should still get one.
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try app.writeOpenApi(&out.writer);
+
+    try testing.expect(std.mem.indexOf(u8, out.written(), "\"title\":\"API\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "/held") != null);
 }
 
 test "a service that was never registered is caught before serving" {

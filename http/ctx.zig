@@ -609,10 +609,26 @@ pub const Ctx = struct {
     /// A program with no loop in it needs none of this: `std.Io.randomSecure`
     /// is the same bytes, and there is no fiber to park.
     pub fn entropy(self: *const Ctx, comptime n: usize) ![n]u8 {
-        _ = self;
         var out: [n]u8 = undefined;
-        try bulkhead.randomSecure(&out);
+        try self.entropyInto(&out);
         return out;
+    }
+
+    /// `entropy` for a caller that cannot say the length while compiling
+    /// ([ADR 0166](../docs/adr/0166-entropy-a-function-pointer-can-carry.md)).
+    ///
+    /// The same syscall through the same Bulkhead; what changes is only that
+    /// the width is a value. `entropy` returns `![n]u8`, and a **function
+    /// pointer** has to name one return type — so a Scope type-erased to
+    /// cross one carries exactly one width, and the second caller that wants
+    /// a different number of bytes has nowhere to put it. Zig has no
+    /// closures, so erasing a Scope is what storing a callback comes to.
+    ///
+    /// `Run.entropyInto` is the same call off the loop, which is what keeps
+    /// one function body compiling under both.
+    pub fn entropyInto(self: *const Ctx, buf: []u8) !void {
+        _ = self;
+        try bulkhead.randomSecure(buf);
     }
 
     /// Hash a password: salted from `Ctx.entropy`, off the loop, and behind

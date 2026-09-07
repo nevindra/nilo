@@ -9,9 +9,50 @@ in [`docs/history.md`](./docs/history.md); what is coming is in
 
 ## Unreleased
 
-Eleven things a real port hit, in the order they cost it the most. Needs Zig
+Fifteen things a real port hit, in the order they cost it the most. Needs Zig
 0.16, as 0.3.0 does. Each entry says what you have to change; the account of why
 is in the ADR it links.
+
+The last four came from the same port a week later, once it had used the first
+eleven and reached its first hard seam — an event bus.
+
+- **`app.writeOpenApi(w)` — the API description, with no server**
+  ([ADR 0167](./docs/adr/0167-the-document-is-a-build-artefact.md)). The
+  document was reachable only from `GET /openapi.json` on a listening server,
+  and `listen` runs `db.checking` — so producing the file a typed frontend
+  client is generated from needed a **migrated database**. Called after the
+  routes are registered and before `listen`, this needs no port, no database and
+  no network, which makes `zig build openapi > openapi.json` an ordinary build
+  step. The served copy goes through the same call, so a checked-in file and a
+  running server cannot describe two different APIs.
+
+- **A value can reach the bottom of the call stack**
+  ([ADR 0165](./docs/adr/0165-a-value-that-reaches-the-bottom.md)).
+  `nilo_resolve` arrives as a handler argument, which is the top; an audit row
+  assembled sixty calls down had nowhere to read it from. Both scopes answer
+  `resolve` now, so one function body works either way:
+
+  ```zig
+  const actor = try scope.resolve(Actor);   // a *Ctx or a *Run
+  ```
+
+  Under a request that is the declared resolver, unchanged. A tick is told
+  once — `try run.give(Actor, .{ … })` — and `run.resolve` answers
+  `error.NotGiven` rather than null, because the failure this exists for is an
+  audit column that is quietly NULL. **This is not `c.locals`**: nothing was
+  added to `Ctx` and ADR 0016 stands.
+
+- **`entropyInto(buf)` on `Ctx` and `Run`**
+  ([ADR 0166](./docs/adr/0166-entropy-a-function-pointer-can-carry.md)).
+  `entropy` answers `![n]u8` with `n` comptime, and a **function pointer** has to
+  name one return type — so a Scope type-erased to cross one carries exactly one
+  width. Zig has no closures, so erasing a Scope is what storing a callback comes
+  to. Same bytes, same wait; `entropy` is now written in terms of it.
+
+- **The transaction type is spelled `sql.Db.Tx`**, and the reference says so.
+  Every example infers it from `db.begin`, so the name never had to be written
+  until a function of yours took one — `fn append(self: *Bus, tx: *sql.Db.Tx, …)`.
+  Documentation only; `sql.Tx` never existed.
 
 ### Fixed
 

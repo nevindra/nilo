@@ -2444,3 +2444,36 @@ which is why a gap survives long after it stops being one and why the eleven
 arrived together rather than as they were hit. The practical form is the port's
 own and belongs to both sides of this: report the thing nilo cannot spell
 *before* writing the patch for it, not after.
+
+## An artefact somebody else builds against cannot need the thing running
+
+The same port hit its first hard seam — an event bus — and the item it filed as
+the largest was not about Zig at all. nilo's OpenAPI document is a good one, and
+it existed in exactly one place: `GET /openapi.json`, on a server that is
+listening. Their frontend generates a typed client from a **checked-in** file,
+and the diff of that file in review is how somebody sees a breaking change
+before it ships.
+
+Producing it meant booting, and booting runs `db.checking`. **So a file
+describing a set of types required a migrated database.** Nothing was missing to
+fix it: `openapi.write` was already public and `App` already collected the
+operations at registration. What was missing was a door, and the reason nobody
+had noticed is that the framework's own use of the document — read it in a
+browser — is satisfied by the server that serves it
+([ADR 0167](./adr/0167-the-document-is-a-build-artefact.md)).
+
+**Ask where an output has to be readable from, not just whether it can be
+produced.** A thing other people build against has to be producible by a build,
+which means without a port, a database or a network — and a feature that is only
+reachable from a running server has quietly picked one answer to that.
+
+The same round found the two shapes that come of Zig having no closures. A
+callback is a function pointer, so it cannot be generic over the Scope it is
+handed, so the caller type-erases the Scope into a vtable — and then `entropy`,
+which answers `![n]u8`, cannot go in it, because a function pointer names one
+return type ([ADR 0166](./adr/0166-entropy-a-function-pointer-can-carry.md)).
+`core/scope.zig` says a vtable was rejected "to buy a polymorphism nobody has
+asked for". Somebody asked within a fortnight of the first caller arriving. The
+decision stands; what changed is that nilo's own API is no longer the reason
+they cannot build one.
+
