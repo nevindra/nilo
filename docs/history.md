@@ -2538,6 +2538,16 @@ workaround outlives its reason — which in a repository whose rule is that
 nothing load-bearing may live only in somebody's head is the same failure in a
 different costume.
 
+**And the two halves have to be bound, not merely both present.** The port
+checked its own code against this rule and found the interesting case: it had
+both sides, 580 lines apart in one file, with nothing tying them. Delete or
+narrow the half that proves the behaviour still matters and the half that
+asserts its absence stays green, pointing at nothing. `show`'s test is stronger
+only because both halves sit in one test, which was convenience rather than
+judgement. Put them in one test where the shape allows it, and where it does not,
+have each name the other — a pair nothing references is a pair that decays into
+one.
+
 The same round's other lesson is smaller and came from the same test failing
 first: it named `Uuid`, which `http/` may not import (ADR 0042). The fix was not
 a different import. **A test should hold the property, not an instance of it** —
