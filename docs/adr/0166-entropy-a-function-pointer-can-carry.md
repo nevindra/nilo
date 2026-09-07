@@ -40,6 +40,13 @@ from configuration uses.
 ## Consequences
 
 - Two methods, four lines each, no new state and no allocation.
+- **It does not remove a vtable entry, and the win is not that it might.** A
+  caller that erases a Scope still needs one, because `entropyInto` reads the
+  Run's own `Io`. What changes is the entry's *signature*: the old one was
+  frozen at whatever single width its first caller wanted, and this one takes
+  the width as a value, so the second caller — a session token, a v4 — has
+  somewhere to put its number. One entry that fits every width is worth more
+  than one entry fewer.
 - Nothing on any measured axis: it is the same call, and `entropy` still
   compiles to the same thing because the array is still on the caller's stack.
 - The Scope header in `core/scope.zig` says a vtable was rejected "to buy a

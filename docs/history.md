@@ -2477,3 +2477,46 @@ asked for". Somebody asked within a fortnight of the first caller arriving. The
 decision stands; what changed is that nilo's own API is no longer the reason
 they cannot build one.
 
+## An escape hatch that costs nothing teaches nothing
+
+The most expensive thing a port found had no error message behind it. Five
+times, in three contexts, it wrote the untyped call while a typed one existed —
+`db.exec`, `db.count`, `Str.static`, `Ctx.resolve`, `db.select` — and all five
+compiled, passed their tests, and would have shipped. The last redeclared a
+subset of a Row that was eleven lines up in the same import.
+
+**A compile check was designed and then counted against the five, and caught
+one.** Three of the five are not SQL at all, which is the finding: the pattern
+runs on the whole public surface and is not about `db.raw`. Two things then
+decided it, and the first is the one worth keeping — **a check that lands makes
+the problem look solved**. Instance six through `db.raw` would be caught,
+instances seven to ten elsewhere would not, and nobody would look, because there
+is a check now. For a pattern that cuts across modules, a narrow check is worse
+than none. The account is
+[ADR 0168](./adr/0168-an-escape-hatch-that-costs-nothing-teaches-nothing.md).
+
+Two more general things came out of the same round.
+
+**A decision that makes a wrong shape cheaper is a cost of that decision.**
+[ADR 0155](./adr/0155-a-row-that-owns-no-table.md) is right and it made
+declaring a throwaway projection inexpensive *and blessed by the compiler*. The
+port's wrong shape compiled and had its columns checked. Ask what a new
+affordance makes easier that nobody wanted.
+
+**"The layer below cannot fix it" is not "nobody can".** The port nearly did not
+file the unreadable test output at all, because `std.testing` prints with
+`{any}` and `{any}` skips custom formatters by design — two true facts and a
+conclusion that does not follow. `nilo.testing` sits one layer up and had the
+rendering already
+([ADR 0169](./adr/0169-a-failed-assertion-that-can-be-read.md)).
+
+The first shape built for it was an `expectEqual`, and the caller it was built
+for argued it down before it shipped. **An assertion helper pulls the whole
+assertion surface behind it** — once `nilo.testing.expectEqual` exists,
+`expectEqualDeep`, `expectEqualSlices` and `expectError` are all asked for, each
+missing one reads as a gap, and each present one has to follow `std.testing`
+for ever. The deciding argument was smaller and better: the failure actually
+reported was an `expectError` finding a payload, which an equality helper cannot
+help with at all. **Check the fix against the instance that was reported, not
+against the category it was filed under.**
+

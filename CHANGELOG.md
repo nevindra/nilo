@@ -9,12 +9,15 @@ in [`docs/history.md`](./docs/history.md); what is coming is in
 
 ## Unreleased
 
-Fifteen things a real port hit, in the order they cost it the most. Needs Zig
+Seventeen things a real port hit, in the order they cost it the most. Needs Zig
 0.16, as 0.3.0 does. Each entry says what you have to change; the account of why
 is in the ADR it links.
 
-The last four came from the same port a week later, once it had used the first
-eleven and reached its first hard seam — an event bus.
+The last six came from the same port a week later, once it had used the first
+eleven and reached its first hard seam — an event bus. One more it reported —
+five places where it wrote the untyped call while a typed one existed, with no
+error message behind any of them — is a named failure mode rather than a change:
+[ADR 0168](./docs/adr/0168-an-escape-hatch-that-costs-nothing-teaches-nothing.md).
 
 - **`app.writeOpenApi(w)` — the API description, with no server**
   ([ADR 0167](./docs/adr/0167-the-document-is-a-build-artefact.md)). The
@@ -48,6 +51,27 @@ eleven and reached its first hard seam — an event bus.
   name one return type — so a Scope type-erased to cross one carries exactly one
   width. Zig has no closures, so erasing a Scope is what storing a callback comes
   to. Same bytes, same wait; `entropy` is now written in terms of it.
+
+- **`nilo.testing.show(value)` — a failure message somebody can read**
+  ([ADR 0169](./docs/adr/0169-a-failed-assertion-that-can-be-read.md)).
+  `std.testing` prints with `{any}`, which is the specifier that skips a type's
+  own formatter, so a `Uuid` prints as sixteen decimal numbers and a
+  `[]const u8` as its bytes. `show` renders as JSON into whatever writer is
+  formatting it — `{f}` — allocating nothing:
+
+  ```zig
+  errdefer std.debug.print("row: {f}\n", .{nilo.testing.show(row)});
+  ```
+
+  A renderer rather than an assertion, so it works in `expect`, in
+  `expectError`, and in a `std.debug.print` while you are poking about.
+
+- **The reference says a v7 is not ordered inside one millisecond.** The fact
+  was already in `Uuid.v7`'s doc comment and nowhere a reader meets first. The
+  trap is not that ids are unordered — it is that they *look* ordered until two
+  rows share a timestamp, which is exactly what `now()` inside a transaction
+  gives every row one command writes. No code changed; `v7` is still stateless
+  and still takes no counter (ADR 0042).
 
 - **The transaction type is spelled `sql.Db.Tx`**, and the reference says so.
   Every example infers it from `db.begin`, so the name never had to be written

@@ -1053,6 +1053,26 @@ where `Doc.id` is a `sql.Uuid`, which is this same type.
 A `Uuid` in a returned struct leaves as its text rather than as sixteen
 numbers, and one in a Row is written and read as the `uuid` column.
 
+**A v7 is sortable across milliseconds and not within one.** Its first six
+bytes are the clock and the other ten are the entropy you passed, with no
+counter — so two keys minted in the same millisecond come back in random order
+relative to each other, and RFC 9562 allows a counter there deliberately not
+taken ([ADR 0042](./adr/0042-the-bottom-layer-holds-more-than-one-module.md)):
+a counter is a threadlocal or an atomic, and having no state is what lets `v7`
+be called from any fiber without a lock.
+
+**The trap is not "the ids are unordered" — it is "they look ordered as long as
+the timestamps differ".** The case that finds it is a row whose timestamp comes
+from `now()` inside a transaction. That is Postgres behaviour rather than
+nilo's: `now()` is the *transaction's* clock, so every row one command writes
+carries the identical instant, and the whole of the ordering then rests on ten
+random bytes. `ORDER BY occurred_at, id` looks right in every test where the
+writes were a millisecond apart and reshuffles the rows written together.
+
+If the order rows were written in is something your product shows, store it:
+an ordinal column the command fills, or a sequence. A v7 orders by *when*, and
+two things that happened at the same instant have no *when* to be ordered by.
+
 **The randomness is an argument, and it has to be unguessable.** Entropy is IO
 and a module in the bottom layer has no Bulkhead to reach through, so `v4` and
 `v7` take what they need rather than fetching it — inside a request that is
@@ -1963,6 +1983,19 @@ pub fn writeTheDocument(gpa: std.mem.Allocator) ![]u8 {
 Call it after the routes are registered and before `listen`. The operations are
 collected as each route is registered, so nothing has to have started.
 
+**`app.provide` does not have to be called**, which is what makes the build
+step's binary genuinely clean. `provide` is for the request path; writing the
+document needs only the operations, so a program that does nothing but write it
+links no database driver and needs no stand-in `*Db` to get registration past
+the type checker.
+
+**Register the routes in one place both callers use.** A `routes.zig` that
+`main.zig` and the document step each call is the same argument as `buildDocs`
+going through this method rather than beside it: two route lists is how a
+checked-in contract starts describing a server that no longer exists, and the
+one somebody forgets to add to the second list disappears with no error and no
+failing test.
+
 **This is what makes the document a build artefact rather than a thing you
 curl.** A checked-in `openapi.json` is how a typed frontend client is generated
 and how a breaking change shows up in review; producing it by booting a server
@@ -2030,6 +2063,32 @@ A `Message` is `.kind` (`.text`, `.binary`, `.ping`, `.pong`, `.close`),
 thread and no socket, so a test cannot read what the server said and then
 decide what to send next — and a conversation between *two* sockets, a `Room`
 broadcast included, needs two connections and is out of reach here.
+
+### A failed assertion that can be read
+
+`std.testing` prints both sides with `{any}`, and `{any}` is the specifier that
+means *do not call the type's own formatter* — so a `Uuid` prints as sixteen
+decimal numbers and a `[]const u8` as its bytes. On a schema with many uuid
+columns nearly every row asserted on comes out as noise
+([ADR 0169](./adr/0169-a-failed-assertion-that-can-be-read.md)):
+
+```zig
+errdefer std.debug.print("row: {f}\n", .{nilo.testing.show(row)});
+```
+
+`show(value)` renders as JSON into whatever writer is formatting it — the
+rendering nilo already has for the types it carries, so a `Uuid` is text, a
+`Str` is a string and a `Timestamp` is RFC 3339. **Nothing is allocated**, which
+is what lets it sit inside a `std.debug.print` while you are poking about. For an
+actual `[]const u8`, `std.fmt.allocPrint(gpa, "{f}", .{nilo.testing.show(v)})`
+needs nothing from here.
+
+It is a renderer and not an assertion on purpose: an `expectEqual` of nilo's own
+would pull `expectEqualDeep`, `expectEqualSlices` and `expectError` behind it,
+and it would not have helped the failure this came from, which was an
+`expectError` finding a payload rather than two values that differed. A `Json(T)`
+column nests JSON inside the JSON, which reads well and is not meant to be parsed
+back.
 
 ### Catching a refusal with no request in flight
 

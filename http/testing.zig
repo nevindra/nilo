@@ -199,6 +199,55 @@ pub const Answer = struct {
     }
 };
 
+/// A value rendered the way it goes over the wire, for a failure message
+/// somebody can read
+/// ([ADR 0169](../docs/adr/0169-a-failed-assertion-that-can-be-read.md)).
+///
+/// ```zig
+/// errdefer std.debug.print("row: {f}\n", .{nilo.testing.show(row)});
+/// ```
+///
+/// **`std.testing` prints with `{any}`, and `{any}` is the specifier that
+/// means *do not call the type's own formatter*.** So a `Uuid` comes out as
+/// sixteen decimal numbers and a `[]const u8` as its bytes — on a schema with
+/// many uuid columns, nearly every row asserted on prints as noise. That is
+/// not `std`'s bug and there is nothing below this layer that can decide
+/// otherwise; what this layer has is a rendering for every type it carries,
+/// and JSON is it. `Uuid.jsonStringify` writes text, `Str` writes a string, a
+/// `Timestamp` writes RFC 3339, a `Decimal` its digits.
+///
+/// **A renderer rather than an assertion, and that is the whole shape.** An
+/// `expectEqual` of nilo's own pulls in the rest of the assertion surface
+/// behind it — `expectEqualDeep`, `expectEqualSlices`, `expectError` — where
+/// every one nilo does not have looks like a gap and every one it does have
+/// has to follow `std.testing`. And it would not have helped the failure this
+/// was reported from, which was an `expectError` that found a payload rather
+/// than two values that differed. One thing that hands back text works in
+/// `expect`, in `expectError`, and in the `std.debug.print` somebody reaches
+/// for while poking about, which is where it gets used most.
+///
+/// **Nothing is allocated.** It writes straight into whatever writer is
+/// formatting it. For an actual `[]const u8`,
+/// `std.fmt.allocPrint(gpa, "{f}", .{show(v)})` is the ordinary spelling and
+/// needs nothing from here.
+///
+/// A `sql.Json(T)` column nests JSON inside the JSON, which reads well and is
+/// **not** meant to be parsed back. This is for a person reading a failure.
+pub fn show(value: anytype) Shown(@TypeOf(value)) {
+    return .{ .value = value };
+}
+
+/// What `show` returns: the value, and the one way of printing it.
+pub fn Shown(comptime T: type) type {
+    return struct {
+        value: T,
+
+        pub fn format(self: @This(), w: *std.Io.Writer) !void {
+            try std.json.Stringify.value(self.value, .{}, w);
+        }
+    };
+}
+
 /// What a fail function said, read back where there was no request
 /// ([ADR 0161](../docs/adr/0161-a-refusal-outside-a-request-is-still-a-refusal.md)).
 pub const Refused = struct {
@@ -1296,4 +1345,52 @@ test "the slot goes back to whatever held it, so one test cannot leak into the n
     }
 
     try testing.expectEqual(@as(?*anyopaque, @ptrCast(&outer)), bulkhead.slot());
+}
+
+
+test "show calls a type's own rendering where {any} refuses to" {
+    // Stands in for `Uuid`, which this module may not import — `http/` sees
+    // `nilo_core` and no other tool module (ADR 0042). What is being held is
+    // the property, not the type: a value that knows how to write itself
+    // gets to, where `{any}` prints the bytes it is made of.
+    const Key = struct {
+        bytes: [4]u8,
+
+        pub fn jsonStringify(self: @This(), jw: anytype) !void {
+            var text: [8]u8 = undefined;
+            _ = std.fmt.bufPrint(&text, "{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
+                self.bytes[0], self.bytes[1], self.bytes[2], self.bytes[3],
+            }) catch unreachable;
+            try jw.write(&text);
+        }
+    };
+    const Row = struct { key: Key, name: []const u8 };
+
+    const row: Row = .{ .key = .{ .bytes = .{ 0x01, 0x8b, 0xcf, 0xe5 } }, .name = "wati" };
+
+    var buf: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try w.print("{f}", .{show(row)});
+
+    // What a person can read: the key as its own text, and the name as a
+    // string rather than as four byte values.
+    try std.testing.expectEqualStrings("{\"key\":\"018bcfe5\",\"name\":\"wati\"}", w.buffered());
+
+    // And the thing this exists to replace, for the contrast: `{any}` prints
+    // both of them as the numbers they are made of.
+    var noisy: [256]u8 = undefined;
+    var n = std.Io.Writer.fixed(&noisy);
+    try n.print("{any}", .{row});
+    try std.testing.expect(std.mem.indexOf(u8, n.buffered(), "119, 97, 116, 105") != null);
+}
+
+test "show writes into whatever is formatting it, and allocates nothing" {
+    const Small = struct { n: u32 };
+
+    // No allocator anywhere, which is what lets this go inside a
+    // `std.debug.print` while somebody is poking about.
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try w.print("{f}", .{show(Small{ .n = 7 })});
+    try std.testing.expectEqualStrings("{\"n\":7}", w.buffered());
 }

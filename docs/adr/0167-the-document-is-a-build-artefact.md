@@ -56,6 +56,26 @@ disagree about what the API is called.
 `app.operations`.** That is the version that already existed, in effect, and it
 requires reaching into a private field. The operations list is `App`'s.
 
+## What the first caller found
+
+It worked unmodified — 30 KB, 32 operations, no database, no port, no network —
+and turned up two things worth writing down.
+
+**`App.provide` is not needed to write the document.** They nearly built a
+stand-in `*sql.Db` to get registration to type-check, and did not have to:
+`provide` is for the request path, and writing the document needs only the
+operations, which are collected as each route is registered. That is what makes
+the build step's binary genuinely clean — it never touches `nilo_sql` at all.
+
+**One route list, called by both.** They moved registration into a `routes.zig`
+that `main.zig` and the document step each call, for the reason `buildDocs` was
+put through `writeOpenApi` rather than beside it: two lists is how a checked-in
+contract starts describing a server that no longer exists, and the context
+somebody forgets to register in one of them disappears with no error and no
+failing test. **A build artefact and the running thing have to come off one
+source, at every level** — inside nilo that is one call, and in a project it is
+one route list.
+
 ## Consequences
 
 - One public method, ten lines, and one call site moved onto it.
