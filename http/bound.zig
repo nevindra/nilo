@@ -477,11 +477,25 @@ fn innerOf(comptime F: type) type {
 /// missing, so neither has a "did not fit" sentence and asking `convert` for
 /// one is a compile error by design.
 fn canFail(comptime F: type) bool {
-    const Inner = innerOf(F);
+    const Inner = convertsAs(F);
     if (Inner == Str or Inner == Upload) return false;
-    // A nested object or a list has no text conversion either: what goes
-    // wrong with one of those is its kind, which is a different sentence.
+    // A nested object has no text conversion either: what goes wrong with one
+    // of those is its kind, which is a different sentence.
     return convert.convertible(Inner);
+}
+
+/// The type a field's **value** converts as: its element when the field is a
+/// list, and the field itself otherwise
+/// ([ADR 0164](../docs/adr/0164-a-query-parameter-that-is-a-list.md)).
+///
+/// A list of `Str` cannot fail and a list of enums can, and the difference is
+/// the element rather than the slice. Getting this wrong is not a worse
+/// message — `sayerFor` reaches `unreachable` on a reason `canFail` said could
+/// not happen.
+fn convertsAs(comptime F: type) type {
+    const Inner = innerOf(F);
+    if (convert.listElement(Inner)) |Item| return Item;
+    return Inner;
 }
 
 /// What a field would have taken, in the words the messages already use.
@@ -541,8 +555,11 @@ fn sayerFor(
                     labelFor(slot, name) ++ " has to be " ++ comptime expectedFor(F) ++ ", not {s}",
                     .{f.kind},
                 ),
+                // `convertsAs` rather than `innerOf`: for a list it is the
+                // element that would not convert, and the element is what the
+                // sentence has to name (ADR 0164).
                 else => if (comptime canFail(F))
-                    try convert.sayWhy(innerOf(F), slot, f.given, labelFor(slot, name), w)
+                    try convert.sayWhy(convertsAs(F), slot, f.given, labelFor(slot, name), w)
                 else
                     unreachable,
             }

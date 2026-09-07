@@ -269,6 +269,46 @@ pub fn Query(comptime T: type) type {
     };
 }
 
+/// One request header, as a typed argument
+/// ([ADR 0163](../docs/adr/0163-a-header-a-handler-can-be-given.md)).
+///
+/// ```zig
+/// fn addComment(
+///     actor: FromHeader("X-Staff-Id", Uuid),
+///     body: NewComment,
+/// ) !Status(201, Comment) {
+///     ... actor.value ...
+/// }
+/// ```
+///
+/// `c.header("X-Staff-Id")` does the reading and is not the point. A path
+/// param, a query struct and a JSON body are all typed arguments that appear
+/// in the generated document; a header was a lookup that appeared nowhere, so
+/// a client generated from the document could not know the endpoint needed
+/// one. This is the same wrapper family, and it writes itself into the
+/// document as a header parameter.
+///
+/// **Absent is decided by the type, the way a query field decides it.** A
+/// `?T` is null when the header is not there; anything else is a 400 saying
+/// which header is required. Text that will not convert is the same 400 a
+/// query param gets, in the same words.
+///
+/// **`FromHeader` rather than `Header`, and that is not a preference.**
+/// `nilo.Header` is the response side — `Response.headers` is a list a
+/// handler writes — and has been since 0.2.0. ADR 0107 settled the same
+/// collision the other way for `Ctx.RequestHeader`; this name carries the
+/// direction for the same reason.
+pub fn FromHeader(comptime name: []const u8, comptime T: type) type {
+    return struct {
+        pub const nilo_header = .{ .name = name, .value = T };
+        /// What a nilo compile error calls this type, which is the name the
+        /// reader's own import line gives it (ADR 0122).
+        pub const nilo_type_name = "nilo.FromHeader(\"" ++ name ++ "\", " ++ naming.of(T) ++ ")";
+
+        value: T,
+    };
+}
+
 /// The role of one handler argument, decided at compile time.
 const Role = union(enum) {
     ctx,
@@ -277,6 +317,11 @@ const Role = union(enum) {
     param: usize,
     body,
     query,
+    /// One named request header, read into the type it was asked for
+    /// ([ADR 0163](../docs/adr/0163-a-header-a-handler-can-be-given.md)).
+    /// Its own role rather than a flavour of `.query`, because two of them on
+    /// one handler is ordinary and two query structs is not.
+    header,
     /// The body again, but as an HTML form rather than as JSON (ADR 0031).
     /// A separate role and not a flavour of `.body`, because the two are
     /// the same slot and asking for both has to be refused.
@@ -342,6 +387,7 @@ pub fn wrap(comptime pattern: []const u8, comptime f: anytype) router.CtxHandler
                     .param => |nth| args[i] = try paramValue(P, c, param_names[nth]),
                     .body => args[i] = try c.json(P),
                     .query => args[i] = .{ .value = try queryValue(P.nilo_query, c) },
+                    .header => args[i] = .{ .value = try headerValue(P, c) },
                     .form => args[i] = .{ .value = try c.form(P.nilo_form) },
                     .arena => args[i] = c._arena,
                     .resolved => args[i] = try resolve.value(P, c),
@@ -435,6 +481,7 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
         }
 
         var query: []const openapi.Field = &.{};
+        var headers: []const openapi.Field = &.{};
         var body: ?*const openapi.Schema = null;
         var body_kind: openapi.BodyKind = .json;
         // Whether nilo can refuse this request before the handler runs.
@@ -452,6 +499,20 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
             .param => can_reject = can_reject or p.type.? != Str,
             .query => {
                 query = queryFields(p.type.?.nilo_query);
+                can_reject = true;
+            },
+            // A header the signature asks for is a header the document can
+            // promise, which is the whole of ADR 0163: `c.header` reads one
+            // and appears nowhere, so a generated client could not know the
+            // endpoint needed it. `required` follows the optional, the way a
+            // query field's does.
+            .header => {
+                const asked = p.type.?.nilo_header;
+                headers = headers ++ [_]openapi.Field{.{
+                    .name = asked.name,
+                    .schema = openapi.schemaOf(asked.value),
+                    .required = @typeInfo(asked.value) != .optional,
+                }};
                 can_reject = true;
             },
             .body => {
@@ -505,6 +566,7 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
             .pattern = pattern,
             .params = path_params,
             .query = query,
+            .headers = headers,
             .body = body,
             .body_kind = body_kind,
             .answer = answer,
@@ -517,13 +579,18 @@ fn queryFields(comptime T: type) []const openapi.Field {
     comptime {
         var out: []const openapi.Field = &.{};
         for (@typeInfo(T).@"struct".fields) |f| {
+            const is_list = queryList(f.type) != null;
             out = out ++ [_]openapi.Field{.{
                 .name = f.name,
                 .schema = openapi.schemaOf(f.type),
                 // Absent is allowed when there is a default to fall back to,
                 // or when the field is optional and absent means null — the
-                // same two exemptions `queryValue` applies at runtime.
-                .required = f.default_value_ptr == null and @typeInfo(f.type) != .optional,
+                // same two exemptions `queryValue` applies at runtime. A list
+                // is never required: nothing sent is the empty list, which is
+                // what `queryValue` does with one (ADR 0164).
+                .required = !is_list and
+                    f.default_value_ptr == null and @typeInfo(f.type) != .optional,
+                .list = is_list,
             }};
         }
         return out;
@@ -800,6 +867,10 @@ fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Rol
         .query => .bound_query,
     };
     if (comptime hasNamedDecl(P, "nilo_query")) return .query;
+    if (comptime hasNamedDecl(P, "nilo_header")) {
+        checkHeaderValue(pattern, P, i);
+        return .header;
+    }
     if (comptime hasNamedDecl(P, form_mod.marker)) return .form;
     // Before `.@"struct" => .body`, and with a message of its own: an
     // `Upload` in the argument list is somebody reaching for a file the way
@@ -882,10 +953,66 @@ fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Rol
                 "\" is a " ++ naming.of(P) ++ ", which nilo does not recognise.\n" ++
                 "  What you can ask for: `*Ctx`, a pointer to a service (`*Db`), a path param " ++
                 "(`u32`, `nilo.Str`, `bool`, an enum, or a type carrying `nilo_parse`), " ++
-                "`nilo.Query(T)` for the query string, a `std.mem.Allocator` for the request " ++
+                "`nilo.Query(T)` for the query string, `nilo.FromHeader(\"X-Thing\", T)` for " ++
+                "one header, a `std.mem.Allocator` for the request " ++
                 "arena, or one struct for the request body.",
         ),
     };
+}
+
+/// A `FromHeader` has to name a header and ask for something request text can
+/// become (ADR 0163). Checked where the argument is read, so the message
+/// names the route and the header rather than landing inside `convert`.
+fn checkHeaderValue(comptime pattern: []const u8, comptime P: type, comptime i: usize) void {
+    comptime {
+        const named = P.nilo_header.name;
+        const V = P.nilo_header.value;
+
+        if (named.len == 0) @compileError(
+            "nilo: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
+                "\" is a `FromHeader(\"\", …)`, which names no header.\n" ++
+                "  Write the header the client sends: `FromHeader(\"X-Staff-Id\", nilo.Str)`.",
+        );
+        // The same rule `http1` holds a response header to, asked here
+        // because a name with a space in it can never match anything and the
+        // document would carry it verbatim.
+        if (!http1.headerNameOk(named)) @compileError(
+            "nilo: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
+                "\" asks for the header \"" ++ named ++ "\", which is not a header name.\n" ++
+                "  A header name is letters, digits and `-`, with no spaces or colons: " ++
+                "`FromHeader(\"X-Staff-Id\", nilo.Str)`.",
+        );
+
+        if (!converting.convertible(V)) @compileError(
+            "nilo: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
+                "\" asks for the header \"" ++ named ++ "\" as a " ++ naming.of(V) ++
+                ", which request text cannot become.\n" ++
+                "  A header arrives as text, so it is read as a `nilo.Str`, a number, a " ++
+                "`bool`, an enum, or a type that parses itself with `nilo_parse` — wrapped " ++
+                "in `?` when the client may not send it.",
+        );
+    }
+}
+
+/// Read one header into the type the handler asked for. Absent is null for an
+/// optional and a 400 for anything else, which is the rule `queryValue`
+/// follows for a field with no default.
+fn headerValue(comptime P: type, c: *const Ctx) !P.nilo_header.value {
+    const V = P.nilo_header.value;
+    const named = P.nilo_header.name;
+    const Inner = switch (@typeInfo(V)) {
+        .optional => |o| o.child,
+        else => V,
+    };
+
+    if (c.header(named)) |s| {
+        // `.query` rather than a slot of its own, for the reason a path param
+        // uses it: what differs between the slots is how a form spells a
+        // boolean, and a header is not a form.
+        return try convert(Inner, .query, s, named);
+    }
+    if (comptime @typeInfo(V) == .optional) return null;
+    return fail.badRequest("the {s} header is required", .{named});
 }
 
 /// Every field of a `Query(T)` struct has to be something a query value can
@@ -911,12 +1038,30 @@ fn checkQueryFields(comptime pattern: []const u8, comptime T: type, comptime i: 
 
         for (info.fields) |f| {
             if (converting.convertible(f.type)) continue;
+            // A list of them, which is `?tag=a,b` and `?tag=a&tag=b`
+            // ([ADR 0164](../docs/adr/0164-a-query-parameter-that-is-a-list.md)).
+            // Checked here rather than in `convertible`, because the answer is
+            // different one slot over: a `Form(T)` reads a body this file does
+            // not, and promising a list there would compile and fill nothing.
+            if (queryList(f.type)) |Item| {
+                if (converting.convertible(Item)) continue;
+                @compileError(
+                    "nilo: the field `" ++ f.name ++ ": " ++ naming.of(f.type) ++ "` of the " ++
+                        "`Query(" ++ naming.of(T) ++ ")` on route \"" ++ pattern ++
+                        "\" is a list of " ++ naming.of(Item) ++ ", which a query value " ++
+                        "cannot become.\n" ++
+                        "  Each value arrives as text, so the element is a `nilo.Str`, a " ++
+                        "number, a `bool`, an enum, or a type that parses itself with " ++
+                        "`nilo_parse`: `tags: []const nilo.Str = &.{}`.",
+                );
+            }
             @compileError(
                 "nilo: the field `" ++ f.name ++ ": " ++ naming.of(f.type) ++ "` of the " ++
                     "`Query(" ++ naming.of(T) ++ ")` on route \"" ++ pattern ++
                     "\" is not something a query value can become.\n" ++
                     "  A query param arrives as text, so a field is a `nilo.Str`, a number, " ++
-                    "a `bool`, or an enum — optionally wrapped in `?` when it may be absent.",
+                    "a `bool`, an enum, or a type that parses itself with `nilo_parse` — " ++
+                    "optionally wrapped in `?` when it may be absent.",
             );
         }
     }
@@ -999,6 +1144,112 @@ fn paramValue(comptime P: type, c: *const Ctx, comptime name: []const u8) !P {
     return convert(P, .query, s, ":" ++ name);
 }
 
+/// The element of a query field that is a list, or null when it is not one
+/// ([ADR 0164](../docs/adr/0164-a-query-parameter-that-is-a-list.md)).
+///
+/// `convert.zig`'s, because `bound.zig` has to give the same answer when it
+/// words the failure of one — and a list that fills here and reports as
+/// "cannot fail" over there ends at an `unreachable`.
+const queryList = converting.listElement;
+
+/// How many values a query string holds for `name`, counting the pieces of
+/// each comma-joined one.
+fn countList(c: *const Ctx, comptime name: []const u8) usize {
+    var n: usize = 0;
+    var it = c.queries();
+    while (it.next()) |p| {
+        if (!std.mem.eql(u8, p.name.view(), name)) continue;
+        var pieces = std.mem.splitScalar(u8, p.value.view(), ',');
+        while (pieces.next()) |piece| {
+            if (piece.len > 0) n += 1;
+        }
+    }
+    return n;
+}
+
+/// Every value of one repeated or comma-joined query parameter, converted
+/// ([ADR 0164](../docs/adr/0164-a-query-parameter-that-is-a-list.md)).
+///
+/// **Both spellings are read, and that is the decision.** `?type=A,B` is what
+/// nilo writes into the document as `style: form, explode: false`, and it is
+/// what a client generated from that document sends. `?type=A&type=B` is what
+/// half the clients in the world send anyway, and a server that takes the
+/// first and drops the rest answers with fewer rows — which looks exactly
+/// like a filter that worked. Reading both costs one comparison and removes
+/// the failure mode rather than documenting it.
+///
+/// **One allocation, for a route that asked for a list and no other.** The
+/// elements point into the query string, which lives as long as the request;
+/// what is allocated is the slice of them, sized by a first pass, out of the
+/// request arena (ADR 0018).
+///
+/// An empty value contributes nothing, so `?tags=` is an empty list rather
+/// than a list holding one empty string. That is the cost of the separator:
+/// a value with a comma in it cannot be sent, and a value that is empty
+/// cannot be told from an absent one.
+fn collectList(
+    comptime Item: type,
+    c: *const Ctx,
+    comptime name: []const u8,
+    comptime label: []const u8,
+) ![]const Item {
+    const n = countList(c, name);
+    if (n == 0) return &.{};
+
+    const out = c.arena().alloc(Item, n) catch
+        return fail.internal("no room for the values of {s}", .{label});
+
+    var at: usize = 0;
+    var it = c.queries();
+    while (it.next()) |p| {
+        if (!std.mem.eql(u8, p.name.view(), name)) continue;
+        var pieces = std.mem.splitScalar(u8, p.value.view(), ',');
+        while (pieces.next()) |piece| {
+            if (piece.len == 0) continue;
+            out[at] = try convert(Item, .query, Str.fromRequest(piece, c._lifetime), label);
+            at += 1;
+        }
+    }
+    return out[0..at];
+}
+
+/// `collectList`, recording what would not convert instead of answering with
+/// it (ADR 0164). The **first** bad value is the one the handler is told
+/// about, and the rest of the list is still read: a filter with one typo in
+/// it is a filter, not a request with nothing in it.
+fn collectListCollecting(
+    comptime Item: type,
+    c: *const Ctx,
+    comptime name: []const u8,
+    outcome: *converting.Outcome,
+) ![]const Item {
+    const n = countList(c, name);
+    if (n == 0) return &.{};
+
+    const out = try c.arena().alloc(Item, n);
+    var at: usize = 0;
+    var it = c.queries();
+    while (it.next()) |p| {
+        if (!std.mem.eql(u8, p.name.view(), name)) continue;
+        var pieces = std.mem.splitScalar(u8, p.value.view(), ',');
+        while (pieces.next()) |piece| {
+            if (piece.len == 0) continue;
+            const text = Str.fromRequest(piece, c._lifetime);
+            var converted: Item = undefined;
+            if (converting.tryConvert(Item, .query, text, &converted)) |reason| {
+                if (outcome.reason == null) {
+                    outcome.given = text;
+                    outcome.reason = reason;
+                }
+            } else {
+                out[at] = converted;
+                at += 1;
+            }
+        }
+    }
+    return out[0..at];
+}
+
 /// Read the query string into `T`. A field that is absent falls back to its
 /// default, or to null if it is optional; one with neither is required, and
 /// saying so is a 400 rather than a surprise zero.
@@ -1006,7 +1257,23 @@ fn queryValue(comptime T: type, c: *const Ctx) !T {
     var out: T = undefined;
     inline for (@typeInfo(T).@"struct".fields) |f| {
         const label = "?" ++ f.name;
-        if (c.query(f.name)) |s| {
+        if (comptime queryList(f.type)) |Item| {
+            // A list is never "absent": nothing sent is the empty list, which
+            // is what every filter written against one already means. A
+            // default is still honoured, for the field that wants one.
+            const found = try collectList(Item, c, f.name, label);
+            if (found.len == 0) {
+                if (f.defaultValue()) |default| {
+                    @field(out, f.name) = default;
+                } else if (@typeInfo(f.type) == .optional) {
+                    @field(out, f.name) = null;
+                } else {
+                    @field(out, f.name) = &.{};
+                }
+            } else {
+                @field(out, f.name) = found;
+            }
+        } else if (c.query(f.name)) |s| {
             const Inner = switch (@typeInfo(f.type)) {
                 .optional => |o| o.child,
                 else => f.type,
@@ -1041,7 +1308,23 @@ fn queryValueCollecting(
             else => f.type,
         };
 
-        if (c.query(f.name)) |s| {
+        if (comptime queryList(f.type)) |Item| {
+            // The same reading as `queryValue`, with the one difference this
+            // whole function is: a value that will not convert is recorded
+            // rather than answered (ADR 0164, `bound.zig`).
+            const found = collectListCollecting(Item, c, f.name, &outcomes[i]) catch &.{};
+            if (found.len == 0) {
+                if (f.defaultValue()) |default| {
+                    @field(out, f.name) = default;
+                } else if (@typeInfo(f.type) == .optional) {
+                    @field(out, f.name) = null;
+                } else {
+                    @field(out, f.name) = &.{};
+                }
+            } else {
+                @field(out, f.name) = found;
+            }
+        } else if (c.query(f.name)) |s| {
             outcomes[i].given = s;
             var converted: Inner = undefined;
             if (converting.tryConvert(Inner, .query, s, &converted)) |reason| {

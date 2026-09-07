@@ -178,6 +178,7 @@ series at all. See [Metrics](./guide/metrics.md).
 | `u32`, `f64`, `Str`, `bool`, an enum | a path param, positionally |
 | a type with `nilo_parse` | a path param too — `sql.Uuid` is one |
 | `Query(T)` | the query string as a struct |
+| `FromHeader("X-Staff-Id", T)` | one request header, converted like a path param |
 | `Form(T)` | the body as an HTML form — urlencoded or multipart |
 | `Bound(W)` | any of the three above, with its failures instead of a 400 |
 | `Session(T)` | the session, out of its cookie |
@@ -214,6 +215,70 @@ an enum.
 asking for both is a compile error. A `Form(T)` field is a `Str`, a number, a
 `bool`, an enum or an `Upload`, optionally in a `?`; a default is what "not
 sent" means. See [Forms](./guide/forms.md).
+
+### `FromHeader(name, T)`
+
+One request header, as an argument the signature declares
+([ADR 0163](./adr/0163-a-header-a-handler-can-be-given.md)):
+
+<!-- compiles -->
+```zig
+fn addComment(
+    actor: nilo.FromHeader("X-Staff-Id", sql.Uuid),
+    tracing: nilo.FromHeader("X-Request-Id", ?Str),
+) !usize {
+    _ = actor.value;
+    const asked = tracing.value orelse return 0;
+    return asked.len();
+}
+```
+
+`.value` is the header, converted the way a path param is: a `?T` is null when
+the header is not sent, anything else is a 400 saying which header is required,
+and text that will not convert is the same 400 in the same words. Two of them
+on one handler is ordinary — unlike `Query(T)`, which is one struct.
+
+`c.header("X-Staff-Id")` still reads it and is not going anywhere. What the
+wrapper adds is the generated document: a header parameter, so a client built
+from the OpenAPI knows the endpoint needs one. The name is checked while
+compiling — empty, or anything that is not a header token, is a Refusal.
+
+**`FromHeader` and not `Header`**: `nilo.Header` is the response side, and has
+been since 0.2.0.
+
+### A query field that is a list
+
+A `Query(T)` field may be a slice, and every arrival of that name is one
+element ([ADR 0164](./adr/0164-a-query-parameter-that-is-a-list.md)):
+
+<!-- compiles -->
+```zig
+const Filter = struct {
+    tag: []const Str = &.{},
+    limit: u32 = 20,
+};
+
+fn search(q: nilo.Query(Filter)) !usize {
+    return q.value.tag.len;
+}
+```
+
+**Both spellings are read**: `?tag=a&tag=b&tag=c` and `?tag=a,b,c` are the same
+three elements, in the order they arrived, allocated from the request arena.
+`?tag=a,b` is what nilo writes into the document — `"style":"form"`,
+`"explode":false` — and `?tag=a&tag=b` is what half the clients in the world
+send anyway; a server that takes the first and drops the rest answers with fewer
+rows, which looks exactly like a filter that worked.
+
+An empty value contributes nothing, so `?tag=` is an empty list rather than a
+list holding one empty string — which is also why a list field wants `= &.{}`
+rather than being required, and why it is never `required` in the document.
+That is the cost of the separator: a value with a comma in it cannot be sent.
+
+The element converts exactly like a scalar field would, so `[]const Kind` for an
+enum refuses `?kind=nope` with the same sentence a single `kind` gets, and under
+`Bound(Query(T))` it is the **first** bad value that is reported. A list of
+something a query value cannot become at all is a Refusal.
 
 ### `Bound(W)`
 
@@ -555,10 +620,30 @@ const rows = try db.select(User, &run, .{ .where = .{ .age = .{ .gt = 18 } } });
 | | |
 |---|---|
 | `nilo.Run.init(gpa)` | |
+| `nilo.Run.initIo(gpa, io)` | the same, and able to `entropy` |
 | `run.deinit()` | |
 | `run.arena()` | `std.mem.Allocator` — memory that lasts as long as this tick |
 | `run.str(bytes)` | `Str` — text you allocated from `run.arena()`, stamped with this tick |
+| `run.entropy(n)` | `![n]u8` from the operating system. `error.NoIo` on a Run built by `init` |
 | `run.reset()` | end the tick: the memory goes back, the pages stay, and every `Str` from it goes stale |
+
+`entropy` is spelled the same as [`Ctx.entropy`](#reading), so one function body
+compiles under both — which is what "pass the `*Ctx`, or a `nilo.Run` if there
+is no request" has always promised, and was false of the most common function in
+any program, the one that mints a key
+([ADR 0160](./adr/0160-a-scope-that-can-mint-a-key.md)):
+
+```zig
+fn create(db: *Db, scope: anytype, title: []const u8) !Doc {
+    const key = id.Uuid.v7(try scope.entropy(id.Uuid.v7_entropy), nilo.nowMillis());
+    return db.insert(Doc, scope, .{ .id = key, .title = title });
+}
+```
+
+`init` leaves it null rather than requiring an `Io`, because handing out memory
+and stamping a lifetime need none and most Runs never mint anything; `initIo`
+takes the same `Io` the pool or the `std.Io.Threaded` was started with, which a
+CLI, a seed and a test all have in hand by the time they build a Run.
 
 ## Scope
 
@@ -1830,6 +1915,38 @@ thread and no socket, so a test cannot read what the server said and then
 decide what to send next — and a conversation between *two* sockets, a `Room`
 broadcast included, needs two connections and is out of reach here.
 
+### Catching a refusal with no request in flight
+
+A service function called from a CLI, a seed or a plain test refuses through the
+same fail functions, and outside a request there is nowhere to park the status —
+so four different refusals arrive at the caller as four identical
+`error.Failed`. `Refusals` gives the test the status and the sentence back
+([ADR 0161](./adr/0161-a-refusal-outside-a-request-is-still-a-refusal.md)):
+
+```zig
+var refusals: nilo.testing.Refusals = .{};
+refusals.begin();
+defer refusals.end();
+
+try testing.expectError(error.Failed, comment.edit(&db, &run, id, someone_else, "hi"));
+const said = refusals.caught().?;
+try testing.expectEqual(@as(u16, 409), said.status);
+```
+
+| | |
+|---|---|
+| `refusals.begin()` | install the slot. Not a constructor: what goes in the slot is this struct's address |
+| `refusals.end()` | put back whatever was there. Safe twice, safe on one that never began |
+| `refusals.caught()` | `?Refused` — `.status` and `.message`, or null if nothing refused |
+| `refusals.clear()` | forget the last one, for a test that makes a second call |
+
+`clear` between calls matters: without it the second assertion passes on the
+first call's sentence, which is the one way a test like this goes quietly wrong.
+`message` is borrowed from the `Refusals`, so it lives as long as that does.
+This is a test type — the slot it installs is the Bulkhead's fallback, the one a
+call made off the loop already uses, and a running server has a real slot per
+fiber.
+
 ## `nilo_sql`
 
 A second module, imported separately. A project that never imports it links
@@ -1861,7 +1978,32 @@ const User = struct {
 |---|---|
 | `.name` | the table, **written out**. Never guessed from the type name. `"app.users"` is a schema and a table; a bare name is whatever `search_path` resolves to |
 | `.key` | the column that identifies a row. Defaults to `id` when there is a field of that name |
+| `.managed = false` | this program reads the table and does not build it; the migrator leaves it alone. See [Migrations](#migrations) |
 | `pub const nilo_table = Other` | a narrower Row: the same table as `Other`, fewer columns, checked against it while compiling |
+| `pub const nilo_table = .projection` | a Row that owns no table at all — the shape `db.raw` fills. See below |
+
+#### A Row that owns no table
+
+A join, an aggregate or a window function comes back in a shape no table has.
+`.projection` is a Row that says so
+([ADR 0155](./adr/0155-a-row-that-owns-no-table.md)):
+
+<!-- compiles -->
+```zig
+const Busiest = struct {
+    pub const nilo_table = .projection;
+
+    email: Str,
+    documents: i64,
+};
+```
+
+It has every column type, every reader and every conversion an ordinary Row has,
+and no table, so `db.select`, `db.find`, `db.insert` and the migrator all refuse
+it while compiling, naming the type and saying it is a projection. `db.raw` and
+`db.exec` are what it is for. Before this the only way to spell such a shape was
+to give it a `.name` that pointed at a real table it did not match, which
+compiled and then said nothing when somebody wrote `db.select` against it.
 
 ### `Db`
 
@@ -2098,6 +2240,25 @@ because a waiting fiber frees its thread
 ([ADR 0059](./adr/0059-a-round-trip-is-not-the-cost-worth-chasing.md)).
 Statements that must land together are a data-modifying CTE through `db.raw`.
 
+**A statement you wrote is one nilo does not cast.** `Decimal`, `Interval`,
+`Inet` and any `AsText` column travel as the text the database printed, and the
+`::text` (or `CAST(… AS TEXT)`) that makes that true is added to the SELECT list
+*nilo* writes. A `db.raw` list is yours, so nilo adds nothing to it and the
+driver hands back a `numeric` the reader cannot parse — at run time, on one
+route, with no compile error anywhere near it. So `db.raw` now refuses it while
+compiling: a bare column, or a `*`, in the position of an as-text field is a
+Refusal naming the column, the field and the field's column type
+([ADR 0154](./adr/0154-a-raw-statement-cannot-cast-what-it-did-not-write.md)).
+Writing the cast yourself is the fix, and the message says so:
+
+```zig
+const rows = try db.raw(Invoice, c, "SELECT id, total::text FROM invoices", .{});
+```
+
+An aliased expression — `sum(amount)::text AS total` — is already an expression
+rather than a column path, so it passes. What the check refuses is the shape
+that could only ever be wrong.
+
 ### A batch
 
 `insertMany` sends one array per column and lets Postgres `unnest` them, so
@@ -2302,7 +2463,7 @@ than asking the server to release a mark it no longer has.
 
 | | |
 |---|---|
-| `sql.Timestamp` | microseconds since the epoch, written as RFC 3339 in JSON. `timestamptz`. `.now()`, `.fromSeconds(s)`, `.seconds()` |
+| `sql.Timestamp` | microseconds since the epoch, written as RFC 3339 in JSON. `timestamptz`. `.now()`, `.fromSeconds(s)`, `.seconds()`, `.nilo_parse(text)` |
 | `sql.Uuid` | `nilo_id`'s [`Uuid`](#nilo_id), re-exported — the same type either import gives you. `uuid` |
 | `sql.Json(T)` | a `T` stored as `jsonb`, parsed per row into the request arena. Not available in `db.stream`, which allocates nothing |
 | `sql.Decimal` | a `numeric`, held as its digits. `.text` is the value; there is no arithmetic. Writes itself into JSON as a **string**, so a consumer's `JSON.parse` cannot round it into an `f64` ([ADR 0050](./adr/0050-a-numeric-is-digits-and-a-string-in-json.md)) |
@@ -2336,6 +2497,26 @@ a column type does: conditions, `.set`, `insert`, a batch.
 
 `sql.AsText(name)` is the whole of that for a type that is just the text, and
 `sql.Decimal`, `sql.Interval` and `sql.Inet` are three instances of it.
+
+**A `Timestamp` reads back what it prints.** `Timestamp.nilo_parse(text)` is
+`?Timestamp`, and it is the same declaration that makes a type a path param
+([ADR 0142](./adr/0142-a-path-param-can-parse-itself.md)) and, since
+[ADR 0158](./adr/0158-one-arrival-one-answer.md), a query field — so a keyset
+cursor the server printed one request ago is an ordinary typed argument
+([ADR 0159](./adr/0159-what-a-server-prints-it-can-read.md)):
+
+```zig
+const Page = struct { after: ?sql.Timestamp = null, limit: u32 = 50 };
+
+fn feed(db: *Db, c: *nilo.Ctx, page: nilo.Query(Page)) ![]Event { … }
+```
+
+It takes an offset — `2026-08-16T16:30:00+07:00` is the same moment as
+`2026-08-16T09:30:00Z` — and fractional seconds, truncated at microseconds
+because that is the resolution the column has. It refuses a bare local time with
+no zone, because that is not an instant. The round trip is the property that is
+tested: what `writeRfc3339` prints, `nilo_parse` reads back to the same
+microsecond.
 
 Two mistakes stop at compile time: one of `nilo_read`/`nilo_write` without the
 other, and both without a `nilo_column`. **An array of one is not read** —
@@ -2398,6 +2579,32 @@ const User = struct {
 | `.index = .{ .created_at }` | the same three shapes, without the uniqueness |
 | `.references = .{ .org_id = .{ Org, .id } }` | keyed by the column doing the pointing, and it names the **Row** rather than a table, so renaming the table moves the key with it. A third entry says what happens on delete: `.cascade`, `.restrict` or `.set_null` |
 | `.was = .{ .email = "handle" }` | this column used to be called that. The old name is text, because it is not a column any more |
+| `.managed = false` | somebody else builds this table. `plan`, `createMissing` and `generate` skip it entirely |
+
+**`.managed = false` is for the table this program reads and does not own.** A
+foreign key names the *Row* that owns the table it points at, so
+`comments.author_staff_id` cannot say it points at `staff` without a `Staff`
+Row — and a `Staff` Row is part of the schema the diff sees, so the tool emits
+`CREATE TABLE staff` for a table that has existed for a year and whose real
+definition has twenty columns this program never needed. One word settles it:
+
+<!-- compiles -->
+```zig
+const Staff = struct {
+    pub const nilo_table = .{ .name = "staff", .managed = false };
+
+    id: i64,
+    email: Str,
+};
+```
+
+Everything else about the Row is unchanged — `.references` may point at it,
+`db.checking` still holds it against the live schema, and every statement reads
+it the same way. What changes is only who *builds* it
+([ADR 0162](./adr/0162-a-table-this-program-reads-and-does-not-build.md)). The
+word is written into `migrations/snapshot.zon`, where `managed: true` is silence
+and `managed: false` is a line, so a program that starts or stops building a
+table is a visible change in a reviewed file.
 
 Names follow Postgres' own convention, so a schema nilo generates and one
 somebody wrote by hand look the same: `users_email_key`,

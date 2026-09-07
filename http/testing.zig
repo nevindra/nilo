@@ -199,6 +199,88 @@ pub const Answer = struct {
     }
 };
 
+/// What a fail function said, read back where there was no request
+/// ([ADR 0161](../docs/adr/0161-a-refusal-outside-a-request-is-still-a-refusal.md)).
+pub const Refused = struct {
+    /// The status the fail function was given: 409, 422, whatever it wrote.
+    status: u16,
+    /// The sentence a person would have read. Borrowed from the `Refusals`
+    /// this came out of, so it is good for as long as that is in scope.
+    message: []const u8,
+};
+
+/// Catch what a service function refuses with, outside a request.
+///
+/// ```zig
+/// var refusals: nilo.testing.Refusals = .{};
+/// refusals.begin();
+/// defer refusals.end();
+///
+/// try testing.expectError(error.Failed, comment.edit(&db, run, id, someone_else, "hi"));
+/// const said = refusals.caught().?;
+/// try testing.expectEqual(@as(u16, 409), said.status);
+/// try testing.expect(std.mem.indexOf(u8, said.message, "somebody else's") != null);
+/// ```
+///
+/// **Why this exists.** `fail.status` parks the code on the request in
+/// flight and returns one error, so outside a request `current()` is null and
+/// the status and the sentence are dropped. A service function that refuses
+/// four different ways is then four identical `error.Failed`s to its caller,
+/// and a test can only say "it failed" — which is a poor thing to assert in a
+/// project whose convention is that errors are sentences.
+///
+/// Moving such a test over the wire, where `Client` gives a real status,
+/// works and is a fair trade for an endpoint that has one. It is not a trade
+/// available to a service function called by a CLI or a seed, and that is the
+/// gap this closes.
+///
+/// **A test type and nothing else.** The slot it installs is the Bulkhead's
+/// fallback, which is what a call made off the loop already uses; nothing
+/// here runs in a server, and a running one has a real slot per fiber.
+pub const Refusals = struct {
+    in_flight: fail.InFlight = .{},
+    previous: ?*anyopaque = null,
+    installed: bool = false,
+
+    /// Install the slot. Separate from a constructor on purpose: what goes in
+    /// the slot is a pointer to this struct, so it has to be at the address
+    /// the test will keep it at rather than at a returned temporary's.
+    pub fn begin(self: *Refusals) void {
+        self.in_flight = .{};
+        // The `InFlight`, not this struct: what the slot holds is what
+        // `fail.inFlight` casts it back to. It is the first field, so the two
+        // addresses are the same one today — which is exactly the kind of
+        // accident that stops being true and takes a fail function's message
+        // with it.
+        self.previous = bulkhead.setFallbackSlot(@ptrCast(&self.in_flight));
+        self.installed = true;
+    }
+
+    /// Put back whatever was in the slot before. Safe to call twice, and safe
+    /// on a `Refusals` that never began.
+    pub fn end(self: *Refusals) void {
+        if (!self.installed) return;
+        _ = bulkhead.setFallbackSlot(self.previous);
+        self.installed = false;
+    }
+
+    /// What the last refusal said, or null when nothing has refused.
+    pub fn caught(self: *const Refusals) ?Refused {
+        if (!self.in_flight.failure.isSet()) return null;
+        return .{
+            .status = self.in_flight.failure.status,
+            .message = self.in_flight.failure.message(),
+        };
+    }
+
+    /// Forget the last one, for a test that makes a second call. Without it
+    /// the second assertion passes on the first call's sentence, which is the
+    /// one way a test like this goes quietly wrong.
+    pub fn clear(self: *Refusals) void {
+        self.in_flight.failure.clear();
+    }
+};
+
 /// A stand-in for a client on the other end of a connection.
 pub const Client = struct {
     gpa: std.mem.Allocator,
@@ -1160,4 +1242,58 @@ test "a client can be used for more than one request" {
         const answer = try client.get(&app, "/thing");
         try testing.expectEqual(@as(u16, 201), answer.status);
     }
+}
+
+/// A service function of the kind this repository is written for: no `Ctx`,
+/// refusing four different ways, called by a handler and by a seed alike.
+fn editComment(author_matches: bool, empty: bool) fail.Error!void {
+    if (empty) return fail.unprocessable("a comment with nothing in it is not an edit", .{});
+    if (!author_matches) return fail.conflict("editing somebody else's comment", .{});
+}
+
+test "a refusal outside a request keeps its status and its sentence" {
+    // Before this, both were dropped: `current()` is null with no request in
+    // flight, so four different refusals were four identical `error.Failed`s
+    // and a test could only say "it failed" (ADR 0161).
+    var refusals: Refusals = .{};
+    refusals.begin();
+    defer refusals.end();
+
+    try testing.expect(refusals.caught() == null);
+
+    try testing.expectError(error.Failed, editComment(false, false));
+    const said = refusals.caught() orelse return error.NothingCaught;
+    try testing.expectEqual(@as(u16, 409), said.status);
+    try testing.expectEqualStrings("editing somebody else's comment", said.message);
+
+    // The other way the same function refuses, which is the whole point: two
+    // calls, two sentences, one error type.
+    refusals.clear();
+    try testing.expectError(error.Failed, editComment(true, true));
+    const second = refusals.caught() orelse return error.NothingCaught;
+    try testing.expectEqual(@as(u16, 422), second.status);
+    try testing.expectEqualStrings("a comment with nothing in it is not an edit", second.message);
+
+    // And a call that refuses nothing leaves nothing behind.
+    refusals.clear();
+    try editComment(true, false);
+    try testing.expect(refusals.caught() == null);
+}
+
+test "the slot goes back to whatever held it, so one test cannot leak into the next" {
+    var outer: fail.InFlight = .{};
+    const before = bulkhead.setFallbackSlot(@ptrCast(&outer));
+    defer _ = bulkhead.setFallbackSlot(before);
+
+    {
+        var refusals: Refusals = .{};
+        refusals.begin();
+        defer refusals.end();
+        try testing.expectError(error.Failed, editComment(false, false));
+        // The refusal went to the Refusals rather than to what was installed
+        // before it.
+        try testing.expect(!outer.failure.isSet());
+    }
+
+    try testing.expectEqual(@as(?*anyopaque, @ptrCast(&outer)), bulkhead.slot());
 }

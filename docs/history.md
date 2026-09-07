@@ -2330,3 +2330,85 @@ It also produced a fourth finding that no test would have called a bug:
 `status` said `applied` for a version whose file no longer matched what ran.
 `verify` reported it correctly, and `status` is the command people type. The row
 already carried the hash, so saying `edited` there cost one comparison.
+
+## What a build step matches, and two ways a check can silently not run
+
+`refusals/` holds the wording of 195 error messages, and the whole mechanism
+rests on one line of `std.Build.Step.Compile`:
+
+```zig
+fn matchCompileError(actual: []const u8, expected: []const u8) bool {
+    if (mem.endsWith(u8, actual, expected)) return true;
+```
+
+**`endsWith`, not `contains`.** A `.says` that is a *prefix* of the message —
+which is the natural thing to write when the rest of the line holds a generated
+type name — never matches, and the step fails with "should contain" printed
+above an actual that visibly contains it. Two new refusals were written that way
+and the mismatch took a probe of the raw compiler output to see, because the
+report reads as though the compiler were lying.
+
+So a `.says` is **the whole tail of the first line**, and the message has to be
+worth ending there. That is a constraint on the message, not only on the table:
+`@typeName` of an `AsText` renders as `types.AsText("numeric"[0..7])`, and a
+check whose text ends in a compiler rendering detail breaks the day the
+rendering changes. Both messages were rewritten to name the *column* type —
+`` a `numeric` column read as text `` — which is stabler and reads better
+anyway.
+
+The neighbouring way to have a check that never runs is already in
+`CLAUDE.md`: six tables, six steps, and a row added to one while another is run.
+Both failures look like a passing suite.
+
+## A comptime budget belongs to whoever spends it
+
+Sixteen `named` routes on one group stopped compiling with `evaluation exceeded
+1000 backwards branches` pointing into `app.zig`. Before fixing it, two things
+about `@setEvalBranchQuota` were worth measuring rather than assuming, because
+the fix is wrong under either alternative:
+
+- **it reaches the caller.** A comptime call is analysed inside the caller's
+  evaluation, so a quota raised inside a framework function raises the budget
+  the caller's whole `register` is spending;
+- **a smaller value later does not lower it.** The compiler keeps the larger, so
+  a library raising a ceiling cannot undo a caller who raised it higher.
+
+Both were confirmed with a ten-line program before the change was written. What
+follows from them is that a per-call *exact* size is the wrong shape: the budget
+is one ceiling for an entire evaluation, so a formula sized from one route's
+name is right for the first route and short by the two hundredth. Raise
+generously ([ADR 0157](./adr/0157-a-check-pays-for-its-own-branches.md)).
+
+The same evaluation then found two more places spending a caller's budget
+without paying for it — `row.readSpec`, which compares every marker field
+against six allowed words for every Row in a schema, and `rawcheck.assertList`.
+Neither had been reachable before because no program had had enough Rows.
+
+## Eleven items from a port, and what the shape of the list said
+
+A backend port on 0.3.0 — two contexts, 29 endpoints, 84 tests against a real
+database — handed back eleven items in one file, each with the error copied from
+a build log rather than paraphrased. The distribution is the part worth keeping:
+
+- **one was wrong at run time and silent** — a `date` read through `db.raw` came
+  back as the four bytes of its wire format and nothing failed
+  ([ADR 0154](./adr/0154-a-raw-statement-cannot-cast-what-it-did-not-write.md)).
+  It cost them an afternoon of suspecting the driver.
+- **three were a mechanism stopping one clause short.** `convertible` did not
+  reach the `parsesItself` branch `tryConvert` already had; `forWire` had a
+  `Str` scalar and a `Uuid` list and no `Str` list; `checkName` never raised the
+  quota `row.zig`'s `distance` has always raised. In each, the work existed and
+  the last clause did not.
+- **two were a rule written as its mechanism.** "A `nilo_parse` makes a type a
+  path param, and a path param does not come through here" is a true sentence
+  about a call graph, and it reads as a decision. Stated as what the caller sees
+  — *the same text off the same request line means two things* — there is
+  nothing left to decide
+  ([ADR 0158](./adr/0158-one-arrival-one-answer.md)). This is the third time a
+  requirement phrased as a mechanism read as a blocker; ADR 0063 is the first.
+
+**Nothing in the list needed a design nobody had.** The expensive part was not
+the building; it was that a caller had to find each one by hitting it. The one
+that cost the most — the silent `date` — is also the one nothing in the
+repository could have found, because every test that reads a text column reads
+it through a statement nilo wrote.

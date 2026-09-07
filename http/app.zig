@@ -2007,6 +2007,26 @@ pub fn GroupWith(
 /// starting with a letter or `_`.
 fn checkName(comptime name: []const u8) void {
     comptime {
+        // **A framework spending a caller's comptime budget is the
+        // framework's to account for**
+        // ([ADR 0157](../docs/adr/0157-a-check-pays-for-its-own-branches.md)).
+        // This loop walks a name a byte at a time, so sixteen `named` routes
+        // on one group were enough to finish the default 1,000 backwards
+        // branches — and what the caller saw was `evaluation exceeded 1000
+        // backwards branches` pointing at a line in `app.zig` and at whichever
+        // route it happened to stop on, which reads like a problem with that
+        // route.
+        //
+        // **Generous rather than exact, and that is what the quota is.** It
+        // is a ceiling on the caller's whole `register`, not on this call: a
+        // comptime call is analysed inside the caller's evaluation, so every
+        // route's bytes are counted against one budget and setting it again
+        // per route only ever raises it. An exact `name.len` would therefore
+        // be right for the first route and short by the two hundredth. What
+        // this buys is that nilo's own walk is never the thing that runs out;
+        // a caller whose comptime work genuinely needs more still says so.
+        // `row.zig`'s `distance` sizes its own the same way, one file over.
+        @setEvalBranchQuota(10_000 + 1_000 * (name.len + 1));
         if (name.len == 0) @compileError(
             "nilo: `app.named(\"\")` is a route with no name, which is `app` with extra steps.\n" ++
                 "  Give it the name the generated client and your own authorisation table " ++
@@ -2889,6 +2909,177 @@ test "query params and headers are readable from Ctx" {
     defer h.deinit();
     const result = h.send(&app, "GET /search?word=zig&empty= HTTP/1.1\r\nHost: t\r\nX-Token: secret\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200"));
+}
+
+const Kind = enum { comment, event };
+
+const Filter = struct {
+    tag: []const str_mod.Str = &.{},
+    kind: []const Kind = &.{},
+};
+
+fn filtered(arena: std.mem.Allocator, q: typed.Query(Filter)) ![]const u8 {
+    // Written out rather than counted, so a test can tell "read one value"
+    // from "read the first of two". The request arena, so the answer lives
+    // exactly as long as the request that asked for it.
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    for (q.value.tag) |t| w.print("{s};", .{t.view()}) catch {};
+    for (q.value.kind) |k| w.print("{s};", .{@tagName(k)}) catch {};
+    return arena.dupe(u8, w.buffered());
+}
+
+test "a query parameter that is a list is read both ways it can arrive" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/feed", filtered);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    // Comma-joined, which is what nilo writes into the document and what a
+    // client generated from it sends (ADR 0164).
+    const commas = h.send(&app, "GET /feed?tag=a,b HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, commas.response, "a;b;") != null);
+
+    // Repeated, which is what half the clients in the world send anyway. A
+    // server that took the first and dropped the rest would answer with
+    // fewer rows, which reads exactly like a filter that worked.
+    const repeated = h.send(&app, "GET /feed?tag=a&tag=b HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, repeated.response, "a;b;") != null);
+
+    // And both at once, because nothing stops a client doing that either.
+    const both = h.send(&app, "GET /feed?tag=a,b&tag=c HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, both.response, "a;b;c;") != null);
+}
+
+test "a list nobody sent is the empty list, and a bad value in one is a 400" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/feed", filtered);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    // Absent is empty rather than a refusal: every filter written against a
+    // list already means "no filter" by not sending one.
+    const none = h.send(&app, "GET /feed HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, none.response, "HTTP/1.1 200"));
+
+    // And so is a key with nothing after it, which is what an empty text box
+    // submits.
+    const empty = h.send(&app, "GET /feed?tag= HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, empty.response, "HTTP/1.1 200"));
+
+    // An element that will not convert is the same 400 a scalar gets, which
+    // is what makes a list of enums worth having: the set is in the document
+    // and the refusal happens before the handler runs.
+    const wrong = h.send(&app, "GET /feed?kind=comment,nonsense HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, wrong.response, "HTTP/1.1 400"));
+}
+
+test "a list query parameter says on the document which spelling it takes" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    app.docs(.{});
+    try app.get("/feed", filtered);
+
+    const json = try docsFor(&app);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+    defer parsed.deinit();
+
+    const params = parsed.value.object.get("paths").?.object
+        .get("/feed").?.object.get("get").?.object.get("parameters").?.array.items;
+    const tag = params[0].object;
+    try testing.expectEqualStrings("tag", tag.get("name").?.string);
+    // The half a convention held in a private helper could not state.
+    try testing.expectEqualStrings("form", tag.get("style").?.string);
+    try testing.expect(!tag.get("explode").?.bool);
+    try testing.expectEqualStrings("array", tag.get("schema").?.object.get("type").?.string);
+    // A list is never required: nothing sent is the empty list.
+    try testing.expect(!tag.get("required").?.bool);
+
+    // And the values of an enum list are in the document, which is the thing
+    // a `commaList` helper in the caller could never put there.
+    const kind = params[1].object;
+    try testing.expect(kind.get("schema").?.object.get("items").?.object.get("enum") != null);
+}
+
+fn whoIsAsking(actor: typed.FromHeader("X-Staff-Id", u32)) !u32 {
+    return actor.value;
+}
+
+fn maybeAsking(actor: typed.FromHeader("X-Staff-Id", ?u32)) !u32 {
+    return actor.value orelse 0;
+}
+
+test "a header a handler asks for is read into the type it asked for" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/asking", whoIsAsking);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const found = h.send(&app, "GET /asking HTTP/1.1\r\nHost: t\r\nX-Staff-Id: 42\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, found.response, "HTTP/1.1 200"));
+    try testing.expect(std.mem.endsWith(u8, found.response, "42"));
+
+    // The name is matched the way `c.header` matches it, which is the way the
+    // wire works: a client that sends it lower case is not sending a
+    // different header.
+    const lower = h.send(&app, "GET /asking HTTP/1.1\r\nHost: t\r\nx-staff-id: 42\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, lower.response, "HTTP/1.1 200"));
+}
+
+test "a header that is required and absent is a 400 naming it, not a surprise zero" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/asking", whoIsAsking);
+    try app.get("/maybe", maybeAsking);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const missing = h.send(&app, "GET /asking HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, missing.response, "HTTP/1.1 400"));
+    try testing.expect(std.mem.indexOf(u8, missing.response, "X-Staff-Id") != null);
+
+    // Text that will not convert is the same 400 a query param gets.
+    const nonsense = h.send(&app, "GET /asking HTTP/1.1\r\nHost: t\r\nX-Staff-Id: wati\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, nonsense.response, "HTTP/1.1 400"));
+
+    // And an optional one absent is null rather than a refusal, which is the
+    // rule a query field with a `?` already follows.
+    const optional = h.send(&app, "GET /maybe HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, optional.response, "HTTP/1.1 200"));
+}
+
+test "a header a handler asks for is a header the document promises" {
+    // The whole point of the wrapper: `c.header` reads one and the document
+    // says nothing, so a generated client cannot know to send it (ADR 0163).
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    app.docs(.{});
+    try app.get("/asking", whoIsAsking);
+    try app.get("/maybe", maybeAsking);
+
+    const json = try docsFor(&app);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+    defer parsed.deinit();
+
+    const paths = parsed.value.object.get("paths").?.object;
+    const required = paths.get("/asking").?.object.get("get").?.object
+        .get("parameters").?.array.items[0].object;
+    try testing.expectEqualStrings("X-Staff-Id", required.get("name").?.string);
+    try testing.expectEqualStrings("header", required.get("in").?.string);
+    try testing.expect(required.get("required").?.bool);
+    try testing.expectEqualStrings("integer", required.get("schema").?.object.get("type").?.string);
+
+    // `required` follows the optional, the way a query field's does.
+    const optional = paths.get("/maybe").?.object.get("get").?.object
+        .get("parameters").?.array.items[0].object;
+    try testing.expect(!optional.get("required").?.bool);
 }
 
 // ---- stage 3: typed handlers, services, fail functions ----
@@ -6301,6 +6492,33 @@ test "a route that says its own name gets it as the operationId" {
         "createUser",
         paths.get("/api/users").?.object.get("post").?.object.get("operationId").?.string,
     );
+}
+
+test "twenty named routes on one group is a program, not a branch budget" {
+    // Sixteen was the number that stopped compiling, and the message named a
+    // line in this file and whichever route the walk happened to be on
+    // (ADR 0157). Twenty here, so the test fails if the sizing is ever taken
+    // back out — and long names, because the cost is per byte.
+    var db = Db{ .rows = &.{} };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+
+    const api = app.group("/api");
+    inline for (.{
+        "listPartnerCapabilities", "addPartnerCapability",     "removePartnerCapability",
+        "listPartnerContacts",     "addPartnerContact",        "updatePartnerContact",
+        "listWorkItemLabels",      "addWorkItemLabel",         "removeWorkItemLabel",
+        "listWorkItemPartners",    "addWorkItemPartner",       "tickWorkItemChecklist",
+        "listCommitmentFacets",    "identifyCommitment",       "promiseCommitment",
+        "startCommitment",         "deliverCommitment",        "breakDownCommitment",
+        "changeCommitmentDueDate", "unfundCommitment",
+    }, 0..) |name, i| {
+        try api.named(name).tryRoute(.GET, std.fmt.comptimePrint("/thing/{d}", .{i}), docListUsers);
+    }
+
+    try testing.expect(app.nameTaken("changeCommitmentDueDate") != null);
+    try testing.expect(app.nameTaken("listPartnerCapabilities") != null);
 }
 
 test "two routes cannot share a name" {

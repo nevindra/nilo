@@ -168,21 +168,53 @@ fn wrongParse(comptime T: type, comptime wrong: []const u8) noreturn {
 /// filled from a request. Answering here rather than at each call site is
 /// what keeps `Query(T)` and `Form(T)` agreeing on what a field may be.
 ///
-/// A type that parses itself is deliberately not on this list, and the gap is
-/// where it stops rather than what it is: `nilo_parse` makes a type a path
-/// param (ADR 0142), and a path param does not come through here — `roleOf`
-/// gates it and `paramValue` calls `convert` straight. Widening this would
-/// also let one into a `Query(T)`, a `Form(T)` and a JSON body, and the last
-/// of those is a different question — `std.json` fills a body, not this file.
+/// **A type that parses itself is on this list**, which it was not for two
+/// releases ([ADR 0158](../docs/adr/0158-one-arrival-one-answer.md)). The gap
+/// used to be argued as where `nilo_parse` stops — it makes a type a path
+/// param (ADR 0142), and a path param does not come through here — and the
+/// argument was about the mechanism rather than about the text: `/deals/:id`
+/// read a `sql.Uuid` and `?actor=<uuid>` refused one, off the same request
+/// line, for the same type. One arrival cannot mean two things.
+///
+/// The concern the old wording raised was the JSON body, and it answers
+/// itself: `std.json` fills a body, not this file. What this decides is a
+/// `Query(T)` and a `Form(T)`, both of which reach `tryConvert` — where the
+/// case has been handled since ADR 0142, ahead of its own switch.
 pub fn convertible(comptime T: type) bool {
     const Inner = switch (@typeInfo(T)) {
         .optional => |o| o.child,
         else => T,
     };
     if (Inner == Str) return true;
+    // `comptime` on the call, because this function is asked at run time by a
+    // test and `parsesItself` answers out of a comptime block.
+    if (comptime parsesItself(Inner)) return true;
     return switch (@typeInfo(Inner)) {
         .int, .float, .bool, .@"enum" => true,
         else => false,
+    };
+}
+
+/// The element of a field that is a **list of values**, or null when it is not
+/// one ([ADR 0164](../docs/adr/0164-a-query-parameter-that-is-a-list.md)).
+///
+/// `Str` is a struct and `[]const u8` is text, so neither is a list here — the
+/// same reading `std.json` and `sql/types.zig` both give a slice of bytes.
+///
+/// **A type question, not a promise.** `convertible` deliberately does not
+/// answer true for a list, because the answer differs by slot: a query string
+/// is read by `typed.zig` and a form body is not. What lives here is only the
+/// shape, so that the two files which have to agree about it — the one that
+/// fills the field and the one that words its failure — read it from one
+/// place.
+pub fn listElement(comptime T: type) ?type {
+    const Inner = switch (@typeInfo(T)) {
+        .optional => |o| o.child,
+        else => T,
+    };
+    return switch (@typeInfo(Inner)) {
+        .pointer => |p| if (p.size == .slice and p.child != u8) p.child else null,
+        else => null,
     };
 }
 
@@ -486,6 +518,13 @@ test "the types request text can become" {
     try testing.expect(!convertible([]const u8));
     try testing.expect(!convertible(struct { a: u32 }));
     try testing.expect(!convertible([4]u8));
+
+    // And a type that parses itself, which used to be the one thing
+    // `tryConvert` could do and `convertible` would not promise (ADR 0158).
+    // `/deals/:id` read a `Sku` and `?sku=ABC` refused one, off the same
+    // request line.
+    try testing.expect(convertible(Sku));
+    try testing.expect(convertible(?Sku));
 }
 
 test "text that fits becomes the value" {

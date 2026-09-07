@@ -113,6 +113,128 @@ pub const Timestamp = struct {
         });
     }
 
+    /// The other half of `writeRfc3339`, so that a value this server printed
+    /// can be handed back to it
+    /// ([ADR 0159](../docs/adr/0159-what-a-server-prints-it-can-read.md)).
+    ///
+    /// **The round trip is the property.** Every keyset cursor is a timestamp
+    /// the same server wrote one request ago, and a parser that disagrees
+    /// with the writer by a microsecond pages past rows or repeats them
+    /// without failing — which is why the test below asserts the pair rather
+    /// than each half.
+    ///
+    /// Wider than what the writer prints, on purpose: an offset (`+07:00`)
+    /// and fractional seconds both arrive from clients that were never told
+    /// what nilo emits, and both have one correct reading. **A time with no
+    /// zone at all is refused**, because there is no correct reading of it —
+    /// guessing UTC is how a cursor moves by seven hours at a customer who
+    /// runs their browser in Jakarta.
+    ///
+    /// `nilo_parse` rather than a method with a name of its own: the
+    /// declaration is what makes a type a path param and, since ADR 0158, a
+    /// query field. Nothing here imports `nilo_http` to say so (ADR 0042).
+    pub fn nilo_parse(text: []const u8) ?Timestamp {
+        // `2026-10-01T09:30:00Z` is the shortest thing this accepts, and
+        // every index below is inside it.
+        if (text.len < 20) return null;
+        if (text[4] != '-' or text[7] != '-') return null;
+        if (text[10] != 'T' and text[10] != 't') return null;
+        if (text[13] != ':' or text[16] != ':') return null;
+
+        const year = fixed(i64, text[0..4]) orelse return null;
+        const month = fixed(u8, text[5..7]) orelse return null;
+        const day = fixed(u8, text[8..10]) orelse return null;
+        const hour = fixed(u8, text[11..13]) orelse return null;
+        const minute = fixed(u8, text[14..16]) orelse return null;
+        const second = fixed(u8, text[17..19]) orelse return null;
+
+        if (month < 1 or month > 12) return null;
+        if (day < 1 or day > daysInMonth(year, month)) return null;
+        // 59 rather than RFC 3339's 60: a leap second has no microsecond to
+        // come back to, so accepting one would break the round trip in the
+        // one place this type is used for.
+        if (hour > 23 or minute > 59 or second > 59) return null;
+
+        var rest = text[19..];
+
+        // Fractional seconds, truncated at microseconds because that is the
+        // resolution the column has. Digits past the sixth are read and
+        // dropped rather than refused: they are somebody else's precision,
+        // not a mistake.
+        var fraction: i64 = 0;
+        if (rest.len > 0 and rest[0] == '.') {
+            var i: usize = 1;
+            var scale: i64 = 100_000;
+            while (i < rest.len and std.ascii.isDigit(rest[i])) : (i += 1) {
+                if (scale > 0) {
+                    fraction += @as(i64, rest[i] - '0') * scale;
+                    scale = @divTrunc(scale, 10);
+                }
+            }
+            if (i == 1) return null; // a dot with no digits after it
+            rest = rest[i..];
+        }
+
+        const offset: i64 = if (rest.len == 1 and (rest[0] == 'Z' or rest[0] == 'z'))
+            0
+        else if (rest.len == 6 and (rest[0] == '+' or rest[0] == '-') and rest[3] == ':') blk: {
+            const hours = fixed(u8, rest[1..3]) orelse return null;
+            const minutes = fixed(u8, rest[4..6]) orelse return null;
+            if (hours > 23 or minutes > 59) return null;
+            const total = @as(i64, hours) * 3600 + @as(i64, minutes) * 60;
+            break :blk if (rest[0] == '-') -total else total;
+        } else return null;
+
+        const secs = daysFromCivil(year, month, day) * std.time.s_per_day +
+            @as(i64, hour) * 3600 + @as(i64, minute) * 60 + @as(i64, second) - offset;
+        return .{ .micros = secs * std.time.us_per_s + fraction };
+    }
+
+    /// A fixed-width run of digits, or null when any byte is not one.
+    ///
+    /// `std.fmt.parseInt` is not this: it takes `+7` and `-0`, neither of
+    /// which is a field of a timestamp, and it would read `2026-1O-01` as far
+    /// as the letter and stop somewhere useless. Same argument as
+    /// `convert.spelledAsNumber`.
+    fn fixed(comptime T: type, digits: []const u8) ?T {
+        var out: T = 0;
+        for (digits) |ch| {
+            if (!std.ascii.isDigit(ch)) return null;
+            out = out * 10 + @as(T, ch - '0');
+        }
+        return out;
+    }
+
+    fn isLeap(year: i64) bool {
+        return @rem(year, 4) == 0 and (@rem(year, 100) != 0 or @rem(year, 400) == 0);
+    }
+
+    fn daysInMonth(year: i64, month: u8) u8 {
+        return switch (month) {
+            1, 3, 5, 7, 8, 10, 12 => 31,
+            4, 6, 9, 11 => 30,
+            2 => if (isLeap(year)) 29 else 28,
+            else => 0,
+        };
+    }
+
+    /// Days from 1970-01-01 to a civil date — Howard Hinnant's `days_from_civil`,
+    /// which is the inverse of what `std.time.epoch` does on the way out.
+    ///
+    /// Written here rather than found in std because std has the one
+    /// direction: `EpochSeconds` walks days into a date and nothing walks a
+    /// date back into days.
+    fn daysFromCivil(year: i64, month: u8, day: u8) i64 {
+        const shifted = year - @as(i64, @intFromBool(month <= 2));
+        const era = @divFloor(shifted, 400);
+        const year_of_era = shifted - era * 400;
+        const month_term: i64 = @as(i64, month) + (if (month > 2) @as(i64, -3) else @as(i64, 9));
+        const day_of_year = @divTrunc(153 * month_term + 2, 5) + @as(i64, day) - 1;
+        const day_of_era = year_of_era * 365 + @divTrunc(year_of_era, 4) -
+            @divTrunc(year_of_era, 100) + day_of_year;
+        return era * 146_097 + day_of_era - 719_468;
+    }
+
     pub fn jsonStringify(self: Timestamp, jw: anytype) !void {
         var buf: [32]u8 = undefined;
         var w = std.Io.Writer.fixed(&buf);
@@ -432,6 +554,81 @@ test "a Timestamp can say what time it is, and says it in microseconds" {
     // The unit, not the instant: a reading in seconds or milliseconds would
     // land far below a moment that has already happened.
     try testing.expect(now.seconds() > 1_767_225_600);
+}
+
+test "what a Timestamp prints, a Timestamp reads back to the same microsecond" {
+    // The property, asserted as a pair rather than as two halves: every
+    // keyset cursor in a paged list is a value this same writer produced, so
+    // a parser that agrees with a spec and not with the writer still pages
+    // wrong (ADR 0159).
+    var buf: [40]u8 = undefined;
+    for ([_]i64{
+        0, // the epoch itself
+        1_786_872_600, // an ordinary afternoon
+        1_709_208_000, // a leap day
+        1_740_830_400, // the year after one
+        4_102_444_800, // 2100, which is not a leap year
+    }) |secs| {
+        const written = Timestamp.fromSeconds(secs);
+        const read = Timestamp.nilo_parse(try textOf(written, &buf)) orelse
+            return error.WriterPrintedSomethingTheParserRefused;
+        try testing.expectEqual(written.micros, read.micros);
+    }
+}
+
+test "a timestamp with an offset is the same moment as the Z it stands for" {
+    const jakarta = Timestamp.nilo_parse("2026-08-16T16:30:00+07:00").?;
+    const utc = Timestamp.nilo_parse("2026-08-16T09:30:00Z").?;
+    try testing.expectEqual(utc.micros, jakarta.micros);
+    try testing.expectEqual(@as(i64, 1_786_872_600), utc.seconds());
+
+    // And the other sign, which is the one a `-` in the arithmetic gets wrong.
+    const bogota = Timestamp.nilo_parse("2026-08-16T04:30:00-05:00").?;
+    try testing.expectEqual(utc.micros, bogota.micros);
+}
+
+test "fractional seconds are kept to the resolution the column has" {
+    const with = Timestamp.nilo_parse("2026-08-16T09:30:00.123456Z").?;
+    try testing.expectEqual(@as(i64, 1_786_872_600_123_456), with.micros);
+
+    // Fewer digits are the tenths they say they are, not the last six.
+    try testing.expectEqual(
+        @as(i64, 1_786_872_600_500_000),
+        Timestamp.nilo_parse("2026-08-16T09:30:00.5Z").?.micros,
+    );
+    // And more are somebody else's precision, dropped rather than refused.
+    try testing.expectEqual(
+        @as(i64, 1_786_872_600_123_456),
+        Timestamp.nilo_parse("2026-08-16T09:30:00.1234567891Z").?.micros,
+    );
+}
+
+test "a timestamp with no zone is refused, because there is no right reading of it" {
+    // The one that matters: a cursor read as UTC when the client meant local
+    // moves the page by hours and nothing fails.
+    try testing.expectEqual(@as(?Timestamp, null), Timestamp.nilo_parse("2026-08-16T09:30:00"));
+
+    // And the rest of what is not a timestamp.
+    for ([_][]const u8{
+        "",
+        "2026-08-16",
+        "2026-08-16 09:30:00Z", // a space where the T goes
+        "2026-13-01T00:00:00Z", // no thirteenth month
+        "2026-02-30T00:00:00Z", // nor a thirtieth of February
+        "2025-02-29T00:00:00Z", // nor a leap day in a year without one
+        "2026-08-16T24:00:00Z",
+        "2026-08-16T09:60:00Z",
+        "2026-1O-01T00:00:00Z", // a letter O where a zero goes
+        "2026-08-16T09:30:00.Z", // a dot with no digits
+        "2026-08-16T09:30:00+0700", // an offset with no colon
+        "2026-08-16T09:30:00Q",
+        "yesterday",
+    }) |not_one| {
+        try testing.expectEqual(@as(?Timestamp, null), Timestamp.nilo_parse(not_one));
+    }
+
+    // A leap day in a year that has one still reads.
+    try testing.expect(Timestamp.nilo_parse("2024-02-29T12:00:00Z") != null);
 }
 
 test "a uuid column and a generated key are the same type" {

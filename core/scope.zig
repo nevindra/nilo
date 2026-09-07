@@ -90,9 +90,27 @@ pub const Run = struct {
 
     _arena: std.heap.ArenaAllocator,
     _lifetime: Lifetime,
+    /// What `entropy` asks for bytes, when the Run was given one.
+    ///
+    /// Optional because the two things a Run does — hand out memory and stamp
+    /// a lifetime — need no Io at all, and a great many of them are made in a
+    /// test that will never mint a key. Requiring one would make every
+    /// existing `Run.init(gpa)` a compile error to buy a call most of them do
+    /// not make.
+    _io: ?std.Io = null,
 
     pub fn init(gpa: std.mem.Allocator) Run {
         return .{ ._arena = .init(gpa), ._lifetime = .init() };
+    }
+
+    /// A Run that can also mint a key
+    /// ([ADR 0160](../docs/adr/0160-a-scope-that-can-mint-a-key.md)).
+    ///
+    /// The same Io a `nilo_sql` pool or an `std.Io.Threaded` was started
+    /// with, which a CLI, a seed and a test all have in hand by the time they
+    /// build a Run: they needed one to open the database.
+    pub fn initIo(gpa: std.mem.Allocator, io: std.Io) Run {
+        return .{ ._arena = .init(gpa), ._lifetime = .init(), ._io = io };
     }
 
     pub fn deinit(self: *Run) void {
@@ -106,6 +124,40 @@ pub const Run = struct {
 
     pub fn str(self: *Run, bytes: []const u8) Str {
         return .fromRequest(bytes, &self._lifetime);
+    }
+
+    /// `n` bytes from the operating system's entropy source
+    /// ([ADR 0160](../docs/adr/0160-a-scope-that-can-mint-a-key.md)).
+    ///
+    /// ```zig
+    /// const key = id.v7(try scope.entropy(id.Uuid.v7_entropy), nilo.nowMillis());
+    /// ```
+    ///
+    /// **Spelled the same as `Ctx.entropy` so that one function body compiles
+    /// under both**, which is what the refusal in `check` above has always
+    /// promised: *pass the `*Ctx` the handler was given, or a `nilo.Run` if
+    /// there is no request*. It was true of every statement in `nilo_sql` and
+    /// false of the most common function in any program — the one that mints
+    /// a key — so a service function written against a Scope compiled until
+    /// somebody wrote `create`.
+    ///
+    /// **What it does is not what `Ctx.entropy` does, and that is the point.**
+    /// There the call goes through the Bulkhead, because a syscall straight
+    /// from a fiber stops every request sharing that thread (ADR 0046). Here
+    /// there is no fiber and nothing to park: this is `std.Io.randomSecure`,
+    /// which is the same bytes. The two agree about the *signature*, which is
+    /// all a caller written against a Scope can see, and disagree about the
+    /// cost, which is the layer's business rather than the caller's.
+    ///
+    /// `error.NoIo` when the Run was built by `init` rather than `initIo`.
+    /// Not a compile error, because the Io is a value rather than a type; the
+    /// call that needs it says so here rather than at every `Run.init` in a
+    /// suite that never mints anything.
+    pub fn entropy(self: *Run, comptime n: usize) ![n]u8 {
+        const io = self._io orelse return error.NoIo;
+        var out: [n]u8 = undefined;
+        try std.Io.randomSecure(io, &out);
+        return out;
     }
 
     /// Throw this tick's memory away and start the next one, keeping the
@@ -132,6 +184,27 @@ test "a Run hands out memory and a lifetime" {
 
 test "a Run is a Scope" {
     check(*Run, "a test");
+}
+
+test "a Run given an Io mints bytes, and one without says so rather than inventing them" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    var run = Run.initIo(testing.allocator, threaded.io());
+    defer run.deinit();
+
+    // Enough for a v7 key, which is the call this exists for.
+    const first = try run.entropy(10);
+    const second = try run.entropy(10);
+    // Not a proof of randomness — a proof that something filled it. Two draws
+    // of ten bytes colliding is not a thing that happens.
+    try testing.expect(!std.mem.eql(u8, &first, &second));
+
+    // And the Run that was never given one refuses rather than handing back a
+    // key somebody could guess.
+    var without = Run.init(testing.allocator);
+    defer without.deinit();
+    try testing.expectError(error.NoIo, without.entropy(10));
 }
 
 test "text stamped by a Run goes stale when the tick ends" {

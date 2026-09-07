@@ -522,18 +522,18 @@ to be careful about is that it cannot end up in a release binary.
 
 **Waiting on: ready.**
 
-**2. A repeated name cannot bind to a list.** `convert.convertible` accepts a
-`Str`, a number, a `bool`, an enum and optionals of those, and nothing else — so
-`?tag=a&tag=b` into `tags: []const Str`, and a `<select multiple>` or a checkbox
-group into a `Form(T)`, are both a compile error naming the field. `parseQuery`
-and `parseMultipart` already keep every occurrence in order and `Fields.find`
+**2. A form field cannot bind to a list.** A query parameter can, since
+[ADR 0164](./adr/0164-a-query-parameter-that-is-a-list.md); a `<select multiple>`
+or a checkbox group into a `Form(T)` is still a compile error naming the field.
+`parseMultipart` already keeps every occurrence in order and `Fields.find`
 deliberately returns the first, so the data is there and only the binding is
-missing. It costs a slice per list field out of the request arena, on requests
-that ask for one.
+missing.
 
-**Waiting on: a design** for where the slice lives when the same struct is also
-what `Bound(Query(T))` hands back — an `Outcome` is one reason per field, and a
-list can fail at element three.
+**Waiting on: a decision** about the separator, which is where this stops being
+the query case one slot over. A browser sends a repeated name and never a
+comma-joined one, so the reading that made sense for a query string — take both
+spellings, write the comma into the document — is half wrong here: there is no
+document to write, and a comma in a form value is a value with a comma in it.
 
 **3. `permessage-deflate`.** Negotiated in the handshake, and a compressor per
 connection is memory that has not been budgeted.
@@ -898,17 +898,16 @@ worth designing.
 **Waiting on: a design** for what the handler hands over, given that nothing in
 this framework should be hashing a body per request.
 
-**A header or a cookie cannot be bound to a struct.** The slots a handler
-argument can fill are `Query(T)`, `Form(T)`, a JSON body, `Session(T)`,
-`Bound(W)`, a path param, a service and a resolved value. `X-Tenant-Id`, an API
-version and an `Idempotency-Key` are read with `c.header` and converted by hand,
-though `convert.zig` and `bound.zig` are the two halves that would do it and
-are both already written.
+**A cookie cannot be bound to a handler argument.** A header can, since
+[ADR 0163](./adr/0163-a-header-a-handler-can-be-given.md) —
+`FromHeader("X-Tenant-Id", T)` — and the same question about a cookie has a
+different answer: a cookie's name is not the problem, `Session(T)` already owns
+the one cookie most programs read, and what is left is a bare cookie converted
+by hand with `c.cookie`.
 
-**Waiting on: a design** for how a field name becomes a header name.
-`x_tenant_id` → `X-Tenant-Id` is a guess with a rule under it, and a rule that
-guesses wrong is worse than one that makes the type say it — which is a marker,
-and this repository already has one shape for that (`nilo_json`).
+**Waiting on: a caller.** The header half was built because authentication put
+one argument on every command endpoint in fourteen contexts; nothing has yet
+asked for the cookie half at that scale.
 
 **Every method nilo does not name is the same method.** `http1.Method` holds
 seven and `other`, and `methodFrom` maps everything else onto that one tag, so
@@ -1206,9 +1205,11 @@ there is the choice: a database file whose times are readable as RFC 3339 is
 what many SQLite schemas hold, and reaching it means `sql.AsText("timestamptz")`
 and a conversion the caller writes.
 
-**Waiting on: a caller.** A `time_form` beside `uuid_form` is the shape, and it
-needs an RFC 3339 *parser* — `Timestamp` can only write one today — for a
-column this module already round-trips exactly.
+**Waiting on: a caller.** A `time_form` beside `uuid_form` is the shape, and the
+half it was waiting on is there:
+[ADR 0159](./adr/0159-what-a-server-prints-it-can-read.md) gave `Timestamp` the
+RFC 3339 parser this needs, so what is left is the Dialect choice rather than
+the arithmetic.
 
 **A Row column of a type no Dialect knows fails in pg.zig's words, not nilo's.**
 `dialect.accepts` answers `null` for any struct it does not recognise, and
@@ -1481,19 +1482,6 @@ widest Row a `Db` can ever read is known before the program runs.
 **Waiting on: ready.** It is small next to the stack finding
 ([ADR 0063](./adr/0063-a-handlers-stack-is-per-connection.md)) and it is free,
 which is the only reason it is written down.
-
-**A `db.raw` Row has to name a relation it never reads.** `raw` did not write
-the statement, so the table name in the Row's `nilo_table` is never used — but
-`fill` calls `assertRow`, so the marker has to be there. The shape a join
-answers with is usually not a table, and the guide's own two examples had to be
-pointed at a view before they compiled
-([ADR 0083](./adr/0083-the-guide-is-the-source-of-its-own-snippets.md)).
-
-**Waiting on: a design.** Dropping the assert is one line and the wrong one:
-`columnsOf` makes the same call, and a Row is the one shape this module takes
-everywhere. What is wanted is a name for *the struct a `SELECT` list fills*
-that is not a Row, and the cost of a second such shape is what has to be
-weighed.
 
 **`db.raw` is routed by its first keyword.** Exact for everything the module
 generates, because the module wrote the text. A guess for `db.raw`, where the

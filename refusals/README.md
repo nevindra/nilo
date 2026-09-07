@@ -50,6 +50,19 @@ compiler stops at the route registration.
 Leave the `nilo: ` off. The build step puts it there, which is how a message
 that does not start with it becomes impossible to write down as passing.
 
+**`.says` is the *whole* first line, not a phrase inside it.** The step this
+hangs off is `expectCompileErrors`, and it matches with `mem.endsWith` — so a
+`.says` that stops halfway through the line never matches, and the failure it
+prints says "should contain … but not found" while the text is plainly there in
+the output underneath. That reads exactly like a message that changed, which is
+the wrong place to look. Copy the line whole.
+
+The same rule decides how a message should be *worded*: end it on something
+stable. A sentence that finishes with a `@typeName` ends differently for a
+generic type than the source says it does, and the row then has to be written
+against the rendering rather than against the words. Put the varying part in
+the middle and a fixed phrase at the end.
+
 To find out what to put in `.says`, guess, run `zig build refusals`, and read
 the failure — it prints what was expected beside what actually came out.
 

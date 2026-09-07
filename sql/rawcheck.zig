@@ -25,6 +25,9 @@
 //! (ADR 0148 argues why closing only one of them is still worth doing).
 
 const std = @import("std");
+/// For `asText` alone: which Row fields are read as the text the database
+/// printed, and therefore have to be asked for that way (ADR 0154).
+const types = @import("types.zig");
 
 /// What one pass over a statement found.
 pub const List = struct {
@@ -34,6 +37,15 @@ pub const List = struct {
     /// One entry per column, in order. Empty string where the column has no
     /// name this is willing to claim.
     names: []const []const u8,
+    /// The text of each column, trimmed, in the same order — what the caller
+    /// actually wrote, alias and all. `names` is what it is *called*; this is
+    /// what it *is*, and a text column has to be asked for as text
+    /// ([ADR 0154](../docs/adr/0154-a-raw-statement-cannot-cast-what-it-did-not-write.md)).
+    exprs: []const []const u8,
+    /// Whether a `*` stands at the top level of the list. Reported rather than
+    /// folded into `count = null`, because a `*` is countable by the database
+    /// and uncastable by anybody — two different answers that used to be one.
+    starred: bool,
 };
 
 /// Count the columns a statement answers with.
@@ -41,9 +53,11 @@ pub fn scan(comptime sql: []const u8) List {
     return comptime blk: {
         @setEvalBranchQuota(200 * sql.len + 10_000);
 
-        const start = listStart(sql) orelse break :blk .{ .count = null, .names = &.{} };
+        const start = listStart(sql) orelse
+            break :blk .{ .count = null, .names = &.{}, .exprs = &.{}, .starred = false };
 
         var names: []const []const u8 = &.{};
+        var exprs: []const []const u8 = &.{};
         var n: usize = 0;
         var depth: usize = 0;
         var i: usize = start;
@@ -68,6 +82,7 @@ pub fn scan(comptime sql: []const u8) List {
                 starred = true;
             } else if (depth == 0 and ch == ',') {
                 names = names ++ [_][]const u8{nameOf(sql[from..i])};
+                exprs = exprs ++ [_][]const u8{trim(sql[from..i])};
                 n += 1;
                 from = i + 1;
             } else if (depth == 0 and endsList(sql, i)) {
@@ -77,12 +92,15 @@ pub fn scan(comptime sql: []const u8) List {
         }
 
         names = names ++ [_][]const u8{nameOf(sql[from..i])};
+        exprs = exprs ++ [_][]const u8{trim(sql[from..i])};
         n += 1;
 
         // `*` cannot be counted: how many columns it stands for is the
-        // database's answer, not this file's.
-        if (starred) break :blk .{ .count = null, .names = &.{} };
-        break :blk .{ .count = n, .names = names };
+        // database's answer, not this file's. It is still reported, because
+        // what a `*` cannot do is carry a cast, and that is a different
+        // question from how many columns it stands for (ADR 0154).
+        if (starred) break :blk .{ .count = null, .names = &.{}, .exprs = &.{}, .starred = true };
+        break :blk .{ .count = n, .names = names, .exprs = exprs, .starred = false };
     };
 }
 
@@ -97,12 +115,21 @@ pub fn scan(comptime sql: []const u8) List {
 /// Guessing at either would turn working statements into compile errors,
 /// which is the one outcome a check like this cannot afford.
 pub fn assertList(
+    comptime D: type,
     comptime Row: type,
     comptime sql: []const u8,
     comptime call: []const u8,
 ) void {
     comptime {
+        // The framework's own walk, paid for by the framework
+        // ([ADR 0157](../docs/adr/0157-a-check-pays-for-its-own-branches.md)).
+        // `scan` sizes its own; what this covers is the two comparisons per
+        // column below and the `comptimePrint` a refusal builds, both of which
+        // are spent out of the caller's budget for every raw statement in the
+        // program rather than for this one.
+        @setEvalBranchQuota(20_000 + 200 * sql.len);
         const list = scan(sql);
+        assertCasts(D, Row, list, call);
         const count = list.count orelse return;
         const fields = @typeInfo(Row).@"struct".fields;
 
@@ -125,6 +152,103 @@ pub fn assertList(
                     "  A raw statement fills the Row by position, so column {d} becomes " ++
                     "field {d}. Reorder the SELECT list, or alias the column: `… AS \"{s}\"`.",
                 .{ at, call, name, at, @typeName(Row), field.name, at, at, field.name },
+            ));
+        }
+    }
+}
+
+/// Hold the columns a **text column** is filled from against the one thing
+/// they have to be: asked for as text
+/// ([ADR 0154](../docs/adr/0154-a-raw-statement-cannot-cast-what-it-did-not-write.md)).
+///
+/// A text column — `Decimal`, `Interval`, `Inet`, and anything a project
+/// declared the same way with `AsText` (ADR 0055) — is read as the text the
+/// database printed. In every statement this module writes, the Dialect adds
+/// the cast that makes that true. In a statement it did not write, nobody
+/// does: the driver hands over whatever wire format it chose, and `nilo_read`
+/// keeps those bytes as if they were the digits. A `date` comes back as the
+/// four bytes of its binary form and **nothing fails**, which is the only
+/// silent wrong answer in this module.
+///
+/// **What is refused is narrow on purpose: a bare column, and a `*`.** Those
+/// are the two shapes that cannot possibly have a cast in them. Any
+/// expression at all — `total::text`, `coalesce(a::text, '')`, `to_char(…)`,
+/// a literal — is left alone, because reading a cast out of an expression
+/// means parsing SQL, and refusing a statement that works is the one outcome
+/// this file must not have.
+fn assertCasts(
+    comptime D: type,
+    comptime Row: type,
+    comptime list: List,
+    comptime call: []const u8,
+) void {
+    comptime {
+        if (@typeInfo(Row) != .@"struct") return;
+        const fields = @typeInfo(Row).@"struct".fields;
+
+        // A `*` stands for columns nobody named, so no cast reached any of
+        // them. Refused for the Row that has a text column in it and for no
+        // other, which is why this is not a rule about `*`.
+        if (list.starred) {
+            for (fields, 1..) |field, at| {
+                if (types.asText(field.type) == null) continue;
+                // **The first line names the column type rather than the Zig
+                // type**, and that is not only for reading: `@typeName` of an
+                // `AsText` renders as `types.AsText("numeric"[0..7])`, and the
+                // build step matches the whole first line of a refusal
+                // (ADR 0027), so a message ending in a compiler rendering
+                // detail is a check that breaks when the rendering changes.
+                @compileError(std.fmt.comptimePrint(
+                    "nilo: the statement handed to `{s}` selects `*`, and field {d} of {s} is " ++
+                        "a `{s}` column read as text.\n" ++
+                        "  A text column arrives as the text the database printed, and a `*` " ++
+                        "cannot ask for one: what comes back is the wire format, kept as if it " ++
+                        "were digits. Write the columns out and cast `{s}` — " ++
+                        "`{s} AS \"{s}\"`.",
+                    .{
+                        call,
+                        at,
+                        @typeName(Row),
+                        types.asText(field.type).?,
+                        field.name,
+                        D.readAs(field.name, field.type),
+                        field.name,
+                    },
+                ));
+            }
+            return;
+        }
+        if (list.count == null) return;
+        // A list that is not the Row's length is the count check's to report,
+        // and it says it better than a cast complaint about column three of
+        // two would.
+        if (list.exprs.len != fields.len) return;
+
+        for (list.exprs, fields, 1..) |expr, field, at| {
+            if (types.asText(field.type) == null) continue;
+            const source = trim(beforeAlias(expr));
+            // Anything that is not a bare column already does something to the
+            // value, and this file does not read SQL well enough to say what.
+            if (!isPath(source)) continue;
+            @compileError(std.fmt.comptimePrint(
+                "nilo: column {d} of the statement handed to `{s}` is `{s}`, and field {d} of " ++
+                    "{s} is a `{s}` column read as text.\n" ++
+                    "  A text column arrives as the text the database printed. nilo adds that " ++
+                    "cast to every statement it writes; this one it did not write, so `{s}` " ++
+                    "comes back in the wire format and is kept as if it were digits — " ++
+                    "a `date` becomes four characters and nothing fails. " ++
+                    "Ask for it as `{s} AS \"{s}\"`.",
+                .{
+                    at,
+                    call,
+                    source,
+                    at,
+                    @typeName(Row),
+                    types.asText(field.type).?,
+                    field.name,
+                    D.readAs(source, field.type),
+                    field.name,
+                },
             ));
         }
     }
@@ -263,8 +387,20 @@ fn nameOf(comptime column: []const u8) []const u8 {
     comptime {
         const text = trim(column);
         if (text.len == 0) return "";
-
         // `… AS name`, which is the one that always means what it says.
+        if (aliasAt(text)) |at| return bare(trim(text[at..]));
+        // Or an identifier path and nothing else: `id`, `u.email`,
+        // `"created at"`, `u."created at"`.
+        return pathEnd(text) orelse "";
+    }
+}
+
+/// Just past a top-level `AS`, or null when the column has no explicit alias.
+///
+/// The *last* one at depth 0, because `CASE … END AS kind` has a word that
+/// reads like one inside it.
+fn aliasAt(comptime text: []const u8) ?usize {
+    comptime {
         var i: usize = 0;
         var depth: usize = 0;
         var alias: ?usize = null;
@@ -284,16 +420,33 @@ fn nameOf(comptime column: []const u8) []const u8 {
             }
             i += 1;
         }
-        if (alias) |at| return bare(trim(text[at..]));
+        return alias;
+    }
+}
 
-        // Or an identifier path and nothing else: `id`, `u.email`,
-        // `"created at"`, `u."created at"`.
+/// The column with its `AS name` taken off — what the database is actually
+/// being asked for, which is the half a cast would be in (ADR 0154).
+fn beforeAlias(comptime column: []const u8) []const u8 {
+    comptime {
+        const at = aliasAt(column) orelse return column;
+        return column[0 .. at - "AS".len];
+    }
+}
+
+/// The last part of an identifier path, or null when `text` is anything else.
+///
+/// Two callers, and they want opposite halves of the same answer: `nameOf`
+/// wants the name a path gives itself, and `assertCasts` wants to know that a
+/// column *is* a path — because a path is the one shape with no cast in it.
+fn pathEnd(comptime text: []const u8) ?[]const u8 {
+    comptime {
+        if (text.len == 0) return null;
         var j: usize = 0;
         var last: usize = 0;
         while (j < text.len) {
             if (text[j] == '"') {
                 const past = skipPast(text, j);
-                if (past == j) return "";
+                if (past == j) return null;
                 last = j;
                 j = past;
                 continue;
@@ -303,11 +456,16 @@ fn nameOf(comptime column: []const u8) []const u8 {
                 j += 1;
                 continue;
             }
-            if (!isWordByte(text[j])) return "";
+            if (!isWordByte(text[j])) return null;
             j += 1;
         }
         return bare(text[last..]);
     }
+}
+
+/// Whether the whole of `text` is a bare column and nothing else.
+fn isPath(comptime text: []const u8) bool {
+    return comptime pathEnd(text) != null;
 }
 
 /// `"email"` and `email` are the same name.
@@ -418,9 +576,15 @@ test "lower case reads the same as upper" {
     try testing.expectEqualStrings("email", found.names[1]);
 }
 
+/// The Dialect these tests hold statements against. `assertList` needs one
+/// only to spell the cast it suggests, and Postgres is the one whose spelling
+/// the messages were written against.
+const Pg = @import("dialect.zig").Postgres;
+
 test "a list that lines up with the Row passes, by name and by count" {
     const Tally = struct { country: []const u8, n: i64 };
     comptime assertList(
+        Pg,
         Tally,
         "SELECT u.country, count(*)::bigint AS n FROM users u GROUP BY u.country",
         "db.raw",
@@ -429,12 +593,52 @@ test "a list that lines up with the Row passes, by name and by count" {
 
 test "a star is not counted, so a narrow Row over `SELECT *` still compiles" {
     const Narrow = struct { id: i64 };
-    comptime assertList(Narrow, "SELECT * FROM users", "db.raw");
+    comptime assertList(Pg, Narrow, "SELECT * FROM users", "db.raw");
 }
 
 test "a column with no name this file will claim is counted and not matched" {
     const Two = struct { id: i64, alive: bool };
-    comptime assertList(Two, "SELECT id, deleted_at IS NULL FROM users", "db.raw");
+    comptime assertList(Pg, Two, "SELECT id, deleted_at IS NULL FROM users", "db.raw");
+}
+
+test "a text column asked for as text passes, however the cast is written" {
+    const Money = struct { id: i64, total: types.Decimal };
+    // The cast nilo would have written itself.
+    comptime assertList(Pg, Money, "SELECT id, total::text AS total FROM invoices", "db.raw");
+    // And the ones it would not: an alias is not required, and an expression
+    // this file cannot read is left alone rather than guessed at.
+    comptime assertList(Pg, Money, "SELECT id, i.total::text FROM invoices i", "db.raw");
+    comptime assertList(
+        Pg,
+        Money,
+        "SELECT id, coalesce(total::text, '0') AS total FROM invoices",
+        "db.raw",
+    );
+    comptime assertList(Pg, Money, "SELECT id, CAST(total AS text) AS total FROM invoices", "db.raw");
+}
+
+test "a column that is not read as text is nobody's business here" {
+    const Plain = struct { id: i64, email: []const u8 };
+    comptime assertList(Pg, Plain, "SELECT id, email FROM users", "db.raw");
+}
+
+test "the shapes a cast cannot be hiding in are the only ones refused" {
+    // What the refusal files hold as compile errors, asserted here as the
+    // *predicate* they turn on — a bare column, aliased or not, is a path and
+    // everything else is not.
+    try testing.expect(isPath("total"));
+    try testing.expect(isPath("i.total"));
+    try testing.expect(isPath("\"total due\""));
+    try testing.expect(!isPath("total::text"));
+    try testing.expect(!isPath("CAST(total AS text)"));
+    try testing.expect(!isPath("coalesce(total::text, '0')"));
+    try testing.expect(!isPath("'0'"));
+
+    // The alias comes off; the whitespace it left is `trim`'s to take, which
+    // is what `assertCasts` does with this.
+    try testing.expectEqualStrings("total ", comptime beforeAlias("total AS amount"));
+    try testing.expectEqualStrings("i.total::text ", comptime beforeAlias("i.total::text AS amount"));
+    try testing.expectEqualStrings("total", comptime beforeAlias("total"));
 }
 
 test "a data-modifying CTE answers with its RETURNING, not with the insert's source SELECT" {

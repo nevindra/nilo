@@ -299,6 +299,23 @@ pub const testing = @import("testing.zig");
 /// ```
 pub const Query = @import("typed.zig").Query;
 
+/// One request header, as a typed argument — the same family as `Query(T)`
+/// and `Form(T)`, on a header
+/// ([ADR 0163](../docs/adr/0163-a-header-a-handler-can-be-given.md)).
+///
+/// ```zig
+/// fn addComment(actor: nilo.FromHeader("X-Staff-Id", Uuid), body: NewComment) !Comment { … }
+/// ```
+///
+/// `c.header("X-Staff-Id")` reads one too, and the difference is the
+/// generated document: a header nilo was told about is a header the document
+/// promises, so a client generated from it knows to send one. Absent is null
+/// for a `?T` and a 400 for anything else.
+///
+/// **Not `Header`**: that name is the response side, and has been since
+/// 0.2.0.
+pub const FromHeader = @import("typed.zig").FromHeader;
+
 /// An HTML form body, read into a struct of yours — the same idea as
 /// `Query(T)`, on the body instead of the query string (ADR 0031).
 ///

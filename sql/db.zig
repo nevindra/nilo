@@ -810,7 +810,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             values: anytype,
         ) ![]Row {
             comptime core.checkScope(@TypeOf(c), "db.raw");
-            comptime rawcheck.assertList(Row, sql, "db.raw");
+            comptime rawcheck.assertList(D, Row, sql, "db.raw");
             // No ceiling: this module did not write the statement and so has
             // nothing to say about how many rows it can answer with.
             //
@@ -1432,7 +1432,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 values: anytype,
             ) ![]Row {
                 comptime core.checkScope(@TypeOf(c), "tx.raw");
-                comptime rawcheck.assertList(Row, sql, "tx.raw");
+                comptime rawcheck.assertList(D, Row, sql, "tx.raw");
                 return fill(Row, null, self.db, &self.inner, c, sql, self.db.rawPlanOf(sql), try rawValuesOf(values, c));
             }
 
@@ -2593,6 +2593,15 @@ fn forWire(comptime To: type, value: anytype, c: anytype) !To {
     // a copy.
     if (comptime givenElement(V)) |Item| {
         if (comptime Item == types.Uuid or Item == ?types.Uuid) return uuidList(To, value, c);
+        // And a list of `Str`, which is the same missing branch one type over
+        // ([ADR 0156](../docs/adr/0156-a-list-of-str-is-a-parameter-too.md)).
+        // A scalar `Str` has been handled at the top of this function since the
+        // guide's own sign-in snippet failed to compile; a list of them fell
+        // through to `return value;` and stopped as a type error naming a line
+        // in this file, which reads like a bug in nilo rather than a spelling
+        // at the call site. `docs/reference.md` had said `[]const Str` works
+        // for two releases.
+        if (comptime Item == core.Str or Item == ?core.Str) return strList(To, value, c);
     }
     // A text column writes itself. The arena is here for one that has to
     // build its text rather than hold it; the ones this module ships hold it
@@ -2697,6 +2706,39 @@ fn uuidList(comptime To: type, value: anytype, c: anytype) !To {
         }
     } else {
         for (given, out) |*item, *slot| slot.* = &item.bytes;
+    }
+    return out;
+}
+
+/// A list of `Str` as the list of slices the driver's array encoder reads
+/// ([ADR 0156](../docs/adr/0156-a-list-of-str-is-a-parameter-too.md)).
+///
+/// `uuidList` above with one line changed, and deliberately not merged with
+/// it: what each does per element is the whole of it — sixteen bytes borrowed
+/// there, a view taken here — and a shared version would be a comptime switch
+/// wrapped in a function whose body is the switch.
+///
+/// **One allocation, for the slice headers, and none for the text.** A `Str`
+/// is already text somebody else owns, and it outlives the statement by the
+/// rule that made it a `Str` in the first place.
+fn strList(comptime To: type, value: anytype, c: anytype) !To {
+    const given = if (comptime @typeInfo(@TypeOf(value)) == .optional)
+        (value orelse return null)
+    else
+        value;
+
+    const Slice = comptime if (@typeInfo(To) == .optional) @typeInfo(To).optional.child else To;
+    const Element = comptime @typeInfo(Slice).pointer.child;
+    // Read off what the caller wrote, for the reason `uuidList` says: `.in` on
+    // a nullable column asks for an element with the column's `?` on it, and
+    // the list written at the call site has none.
+    const Given = comptime givenElement(@TypeOf(given)).?;
+
+    const out = c.arena().alloc(Element, given.len) catch return error.QueryFailed;
+    if (comptime @typeInfo(Given) == .optional) {
+        for (given, out) |item, *slot| slot.* = if (item) |text| text.view() else null;
+    } else {
+        for (given, out) |item, *slot| slot.* = item.view();
     }
     return out;
 }
@@ -2962,6 +3004,42 @@ test "a list of uuids travels as slices, because an array of them is not a shape
     // And the other lists, which did not move.
     try testing.expectEqual([]const i32, WireList([]const i32));
     try testing.expectEqual([]const []const u8, WireList([]const core.Str));
+}
+
+test "a list of Str binds as slices, which is the branch the reference promised" {
+    // `docs/reference.md` has said `[]const Str` is `text[]` since lists
+    // landed. As a column both spellings worked; as a parameter only
+    // `[]const []const u8` did, and the first fell through `forWire` to
+    // `return value;` and stopped as a type error naming a line in this file
+    // (ADR 0156). The type derivation was never the missing half — the test
+    // above has asserted `WireList([]const core.Str)` all along.
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+
+    const wati = run.str("wati");
+    const budi = run.str("budi");
+    const given = [_]core.Str{ wati, budi };
+
+    const bound = try forWire([]const []const u8, @as([]const core.Str, &given), &run);
+    try testing.expectEqual(@as(usize, 2), bound.len);
+    try testing.expectEqualStrings("wati", bound[0]);
+    try testing.expectEqualStrings("budi", bound[1]);
+    // Pointing at the caller's own text rather than at a copy of it, which is
+    // what makes this one allocation for the headers and none for the bytes.
+    try testing.expectEqual(wati.view().ptr, bound[0].ptr);
+
+    // The optional list, absent.
+    const none: ?[]const core.Str = null;
+    try testing.expectEqual(
+        @as(?[]const []const u8, null),
+        try forWire(?[]const []const u8, none, &run),
+    );
+
+    // And a NULL among the elements, which is where the `?` sits on Postgres.
+    const maybe = [_]?core.Str{ wati, null };
+    const mixed = try forWire([]const ?[]const u8, @as([]const ?core.Str, &maybe), &run);
+    try testing.expectEqualStrings("wati", mixed[0].?);
+    try testing.expectEqual(@as(?[]const u8, null), mixed[1]);
 }
 
 test "an `in` over uuids is one parameter of slices rather than of arrays" {

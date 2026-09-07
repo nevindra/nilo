@@ -124,6 +124,12 @@ pub const Field = struct {
     /// A field with a default is what "absent" is allowed to mean, so it is
     /// not required — the same rule `Query(T)` and the body parser follow.
     required: bool,
+    /// Whether this parameter takes more than one value, which the document
+    /// has to say *how* ([ADR 0164](../docs/adr/0164-a-query-parameter-that-is-a-list.md)).
+    /// `?tag=a,b` and `?tag=a&tag=b` are two wire contracts and a client
+    /// generated against the wrong one sends a filter the server reads half
+    /// of. Written as `style: form, explode: false`, which is the comma.
+    list: bool = false,
 };
 
 /// One path or query param.
@@ -200,6 +206,11 @@ pub const Operation = struct {
     /// In the order they appear in the pattern. A catch-all is named `*`.
     params: []const Param,
     query: []const Field,
+    /// The request headers the signature asks for
+    /// ([ADR 0163](../docs/adr/0163-a-header-a-handler-can-be-given.md)).
+    /// Empty for every route that reads its headers with `c.header`, which
+    /// nilo cannot see and does not guess at.
+    headers: []const Field = &.{},
     body: ?*const Schema,
     body_kind: BodyKind = .json,
     answer: Answer,
@@ -860,7 +871,7 @@ fn writeOperation(w: *std.Io.Writer, components: *const Components, op: Operatio
     try w.writeAll("\":{\"operationId\":");
     try writeOperationId(w, op);
 
-    if (op.params.len > 0 or op.query.len > 0) {
+    if (op.params.len > 0 or op.query.len > 0 or op.headers.len > 0) {
         try w.writeAll(",\"parameters\":[");
         for (op.params, 0..) |p, i| {
             if (i > 0) try w.writeByte(',');
@@ -876,7 +887,24 @@ fn writeOperation(w: *std.Io.Writer, components: *const Components, op: Operatio
             if (i > 0 or op.params.len > 0) try w.writeByte(',');
             try w.writeAll("{\"name\":");
             try writeString(w, f.name);
-            try w.print(",\"in\":\"query\",\"required\":{s},\"schema\":", .{
+            try w.print(",\"in\":\"query\",\"required\":{s},", .{
+                if (f.required) "true" else "false",
+            });
+            // Which of the two spellings a generated client should send
+            // (ADR 0164). Only on a list, because on a scalar the pair means
+            // nothing and every generator would carry it about anyway.
+            if (f.list) try w.writeAll("\"style\":\"form\",\"explode\":false,");
+            try w.writeAll("\"schema\":");
+            try writeSchema(w, components, f.schema);
+            try w.writeByte('}');
+        }
+        // Last, so that adding one does not move the path and query params a
+        // generated client has already been built against (ADR 0163).
+        for (op.headers, 0..) |f, i| {
+            if (i > 0 or op.params.len > 0 or op.query.len > 0) try w.writeByte(',');
+            try w.writeAll("{\"name\":");
+            try writeString(w, f.name);
+            try w.print(",\"in\":\"header\",\"required\":{s},\"schema\":", .{
                 if (f.required) "true" else "false",
             });
             try writeSchema(w, components, f.schema);

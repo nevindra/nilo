@@ -420,8 +420,8 @@ pub fn checkFields(comptime T: type, comptime what: []const u8) void {
                 "nilo: the field `" ++ f.name ++ ": " ++ naming.of(f.type) ++ "` of " ++ what ++
                     " is not something a form value can become.\n" ++
                     "  A form field arrives as text, so a field is a `nilo.Str`, a number, a " ++
-                    "`bool`, or an enum — or a `nilo.Upload` for a file — optionally wrapped in " ++
-                    "`?` when it may be absent.",
+                    "`bool`, an enum, or a type that parses itself with `nilo_parse` — or a " ++
+                    "`nilo.Upload` for a file — optionally wrapped in `?` when it may be absent.",
             );
         }
     }

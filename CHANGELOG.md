@@ -7,6 +7,130 @@ that have, one page each. What was measured and what was got wrong on the way is
 in [`docs/history.md`](./docs/history.md); what is coming is in
 [`docs/roadmap.md`](./docs/roadmap.md).
 
+## Unreleased
+
+Eleven things a real port hit, in the order they cost it the most. Needs Zig
+0.16, as 0.3.0 does. Each entry says what you have to change; the account of why
+is in the ADR it links.
+
+### Fixed
+
+- **A `db.raw` reading a text column got the wire format and kept it as if it
+  were digits**
+  ([ADR 0154](./docs/adr/0154-a-raw-statement-cannot-cast-what-it-did-not-write.md)).
+  A `date` came back as four characters and **nothing errored**. The Dialect
+  adds `::text` to every `SELECT` list nilo writes and to none that you write,
+  so this was the one silent wrong answer in the module — and `Decimal` is
+  `AsText("numeric")`, so it was money as much as dates.
+
+  It is now a compile error, in the machinery that already counts the columns
+  (ADR 0148):
+
+  ```
+  nilo: column 2 of the statement handed to `db.raw` is `total`, and field 2 of
+  Invoice is a `numeric` column read as text.
+    […] Ask for it as `total::text AS "total"`.
+  ```
+
+  **What you have to change:** cast the column — `total::text AS "total"` on
+  Postgres, `CAST(total AS TEXT)` on SQLite. Only two shapes are refused, a bare
+  column and a `*`; any expression at all is left alone.
+
+- **`[]const Str` was documented as a `db.raw` parameter and was not one**
+  ([ADR 0156](./docs/adr/0156-a-list-of-str-is-a-parameter-too.md)). It stopped
+  inside nilo with `expected type '…!?[]const []const u8'`, naming a line of
+  nilo's rather than your call site. Both spellings work now, as the reference
+  has said since lists landed. Nothing to change.
+
+- **Sixteen `named` routes on one group exceeded the comptime branch budget**
+  ([ADR 0157](./docs/adr/0157-a-check-pays-for-its-own-branches.md)).
+  `evaluation exceeded 1000 backwards branches`, pointing at a line in `app.zig`
+  and at whichever route the walk stopped on. `checkName` sizes its own quota
+  now. **What you have to change:** delete the `@setEvalBranchQuota` you added
+  to your own `register` to get round it.
+
+### New
+
+- **`nilo.FromHeader("X-Staff-Id", T)` — one request header, as a typed
+  argument** ([ADR 0163](./docs/adr/0163-a-header-a-handler-can-be-given.md)).
+  The same family as `Query(T)` and `Form(T)`, converted the same way, and —
+  the point — **written into the API description**, so a generated client knows
+  the endpoint needs it. `c.header` read one and appeared nowhere.
+
+  ```zig
+  fn addComment(actor: nilo.FromHeader("X-Staff-Id", Uuid), body: NewComment) !Comment
+  ```
+
+  Absent is null for a `?T` and a 400 naming the header for anything else. It is
+  `FromHeader` rather than `Header` because `nilo.Header` is the response side.
+
+- **A query parameter can be a list**
+  ([ADR 0164](./docs/adr/0164-a-query-parameter-that-is-a-list.md)).
+  `tag: []const Str = &.{}` in a `Query(T)`, elements of any type a query value
+  can become — so a list of enums is refused with a 400 before the handler runs
+  and its values are in the document.
+
+  **Both spellings are read** — `?tag=a,b` and `?tag=a&tag=b` — and the document
+  says which one nilo would write, as `style: form, explode: false`. A server
+  that reads only one of them answers with fewer rows, which looks exactly like
+  a filter that worked. Absent is the empty list, so a list field is never
+  `required`.
+
+- **A `Query(T)` or `Form(T)` field can be a type that parses itself**
+  ([ADR 0158](./docs/adr/0158-one-arrival-one-answer.md)). `/deals/:id` read a
+  `sql.Uuid` and `?actor=<uuid>` refused one, off the same request line. Now
+  both work; `tryConvert` had handled the case since ADR 0142.
+
+- **`sql.Timestamp` reads RFC 3339 back**
+  ([ADR 0159](./docs/adr/0159-what-a-server-prints-it-can-read.md)). It wrote
+  one and could not read one, so every keyset cursor — a value the same server
+  printed a request ago — needed a parser of the caller's own, and a parser that
+  disagrees with the writer pages past rows silently. An offset and fractional
+  seconds are accepted; **a time with no zone is refused**, because guessing UTC
+  moves the page by hours at a customer who is not in it.
+
+- **`nilo.Run` can mint a key**
+  ([ADR 0160](./docs/adr/0160-a-scope-that-can-mint-a-key.md)). nilo's own
+  refusal says *pass the `*Ctx` the handler was given, or a `nilo.Run` if there
+  is no request* — and `entropy` was on `Ctx` alone, so every service function
+  that creates something failed to compile under a `Run`.
+
+  ```zig
+  var run = nilo.Run.initIo(gpa, io);   // and `entropy` works
+  ```
+
+  `Run.init(gpa)` is unchanged and answers `error.NoIo` from `entropy`.
+
+- **`nilo.testing.Refusals` — read a fail function's status and sentence outside
+  a request**
+  ([ADR 0161](./docs/adr/0161-a-refusal-outside-a-request-is-still-a-refusal.md)).
+  With no request in flight the status and the message were dropped, so a
+  service function refusing four ways was four identical `error.Failed`s. Driving
+  the endpoint with `testing.Client` was the answer and is not one for a
+  function a CLI or a seed calls.
+
+- **`pub const nilo_table = .projection;` — a Row that owns no table**
+  ([ADR 0155](./docs/adr/0155-a-row-that-owns-no-table.md)). A `UNION ALL`, a
+  `GROUP BY` rollup or a card joining four tables is a shape no table has, and
+  had to name one anyway to get past `assertRow`. `db.raw` and `tx.raw` fill a
+  projection; everything that writes its own SQL refuses it by name — including
+  `db.checking`, which used to take the decorative name at its word and go
+  looking for a column of a table nobody meant.
+
+- **`.managed = false` — a table this program reads and does not build**
+  ([ADR 0162](./docs/adr/0162-a-table-this-program-reads-and-does-not-build.md)).
+  A `.references` names the Row that owns the table, so a foreign key onto
+  `staff` needed a `Staff` Row — and the migration tool then wanted to create
+  `staff`. That made it all-or-nothing on a schema you own part of.
+
+  ```zig
+  pub const nilo_table = .{ .name = "staff", .managed = false };
+  ```
+
+  `plan`, `createMissing` and `generate` skip it; `db.checking` still holds it
+  against the live schema. The snapshot records it, so a program that starts
+  building one is a visible line in the file rather than a silent change.
+
 ## 0.3.0
 
 Needs Zig 0.16, as 0.2.0 does. Each entry says what you have to change; the

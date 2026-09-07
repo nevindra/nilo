@@ -39,6 +39,24 @@
 //! database in the room. Written out longhand, the same typo would survive
 //! until the schema comparison reached a live Postgres.
 //!
+//! And a third shape, for a Row that **no table has**: the merged page of a
+//! `UNION ALL`, a `GROUP BY` rollup, a card joining four tables
+//! ([ADR 0155](../docs/adr/0155-a-row-that-owns-no-table.md)).
+//!
+//! ```zig
+//! const TimelineRow = struct {
+//!     pub const nilo_table = .projection;
+//!
+//!     at: sql.Timestamp,
+//!     kind: Str,
+//! };
+//! ```
+//!
+//! `db.raw` and `tx.raw` fill one, because there the caller wrote the
+//! statement. Everything that writes its own SQL refuses it by name, which is
+//! the point: before this, such a Row had to name a table it did not
+//! represent, and `db.checking` would then take that name at its word.
+//!
 //! Everything here answers a question about a type rather than about a
 //! request, so all of it is settled before the binary exists — the first half
 //! of ADR 0039's rule.
@@ -69,6 +87,37 @@ pub fn isRow(comptime T: type) bool {
         .@"struct" => @hasDecl(T, marker),
         else => false,
     };
+}
+
+/// The one word the marker may be instead of a table or another Row.
+pub const projection_word = "projection";
+
+/// Whether `T` is a **projection**: a Row that reads and owns no table
+/// ([ADR 0155](../docs/adr/0155-a-row-that-owns-no-table.md)).
+///
+/// A `UNION ALL` over two tables, a `GROUP BY` rollup, a search across seven
+/// tables, a card joining four — none of them is a table's shape, and until
+/// this existed each one had to name a table it did not represent so that
+/// `assertRow` would pass. That is a lie in the source, and the comment above
+/// each saying the name is decoration does not make it a true one.
+///
+/// What it buys is a **sharper** refusal rather than a looser one: a
+/// projection is fillable by `db.raw` and `tx.raw`, and everything that names
+/// a table — `select`, `find`, `count`, `insert`, `update`, `delete`,
+/// `db.checking`, the migration tool — now refuses it by name instead of
+/// going to a live database looking for `events.body`.
+pub fn isProjection(comptime T: type) bool {
+    // `comptime` on the condition rather than on the block: it folds the
+    // branch, so `@field` below is never analysed for a type that has no
+    // marker to read.
+    if (comptime !isRow(T)) return false;
+    const decl = @field(T, marker);
+    if (@TypeOf(decl) != @TypeOf(.enum_literal)) return false;
+    // `==` rather than comparing `@tagName` with `std.mem.eql`: the compiler
+    // settles two enum literals in one step, and the string version spends a
+    // caller's backwards branches on a ten-byte comparison (ADR 0157 is the
+    // same lesson one module over).
+    return decl == .projection;
 }
 
 /// The table `Row` reads, following a borrowed marker to the Row that names
@@ -137,6 +186,24 @@ pub fn keyOf(comptime Row: type) []const u8 {
         );
         break :blk named;
     };
+}
+
+/// Whether this program builds the table `Row` reads, or only reads it
+/// ([ADR 0162](../docs/adr/0162-a-table-this-program-reads-and-does-not-build.md)).
+///
+/// **The default is true, and the word exists for a port.** A `.references`
+/// names the Row that owns the table, so a foreign key onto `staff` needs a
+/// `Staff` Row — and the moment one exists the migration tool wants to create
+/// `staff`, which has been there for a year with twenty columns this program
+/// has never read. That made the tool all-or-nothing on a schema a program
+/// owns part of: usable at 59 tables of 59, unusable at 47 of 59.
+///
+/// What `.managed = false` changes is only who builds it. The Row is still a
+/// Row: `.references` may point at it, `db.checking` still holds it against
+/// the live schema, and every statement reads it the same way. `plan`,
+/// `createMissing` and `generate` leave it alone.
+pub fn managedOf(comptime Row: type) bool {
+    return comptime specOf(Row).managed;
 }
 
 /// The columns `Row` reads, in the order it declares them. This is the
@@ -279,6 +346,11 @@ pub fn columnList(comptime Row: type) []const u8 {
 const Spec = struct {
     name: []const u8,
     key: ?[]const u8,
+    /// Whether this program **builds** the table, as against merely reading
+    /// it ([ADR 0162](../docs/adr/0162-a-table-this-program-reads-and-does-not-build.md)).
+    /// True unless the Row says otherwise, because that is what every Row
+    /// written before this meant.
+    managed: bool = true,
 };
 
 /// What may be written in the marker. `.name` and `.key` are read here;
@@ -286,7 +358,7 @@ const Spec = struct {
 /// one of them being silently ignored. One list rather than a check in each
 /// file, because a word allowed in one place and refused in another is the
 /// mistake this whole arrangement exists to make impossible.
-const allowed = [_][]const u8{ "name", "key", "unique", "index", "references", "was" };
+const allowed = [_][]const u8{ "name", "key", "unique", "index", "references", "was", "managed" };
 
 /// The table spec `Row` resolves to, following `nilo_table = OtherRow` until
 /// a spec that names a table is reached. Every borrowed Row is checked against
@@ -307,6 +379,29 @@ pub fn ownerOf(comptime Row: type) type {
         var depth: usize = 0;
         while (depth < max_borrow_depth) : (depth += 1) {
             const decl = @field(current, marker);
+            // A projection owns no table, so every question that starts
+            // "which table" ends here rather than at a live database looking
+            // for a column of a table nobody meant (ADR 0155). This is the
+            // one funnel: `tableOf`, `keyOf` and `qualifiedOf` all come
+            // through, and so does everything in `table.zig`.
+            if (@TypeOf(decl) == @TypeOf(.enum_literal)) {
+                if (decl != .projection) @compileError(
+                    "nilo: " ++ @typeName(current) ++ "'s " ++ marker ++ " is `." ++
+                        @tagName(decl) ++ "`, which is not a word it takes.\n" ++
+                        "  The only one is `." ++ projection_word ++ "`, for a Row that no " ++
+                        "table has the shape of. Otherwise it is `.{ .name = \"<table>\" }` " ++
+                        "or another Row.",
+                );
+                @compileError(
+                    "nilo: " ++ @typeName(Row) ++ " is a projection, so it has no table to " ++
+                        (if (current == Row) "read." else "borrow from " ++ @typeName(current) ++ ".") ++
+                        "\n  A projection is filled by `db.raw` and `tx.raw` and by nothing " ++
+                        "else: everything here that writes its own SQL has to name a table, " ++
+                        "and this Row is the shape of an answer rather than of a table. Give " ++
+                        "the statement to `db.raw`, or write `." ++ marker ++
+                        " = .{ .name = \"<table>\" }` if there really is one.",
+                );
+            }
             if (@TypeOf(decl) == type) {
                 if (!isRow(decl)) @compileError(
                     "nilo: " ++ @typeName(current) ++ "'s " ++ marker ++ " names " ++
@@ -338,6 +433,15 @@ fn specOf(comptime Row: type) Spec {
 
 fn readSpec(comptime Row: type, comptime decl: anytype) Spec {
     comptime {
+        // Every field of the marker is compared against the six words allowed
+        // in it, and every Row in a schema comes through here — so a program
+        // with tens of tables spends the default 1,000 backwards branches on
+        // `std.mem.eql` alone, and the compile stops in a file of std's
+        // ([ADR 0157](../docs/adr/0157-a-check-pays-for-its-own-branches.md)).
+        // Generous rather than exact, for the reason that ADR gives: the
+        // budget is the caller's whole evaluation and this raises a ceiling
+        // rather than spending an allowance.
+        @setEvalBranchQuota(50_000);
         const D = @TypeOf(decl);
         if (@typeInfo(D) != .@"struct") @compileError(
             "nilo: " ++ @typeName(Row) ++ "'s " ++ marker ++ " is a " ++
@@ -363,7 +467,8 @@ fn readSpec(comptime Row: type, comptime decl: anytype) Spec {
             );
         }
         const key: ?[]const u8 = if (@hasField(D, "key")) @tagName(decl.key) else null;
-        return .{ .name = decl.name, .key = key };
+        const managed: bool = if (@hasField(D, "managed")) decl.managed else true;
+        return .{ .name = decl.name, .key = key, .managed = managed };
     }
 }
 
@@ -406,7 +511,9 @@ pub fn assertRow(comptime T: type) void {
         if (!@hasDecl(T, marker)) @compileError(
             "nilo: " ++ @typeName(T) ++ " is not a Row — it has no `" ++ marker ++ "`.\n" ++
                 "  Add `pub const " ++ marker ++ " = .{ .name = \"<table>\" };` to it, " ++
-                "or `= <OtherRow>` to read the same table as another Row.",
+                "`= <OtherRow>` to read the same table as another Row, or `= ." ++
+                projection_word ++ "` when no table has this shape and `db.raw` is what " ++
+                "fills it (ADR 0155).",
         );
     }
 }
@@ -459,9 +566,31 @@ const Membership = struct {
     plan: []const u8,
 };
 
+const Timeline = struct {
+    pub const nilo_table = .projection;
+
+    at: i64,
+    kind: []const u8,
+};
+
 test "a Row names the table it reads" {
     try testing.expectEqualStrings("users", tableOf(User));
     try testing.expectEqualStrings("id", keyOf(User));
+}
+
+test "a projection is a Row, and is the one Row that names no table" {
+    // Both halves matter. It has to pass `assertRow`, or `db.raw` would not
+    // take it; and it has to be recognisable as a projection, or everything
+    // that writes SQL would go looking for a table called `.projection`
+    // (ADR 0155).
+    try testing.expect(isRow(Timeline));
+    try testing.expect(isProjection(Timeline));
+
+    // And the Rows that do own a table are not projections, including the one
+    // that borrows: a borrowed marker is a `type`, not a word.
+    try testing.expect(!isProjection(User));
+    try testing.expect(!isProjection(UserCard));
+    try testing.expect(!isProjection(struct { id: i64 }));
 }
 
 test "a key that is not id has to be written, and is" {

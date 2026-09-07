@@ -181,6 +181,13 @@ pub const Desc = struct {
     /// Never written to a snapshot. A rename is how a schema got somewhere,
     /// not part of where it is.
     renames: []const Rename = &.{},
+    /// Whether this program builds the table
+    /// ([ADR 0162](../docs/adr/0162-a-table-this-program-reads-and-does-not-build.md)).
+    /// Written to a snapshot, unlike the two above: a table this program
+    /// starts or stops building is a change somebody should see in the file's
+    /// diff, and `std.zon` omits a field equal to its default — so `false` is
+    /// a line and `true` is silence.
+    managed: bool = true,
 
     pub fn column(self: Desc, name: []const u8) ?Column {
         for (self.columns) |c| {
@@ -211,6 +218,7 @@ pub fn descOf(comptime D: type, comptime Row: type) Desc {
             .indexes = indexesOf(owner, qualified.table, decl),
             .references = referencesOf(owner, qualified.table, decl),
             .renames = renamesOf(owner, decl),
+            .managed = row_mod.managedOf(owner),
         };
     };
 }

@@ -244,6 +244,30 @@ const sql_refusals = [_]Refusal{
         .name = "raw_column_in_another_fields_place",
         .says = "column 1 of the statement handed to `db.raw` is named `owner_id`, and field 1 of raw_column_in_another_fields_place.Person is `id`.",
     },
+    // The two shapes a `::text` cannot be hiding in, and the only two this
+    // refuses (ADR 0154). Both name the *column* type rather than the Zig one:
+    // `@typeName` of an `AsText` is `types.AsText("numeric"[0..7])`, and a
+    // check whose text ends in a compiler rendering detail breaks when the
+    // rendering does.
+    .{
+        .name = "raw_text_column_not_cast",
+        .says = "column 2 of the statement handed to `db.raw` is `total`, and field 2 of raw_text_column_not_cast.Invoice is a `numeric` column read as text.",
+    },
+    .{
+        .name = "raw_star_over_a_text_column",
+        .says = "the statement handed to `db.raw` selects `*`, and field 2 of raw_star_over_a_text_column.Invoice is a `numeric` column read as text.",
+    },
+    // A Row that owns no table, refused by everything that has to name one
+    // (ADR 0155). The second is the near miss: one word is allowed, so a
+    // different one is a typo rather than a Row nobody has implemented yet.
+    .{
+        .name = "select_on_a_projection",
+        .says = "select_on_a_projection.Timeline is a projection, so it has no table to read.",
+    },
+    .{
+        .name = "table_marker_is_an_unknown_word",
+        .says = "table_marker_is_an_unknown_word.Rollup's nilo_table is `.view`, which is not a word it takes.",
+    },
     .{
         .name = "half_a_column_type",
         .says = "half_a_column_type.Money is being used as a column type and has `nilo_write` without `nilo_read`.",
@@ -821,6 +845,26 @@ const refusals = [_]Refusal{
     .{
         .name = "query_field_cannot_convert",
         .says = "the field `tags: []const u8` of the `Query(query_field_cannot_convert.Search)` on route \"/users\" is not something a query value can become.",
+    },
+    // A query field that *is* a list, refused on its element rather than on
+    // its shape (ADR 0164). The message above is still the one a `[]const u8`
+    // gets, because text is not a list.
+    .{
+        .name = "query_list_of_something_else",
+        .says = "the field `actors: []const query_list_of_something_else.Actor` of the `Query(query_list_of_something_else.Search)` on route \"/users\" is a list of query_list_of_something_else.Actor, which a query value cannot become.",
+    },
+    // The three ways to ask for a header wrong (ADR 0163).
+    .{
+        .name = "header_with_no_name",
+        .says = "argument 1 of the handler for route \"/thing\" is a `FromHeader(\"\", …)`, which names no header.",
+    },
+    .{
+        .name = "header_name_not_a_token",
+        .says = "argument 1 of the handler for route \"/thing\" asks for the header \"X Staff Id\", which is not a header name.",
+    },
+    .{
+        .name = "header_value_cannot_convert",
+        .says = "argument 1 of the handler for route \"/thing\" asks for the header \"X-Staff-Id\" as a header_value_cannot_convert.Actor, which request text cannot become.",
     },
     .{
         .name = "query_not_a_struct",

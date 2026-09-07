@@ -139,8 +139,18 @@ pub fn missingOf(comptime D: type, comptime Rows: []const type) []const ddl.Crea
     comptime {
         const ordered = orderOf(D, Rows);
         var out: [ordered.len]ddl.Created = undefined;
-        for (ordered, 0..) |R, i| out[i] = ddl.createdIfMissing(D, R);
-        const frozen = out;
+        var n: usize = 0;
+        for (ordered) |R| {
+            // A table this program reads and does not build is not missing —
+            // it is somebody else's (ADR 0162). `createMissing` is the one
+            // call that would otherwise create it, `IF NOT EXISTS` and all,
+            // which is the same silence a `CREATE TABLE` for a table with
+            // twenty columns this program never reads would leave behind.
+            if (!row_mod.managedOf(R)) continue;
+            out[n] = ddl.createdIfMissing(D, R);
+            n += 1;
+        }
+        const frozen = out[0..n].*;
         return &frozen;
     }
 }
@@ -298,6 +308,13 @@ pub fn plan(
     }
 
     for (desired) |t| {
+        // A table this program reads and does not build
+        // ([ADR 0162](../docs/adr/0162-a-table-this-program-reads-and-does-not-build.md)).
+        // It stays in `desired` rather than being filtered out before the
+        // call, because the drop loop below reads this same list: a Row that
+        // stops being managed would otherwise look like a Row that was
+        // deleted, and the plan would drop somebody else's table.
+        if (!t.desc.managed) continue;
         const old = before.table(t.desc.schema, t.desc.table) orelse {
             try steps.append(gpa, .{
                 .kind = .create_table,
@@ -1048,6 +1065,78 @@ test "a schema that has never been generated is one CREATE TABLE per Row" {
     try testing.expectEqual(Kind.create_table, change.steps[1].kind);
     try testing.expectEqual(Kind.create_index, change.steps[2].kind);
     try testing.expect(!change.destructive());
+}
+
+/// The table this program reads and does not build: a `Staff` that exists so
+/// that `.references` can point at it, on a schema another tool owns
+/// (ADR 0162).
+const Staff = struct {
+    pub const nilo_table = .{ .name = "staff", .key = .id, .managed = false };
+    id: i64,
+    name: []const u8,
+};
+
+const Comment = struct {
+    pub const nilo_table = .{
+        .name = "comments",
+        .key = .id,
+        .references = .{ .author_staff_id = .{ Staff, .id } },
+    };
+
+    id: i64,
+    author_staff_id: i64,
+    body: []const u8,
+};
+
+test "a table this program only reads is never created, and the one pointing at it is" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const tables = comptime tablesOf(Pg, &.{ Comment, Staff });
+    const change = try plan(a, Pg, tables, snapshot.empty(Pg));
+
+    try testing.expectEqual(@as(usize, 0), change.problems.len);
+    // One table, not two: `comments` is this program's and `staff` is not.
+    // Before this, declaring `Staff` at all meant a `CREATE TABLE staff` for
+    // a table that had been there for a year.
+    try testing.expectEqual(@as(usize, 1), change.steps.len);
+    try testing.expectEqual(Kind.create_table, change.steps[0].kind);
+    try testing.expect(std.mem.indexOf(u8, change.steps[0].sql, "comments") != null);
+
+    // And the foreign key onto it is still written, which is the whole reason
+    // the Row has to exist.
+    try testing.expect(std.mem.indexOf(u8, change.steps[0].sql, "staff") != null);
+}
+
+test "a table this program only reads is not created by createMissing either" {
+    // The other call that would have made it, `IF NOT EXISTS` and all.
+    const missing = comptime missingOf(Pg, &.{ Comment, Staff });
+    try testing.expectEqual(@as(usize, 1), missing.len);
+    try testing.expect(std.mem.indexOf(u8, missing[0].table, "comments") != null);
+}
+
+test "a table this program only reads is not dropped for not being described" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // The snapshot has both, which is what `generate` writes: an external
+    // table is recorded rather than forgotten, so that a program which starts
+    // building one is a visible line in the file.
+    const before = try snapshotFrom(a, Pg, &.{ Comment, Staff });
+    try testing.expectEqual(@as(usize, 2), before.tables.len);
+    for (before.tables) |t| {
+        if (std.mem.eql(u8, t.table, "staff")) try testing.expect(!t.managed);
+        if (std.mem.eql(u8, t.table, "comments")) try testing.expect(t.managed);
+    }
+
+    // Nothing to do, and in particular no `DROP TABLE staff` — the drop loop
+    // reads the same desired list, so a table that is merely unmanaged still
+    // counts as described.
+    const change = try plan(a, Pg, comptime tablesOf(Pg, &.{ Comment, Staff }), before);
+    try testing.expectEqual(@as(usize, 0), change.steps.len);
+    try testing.expectEqual(@as(usize, 0), change.problems.len);
 }
 
 test "a table is created after the tables it points at, and the order is a constant" {
