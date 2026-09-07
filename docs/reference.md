@@ -207,9 +207,15 @@ from the type as well: a `Uuid` publishes `{"type":"string","format":"uuid"}`
 through its `nilo_openapi`, so a generated client gets the format rather than a
 bare string. The declaration is looked for by name and never imported, which is
 what lets a module in the bottom layer offer it
-([ADR 0142](./adr/0142-a-path-param-can-parse-itself.md)). This is for a path
-param; a `Query(T)` or `Form(T)` field is still a `Str`, a number, a `bool` or
-an enum.
+([ADR 0142](./adr/0142-a-path-param-can-parse-itself.md)).
+
+**A `Query(T)` or `Form(T)` field takes one too**, and for the same reason: one
+arrival has one answer, so `/deals/:id` and `?actor=<uuid>` cannot read the same
+type two different ways
+([ADR 0158](./adr/0158-one-arrival-one-answer.md)). So a field is a `Str`, a
+number, a `bool`, an enum, **or a type with `nilo_parse`** — `sql.Uuid` and
+`sql.Timestamp` both are — optionally in a `?`, and a `Form(T)` field may also
+be an `Upload`.
 
 `Form(T)` and a plain struct are the same slot — a form *is* the body — so
 asking for both is a compile error. A `Form(T)` field is a `Str`, a number, a
@@ -650,6 +656,20 @@ fn create(db: *Db, scope: anytype, title: []const u8) !Doc {
 and stamping a lifetime need none and most Runs never mint anything; `initIo`
 takes the same `Io` the pool or the `std.Io.Threaded` was started with, which a
 CLI, a seed and a test all have in hand by the time they build a Run.
+
+**`run.str` is for text you allocated; a literal wants
+[`Str.static`](#str).** The two are not interchangeable and the difference is
+what each one promises: `run.str` stamps the tick, so the `Str` goes stale when
+the tick ends and the use-after-request trap can catch it; `Str.static` carries
+no marker and is never stale, which is the right answer for a literal in the
+program's own text. It matters most where a Scope is already in hand and reaching
+for it is the obvious move — building a list, where `run.str` costs a call per
+element and says nothing true about a literal:
+
+<!-- compiles -->
+```zig
+const types: []const Str = &.{ .static("DealValueChanged"), .static("DealWon") };
+```
 
 ## Scope
 

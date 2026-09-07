@@ -2412,3 +2412,26 @@ the building; it was that a caller had to find each one by hitting it. The one
 that cost the most — the silent `date` — is also the one nothing in the
 repository could have found, because every test that reads a text column reads
 it through a statement nilo wrote.
+
+## The sentence a reader hits first is the one that has to change
+
+The same port came back a week later having actually used the eleven, and two
+of its findings were about this repository's own pages rather than its code.
+The one worth keeping: `docs/reference.md` still said *this is for a path param;
+a `Query(T)` or `Form(T)` field is still a `Str`, a number, a `bool` or an
+enum* — the exact thing [ADR 0158](./adr/0158-one-arrival-one-answer.md) had
+just made false. The correct sentence was a hundred lines below it, in the
+section about list fields, which is what made the stale one read as deliberate
+rather than as a leftover.
+
+**A feature that widens what a type may be has to go and delete the sentence
+that said it may not**, and the place to look is above where the new sentence
+went — a reader meets the restriction before they meet the capability, and a
+reader who believes the restriction writes the workaround and never comes back.
+This one would have cost the next port a `uuidOf` helper for the second time.
+
+The other finding needed no change at all: `Str.static` was already in the
+reference, one row of one table, and the port did not find it while building a
+`[]const Str` and reached for a Scope per element instead. A declaration is
+findable from where somebody is standing when they need it, not from where it
+belongs.
