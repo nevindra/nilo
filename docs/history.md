@@ -2435,3 +2435,12 @@ reference, one row of one table, and the port did not find it while building a
 `[]const Str` and reached for a Scope per element instead. A declaration is
 findable from where somebody is standing when they need it, not from where it
 belongs.
+
+**Both had the same cause, and the port named it better than this file had.** It
+did not merely find another way — it *wrote* one, and `uuidOf` and `commaList`
+passed their tests and read sensibly, so nothing ever pulled it back to the
+page. **A workaround that has been written is a reason never to ask again**,
+which is why a gap survives long after it stops being one and why the eleven
+arrived together rather than as they were hit. The practical form is the port's
+own and belongs to both sides of this: report the thing nilo cannot spell
+*before* writing the patch for it, not after.
