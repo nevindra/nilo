@@ -10,7 +10,7 @@ yet:
 
 ```
 zig init
-zig fetch --save git+https://github.com/nevindra/nilo?ref=v0.2.0
+zig fetch --save git+https://github.com/nevindra/nilo?ref=v0.3.0
 ```
 
 That writes nilo into your `build.zig.zon`, pinned to the tag you asked for.

@@ -6,7 +6,7 @@
 
     // nilo by path, because this project lives inside the repository it is
     // testing. A real dependent writes
-    // `zig fetch --save git+https://github.com/nevindra/nilo?ref=v0.2.0`
+    // `zig fetch --save git+https://github.com/nevindra/nilo?ref=v0.3.0`
     // instead, and gets the same package: whatever `.paths` in nilo's own
     // `build.zig.zon` lists, and nothing else. That is the point of consuming
     // it from out here rather than adding a ninth example — a file this app

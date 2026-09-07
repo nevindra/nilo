@@ -1,6 +1,6 @@
 .{
     .name = .nilo,
-    .version = "0.2.0",
+    .version = "0.3.0",
     .minimum_zig_version = "0.16.0",
     .fingerprint = 0xa9fef7e1c22a71e4,
     .dependencies = .{

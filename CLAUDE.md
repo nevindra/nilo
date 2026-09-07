@@ -462,8 +462,21 @@ sentences with long bodies, which is the older convention rather than a mistake.
 
 **Documentation is part of the change**, not a follow-up: a design decision goes
 in a new `docs/adr/` file, what got built and what was measured goes in
-`docs/history.md`, what is next or refused goes in `docs/roadmap.md`, and a
-released change goes in `CHANGELOG.md`.
+`docs/history.md`, what is next or refused goes in `docs/roadmap.md`, and what a
+user has to change goes in `CHANGELOG.md`.
+
+**`CHANGELOG.md` holds one release, the untagged one.** Work lands under
+`## Unreleased`; cutting a release renames that heading to the version and bumps
+it in five other places — `.version` in `build.zig.zon`, the badge and the
+`?ref=` in `README.md`, the `?ref=` in `docs/guide/getting-started.md`, the
+"needs Zig" line in `docs/roadmap.md`, and the comment in
+`stress/arsip/build.zig.zon`. Tagging then moves the section onto that tag's
+page — `gh release create vX.Y.Z --verify-tag --notes-file …`, with every `](./`
+link rewritten to a blob URL pinned to the tag, because a relative link does not
+resolve on a release page. What stays in the file is one line under
+`## Released` pointing at the page, and any README link into the section it took
+becomes a link to that page. The file is then the next release again, and it
+never grows past one.
 
 **The roadmap holds nothing that is built.** It is what is coming, what is
 refused and what nobody has decided: a plan, not a record. The moment something

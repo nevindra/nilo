@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://ziglang.org/"><img alt="Zig 0.16" src="https://img.shields.io/badge/zig-0.16-f7a41d?style=flat-square&logo=zig&logoColor=white"></a>
-  <a href="./CHANGELOG.md"><img alt="version 0.2.0" src="https://img.shields.io/badge/version-0.2.0-3b82f6?style=flat-square"></a>
+  <a href="./CHANGELOG.md"><img alt="version 0.3.0" src="https://img.shields.io/badge/version-0.3.0-3b82f6?style=flat-square"></a>
   <a href="./docs/reference.md"><img alt="10 modules" src="https://img.shields.io/badge/modules-10-8957e5?style=flat-square"></a>
   <a href="./refusals/README.md"><img alt="195 refusals" src="https://img.shields.io/badge/mistakes%20refused%20while%20compiling-195-e05d44?style=flat-square"></a>
   <a href="./docs/adr/"><img alt="153 ADRs" src="https://img.shields.io/badge/decisions%20on%20file-153-6b7280?style=flat-square"></a>
@@ -33,9 +33,12 @@ import what you use, and Zig never compiles the rest.
 | **195 refusals** | mistakes that stop the build with a sentence nilo wrote, held in place by six build steps. |
 | **Zero glue** | routing, the 400, the 404, the OpenAPI document and the SQL all read the same struct. |
 
-> **0.2.0**, needs **Zig 0.16**. It used to be called `zfast`. Five things break
-> coming from 0.1.0, and [Upgrading](./CHANGELOG.md#upgrading-from-010) lists
-> all five with the fix next to each.
+> **0.3.0**, needs **Zig 0.16**. Coming from 0.2.0, there are eleven things to
+> read before you deploy and
+> [Read this before deploying](./CHANGELOG.md#read-this-before-deploying) lists
+> them with the fix next to each. Coming from 0.1.0, start with
+> [Upgrading](https://github.com/nevindra/nilo/releases/tag/v0.2.0#upgrading-from-010)
+> instead.
 
 ## A route is just a function
 
@@ -310,7 +313,7 @@ Zig 0.16 and nothing else. No C library, no system package.
 
 ```console
 $ zig init                                                          # only if you have no build.zig.zon yet
-$ zig fetch --save git+https://github.com/nevindra/nilo?ref=v0.2.0
+$ zig fetch --save git+https://github.com/nevindra/nilo?ref=v0.3.0
 ```
 
 **Keep the `?ref=`.** Without it, `zig fetch` takes whatever `main` happens to be
