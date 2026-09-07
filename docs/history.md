@@ -2555,3 +2555,41 @@ a local type with a `jsonStringify` of its own holds "a value that knows how to
 write itself gets to", where the `Uuid` version would have stayed green while
 the property broke for every other type.
 
+## The slow build had an explanation on file, and it was the wrong one
+
+`zig build test` took 30.6s after one edit under `http/`. CLAUDE.md had said since
+16 August that **the refusals are the slow part**, and that sentence is why
+nobody looked: it is true for a run that changes nothing, where the refusals are
+2.6s of a 2.9s floor, and it is false for the run anybody actually does. On the
+edit run the refusals were 15.9s of CPU spread over sixteen cores, and one
+`ReleaseSafe` compile was thirty seconds on its own.
+
+**110s of CPU finishing in 30.6s of wall on sixteen cores is the whole
+diagnosis, and it takes one command.** A perfectly parallel build would have
+been seven seconds. It was not, so something big ran alone, and a single
+compilation is the one thing in a build that cannot be split. `--time-report`
+then said 25.977s of that compilation's 27.614s was LLVM Emit, 94.1%, against a
+`Debug` build of the same root that has no such phase at all
+([ADR 0170](./adr/0170-a-test-does-not-need-the-optimiser.md)).
+
+The repository had already been near this twice. `stripMeasured` records that
+LLVM is the cost of a release build and reaches for debug info, which is half of
+it. ADR 0041 sells ten modules and a layering step, and one of them still pulls
+712 files into a single compilation, because LLVM has no crate boundary to stop
+at. **Neither note was wrong. Both answered a question nobody had timed.**
+
+Two habits came out of it. **Compare CPU against wall before believing any
+theory about a slow build**, because the ratio names the shape of the problem
+before you know anything else. And **`--time-report` stands up a web server and
+waits**, so from a terminal it is ten minutes of elapsed time against one second
+of CPU, which is the deadlock signature this file already documents. That
+procedure has now caught three things, and the third was not a deadlock.
+
+**Then the interleaving rule was broken within the hour by the person writing it
+down.** `--watch` looked like a 2s saving, from two un-interleaved runs against
+a remembered number. Interleaved, alternating one fresh run with one watch
+rebuild, it lost all three rounds, and the fresh column alone spanned 5.7s. The
+honest answer is no measurable difference. **A margin you found without
+interleaving is not a small result, it is not a result**, and knowing the rule
+is plainly no protection against skipping it when a number is the one you
+wanted.

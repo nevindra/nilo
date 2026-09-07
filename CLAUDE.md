@@ -69,7 +69,7 @@ Three files carry context this one deliberately does not repeat:
 - **`CONTEXT.md`** — the project's vocabulary, and the words it refuses to use
   (Ctx not "Context", Str not "string", keep not "dupe", Refusal not "negative
   test"). Match it in code, comments, docs and commit messages.
-- **`docs/adr/`** — 153 binding decisions, each naming the alternative it
+- **`docs/adr/`** — 170 binding decisions, each naming the alternative it
   rejected. Check here before proposing a design change; "why not X?" usually
   already has an answer on file. **ADR 0041 decides which module new work goes
   in and ADR 0042 decides what that module may import**, and they are the two
@@ -104,6 +104,8 @@ or the layout has to change there and here together.
 ```
 zig build test         # the loop: the suite in Debug, plus the refusals — and every
                        #   module's gate below except test-sql, plus layering and snippets
+zig build test --watch # the same loop, left running, rebuilding on every save. A
+                       #   convenience and not a speed-up: measured no faster
 zig build test-all     # the above, plus the same suite in ReleaseSafe, plus test-sql
                        #   and refusals-sql. What CI runs, and the whole gate: nothing
                        #   under this list has to be remembered separately
@@ -152,9 +154,15 @@ zig build run-{hello,rest,orders,forms,spa,stream,chat,scheduled,outbound}  # ru
 `-Dstrip=true|false` overrides the per-artifact debug-info default (release
 builds of the two measured binaries strip; examples and tests keep theirs).
 
-**The refusals are the slow part of `zig build test` and never cache** — the
-compiler keeps nothing from a compilation that failed, so all of them are
-re-analysed every run. They stay on `test` on purpose (ADR 0027).
+**The refusals never cache** — the compiler keeps nothing from a compilation
+that failed, so all 113 are re-analysed every run. They stay on `test` on
+purpose (ADR 0027). They are the *floor*: 2.6s of a 2.9s run that changed
+nothing, and 15.9s of CPU spread over sixteen cores.
+
+**They are not the slow part of a run that changed something, and believing
+they were is why nobody timed it for three weeks.** That is one compilation,
+and until ADR 0170 it was thirty seconds of LLVM in a 30.6s build. The numbers
+and the ranked levers are in [`bench/result/build.md`](bench/result/build.md).
 
 **`test-all` is the whole gate, and the list below is a list of *narrower* runs
 rather than of things it misses.** It carries every module's own step —
@@ -187,6 +195,18 @@ first are the ones that open a real socket at both ends — `test-fetch`,
 `test-s3`, and now `test` itself, since `http/live.zig` stands a server up.
 **A wait on a flag needs a bound and the giving-up path needs to set
 something**, or the failure arrives as a suite that never finishes.
+
+The same command reads the other way too, and that is the third thing it has
+caught. `zig build --time-report` prints nothing and stands up a web server
+instead, so it sits at ten minutes of wall against one second of CPU and looks
+exactly like the deadlock above. It is finished and waiting for a browser:
+pass `--webui=127.0.0.1:9977` and open it. **Ten minutes with no CPU is either
+a deadlock or something waiting on you**, and nothing else.
+
+**And a build that is genuinely slow gets the same treatment as a stuck one:
+compare its CPU against its wall.** 110s of CPU finishing in 30.6s on sixteen
+cores means one step ran alone, which is how the thirty seconds of LLVM behind
+ADR 0170 were found after three weeks of blaming the refusals.
 
 ### Running one test
 
@@ -333,7 +353,8 @@ body, not a sentence in a session — the file. One file an area, named for it:
 [`sql.md`](bench/result/sql.md) for the database,
 [`fetch.md`](bench/result/fetch.md) for the way out,
 [`s3.md`](bench/result/s3.md) for the object store,
-[`cache.md`](bench/result/cache.md) for the cache. Each carries what was run,
+[`cache.md`](bench/result/cache.md) for the cache, and
+[`build.md`](bench/result/build.md) for waiting on the build itself. Each carries what was run,
 the machine, the commit, the numbers, and the decision they moved — and a
 closing section saying whether the number can be pushed further, so the next
 person starts from the ranked levers rather than from the top. A run that

@@ -245,7 +245,7 @@ const sql_refusals = [_]Refusal{
         .says = "column 1 of the statement handed to `db.raw` is named `owner_id`, and field 1 of raw_column_in_another_fields_place.Person is `id`.",
     },
     // The two shapes a `::text` cannot be hiding in, and the only two this
-    // refuses (ADR 0154). Both name the *column* type rather than the Zig one:
+    // refuses (ADR 0170). Both name the *column* type rather than the Zig one:
     // `@typeName` of an `AsText` is `types.AsText("numeric"[0..7])`, and a
     // check whose text ends in a compiler rendering detail breaks when the
     // rendering does.
@@ -1340,6 +1340,24 @@ const Snippets = struct {
 const loop_mode: std.builtin.OptimizeMode = .Debug;
 const test_modes = [_]std.builtin.OptimizeMode{ .Debug, .ReleaseSafe };
 
+/// LLVM is what a `ReleaseSafe` test build costs, and none of it buys a test.
+/// Measured on Zig 0.16 with `--time-report`: `fetch/deadline.zig` against the
+/// whole module graph, zio included, is 27.614s, of which 25.977s is LLVM Emit.
+/// That is 94.1%, and the `Debug` build of the same root has no such phase at
+/// all. The self-hosted x86_64 backend compiles it in 1.6s with the same 48
+/// tests green, which took `zig build test` from 30.6s to 9.8s after one edit
+/// under `http/`, and `test-all` from 65.9s to 12.5s (ADR 0170).
+///
+/// The safety checks ADR 0019 is here for are inserted by Sema, so they survive
+/// the swap. What does not survive is LLVM's stack layout, so this is a very
+/// close gate rather than the identical one, and that trade is the ADR's
+/// subject. `Debug` is already on this backend, so this only names the other
+/// mode, and every `bench-*` target stays on LLVM: a throughput number measured
+/// through a backend that does not optimise would be fiction.
+fn testBackend(mode: std.builtin.OptimizeMode) ?bool {
+    return if (mode == loop_mode) null else false;
+}
+
 /// Debug info is half of a release build. Measured on Zig 0.16, warm, one
 /// source file changed: `-Doptimize=ReleaseFast` is 14.7s, and the same build
 /// with debug info off is 7.3s. Linking is not in it either way — `build-obj`
@@ -2140,7 +2158,7 @@ pub fn build(b: *std.Build) void {
     // that it works is the property, not a convenience.
     const test_core_step = b.step("test-core", "Run Core's tests — no Engine, no module graph");
     for (test_modes) |mode| {
-        const tests = b.addTest(.{ .root_module = coreFor(b, target, mode) });
+        const tests = b.addTest(.{ .root_module = coreFor(b, target, mode), .use_llvm = testBackend(mode) });
         test_core_step.dependOn(&b.addRunArtifact(tests).step);
     }
     test_step.dependOn(test_core_step);
@@ -2151,7 +2169,7 @@ pub fn build(b: *std.Build) void {
     // `zig test id/id.zig` is this without `build.zig` at all.
     const test_id_step = b.step("test-id", "Run nilo_id's tests — no Engine, no module graph");
     for (test_modes) |mode| {
-        const tests = b.addTest(.{ .root_module = idFor(b, target, mode) });
+        const tests = b.addTest(.{ .root_module = idFor(b, target, mode), .use_llvm = testBackend(mode) });
         test_id_step.dependOn(&b.addRunArtifact(tests).step);
     }
     test_step.dependOn(test_id_step);
@@ -2164,7 +2182,7 @@ pub fn build(b: *std.Build) void {
         "Run nilo_config's tests — no Engine, no module graph",
     );
     for (test_modes) |mode| {
-        const tests = b.addTest(.{ .root_module = configFor(b, target, mode) });
+        const tests = b.addTest(.{ .root_module = configFor(b, target, mode), .use_llvm = testBackend(mode) });
         test_config_step.dependOn(&b.addRunArtifact(tests).step);
     }
 
@@ -2208,7 +2226,7 @@ pub fn build(b: *std.Build) void {
         "Run nilo_pw's tests — no Engine, no module graph",
     );
     for (test_modes) |mode| {
-        const tests = b.addTest(.{ .root_module = pwFor(b, target, mode) });
+        const tests = b.addTest(.{ .root_module = pwFor(b, target, mode), .use_llvm = testBackend(mode) });
         test_pw_step.dependOn(&b.addRunArtifact(tests).step);
     }
 
@@ -2238,7 +2256,7 @@ pub fn build(b: *std.Build) void {
         "Run nilo_cache's tests — no Engine, no module graph",
     );
     for (test_modes) |mode| {
-        const tests = b.addTest(.{ .root_module = cacheFor(b, target, mode) });
+        const tests = b.addTest(.{ .root_module = cacheFor(b, target, mode), .use_llvm = testBackend(mode) });
         test_cache_step.dependOn(&b.addRunArtifact(tests).step);
     }
 
@@ -2269,7 +2287,7 @@ pub fn build(b: *std.Build) void {
         "Run nilo_jwt's tests — no Engine, no module graph",
     );
     for (test_modes) |mode| {
-        const tests = b.addTest(.{ .root_module = jwtFor(b, target, mode) });
+        const tests = b.addTest(.{ .root_module = jwtFor(b, target, mode), .use_llvm = testBackend(mode) });
         test_jwt_step.dependOn(&b.addRunArtifact(tests).step);
     }
     test_step.dependOn(test_jwt_step);
@@ -2286,6 +2304,7 @@ pub fn build(b: *std.Build) void {
     for (test_modes) |mode| {
         const tests = b.addTest(.{
             .root_module = fetchFor(b, target, mode, coreFor(b, target, mode)),
+            .use_llvm = testBackend(mode),
         });
         test_fetch_step.dependOn(&b.addRunArtifact(tests).step);
     }
@@ -2314,7 +2333,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "nilo_http", .module = httpFor(b, target, mode, mode_core) },
             },
         });
-        const tests = b.addTest(.{ .root_module = root });
+        const tests = b.addTest(.{ .root_module = root, .use_llvm = testBackend(mode) });
         test_fetch_engine_step.dependOn(&b.addRunArtifact(tests).step);
     }
     test_step.dependOn(test_fetch_engine_step);
@@ -2379,6 +2398,7 @@ pub fn build(b: *std.Build) void {
     for (test_modes) |mode| {
         const tests = b.addTest(.{
             .root_module = s3For(b, target, mode, coreFor(b, target, mode), s3_config.createModule()),
+            .use_llvm = testBackend(mode),
         });
         test_s3_step.dependOn(&b.addRunArtifact(tests).step);
     }
@@ -2445,7 +2465,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "net_config", .module = net_config.createModule() },
             },
         });
-        const tests = b.addTest(.{ .root_module = root });
+        const tests = b.addTest(.{ .root_module = root, .use_llvm = testBackend(mode) });
         smoke_tls_step.dependOn(&b.addRunArtifact(tests).step);
     }
 
@@ -2869,7 +2889,7 @@ pub fn build(b: *std.Build) void {
             }
         }
         under_test.addOptions("live_config", live_config);
-        const sql_tests = b.addTest(.{ .root_module = under_test });
+        const sql_tests = b.addTest(.{ .root_module = under_test, .use_llvm = testBackend(mode) });
         test_sql_step.dependOn(&b.addRunArtifact(sql_tests).step);
 
         // The pool's own deadline, watched firing. A root of its own for the
@@ -2890,7 +2910,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "nilo_sql", .module = under_test },
             },
         });
-        const deadline_tests = b.addTest(.{ .root_module = deadline_root });
+        const deadline_tests = b.addTest(.{ .root_module = deadline_root, .use_llvm = testBackend(mode) });
         test_sql_step.dependOn(&b.addRunArtifact(deadline_tests).step);
     }
 
@@ -2944,7 +2964,7 @@ pub fn build(b: *std.Build) void {
         });
 
         for ([_]*std.Build.Module{ lib_tests, bench_tests }) |module| {
-            const tests = b.addTest(.{ .root_module = module });
+            const tests = b.addTest(.{ .root_module = module, .use_llvm = testBackend(mode) });
             step.dependOn(&b.addRunArtifact(tests).step);
         }
 
@@ -2960,7 +2980,7 @@ pub fn build(b: *std.Build) void {
             if (example.needs_fetch) {
                 module.addImport("nilo_fetch", fetchFor(b, target, mode, core_mod));
             }
-            const tests = b.addTest(.{ .root_module = module });
+            const tests = b.addTest(.{ .root_module = module, .use_llvm = testBackend(mode) });
             step.dependOn(&b.addRunArtifact(tests).step);
         }
     }

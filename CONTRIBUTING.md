@@ -16,7 +16,9 @@ zig build test
 ```
 
 You need Zig 0.16 and nothing else. No C library, no system package, no
-database. `zig build test` takes about a second.
+database. A `zig build test` that finds nothing to rebuild is about four
+seconds, almost all of it the refusals below; the first one after a clone builds
+everything and takes considerably longer.
 
 Then read these four, in this order. They're the whole background you need:
 
@@ -25,7 +27,7 @@ Then read these four, in this order. They're the whole background you need:
 | [`README.md`](./README.md) | what this is and what it refuses to be |
 | [`CONTEXT.md`](./CONTEXT.md) | the vocabulary, and the words this project won't use |
 | [`CLAUDE.md`](./CLAUDE.md) | the working brief: layout, commands, invariants, conventions |
-| [`docs/adr/`](./docs/adr/) | 71 decisions, each one naming the alternative it beat |
+| [`docs/adr/`](./docs/adr/) | 170 decisions, each one naming the alternative it beat |
 
 The ADRs are the important one. Before you propose a design change, check
 whether it already has a file. "Why not X?" usually has an answer on record, and
@@ -36,6 +38,7 @@ with a vibe.
 
 ```
 zig build test         # the loop: the suite in Debug, plus the refusals
+zig build test --watch # the same, left running, rebuilding on save. Not faster, just easier
 zig build test-all     # the above plus the same suite in ReleaseSafe. This is what CI runs
 zig build layering     # check that no module imports upward or sideways
 zig build refusals     # the framework's 113 compile-error checks — NOT the others
@@ -62,8 +65,15 @@ zig build bench-ws-server && python3 bench/ws_idle.py both   # what a socket cos
 Two things worth knowing before they surprise you:
 
 **The refusals never cache.** The compiler keeps nothing from a compilation that
-failed, so all 125 of them get re-analysed on every run. That's why they're the
-slow part of `zig build test`, and they stay there on purpose.
+failed, so they get re-analysed on every run: 140 of the 203 on `zig build
+test`, and the SQL table's 63 on top of that for `test-all`. They stay there on
+purpose.
+
+They're the *floor* rather than the slow part, and the difference matters if
+you're ever timing this. A run that changed nothing is about as long as they
+are; a run after you edited something is longer, and what makes it longer is
+whichever single compilation is biggest, because that one cannot be split
+across your cores. `bench/result/build.md` has the numbers and the levers.
 
 **The bottom four modules run without the build system.** `zig test core/core.zig`,
 `zig test id/id.zig`, `zig test config/config.zig` and `zig test pw/pw.zig` all
