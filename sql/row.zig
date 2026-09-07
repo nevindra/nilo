@@ -281,11 +281,26 @@ const Spec = struct {
     key: ?[]const u8,
 };
 
+/// What may be written in the marker. `.name` and `.key` are read here;
+/// `sql/table.zig` reads the other four, and this list is what stops a typo in
+/// one of them being silently ignored. One list rather than a check in each
+/// file, because a word allowed in one place and refused in another is the
+/// mistake this whole arrangement exists to make impossible.
+const allowed = [_][]const u8{ "name", "key", "unique", "index", "references", "was" };
+
 /// The table spec `Row` resolves to, following `nilo_table = OtherRow` until
 /// a spec that names a table is reached. Every borrowed Row is checked against
 /// the one it borrows from on the way past, so the check cannot be skipped by
 /// asking a question that does not need it.
-fn specOf(comptime Row: type) Spec {
+/// The Row at the end of the borrow chain: the one that names a table rather
+/// than another Row.
+///
+/// **This is the only Row allowed to describe the table**, which is what keeps
+/// a query type from becoming a migration file in disguise
+/// ([ADR 0153](../docs/adr/0153-a-migration-is-a-diff-against-a-snapshot.md)).
+/// Nothing enforces it, because the language does: a borrowing Row's marker is
+/// a `type`, and there is nowhere on a type to write `.unique`.
+pub fn ownerOf(comptime Row: type) type {
     comptime {
         assertRow(Row);
         var current = Row;
@@ -303,7 +318,7 @@ fn specOf(comptime Row: type) Spec {
                 current = decl;
                 continue;
             }
-            return readSpec(current, decl);
+            return current;
         }
         @compileError(
             "nilo: " ++ @typeName(Row) ++ " borrows a table through more than " ++
@@ -311,6 +326,13 @@ fn specOf(comptime Row: type) Spec {
                 "  A Row that borrows from itself, directly or in a ring, never " ++
                 "reaches a table.",
         );
+    }
+}
+
+fn specOf(comptime Row: type) Spec {
+    comptime {
+        const owner = ownerOf(Row);
+        return readSpec(owner, @field(owner, marker));
     }
 }
 
@@ -329,12 +351,15 @@ fn readSpec(comptime Row: type, comptime decl: anytype) Spec {
                 "`User` to `users` reads well until `Category`.",
         );
         for (@typeInfo(D).@"struct".fields) |f| {
-            if (std.mem.eql(u8, f.name, "name")) continue;
-            if (std.mem.eql(u8, f.name, "key")) continue;
-            @compileError(
+            for (allowed) |ok| {
+                if (std.mem.eql(u8, f.name, ok)) break;
+            } else @compileError(
                 "nilo: " ++ @typeName(Row) ++ "'s " ++ marker ++ " sets `." ++ f.name ++
                     "`, which is not part of it.\n" ++
-                    "  It takes `.name` and, when the identity column is not `id`, `.key`.",
+                    "  It takes `.name`, and `.key` when the identity column is not " ++
+                    "`id`. The four a migration reads are `.unique`, `.index`, " ++
+                    "`.references` and `.was`; everything else about the table is SQL " ++
+                    "in a step, which nilo will not touch.",
             );
         }
         const key: ?[]const u8 = if (@hasField(D, "key")) @tagName(decl.key) else null;

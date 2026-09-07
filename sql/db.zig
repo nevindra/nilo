@@ -240,6 +240,13 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// two.
         pub const db_name = name;
 
+        /// The half that writes the SQL. A handler never names it — that is
+        /// the whole point of the seam — and a migration has to, because DDL
+        /// is the one thing this module generates from a type rather than
+        /// from a statement it already knows
+        /// ([ADR 0153](../docs/adr/0153-a-migration-is-a-diff-against-a-snapshot.md)).
+        pub const Dialect = D;
+
         /// `db_name` as it goes into a message: the ordinary `Db` is "the
         /// database", a named one is quoted. Comptime, so a trap that never
         /// fires costs nothing to have worded well.

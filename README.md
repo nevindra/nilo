@@ -190,14 +190,25 @@ list of Rows describes, and every statement it sends is already in `.rodata`:
 try sql.migrate.createMissing(&db, &run, &.{ Org, User });
 ```
 
-For a schema that changes, `migrate.plan` diffs your types against a snapshot
-the repository keeps in git, so working out a migration needs no database, no
-shadow copy of one and no `DATABASE_URL`. A rename is written in the type
-(`.was = .{ .email = "e_mail" }`) rather than guessed from the diff or asked at
-a prompt, so the same code produces the same migration for everybody. The diff,
-the plan and the ledger are all here; **a command that runs one for you is
-not**, and [ADR 0153](./docs/adr/0153-a-migration-is-a-diff-against-a-snapshot.md)
-is the reasoning, including why there is no `down`.
+For a schema that changes, your project gets a `db` command out of a `main` of
+ten lines:
+
+```console
+$ db check                       # do the Rows and the migrations agree?
+$ db generate --name add_nickname
+$ db migrate
+```
+
+`generate` and `check` **open no database**. Both halves of the diff are files —
+your types on one side, a snapshot the repository keeps in git on the other — so
+working out a migration needs no shadow copy of a database and no
+`DATABASE_URL`, and CI needs no service container. A rename is written in the
+type (`.was = .{ .email = "e_mail" }`) rather than guessed from the diff or
+asked at a prompt, so the same code produces the same migration for everybody.
+A version is one `.zig` file holding a list of steps, and it is exactly what
+runs. There is no `down`, and
+[ADR 0153](./docs/adr/0153-a-migration-is-a-diff-against-a-snapshot.md) is the
+reasoning.
 
 Four words go in the marker, and every one of them is checked while compiling.
 `.references` is checked hardest, because both sides have to hold the same

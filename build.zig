@@ -336,6 +336,70 @@ const sql_refusals = [_]Refusal{
         .name = "unknown_select_option",
         .says = "a select on unknown_select_option.User was given `.limti`, which is not one of its options.",
     },
+
+    // The twelve `sql/table.zig` adds (ADR 0153). Every one of them is a
+    // schema that would compile, create a table, and be wrong about it later:
+    // a key nothing can identify a row by, a unique over a column that has no
+    // case, two sides of a foreign key holding different types. A migration
+    // tool that found these at `ALTER` time would find them after the deploy.
+    .{
+        .name = "table_key_is_optional",
+        .says = "table_key_is_optional.User's key `id` is optional.",
+    },
+    .{
+        .name = "table_column_has_no_sql_type",
+        .says = "the postgres dialect has no column type for" ++
+            " table_column_has_no_sql_type.User.place, which it reads as" ++
+            " table_column_has_no_sql_type.Point.",
+    },
+    .{
+        .name = "table_ignoring_case_on_a_number",
+        .says = "table_ignoring_case_on_a_number.User's unique on `age` asks to ignore" ++
+            " case, and the column is i64.",
+    },
+    .{
+        .name = "table_unique_column_as_text",
+        .says = "table_unique_column_as_text.User's `.unique` names a column as" ++
+            " *const [5:0]u8.",
+    },
+    .{
+        .name = "table_unique_over_no_columns",
+        .says = "table_unique_over_no_columns.User has an empty entry in `.unique`.",
+    },
+    .{
+        .name = "table_references_not_a_row",
+        .says = "table_references_not_a_row.User's `.references.org_id` points at" ++
+            " something that is not a Row.",
+    },
+    .{
+        .name = "table_reference_type_mismatch",
+        .says = "table_reference_type_mismatch.User.org_id is []const u8 and points at" ++
+            " table_reference_type_mismatch.Org.id, which is i64.",
+    },
+    .{
+        .name = "table_set_null_on_a_required_column",
+        .says = "table_set_null_on_a_required_column.User.org_id is set to null on" ++
+            " delete, and it is i64.",
+    },
+    .{
+        .name = "table_on_delete_unknown",
+        .says = "table_on_delete_unknown.User's `.references.org_id` says `.set_default`" ++
+            " happens on delete.",
+    },
+    .{
+        .name = "table_was_written_as_a_column",
+        .says = "table_was_written_as_a_column.User's `.was.email` is `.handle`.",
+    },
+    .{
+        .name = "table_was_a_column_that_is_still_there",
+        .says = "table_was_a_column_that_is_still_there.User says `email` was called" ++
+            " `handle`, and it reads a column called `handle` as well.",
+    },
+    .{
+        .name = "table_references_in_a_ring",
+        .says = "these tables point at each other in a ring, so none of them can be" ++
+            " created first:",
+    },
 };
 
 /// The same, for `s3/refusals/`. The fifth table, hung off `test-s3`.
@@ -1502,7 +1566,7 @@ const Layering = struct {
                     at = end + 1;
 
                     const named = source[from..end];
-                    if (commented(source, found)) continue;
+                    if (notCode(source, found)) continue;
                     if (permits(layer, named)) continue;
                     refused += 1;
                     try s.addError("nilo: {s}/{s}:{d} imports `{s}`, which a module in this layer may not name.\n" ++
@@ -1521,15 +1585,26 @@ const Layering = struct {
         if (refused > 0) return error.MakeFailed;
     }
 
-    /// Whether the line this sits on is a comment. Every module root in
-    /// this repository opens with a doc comment showing how somebody else
-    /// imports it, and a scan that could not tell those apart would refuse
-    /// the documentation for saying the true thing. Line-level is enough:
-    /// a real `@import` is never written after a `//` on the same line.
-    fn commented(source: []const u8, found: usize) bool {
+    /// Whether this `@import` is text rather than an import, which happens
+    /// two ways here.
+    ///
+    /// A `//` comment: every module root in this repository opens with a doc
+    /// comment showing how somebody else imports it, and a scan that could
+    /// not tell those apart would refuse the documentation for saying the
+    /// true thing.
+    ///
+    /// A `\\` multiline string: `sql/migrations.zig` *writes* Zig files, and
+    /// the import line in the template it prints belongs to the file it
+    /// generates rather than to this module. Without this half the layering
+    /// step refuses a code generator for generating correct code.
+    ///
+    /// Line-level is enough for both, and for the same reason: everything
+    /// after a `//` or a `\\` runs to the end of the line, so a real
+    /// `@import` is never on the same line after either.
+    fn notCode(source: []const u8, found: usize) bool {
         const line = if (std.mem.lastIndexOfScalar(u8, source[0..found], '\n')) |nl| nl + 1 else 0;
         const before = std.mem.trimStart(u8, source[line..found], " \t");
-        return std.mem.startsWith(u8, before, "//");
+        return std.mem.startsWith(u8, before, "//") or std.mem.startsWith(u8, before, "\\\\");
     }
 
     fn permits(layer: Layer, named: []const u8) bool {

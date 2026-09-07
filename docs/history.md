@@ -2265,3 +2265,68 @@ This is the fifth premise in this file that decayed, and the first that decayed
 *inside* a sentence whose other half was solid. The earlier four were whole
 claims nobody re-tested. This one had a run behind it, which is what made it
 read as safe. **The unit that needs evidence is the clause, not the sentence.**
+
+## A function that decides and announces cannot be tested on the branch that announces
+
+`migrate.expect` refuses to serve a database that is behind the binary. It was
+one function: read the ledger, compare, and either return, log `info`, or log
+`err` and fail. The test that drove the failing direction could never pass — the
+test runner counts one `std.log.err` line as a failed run, and
+`std.testing.log_level` has nothing below `err` to turn down to. This repository
+already knew that rule and wrote it into `sql/db.zig`. What it did not have is
+the fix, which is not "log at `warn` instead":
+
+**Split the decision from the sentence.** `migrate.standing` answers a value —
+`.at`, `.want`, and a verdict of `.level`, `.ahead` or `.behind`. `expect` is
+that plus the sentence and the refusal. The test drives `standing` for the
+behind case and `expect` for the two that pass. The shipped API came out better
+than the one being tested around: a program that would rather decide for itself
+now can, which nothing had asked for and everything wanted.
+
+The same rule killed a second test in the same file and improved that one too.
+"A step that fails takes the ledger row with it" ran `CREATE TABLE "half"` twice
+in one version, and the driver logs a refused statement at `err`. Rewritten as a
+unique violation, which maps to `error.AlreadyExists` and logs nothing, it now
+also proves the *first* step went back — the table is empty afterwards — which
+the original never checked.
+
+**A diagnostic that cannot be provoked is a diagnostic that gets deleted rather
+than fixed.** The pressure the test runner puts on `std.log.err` is worth
+keeping; the thing to reach for when it bites is a value the caller can read,
+not a quieter level.
+
+## Eighteen passing tests and three bugs, all found by the first real dependent
+
+`sql/migrations.zig` and `sql/cli.zig` shipped with eighteen tests, green in
+both optimize modes. Then a throwaway project in a scratch directory imported
+`nilo_sql` the way anybody would — `b.dependency("nilo", .{ .sql = true })`, a
+`main` of ten lines, two Rows — and building it found three defects in the first
+five minutes:
+
+- **`std.Io.Dir` has no `makeDir`.** `openDir` in the CLI called it. No test
+  reached that line, because every test hands the functions a `tmpDir` that is
+  already open. A dependent has to make the directory.
+- **The generated manifest declared an array, not a slice.** `pub const versions
+  = [_]migrate.Version{…}` compiles, and every test that checked the manifest
+  text passed. The first caller who wrote `manifest.versions` got a coercion
+  error and would have had to write `&manifest.versions` forever.
+- **Multi-line SQL printed at column zero.** `writeSteps` did `w.print("    {s}",
+  …)`, which indents the first line of a six-line `CREATE TABLE` and leaves the
+  other five hard against the margin, where they read as five more steps. Every
+  test used a one-line `ALTER TABLE`.
+
+None of the three is subtle, and none was findable from inside the module. They
+share a shape: **a test calls a function, a dependent uses it.** The test picks
+the argument that is convenient, which is the open directory, the one-line
+statement, and the text buffer nobody coerces.
+
+The scratch project cost about fifteen minutes to write and was deleted
+afterwards. **Build one before calling a module done**, and drive it the way the
+documentation says to — first build, first `generate`, first `migrate`, then
+tamper with a version and watch `verify` catch it. Four of the six commands had
+never been run in one process against one database until that afternoon.
+
+It also produced a fourth finding that no test would have called a bug:
+`status` said `applied` for a version whose file no longer matched what ran.
+`verify` reported it correctly, and `status` is the command people type. The row
+already carried the hash, so saying `edited` there cost one comparison.

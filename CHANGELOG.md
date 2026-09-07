@@ -12,6 +12,55 @@ account of why is in the ADR it links.
 
 ### New
 
+- **A schema is what your Rows already say, and `nilo_sql` can now create it and
+  diff it** ([ADR 0153](./docs/adr/0153-a-migration-is-a-diff-against-a-snapshot.md)).
+  A Row's marker gained three words — `.unique`, `.index` and `.references` —
+  plus `.was` for a column that was renamed. `sql.migrate.createMissing(&db,
+  &run, &.{ User, Org })` creates every table those types describe, indexes and
+  foreign keys included, in the order the references need rather than the order
+  you wrote them in; two tables pointing at each other is a compile error naming
+  both. `sql.migrate.plan` diffs the types against `migrations/snapshot.zon` and
+  hands back the steps, which is a diff that needs **no database on either
+  side**. `sql.migrate.apply` runs one version in one transaction behind a
+  Postgres advisory lock, so ten replicas booting together run it once, and
+  records it in a `nilo_migrations` table that is itself an ordinary Row.
+  `sql.migrate.expect(&db, &run, head)` refuses to serve a database that is
+  behind the binary, and allows one that is ahead, which is the middle of a
+  two-stage deploy.
+
+  Migrations are forward-only by design — there is no `down` — and nilo never
+  touches a table, index or constraint it did not create.
+
+  Nothing to change. A program that never names `sql.migrate` links none of it:
+  the two stripped `zig build size-sql` probes are byte for byte what they were
+  before this landed ([`bench/result/sql.md` §10](./bench/result/sql.md)).
+
+- **And your project gets a `db` command, in a `main` of ten lines**
+  ([ADR 0153](./docs/adr/0153-a-migration-is-a-diff-against-a-snapshot.md)).
+  `sql.migrations` reads and writes the `migrations/` directory; `sql.cli` is
+  the commands on top of it. `sql.cli.Tool(Db, &.{ User, Org })` gives you
+  `generate`, `check`, `status`, `migrate` and `verify` — nilo owns the parsing,
+  the dispatch and every sentence that comes back, and you own the allocator,
+  the connection string and the `Db` type.
+
+  `generate` and `check` **open no database**: both halves of the diff are
+  files, so CI needs no service container. The exit code is the whole API for a
+  pipeline — `0` did it, `1` you have something to do, `2` the command line was
+  wrong.
+
+  A version is one `.zig` file holding a list of steps, and it is what runs:
+  those steps, in that order, in one transaction. `--drop` is required before
+  anything that loses data is written, and the generated file records that you
+  passed it. `status` marks a version `edited` rather than `applied` when its
+  file no longer hashes to what ran.
+
+  **Two things to change if you were on the library half.** `migrate.Version`
+  no longer carries a hash and `versionOf` is gone: `migrate.chainOf(gpa,
+  versions)` works the whole list out in one pass and hands back a `Chain`,
+  which is what `applyPending` and `drift` now take. And `migrate.expect` was
+  split — `migrate.standing` is the same query as a value, for a program that
+  would rather decide than be refused.
+
 - **`nilo_jwt`, the tenth module: checking somebody else's signed token**
   ([ADR 0140](./docs/adr/0140-nilo-verifies-a-token-and-does-not-fetch-one.md)).
   A tool module — it imports nothing, needs no event loop, and

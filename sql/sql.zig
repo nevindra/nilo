@@ -51,8 +51,12 @@
 //! that is further out, because it can be predicted without reading the
 //! reference.
 //!
-//! Migrations are not here and are not implied. Nothing in this design
-//! forecloses them.
+//! Migrations **are** here, and they are the one thing in this module that
+//! writes DDL rather than a statement over a table that already exists
+//! ([ADR 0153](../docs/adr/0153-a-migration-is-a-diff-against-a-snapshot.md)).
+//! They are also the one part that is not in a server: a diff is a tool, so it
+//! spends nothing on any of ADR 0018's four axes because it is not in the
+//! process those axes measure.
 //!
 //! ## How it is put together
 //!
@@ -64,6 +68,10 @@
 //! | **statements** | `statement.zig` | every one of them, each as a constant |
 //! | **types** | `types.zig` | Timestamp and Json — value, not arithmetic. `Uuid` is `nilo_id`'s, and `AsText` is the door out |
 //! | **schema** | `schema.zig` | Row against table, while the server starts |
+//! | **table** | `table.zig` | what a Row says about the *table*: the three marker words |
+//! | **ddl** | `ddl.zig` | the SQL that changes a table's shape. `CREATE` is a constant |
+//! | **snapshot** | `snapshot.zig` | what the last generate believed, as a `.zon` file |
+//! | **migrate** | `migrate.zig` | the diff, the plan, and the record of what ran |
 //! | **Wire** | `wire.zig` | the contract a driver meets |
 //! | **the drivers** | `postgres.zig`, `sqlite.zig` | pg.zig and zqlite, and the only two files that name either |
 //! | **Db** | `db.zig` | what a handler holds, and where `Str` stops |
@@ -99,6 +107,7 @@
 const std = @import("std");
 
 pub const row = @import("row.zig");
+pub const table = @import("table.zig");
 pub const dialect = @import("dialect.zig");
 pub const wire = @import("wire.zig");
 pub const where = @import("where.zig");
@@ -108,6 +117,24 @@ pub const types = @import("types.zig");
 pub const postgres = @import("postgres.zig");
 pub const sqlite = @import("sqlite.zig");
 pub const db = @import("db.zig");
+pub const ddl = @import("ddl.zig");
+pub const snapshot = @import("snapshot.zig");
+pub const migrations = @import("migrations.zig");
+pub const cli = @import("cli.zig");
+
+/// Migrations: the diff between the types and a snapshot the repository holds,
+/// and the record of what has been applied
+/// ([ADR 0153](../docs/adr/0153-a-migration-is-a-diff-against-a-snapshot.md)).
+///
+/// **Nothing here is on the request path and nothing here is in a server.** A
+/// program that never names it links none of it, the same way `sqlite.zig` is
+/// dropped by a program holding only `sql.Db`.
+///
+/// Two calls cover the two ends. `migrate.createMissing(&db, &run, &.{ … })` is
+/// a small application's whole startup, and every statement it sends is a
+/// constant in the binary. `migrate.plan(…)` is the diff a tool generates from,
+/// and it touches no database at all.
+pub const migrate = @import("migrate.zig");
 
 /// What a handler holds. `*sql.Db` in a signature is a service like any
 /// other, so `listen()` checks it is registered before the first request
@@ -331,6 +358,7 @@ test {
     // not reachable from there: a `_ = @import` line pointing the other way
     // would compile the whole of it into every nilo build.
     _ = row;
+    _ = table;
     _ = dialect;
     _ = wire;
     _ = where;
@@ -340,6 +368,16 @@ test {
     _ = postgres;
     _ = sqlite;
     _ = db;
+    _ = ddl;
+    _ = snapshot;
+    _ = migrate;
+    // The migration runner against a real SQLite file. It needs the module
+    // graph and no server, which is why it is here rather than in
+    // `migrate.zig`'s own test block: that file runs under a plain `zig test`
+    // and keeping it that way is worth a second file.
+    _ = migrations;
+    _ = cli;
+    _ = @import("migrate_live.zig");
     // The tests that need a database. Every one of them skips when
     // `DATABASE_URL` is unset, so this line costs nothing to somebody who
     // has not started one (`sql/live.zig`).

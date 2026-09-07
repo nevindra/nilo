@@ -71,7 +71,7 @@ other module's.
 | [`nilo_jwt`](#nilo_jwt-checking-somebody-elses-token) | needs no loop | no number against a verification, and only RS256 |
 | [`nilo_fetch`](#nilo_fetch-calling-somebody-elses-api) | borrows the loop | 4,139 bytes of stack per idle connection, and nothing measured through TLS |
 | [`nilo_http`](#nilo_http-the-server) | owns the loop | a megabyte of request arena held per connection, nothing that reads a `Forwarded` header, and a long tail |
-| [`nilo_sql`](#nilo_sql-postgres-and-sqlite) | borrows the loop | a `Timestamp` the two halves of SQLite disagree about, a pool option dropped without a word, and where migrations live |
+| [`nilo_sql`](#nilo_sql-postgres-and-sqlite) | borrows the loop | a migration library with no command that runs it, a `Timestamp` the two halves of SQLite disagree about, and a pool option dropped without a word |
 | [`nilo_s3`](#nilo_s3-object-storage) | borrows the loop | nothing measured through TLS, and no `LIST`, `COPY` or multipart |
 
 Everything that is about the repository rather than one module stays whole at
@@ -1121,7 +1121,26 @@ answered**, rather than the list being adopted as a list.
 
 ### Next
 
-**1. Decide whether a SQLite statement hops or runs in the fiber.** The Wire
+**1. Four migration commands are missing, and two of them are the debt that
+forward-only creates.** `generate`, `check`, `status`, `migrate` and `verify`
+ship ([ADR 0153](./adr/0153-a-migration-is-a-diff-against-a-snapshot.md)). The
+four that do not are `push` and `pull`, which are the SQLite and the rescue
+cases, and `reset` and `squash`.
+
+`reset` and `squash` are the ones that matter. There is no `down`, so a
+developer whose laptop database is in a state no version describes has nothing
+to type, and a project three years in has four hundred version files every CI
+run reads. Skipping them does not remove that pain, it moves it onto somebody's
+laptop and into somebody's build. `squash` is the harder half: it has to leave
+the ledger of every database that already ran the old versions alone, which
+means writing a new first version that is only ever applied to a database that
+has applied nothing.
+
+**Waiting on: a design** for what `squash` writes into the ledger of a database
+that is already past it. Rewriting rows is out — that is the thing `verify`
+exists to catch.
+
+**2. Decide whether a SQLite statement hops or runs in the fiber.** The Wire
 ships with the choice as a field that has no default, so every program says
 which it wants and neither is a guess
 ([ADR 0073](./adr/0073-a-file-has-no-socket-to-wait-on.md)). What nobody has is
@@ -1144,7 +1163,7 @@ is the smaller of the two jobs.
 have been ([§9](../bench/result/sql.md),
 [`spike/sqlite_facts`](../spike/sqlite_facts/)). This is the one that cannot.
 
-**2. An update cannot change a column using its own value.** `.set` binds
+**3. An update cannot change a column using its own value.** `.set` binds
 values, so `SET "views" = "views" + 1` has no spelling and an atomic counter is
 `db.exec` with the SQL written out. Read-modify-write is the alternative, which
 is two round trips and wrong under load unless it is wrapped in a transaction
@@ -1159,7 +1178,7 @@ constant.
 number is obvious; concatenation, `coalesce` and array append are each a
 dialect disagreement, and a set of one operator is not worth a mechanism.
 
-**3. A watched statement cannot say which request it came from.**
+**4. A watched statement cannot say which request it came from.**
 `db.watching` shows the text, the plan, the duration and the rows
 ([ADR 0137](./adr/0137-a-statement-can-be-watched.md)), so *which statement is
 slow* is answerable. *Slow on which page* is not: a `Sent` carries no request
@@ -1577,45 +1596,6 @@ here rather than five items above.
 Every property in ADR 0039 is downstream of that one, so anything that gives it
 up is a different module.
 
-**Migrations, and where they run.** This was written down as the other half of
-the join question, which was wrong. ADR 0039's line is about the shape of a
-`SELECT`, and a migration is DDL. The two are undecided for different reasons
-and neither waits on the other.
-
-Half the machine is already built. `schema.compare` reads the catalog, knows
-which Postgres types each Zig type may be read out of, and reports a column
-that is missing, wrongly typed or wrongly nullable. What it cannot do is look
-the other way, at a column the table has and the Row dropped, and
-`dialect.accepts` answers with the *list* a column may read out of, where
-`CREATE TABLE` needs the one to write.
-
-Three questions have no answer, and not one of them is about Zig.
-
-- **A rename cannot be told apart from a drop and an add.** drizzle-kit asks
-  the developer. Asking means an interactive CLI, guessing means silent data
-  loss, and refusing means a tool that only works on schemas nobody renames.
-- **Where the record of what has been applied lives**, who commits it, and what
-  two branches that each add a migration do when they meet.
-- **A data migration cannot be derived from a struct diff.** There is a
-  hand-written half whatever happens to the generated one.
-
-What *is* settled is where it runs. A migration is a CLI rather than a server,
-so it links no router and no accept loop, which means it spends nothing on any
-of the four axes because it is not in the process those axes measure. Nothing
-blocks it there any more: `nilo_sql` takes a Scope rather than a `Ctx`, so a
-migration is an ordinary program holding a `Run`.
-
-The tooling it would carry is `generate` (DDL out of the diff `schema.compare`
-already computes), `migrate` (apply, and record what was applied), `push` (the
-diff straight at a database, no files in between), `pull` (Zig structs out of a
-database that already exists) and `check` (two migrations written against the
-same parent). **Seeding is the cheapest thing on this page** and needs none of
-the three answers above: a seed is an ordinary program calling `db.insertMany`
-against a `Run`, with no design left in it.
-
-**What would settle it: an answer to the rename question**, which the other two
-are downstream of.
-
 ### Measured against Drizzle
 
 [Drizzle](https://orm.drizzle.team/) is the fair yardstick, and not because it
@@ -1647,9 +1627,10 @@ What is left splits three ways.
   ([0059](./adr/0059-a-round-trip-is-not-the-cost-worth-chasing.md)); automatic
   read-replica routing and a query cache
   ([0060](./adr/0060-a-second-database-is-a-second-type.md)).
-- **Waiting on the two decisions above**: joins, nested rows, aggregates and
-  subqueries wait on the one-table line; every tooling command waits on
-  migrations.
+- **Waiting on the one-table line**: joins, nested rows, aggregates and
+  subqueries. The tooling commands wait on Next 1 rather than on a decision:
+  [ADR 0153](./adr/0153-a-migration-is-a-diff-against-a-snapshot.md) made it and
+  the library under them is built.
 - **Nobody has looked**: row-level security, and Postgres extensions.
 
 A GUI over the database is not coming from here.

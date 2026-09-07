@@ -74,7 +74,9 @@ const nilo = @import("nilo_http");
     the query is a constant, and a misspelled column is a build error. It takes
     a Scope rather than a `Ctx`, so the same query runs with no server in the
     process. Postgres and SQLite, written the same way — and the section on
-    SQLite says which five things it refuses and why.
+    SQLite says which five things it refuses and why. The same struct also
+    *makes* the table: three words for a unique, an index and a foreign key,
+    and a diff that needs no database.
 17. [Work that is not a request](./background.md) — a summary written every
     minute or a queue drained every few seconds: a fiber of your own, owned by
     the server, and the shutdown that reaches it.

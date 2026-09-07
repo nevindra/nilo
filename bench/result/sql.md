@@ -687,6 +687,46 @@ run has to be repeated on.
   cold `zig build test-sql` spent about a minute of CPU inside `zig clang` —
   and "about a minute" is an impression rather than a measurement.
 
+## 10. The migration module costs the server nothing, and that is measured
+
+**What it answers.** `sql/migrate.zig` and the four files under it landed with
+ADR 0153. The claim in the ADR's cost table is that a server which imports
+`nilo_sql` and never calls a migration function carries none of it. That is the
+one axis of the four this module could plausibly spend, so it is the one with a
+number.
+
+**How.** The same A/B the section above uses. `zig build size-sql` builds two
+stripped `ReleaseFast` programs, and the before side was built rather than
+quoted: `git archive HEAD | tar -x` into a scratch directory, `zig-pkg/` copied
+across, `zig build size-sql` there.
+
+| | before (`1dfae4d`) | after | Δ |
+|---|---|---|---|
+| names `sql.Db` (Postgres) | 1,785,640 | 1,785,640 | **0** |
+| names `sql.Sqlite` | 2,291,696 | 2,291,696 | **0** |
+
+Byte for byte, both sides. `sql/sql.zig` gained `pub const table`, `ddl`,
+`snapshot` and `migrate`, and a `pub const` nothing reaches is a declaration Zig
+never analyses — the same property that keeps the SQLite amalgamation out of a
+Postgres-only binary two sections up.
+
+**What it changed.** The ADR's binary-size row went from a reasoned 0 to a
+measured 0. Nothing else: no decision moved, and that is the entry's whole
+value. A future reader who wonders whether shipping a schema toolkit inside the
+database module taxes every server has the answer without re-running it.
+
+**What is still not measured.** `applyPending`, the in-process runner a SQLite
+application calls between `app.start(io)` and `listen()`, which *is* reachable
+from a server and does carry its step text. The two probes above never call it,
+so what a server that does call it pays is still an argument rather than a
+figure. It wants a third probe here.
+
+**Worth noting for the next re-run**: the two absolutes moved since the
+twenty-findings pass above — `pg_only` 1,694,344 → 1,785,640 and `sqlite_only`
+2,217,696 → 2,291,696, both about 5% — over everything that shipped between.
+Neither is migration's. That is the standing reason this file insists a before
+is built rather than quoted.
+
 ## Reproducing this
 
 ```bash
