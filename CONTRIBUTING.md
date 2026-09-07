@@ -41,7 +41,7 @@ zig build test         # the loop: the suite in Debug, plus the refusals
 zig build test --watch # the same, left running, rebuilding on save. Not faster, just easier
 zig build test-all     # the above plus the same suite in ReleaseSafe. This is what CI runs
 zig build layering     # check that no module imports upward or sideways
-zig build refusals     # the framework's 114 compile-error checks — NOT the others
+zig build refusals     # the framework's 113 compile-error checks — NOT the others
 zig build refusals-sql # nilo_sql's 78; refusals-config, -pw, -cache and -s3 for the rest
 zig build snippets     # the documentation's marked snippets, which must compile
 zig build examples     # build all nine examples
@@ -65,8 +65,8 @@ zig build bench-ws-server && python3 bench/ws_idle.py both   # what a socket cos
 Two things worth knowing before they surprise you:
 
 **The refusals never cache.** The compiler keeps nothing from a compilation that
-failed, so they get re-analysed on every run: 140 of the 203 on `zig build
-test`, and the SQL table's 63 on top of that for `test-all`. They stay there on
+failed, so they get re-analysed on every run: 140 of the 218 on `zig build
+test`, and the SQL table's 78 on top of that for `test-all`. They stay there on
 purpose.
 
 They're the *floor* rather than the slow part, and the difference matters if

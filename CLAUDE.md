@@ -89,7 +89,7 @@ goes in an ADR, a number goes in `docs/history.md`, a rule goes in a build step.
 
 Two of those rules are build steps rather than paragraphs, and they are the ones
 to lean on: `zig build layering` refuses an import that goes upward or sideways,
-and the six `refusals` steps check the wording of 219 error messages. Prefer making
+and the six `refusals` steps check the wording of 218 error messages. Prefer making
 a new rule enforceable that way over writing it down here — a paragraph nobody
 runs is the thing that rots.
 
@@ -119,7 +119,7 @@ zig build test-fetch   # only nilo_fetch, both modes — a real socket, no Engin
 zig build test-fetch-engine  # an outbound deadline firing against a real port; on `test`
 zig build test-s3      # only nilo_s3, both modes, plus its refusals
 zig build layering     # check that no module imports upward or sideways
-zig build refusals     # the framework's 114 compile-error checks — NOT the others
+zig build refusals     # the framework's 113 compile-error checks — NOT the others
 zig build refusals-sql # nilo_sql's 78; also run by test-sql
 zig build refusals-config  # nilo_config's 9, and refusals-pw for nilo_pw's 3
 zig build refusals-cache   # nilo_cache's 5; also run by test-cache

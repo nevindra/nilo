@@ -8,8 +8,8 @@
   <a href="https://ziglang.org/"><img alt="Zig 0.16" src="https://img.shields.io/badge/zig-0.16-f7a41d?style=flat-square&logo=zig&logoColor=white"></a>
   <a href="./CHANGELOG.md"><img alt="version 0.3.0" src="https://img.shields.io/badge/version-0.3.0-3b82f6?style=flat-square"></a>
   <a href="./docs/reference.md"><img alt="10 modules" src="https://img.shields.io/badge/modules-10-8957e5?style=flat-square"></a>
-  <a href="./refusals/README.md"><img alt="203 refusals" src="https://img.shields.io/badge/mistakes%20refused%20while%20compiling-203-e05d44?style=flat-square"></a>
-  <a href="./docs/adr/"><img alt="153 ADRs" src="https://img.shields.io/badge/decisions%20on%20file-153-6b7280?style=flat-square"></a>
+  <a href="./refusals/README.md"><img alt="218 refusals" src="https://img.shields.io/badge/mistakes%20refused%20while%20compiling-218-e05d44?style=flat-square"></a>
+  <a href="./docs/adr/"><img alt="174 ADRs" src="https://img.shields.io/badge/decisions%20on%20file-174-6b7280?style=flat-square"></a>
   <a href="./LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-16a34a?style=flat-square"></a>
 </p>
 
@@ -30,7 +30,7 @@ import what you use, and Zig never compiles the rest.
 |---|---|
 | **One rule** | a pointer is a service, a value is request data. There is no second rule. |
 | **One allocation** | per request. A test fails if it ever becomes two. |
-| **203 refusals** | mistakes that stop the build with a sentence nilo wrote, held in place by six build steps. |
+| **218 refusals** | mistakes that stop the build with a sentence nilo wrote, held in place by six build steps. |
 | **Zero glue** | routing, the 400, the 404, the OpenAPI document and the SQL all read the same struct. |
 
 > **0.3.0**, needs **Zig 0.16**. Coming from 0.2.0, there are eleven things to
@@ -423,7 +423,7 @@ parts of it. [Contributing](#contributing) is what that takes.
 | Module | What it does | What isn't in it |
 |---|---|---|
 | **`nilo_http`** | routing, typed handlers, middleware, cookies and sessions, static files, streaming, WebSocket, OpenAPI, metrics, rate limiting | templates and TLS, both on the record below |
-| **`nilo_sql`** | Postgres and SQLite. Your struct is the table, and it makes the table: reads, writes, transactions, streaming, the schema, the diff and the ledger | a command that runs a migration for you. Joins and aggregates, which go through `db.raw`. SQLite refuses batches, row locks and deadlines, and says so while compiling |
+| **`nilo_sql`** | Postgres and SQLite. Your struct is the table, and it makes the table: reads, writes, transactions, streaming, the schema, the diff and the ledger | joins, aggregates and `GROUP BY`, which go through `db.raw`. A migration `down`. SQLite refuses batches, row locks, deadlines and case-sensitive matching, and says so while compiling |
 | **`nilo_s3`** | object storage: S3, MinIO, R2. Your bucket is a type. Get, put, range, stream, presigned GET and POST | `LIST`, `COPY`, multipart |
 | **`nilo_fetch`** | calling somebody else's HTTP API from inside a request: the policy in front of `std.http.Client` | retries, circuit breaker |
 | **`nilo_cache`** | an expiring cache in this process: `get`, `put`, TTLs, stats, on a fixed budget with nothing allocated per operation | pointers in a cached value, which is a compile error naming the field |
@@ -554,14 +554,14 @@ been built, and no allocate-per-request version shipped in the meantime.
 
 An error message is a feature right up until somebody refactors it into mush.
 
-So this repository tests its error messages. There are **203 programs in it that
+So this repository tests its error messages. There are **218 programs in it that
 are supposed to fail to compile**, and six build steps checking the wording of
 every single failure:
 
 | Step | Programs | Over |
 |---|---|---|
 | `zig build refusals` | 113 | the framework |
-| `zig build refusals-sql` | 63 | queries, rows and schemas |
+| `zig build refusals-sql` | 78 | queries, rows and schemas |
 | `zig build refusals-s3` | 10 | buckets and keys |
 | `zig build refusals-config` | 9 | settings |
 | `zig build refusals-cache` | 5 | cached values |
