@@ -308,6 +308,39 @@ pub const OpenOpts = struct {
     limits: core.Limits = .off,
 };
 
+/// Bytes rather than text: a `bytea` on Postgres and a `BLOB` on SQLite.
+///
+/// **The most ordinary column this module could not name**, and the reason it
+/// could not is that `[]const u8` was already spoken for. Text and bytes are
+/// the same Zig type and two different columns, so a Row asking for one had no
+/// way to say which — every mapping answered `text`, and a file hash, a sealed
+/// token, a signature or an encoded document had nowhere to live. The way out
+/// was `sql.AsText("bytea")` through Postgres's hex printing, which costs a
+/// conversion each way and which nothing anywhere pointed at.
+///
+/// **A struct rather than a second protocol beside `nilo_column`.** That
+/// protocol is text on the wire by definition (ADR 0055): it hands the driver
+/// a `[]const u8` and casts it back to the named type, which is precisely what
+/// bytes must not do. So this is one more type both Wires know by name, the
+/// way `Uuid` and `Timestamp` already are — no new mechanism, one more row in
+/// the tables that already exist.
+///
+/// **It lives here rather than in `types.zig` because both Wires have to name
+/// it**, and `postgres.zig` imports this file and not that one. `sql.Bytes` is
+/// this type; there is one of it, under two names.
+///
+/// The slice a read hands back points into the driver's read buffer and dies
+/// at the next row, exactly as a borrowed `Str` does. `db.zig` copies it into
+/// the request arena before a handler sees it.
+pub const Bytes = struct {
+    bytes: []const u8,
+
+    /// Written at a call site: `.{ .digest = sql.Bytes.of(hash) }`.
+    pub fn of(bytes: []const u8) Bytes {
+        return .{ .bytes = bytes };
+    }
+};
+
 /// One column as the database describes it, for the schema comparison. Read
 /// through the Dialect's `introspect` query, which is why the field names are
 /// that query's column names rather than anything invented here.

@@ -2593,3 +2593,63 @@ honest answer is no measurable difference. **A margin you found without
 interleaving is not a small result, it is not a result**, and knowing the rule
 is plainly no protection against skipping it when a number is the one you
 wanted.
+
+## Two blockers that were sentences about one implementation
+
+Both of these sat under **Waiting on: a design** for a cycle, and neither design
+question was real. The pattern is the one
+[ADR 0063](./adr/0063-a-handlers-stack-is-per-connection.md) already named — a
+requirement written as one mechanism reads as a blocker, and written as what it
+has to catch it reads as a choice — and this is the second and third time it has
+cost something.
+
+**`contains` was blocked on an allocation it did not have to make.** The roadmap
+said the fix meant *an allocation per condition in a module whose whole claim is
+that a statement costs none*, which is true of building the pattern in the
+request arena and is not true of the feature. Put the three `replace` calls and
+the `ESCAPE` inside the statement and the database escapes the text it is about
+to match: what binds is the caller's own bytes, and the cost is zero
+([ADR 0173](./adr/0173-the-database-escapes-the-pattern-it-is-going-to-match.md)).
+The unescaped `like` it replaces had been shipping a wrong answer on every
+search term containing `%` or `_`, silently, the whole time.
+
+**The binary column was blocked on a second protocol it did not need.** The
+sentence was *the `nilo_column` protocol is text on the wire by definition, so
+bytes want a second protocol beside it* — and both halves are true. The
+conclusion is not, because that protocol exists for a column type this module
+has never heard of, declared by whoever owns it. There is one binary column,
+both databases have it, and it is one more type the two Wires know by name the
+way `Uuid` already is
+([ADR 0174](./adr/0174-bytes-are-a-type-not-a-second-protocol.md)).
+
+**What to take from both: read a blocker as a sentence about a mechanism and
+ask what it would say about the requirement.** "An allocation per condition" is
+about arenas; "the `%` in the caller's text has to match itself" is about the
+requirement, and the second one has an answer the first hides.
+
+## An operator family arriving without its negations breaks a decision on file
+
+[ADR 0058](./adr/0058-a-set-operation-over-one-table-is-a-condition.md) argues
+that `EXCEPT` needs no mechanism because **every leaf has a negation** and the
+algebra is therefore closed. Adding `contains`, `starts_with` and `ends_with`
+without `not_contains` and its siblings would have made that false, quietly, in
+a file nobody would re-read. Twelve names came out of a three-row table for that
+reason, and there is now a test that walks all twelve.
+
+**A closure argument is a claim about a set that keeps growing**, which makes it
+the kind of documented property that decays without a test under it. The same
+went for `.exists`: it nests inside `.any`, and there is a test saying so,
+because a leaf that cannot go inside `.any` is a leaf the OR half cannot reach.
+
+## The composite key had a hole in a statement nobody would have looked at
+
+`upserting` left the Row's key out of the `DO UPDATE SET` list — *the* key,
+singular. On a Row keyed by two columns that meant the second one was being
+written to the value it had just been matched on. It is a no-op in the ordinary
+case and it is a column in the SET list that can never change reading as though
+it might, which is the exact footgun the surrounding comment already warned
+about for the conflict target.
+
+**A rule stated for one column does not survive the column becoming a list**,
+and the places to check are the ones that said "the key" and meant it.
+

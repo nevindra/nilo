@@ -51,12 +51,27 @@
 //! agree about ordering would be two walks that could stop agreeing.
 
 const std = @import("std");
+const core = @import("nilo_core");
 const row_mod = @import("row.zig");
+const table_mod = @import("table.zig");
 const dialect_mod = @import("dialect.zig");
 
 /// The field name that means OR. A Row with a column of this name is refused,
 /// because one word cannot mean both.
 pub const any_field = "any";
+
+/// The two field names that mean *a row over there matches*, and their
+/// negation. Reserved the same way `any` is, and for the same reason.
+pub const exists_field = "exists";
+pub const not_exists_field = "not_exists";
+
+/// Every word a condition reserves. One list, because `assertNoReservedColumn`
+/// and the message it writes both read it and a word allowed in one and
+/// refused in the other is the mistake this arrangement exists to prevent.
+const reserved = [_][]const u8{ any_field, exists_field, not_exists_field };
+
+/// The names an `.exists` entry may carry.
+const exists_known = [_][]const u8{ "in", "on", "where" };
 
 /// A route from the root of the where struct to one value, as the field names
 /// to follow. Comptime, so `each` can unroll it into `@field` calls.
@@ -73,6 +88,14 @@ pub const Param = struct {
     /// that belongs to no column — a `LIMIT` is a count, not a value out of
     /// a row.
     column: []const u8 = none,
+    /// The Row `column` belongs to, when it is **not** the statement's own.
+    ///
+    /// Null for every parameter a statement over one table writes, which is
+    /// almost all of them. An `.exists` is what makes it necessary: the
+    /// condition inside one compares a column of the *other* table, so
+    /// looking its type up in the statement's Row would answer with a column
+    /// that happens to share a name, or refuse a column that is really there.
+    of: ?type = null,
     /// Whether the value is a list of that column's type rather than one of
     /// them. `.in` compiles to `= ANY($1)`: one placeholder holding many
     /// values, which is what keeps the statement a constant however long
@@ -96,6 +119,15 @@ pub const Param = struct {
         return self.column.len == 0;
     }
 };
+
+/// The type a parameter's column is read into: the statement's own Row, unless
+/// the parameter came from inside an `.exists` and named another one.
+///
+/// One function so that the five places in `db.zig` that used to write
+/// `ColumnType(Row, param.column)` cannot disagree about which Row that is.
+pub fn ParamType(comptime Row: type, comptime param: Param) type {
+    return comptime row_mod.ColumnType(param.of orelse Row, param.column);
+}
 
 /// What a where struct compiles to.
 pub const Plan = struct {
@@ -237,6 +269,15 @@ const State = struct {
     /// What each placeholder is for, in the same order — see `Param`.
     params: [max_params]Param = undefined,
     count: usize = 0,
+    /// Set while the walk is inside an `.exists`: what every column written
+    /// from here is qualified with, and which Row its type comes from.
+    ///
+    /// **On the State rather than threaded through six signatures**, because
+    /// the two have to move together and there is exactly one walk. A
+    /// qualifier that got out of step with the Row would write a column of one
+    /// table and bind it as a column of another, which compiles.
+    qualifier: []const u8 = "",
+    inner: ?type = null,
 
     fn take(self: *State, comptime path: Path, comptime param: Param) usize {
         if (self.count == max_params) @compileError(
@@ -245,8 +286,12 @@ const State = struct {
                 "  That is past anything a hand-written condition reaches; " ++
                 "`db.raw` is the way to send a statement this size.",
         );
+        var owned = param;
+        // Filled here rather than at the six call sites, so a parameter
+        // written inside an `.exists` cannot be recorded as the outer Row's.
+        if (owned.of == null) owned.of = self.inner;
         self.paths[self.count] = path;
-        self.params[self.count] = param;
+        self.params[self.count] = owned;
         self.count += 1;
         const n = self.next;
         self.next += 1;
@@ -278,6 +323,14 @@ fn walk(
             const path = prefix ++ &[_][]const u8{f.name};
             if (std.mem.eql(u8, f.name, any_field)) {
                 out = out ++ anyOf(D, Row, f.type, path, state);
+                continue;
+            }
+            if (std.mem.eql(u8, f.name, exists_field)) {
+                out = out ++ existsOf(D, Row, f.type, path, state, false);
+                continue;
+            }
+            if (std.mem.eql(u8, f.name, not_exists_field)) {
+                out = out ++ existsOf(D, Row, f.type, path, state, true);
                 continue;
             }
             if (!row_mod.hasColumn(Row, f.name)) {
@@ -337,6 +390,283 @@ fn anyOf(
 }
 
 /// One column against one value or one set of operators.
+/// `.exists = .{ .{ .in = Child, .where = .{ … } }, … }` — one `EXISTS`
+/// subquery per entry, ANDed, and `.not_exists` for `NOT EXISTS`.
+///
+/// **This is the one place the line past *one table* moves, and it moves for a
+/// reason that names itself** ([ADR 0171](../docs/adr/0171-a-row-over-there-is-a-condition.md)).
+/// An `EXISTS` does not change the column list and does not change the row
+/// count: the answer is still rows of this Row, one per matching row, so
+/// `.limit` still means what the caller thinks it means. A join changes both,
+/// and that is what is still refused — the boundary did not blur, it moved to
+/// where those two properties actually hold.
+///
+/// **The correlation is read out of the child's own `.references`**, which is
+/// already checked harder than anything else in this repository:
+/// `table.oneReference` makes the target be a Row, the target column be one of
+/// its columns, and the two Zig types be the same. So joining on it costs no
+/// new vocabulary at the call site and no new check — the fact was already
+/// declared, for the migration tool, and this is the second reader of it.
+fn existsOf(
+    comptime D: type,
+    comptime Outer: type,
+    comptime T: type,
+    comptime path: Path,
+    comptime state: *State,
+    comptime negate: bool,
+) []const u8 {
+    comptime {
+        const word = if (negate) not_exists_field else exists_field;
+        const info = switch (@typeInfo(T)) {
+            .@"struct" => |s| s,
+            else => @compileError(
+                "nilo: `." ++ word ++ "` holds a list of tests and this one is a " ++
+                    @typeName(T) ++ ".\n" ++
+                    "  Write `." ++ word ++ " = .{ .{ .in = OtherRow, .where = .{ … } } }`, " ++
+                    "one entry per test.",
+            ),
+        };
+        if (info.fields.len == 0) @compileError(
+            "nilo: `." ++ word ++ "` is empty.\n" ++
+                "  A test over no table matches nothing, which is almost never what was " ++
+                "meant; leave it out instead.",
+        );
+        // A tuple, for the same reason `.any` is one: two tests on a Row cannot
+        // be two fields of the same name, and a filter page that narrows on two
+        // capabilities is the ordinary case rather than the exotic one.
+        if (!info.is_tuple) @compileError(
+            "nilo: `." ++ word ++ "` holds a list of tests and this one is a single " ++
+                "test.\n  Write `." ++ word ++ " = .{ .{ .in = OtherRow, .where = .{ … } } }`, " ++
+                "with the outer braces holding one entry per test — a struct cannot carry " ++
+                "the same field twice, so a single test written bare could never become two.",
+        );
+
+        var out: []const u8 = "";
+        for (info.fields, 0..) |f, i| {
+            if (i > 0) out = out ++ " AND ";
+            out = out ++ oneExists(
+                D,
+                Outer,
+                f.type,
+                path ++ &[_][]const u8{f.name},
+                state,
+                negate,
+                word,
+            );
+        }
+        return out;
+    }
+}
+
+fn oneExists(
+    comptime D: type,
+    comptime Outer: type,
+    comptime T: type,
+    comptime path: Path,
+    comptime state: *State,
+    comptime negate: bool,
+    comptime word: []const u8,
+) []const u8 {
+    comptime {
+        const shape = "  Write `.{ .in = OtherRow, .where = .{ … } }`, and `.on = .<column>` " ++
+            "when the two tables are joined by a column no `.references` names.";
+
+        if (@typeInfo(T) != .@"struct" or @typeInfo(T).@"struct".is_tuple) @compileError(
+            "nilo: an entry of `." ++ word ++ "` is a " ++ @typeName(T) ++ ".\n" ++ shape,
+        );
+        for (@typeInfo(T).@"struct".fields) |f| {
+            for (exists_known) |ok| {
+                if (std.mem.eql(u8, f.name, ok)) break;
+            } else @compileError(
+                "nilo: an entry of `." ++ word ++ "` sets `." ++ f.name ++
+                    "`, which is not part of it.\n" ++
+                    "  It takes `.in`, `.where`, and `.on` when the join column is not " ++
+                    "one a `.references` already names.",
+            );
+        }
+        if (!@hasField(T, "in")) @compileError(
+            "nilo: an entry of `." ++ word ++ "` does not say `.in`.\n" ++
+                "  That is the Row the matching row would be over.\n" ++ shape,
+        );
+        if (!@hasField(T, "where")) @compileError(
+            "nilo: an entry of `." ++ word ++ "` does not say `.where`.\n" ++
+                "  Without one it asks whether the other table has any row joined to " ++
+                "this one at all, which the join column already answers — and answers " ++
+                "without a subquery.\n" ++ shape,
+        );
+
+        const Child = @FieldType(T, "in");
+        if (Child != type) @compileError(
+            "nilo: `." ++ word ++ "`'s `.in` is a " ++ @typeName(Child) ++ ".\n" ++
+                "  It is the Row itself, written where it is used: `.in = PartnerCapability`.",
+        );
+        // The **value** written there, which is the Row itself. `@FieldType`
+        // would answer `type`, which is what `.in`'s field holds rather than
+        // what it says.
+        const Inner = fieldValue(T, "in");
+        row_mod.assertRow(Inner);
+
+        const link = correlation(Outer, Inner, T, word);
+
+        const outer_rel = relationOf(D, Outer);
+        const inner_rel = relationOf(D, Inner);
+        if (std.mem.eql(u8, outer_rel, inner_rel)) @compileError(
+            "nilo: `." ++ word ++ "` names " ++ @typeName(Inner) ++ ", which reads the same " ++
+                "table as " ++ @typeName(Outer) ++ ".\n" ++
+                "  Both sides would be written as " ++ inner_rel ++ ", so every column in " ++
+                "the subquery would be ambiguous. A test against the same table needs an " ++
+                "alias, which is `db.raw`.",
+        );
+
+        // The walk inside the subquery names the other table and the other
+        // Row. Saved and put back, so a second entry beside this one is walked
+        // against the outer Row again.
+        const was_qualifier = state.qualifier;
+        const was_inner = state.inner;
+        state.qualifier = inner_rel ++ ".";
+        state.inner = Inner;
+        // The **type** of the condition, because that is what a walk reads —
+        // the mirror of the line above, and the one place the two are easy to
+        // mix up.
+        const inside = walk(
+            D,
+            Inner,
+            @FieldType(T, "where"),
+            path ++ &[_][]const u8{"where"},
+            state,
+        );
+        state.qualifier = was_qualifier;
+        state.inner = was_inner;
+
+        if (inside.len == 0) @compileError(
+            "nilo: an entry of `." ++ word ++ "` has an empty `.where`.\n" ++
+                "  An empty condition matches every row of " ++ @typeName(Inner) ++ ", so " ++
+                "the test asks only whether one is joined to this row — which the join " ++
+                "column answers without a subquery.",
+        );
+
+        return (if (negate) "NOT EXISTS (SELECT 1 FROM " else "EXISTS (SELECT 1 FROM ") ++
+            inner_rel ++ " WHERE " ++
+            inner_rel ++ "." ++ D.quote(link.inner) ++ " = " ++
+            outer_rel ++ "." ++ D.quote(link.outer) ++
+            " AND " ++ inside ++ ")";
+    }
+}
+
+/// The relation a Row reads, quoted and schema-qualified — the same text
+/// `statement.relation` writes, computed here because a subquery names two of
+/// them and neither is the statement's own.
+fn relationOf(comptime D: type, comptime Row: type) []const u8 {
+    comptime {
+        const q = row_mod.qualifiedOf(Row);
+        return D.qualify(q.schema, q.table);
+    }
+}
+
+/// Which column of each side the two tables are joined by.
+const Link = struct {
+    inner: []const u8,
+    outer: []const u8,
+};
+
+/// The join, taken from the child's `.references` — or from `.on` plus the
+/// outer Row's key when the schema does not declare one.
+///
+/// **Zero matches and two matches are both Refusals**, and they are different
+/// mistakes: nothing to join on is a schema that has not said how the tables
+/// relate, and two ways to join is a schema that has said it twice — a table
+/// with `.created_by` and `.updated_by` both pointing at `staff` is the
+/// ordinary shape of the second, and guessing between them would be a query
+/// that reads correctly and answers the wrong question.
+fn correlation(
+    comptime Outer: type,
+    comptime Inner: type,
+    comptime T: type,
+    comptime word: []const u8,
+) Link {
+    comptime {
+        const outer_q = row_mod.qualifiedOf(Outer);
+        var found: []const Link = &.{};
+        var named: []const u8 = "";
+
+        for (table_mod.foreignKeysOf(Inner)) |ref| {
+            if (!std.mem.eql(u8, ref.table, outer_q.table)) continue;
+            if (!table_mod.sameSchema(ref.schema, outer_q.schema)) continue;
+            named = named ++ (if (found.len == 0) "" else ", ") ++ "`" ++ ref.column ++ "`";
+            found = found ++ &[_]Link{.{ .inner = ref.column, .outer = ref.target }};
+        }
+
+        if (@hasField(T, "on")) {
+            const On = @FieldType(T, "on");
+            if (On != @TypeOf(.enum_literal)) @compileError(
+                "nilo: `." ++ word ++ "`'s `.on` is a " ++ @typeName(On) ++ ".\n" ++
+                    "  It is the column of " ++ @typeName(Inner) ++ " that points at " ++
+                    @typeName(Outer) ++ ", written as a name: `.on = .partner_id`.",
+            );
+            const wanted = @tagName(fieldValue(T, "on"));
+            if (!row_mod.hasColumn(Inner, wanted)) {
+                row_mod.noSuchColumn(Inner, wanted, "`." ++ word ++ "`'s `.on`");
+            }
+            // A declared foreign key on that column still wins, because it
+            // names the column on the *other* side exactly rather than
+            // assuming the key.
+            for (found) |link| {
+                if (std.mem.eql(u8, link.inner, wanted)) return link;
+            }
+            const outer_keys = row_mod.keysOf(Outer);
+            if (outer_keys.len != 1) @compileError(
+                "nilo: `." ++ word ++ "`'s `.on = ." ++ wanted ++ "` has nothing to join to.\n" ++
+                    "  " ++ @typeName(Inner) ++ " declares no `.references` from that column, " ++
+                    "so the other side would be " ++ @typeName(Outer) ++ "'s key — and that " ++
+                    "key is " ++ row_mod.keyList(Outer) ++ ", which one column cannot match.\n" ++
+                    "  Declare the foreign key: `.references = .{ ." ++ wanted ++ " = .{ " ++
+                    @typeName(Outer) ++ ", .<column> } }`.",
+            );
+            return .{ .inner = wanted, .outer = outer_keys[0] };
+        }
+
+        if (found.len == 0) @compileError(
+            "nilo: `." ++ word ++ "` names " ++ @typeName(Inner) ++ ", which declares no " ++
+                "`.references` to " ++ @typeName(Outer) ++ "'s table `" ++ outer_q.table ++
+                "`.\n" ++
+                "  The join is read out of the schema rather than written at the call site, " ++
+                "so there has to be one. Add `.references = .{ .<column> = .{ " ++
+                @typeName(Outer) ++ ", .<column> } }` to " ++ @typeName(Inner) ++ "'s " ++
+                row_mod.marker ++ ", or say which column joins with `.on = .<column>`.",
+        );
+        if (found.len > 1) @compileError(
+            "nilo: `." ++ word ++ "` names " ++ @typeName(Inner) ++ ", which points at " ++
+                @typeName(Outer) ++ "'s table from more than one column: " ++ named ++ ".\n" ++
+                "  Which of them joins is a question about what the query means, and " ++
+                "guessing would answer a different one. Write `.on = .<column>`.",
+        );
+        return found[0];
+    }
+}
+
+/// The value a caller wrote out for one field of a struct literal, the way
+/// `statement.writtenValue` reads one — one field, never the whole struct, so
+/// a sibling holding a runtime value is not demanded to be comptime as well.
+fn fieldValue(comptime T: type, comptime field: []const u8) blk: {
+    for (@typeInfo(T).@"struct".fields) |f| {
+        if (std.mem.eql(u8, f.name, field)) break :blk f.type;
+    }
+    break :blk void;
+} {
+    comptime {
+        for (@typeInfo(T).@"struct".fields) |f| {
+            if (!std.mem.eql(u8, f.name, field)) continue;
+            const written = f.default_value_ptr orelse @compileError(
+                "nilo: `." ++ field ++ "` has no value written out where it is used.\n" ++
+                    "  It is settled while compiling, so it has to be a literal rather " ++
+                    "than something worked out at run time.",
+            );
+            return @as(*const f.type, @ptrCast(@alignCast(written))).*;
+        }
+        unreachable;
+    }
+}
+
 fn condition(
     comptime D: type,
     comptime Row: type,
@@ -346,7 +676,7 @@ fn condition(
     comptime state: *State,
 ) []const u8 {
     comptime {
-        const quoted = D.quote(column);
+        const quoted = state.qualifier ++ D.quote(column);
 
         // `.deleted_at = null` is `IS NULL`. It cannot mean anything else:
         // `= NULL` is never true in SQL, so reading it the other way would
@@ -391,6 +721,7 @@ fn operatorsOf(comptime T: type) ?[]const Operator {
             if (spelling(f.name) != null) continue;
             if (listSpelling(f.name) != null) continue;
             if (nullSafeSpelling(f.name) != null) continue;
+            if (patternSpelling(f.name) != null) continue;
             return null;
         }
         var out: [info.fields.len]Operator = undefined;
@@ -462,6 +793,109 @@ fn listSpelling(comptime name: []const u8) ?ListOp {
     }
 }
 
+/// The **pattern** operators: the three shapes a search box actually asks for,
+/// each in a case-folding and a case-sensitive spelling, each negatable.
+///
+/// **They exist because `like` hands the escaping to the caller and nothing
+/// says so.** `.name = .{ .like = text }` binds the caller's text unchanged, so
+/// a user typing `%` matches far more than they should and one typing `_`
+/// matches a character they should not. Nothing is smuggled — it is a bound
+/// parameter — and it is still the wrong answer, on the one input nobody tried.
+/// Every caller ended up writing the same escape, and most of them did not.
+///
+/// Twelve names out of three rows, because a name written by hand twelve times
+/// is a name spelled wrong once. The shape is the row; `i` in front folds case
+/// and `not_` in front negates, which is the spelling `like`/`ilike`/`not_like`
+/// already set.
+///
+/// **All twelve cost no allocation**, which is what took this from a design
+/// nobody had to a Dialect call: the pattern is assembled and escaped inside
+/// the statement (`dialect.pattern`), so what binds is the caller's own text
+/// and the statement is the same constant every other one here is.
+const PatternOp = struct {
+    shape: dialect_mod.Pattern,
+    fold: bool,
+    negate: bool,
+    /// The folding spelling of this shape, for the Refusal on a Dialect whose
+    /// `LIKE` cannot be told to respect case.
+    folding: []const u8,
+};
+
+const pattern_shapes = [_]struct { name: []const u8, shape: dialect_mod.Pattern }{
+    .{ .name = "contains", .shape = .contains },
+    .{ .name = "starts_with", .shape = .starts_with },
+    .{ .name = "ends_with", .shape = .ends_with },
+};
+
+fn patternSpelling(comptime name: []const u8) ?PatternOp {
+    comptime {
+        for (pattern_shapes) |row| {
+            const folding = "i" ++ row.name;
+            for ([_]bool{ false, true }) |fold| {
+                const base = if (fold) folding else row.name;
+                for ([_]bool{ false, true }) |negate| {
+                    const spelled = if (negate) "not_" ++ base else base;
+                    if (std.mem.eql(u8, name, spelled)) return .{
+                        .shape = row.shape,
+                        .fold = fold,
+                        .negate = negate,
+                        .folding = folding,
+                    };
+                }
+            }
+        }
+        return null;
+    }
+}
+
+/// A pattern operator compares text against text, and both halves are checked.
+///
+/// The column, because `"age" LIKE …` is a comparison Postgres will make by
+/// casting the number to text — an answer nobody wants and no error at all.
+/// And the value, because a pattern is built out of the caller's own text and
+/// there is nothing to build one out of otherwise.
+fn assertTextPattern(
+    comptime Row: type,
+    comptime column: []const u8,
+    comptime op: []const u8,
+    comptime Value: type,
+) void {
+    comptime {
+        const F = row_mod.ColumnType(Row, column);
+        if (!isText(F)) @compileError(
+            "nilo: `." ++ column ++ " = .{ ." ++ op ++ " = … }` on " ++ @typeName(Row) ++
+                ", whose `" ++ column ++ "` is " ++ @typeName(F) ++ ".\n" ++
+                "  A pattern matches text. On a column holding something else the " ++
+                "database casts it to text first, which compares the digits it happens " ++
+                "to print rather than the value.",
+        );
+        if (!isText(Value) and Value != @TypeOf(.enum_literal)) @compileError(
+            "nilo: `." ++ column ++ " = .{ ." ++ op ++ " = … }` was given a " ++
+                @typeName(Value) ++ ".\n" ++
+                "  The pattern is built out of the text handed in, so what goes here is " ++
+                "text — a `Str` from the request, or a `[]const u8`.",
+        );
+    }
+}
+
+/// Whether `T` is text this module will match a pattern against. `Str` is
+/// Core's and is the ordinary one, because the text a search box sends arrives
+/// as one.
+fn isText(comptime T: type) bool {
+    comptime {
+        const Inner = switch (@typeInfo(T)) {
+            .optional => |o| o.child,
+            else => T,
+        };
+        if (Inner == core.Str) return true;
+        return switch (@typeInfo(Inner)) {
+            .pointer => |p| p.size == .slice and p.child == u8,
+            .array => |a| a.child == u8,
+            else => false,
+        };
+    }
+}
+
 fn operator(
     comptime D: type,
     comptime Row: type,
@@ -491,6 +925,20 @@ fn operator(
         }
 
         assertNotOptional(column, op.name, op.T);
+
+        // A pattern, whose text is assembled and escaped by the statement
+        // rather than by this side — so the parameter is the caller's own
+        // text and nothing here allocates (`dialect.pattern`).
+        if (patternSpelling(op.name)) |pat| {
+            assertTextPattern(Row, column, op.name, op.T);
+            const bound = D.bindAs(
+                D.placeholder(state.take(path, .{ .column = column })),
+                row_mod.ColumnType(Row, column),
+                false,
+            );
+            return D.pattern(quoted, bound, pat.shape, pat.fold, pat.negate) orelse
+                dialect_mod.noPatternForm(D, column, op.name, pat.folding);
+        }
 
         if (listSpelling(op.name)) |list_op| {
             // Taken once, outside the switch: the counter is what numbers
@@ -587,16 +1035,23 @@ fn assertNotOptional(
     }
 }
 
-/// A Row cannot have a column named `any`, because `.any` already means OR
-/// inside a condition and one word cannot be both.
+/// A Row cannot have a column named `any`, `exists` or `not_exists`, because
+/// each already means something inside a condition and one word cannot be both.
 fn assertNoReservedColumn(comptime Row: type) void {
     comptime {
-        if (row_mod.hasColumn(Row, any_field)) @compileError(
-            "nilo: " ++ @typeName(Row) ++ " has a column named `" ++ any_field ++
-                "`, which is the word a condition uses for OR.\n" ++
-                "  Read it under another name in the Row and reach the column " ++
-                "itself with `db.raw`.",
-        );
+        for (reserved) |word| {
+            if (!row_mod.hasColumn(Row, word)) continue;
+            const means = if (std.mem.eql(u8, word, any_field))
+                "OR"
+            else
+                "a matching row in another table";
+            @compileError(
+                "nilo: " ++ @typeName(Row) ++ " has a column named `" ++ word ++
+                    "`, which is the word a condition uses for " ++ means ++ ".\n" ++
+                    "  Read it under another name in the Row and reach the column " ++
+                    "itself with `db.raw`.",
+            );
+        }
     }
 }
 
@@ -635,6 +1090,233 @@ test "two operators on one column are ANDed, so a range needs no new idea" {
         "\"age\" > $1 AND \"age\" < $2",
         sqlOf(.{ .age = .{ .gt = 18, .lt = 65 } }),
     );
+}
+
+test "a contains builds its pattern in the statement, and escapes what it wraps" {
+    // The three `replace` calls are the feature. Without them a search term
+    // holding `%` matches far more than it should, and one holding `_` matches
+    // a character it should not — quietly, on the input nobody tried.
+    try testing.expectEqualStrings(
+        "\"email\" LIKE '%' || replace(replace(replace($1, '\\', '\\\\')," ++
+            " '%', '\\%'), '_', '\\_') || '%' ESCAPE '\\'",
+        sqlOf(.{ .email = .{ .contains = @as([]const u8, "a") } }),
+    );
+}
+
+test "the escape character is doubled first, or the escaping escapes itself" {
+    // Order is not style here. Doubling `\` after putting one in front of `%`
+    // would turn the escape into a literal backslash and let the `%` through.
+    const written = sqlOf(.{ .email = .{ .contains = @as([]const u8, "a") } });
+    const doubles = std.mem.indexOf(u8, written, "'\\', '\\\\'").?;
+    const percents = std.mem.indexOf(u8, written, "'%', '\\%'").?;
+    try testing.expect(doubles < percents);
+}
+
+test "starts_with anchors the front, ends_with the back" {
+    try testing.expect(std.mem.endsWith(
+        u8,
+        sqlOf(.{ .email = .{ .starts_with = @as([]const u8, "a") } }),
+        "'\\_') || '%' ESCAPE '\\'",
+    ));
+    try testing.expect(std.mem.indexOf(
+        u8,
+        sqlOf(.{ .email = .{ .ends_with = @as([]const u8, "a") } }),
+        "LIKE '%' || replace",
+    ) != null);
+    // And the anchored end carries no `%` of its own, which is the whole
+    // difference between the two.
+    try testing.expect(std.mem.endsWith(
+        u8,
+        sqlOf(.{ .email = .{ .ends_with = @as([]const u8, "a") } }),
+        "'\\_') ESCAPE '\\'",
+    ));
+}
+
+test "the folding spelling is ILIKE and the negation is NOT, on the same expression" {
+    try testing.expect(std.mem.indexOf(
+        u8,
+        sqlOf(.{ .email = .{ .icontains = @as([]const u8, "a") } }),
+        "\"email\" ILIKE '%'",
+    ) != null);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        sqlOf(.{ .email = .{ .not_contains = @as([]const u8, "a") } }),
+        "\"email\" NOT LIKE '%'",
+    ) != null);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        sqlOf(.{ .email = .{ .not_icontains = @as([]const u8, "a") } }),
+        "\"email\" NOT ILIKE '%'",
+    ) != null);
+}
+
+test "every leaf still has a negation, which is what keeps the algebra closed" {
+    // ADR 0058's argument that `EXCEPT` needs no mechanism rests on this, so
+    // an operator family arriving without its negations would quietly break a
+    // decision that is on the record.
+    inline for (.{
+        "contains",      "starts_with",      "ends_with",
+        "icontains",     "istarts_with",     "iends_with",
+        "not_contains",  "not_starts_with",  "not_ends_with",
+        "not_icontains", "not_istarts_with", "not_iends_with",
+    }) |name| {
+        try testing.expect(comptime patternSpelling(name) != null);
+    }
+}
+
+test "one parameter per pattern, holding the caller's own text and nothing built" {
+    const p = comptime plan(Pg, User, @TypeOf(.{
+        .email = .{ .contains = @as([]const u8, "a") },
+    }), 1);
+    try testing.expectEqual(@as(usize, 1), p.paths.len);
+    try testing.expectEqualStrings("email", p.params[0].column);
+    // Not a list and not nullable: it binds exactly as an `=` on the same
+    // column would, which is why this family needed no change in `db.zig`.
+    try testing.expect(!p.params[0].list);
+    try testing.expect(!p.params[0].nullable);
+}
+
+test "sqlite writes LIKE where postgres writes ILIKE, because that is what its LIKE is" {
+    const Lite = dialect_mod.SQLite;
+    const written = comptime plan(Lite, User, @TypeOf(.{
+        .email = .{ .icontains = @as([]const u8, "a") },
+    }), 1).sql;
+    try testing.expect(std.mem.indexOf(u8, written, "\"email\" LIKE '%'") != null);
+    try testing.expect(std.mem.indexOf(u8, written, "ILIKE") == null);
+    // And the escaping survives the swap, which is the half that would be easy
+    // to lose in a string splice.
+    try testing.expect(std.mem.endsWith(u8, written, "ESCAPE '\\'"));
+}
+
+// -- a row over there ----------------------------------------------------
+
+const Partner = struct {
+    pub const nilo_table = .{ .name = "partners", .key = .id };
+
+    id: i64,
+    name: []const u8,
+};
+
+const Capability = struct {
+    pub const nilo_table = .{
+        .name = "partner_capabilities",
+        .key = .{ .partner_id, .capability },
+        .references = .{ .partner_id = .{ Partner, .id } },
+    };
+
+    partner_id: i64,
+    capability: []const u8,
+};
+
+fn partnerSql(comptime w: anytype) []const u8 {
+    return comptime plan(Pg, Partner, @TypeOf(w), 1).sql;
+}
+
+test "an exists joins on the reference the child already declared" {
+    try testing.expectEqualStrings(
+        "EXISTS (SELECT 1 FROM \"partner_capabilities\"" ++
+            " WHERE \"partner_capabilities\".\"partner_id\" = \"partners\".\"id\"" ++
+            " AND \"partner_capabilities\".\"capability\" = $1)",
+        partnerSql(.{ .exists = .{
+            .{ .in = Capability, .where = .{ .capability = @as([]const u8, "vision") } },
+        } }),
+    );
+}
+
+test "every column inside the subquery is qualified, or a shared name is ambiguous" {
+    // `partner_capabilities` and `partners` both have a column the other
+    // could have. Unqualified, the database picks one and does not say which.
+    const written = partnerSql(.{ .exists = .{
+        .{ .in = Capability, .where = .{ .capability = @as([]const u8, "vision") } },
+    } });
+    try testing.expect(std.mem.indexOf(u8, written, " \"capability\" = ") == null);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        written,
+        "\"partner_capabilities\".\"capability\" = $1",
+    ) != null);
+}
+
+test "the parameter inside an exists is typed against the other Row" {
+    const p = comptime plan(Pg, Partner, @TypeOf(.{ .exists = .{
+        .{ .in = Capability, .where = .{ .capability = @as([]const u8, "vision") } },
+    } }), 1);
+    try testing.expectEqual(@as(usize, 1), p.params.len);
+    try testing.expectEqualStrings("capability", p.params[0].column);
+    // Without this the type would be looked up on `Partner`, which has no
+    // `capability` at all — so the mistake would be a Refusal here and a
+    // wrongly-bound value on a Row that happened to share the name.
+    try testing.expectEqual(Capability, p.params[0].of.?);
+}
+
+test "an exists numbers its placeholders in the one walk, beside the outer ones" {
+    const p = comptime plan(Pg, Partner, @TypeOf(.{
+        .name = @as([]const u8, "acme"),
+        .exists = .{
+            .{ .in = Capability, .where = .{ .capability = @as([]const u8, "vision") } },
+        },
+    }), 1);
+    try testing.expectEqual(@as(usize, 2), p.params.len);
+    try testing.expect(std.mem.indexOf(u8, p.sql, "\"name\" = $1") != null);
+    try testing.expect(std.mem.indexOf(u8, p.sql, "\"capability\" = $2") != null);
+    // And the outer parameter is still the outer Row's.
+    try testing.expectEqual(@as(?type, null), p.params[0].of);
+}
+
+test "the walk goes back to the outer Row after a subquery, not on to the next one" {
+    // Two tests side by side is the shape a filter page with two facets has,
+    // and getting the restore wrong would walk the second against the first's
+    // Row without ever failing to compile.
+    const written = partnerSql(.{
+        .exists = .{
+            .{ .in = Capability, .where = .{ .capability = @as([]const u8, "a") } },
+            .{ .in = Capability, .where = .{ .capability = @as([]const u8, "b") } },
+        },
+        .name = @as([]const u8, "acme"),
+    });
+    try testing.expect(std.mem.indexOf(u8, written, "\"capability\" = $1) AND EXISTS") != null);
+    // Unqualified, which is the outer walk's own spelling — the qualifier is
+    // put back when the subquery ends, so a statement with an `.exists` in it
+    // writes its own columns exactly as it did before one existed.
+    try testing.expect(std.mem.endsWith(u8, written, "AND \"name\" = $3"));
+}
+
+test "not_exists is the same subquery with two words in front" {
+    try testing.expect(std.mem.startsWith(
+        u8,
+        partnerSql(.{ .not_exists = .{
+            .{ .in = Capability, .where = .{ .capability = @as([]const u8, "vision") } },
+        } }),
+        "NOT EXISTS (SELECT 1 FROM \"partner_capabilities\"",
+    ));
+}
+
+test "an exists nests inside any, because it is a condition like any other" {
+    // ADR 0058's closure argument needs this: a leaf that cannot go inside
+    // `.any` is a leaf the OR half of the algebra cannot reach.
+    const written = partnerSql(.{ .any = .{
+        .{ .name = @as([]const u8, "acme") },
+        .{ .exists = .{
+            .{ .in = Capability, .where = .{ .capability = @as([]const u8, "vision") } },
+        } },
+    } });
+    try testing.expect(std.mem.indexOf(u8, written, " OR EXISTS (SELECT 1") != null);
+}
+
+test "an explicit on wins where the schema declares nothing" {
+    const Loose = struct {
+        pub const nilo_table = .{ .name = "notes", .key = .id };
+        id: i64,
+        partner_id: i64,
+        body: []const u8,
+    };
+    try testing.expect(std.mem.indexOf(
+        u8,
+        partnerSql(.{ .exists = .{
+            .{ .in = Loose, .on = .partner_id, .where = .{ .body = @as([]const u8, "x") } },
+        } }),
+        "\"notes\".\"partner_id\" = \"partners\".\"id\"",
+    ) != null);
 }
 
 test "null means IS NULL, because = NULL is never true" {

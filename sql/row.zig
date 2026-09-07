@@ -164,27 +164,78 @@ pub fn qualifiedOf(comptime Row: type) Qualified {
     };
 }
 
-/// The column that identifies a row, as written text. `.key` defaults to `id`
-/// when the Row has a field of that name and is required when it does not —
-/// there is nothing to infer from a Row whose identity column is `user_id`.
-pub fn keyOf(comptime Row: type) []const u8 {
+/// The columns that identify a row, in the order the marker wrote them.
+///
+/// `.key` defaults to `id` when the Row has a field of that name and is
+/// required when it does not — there is nothing to infer from a Row whose
+/// identity column is `user_id`.
+///
+/// **One column or several, and the several is not an edge case.** Every
+/// multi-tenant table is keyed `(tenant_id, id)` and every join table is keyed
+/// by the two things it joins, so `.key = .{ .tenant_id, .id }` is the ordinary
+/// shape rather than the exotic one. It is written as a tuple of column names,
+/// which is the spelling `conflictColumns` already reads for an upsert target:
+/// one way to name a set of columns, not two.
+pub fn keysOf(comptime Row: type) []const []const u8 {
     return comptime blk: {
         const spec = specOf(Row);
         const named = spec.key orelse {
             if (!hasColumn(Row, "id")) @compileError(
                 "nilo: " ++ @typeName(Row) ++ " has no column `id`, so its " ++
                     marker ++ " has to say which column identifies a row.\n" ++
-                    "  Write `.key = .<column>` alongside `.name`.",
+                    "  Write `.key = .<column>` alongside `.name`, or " ++
+                    "`.key = .{ .<column>, .<column> }` when it takes two.",
             );
-            break :blk "id";
+            break :blk &[_][]const u8{"id"};
         };
-        if (!hasColumn(Row, named)) @compileError(
-            "nilo: " ++ @typeName(Row) ++ "'s key names the column `" ++ named ++
-                "`, which is not one of its columns.\n" ++
-                "  The key has to be a column the Row reads, or nothing can " ++
-                "identify what was read.",
-        );
+        for (named) |column| {
+            if (!hasColumn(Row, column)) @compileError(
+                "nilo: " ++ @typeName(Row) ++ "'s key names the column `" ++ column ++
+                    "`, which is not one of its columns.\n" ++
+                    "  The key has to be a column the Row reads, or nothing can " ++
+                    "identify what was read.",
+            );
+        }
         break :blk named;
+    };
+}
+
+/// The one column that identifies a row, for the callers that can only mean
+/// one. A composite key is a Refusal here rather than a silent first column:
+/// picking `tenant_id` out of `(tenant_id, id)` and calling it the key would
+/// find the wrong row and report nothing.
+pub fn keyOf(comptime Row: type) []const u8 {
+    return comptime blk: {
+        const keys = keysOf(Row);
+        if (keys.len != 1) @compileError(
+            "nilo: " ++ @typeName(Row) ++ " is keyed by " ++ keyList(Row) ++
+                ", and this call takes a key of one column.\n" ++
+                "  A statement that identifies a row by several columns names them " ++
+                "all: `db.find(Row, c, .{ ." ++ keys[0] ++ " = …, ." ++ keys[1] ++
+                " = … })`.",
+        );
+        break :blk keys[0];
+    };
+}
+
+/// Whether `column` is one of the columns the key is made of.
+pub fn isKey(comptime Row: type, comptime column: []const u8) bool {
+    return comptime blk: {
+        for (keysOf(Row)) |name| {
+            if (std.mem.eql(u8, name, column)) break :blk true;
+        }
+        break :blk false;
+    };
+}
+
+/// The key's columns as one readable line, for a message.
+pub fn keyList(comptime Row: type) []const u8 {
+    return comptime blk: {
+        var out: []const u8 = "";
+        for (keysOf(Row), 0..) |c, i| {
+            out = out ++ (if (i == 0) "" else ", ") ++ "`" ++ c ++ "`";
+        }
+        break :blk out;
     };
 }
 
@@ -345,7 +396,11 @@ pub fn columnList(comptime Row: type) []const u8 {
 
 const Spec = struct {
     name: []const u8,
-    key: ?[]const u8,
+    /// The key's columns, or null when the marker said nothing and `id` is
+    /// the answer. A list rather than a name because a key spanning two
+    /// columns is the ordinary shape of a join table and of every
+    /// multi-tenant one.
+    key: ?[]const []const u8,
     /// Whether this program **builds** the table, as against merely reading
     /// it ([ADR 0162](../docs/adr/0162-a-table-this-program-reads-and-does-not-build.md)).
     /// True unless the Row says otherwise, because that is what every Row
@@ -466,10 +521,60 @@ fn readSpec(comptime Row: type, comptime decl: anytype) Spec {
                     "in a step, which nilo will not touch.",
             );
         }
-        const key: ?[]const u8 = if (@hasField(D, "key")) @tagName(decl.key) else null;
+        const key: ?[]const []const u8 = if (@hasField(D, "key")) keyNames(Row, decl.key) else null;
         const managed: bool = if (@hasField(D, "managed")) decl.managed else true;
         return .{ .name = decl.name, .key = key, .managed = managed };
     }
+}
+
+/// The columns `.key` names, out of `.id` or `.{ .tenant_id, .id }`.
+///
+/// The same two spellings `conflictColumns` reads for an upsert target, and
+/// deliberately so: a set of columns is written one way in this repository,
+/// and a second way to say it is a second thing to remember.
+fn keyNames(comptime Row: type, comptime written: anytype) []const []const u8 {
+    comptime {
+        const K = @TypeOf(written);
+        if (K == @TypeOf(.enum_literal)) {
+            const one = [_][]const u8{@tagName(written)};
+            return &one;
+        }
+        const info = switch (@typeInfo(K)) {
+            .@"struct" => |s| s,
+            else => notAKey(Row, K),
+        };
+        if (!info.is_tuple) notAKey(Row, K);
+        if (info.fields.len == 0) @compileError(
+            "nilo: " ++ @typeName(Row) ++ "'s `.key` is empty.\n" ++
+                "  A row with nothing identifying it cannot be found, updated in a " ++
+                "batch, or pointed at by a `.references`. Name the column: " ++
+                "`.key = .id`.",
+        );
+        // One column written as a tuple is the same key written the long way,
+        // and reading it as one keeps `db.find` taking a bare value for it.
+        var names: []const []const u8 = &.{};
+        for (info.fields) |f| {
+            const value = @field(written, f.name);
+            if (@TypeOf(value) != @TypeOf(.enum_literal)) notAKey(Row, K);
+            for (names) |already| {
+                if (std.mem.eql(u8, already, @tagName(value))) @compileError(
+                    "nilo: " ++ @typeName(Row) ++ "'s `.key` names `" ++ @tagName(value) ++
+                        "` twice.\n" ++
+                        "  Each column of a key identifies a different part of the row.",
+                );
+            }
+            names = names ++ &[_][]const u8{@tagName(value)};
+        }
+        return names;
+    }
+}
+
+fn notAKey(comptime Row: type, comptime K: type) noreturn {
+    @compileError(
+        "nilo: " ++ @typeName(Row) ++ "'s `.key` is a " ++ @typeName(K) ++ ".\n" ++
+            "  It is the column that identifies a row, written as a name — `.key = .id` " ++
+            "— or `.key = .{ .tenant_id, .id }` for a key spanning two of them.",
+    );
 }
 
 /// Every column a borrowed Row reads has to be one the Row it borrows from
@@ -596,6 +701,56 @@ test "a projection is a Row, and is the one Row that names no table" {
 test "a key that is not id has to be written, and is" {
     try testing.expectEqualStrings("memberships", tableOf(Membership));
     try testing.expectEqualStrings("user_id", keyOf(Membership));
+}
+
+const Seat = struct {
+    pub const nilo_table = .{ .name = "seats", .key = .{ .tenant_id, .id } };
+
+    tenant_id: i64,
+    id: i64,
+    label: []const u8,
+};
+
+test "a key can span two columns, which is what every multi-tenant table is" {
+    const keys = keysOf(Seat);
+    try testing.expectEqual(@as(usize, 2), keys.len);
+    try testing.expectEqualStrings("tenant_id", keys[0]);
+    try testing.expectEqualStrings("id", keys[1]);
+}
+
+test "the key's columns keep the order the marker wrote them in" {
+    // Order is not decoration: it is the order of the index the PRIMARY KEY
+    // creates, so `(tenant_id, id)` and `(id, tenant_id)` serve different
+    // lookups. The Row's own field order is the other one, and is not it.
+    const Reversed = struct {
+        pub const nilo_table = .{ .name = "seats", .key = .{ .id, .tenant_id } };
+        tenant_id: i64,
+        id: i64,
+    };
+    try testing.expectEqualStrings("id", keysOf(Reversed)[0]);
+    try testing.expectEqualStrings("tenant_id", keysOf(Reversed)[1]);
+}
+
+test "a key of one column written as a tuple is the same key written the long way" {
+    const Long = struct {
+        pub const nilo_table = .{ .name = "users", .key = .{.id} };
+        id: i64,
+    };
+    try testing.expectEqual(@as(usize, 1), keysOf(Long).len);
+    // And it still reaches the callers that can only mean one column, which is
+    // what makes the two spellings one key rather than two shapes.
+    try testing.expectEqualStrings("id", keyOf(Long));
+}
+
+test "isKey answers for every column of a composite key, not just the first" {
+    try testing.expect(isKey(Seat, "tenant_id"));
+    try testing.expect(isKey(Seat, "id"));
+    try testing.expect(!isKey(Seat, "label"));
+}
+
+test "the key reads as a sentence, for the messages that have to name it" {
+    try testing.expectEqualStrings("`tenant_id`, `id`", keyList(Seat));
+    try testing.expectEqualStrings("`id`", keyList(User));
 }
 
 test "a narrower Row reads the table of the Row it borrows from" {

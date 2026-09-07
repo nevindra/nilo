@@ -2491,9 +2491,9 @@ pointing at `insertOrIgnore`.
 | | |
 |---|---|
 | `.where` | a condition; see below |
-| `.order` | `.{ .created_at = .desc }`, one column per field |
+| `.order` | `.{ .created_at = .desc }`, one column per field. `.asc_nulls_last` and its three siblings say where NULLs go, which the two databases otherwise disagree about |
 | `.limit` / `.offset` | a literal is baked into the SQL; a variable becomes a parameter. A literal limit is also the row ceiling, so the result list is allocated once |
-| `.set` | update only: columns to new values |
+| `.set` | update only: columns to new values, or `.{ .views = .{ .plus = 1 } }` for arithmetic on the column's own value |
 
 ### Conditions
 
@@ -2504,13 +2504,15 @@ Different fields are ANDed. Several operators on one field are ANDed too.
 | `.id = 7` | `"id" = $1` |
 | `.age = .{ .gt = 18, .lt = 65 }` | `"age" > $1 AND "age" < $2` |
 | `.eq` `.ne` `.gt` `.gte` `.lt` `.lte` | |
-| `.like` / `.ilike` | and `.not_like` / `.not_ilike` |
+| `.like` / `.ilike` | and `.not_like` / `.not_ilike`. **These do not escape the text you give them**; the row below is the one to reach for |
+| `.contains` `.starts_with` `.ends_with` | the pattern is built *and* escaped by the statement, so `%` and `_` in a search term match themselves. `i` in front folds case (`.icontains`), `not_` in front negates — twelve in all. On SQLite the case-sensitive half is a Refusal: its `LIKE` folds ASCII case and cannot be told not to |
 | `.in = &.{ 1, 2, 3 }` | `= ANY($1)` — one parameter, so the statement stays a constant |
 | `.not_in = &.{ 1, 2, 3 }` | `<> ALL($1)` — one parameter likewise |
 | `.deleted_at = null` | `IS NULL` |
 | `.deleted_at = .{ .ne = null }` | `IS NOT NULL` |
 | `.handle = .{ .not_distinct_from = maybe }` | `IS NOT DISTINCT FROM $1` — `=` with null treated as a value. **The one operator an optional may reach**; `.distinct_from` is its negation |
 | `.any = .{ .{ … }, .{ … } }` | OR, bracketed. Not `.or`, which is a keyword — so `any` is a reserved column name |
+| `.exists = .{ .{ .in = Other, .where = .{ … } } }` | `EXISTS (SELECT 1 FROM …)`, joined on the `.references` `Other` declares. `.not_exists` negates; both are reserved column names, and both nest inside `.any` |
 
 A column that does not exist is a compile error naming the near miss.
 
@@ -2525,6 +2527,50 @@ or branch
 null-safe pair is the exception because its statement does **not** change
 when the value turns out to be null: `"handle" IS NOT DISTINCT FROM $1` is
 the same six words either way, so nothing is left until run time.
+
+### A row in another table
+
+```zig
+db.select(Partner, c, .{ .where = .{
+    .name = .{ .icontains = search },
+    .exists = .{
+        .{ .in = PartnerCapability, .where = .{ .capability = cap } },
+    },
+} });
+```
+
+**The join is read out of the schema, not written here.** It comes from the
+`.references` the other Row declares, which is already checked while compiling —
+the target has to be a Row, the target column one of its columns, and the two
+Zig types the same. A Row that declares none is a compile error saying so, and
+one that points at this table from **two** columns is a compile error naming
+both: which of them joins is a question about what the query means.
+`.on = .<column>` says which, and is also the way in for a Row over a view.
+
+The entries are a list because a struct cannot carry the same field twice, and
+narrowing on two capabilities is the ordinary case. They are ANDed.
+
+**This is the only place the *one table* line moves**, and
+[ADR 0171](./adr/0171-a-row-over-there-is-a-condition.md) says why: an `EXISTS`
+changes neither the column list nor the row count, so the Row still describes
+the answer and `.limit` still means what you think. A join changes both, and is
+still `db.raw`.
+
+### A key of several columns
+
+```zig
+pub const nilo_table = .{ .name = "seats", .key = .{ .tenant_id, .id } };
+```
+
+```zig
+const seat = try db.find(Seat, c, .{ .tenant_id = tenant, .id = id });
+```
+
+Named fields rather than a tuple: two `i64` key columns written the other way
+round would find the wrong row and report nothing. Leaving one out, adding a
+column that is not part of the key, and passing a tuple are all compile errors.
+`updateMany` joins on every column, and `CREATE TABLE` writes a
+`PRIMARY KEY (…)` constraint rather than a clause on one column.
 
 ### Streaming
 
@@ -2650,6 +2696,7 @@ than asking the server to release a mark it no longer has.
 | `sql.Json(T)` | a `T` stored as `jsonb`, parsed per row into the request arena. Not available in `db.stream`, which allocates nothing |
 | `sql.Decimal` | a `numeric`, held as its digits. `.text` is the value; there is no arithmetic. Writes itself into JSON as a **string**, so a consumer's `JSON.parse` cannot round it into an `f64` ([ADR 0050](./adr/0050-a-numeric-is-digits-and-a-string-in-json.md)) |
 | `sql.Interval`, `sql.Inet` | an `interval` and an `inet`, held as the text Postgres prints. `.text` is the value |
+| `sql.Bytes` | bytes rather than text: `bytea` on Postgres, `BLOB` on SQLite. `.bytes` is the value, `sql.Bytes.of(hash)` writes one. The slice a read hands back lives in the request arena, the way a `Str` does. This is what to reach for instead of `sql.AsText("bytea")`, which goes through hex printing and costs a conversion each way ([ADR 0174](./adr/0174-bytes-are-a-type-not-a-second-protocol.md)) |
 | `sql.AsText("money")` | any Postgres type at all, held as its text — the door out of this table. A column type of your own is any struct or enum with `nilo_column`, `nilo_read(text, arena)` and `nilo_write(arena)`; see below |
 | a slice | an array column, with no wrapper: `[]const Str` is `text[]`, `[]const i32` is `int4[]`, `?[]const i32` a nullable one, `[]const ?i32` one whose elements may be NULL ([ADR 0051](./adr/0051-an-array-is-a-slice-and-a-slice-is-one-deep.md)). `[]const u8` is text, so a list of text is `[]const Str` or `[]const []const u8`. `[]const sql.Uuid` is `uuid[]`, in both directions and as an `.in` list ([ADR 0145](./adr/0145-a-raw-parameter-is-converted-the-way-a-rows-is.md)). Not available in `db.stream` |
 | an enum | read out of `text`, a `varchar` or a Postgres enum. A value the Zig enum does not have fails the request. Add `pub const nilo_column = "user_role"` to it and the column is checked at startup — and can be batched |

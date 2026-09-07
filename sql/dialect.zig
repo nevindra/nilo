@@ -78,6 +78,24 @@ pub const ListForm = enum {
 /// would fail honest schemas.
 pub const Accepts = ?[]const []const u8;
 
+/// Where NULLs sit in an ordered result, asked by an order term that said.
+///
+/// **The two databases disagree by default and neither is wrong**, which is
+/// why this exists rather than being left to whichever one the caller happens
+/// to develop against: Postgres sorts NULLs last ascending and SQLite sorts
+/// them first. A Row that sorts on a nullable column is therefore not portable
+/// until somebody says which, and until this was written nothing said so.
+pub const Nulls = enum { first, last };
+
+/// Which part of a column's text a pattern operator has to match.
+///
+/// The pattern itself is **built in the statement** rather than in the caller's
+/// memory, which is the decision this whole family turns on. `'%' || $1 || '%'`
+/// with the `%` and `_` inside `$1` escaped by the database costs no allocation
+/// at all, where building the pattern on this side costs one per condition — in
+/// a module whose headline claim is that a statement costs none (ADR 0018).
+pub const Pattern = enum { contains, starts_with, ends_with };
+
 /// How a read holds on to the rows it matched, until the transaction around
 /// it ends. Written as `.lock = .update` in a select's options.
 ///
@@ -191,6 +209,66 @@ pub const Postgres = struct {
         return " OFFSET " ++ placeholder_text;
     }
 
+    /// Where NULLs sit in an ordered result, or `null` for a database that
+    /// cannot be told. Written the same way `lock` is, and for the same
+    /// reason: a Dialect that has no spelling for this refuses rather than
+    /// sorting a nullable column somewhere the caller did not ask for.
+    ///
+    /// Postgres's own default is `NULLS LAST` ascending and `NULLS FIRST`
+    /// descending, so this clause is written only when the caller asked —
+    /// which keeps the statement identical to what it was for every order
+    /// term written before this existed.
+    pub fn nulls(comptime placement: Nulls) ?[]const u8 {
+        return switch (placement) {
+            .first => " NULLS FIRST",
+            .last => " NULLS LAST",
+        };
+    }
+
+    /// A pattern match against text the caller supplied, with the `%` and `_`
+    /// **inside that text** escaped so that they match themselves.
+    ///
+    /// **This is the operator family that existed as a bug before it existed
+    /// as a feature.** `.email = .{ .like = text }` puts the caller's text in
+    /// the parameter and nothing escapes it, so a search box wired straight to
+    /// it matches far too much the first time somebody types `%` — and matches
+    /// a character it should not the first time somebody types `_`. Nothing is
+    /// smuggled, because it is a bound parameter; it is simply the wrong
+    /// answer, on the one input nobody tried.
+    ///
+    /// **The escaping is three `replace` calls in the statement text**, which
+    /// is what makes this cost nothing. The alternative was building the
+    /// pattern in the request arena, one allocation per condition, and it is
+    /// what the design was blocked on for a cycle. `replace`, `||` and
+    /// `ESCAPE` are all standard, so both Dialects write the same shape.
+    ///
+    /// The order of the three matters and is not arbitrary: the escape
+    /// character is doubled **first**, or the backslash written in front of a
+    /// `%` by the second call would itself be escaped by the third.
+    ///
+    /// `null` when this Dialect cannot express the combination, and the caller
+    /// gets `noPatternForm` naming it rather than a match that folds case when
+    /// it was asked not to.
+    pub fn pattern(
+        comptime quoted: []const u8,
+        comptime bound: []const u8,
+        comptime shape: Pattern,
+        comptime fold: bool,
+        comptime negate: bool,
+    ) ?[]const u8 {
+        comptime {
+            const escaped = "replace(replace(replace(" ++ bound ++
+                ", '\\', '\\\\'), '%', '\\%'), '_', '\\_')";
+            const built = switch (shape) {
+                .contains => "'%' || " ++ escaped ++ " || '%'",
+                .starts_with => escaped ++ " || '%'",
+                .ends_with => "'%' || " ++ escaped,
+            };
+            return quoted ++ (if (negate) " NOT " else " ") ++
+                (if (fold) "ILIKE " else "LIKE ") ++ built ++ " ESCAPE '\\'";
+        }
+    }
+
     /// How this Dialect spells a row lock, or `null` when it has none — a
     /// database with one writer at a time has nothing to say here, and the
     /// caller gets a Refusal naming it rather than a lock that silently is
@@ -231,6 +309,10 @@ pub const Postgres = struct {
     /// because the caller wrote the `SELECT` list (ADR 0039), so a cast that
     /// changes what Postgres would have called the column changes nothing.
     pub fn readAs(comptime quoted: []const u8, comptime T: type) []const u8 {
+        // A `Bytes` is asked for as itself. It is the one column here whose
+        // value is not text in any representation, so `::text` would hand back
+        // Postgres's `\x…` hex printing and lose the point of the column.
+        if (comptime types.isBytes(T)) return quoted;
         return if (comptime types.asText(T) != null) quoted ++ "::text" else quoted;
     }
 
@@ -253,6 +335,13 @@ pub const Postgres = struct {
         comptime list: bool,
     ) []const u8 {
         return comptime blk: {
+            // **The cast is load-bearing on this one.** pg.zig binds a
+            // `[]const u8` and Postgres infers `text` for the parameter, so
+            // without `::bytea` an insert into a `bytea` column is *column is
+            // of type bytea but expression is of type text* — at run time,
+            // from the database, about a statement that looks right.
+            if (types.isBytes(T)) break :blk placeholder_text ++
+                "::bytea" ++ if (list) "[]" else "";
             const named = types.asText(T) orelse break :blk placeholder_text;
             break :blk placeholder_text ++ "::" ++ named ++ if (list) "[]" else "";
         };
@@ -277,6 +366,7 @@ pub const Postgres = struct {
     pub fn arrayOf(comptime T: type) ?[]const u8 {
         return comptime blk: {
             if (types.listElement(T) != null) break :blk null;
+            if (types.isBytes(T)) break :blk "bytea[]";
             // Digits, cast twice — the array form of what `bindAs` does to a
             // single `numeric`, and for the same reason. `$1::numeric[]`
             // alone would have the driver encode the text as binary numeric
@@ -471,6 +561,11 @@ pub const Postgres = struct {
         // makes for `Uuid`, and for the same reason (ADR 0042).
         if (Inner == core.Str) return &.{ "text", "varchar", "bpchar", "char", "name" };
 
+        // Bytes, which is the one type here that is neither text nor a
+        // number and has to say so before `declaredColumn` and the pointer
+        // branch both answer `text` for it.
+        if (types.isBytes(Inner)) return &.{"bytea"};
+
         if (types.declaredColumn(Inner)) |declared| {
             if (std.mem.eql(u8, declared, "timestamptz")) return &.{ "timestamptz", "timestamp" };
             if (std.mem.eql(u8, declared, "jsonb")) return &.{ "jsonb", "json" };
@@ -653,6 +748,43 @@ pub const SQLite = struct {
     /// limiting gets SQLite's own syntax error — which names the statement.
     pub fn offset(comptime placeholder_text: []const u8) []const u8 {
         return " OFFSET " ++ placeholder_text;
+    }
+
+    /// The same two words, and **that is the finding rather than the
+    /// coincidence.** SQLite has taken `NULLS FIRST`/`NULLS LAST` since 3.30
+    /// (2019), so the clause the two databases disagree about by *default* is
+    /// the one they spell identically once it is written out. That is what
+    /// makes this worth a Dialect declaration instead of a Refusal: saying it
+    /// is portable, leaving it out is not.
+    pub fn nulls(comptime placement: Nulls) ?[]const u8 {
+        return Postgres.nulls(placement);
+    }
+
+    /// The same three `replace` calls, and **one combination it refuses.**
+    ///
+    /// SQLite has no `ILIKE`, because its `LIKE` already folds ASCII case —
+    /// which is the other half of the same fact: it cannot be told *not* to
+    /// without `PRAGMA case_sensitive_like`, and a pragma is a property of the
+    /// connection rather than of the statement. So the folding operators are
+    /// this database's plain `LIKE`, and the case-sensitive ones are a Refusal
+    /// naming it (ADR 0061). A match that quietly ignored case on one of the
+    /// two databases is exactly the kind of lie the seam exists not to tell.
+    pub fn pattern(
+        comptime quoted: []const u8,
+        comptime bound: []const u8,
+        comptime shape: Pattern,
+        comptime fold: bool,
+        comptime negate: bool,
+    ) ?[]const u8 {
+        comptime {
+            if (!fold) return null;
+            const written = Postgres.pattern(quoted, bound, shape, true, negate).?;
+            // `ILIKE` is Postgres's word for what this database's `LIKE`
+            // already does, so the same expression with the one word swapped
+            // is the whole difference.
+            const at = std.mem.indexOf(u8, written, "ILIKE ").?;
+            return written[0..at] ++ "LIKE " ++ written[at + "ILIKE ".len ..];
+        }
     }
 
     /// None. SQLite serialises writers with a lock over the whole database,
@@ -884,6 +1016,13 @@ pub const SQLite = struct {
         // the three carrying `INT`, and NUMERIC for the rest — which is what
         // `DATETIME` and `TIMESTAMP` are, and they are what somebody writing
         // the table by hand reaches for.
+        // BLOB, and this row was already half here: `acceptsSqlite` has
+        // always listed `BLOB` among what a byte slice may read out of, and
+        // nothing could ever write one, because `WireWrite` sent a
+        // `[]const u8` as text and zqlite needs its `Blob` wrapper to do
+        // anything else.
+        if (types.isBytes(Inner)) return &.{"BLOB"};
+
         if (Inner == types.Timestamp) return &.{
             "INTEGER", "INT", "BIGINT", "NUMERIC", "DATETIME", "TIMESTAMP",
         };
@@ -933,6 +1072,7 @@ pub fn assertDialect(comptime D: type) void {
             "lock",       "uuid_form",   "json_form", "enum_form",
             "columnType", "keyColumn",   "foldedColumn",
             "can_alter_column",             "advisoryLock",
+            "nulls",      "pattern",
         };
         for (owed) |decl| {
             if (!@hasDecl(D, decl)) @compileError(
@@ -953,6 +1093,42 @@ pub fn noRowLock(comptime D: type, comptime Row: type) noreturn {
             @typeName(Row) ++ ".\n" ++
             "  Its database does not let one transaction hold a row against another, " ++
             "so there is nothing to write that would mean what `.lock` means.",
+    );
+}
+
+/// The message an order term stops with on a Dialect that cannot be told where
+/// NULLs go. Both shipped Dialects can, so nothing reaches this today — it is
+/// here because the alternative is sorting a nullable column somewhere the
+/// caller did not ask for, quietly, and only on one of the two databases.
+pub fn noNullsOrder(comptime D: type, comptime Row: type, comptime column: []const u8) noreturn {
+    @compileError(
+        "nilo: the " ++ D.name ++ " dialect cannot be told where NULLs sort, asked for " ++
+            "on column `" ++ column ++ "` of " ++ @typeName(Row) ++ ".\n" ++
+            "  Order by a column that has no NULLs in it, or sort them into place " ++
+            "with a condition the database can express.",
+    );
+}
+
+/// The message a pattern operator stops with on a Dialect that cannot spell
+/// that combination of case and shape.
+///
+/// It names the operator that *does* work there rather than only the one that
+/// does not, because on SQLite the fix is one letter: `contains` is refused
+/// and `icontains` is what that database's `LIKE` already means.
+pub fn noPatternForm(
+    comptime D: type,
+    comptime column: []const u8,
+    comptime op: []const u8,
+    comptime folding: []const u8,
+) noreturn {
+    @compileError(
+        "nilo: the " ++ D.name ++ " dialect has no `" ++ op ++ "`, asked for on column `" ++
+            column ++ "`.\n" ++
+            "  Its `LIKE` folds ASCII case and cannot be told not to by a statement — " ++
+            "`PRAGMA case_sensitive_like` is a property of the connection, so a " ++
+            "case-sensitive match here would depend on how the database was opened " ++
+            "rather than on what the query says.\n" ++
+            "  `" ++ folding ++ "` is the operator that means what this database does.",
     );
 }
 

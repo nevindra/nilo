@@ -694,6 +694,18 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// whole endpoint. It is `one` with the condition filled in, `LIMIT
         /// 1` included; a struct where the key goes is a Refusal pointing at
         /// `one`.
+        ///
+        /// **A key of several columns is handed over by name**
+        /// ([ADR 0172](../docs/adr/0172-a-key-is-as-many-columns-as-it-takes.md)):
+        ///
+        /// ```zig
+        /// const seat = try db.find(Seat, c, .{ .tenant_id = tenant, .id = id });
+        /// ```
+        ///
+        /// Named rather than positional, because two key columns of the same
+        /// type written the other way round would find the wrong row and
+        /// report nothing. A column left out, a column that is not part of the
+        /// key, and a tuple are all Refusals.
         pub fn find(self: *Self, comptime Row: type, c: anytype, key: anytype) !?Row {
             comptime core.checkScope(@TypeOf(c), "db.find");
             const stmt = comptime statement.find(D, Row, @TypeOf(key));
@@ -1778,6 +1790,11 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             if (comptime types.asText(F) != null) {
                 return F.nilo_read(value, c.arena()) catch return error.QueryFailed;
             }
+            // The same one copy a text column costs. What the Wire handed
+            // back points into the driver's read buffer and dies at the next
+            // row, so a `Bytes` that outlives the read is a `Bytes` that was
+            // copied — there is no version of this that is free.
+            if (F == types.Bytes) return .{ .bytes = try c.arena().dupe(u8, value.bytes) };
             if (F == types.Timestamp) return .{ .micros = value };
             if (F == types.Uuid) return uuidOf(value);
             if (comptime types.jsonPayload(F)) |Payload| {
@@ -1901,7 +1918,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 // The one parameter that is not one value: a list the Dialect
                 // wants as JSON text rather than as an array (ADR 0119).
                 if (comptime param.list and D.list_form == .json_each) {
-                    const Item = comptime WireWrite(D, row_mod.ColumnType(Row, param.column));
+                    const Item = comptime WireWrite(D, where_mod.ParamType(Row, param));
                     const value = where_mod.valueAt(options, path);
                     out[i] = try jsonList(Item, value, c);
                 } else {
@@ -1914,7 +1931,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                     // coercion is the one `forWire` was about to do anyway.
                     const Given = comptime where_mod.ValueAt(@TypeOf(options), path);
                     const Wanted = comptime if (where_mod.comptimeOnly(Given))
-                        row_mod.ColumnType(Row, param.column)
+                        where_mod.ParamType(Row, param)
                     else
                         Given;
                     out[i] = try forWire(
@@ -2142,7 +2159,7 @@ fn Values(
                 fields[i] = where_mod.ValueAt(O, stmt.paths[i]);
                 continue;
             }
-            const F = WireWrite(D, row_mod.ColumnType(Row, param.column));
+            const F = WireWrite(D, where_mod.ParamType(Row, param));
             // `.in` is one placeholder holding many values — `= ANY($1)` —
             // so what binds is a list of the column's type rather than one
             // of them. `distinct_from` is the mirror: one value, which may be
@@ -2164,7 +2181,7 @@ fn Values(
                 (if (D.list_form == .json_each)
                     []const u8
                 else
-                    []const ArrayElement(D, row_mod.ColumnType(Row, param.column)))
+                    []const ArrayElement(D, where_mod.ParamType(Row, param)))
             else if (param.nullable) Maybe(F) else F;
         }
         const frozen = fields;
@@ -2282,6 +2299,12 @@ fn RawWrite(comptime D: type, comptime F: type) type {
 ///   makes the missing case an error instead of an unreachable.
 fn WireRead(comptime F: type) type {
     comptime {
+        // **Not `[]const u8`, and that is the point.** Text and bytes are the
+        // same Zig type and two different columns, so a Wire handed
+        // `[]const u8` cannot tell which read to make — and on SQLite the two
+        // reads are `sqlite3_column_text` and `sqlite3_column_blob`, which are
+        // not the same call. Keeping the type is what lets each Wire pick.
+        if (F == types.Bytes) return types.Bytes;
         if (F == core.Str) return []const u8;
         if (F == types.Timestamp) return i64;
         if (F == types.Uuid) return []const u8;
@@ -2518,6 +2541,12 @@ fn assertUnlocked(
 /// and writes the `T` inside rather than the wrapper.
 fn WireWrite(comptime D: type, comptime F: type) type {
     comptime {
+        // The write half of the same argument. Postgres binds the slice
+        // inside and the Dialect casts it (`bindAs`); SQLite has to hand
+        // zqlite its `Blob` wrapper, and only `sqlite.zig` may name that — so
+        // what travels this far is nilo's own type and the Wire unwraps it.
+        if (F == types.Bytes) return types.Bytes;
+        if (F == ?types.Bytes) return ?types.Bytes;
         if (F == core.Str) return []const u8;
         if (F == ?core.Str) return ?[]const u8;
         if (F == types.Timestamp) return i64;

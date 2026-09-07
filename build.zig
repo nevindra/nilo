@@ -424,6 +424,89 @@ const sql_refusals = [_]Refusal{
         .says = "these tables point at each other in a ring, so none of them can be" ++
             " created first:",
     },
+    // A key spanning several columns. Every one of these is a statement that
+    // would have compiled, run, and answered with the wrong row — which is why
+    // the composite key arrived with four Refusals rather than one.
+    .{
+        .name = "find_missing_a_key_column",
+        .says = "`db.find` on find_missing_a_key_column.Seat does not say `.tenant_id`," ++
+            " which is part of its key `tenant_id`, `id`.",
+    },
+    .{
+        .name = "find_with_a_positional_key",
+        .says = "`db.find` on find_with_a_positional_key.Seat was given a tuple where" ++
+            " its key goes.",
+    },
+    .{
+        .name = "find_on_a_column_that_is_not_the_key",
+        .says = "`db.find` on find_on_a_column_that_is_not_the_key.Seat was given" ++
+            " `.label`, which is a column but not part of its key `tenant_id`, `id`.",
+    },
+    .{
+        .name = "key_names_a_column_twice",
+        .says = "key_names_a_column_twice.Seat's `.key` names `id` twice.",
+    },
+    // Arithmetic in a `.set`. The nullable one is the reason the other two
+    // exist: it is the only one of the three that would otherwise run.
+    .{
+        .name = "set_arithmetic_on_a_nullable_column",
+        .says = "`.set = .{ .views = .{ .plus = … } }` on" ++
+            " set_arithmetic_on_a_nullable_column.Post, whose `views` is ?i64.",
+    },
+    .{
+        .name = "set_arithmetic_on_a_text_column",
+        .says = "`.set = .{ .title = .{ .plus = … } }` on" ++
+            " set_arithmetic_on_a_text_column.Post, whose `title` is []const u8.",
+    },
+    .{
+        .name = "set_with_two_operators",
+        .says = "`.set` on column `views` of set_with_two_operators.Post was given" ++
+            " more than one operator.",
+    },
+    // The pattern operators. The first two are about what a pattern can match;
+    // the third is a Dialect refusing rather than folding case when it was
+    // asked not to.
+    .{
+        .name = "pattern_on_a_number_column",
+        .says = "`.age = .{ .contains = … }` on pattern_on_a_number_column.User," ++
+            " whose `age` is i32.",
+    },
+    .{
+        .name = "pattern_given_something_that_is_not_text",
+        .says = "`.email = .{ .contains = … }` was given a i32.",
+    },
+    .{
+        .name = "sqlite_case_sensitive_pattern",
+        .says = "the sqlite dialect has no `contains`, asked for on column `email`.",
+    },
+    // `.exists`. The first two are the two ways a schema can fail to say how
+    // two tables are joined, and they are different mistakes: nothing said, and
+    // said twice (ADR 0171).
+    .{
+        .name = "exists_without_a_reference",
+        .says = "`.exists` names exists_without_a_reference.Capability, which declares" ++
+            " no `.references` to exists_without_a_reference.Partner's table `partners`.",
+    },
+    .{
+        .name = "exists_with_two_references",
+        .says = "`.exists` names exists_with_two_references.Record, which points at" ++
+            " exists_with_two_references.Staff's table from more than one column:" ++
+            " `created_by`, `updated_by`.",
+    },
+    .{
+        .name = "exists_not_a_list",
+        .says = "`.exists` holds a list of tests and this one is a single test.",
+    },
+    .{
+        .name = "exists_over_the_same_table",
+        .says = "`.exists` names exists_over_the_same_table.Partner, which reads the" ++
+            " same table as exists_over_the_same_table.Partner.",
+    },
+    .{
+        .name = "reserved_column_exists",
+        .says = "reserved_column_exists.Flag has a column named `exists`, which is the" ++
+            " word a condition uses for a matching row in another table.",
+    },
 };
 
 /// The same, for `s3/refusals/`. The fifth table, hung off `test-s3`.

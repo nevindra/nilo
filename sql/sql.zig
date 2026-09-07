@@ -43,13 +43,22 @@
 //!
 //! ## What it will not do
 //!
-//! Joins, aggregates, subqueries, `HAVING`, window functions, CTEs. The line
+//! Joins, aggregates, `GROUP BY`, `HAVING`, window functions, CTEs. The line
 //! is **one table, conditions that filter rows**, and past it the answer is
 //! `db.raw`, which still fills a Row, still uses the request arena and still
 //! follows the `Str` rule — it gives up the compile-time column check and
 //! nothing else. A boundary that fits in one sentence is worth more than one
 //! that is further out, because it can be predicted without reading the
 //! reference.
+//!
+//! **`EXISTS` is the one thing that came back across, and it names the
+//! property the line is really about**
+//! ([ADR 0171](../docs/adr/0171-a-row-over-there-is-a-condition.md)). A
+//! subquery asking whether a row matches over there changes neither the column
+//! list nor the row count, so the Row still describes the answer and `.limit`
+//! still means what the caller thinks. A join changes both. The four above each
+//! break at least one of those, which is why they are still refused and why
+//! that is now a sentence rather than a group.
 //!
 //! Migrations **are** here, and they are the one thing in this module that
 //! writes DDL rather than a statement over a table that already exists
@@ -225,6 +234,11 @@ pub const Json = types.Json;
 pub const Decimal = types.Decimal;
 pub const Interval = types.Interval;
 pub const Inet = types.Inet;
+
+/// Bytes rather than text: a `bytea` on Postgres and a `BLOB` on SQLite.
+/// `sql.Bytes.of(hash)` at a call site; the slice a read hands back lives in
+/// the request arena, the way a `Str` does.
+pub const Bytes = types.Bytes;
 
 /// A column type declared by whoever owns it rather than by this module: any
 /// struct or enum with `nilo_column`, `nilo_read(text, arena)` and

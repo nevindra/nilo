@@ -77,10 +77,12 @@ pub const Column = struct {
     /// of `accepts` and therefore the type the startup check expects.
     sql_type: []const u8,
     nullable: bool = false,
-    /// The one column `.key` names.
+    /// Whether `.key` names this column. True of several columns when the key
+    /// spans several, which is what a join table and a multi-tenant table both
+    /// are.
     key: bool = false,
-    /// The database makes the value. True for an integer key and nothing else
-    /// — see `generatedKey`.
+    /// The database makes the value. True for an integer key of one column and
+    /// nothing else — see `generatedKey`.
     generated: bool = false,
 
     /// Whether two columns describe the same thing. The name is matched by the
@@ -170,7 +172,15 @@ pub const Desc = struct {
     row: []const u8 = "",
     schema: ?[]const u8 = null,
     table: []const u8,
-    key: []const u8,
+    /// The columns that identify a row, in the order the marker wrote them —
+    /// which is also the order they go into the `PRIMARY KEY`, and therefore
+    /// the order of the index behind it.
+    ///
+    /// **A list rather than a name, and the snapshot says `.keys` because of
+    /// it.** A file written by an older `generate` says `.key` and no longer
+    /// parses; `db generate` rewrites it from the types, which is the same
+    /// thing that fixes every other snapshot disagreement.
+    keys: []const []const u8,
     columns: []const Column,
     /// The four below default to nothing so that a snapshot file carries only
     /// what a table actually has. `std.zon` omits a field equal to its default,
@@ -205,15 +215,15 @@ pub fn descOf(comptime D: type, comptime Row: type) Desc {
     return comptime blk: {
         const owner = row_mod.ownerOf(Row);
         const qualified = row_mod.qualifiedOf(owner);
-        const key = row_mod.keyOf(owner);
+        const keys = row_mod.keysOf(owner);
         const decl = @field(owner, row_mod.marker);
 
         break :blk .{
             .row = @typeName(owner),
             .schema = qualified.schema,
             .table = qualified.table,
-            .key = key,
-            .columns = columnsOf(D, owner, key),
+            .keys = keys,
+            .columns = columnsOf(D, owner, keys),
             .uniques = uniquesOf(owner, qualified.table, decl),
             .indexes = indexesOf(owner, qualified.table, decl),
             .references = referencesOf(owner, qualified.table, decl),
@@ -223,14 +233,37 @@ pub fn descOf(comptime D: type, comptime Row: type) Desc {
     };
 }
 
+/// The foreign keys `Row`'s marker declares, **with no Dialect involved.**
+///
+/// `descOf` answers this too, and asking it costs a `columnType` for every
+/// column of the table — which can refuse, for a column type the Dialect has
+/// no name for, in the middle of a question that has nothing to do with column
+/// types. The where walker asks this one, to find how two tables are joined
+/// for an `.exists`, and it has no Dialect's opinion to spend
+/// ([ADR 0171](../docs/adr/0171-a-row-over-there-is-a-condition.md)).
+pub fn foreignKeysOf(comptime Row: type) []const Reference {
+    return comptime blk: {
+        const owner = row_mod.ownerOf(Row);
+        const decl = @field(owner, row_mod.marker);
+        break :blk referencesOf(owner, row_mod.qualifiedOf(owner).table, decl);
+    };
+}
+
 // -- the columns ---------------------------------------------------------
 
-fn columnsOf(comptime D: type, comptime Row: type, comptime key: []const u8) []const Column {
+fn columnsOf(
+    comptime D: type,
+    comptime Row: type,
+    comptime keys: []const []const u8,
+) []const Column {
     comptime {
         const fields = @typeInfo(Row).@"struct".fields;
         var out: [fields.len]Column = undefined;
         for (fields, 0..) |f, i| {
-            const is_key = std.mem.eql(u8, f.name, key);
+            var is_key = false;
+            for (keys) |key| {
+                if (std.mem.eql(u8, f.name, key)) is_key = true;
+            }
             const optional = @typeInfo(f.type) == .optional;
 
             if (is_key and optional) @compileError(
@@ -244,7 +277,12 @@ fn columnsOf(comptime D: type, comptime Row: type, comptime key: []const u8) []c
                 .sql_type = D.columnType(f.type) orelse noColumnType(D, Row, f.name, f.type),
                 .nullable = optional,
                 .key = is_key,
-                .generated = is_key and generatedKey(f.type),
+                // **Only a key of one column is ever generated**, and that is
+                // the rule rather than a limitation. A sequence fills in one
+                // column; a key spanning two is made of values the program
+                // already holds — a tenant and an id, two sides of a join —
+                // so there is nothing for the database to invent.
+                .generated = is_key and keys.len == 1 and generatedKey(f.type),
             };
         }
         const frozen = out;
@@ -610,7 +648,8 @@ test "a table is described entirely from the type, and the description is a cons
 
     try testing.expectEqualStrings("users", desc.table);
     try testing.expectEqual(@as(?[]const u8, null), desc.schema);
-    try testing.expectEqualStrings("id", desc.key);
+    try testing.expectEqual(@as(usize, 1), desc.keys.len);
+    try testing.expectEqualStrings("id", desc.keys[0]);
 }
 
 test "a column's type is the one the dialect would write, and nullability is the `?`" {

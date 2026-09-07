@@ -177,7 +177,8 @@ test "a snapshot written and read back describes the same table" {
     try testing.expectEqual(@as(usize, 1), back.tables.len);
 
     const t = back.table(null, "users").?;
-    try testing.expectEqualStrings("id", t.key);
+    try testing.expectEqual(@as(usize, 1), t.keys.len);
+    try testing.expectEqualStrings("id", t.keys[0]);
     try testing.expectEqual(@as(usize, 5), t.columns.len);
     try testing.expectEqualStrings("int8", t.column("id").?.sql_type);
     try testing.expect(t.column("id").?.generated);

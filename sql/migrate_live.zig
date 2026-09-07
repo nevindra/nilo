@@ -109,6 +109,294 @@ fn lone(number: i64, name: []const u8, steps: []const migrate.Step, out: *[64]u8
     return .{ v, migrate.hashOf("", v.steps, out) };
 }
 
+// -- what the six new shapes do against a real database ------------------
+//
+// Every test below exists because the comptime half only proves the statement
+// is the string it should be. Whether the *database* agrees is a different
+// question, and it is the one that decided at least two of these designs:
+// a pattern is escaped by three `replace` calls the database runs, and a blob
+// is a call zqlite makes rather than a type nilo hands over.
+
+const Doc = struct {
+    pub const nilo_table = .{ .name = "docs", .key = .id };
+
+    id: i64,
+    name: []const u8,
+    digest: sql.Bytes,
+};
+
+const Seat = struct {
+    pub const nilo_table = .{ .name = "seats", .key = .{ .tenant_id, .id } };
+
+    tenant_id: i64,
+    id: i64,
+    label: []const u8,
+    views: i64,
+};
+
+const Partner = struct {
+    pub const nilo_table = .{ .name = "partners", .key = .id };
+
+    id: i64,
+    name: []const u8,
+};
+
+const Capability = struct {
+    pub const nilo_table = .{
+        .name = "partner_capabilities",
+        .key = .{ .partner_id, .capability },
+        .references = .{ .partner_id = .{ Partner, .id } },
+    };
+
+    partner_id: i64,
+    capability: []const u8,
+};
+
+const Slot = struct {
+    pub const nilo_table = .{ .name = "slots", .key = .id };
+
+    id: i64,
+    label: []const u8,
+    rank: ?i64,
+};
+
+test "bytes go into a BLOB and come back the same bytes" {
+    const gpa = testing.allocator;
+    var fx = try Fixture.init(gpa, "bytes");
+    defer fx.deinit(gpa);
+
+    try migrate.createMissing(&fx.db, &fx.run, &.{Doc});
+
+    // A NUL in the middle, a byte no UTF-8 decoder accepts, and a `%`. The
+    // first is what a text read would truncate at, the second is what a text
+    // read would mangle, and the third is only here because binary data does
+    // not care what SQL thinks of it.
+    const raw = [_]u8{ 0xff, 0x00, 0x25, 0x41, 0xfe, 0x00 };
+    const made = try fx.db.insert(Doc, &fx.run, .{
+        .name = "report",
+        .digest = sql.Bytes.of(&raw),
+    });
+    try testing.expectEqualSlices(u8, &raw, made.digest.bytes);
+
+    // And read back on its own, which is the path that goes through the
+    // column-type check rather than through `RETURNING`.
+    const found = (try fx.db.find(Doc, &fx.run, made.id)).?;
+    try testing.expectEqualSlices(u8, &raw, found.digest.bytes);
+    try testing.expectEqual(@as(usize, 6), found.digest.bytes.len);
+}
+
+test "the column a bytes Row creates is the column the check accepts" {
+    // The same loop every column type here has to close: `columnType` writes
+    // what `accepts` will read out of, or `generate` writes a schema that
+    // stops the server it was generated for.
+    const gpa = testing.allocator;
+    var fx = try Fixture.init(gpa, "bytescheck");
+    defer fx.deinit(gpa);
+
+    try migrate.createMissing(&fx.db, &fx.run, &.{Doc});
+    try testing.expectEqual(@as(usize, 0), try fx.db.checkSchema(&.{Doc}));
+}
+
+test "a row keyed by two columns is found by both of them" {
+    const gpa = testing.allocator;
+    var fx = try Fixture.init(gpa, "composite");
+    defer fx.deinit(gpa);
+
+    try migrate.createMissing(&fx.db, &fx.run, &.{Seat});
+
+    _ = try fx.db.insert(Seat, &fx.run, .{
+        .tenant_id = 1,
+        .id = 7,
+        .label = "one",
+        .views = 0,
+    });
+    // The same id under another tenant, which is the whole reason the key
+    // spans two columns and the row a single-column find would have got wrong.
+    _ = try fx.db.insert(Seat, &fx.run, .{
+        .tenant_id = 2,
+        .id = 7,
+        .label = "two",
+        .views = 0,
+    });
+
+    const first = (try fx.db.find(Seat, &fx.run, .{ .tenant_id = 1, .id = 7 })).?;
+    try testing.expectEqualStrings("one", first.label);
+    const second = (try fx.db.find(Seat, &fx.run, .{ .tenant_id = 2, .id = 7 })).?;
+    try testing.expectEqualStrings("two", second.label);
+    try testing.expectEqual(
+        @as(?Seat, null),
+        try fx.db.find(Seat, &fx.run, .{ .tenant_id = 3, .id = 7 }),
+    );
+}
+
+test "the composite PRIMARY KEY is a real constraint, not a clause nobody enforces" {
+    const gpa = testing.allocator;
+    var fx = try Fixture.init(gpa, "compositepk");
+    defer fx.deinit(gpa);
+
+    try migrate.createMissing(&fx.db, &fx.run, &.{Seat});
+    _ = try fx.db.insert(Seat, &fx.run, .{
+        .tenant_id = 1,
+        .id = 7,
+        .label = "one",
+        .views = 0,
+    });
+    try testing.expectError(error.AlreadyExists, fx.db.insert(Seat, &fx.run, .{
+        .tenant_id = 1,
+        .id = 7,
+        .label = "again",
+        .views = 0,
+    }));
+}
+
+test "a counter adds to its own value, so two updates in a row make two" {
+    const gpa = testing.allocator;
+    var fx = try Fixture.init(gpa, "counter");
+    defer fx.deinit(gpa);
+
+    try migrate.createMissing(&fx.db, &fx.run, &.{Seat});
+    _ = try fx.db.insert(Seat, &fx.run, .{
+        .tenant_id = 1,
+        .id = 7,
+        .label = "one",
+        .views = 41,
+    });
+
+    // No read in front of either of these, which is the point: the shape that
+    // needs one is the shape that races.
+    _ = try fx.db.update(Seat, &fx.run, .{
+        .set = .{ .views = .{ .plus = 1 } },
+        .where = .{ .tenant_id = 1, .id = 7 },
+    });
+    const bumped = (try fx.db.find(Seat, &fx.run, .{ .tenant_id = 1, .id = 7 })).?;
+    try testing.expectEqual(@as(i64, 42), bumped.views);
+
+    _ = try fx.db.update(Seat, &fx.run, .{
+        .set = .{ .views = .{ .minus = 2 } },
+        .where = .{ .tenant_id = 1, .id = 7 },
+    });
+    const down = (try fx.db.find(Seat, &fx.run, .{ .tenant_id = 1, .id = 7 })).?;
+    try testing.expectEqual(@as(i64, 40), down.views);
+}
+
+test "a search term holding a wildcard matches the wildcard and nothing else" {
+    // **The bug this operator family was built for.** Wired straight to
+    // `.like`, the term `100%` matches every label starting with `100` —
+    // including `1000`, which nobody asked for and nothing reports.
+    const gpa = testing.allocator;
+    var fx = try Fixture.init(gpa, "search");
+    defer fx.deinit(gpa);
+
+    try migrate.createMissing(&fx.db, &fx.run, &.{Slot});
+    for ([_][]const u8{ "100% cotton", "1000 threads", "a_b", "axb" }) |label| {
+        _ = try fx.db.insert(Slot, &fx.run, .{ .label = label, .rank = null });
+    }
+
+    const percent = try fx.db.select(Slot, &fx.run, .{
+        .where = .{ .label = .{ .icontains = @as([]const u8, "100%") } },
+    });
+    try testing.expectEqual(@as(usize, 1), percent.len);
+    try testing.expectEqualStrings("100% cotton", percent[0].label);
+
+    // `_` is the other one, and it is the one nobody remembers: unescaped it
+    // matches any single character, so `a_b` would also find `axb`.
+    const underscore = try fx.db.select(Slot, &fx.run, .{
+        .where = .{ .label = .{ .icontains = @as([]const u8, "a_b") } },
+    });
+    try testing.expectEqual(@as(usize, 1), underscore.len);
+    try testing.expectEqualStrings("a_b", underscore[0].label);
+}
+
+test "starts_with anchors, and a backslash in the term is still just a backslash" {
+    const gpa = testing.allocator;
+    var fx = try Fixture.init(gpa, "anchored");
+    defer fx.deinit(gpa);
+
+    try migrate.createMissing(&fx.db, &fx.run, &.{Slot});
+    for ([_][]const u8{ "alpha", "beta alpha", "a\\b", "a%b" }) |label| {
+        _ = try fx.db.insert(Slot, &fx.run, .{ .label = label, .rank = null });
+    }
+
+    const front = try fx.db.select(Slot, &fx.run, .{
+        .where = .{ .label = .{ .istarts_with = @as([]const u8, "alpha") } },
+    });
+    try testing.expectEqual(@as(usize, 1), front.len);
+
+    // The escape character itself, which is what the first of the three
+    // `replace` calls is for — and the one that breaks if the order is wrong.
+    const backslash = try fx.db.select(Slot, &fx.run, .{
+        .where = .{ .label = .{ .icontains = @as([]const u8, "a\\b") } },
+    });
+    try testing.expectEqual(@as(usize, 1), backslash.len);
+    try testing.expectEqualStrings("a\\b", backslash[0].label);
+}
+
+test "an exists narrows to the rows with a match over there, and counts the same" {
+    const gpa = testing.allocator;
+    var fx = try Fixture.init(gpa, "exists");
+    defer fx.deinit(gpa);
+
+    try migrate.createMissing(&fx.db, &fx.run, &.{ Partner, Capability });
+
+    const one = try fx.db.insert(Partner, &fx.run, .{ .name = "acme" });
+    const two = try fx.db.insert(Partner, &fx.run, .{ .name = "globex" });
+    _ = try fx.db.insert(Capability, &fx.run, .{
+        .partner_id = one.id,
+        .capability = "vision",
+    });
+    _ = try fx.db.insert(Capability, &fx.run, .{
+        .partner_id = two.id,
+        .capability = "audio",
+    });
+
+    const with_vision = try fx.db.select(Partner, &fx.run, .{
+        .where = .{ .exists = .{
+            .{ .in = Capability, .where = .{ .capability = @as([]const u8, "vision") } },
+        } },
+        .order = .{ .name = .asc },
+    });
+    try testing.expectEqual(@as(usize, 1), with_vision.len);
+    try testing.expectEqualStrings("acme", with_vision[0].name);
+
+    // The count runs the same subquery, which is what makes a page's total
+    // agree with the page — the reason `db.count` shares the walker at all.
+    try testing.expectEqual(@as(usize, 1), try fx.db.count(Partner, &fx.run, .{
+        .where = .{ .exists = .{
+            .{ .in = Capability, .where = .{ .capability = @as([]const u8, "vision") } },
+        } },
+    }));
+
+    const without = try fx.db.select(Partner, &fx.run, .{
+        .where = .{ .not_exists = .{
+            .{ .in = Capability, .where = .{ .capability = @as([]const u8, "vision") } },
+        } },
+    });
+    try testing.expectEqual(@as(usize, 1), without.len);
+    try testing.expectEqualStrings("globex", without[0].name);
+}
+
+test "an order term decides where NULLs go, rather than the database deciding" {
+    // SQLite sorts NULLs first ascending and Postgres sorts them last, so this
+    // is the one order term whose answer used to depend on which database was
+    // underneath — and a page boundary that moves with the database is a page
+    // that skips rows.
+    const gpa = testing.allocator;
+    var fx = try Fixture.init(gpa, "nulls");
+    defer fx.deinit(gpa);
+
+    try migrate.createMissing(&fx.db, &fx.run, &.{Slot});
+    _ = try fx.db.insert(Slot, &fx.run, .{ .label = "has", .rank = 1 });
+    _ = try fx.db.insert(Slot, &fx.run, .{ .label = "none", .rank = null });
+
+    const last = try fx.db.select(Slot, &fx.run, .{ .order = .{ .rank = .asc_nulls_last } });
+    try testing.expectEqualStrings("has", last[0].label);
+    try testing.expectEqualStrings("none", last[1].label);
+
+    const first = try fx.db.select(Slot, &fx.run, .{ .order = .{ .rank = .asc_nulls_first } });
+    try testing.expectEqualStrings("none", first[0].label);
+    try testing.expectEqualStrings("has", first[1].label);
+}
+
 test "createMissing creates every table the types describe, in reference order" {
     const gpa = testing.allocator;
     var fx = try Fixture.init(gpa, "create");

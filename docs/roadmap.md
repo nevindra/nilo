@@ -1162,22 +1162,7 @@ is the smaller of the two jobs.
 have been ([§9](../bench/result/sql.md),
 [`spike/sqlite_facts`](../spike/sqlite_facts/)). This is the one that cannot.
 
-**3. An update cannot change a column using its own value.** `.set` binds
-values, so `SET "views" = "views" + 1` has no spelling and an atomic counter is
-`db.exec` with the SQL written out. Read-modify-write is the alternative, which
-is two round trips and wrong under load unless it is wrapped in a transaction
-with `.lock = .update` — so the shape everybody reaches for first is the one
-that races. What fits is the shape a condition already has: a value that is a
-struct of operators rather than a value, `.set = .{ .views = .{ .plus = 1 } }`,
-with the column name written into the fragment and the operand bound. It is one
-more branch in `updating` in `sql/statement.zig` and it keeps the statement a
-constant.
-
-**Waiting on: a design** for which operators are in it. `plus`/`minus` on a
-number is obvious; concatenation, `coalesce` and array append are each a
-dialect disagreement, and a set of one operator is not worth a mechanism.
-
-**4. A watched statement cannot say which request it came from.**
+**3. A watched statement cannot say which request it came from.**
 `db.watching` shows the text, the plan, the duration and the rows
 ([ADR 0137](./adr/0137-a-statement-can-be-watched.md)), so *which statement is
 slow* is answerable. *Slow on which page* is not: a `Sent` carries no request
@@ -1315,21 +1300,6 @@ check — calling `checking` and getting a warning because the default pool had
 dialled nothing — is closed
 ([ADR 0144](./adr/0144-a-check-dials-the-connection-it-needs.md)).
 
-**A key is one column, so a composite key has no `find` and no batch update.**
-`row.keyOf` answers a single name, `statement.find` writes one `=` against it,
-and `updateMany` joins on it. A table keyed by `(tenant_id, id)` — which is what
-every multi-tenant schema is — reaches `db.one` with the condition written out
-and has no batch update at all. `.key = .{ .tenant_id, .id }` is the spelling
-the rest of the module already uses for a tuple of columns, since
-`conflictColumns` reads exactly that shape for an upsert target.
-
-**Waiting on: ready.** A caller has now reached it, on a schema whose join
-tables are keyed `(partner_id, capability)`. The `find` half is small;
-`updateMany` joining on two columns is a second `AND` in the fragment and
-nothing else. The third thing the same shape used to cost — `insertOrIgnore`
-demanding a key `DO NOTHING` never writes — was separable and is closed
-([ADR 0143](./adr/0143-do-nothing-has-no-key-to-leave-out.md)).
-
 **An upsert cannot name a constraint or a partial index.** `ON CONFLICT` takes
 only a column tuple, so a unique constraint by name
 (`ON CONFLICT ON CONSTRAINT users_email_key`) and a partial unique index
@@ -1344,22 +1314,21 @@ Row plus a conflict target without giving up the column check.
 to take on trust, which is the one place it takes nothing on trust, so the
 design question is real rather than clerical.
 
-**`like` hands `%` and `_` escaping to the caller and nothing says so.**
-`.email = .{ .like = text }` puts the caller's text in the parameter, so a
-user-supplied search term containing `%` matches far more than it should and one
-containing `_` matches a character it should not. Nothing is smuggled — it is a
-bound parameter — but a search box wired straight to `.like` is wrong in a way
-that only shows up on the input nobody tried. Every caller ends up writing the
-same escape.
+**`.ilike` writes the word `ILIKE` on both Dialects, and SQLite has no such
+word.** The operator table in `where.zig` spells its own SQL and predates the
+second Dialect, so `.email = .{ .ilike = text }` compiles against
+`sql.Sqlite` and comes back a syntax error from the database. Nobody is using it
+successfully, because it has never worked there.
 
-**Waiting on: a design.** A caller with a search box on most of its list
-endpoints has confirmed it, and confirmed that the design problem is the real
-part: they will write the escape at each call site meanwhile. The fix everybody
-wants is `contains`, `starts_with` and `ends_with`, which build the pattern
-*and* escape it — and that means an
-allocation per condition in a module whose whole claim is that a statement costs
-none, plus an `ESCAPE` clause the two Dialects spell the same way but SQLite
-applies differently to `LIKE` on a `BLOB`.
+Found while building the pattern operators, which go through `dialect.pattern`
+precisely so they do not inherit this
+([ADR 0173](./adr/0173-the-database-escapes-the-pattern-it-is-going-to-match.md)).
+It was left alone rather than changed under cover of another feature.
+
+**Waiting on: ready.** The fix is a Refusal naming the dialect, the way `.lock`
+and `insertMany` already refuse there — turning a runtime syntax error into a
+compile error, which is strictly better because no working code can depend on
+it. `.like` is unaffected: both databases have that word.
 
 **`selectFor` and its six siblings are Postgres-only.** `sql.selectFor(Row,
 Options)` and the rest hard-code `dialect.Postgres`, so a program on
@@ -1398,35 +1367,21 @@ URL that is correct.
 **Waiting on: a design** — which parameters are safe to drop, which are worth
 carrying, and whether the refusal names the two it knows.
 
-**There is no binary column.** `Postgres.accepts` answers `text`, `varchar`,
-`bpchar`, `char` and `name` for a `[]const u8`, and nothing anywhere answers
-`bytea`, so a Row cannot read one. SQLite is the same the other way round:
-`acceptsSqlite` already lists `BLOB` for a byte slice, and nothing can write one
-there, because `WireWrite` sends a `[]const u8` as text and zqlite needs its
-`Blob` wrapper to do anything else. A file hash, a sealed token, a signature, an
-encoded document — the most ordinary column this module cannot name.
-`sql.AsText("bytea")` reaches it through Postgres's hex text and costs a
-conversion each way, and nothing anywhere says so.
+**A deep page is still `OFFSET`, and nothing writes down the keyset form.**
+The database counts past every row it is not going to answer with, which is the
+one pagination shape that gets slower as the table grows. The sort can be made
+stable now that an order term says where NULLs go
+([ADR 0173](./adr/0173-the-database-escapes-the-pattern-it-is-going-to-match.md)
+is a different entry; the order half is
+[ADR 0171](./adr/0171-a-row-over-there-is-a-condition.md)'s neighbour in the
+same cycle), so what is left is a condition the caller writes by hand — and a
+guide page saying which one.
 
-**Waiting on: a design.** The `nilo_column`/`nilo_read`/`nilo_write` protocol
-([ADR 0055](./adr/0055-a-column-type-can-come-from-outside-this-module.md)) is
-text on the wire by definition, so bytes want a second protocol beside it rather
-than another instance of it.
+`DISTINCT` is not in this entry and is not coming: over one table with a key
+every row appears once, so asking for it is almost always a sign the query
+wanted something else. ADR 0058 makes the same argument for `UNION`.
 
-**A `SELECT` has four options and a listing page wants three more.** No
-`DISTINCT`. No `NULLS FIRST`/`NULLS LAST` on an order term, which is what a
-nullable sort column needs before it can be paginated at all — the two dialects
-disagree by default, Postgres putting NULLs last ascending and SQLite putting
-them first, so a Row that sorts on one is already not portable. And no keyset
-form, so a deep page is `OFFSET` and the database counts past every row it is
-not going to answer with, which is the one pagination shape that gets slower as
-the table grows.
-
-The first two are a widening of `.order`, which today takes a direction and
-nothing else. The third is a condition the caller can write by hand once the
-sort is stable, so what is missing there is the guide saying so.
-
-**Waiting on: a caller.**
+**Waiting on: ready.** It is a guide page rather than a feature.
 
 **The SQLite half has no live test against contention.** The Wire's own tests
 run one process, so the case the reader and writer split exists for has a
@@ -1570,19 +1525,23 @@ Wires.
 
 ### Not decided
 
-**Whether the line past one table moves.** The module reads and writes a single
-table and refuses everything past *one table, conditions that filter rows*
-([ADR 0039](./adr/0039-the-shape-of-a-query-is-settled-while-compiling.md)),
-with `db.raw` as the way out. A join is where dialects disagree most, and a
-builder's surface grows with the builder.
+**Whether the line past one table moves further.** It moved once:
+`.exists` is a condition and ships
+([ADR 0171](./adr/0171-a-row-over-there-is-a-condition.md)). What is still
+refused is joins, nested rows fetched with their parent, aggregates and
+`GROUP BY`, with `db.raw` as the way out.
 
-Joins, nested rows fetched with their parent, aggregates, `GROUP BY` and
-subqueries are all downstream of this one answer, which is why they are a line
-here rather than five items above.
+**And the four are now grouped for a reason rather than by habit.** ADR 0171
+names the two properties that let `EXISTS` across: it does not change the column
+list, so the Row still describes the answer, and it does not change the row
+count, so `.limit` still means what the caller thinks. Every one of the four
+above breaks at least one. A join to a one-to-many breaks both, and the second
+of those is the expensive one — the query runs, the page renders, and some rows
+never appear.
 
-**What would settle it: a shape that keeps the statement a comptime constant.**
-Every property in ADR 0039 is downstream of that one, so anything that gives it
-up is a different module.
+**What would settle it: a shape that keeps those two properties and the
+statement a comptime constant.** Every property in ADR 0039 is downstream of the
+last one, so anything that gives it up is a different module.
 
 ### Measured against Drizzle
 
@@ -1615,8 +1574,10 @@ What is left splits three ways.
   ([0059](./adr/0059-a-round-trip-is-not-the-cost-worth-chasing.md)); automatic
   read-replica routing and a query cache
   ([0060](./adr/0060-a-second-database-is-a-second-type.md)).
-- **Waiting on the one-table line**: joins, nested rows, aggregates and
-  subqueries. The tooling commands wait on Next 1 rather than on a decision:
+- **Waiting on the one-table line**: joins, nested rows and aggregates.
+  Subqueries came off this list — `.exists` is a condition and ships
+  ([ADR 0171](./adr/0171-a-row-over-there-is-a-condition.md)). The tooling
+  commands wait on Next 1 rather than on a decision:
   [ADR 0153](./adr/0153-a-migration-is-a-diff-against-a-snapshot.md) made it and
   the library under them is built.
 - **Nobody has looked**: row-level security, and Postgres extensions.

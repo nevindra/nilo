@@ -19,6 +19,74 @@ five places where it wrote the untyped call while a typed one existed, with no
 error message behind any of them — is a named failure mode rather than a change:
 [ADR 0168](./docs/adr/0168-an-escape-hatch-that-costs-nothing-teaches-nothing.md).
 
+- **`nilo_sql`: six shapes a listing page needed, and one of them was a wrong
+  answer rather than a missing one.** Each is a widening of a shape that was
+  already there, and all six cost nothing on ADR 0018's four axes — every one is
+  comptime string concatenation and the parameter tuple it was already sending.
+
+  - **`contains`, `starts_with`, `ends_with`, and their folding and negated
+    spellings** — twelve operators in all
+    ([ADR 0173](./docs/adr/0173-the-database-escapes-the-pattern-it-is-going-to-match.md)).
+    **Change your search boxes.** `.name = .{ .like = term }` never escaped the
+    caller's text, so a term holding `%` matched far more than it should and one
+    holding `_` matched a character it should not — no error, and only on the
+    input nobody tried. The pattern is now built and escaped inside the
+    statement, so this costs no allocation:
+
+    ```zig
+    .where = .{ .name = .{ .icontains = search } }
+    ```
+
+    On SQLite the case-sensitive half (`contains`) is a Refusal naming the
+    dialect, because its `LIKE` folds ASCII case and cannot be told not to by a
+    statement. `icontains` is what that database does.
+
+  - **A key can span several columns**
+    ([ADR 0172](./docs/adr/0172-a-key-is-as-many-columns-as-it-takes.md)).
+    `.key = .{ .tenant_id, .id }`, and `db.find` then takes a struct naming
+    every column of it — named rather than positional, because two `i64` columns
+    written the other way round would find the wrong row and say nothing.
+    `updateMany` joins on all of them, and `CREATE TABLE` writes a
+    `PRIMARY KEY (…)` constraint.
+
+    **Breaking, and it is the snapshot:** `table.Desc.key` became `Desc.keys`, so
+    a `.zon` snapshot written by an older `generate` no longer parses. Run
+    `db generate` to rewrite it from your types.
+
+  - **`.exists` and `.not_exists`**
+    ([ADR 0171](./docs/adr/0171-a-row-over-there-is-a-condition.md)) — the first
+    time the *one table* line has moved, and it moved to where the two
+    properties behind it actually hold. The join comes out of the child Row's
+    own `.references`, so there is nothing new to write at the call site:
+
+    ```zig
+    .where = .{ .exists = .{
+        .{ .in = PartnerCapability, .where = .{ .capability = cap } },
+    } }
+    ```
+
+    `exists` and `not_exists` are now reserved column names, beside `any`. A Row
+    with a column called either is refused by name.
+
+  - **`sql.Bytes` — a `bytea` and a `BLOB`**
+    ([ADR 0174](./docs/adr/0174-bytes-are-a-type-not-a-second-protocol.md)). A
+    file hash, a sealed token, a signature. `sql.AsText("bytea")` still works and
+    is now the wrong answer: it goes through Postgres's hex printing and costs a
+    conversion each way.
+
+  - **`.set = .{ .views = .{ .plus = 1 } }`** — arithmetic on the column's own
+    value, so an atomic counter is one statement. Without it the shape everybody
+    reaches for is read-modify-write, which is two round trips and races unless
+    it is wrapped in a transaction with `.lock = .update`. `plus` and `minus`
+    only, on a column holding a number; a nullable one is a Refusal, because
+    `views = views + 1` on a NULL stores NULL and reports one row changed.
+
+  - **`.order = .{ .rank = .asc_nulls_last }`** and its three siblings. Postgres
+    sorts NULLs last ascending and SQLite sorts them first, so a Row ordered on a
+    nullable column already answered differently on the two and nothing said so.
+    `.asc` and `.desc` still mean *the database's own default*, so every order
+    term you have written compiles to the same SQL it did.
+
 - **`app.writeOpenApi(w)` — the API description, with no server**
   ([ADR 0167](./docs/adr/0167-the-document-is-a-build-artefact.md)). The
   document was reachable only from `GET /openapi.json` on a listening server,

@@ -1516,7 +1516,8 @@ test "the hash is chained, so editing one version moves every version after it" 
 test "the ledger is an ordinary Row, so the same machinery creates and checks it" {
     const desc = comptime table_mod.descOf(Pg, Applied);
     try testing.expectEqualStrings("nilo_migrations", desc.table);
-    try testing.expectEqualStrings("version", desc.key);
+    try testing.expectEqual(@as(usize, 1), desc.keys.len);
+    try testing.expectEqualStrings("version", desc.keys[0]);
     try testing.expect(desc.column("version").?.key);
 
     // And its DDL is a constant like any other table's.

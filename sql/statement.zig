@@ -47,7 +47,42 @@ const types_mod = @import("types.zig");
 
 /// The direction an order term reads. Always comptime — which way a sort runs
 /// is shape, and a sort direction chosen at runtime is two statements.
-pub const Direction = enum { asc, desc };
+///
+/// **Four of the six say where NULLs go, and they exist because the two
+/// databases disagree about it.** Postgres sorts NULLs last ascending;
+/// SQLite sorts them first. So a Row ordered on a nullable column already
+/// answers differently on the two, and nothing said so — which also means a
+/// nullable sort column cannot be paginated, because the first page's tail
+/// and the second page's head are decided by an order the caller never wrote.
+///
+/// `.asc` and `.desc` keep meaning *the database's own default*, so every
+/// order term written before these existed compiles to the same SQL it did.
+/// Saying `.asc_nulls_last` is how a caller stops depending on that default.
+pub const Direction = enum {
+    asc,
+    desc,
+    asc_nulls_first,
+    asc_nulls_last,
+    desc_nulls_first,
+    desc_nulls_last,
+
+    /// Which way the sort runs, with the NULL placement set aside.
+    pub fn descending(self: Direction) bool {
+        return switch (self) {
+            .desc, .desc_nulls_first, .desc_nulls_last => true,
+            .asc, .asc_nulls_first, .asc_nulls_last => false,
+        };
+    }
+
+    /// Where NULLs go, or `null` for the two that leave it to the database.
+    pub fn placement(self: Direction) ?dialect_mod.Nulls {
+        return switch (self) {
+            .asc, .desc => null,
+            .asc_nulls_first, .desc_nulls_first => .first,
+            .asc_nulls_last, .desc_nulls_last => .last,
+        };
+    }
+};
 
 /// The name a statement is prepared under, on a connection that keeps plans.
 ///
@@ -290,7 +325,10 @@ fn tally(
 pub fn find(comptime D: type, comptime Row: type, comptime K: type) Statement {
     return comptime blk: {
         dialect_mod.assertDialect(D);
-        const key = row_mod.keyOf(Row);
+        const keys = row_mod.keysOf(Row);
+        if (keys.len > 1) break :blk findComposite(D, Row, keys, K);
+
+        const key = keys[0];
         assertKeyValue(Row, key, K);
 
         break :blk .{
@@ -309,6 +347,109 @@ pub fn find(comptime D: type, comptime Row: type, comptime K: type) Statement {
             .reserve = 1,
         };
     };
+}
+
+/// The same statement for a Row identified by several columns, where the
+/// caller hands over a struct naming each of them.
+///
+/// ```zig
+/// db.find(Membership, c, .{ .tenant_id = tenant, .id = id })
+/// ```
+///
+/// **A struct rather than a tuple, and that is the whole DX argument.** A
+/// tuple would be positional, and a key of `(tenant_id, id)` whose two columns
+/// are both `i64` would then silently find the wrong row when somebody wrote
+/// them the other way round. Named fields make that a Refusal at `zig build`,
+/// which is what every other option struct in this module already buys.
+fn findComposite(
+    comptime D: type,
+    comptime Row: type,
+    comptime keys: []const []const u8,
+    comptime K: type,
+) Statement {
+    comptime {
+        assertCompositeKey(Row, keys, K);
+
+        var conditions: []const u8 = "";
+        var paths: []const where_mod.Path = &.{};
+        var params: []const where_mod.Param = &.{};
+
+        // Numbered in the **key's** order rather than the caller's, so two
+        // call sites writing the fields the other way round still compile to
+        // one statement and prepare under one name.
+        for (keys, 0..) |key, i| {
+            if (i > 0) conditions = conditions ++ " AND ";
+            conditions = conditions ++ D.quote(key) ++ " = " ++ D.bindAs(
+                D.placeholder(i + 1),
+                row_mod.ColumnType(Row, key),
+                false,
+            );
+            paths = paths ++ &[_]where_mod.Path{&[_][]const u8{key}};
+            params = params ++ &[_]where_mod.Param{.{ .column = key }};
+        }
+
+        return .{
+            .sql = "SELECT " ++ columnList(D, Row) ++
+                " FROM " ++ relation(D, Row) ++
+                " WHERE " ++ conditions ++ D.limit("1"),
+            .paths = paths,
+            .params = params,
+            .reserve = 1,
+        };
+    }
+}
+
+/// What a composite key is handed as: a struct naming every one of its
+/// columns, and none that are not.
+fn assertCompositeKey(
+    comptime Row: type,
+    comptime keys: []const []const u8,
+    comptime K: type,
+) void {
+    comptime {
+        var wanted: []const u8 = "";
+        for (keys, 0..) |k, i| {
+            wanted = wanted ++ (if (i == 0) "" else ", ") ++ "." ++ k ++ " = …";
+        }
+        const shape = "  It takes every column of the key, by name: " ++
+            "`db.find(Row, c, .{ " ++ wanted ++ " })`.";
+
+        const info = switch (@typeInfo(K)) {
+            .@"struct" => |s| s,
+            else => @compileError(
+                "nilo: `db.find` on " ++ @typeName(Row) ++ ", which is keyed by " ++
+                    row_mod.keyList(Row) ++ ", was given a " ++ @typeName(K) ++ ".\n" ++ shape,
+            ),
+        };
+        if (info.is_tuple) @compileError(
+            "nilo: `db.find` on " ++ @typeName(Row) ++ " was given a tuple where its key " ++
+                "goes.\n  A tuple is positional, and two key columns of the same type " ++
+                "written the other way round would find the wrong row and report nothing.\n" ++
+                shape,
+        );
+
+        for (info.fields) |f| {
+            if (!row_mod.isKey(Row, f.name)) {
+                if (row_mod.hasColumn(Row, f.name)) @compileError(
+                    "nilo: `db.find` on " ++ @typeName(Row) ++ " was given `." ++ f.name ++
+                        "`, which is a column but not part of its key " ++
+                        row_mod.keyList(Row) ++ ".\n" ++
+                        "  A find identifies one row by its key. Narrowing on another " ++
+                        "column is `db.one`, which takes a whole condition.",
+                );
+                row_mod.noSuchColumn(Row, f.name, "`db.find`");
+            }
+        }
+        for (keys) |key| {
+            if (!@hasField(K, key)) @compileError(
+                "nilo: `db.find` on " ++ @typeName(Row) ++ " does not say `." ++ key ++
+                    "`, which is part of its key " ++ row_mod.keyList(Row) ++ ".\n" ++
+                    "  Leaving one out would match every row that shares the rest, and " ++
+                    "`LIMIT 1` would then answer with whichever the database reached " ++
+                    "first.\n" ++ shape,
+            );
+        }
+    }
 }
 
 /// A key is one value. A struct where one goes is almost always a condition
@@ -572,21 +713,29 @@ pub fn updateMany(comptime D: type, comptime Row: type, comptime V: type) Statem
             ),
         };
 
-        const key = row_mod.keyOf(Row);
-        var has_key = false;
-        for (info.fields) |f| {
-            if (std.mem.eql(u8, f.name, key)) has_key = true;
+        const keys = row_mod.keysOf(Row);
+        for (keys) |key| {
+            var has_key = false;
+            for (info.fields) |f| {
+                if (std.mem.eql(u8, f.name, key)) has_key = true;
+            }
+            // The key list is named only when there is more than one column in
+            // it. On the ordinary Row it would repeat the column the sentence
+            // has already said, and a message that pads is a message people
+            // stop reading.
+            if (!has_key) @compileError(
+                "nilo: a batch update of " ++ @typeName(Row) ++ " does not carry `" ++ key ++
+                    "`" ++ (if (keys.len > 1) ", which is part of its key " ++
+                    row_mod.keyList(Row) else "") ++ ".\n" ++
+                    "  Every row in a batch is found by its key, because the join is " ++
+                    "the condition — there is no `.where` to write instead. Add `" ++ key ++
+                    "` to the struct the rows are written as.",
+            );
         }
-        if (!has_key) @compileError(
-            "nilo: a batch update of " ++ @typeName(Row) ++ " does not carry `" ++ key ++
-                "`.\n  Every row in a batch is found by its key, because the join is " ++
-                "the condition — there is no `.where` to write instead. Add `" ++ key ++
-                "` to the struct the rows are written as.",
-        );
-        if (info.fields.len < 2) @compileError(
+        if (info.fields.len < keys.len + 1) @compileError(
             "nilo: a batch update of " ++ @typeName(Row) ++ " has nothing to set.\n" ++
-                "  It carries `" ++ key ++ "` and no other column, so every row would " ++
-                "be found and then left alone.",
+                "  It carries " ++ row_mod.keyList(Row) ++ " and no other column, so every " ++
+                "row would be found and then left alone.",
         );
 
         var arrays: []const u8 = "";
@@ -613,7 +762,7 @@ pub fn updateMany(comptime D: type, comptime Row: type, comptime V: type) Statem
             // `SET "id" = v."id"` without complaint and renumber nothing,
             // but it is a column in the SET list that can never change and
             // reads as though it might — the same argument `upserting` makes.
-            if (!std.mem.eql(u8, f.name, key)) {
+            if (!row_mod.isKey(Row, f.name)) {
                 if (written > 0) sets = sets ++ ", ";
                 sets = sets ++ D.quote(f.name) ++ " = " ++ batch_source ++ "." ++ D.quote(f.name);
                 written += 1;
@@ -623,13 +772,21 @@ pub fn updateMany(comptime D: type, comptime Row: type, comptime V: type) Statem
             params = params ++ &[_]where_mod.Param{.{ .column = f.name, .list = true }};
         }
 
-        const quoted_key = D.quote(key);
+        // One `AND` per key column, which is the whole of what a composite key
+        // costs a batched update.
+        var joined: []const u8 = "";
+        for (keys, 0..) |key, i| {
+            const quoted_key = D.quote(key);
+            if (i > 0) joined = joined ++ " AND ";
+            joined = joined ++ batch_target ++ "." ++ quoted_key ++
+                " = " ++ batch_source ++ "." ++ quoted_key;
+        }
+
         break :blk .{
             .sql = "UPDATE " ++ relation(D, Row) ++ " AS " ++ batch_target ++
                 " SET " ++ sets ++
                 " FROM unnest(" ++ arrays ++ ") AS " ++ batch_source ++ "(" ++ aliases ++ ")" ++
-                " WHERE " ++ batch_target ++ "." ++ quoted_key ++
-                " = " ++ batch_source ++ "." ++ quoted_key ++
+                " WHERE " ++ joined ++
                 " RETURNING " ++ columnListFrom(D, Row, batch_target ++ "."),
             .paths = paths,
             .params = params,
@@ -791,11 +948,15 @@ fn upserting(
         // ([ADR 0143](../docs/adr/0143-do-nothing-has-no-key-to-leave-out.md)).
         // The comptime `if` prunes the call, so the Row never has to answer a
         // question this statement does not ask.
-        const key = if (action == .update) row_mod.keyOf(Row) else "";
+        const keys: []const []const u8 = if (action == .update) row_mod.keysOf(Row) else &.{};
         var sets: []const u8 = "";
         var written: usize = 0;
         for (@typeInfo(V).@"struct".fields) |f| {
-            if (std.mem.eql(u8, key, f.name)) continue;
+            var is_key = false;
+            for (keys) |key| {
+                if (std.mem.eql(u8, key, f.name)) is_key = true;
+            }
+            if (is_key) continue;
             var is_target = false;
             for (targets) |name| {
                 if (std.mem.eql(u8, name, f.name)) is_target = true;
@@ -811,10 +972,10 @@ fn upserting(
 
         if (action == .update and written == 0) @compileError(
             "nilo: `db.insertOrUpdate` on " ++ @typeName(Row) ++ " has nothing to set.\n" ++
-                "  Every column it was given is either the conflict target or the key `" ++
-                key ++ "`, and the update half writes neither — the first is the value the " ++
-                "rows were matched on, and the second identifies the row that is already " ++
-                "there.\n" ++
+                "  Every column it was given is either the conflict target or part of the " ++
+                "key " ++ row_mod.keyList(Row) ++ ", and the update half writes neither — " ++
+                "the first is the value the rows were matched on, and the second " ++
+                "identifies the row that is already there.\n" ++
                 "  `db.insertOrIgnore` is the statement with nothing to set, and says so.",
         );
 
@@ -835,6 +996,117 @@ fn upserting(
             .reserve = 1,
         };
     };
+}
+
+/// The arithmetic a `.set` may do to the column's **own** value, rather than
+/// replacing it.
+///
+/// ```zig
+/// .set = .{ .views = .{ .plus = 1 } }
+/// ```
+/// ```sql
+/// SET "views" = "views" + $1
+/// ```
+///
+/// **This exists because the shape everybody reaches for first is the one that
+/// races.** Without it an atomic counter is read-modify-write: two round trips,
+/// and two requests that both read 7 both write 8. Getting it right meant a
+/// transaction with `.lock = .update` around a read the caller had to remember
+/// to write — so the correct version was longer, slower and easy to leave out,
+/// which is the worst arrangement a library can offer.
+///
+/// **Two operators and no more, and that is the decision.** `+` and `-` are
+/// spelled the same by every database and mean the same thing on every number.
+/// Concatenation, `coalesce` and array append are each a place the two Dialects
+/// disagree, so each would be a Dialect declaration rather than a row in this
+/// table — and none of them has a caller yet.
+const SetOp = struct {
+    name: []const u8,
+    spelling: []const u8,
+};
+
+const set_ops = [_]SetOp{
+    .{ .name = "plus", .spelling = "+" },
+    .{ .name = "minus", .spelling = "-" },
+};
+
+/// Whether a `.set` value is arithmetic on the column rather than a new value
+/// for it.
+///
+/// **The column's own type wins, and that check is load-bearing rather than
+/// defensive.** A `Json(T)` whose payload happens to have a field called `plus`
+/// is a document being written, not an addition — so a value whose type is
+/// exactly what the column reads is never read as an operator, the same way
+/// `assertKeyValue` tells a `Uuid` key from a condition written by habit.
+fn setOperator(
+    comptime Row: type,
+    comptime column: []const u8,
+    comptime T: type,
+) ?SetOp {
+    comptime {
+        const F = row_mod.ColumnType(Row, column);
+        if (T == F or T == ?F) return null;
+        const info = switch (@typeInfo(T)) {
+            .@"struct" => |s| s,
+            else => return null,
+        };
+        if (info.is_tuple or info.fields.len == 0) return null;
+
+        var found: ?SetOp = null;
+        for (info.fields) |f| {
+            for (set_ops) |op| {
+                if (std.mem.eql(u8, f.name, op.name)) {
+                    // Two operators on one column would have to compose, and
+                    // `views + 1 - 2` is a sum somebody wrote as two thoughts.
+                    // The message is worth more than the composition.
+                    if (found != null) @compileError(
+                        "nilo: `.set` on column `" ++ column ++ "` of " ++ @typeName(Row) ++
+                            " was given more than one operator.\n" ++
+                            "  A column is changed once per statement. Write the arithmetic " ++
+                            "out: `.{ .plus = a - b }`.",
+                    );
+                    found = op;
+                    break;
+                }
+            } else return null;
+        }
+        return found;
+    }
+}
+
+/// An operator only means something on a number, and on a column that has one.
+///
+/// **The optional half is the one that costs a debugging session.**
+/// `SET "views" = "views" + $1` with `views` NULL stores NULL: the statement
+/// runs, reports one row changed, and the counter is gone. That is the same
+/// shape as `= NULL` in a condition — legal SQL, no error, wrong answer — and
+/// it is refused here for the same reason (ADR 0039).
+fn assertCountable(
+    comptime Row: type,
+    comptime column: []const u8,
+    comptime op: SetOp,
+) void {
+    comptime {
+        const F = row_mod.ColumnType(Row, column);
+        if (@typeInfo(F) == .optional) @compileError(
+            "nilo: `.set = .{ ." ++ column ++ " = .{ ." ++ op.name ++ " = … } }` on " ++
+                @typeName(Row) ++ ", whose `" ++ column ++ "` is " ++ @typeName(F) ++ ".\n" ++
+                "  Arithmetic on a column that may be NULL stores NULL: the statement " ++
+                "runs, says one row changed, and the value is gone. Make the column " ++
+                "`NOT NULL` with a default of 0, or write the `coalesce` out with " ++
+                "`db.exec`.",
+        );
+        switch (@typeInfo(F)) {
+            .int, .float => {},
+            else => @compileError(
+                "nilo: `.set = .{ ." ++ column ++ " = .{ ." ++ op.name ++ " = … } }` on " ++
+                    @typeName(Row) ++ ", whose `" ++ column ++ "` is " ++ @typeName(F) ++ ".\n" ++
+                    "  `" ++ op.name ++ "` is arithmetic, so it needs a column holding a " ++
+                    "number. A new value for this column is written plainly: `.set = .{ ." ++
+                    column ++ " = value }`.",
+            ),
+        }
+    }
 }
 
 /// The option names an `UPDATE` takes.
@@ -901,12 +1173,23 @@ fn updating(
                 row_mod.noSuchColumn(Row, f.name, "`.set`");
             }
             if (i > 0) sql = sql ++ ", ";
-            sql = sql ++ D.quote(f.name) ++ " = " ++ D.bindAs(
+            const quoted = D.quote(f.name);
+            const bound = D.bindAs(
                 D.placeholder(next),
                 row_mod.ColumnType(Row, f.name),
                 false,
             );
-            paths = paths ++ &[_]where_mod.Path{&[_][]const u8{ "set", f.name }};
+            // Arithmetic on the column's own value, or a new value for it.
+            // The column name goes into the fragment and only the operand is
+            // bound, so the statement is the same constant either way.
+            if (setOperator(Row, f.name, f.type)) |op| {
+                assertCountable(Row, f.name, op);
+                sql = sql ++ quoted ++ " = " ++ quoted ++ " " ++ op.spelling ++ " " ++ bound;
+                paths = paths ++ &[_]where_mod.Path{&[_][]const u8{ "set", f.name, op.name }};
+            } else {
+                sql = sql ++ quoted ++ " = " ++ bound;
+                paths = paths ++ &[_]where_mod.Path{&[_][]const u8{ "set", f.name }};
+            }
             params = params ++ &[_]where_mod.Param{.{ .column = f.name }};
             next += 1;
         }
@@ -1004,12 +1287,19 @@ fn orderBy(comptime D: type, comptime Row: type, comptime T: type) []const u8 {
             if (f.type != Direction and f.type != @TypeOf(.enum_literal)) @compileError(
                 "nilo: `.order` on column `" ++ f.name ++ "` was given a " ++
                     @typeName(f.type) ++ ".\n" ++
-                    "  A direction is `.asc` or `.desc`, and it is settled while " ++
-                    "compiling — a sort chosen at run time is two statements.",
+                    "  A direction is `.asc` or `.desc` — or one of the four that also " ++
+                    "say where NULLs go, `.asc_nulls_last` and its three siblings. It is " ++
+                    "settled while compiling: a sort chosen at run time is two statements.",
             );
             const direction: Direction = writtenValue(T, f.name, Direction);
             if (i > 0) out = out ++ ", ";
-            out = out ++ D.quote(f.name) ++ (if (direction == .asc) " ASC" else " DESC");
+            out = out ++ D.quote(f.name) ++ (if (direction.descending()) " DESC" else " ASC");
+            // Written only when the caller asked, so an order term that says
+            // nothing about NULLs compiles to exactly the text it always did.
+            if (direction.placement()) |where_nulls| {
+                out = out ++ (D.nulls(where_nulls) orelse
+                    dialect_mod.noNullsOrder(D, Row, f.name));
+            }
         }
         return out;
     }
@@ -1240,6 +1530,44 @@ test "several order terms keep the order they were written in" {
     ));
 }
 
+test "an order term can say where NULLs go, which is the half neither database agrees on" {
+    try testing.expect(std.mem.endsWith(
+        u8,
+        sqlOf(.{ .order = .{ .created_at = .desc_nulls_last } }),
+        "ORDER BY \"created_at\" DESC NULLS LAST",
+    ));
+    try testing.expect(std.mem.endsWith(
+        u8,
+        sqlOf(.{ .order = .{ .created_at = .asc_nulls_first } }),
+        "ORDER BY \"created_at\" ASC NULLS FIRST",
+    ));
+}
+
+test "a plain asc or desc writes what it always wrote, so nothing that exists changed" {
+    // The whole reason `.asc` and `.desc` were not given a placement: every
+    // order term written before the four existed has to compile to the same
+    // constant it did, or this is a silent change to what people deployed.
+    try testing.expect(std.mem.endsWith(
+        u8,
+        sqlOf(.{ .order = .{ .created_at = .asc } }),
+        "ORDER BY \"created_at\" ASC",
+    ));
+}
+
+test "both dialects spell the NULLs clause the same, which is what makes it portable" {
+    const o = .{ .order = .{ .created_at = .asc_nulls_last } };
+    try testing.expect(std.mem.endsWith(
+        u8,
+        comptime select(Pg, User, @TypeOf(o)).sql,
+        "ORDER BY \"created_at\" ASC NULLS LAST",
+    ));
+    try testing.expect(std.mem.endsWith(
+        u8,
+        comptime select(Lite, User, @TypeOf(o)).sql,
+        "ORDER BY \"created_at\" ASC NULLS LAST",
+    ));
+}
+
 test "a condition's values are read out of the options struct, not the condition" {
     const o = .{ .where = .{ .id = 7 } };
     const s = comptime select(Pg, User, @TypeOf(o));
@@ -1299,6 +1627,158 @@ test "the value a find binds is the one handed in, reached by an empty path" {
 }
 
 // -- writes ---------------------------------------------------------------
+
+const Seat = struct {
+    pub const nilo_table = .{ .name = "seats", .key = .{ .tenant_id, .id } };
+
+    tenant_id: i64,
+    id: i64,
+    label: []const u8,
+};
+
+test "a find on a composite key ANDs one condition per key column" {
+    const s = comptime find(Pg, Seat, @TypeOf(.{ .tenant_id = @as(i64, 1), .id = @as(i64, 2) }));
+    try testing.expectEqualStrings(
+        "SELECT \"tenant_id\", \"id\", \"label\" FROM \"seats\"" ++
+            " WHERE \"tenant_id\" = $1 AND \"id\" = $2 LIMIT 1",
+        s.sql,
+    );
+    try testing.expectEqual(@as(usize, 2), s.paramCount());
+}
+
+test "the conditions are numbered in the key's order, not the caller's" {
+    // Two call sites writing the same key the other way round have to compile
+    // to one statement, or they prepare under two names and Postgres plans the
+    // same query twice.
+    const written_one_way = comptime find(
+        Pg,
+        Seat,
+        @TypeOf(.{ .tenant_id = @as(i64, 1), .id = @as(i64, 2) }),
+    );
+    const written_the_other = comptime find(
+        Pg,
+        Seat,
+        @TypeOf(.{ .id = @as(i64, 2), .tenant_id = @as(i64, 1) }),
+    );
+    try testing.expectEqualStrings(written_one_way.sql, written_the_other.sql);
+    try testing.expectEqualStrings("tenant_id", written_the_other.params[0].column);
+}
+
+test "each key column's value is reached by its own name" {
+    const key = .{ .tenant_id = @as(i64, 7), .id = @as(i64, 9) };
+    const s = comptime find(Pg, Seat, @TypeOf(key));
+    try testing.expectEqualStrings("tenant_id", s.paths[0][0]);
+    try testing.expectEqualStrings("id", s.paths[1][0]);
+    try testing.expectEqual(@as(i64, 7), where_mod.valueAt(key, s.paths[0]));
+    try testing.expectEqual(@as(i64, 9), where_mod.valueAt(key, s.paths[1]));
+}
+
+test "a batch update on a composite key joins on every column of it" {
+    const Change = struct { tenant_id: i64, id: i64, label: []const u8 };
+    const s = comptime updateMany(Pg, Seat, Change);
+    try testing.expectEqualStrings(
+        "UPDATE \"seats\" AS t SET \"label\" = v.\"label\"" ++
+            " FROM unnest($1::int8[], $2::int8[], $3::text[])" ++
+            " AS v(\"tenant_id\", \"id\", \"label\")" ++
+            " WHERE t.\"tenant_id\" = v.\"tenant_id\" AND t.\"id\" = v.\"id\"" ++
+            " RETURNING t.\"tenant_id\", t.\"id\", t.\"label\"",
+        s.sql,
+    );
+}
+
+test "no column of a composite key is ever in the SET list of a batch" {
+    // The join is the condition, so a key column in the SET list is a column
+    // that can never change reading as though it might — and on a composite
+    // key that used to be true of every column but the first.
+    const Change = struct { tenant_id: i64, id: i64, label: []const u8 };
+    const s = comptime updateMany(Pg, Seat, Change);
+    try testing.expect(std.mem.indexOf(u8, s.sql, "SET \"label\" = v.\"label\" FROM") != null);
+}
+
+const Partner = struct {
+    pub const nilo_table = .{ .name = "partners", .key = .id };
+
+    id: i64,
+    name: []const u8,
+};
+
+const PartnerCapability = struct {
+    pub const nilo_table = .{
+        .name = "partner_capabilities",
+        .key = .{ .partner_id, .capability },
+        .references = .{ .partner_id = .{ Partner, .id } },
+    };
+
+    partner_id: i64,
+    capability: []const u8,
+};
+
+test "a select can ask whether a row exists in another table, and stay one statement" {
+    const o = .{
+        .where = .{
+            .name = @as([]const u8, "acme"),
+            .exists = .{
+                .{ .in = PartnerCapability, .where = .{ .capability = @as([]const u8, "vision") } },
+            },
+        },
+        .order = .{ .name = .asc },
+        .limit = 20,
+    };
+    const s = comptime select(Pg, Partner, @TypeOf(o));
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"name\" FROM \"partners\" WHERE \"name\" = $1" ++
+            " AND EXISTS (SELECT 1 FROM \"partner_capabilities\"" ++
+            " WHERE \"partner_capabilities\".\"partner_id\" = \"partners\".\"id\"" ++
+            " AND \"partner_capabilities\".\"capability\" = $2)" ++
+            " ORDER BY \"name\" ASC LIMIT 20",
+        s.sql,
+    );
+    try testing.expectEqual(@as(usize, 2), s.paramCount());
+}
+
+test "the value inside an exists is reached through the options struct like any other" {
+    const o = .{ .where = .{ .exists = .{
+        .{ .in = PartnerCapability, .where = .{ .capability = @as([]const u8, "vision") } },
+    } } };
+    const s = comptime select(Pg, Partner, @TypeOf(o));
+    // `where` → `exists` → the tuple's first entry → `where` → the column.
+    try testing.expectEqual(@as(usize, 5), s.paths[0].len);
+    try testing.expectEqualStrings("exists", s.paths[0][1]);
+    try testing.expectEqualStrings("0", s.paths[0][2]);
+    try testing.expectEqualStrings(
+        "vision",
+        where_mod.valueAt(o, s.paths[0]),
+    );
+}
+
+test "a delete and a count take the same subquery, because it is the same walker" {
+    const o = .{ .where = .{ .exists = .{
+        .{ .in = PartnerCapability, .where = .{ .capability = @as([]const u8, "vision") } },
+    } } };
+    try testing.expect(std.mem.indexOf(
+        u8,
+        comptime delete(Pg, Partner, @TypeOf(o)).sql,
+        "DELETE FROM \"partners\" WHERE EXISTS (SELECT 1 FROM",
+    ) != null);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        comptime count(Pg, Partner, @TypeOf(o)).sql,
+        "SELECT count(*) FROM \"partners\" WHERE EXISTS (SELECT 1 FROM",
+    ) != null);
+}
+
+test "both dialects write the subquery the same, which is why the line moved here" {
+    const o = .{ .where = .{ .exists = .{
+        .{ .in = PartnerCapability, .where = .{ .capability = @as([]const u8, "vision") } },
+    } } };
+    try testing.expect(std.mem.indexOf(
+        u8,
+        comptime select(Lite, Partner, @TypeOf(o)).sql,
+        "EXISTS (SELECT 1 FROM \"partner_capabilities\"" ++
+            " WHERE \"partner_capabilities\".\"partner_id\" = \"partners\".\"id\"" ++
+            " AND \"partner_capabilities\".\"capability\" = ?1)",
+    ) != null);
+}
 
 test "a qualified table is two identifiers everywhere a relation is written" {
     const Scoped = struct {
@@ -1613,6 +2093,53 @@ test "an update numbers its set columns before its condition" {
     );
     try testing.expectEqual(@as(usize, 3), found.paramCount());
     try testing.expectEqualStrings("id", found.params[2].column);
+}
+
+test "a set can add to the column's own value, which is what an atomic counter is" {
+    const o = .{ .set = .{ .age = .{ .plus = 1 } }, .where = .{ .id = 7 } };
+    const s = comptime update(Pg, User, @TypeOf(o));
+    try testing.expectEqualStrings(
+        "UPDATE \"users\" SET \"age\" = \"age\" + $1 WHERE \"id\" = $2",
+        s.sql,
+    );
+    // The column name is in the text and only the operand is bound, so this
+    // is the same one constant every other statement here is.
+    try testing.expectEqual(@as(usize, 2), s.paramCount());
+    try testing.expectEqualStrings("age", s.params[0].column);
+}
+
+test "the operand is reached through the operator's own name in the path" {
+    const o = .{ .set = .{ .age = .{ .minus = 3 } }, .where = .{ .id = 7 } };
+    const s = comptime update(Pg, User, @TypeOf(o));
+    try testing.expectEqualStrings(
+        "UPDATE \"users\" SET \"age\" = \"age\" - $1 WHERE \"id\" = $2",
+        s.sql,
+    );
+    try testing.expectEqual(@as(usize, 3), s.paths[0].len);
+    try testing.expectEqualStrings("set", s.paths[0][0]);
+    try testing.expectEqualStrings("age", s.paths[0][1]);
+    try testing.expectEqualStrings("minus", s.paths[0][2]);
+    try testing.expectEqual(@as(i32, 3), where_mod.valueAt(o, s.paths[0]));
+}
+
+test "a plain value in a set is still a plain assignment, so nothing that exists changed" {
+    const o = .{ .set = .{ .age = 31 }, .where = .{ .id = 7 } };
+    try testing.expectEqualStrings(
+        "UPDATE \"users\" SET \"age\" = $1 WHERE \"id\" = $2",
+        comptime update(Pg, User, @TypeOf(o)).sql,
+    );
+}
+
+test "both dialects spell the arithmetic the same, which is why it needs no declaration" {
+    const o = .{ .set = .{ .age = .{ .plus = 1 } }, .where = .{ .id = 7 } };
+    try testing.expectEqualStrings(
+        "UPDATE \"users\" SET \"age\" = \"age\" + $1 WHERE \"id\" = $2",
+        comptime update(Pg, User, @TypeOf(o)).sql,
+    );
+    try testing.expectEqualStrings(
+        "UPDATE \"users\" SET \"age\" = \"age\" + ?1 WHERE \"id\" = ?2",
+        comptime update(Lite, User, @TypeOf(o)).sql,
+    );
 }
 
 test "an update's condition is the same language a select's is" {

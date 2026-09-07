@@ -647,12 +647,16 @@ pub fn Wire(comptime opts_in: Options) type {
             values: anytype,
         ) wire.Error!struct { zqlite.Stmt, bool } {
             const conn = &self.conns[at];
+            // Once, at the top, rather than at the four `bind` calls below —
+            // a conversion applied at three of four sites is a bug that only
+            // shows up on the fourth path (`blobbed`).
+            const args = blobbed(values);
 
             if (plan) |name| {
                 if (conn.kept.get(name)) |stmt| {
                     stmt.reset() catch return error.QueryFailed;
                     stmt.clearBindings() catch return error.QueryFailed;
-                    stmt.bind(values) catch |err| return translate(conn.handle, err);
+                    stmt.bind(args) catch |err| return translate(conn.handle, err);
                     return .{ stmt, true };
                 }
                 const stmt = conn.handle.prepare(sql) catch |err|
@@ -661,15 +665,15 @@ pub fn Wire(comptime opts_in: Options) type {
                     // A cache that cannot grow is a slower Wire, not a broken
                     // one: the statement still runs, it is just finalised
                     // afterwards like a `raw`.
-                    stmt.bind(values) catch |err| return translate(conn.handle, err);
+                    stmt.bind(args) catch |err| return translate(conn.handle, err);
                     return .{ stmt, false };
                 };
-                stmt.bind(values) catch |err| return translate(conn.handle, err);
+                stmt.bind(args) catch |err| return translate(conn.handle, err);
                 return .{ stmt, true };
             }
 
             const stmt = conn.handle.prepare(sql) catch |err| return translate(conn.handle, err);
-            stmt.bind(values) catch |err| {
+            stmt.bind(args) catch |err| {
                 stmt.deinit();
                 return translate(conn.handle, err);
             };
@@ -849,6 +853,14 @@ pub fn Wire(comptime opts_in: Options) type {
                 return error.QueryFailed;
             }
 
+            // **`sqlite3_column_blob`, not `sqlite3_column_text`.** Asking
+            // for a BLOB as text makes SQLite convert the column in place,
+            // which changes what a pointer taken earlier points at and reads
+            // the bytes as though they were characters. The two calls are not
+            // interchangeable, which is why `WireRead` keeps the type this far
+            // instead of flattening it to `[]const u8` like everything else.
+            if (comptime Inner == wire.Bytes) return .{ .bytes = stmt.blob(col) };
+
             return switch (@typeInfo(Inner)) {
                 .bool => stmt.boolean(col),
                 .int => std.math.cast(Inner, stmt.int(col)) orelse error.QueryFailed,
@@ -1008,6 +1020,55 @@ pub fn Wire(comptime opts_in: Options) type {
 
 /// A zqlite error as one of the seven this module admits to (ADR 0039).
 ///
+/// The parameter tuple with every `wire.Bytes` in it turned into the wrapper
+/// zqlite binds a blob from.
+///
+/// **This file is the only one allowed to name `zqlite.Blob`**, which is the
+/// whole reason the conversion happens here rather than in `db.zig`: `Blob` is
+/// compared by identity inside the driver, so a structurally identical type of
+/// nilo's would bind as text and store the bytes in a TEXT column that reads
+/// back looking almost right.
+///
+/// It answers the caller's own tuple type when nothing needs converting, which
+/// is every statement that carries no binary column — so this costs nothing to
+/// the programs that do not use one. The same shape `db.rawValuesOf` has, and
+/// for the same reason.
+fn Blobbed(comptime V: type) type {
+    comptime {
+        if (@typeInfo(V) != .@"struct") return V;
+        const fields = @typeInfo(V).@"struct".fields;
+        var out: [fields.len]type = undefined;
+        var changed = false;
+        for (fields, 0..) |f, i| {
+            out[i] = switch (f.type) {
+                wire.Bytes => zqlite.Blob,
+                ?wire.Bytes => ?zqlite.Blob,
+                else => f.type,
+            };
+            if (out[i] != f.type) changed = true;
+        }
+        if (!changed) return V;
+        const frozen = out;
+        return std.meta.Tuple(&frozen);
+    }
+}
+
+fn blobbed(values: anytype) Blobbed(@TypeOf(values)) {
+    const V = @TypeOf(values);
+    if (comptime Blobbed(V) == V) return values;
+
+    var out: Blobbed(V) = undefined;
+    inline for (@typeInfo(V).@"struct".fields, 0..) |f, i| {
+        const held = @field(values, f.name);
+        out[i] = switch (f.type) {
+            wire.Bytes => zqlite.blob(held.bytes),
+            ?wire.Bytes => if (held) |b| zqlite.blob(b.bytes) else null,
+            else => held,
+        };
+    }
+    return out;
+}
+
 /// **Cleaner than the Postgres mapping, and for a reason worth recording**:
 /// SQLite's extended result codes tell a unique violation apart from every
 /// other constraint natively, so this is a switch over an error set rather

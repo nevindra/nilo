@@ -361,6 +361,27 @@ pub fn AsText(comptime column: []const u8) type {
 /// at the top of this file: an interval is only *useful* as a struct if
 /// something adds it to a date, and calendar arithmetic is the half of a date
 /// library that has nothing to do with a database.
+/// Bytes rather than text — a `bytea` or a `BLOB`. Declared in `wire.zig`
+/// because both Wires have to name it and `postgres.zig` imports that file and
+/// not this one; re-exported here so a Row writes `sql.Bytes` beside
+/// `sql.Timestamp` and `sql.Uuid` rather than reaching into the Wire.
+pub const Bytes = @import("wire.zig").Bytes;
+
+/// Whether `T` is the binary column, optional included.
+///
+/// Asked before `declaredColumn` and before the pointer branch in every
+/// `accepts`, because both of those answer `text` for it — which is the whole
+/// reason a binary column could not be named until this type existed.
+pub fn isBytes(comptime T: type) bool {
+    return comptime blk: {
+        const Inner = switch (@typeInfo(T)) {
+            .optional => |o| o.child,
+            else => T,
+        };
+        break :blk Inner == Bytes;
+    };
+}
+
 pub const Interval = AsText("interval");
 
 /// An `inet` column — an address, with an optional mask: `192.168.0.1/24`,

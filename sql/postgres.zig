@@ -468,6 +468,19 @@ pub const Wire = struct {
     pub fn read(self: *Wire, rows: *const Rows, comptime T: type, col: usize) wire.Error!T {
         _ = self;
         const row = rows.current orelse return error.QueryFailed;
+        // pg.zig has no word for nilo's `Bytes`, and needs none: a `bytea`
+        // column comes back as the bytes themselves, so this unwraps to the
+        // slice pg.zig does understand and wraps the answer again. The
+        // `::bytea` on the write side is what makes the column that type in
+        // the first place (`dialect.bindAs`).
+        if (comptime T == wire.Bytes) {
+            const got = row.get([]const u8, col) catch return error.QueryFailed;
+            return .{ .bytes = got };
+        }
+        if (comptime T == ?wire.Bytes) {
+            const got = row.get(?[]const u8, col) catch return error.QueryFailed;
+            return if (got) |b| .{ .bytes = b } else null;
+        }
         return row.get(T, col) catch return error.QueryFailed;
     }
 
