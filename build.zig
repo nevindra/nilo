@@ -2723,6 +2723,28 @@ pub fn build(b: *std.Build) void {
             .dependOn(&run.step);
     }
 
+    // **What fraction of lookups the cache answers, which is the number the
+    // other one cannot see** (ADR 0187). `bench-cache` draws its keys
+    // uniformly at random, and under uniform random every eviction policy
+    // scores the same — so a cache with no policy at all measured perfect
+    // there for a year. This one draws them the way traffic does and puts the
+    // score against the best a cache that size could reach.
+    const bench_cache_hitrate = b.addExecutable(.{
+        .name = "nilo-bench-cache-hitrate",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/cache_hitrate.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "nilo_cache", .module = nilo_cache }},
+        }),
+    });
+    {
+        const run = b.addRunArtifact(bench_cache_hitrate);
+        if (b.args) |args| run.addArgs(args);
+        b.step("bench-cache-hitrate", "What fraction of lookups the cache answers, against the best it could")
+            .dependOn(&run.step);
+    }
+
     const bench_sql_module = b.createModule(.{
         .root_source_file = b.path("bench/sql.zig"),
         .target = target,

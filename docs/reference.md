@@ -1477,23 +1477,47 @@ or when the ring writes over it.
 
 | | |
 |---|---|
-| `.bytes` | the budget. Three quarters to the values, the rest to the table |
+| `.bytes` | the budget. Five sixths to the values, the rest to the table |
 | `.entries` | how many the table points at, when that split is wrong. Clamped to the budget rather than added to it |
-| `.shards` | how many threads can be inside at once. 16, and cut down if the budget cannot carry that many |
+| `.shards` | how many writers can be inside at once, and how many independent rings. 64, and cut down if the budget cannot carry that many |
 
 **`stats()` is how "why is my cache not hitting" gets an answer.** A miss with
 nothing ever written under that key is `misses`; one whose entry the ring wrote
 over is `evicted`; one past its time is `expired`. `Stats.evictionRate()` asks
 the question directly: high means the cache wants more `bytes`, low with few
-hits means it is being asked about keys nobody wrote.
+hits means it is being asked about keys nobody wrote. `rescued` counts entries a
+read moved out of the write cursor's way, which is the policy working.
 
-Sizing, measured rather than guessed: hit rate is ring bytes over working-set
-bytes, to within a point, and there is no cliff. 1.6× the working set is where
-it stopped moving. Holding one entry costs 8 bytes of table slot, 12 bytes of
-header, and the key — about 20 bytes over the value, and **63.3 bytes an entry
-measured against go-cache's 97.5** on 200,000 of them
-([`bench/result/cache.md`](../bench/result/cache.md), which also records the
-rows where go-cache is between a third and three times faster, and why).
+The counters are exact and the *reading* is not a snapshot: nothing is locked
+while they are summed, because a lookup takes no lock either
+([ADR 0188](./adr/0188-a-lookup-asks-the-cursor-afterwards-instead-of-taking-a-lock.md)).
+`evicted` also counts the rare read whose bytes a `put` overwrote mid-copy —
+that read found the key and lost it to the ring, which is what the word means.
+
+**A `get` takes no lock at all**, so readers do not queue behind each other:
+124.5M reads a second on eight threads against 108.8M when they did. A `put`
+does take one, per shard.
+
+**A new entry has to be asked for twice before it gets the run of the ring.** It
+lands in a tenth of it and is copied into the rest when something reads it
+again, so a flood of keys nobody asks for twice cannot flush what the cache is
+holding (ADR 0187). Two things follow: a cache with room still admits freely,
+and a cache written to and never read holds its first entries indefinitely
+rather than forgetting the oldest.
+
+Sizing, measured rather than guessed: on Zipf 0.99 a ring at a fortieth of the
+working set answers 63.9% of lookups and one at a fifth answers 94.1%, which is
+96–98% of what a cache that size could reach. **Ask for the hit rate you want
+rather than for a multiple of the data**, and read `stats()` to find out whether
+you got it.
+
+Holding one entry costs 8 bytes of table slot, 12 bytes of header, and the key
+— about 20 bytes over the value, and **64.3 bytes an entry on 200,000 of them,
+against go-cache's 100.2, freecache's 132.0 and bigcache's 149.4**. That budget
+is the whole of nilo's memory; the two Go ring caches bound only their values
+and put the index on top, so the same 12 MiB budget cost them 25.2 and 28.5 MiB
+of RSS ([`bench/result/cache.md`](../bench/result/cache.md), which also records
+the single-threaded rows where go-cache is faster, and why).
 
 **What it will not do is leave this process.** Two instances of your program
 have two caches that do not agree, neither survives a restart, and nothing here

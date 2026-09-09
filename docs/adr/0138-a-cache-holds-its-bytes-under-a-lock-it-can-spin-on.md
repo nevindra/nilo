@@ -116,6 +116,25 @@ box's worst case.** One thread measured 2,261,642 ops/s locked against
 being inside each other's noise. Two threads on two cores, with the operating
 system also wanting one, put it at 2,045,029 against 2,773,886.
 
+> **Re-taken on eight cores by
+> [ADR 0187](0187-a-cache-that-admits-everything-forgets-what-mattered.md), and
+> the conclusion holds while the 26% does not.** With the shard count raised to
+> 256, removing the lock altogether buys 1.4% on eight threads and nothing at
+> all on one: 29.4 ns against 29.3. The contention this figure recorded was the
+> shard default of sixteen rather than the lock, and raising it to 64 was worth
+> 64% where a lock-free read is worth 1.4%. Two cores could not tell those
+> apart.
+>
+> **And then re-taken again, against a store sized for its working set, by
+> [ADR 0188](0188-a-lookup-asks-the-cursor-afterwards-instead-of-taking-a-lock.md).**
+> The 1.4% above was measured on a 64 MiB store holding 50,000 keys, which is an
+> 11 MiB table and mostly memory latency; at 8 MiB the same removal is worth
+> 13.3%. **A read takes no lock at all now**, and this ADR's "every operation
+> under one lock" holds for writes only. What replaced it is not the lock-free
+> design refused below: a writer is still alone in its shard, so the cursor it
+> publishes is the whole truth about where writing is happening, and a read that
+> re-reads that cursor after its copy can tell.
+
 **And the absolutes are not this module's.** Each measured operation formats its
 key with `std.fmt.bufPrint` and then reads ~500 bytes from a random position in
 a 64 MB ring, so most of the 471 ns is a cache miss and a format. What
@@ -131,6 +150,15 @@ measured — 81.0% against 81.2% predicted. **There is no cliff**, which is the
 thing a FIFO window had to be checked for: a policy that collapses when the
 working set crosses capacity would have ruled the shape out by itself. A ring
 at 1.6× the working set is where the number stopped moving.
+
+> **Corrected by [ADR 0187](0187-a-cache-that-admits-everything-forgets-what-mattered.md).**
+> That paragraph is a fact about the benchmark. It drew its keys uniformly at
+> random, and under uniform random every policy scores the same and that score
+> is the ratio — so the straight line was the harness agreeing with itself, and
+> a result landing exactly on the theoretical optimum should have been the tell.
+> On Zipf 0.99 the FIFO window scored 78% of what a cache that size could reach,
+> and it is now 96%. The window was ruled out by the check it was given; the
+> check could not see it.
 
 Holding an entry costs **8 bytes of slot**, 12 bytes of ring header carrying
 the expiry, the Space and the two lengths, and the key. **Eight eight-byte

@@ -6,18 +6,26 @@
 //! shares one `Store` — so "how much memory does my cache use" has one answer
 //! and it is the number the caller wrote.
 //!
-//! ## A shard is a table and a ring
+//! ## A shard is a table and two rings
 //!
-//! The table is `http/allowance.zig`'s: buckets of four ways, a fingerprint
-//! per way, the stalest way forgotten when a bucket fills. Four ways of 16
+//! The table is `http/allowance.zig`'s: buckets of eight ways, a fingerprint
+//! per way, the coldest way forgotten when a bucket fills. Eight ways of 8
 //! bytes is one cache line, so a lookup touches one.
 //!
 //! The ring is where a value that is not a `u64` has to live. A put takes its
-//! space by moving a position that **only ever goes forwards** and copies the
-//! header, the key and the value in. The ring is a window on that position:
+//! space by moving a cursor that **only ever goes forwards** and copies the
+//! header, the key and the value in. A region is a window on that cursor:
 //! everything in `[head - capacity, head)` is live and everything older has
 //! been written over. **Eviction is what writing does** — no free list to
 //! fragment, no size class to waste, and no sweep.
+//!
+//! **There are two regions and that is the eviction policy** (ADR 0187). A new
+//! entry goes into `small`, a tenth of the ring, so a key nobody asks for
+//! twice is gone in a tenth of the time; one asked for again while it is still
+//! there is copied into `main` and gets the other nine tenths. Without that,
+//! every miss was admitted and a flood of keys nobody would ask for again
+//! flushed the entries worth keeping — on Zipf 0.99 that was 67.0% of lookups
+//! answered where 75.4% was available at the same size.
 //!
 //! ## Why the key is in the ring
 //!
@@ -25,21 +33,31 @@
 //! it alone would hand back the other key's value, and a cache that is quietly
 //! wrong is worse than one that misses. The key is stored and compared.
 //!
-//! ## Why there is a lock, and why it spins
+//! ## Why a write takes a lock and a read takes nothing
 //!
-//! The lock-free version of this was built first and is wrong. A writer
-//! descheduled inside its own `memcpy` is lapped by the ring and writes over
-//! an entry *newer* than itself, whose position is recent enough to pass every
-//! check a reader can make: seven wrong values in 1.9 million hits, measured
-//! in [`spike/cache_ring/`](../spike/cache_ring/). Sharding does not fix it —
-//! sixteen rings gave eight.
+//! Writers hold a spin lock against each other, because two cursors moving at
+//! once is two entries in one place. **A lookup holds nothing** (ADR 0188). It
+//! reads the slot, copies the value out, and then reads the region's cursor a
+//! second time: if the cursor has passed the entry since, some `put` was
+//! writing over those bytes while they were being read, and the answer is
+//! thrown away as an eviction. `reserve` publishes the cursor before it copies
+//! a byte, which is what makes the second reading mean anything.
 //!
-//! It spins rather than parks because Zig 0.16's `std.Io.Mutex.lock` takes an
-//! `io: Io`, and a module with no event loop has none to give it. **That turns
-//! a preference into a rule this file has to keep forever: nothing that waits,
-//! ever, inside a critical section.** It is also what makes the lock safe to
-//! hold inside a fiber — a fiber only moves at a point that waits, so a holder
-//! always finishes and releases. Uncontended the lock measured free.
+//! **The lock-free version that was wrong is not this one.** The first attempt
+//! had no cursor to ask: a writer descheduled inside its own `memcpy` is lapped
+//! by the ring and writes over an entry *newer* than itself, whose position is
+//! recent enough to pass every check a reader could make. Seven wrong values in
+//! 1.9 million hits, measured in [`spike/cache_ring/`](../spike/cache_ring/),
+//! and sharding did not fix it — sixteen rings gave eight. What is different
+//! now is that a writer is alone, so the cursor it publishes is the whole
+//! truth about where it is writing.
+//!
+//! The lock spins rather than parks because Zig 0.16's `std.Io.Mutex.lock`
+//! takes an `io: Io`, and a module with no event loop has none to give it.
+//! **That turns a preference into a rule this file has to keep forever:
+//! nothing that waits, ever, inside a critical section.** It is also what makes
+//! the lock safe to hold inside a fiber — a fiber only moves at a point that
+//! waits, so a holder always finishes and releases.
 
 const std = @import("std");
 const clock = @import("clock.zig");
@@ -73,16 +91,99 @@ const header = 12;
 /// were given 16 MiB, and the cache measured 125.8 bytes an entry against
 /// go-cache's 96.9. Storing where the entry is, plus which pass over the ring
 /// wrote it, needs no mask and no division.
-const Slot = extern struct {
+/// **`freq` is two bits taken out of the fingerprint, not added to the slot.**
+/// Both eviction paths in this file used to order entries by when they were
+/// *written* — the ring laps whatever is oldest, and a full bucket forgets the
+/// stalest way — so an entry read a million times died at the same moment as
+/// one nobody ever asked for. Nothing recorded that a read had happened.
+///
+/// It cost nothing to fix because a fingerprint does not need sixteen bits.
+/// The full key is compared behind it, so a collision is a wasted probe rather
+/// than a wrong answer, and fourteen bits makes that wasted probe four times
+/// likelier — about one lookup in 2,048 rather than one in 8,192. What it buys
+/// is on `bench/result/cache.md`.
+const Slot = packed struct(u64) {
     off: u32 = 0,
     gen: u16 = 0,
-    fp: u16 = 0,
+    fp: u14 = 0,
+    /// How warm this entry is, saturating at three. Bumped by a hit, halved
+    /// across the bucket when a displacement happens, which is the only clock
+    /// this needs: a bucket that never fills never decays, and one under
+    /// pressure decays exactly as fast as it is under pressure.
+    freq: u2 = 0,
+
+    /// **Every read and every write of a slot goes through here**, because
+    /// `get` holds nothing (ADR 0188) and so a slot is always being read while
+    /// somebody may be writing it. It costs nothing: eight bytes, aligned, is
+    /// one `mov` either way. What it buys is that the compiler may not invent a
+    /// second read of a word another thread is storing to, which is the thing
+    /// that turns "the answer is stale" into "the answer is undefined".
+    ///
+    /// **Acquire rather than relaxed, and the ordering is load-bearing.** The
+    /// caller reads the region's cursor straight after this to decide whether
+    /// what the slot points at is still there. That load has to *follow* this
+    /// one, or a slot a `put` has just written could be checked against a
+    /// cursor from before the same `put` moved it, and a key that was just
+    /// stored would read back as a miss. Free on x86, where a load is acquire
+    /// anyway.
+    inline fn load(slot: *const Slot) Slot {
+        return @bitCast(@atomicLoad(u64, @as(*const u64, @ptrCast(slot)), .acquire));
+    }
+
+    /// Release, so the bytes this slot points at are in the ring before
+    /// anything can follow the pointer to them.
+    inline fn store(slot: *Slot, next: Slot) void {
+        @atomicStore(u64, @as(*u64, @ptrCast(slot)), @bitCast(next), .release);
+    }
+
+    inline fn clear(slot: *Slot) void {
+        @atomicStore(u64, @as(*u64, @ptrCast(slot)), 0, .release);
+    }
+
+    /// One warmer, and **nothing at all once it is saturated.** The guard is
+    /// not a micro-optimisation: on Zipfian traffic most hits are to keys that
+    /// are already warm, so without it every read of a hot key dirties the
+    /// bucket's cache line and drags it between cores. quick_cache does the
+    /// same thing for the same reason (`if referenced < MAX_F`).
+    ///
+    /// A lost race here costs one increment of a hint, so it gives up rather
+    /// than looping.
+    inline fn warmer(slot: *Slot, seen: Slot) void {
+        if (seen.freq >= warm) return;
+        var next = seen;
+        next.freq += 1;
+        _ = @cmpxchgWeak(u64, @as(*u64, @ptrCast(slot)), @bitCast(seen), @bitCast(next), .monotonic, .monotonic);
+    }
 };
 
 comptime {
     if (@sizeOf(Slot) != 8) @compileError("nilo: a cache slot has to be 8 bytes for eight to be one cache line");
     if (@sizeOf(Slot) * ways != 64) @compileError("nilo: a bucket has to be exactly one 64-byte cache line");
 }
+
+/// How warm an entry has to be before a read will move it out of the ring's
+/// way. Three is saturated, so this is "asked for at least three times since
+/// the last time this bucket came under pressure".
+const warm = 3;
+
+/// The last eighth of the ring, where an entry is about to be written over.
+/// A read that finds a warm entry in this window copies it back to the head
+/// rather than letting the write cursor take it — second chance, which is
+/// what turns a FIFO into a policy that knows which entries are worth keeping.
+///
+/// An eighth rather than a half because every rescue is itself a write, and a
+/// write pushes the cursor into somebody else. Rescuing early rescues more
+/// often than necessary and spends the ring on it.
+const rescue_window = 8;
+
+/// How much of a shard's ring is the doorkeeper. A tenth: small enough that a
+/// key nobody asks twice for is gone quickly, large enough that a key asked
+/// twice in an ordinary burst is still there to be promoted.
+///
+/// The number is the one S3-FIFO uses and it was checked here rather than
+/// taken: a fifth and a twentieth were both measured and both worse
+/// ([`bench/result/cache.md`](../bench/result/cache.md)).
+const small_share = 10;
 
 /// How many `Space`s one Store will hold. Sixty-four is not a limit anybody
 /// is going to reach; it exists so the collision check below can be an array
@@ -99,9 +200,9 @@ pub const Options = struct {
     /// on top: a caller who wrote 9 MiB got 20. A number a caller cannot use
     /// to size a container is not a budget.
     bytes: usize = 8 << 20,
-    /// How many entries the table can point at, when the three-quarters the
-    /// ring takes by default is the wrong split. Zero derives it from what is
-    /// left of `bytes`.
+    /// How many entries the table can point at, when the five-sixths the ring
+    /// takes by default is the wrong split. Zero derives it from what is left
+    /// of `bytes`.
     ///
     /// **Clamped to the budget rather than added to it**, so raising it takes
     /// slots out of the ring rather than taking more memory from the machine.
@@ -110,11 +211,26 @@ pub const Options = struct {
     /// How many independent tables and rings, and therefore how many threads
     /// can be inside the cache at once.
     ///
-    /// **Sixteen rather than the number of cores on purpose.** A default read
-    /// from the machine makes the same program hold different amounts of
-    /// memory on two boxes and makes a benchmark unreproducible, which is a
-    /// worse trade than a number somebody can raise.
-    shards: usize = 16,
+    /// **A fixed number rather than the number of cores on purpose.** A
+    /// default read from the machine makes the same program hold different
+    /// amounts of memory on two boxes and makes a benchmark unreproducible,
+    /// which is a worse trade than a number somebody can raise.
+    ///
+    /// **Sixty-four rather than sixteen, and the number is measured.** A `put`
+    /// takes its shard's lock, so few shards turn a write into a queue, and a
+    /// shard is also the unit the ring laps in. On eight cores at nine reads to
+    /// a write, sixteen shards
+    /// served 87.4M ops/s and sixty-four served 125.0M — and on a working set
+    /// small enough to stay in cache, 94.2M against 162.7M. It costs 5% of the
+    /// single-threaded figure and **no hit rate at all**: on Zipf 0.99 the two
+    /// are within 0.1 of a point at every budget measured.
+    ///
+    /// 256 is faster again (143.6M and 190.5M) and is not the default because
+    /// it starts costing retention: 4.5 points at 512 KiB, where each shard's
+    /// ring is too small to hold what hashes to it. Raise it by hand on a
+    /// store of several MiB and a machine with cores to spare
+    /// ([`bench/result/cache.md`](../bench/result/cache.md)).
+    shards: usize = 64,
 };
 
 pub const OpenError = error{
@@ -125,8 +241,15 @@ pub const OpenError = error{
 };
 
 /// Hits and misses, so "why is my cache not hitting" has an answer that is not
-/// a guess. Summed across shards on demand; the counters themselves live
-/// inside a lock that was already held, so they cost an increment.
+/// a guess. Summed across shards on demand.
+///
+/// **This is a sum over a moving target rather than a snapshot**, because a
+/// lookup takes no lock (ADR 0188) and so neither does this. The counters are
+/// exact; what is not exact is that they were not all read at the same instant.
+///
+/// `evicted` therefore also counts the rare read whose bytes a `put` overwrote
+/// while they were being copied. That read found the key and lost it to the
+/// ring, which is what `evicted` means.
 pub const Stats = struct {
     hits: u64 = 0,
     /// Nothing in the table under that key.
@@ -140,6 +263,10 @@ pub const Stats = struct {
     puts: u64 = 0,
     /// A value that did not fit an entry, so nothing was stored.
     refused: u64 = 0,
+    /// Warm entries a read moved out of the write cursor's way. **This is the
+    /// number that says the policy is doing something**: zero means every
+    /// entry is dying in write order, which is what this cache did before.
+    rescued: u64 = 0,
 
     /// Of the lookups that found nothing, how many were the ring being small.
     /// A cache with a high number here wants more `bytes`; one with a low
@@ -151,14 +278,66 @@ pub const Stats = struct {
     }
 };
 
+/// What the store counts, as opposed to what a caller reads.
+///
+/// Three things separate this from `Stats`. It is **atomic**, because `get`
+/// holds nothing and any number of reads can count a hit at once. It sits on a
+/// **cache line of its own**, because it used to share one with `small` and
+/// `main` — so every read dirtied the line every write has to read, which is
+/// the shape of false sharing that does not show up until there are cores.
+///
+/// **Counting a read is not free and there is no cheaper exact version.**
+/// Against a build that counted nothing at all it is 4.2% of the eight-thread
+/// figure and 7.0% of the one-thread figure, because a read holds no lock now
+/// and so the increment has to be an atomic read-modify-write. A version with
+/// one set of counters per thread rather than per shard was built and measured:
+/// 1.5% better on eight threads, 3% worse on one, which is a lane lookup buying
+/// back contention it also pays for. Per shard is what stayed.
+const Counters = struct {
+    hits: std.atomic.Value(u64) align(std.atomic.cache_line) = .init(0),
+    misses: std.atomic.Value(u64) = .init(0),
+    evicted: std.atomic.Value(u64) = .init(0),
+    expired: std.atomic.Value(u64) = .init(0),
+    puts: std.atomic.Value(u64) = .init(0),
+    refused: std.atomic.Value(u64) = .init(0),
+    rescued: std.atomic.Value(u64) = .init(0),
+
+    /// Relaxed throughout: nothing in the module branches on a counter, so
+    /// they need to arrive eventually and in no particular order.
+    inline fn bump(c: *std.atomic.Value(u64)) void {
+        _ = c.fetchAdd(1, .monotonic);
+    }
+
+    fn read(self: *const Counters) Stats {
+        return .{
+            .hits = self.hits.load(.monotonic),
+            .misses = self.misses.load(.monotonic),
+            .evicted = self.evicted.load(.monotonic),
+            .expired = self.expired.load(.monotonic),
+            .puts = self.puts.load(.monotonic),
+            .refused = self.refused.load(.monotonic),
+            .rescued = self.rescued.load(.monotonic),
+        };
+    }
+};
+
+
 /// A spin lock, and not by preference — see the header. One to a cache line,
 /// or two shards would share one and the sharding would buy nothing.
+///
+/// **Only writers take it** (ADR 0188). `put`, `del`, `clear` and the promotion
+/// a read hands back are serialised against each other; a `get` takes nothing
+/// at all and validates afterwards instead. A reader-writer version of this
+/// lock was built first and measured: sharing it was worth 11% on eight threads
+/// and cost 11% on one, because two atomic read-modify-writes per lookup is
+/// most of what a lookup costs. Taking nothing was worth 12% on **both**.
 const Lock = struct {
     held: std.atomic.Value(bool) align(std.atomic.cache_line) = .init(false),
 
     fn take(l: *Lock) void {
         while (l.held.swap(true, .acquire)) std.atomic.spinLoopHint();
     }
+
     fn release(l: *Lock) void {
         l.held.store(false, .release);
     }
@@ -172,6 +351,163 @@ const Entry = struct {
     value: []const u8,
 };
 
+/// One stretch of the ring with its own write cursor.
+///
+/// **There are two of them, and that is the whole eviction policy.** A ring is
+/// a queue that forgets in write order, so every miss that writes pushes
+/// something out — and on real traffic most misses are keys nobody will ask
+/// for again. Admitting them all is what flushed the entries worth keeping:
+/// measured on Zipf 0.99 at 128 KiB, the cache was answering 53.1% of lookups
+/// where a cache of that size could answer 66.9%.
+///
+/// A new entry therefore lands in `small`, which is a tenth of the ring and
+/// laps ten times as fast. A key asked for a second time while it is still
+/// there is copied into `main` and gets the rest of the ring to live in; one
+/// that is never asked for again never leaves the tenth it came in through.
+/// **The doorkeeper is a second question rather than a data structure**, which
+/// is why it costs no memory (ADR 0181).
+/// Where a region's write cursor is, and how many times it has been round —
+/// **in one word, so a reader takes both in one load and can never see half of
+/// a move.** Two separate fields would let a lookup read the offset from before
+/// a wrap and the pass number from after it, and conclude that an entry the
+/// ring had just written over was still there.
+const Mark = packed struct(u64) {
+    head: u32,
+    gen: u16,
+    _unused: u16 = 0,
+};
+
+const Region = struct {
+    from: u32,
+    /// Exclusive.
+    to: u32,
+    /// A `Mark`. Moved only under the shard's lock, and read by anybody at any
+    /// time with nothing held at all.
+    cursor: std.atomic.Value(u64),
+
+    fn init(from: u32, to: u32) Region {
+        return .{
+            .from = from,
+            .to = to,
+            .cursor = .init(@bitCast(Mark{ .head = from, .gen = 1 })),
+        };
+    }
+
+    /// Where the cursor is now. Relaxed: the caller either holds the lock, in
+    /// which case nothing else is moving it, or is a lookup that will ask again
+    /// through `settled` before believing what it read.
+    inline fn mark(r: *const Region) Mark {
+        return @bitCast(r.cursor.load(.monotonic));
+    }
+
+    /// The same load, ordered against everything the caller did before it.
+    /// **This is the whole of what makes a lookup safe without a lock**: a read
+    /// copies the value out first and asks this afterwards, and a cursor that
+    /// has since passed the entry means the bytes just copied were being
+    /// written over while they were read. Sequentially consistent because the
+    /// question is precisely "did that happen *before* this", and a relaxed or
+    /// acquire load lets the compiler sink the copy below it. On x86 it is
+    /// still one `mov`.
+    inline fn settled(r: *const Region) Mark {
+        return @bitCast(r.cursor.load(.seq_cst));
+    }
+
+    fn len(r: *const Region) u32 {
+        return r.to - r.from;
+    }
+
+    fn holds(r: *const Region, off: u32) bool {
+        return off >= r.from and off < r.to;
+    }
+
+    /// **An entry is never split across the seam.** One that will not fit
+    /// before the end starts again at the region's first byte, leaving a gap
+    /// of less than one entry — which costs a few bytes and takes the split
+    /// `memcpy` out of every read and every write.
+    ///
+    /// **The cursor is published before a single byte is copied**, and that
+    /// order is the contract the lock-free lookup rests on. A lookup that
+    /// checks the cursor after its copy and finds it unmoved has proved that
+    /// nothing had started writing here; if the store below could sink past the
+    /// `memcpy` its caller does next, the lookup would be checking against a
+    /// cursor that lied. Sequentially consistent is what says so to the
+    /// compiler as well as to the processor.
+    fn reserve(r: *Region, total: usize) u32 {
+        var m = r.mark();
+        if (m.head + total > r.to) {
+            m.head = r.from;
+            m.gen +%= 1;
+            // Zero is how a slot says "never written", so a region's own
+            // generation may never be it.
+            if (m.gen == 0) m.gen = 1;
+        }
+        const off = m.head;
+        m.head += @intCast(total);
+        r.cursor.store(@bitCast(m), .seq_cst);
+        return off;
+    }
+
+    /// Whether what the slot points at is still what it pointed at, judged
+    /// against one reading of the cursor. Written on this pass and behind the
+    /// cursor, or written on the pass before and still ahead of it.
+    fn liveAt(m: Mark, slot: Slot) bool {
+        if (slot.gen == 0) return false;
+        if (slot.gen == m.gen) return slot.off < m.head;
+        if (slot.gen +% 1 == m.gen) return slot.off >= m.head;
+        return false;
+    }
+
+    fn live(r: *const Region, slot: Slot) bool {
+        return liveAt(r.mark(), slot);
+    }
+
+    /// Whether the cursor wrote over this entry **inside the last lap**.
+    ///
+    /// This is a ghost queue that costs nothing (ADR 0188). A dead slot is
+    /// already a record that some key hashing here was in the ring and the
+    /// write cursor took it, which is exactly the fact quick_cache keeps a
+    /// separate list of non-resident entries to remember — and pays half its
+    /// capacity again in full-size slots to do it. `put` reads it to decide
+    /// that a key coming back this soon has earned `main` without going
+    /// through the doorkeeper a second time, which is S3-FIFO's admission rule.
+    ///
+    /// **One lap, and the narrowness is the whole of what it is worth.** The
+    /// window can be widened by counting passes rather than one, and it was
+    /// swept: a tenth of the ring is one lap of `small`, so ten laps of `small`
+    /// is the same stretch of writing as one lap of `main` and looks like the
+    /// fair comparison. It measured *worse* than one lap on five of six sizes
+    /// (63.9% against 64.3% at 128 KiB) while holding 3% more entries, which is
+    /// a cache remembering more and answering less. A ghost that reaches back
+    /// far enough stops being evidence about this key and becomes evidence that
+    /// keys exist.
+    fn ghostAt(m: Mark, slot: Slot) bool {
+        return slot.gen != 0 and slot.gen +% 1 == m.gen and slot.off < m.head;
+    }
+
+    /// How many bytes of writing this entry has left before the cursor reaches
+    /// it. Small means it is about to go.
+    ///
+    /// **Takes the cursor rather than reading it**, because the caller has read
+    /// it two lines earlier and an atomic load is one the compiler may not
+    /// fold away. Reading it twice measured 16% of a one-thread lookup.
+    fn untilAt(r: *const Region, m: Mark, slot: Slot) u32 {
+        return if (slot.gen == m.gen)
+            (r.to - m.head) + (slot.off - r.from)
+        else
+            slot.off -| m.head;
+    }
+
+    /// Whether the next `total` bytes reserved here would land on top of the
+    /// entry at `src_off`. **A promotion reads its source out of the ring and
+    /// writes it back into the same ring**, so the one thing it may not do is
+    /// reserve the space it is about to copy from.
+    fn wouldClobber(r: *const Region, total: usize, src_off: u32, src_total: usize) bool {
+        var at: usize = r.mark().head;
+        if (at + total > r.to) at = r.from;
+        return at < @as(usize, src_off) + src_total and @as(usize, src_off) < at + total;
+    }
+};
+
 const Shard = struct {
     lock: Lock = .{},
     /// Aligned so a bucket never straddles two cache lines. The alignment is
@@ -179,12 +515,13 @@ const Shard = struct {
     /// the allocator a different alignment than `alloc` was given.
     slots: []align(std.atomic.cache_line) Slot,
     ring: []u8,
-    /// Where the next entry goes, and how many times the ring has been round.
-    /// Both guarded by the lock, so plain integers.
-    head: u32 = 0,
-    gen: u16 = 1,
+    /// Where a new entry goes, and where one that proved itself goes. Which
+    /// region a slot is in is read from its offset, so no bit of the slot is
+    /// spent saying it.
+    small: Region,
+    main: Region,
     buckets: u32,
-    stats: Stats = .{},
+    stats: Counters = .{},
 
     /// Any number of buckets, not only a power of two, by multiplying into the
     /// top half of a 64-bit product instead of masking. One `mulx`, and the
@@ -195,31 +532,15 @@ const Shard = struct {
         return self.slots[@as(usize, @intCast(wide >> 32)) * ways ..][0..ways];
     }
 
-    /// **An entry is never split across the seam.** One that will not fit
-    /// before the end starts again at zero, leaving a gap of less than one
-    /// entry — which costs a few bytes and takes the split `memcpy` out of
-    /// every read and every write.
-    fn reserve(self: *Shard, total: usize) u32 {
-        if (self.head + total > self.ring.len) {
-            self.head = 0;
-            self.gen +%= 1;
-            // Zero is how a slot says "never written", so a shard's own
-            // generation may never be it.
-            if (self.gen == 0) self.gen = 1;
-        }
-        const off = self.head;
-        self.head += @intCast(total);
-        return off;
+    fn regionOf(self: *Shard, off: u32) *Region {
+        return if (self.small.holds(off)) &self.small else &self.main;
     }
 
     /// Whether what the slot points at is still what it pointed at. Written
     /// on this pass and behind the cursor, or written on the pass before and
     /// still ahead of it.
     fn live(self: *Shard, slot: Slot) bool {
-        if (slot.gen == 0) return false;
-        if (slot.gen == self.gen) return slot.off < self.head;
-        if (slot.gen +% 1 == self.gen) return slot.off >= self.head;
-        return false;
+        return self.regionOf(slot.off).live(slot);
     }
 
     /// The header, the key and the value, read out of the ring.
@@ -246,6 +567,89 @@ const Shard = struct {
             .value = self.ring[slot.off + header + klen ..][0..vlen],
         };
     }
+
+    /// Copy an entry to `into`'s cursor and point its slot at the copy.
+    ///
+    /// Two things use this and they are the same move. **A promotion** takes an
+    /// entry that has now been asked for twice out of `small` and gives it the
+    /// rest of the ring. **A second chance** keeps a warm entry in `main` by
+    /// putting it back at the head before the cursor reaches it. Both are one
+    /// `memcpy` inside a lock that was already held, which is the only thing
+    /// this module is allowed to do in there (ADR 0138).
+    ///
+    /// **It is given the slot's value as well as its address**, because the
+    /// lock it holds keeps other writers out and no longer keeps lookups out: a
+    /// lookup that found this entry expired clears the slot from under it, and
+    /// re-reading the offset halfway through would copy from wherever the
+    /// cleared slot pointed.
+    fn carry(self: *Shard, into: *Region, slot: *Slot, seen: Slot, e: Entry) bool {
+        const total = header + e.key.len + e.value.len;
+        // An entry that does not fit the region it is going to stays where it
+        // is rather than being truncated into it.
+        if (total > into.len()) return false;
+        if (into.wouldClobber(total, seen.off, total)) return false;
+
+        const off = into.reserve(total);
+        // `copyForwards` rather than `@memcpy`: source and destination are two
+        // windows on one ring, and the check above rules out overlap in the
+        // direction that matters but not aliasing as far as the compiler is
+        // concerned.
+        std.mem.copyForwards(u8, self.ring[off..][0..total], self.ring[seen.off..][0..total]);
+
+        // **The slot moves as one word or not at all.** Two field writes would
+        // let a lookup read the new offset with the old pass number and follow
+        // it into the middle of somebody else's entry. And it is a swap rather
+        // than a store because a lookup is allowed to have warmed this slot, or
+        // to have cleared it as expired, while the copy was being made — the
+        // first is a reason to try again, the second a reason to stop.
+        const gen = into.mark().gen;
+        while (true) {
+            const now = slot.load();
+            if (now.off != seen.off or now.gen != seen.gen) return false;
+            var next = now;
+            next.off = off;
+            next.gen = gen;
+            const word = @as(*u64, @ptrCast(slot));
+            if (@cmpxchgWeak(u64, word, @bitCast(now), @bitCast(next), .release, .monotonic) == null) break;
+        }
+        // Counted by the caller: the counters belong to the thread now rather
+        // than to the shard, and a `Shard` has no way to reach one.
+        return true;
+    }
+
+    /// The write half of a read, and the reason `get` can hold nothing at all
+    /// (ADR 0188).
+    ///
+    /// A hit that proved something — a second ask inside the doorkeeper, or a
+    /// warm entry the cursor is about to reach — wants its entry copied to
+    /// `main`'s head. That is a ring write and a ring write is exclusive, so it
+    /// happens here, **after `get` has already put the value in the caller's
+    /// buffer**. The caller waits for its answer, not for the policy.
+    ///
+    /// **It is handed the way rather than the key, and that is the difference
+    /// between this being worth doing and not.** The first version re-hashed
+    /// nothing but did walk the bucket again and compare the key again, and
+    /// measured 2.5% *slower* than the exclusive lock it replaced: about an
+    /// eighth of reads want a promotion, and an eighth of reads paying a second
+    /// lock and a second scan costs more than seven eighths of reads gain from
+    /// running together.
+    ///
+    /// So the read passes back where it looked, and all this does is check that
+    /// the slot still points where it did. `off` and `gen` together identify
+    /// the entry; `freq` is left out of the comparison because another reader
+    /// is allowed to have bumped it in between, and that is not a reason to
+    /// give up on the promotion.
+    fn promote(self: *Shard, bucket: []Slot, way: usize, expect: Slot) bool {
+        self.lock.take();
+        defer self.lock.release();
+
+        const slot = &bucket[way];
+        const seen = slot.load();
+        if (seen.off != expect.off or seen.gen != expect.gen) return false;
+        if (!self.live(seen)) return false;
+        const e = self.entry(seen) orelse return false;
+        return self.carry(&self.main, slot, seen, e);
+    }
 };
 
 pub const Store = struct {
@@ -269,9 +673,25 @@ pub const Store = struct {
         // The table splits the budget with the ring at whatever the caller's
         // `entries` implies, the ring takes the rest exactly, and the two
         // together are inside the budget by construction.
+        // **A sixth to the table rather than a quarter**, which is where the
+        // knee is and it was swept rather than reasoned. A slot is 8 bytes and
+        // an entry is 12 of header plus the key plus the value, so a quarter
+        // buys about twice as many slots as the ring can ever fill — surplus
+        // paid for once in memory and again in every bucket probe that misses
+        // a larger table. Measured on 100,000 entries in a 4 MiB budget:
+        //
+        //   table   held    bytes/entry  hit rate  1 thread  8 threads
+        //   1/4     67,499  62.1         92.7%     22.7M     127.0M
+        //   1/6     67,711  61.9         92.7%     24.4M     133.4M
+        //   1/8     59,498  70.5         91.5%     28.4M     148.6M
+        //
+        // A sixth costs nothing on any of the first three columns and is worth
+        // 7.5% on the fourth. An eighth is faster again and starts paying for
+        // it in hit rate, which is the wrong currency: a miss is a database
+        // round trip and an operation is 40 ns.
         const slot_bytes = @sizeOf(Slot);
         const total_slots = if (opts.entries == 0)
-            opts.bytes / 4 / slot_bytes
+            opts.bytes / 6 / slot_bytes
         else
             // The table may take at most half, or a large `entries` would
             // leave a cache with nowhere to put anything.
@@ -286,7 +706,15 @@ pub const Store = struct {
         // is bounded by how much work a cache that size is doing anyway.
         // `shardCount()` is what the program actually got.
         const asked = std.math.ceilPowerOfTwo(usize, @max(opts.shards, 1)) catch return error.TooSmall;
-        const shards_n = @max(1, @min(asked, total_cap / 4096));
+        // **Floored to a power of two after the clamp, not before it.**
+        // `shard_mask` is `shards_n - 1` used as a bitmask, which is a modulo
+        // only when the count is a power of two — and the clamp above divides
+        // by 4096, which is any number at all. A count of 12 gave a mask of
+        // 0b1011, so four of the twelve shards were allocated and nothing
+        // could ever hash to them: 33% of the budget at 64 KiB, the smallest
+        // one this module accepts, on the default `shards`. At 192 KiB and 64
+        // shards it was 78%.
+        const shards_n = std.math.floorPowerOfTwo(usize, @max(1, @min(asked, total_cap / 4096)));
         const cap = total_cap / shards_n;
         if (cap > std.math.maxInt(u32)) return error.TooSmall;
 
@@ -310,9 +738,15 @@ pub const Store = struct {
             // Touched once so the pages are resident, rather than the first
             // few thousand operations measuring the kernel handing them over.
             @memset(ring, 0);
+            // The doorkeeper never gets so small that an ordinary entry cannot
+            // pass through it, which on the smallest shard this module builds
+            // makes it a quarter rather than a tenth.
+            const small_len: u32 = @intCast(@max(cap / small_share, 512));
             s.* = .{
                 .slots = slots,
                 .ring = ring,
+                .small = .init(0, small_len),
+                .main = .init(small_len, @intCast(cap)),
                 .buckets = @intCast(buckets),
             };
             made += 1;
@@ -399,7 +833,7 @@ pub const Store = struct {
         {
             shard.lock.take();
             defer shard.lock.release();
-            shard.stats.refused += 1;
+            Counters.bump(&shard.stats.refused);
             return false;
         }
 
@@ -421,36 +855,133 @@ pub const Store = struct {
         shard.lock.take();
         defer shard.lock.release();
 
-        const off = shard.reserve(total);
+        var chosen: usize = 0;
+        var keep_freq: u2 = 0;
+        var displaced = true;
+        var returning = false;
+        const small_to = shard.small.to;
+        const small_mark = shard.small.mark();
+        const main_mark = shard.main.mark();
+
+        // **The same key first, and only the ways whose fingerprint says it
+        // might be.** Refreshing a key that is already there is what a cache
+        // in front of anything spends its writes on, and it used to walk all
+        // eight ways doing the ranking arithmetic on the way past. The vector
+        // compare answers "which ways could this be" in two instructions.
+        //
+        // **This runs before the region is chosen, which is the point of it
+        // running here at all.** A way that carries this fingerprint and is
+        // dead is a ghost — a record that this key was in the ring and the
+        // cursor took it — and a key coming back that soon has already proved
+        // what the doorkeeper exists to ask.
+        var mask = matching(bucket, fp);
+        while (mask != 0) : (mask &= mask - 1) {
+            const i = @ctz(mask);
+            const seen = bucket[i].load();
+            const in_small = seen.off < small_to;
+            const m = if (in_small) small_mark else main_mark;
+            if (!Region.liveAt(m, seen)) {
+                returning = returning or Region.ghostAt(m, seen);
+                continue;
+            }
+            const e = shard.entry(seen) orelse continue;
+            // The same key again is an update rather than a second entry, and
+            // it keeps the warmth it earned — a value being refreshed is the
+            // same value as far as anybody asking for it is concerned.
+            if (e.space == space and std.mem.eql(u8, e.key, key)) {
+                chosen = i;
+                keep_freq = seen.freq;
+                displaced = false;
+                // A key already in `main` is not sent back through the
+                // doorkeeper by being written again. It earned the nine tenths
+                // once; a refresh is the same key, not a new one.
+                returning = returning or !in_small;
+                break;
+            }
+        }
+
+        // **A new entry goes in through the doorkeeper, but only once there is
+        // something to keep it out of.** `small` is a tenth of the ring, so a
+        // key nobody asks for a second time is gone in a tenth of the time and
+        // never displaces what `main` is holding.
+        //
+        // Three things skip it. One too large to leave room in the tenth goes
+        // straight to `main`: a value that big costs enough to fetch that
+        // making it prove itself twice is the wrong trade, and there are few
+        // enough of them to be no threat.
+        //
+        // **A cache that is still filling admits everything**, because a
+        // doorkeeper in front of empty space is not admission control, it is
+        // throwing away room nobody is competing for. Sending unread entries
+        // through the tenth regardless took a store holding 78,875 of them
+        // down to 8,065 — a cache with space to spare using a tenth of it.
+        // `main.gen == 1` says it has never been round.
+        //
+        // And **a key the ring has seen before goes straight back to `main`**,
+        // which is the ghost above and is S3-FIFO's admission rule.
+        const filling = main_mark.gen == 1 and main_mark.head + total <= shard.main.to;
+        const into = if (filling or returning or total * 2 > shard.small.len())
+            &shard.main
+        else
+            &shard.small;
+        const off = into.reserve(total);
         @memcpy(shard.ring[off..][0..header], &head_bytes);
         @memcpy(shard.ring[off + header ..][0..key.len], key);
         @memcpy(shard.ring[off + header + key.len ..][0..value.len], value);
 
-        var chosen: usize = 0;
-        var stalest: u64 = std.math.maxInt(u64);
-        for (bucket, 0..) |*slot, i| {
-            if (slot.gen == 0) {
-                chosen = i;
-                break;
-            }
-            // The same key again is an update rather than a second entry.
-            if (slot.fp == fp and shard.live(slot.*)) {
-                if (shard.entry(slot.*)) |e| {
-                    if (std.mem.eql(u8, e.key, key)) {
-                        chosen = i;
-                        break;
-                    }
+        // Only a genuinely new key pays for the ranking, and only then does
+        // the bucket have to give something up. **After the reserve, not
+        // before**: the entry just written killed whatever the cursor passed
+        // over, and those ways are exactly the ones worth giving up.
+        if (displaced) {
+            var coldest: u64 = std.math.maxInt(u64);
+            for (bucket, 0..) |*slot, i| {
+                const seen = slot.load();
+                if (seen.gen == 0) {
+                    chosen = i;
+                    displaced = false;
+                    break;
+                }
+                const in_small = seen.off < small_to;
+                const region = if (in_small) &shard.small else &shard.main;
+
+                // **Lowest goes first, and age is the last question rather
+                // than the only one.** Ordering by age alone is what made a key
+                // read a million times die at the same moment as one nobody
+                // asked for.
+                //
+                //   0  the ring already took this entry, so the slot is free
+                //   1  still in the doorkeeper — it has been asked for once
+                //   2  promoted, so somebody asked for it twice
+                //
+                // then warmth inside the tier, then write order inside that.
+                const tier: u64 = if (!region.live(seen))
+                    0
+                else if (in_small)
+                    1
+                else
+                    2;
+                const rank = (tier << 62) | (@as(u64, seen.freq) << 60) |
+                    (@as(u64, seen.gen) << 32) | seen.off;
+                if (rank < coldest) {
+                    coldest = rank;
+                    chosen = i;
                 }
             }
-            // Oldest pass first, then earliest in the pass.
-            const age = (@as(u64, slot.gen) << 32) | slot.off;
-            if (age < stalest) {
-                stalest = age;
-                chosen = i;
-            }
         }
-        bucket[chosen] = .{ .off = off, .gen = shard.gen, .fp = fp };
-        shard.stats.puts += 1;
+        // **A bucket decays only when it cannot tell its ways apart**, which
+        // is when the coldest thing in it is still warm. A bucket with a dead
+        // or unproven way to give up has an answer already and must not spend
+        // it: halving on every displacement instead took a warm entry to zero
+        // in two of them, which is how a key being read constantly was still
+        // thrown out by a flood of keys nobody read twice.
+        if (displaced and bucket[chosen].load().freq > 0) for (bucket) |*slot| {
+            var next = slot.load();
+            next.freq >>= 1;
+            slot.store(next);
+        };
+        bucket[chosen].store(.{ .off = off, .gen = into.mark().gen, .fp = fp, .freq = keep_freq });
+        Counters.bump(&shard.stats.puts);
         return true;
     }
 
@@ -461,26 +992,57 @@ pub const Store = struct {
         const hash = std.hash.Wyhash.hash(space, key);
         const shard = self.shardFor(hash);
         const fp = fingerprint(hash);
-        // Read before the lock, for the reason `put` builds its header there.
         const now = self.elapsed();
 
-        // The bucket is one cache line and almost always a miss, and taking
-        // the lock is two atomics that do not need it. Asking for the line
-        // first lets the two overlap instead of queueing.
+        // The bucket is one cache line and almost always a miss. Asking for the
+        // line before anything else lets the miss and the arithmetic overlap.
         const bucket = shard.bucketOf(hash);
         @prefetch(bucket.ptr, .{ .rw = .read, .locality = 3, .cache = .data });
 
-        shard.lock.take();
-        defer shard.lock.release();
-
+        // **A lookup takes nothing** (ADR 0188). It reads the slot, reads the
+        // bytes, and then asks the region's cursor whether anything wrote over
+        // those bytes while it was reading them — which is the same question
+        // `live` already answers, asked a second time. Nothing here is
+        // published to another thread except a warmer `freq` and, on a hit that
+        // proved something, the promotion handed to `Shard.promote` below.
         var evicted = false;
-        for (bucket) |*slot| {
-            if (slot.gen == 0 or slot.fp != fp) continue;
-            if (!shard.live(slot.*)) {
+        var answer: ?usize = null;
+        var move: ?struct { way: usize, slot: Slot } = null;
+        const small_to = shard.small.to;
+
+        // **All eight fingerprints compared at once, and the loop runs only
+        // over the ways that matched.** Walking eight ways with a branch each
+        // costs a mispredict most of the time, and a mispredict is worth more
+        // than the compare it was guarding: the bucket is one cache line that
+        // has already arrived, so the scan was pure branch cost.
+        var mask = matching(bucket, fp);
+        // **Ask for the entry before deciding whether to read it.** The slot
+        // points at the ring, so the second load cannot start until the first
+        // returns — which is the whole of the gap to a hash map that keeps the
+        // key beside the probe. Issuing it here rather than after the region
+        // and liveness checks buys back the dozen cycles those take.
+        if (mask != 0) @prefetch(shard.ring.ptr + bucket[@ctz(mask)].load().off, .{
+            .rw = .read,
+            .locality = 3,
+            .cache = .data,
+        });
+        while (mask != 0) : (mask &= mask - 1) {
+            const way = @ctz(mask);
+            const slot = &bucket[way];
+            const seen = slot.load();
+            // Which region, worked out once: the liveness check below and the
+            // promotion check further down both want it.
+            const in_small = seen.off < small_to;
+            const region = if (in_small) &shard.small else &shard.main;
+            // The cursor is read *after* the slot, and `Slot.load` is an
+            // acquire for that reason: a slot a `put` has just written must be
+            // judged against the cursor that same `put` had already moved.
+            const at = region.mark();
+            if (!Region.liveAt(at, seen)) {
                 evicted = true;
                 continue;
             }
-            const e = shard.entry(slot.*) orelse continue;
+            const e = shard.entry(seen) orelse continue;
 
             // A Space whose name shares 32 bits with another's is refused at
             // `registerSpace`, so this can only be a fingerprint collision
@@ -489,22 +1051,70 @@ pub const Store = struct {
             // than somebody else's value.
             if (e.space != space) continue;
             if (!std.mem.eql(u8, e.key, key)) continue;
+            if (e.value.len > out.len) continue;
+            @memcpy(out[0..e.value.len], e.value);
+
+            // **Everything above read the ring with nothing held, so nothing
+            // above is true yet.** A `put` publishes its cursor before it
+            // copies a byte, so a cursor that has since passed this entry means
+            // those bytes were being written over while they were being read —
+            // the key that matched may have been half of one key and half of
+            // another, and what landed in `out` is somebody else's value or no
+            // value at all. Asking again is the whole price of the lock this
+            // does not take: one load, of a word every lookup already reads.
+            //
+            // It counts as an eviction rather than a miss, because that is what
+            // it is: the ring reached this entry.
+            if (!Region.liveAt(region.settled(), seen)) {
+                evicted = true;
+                continue;
+            }
 
             if (e.expires != 0 and now >= e.expires) {
                 // Forgotten now rather than at a sweep that does not exist.
-                slot.* = .{};
-                shard.stats.expired += 1;
+                // Two readers may do this at once and it is the same store
+                // either way.
+                slot.clear();
+                Counters.bump(&shard.stats.expired);
                 return null;
             }
 
-            if (e.value.len > out.len) continue;
-            @memcpy(out[0..e.value.len], e.value);
-            shard.stats.hits += 1;
-            return e.value.len;
+            // **The read is what the policy learns from**, and this is the
+            // only place in the file that learns anything at all. What it
+            // learns is one bit of arithmetic on the slot; what it *decides*
+            // is whether a write has to follow, and that write is not done
+            // from here.
+            if (in_small) {
+                // A second ask while it is still in the doorkeeper. That is
+                // the whole admission test, and passing it buys the rest of
+                // the ring.
+                slot.warmer(seen);
+                move = .{ .way = way, .slot = seen };
+            } else if (seen.freq < warm) {
+                slot.warmer(seen);
+            } else if (@as(usize, shard.main.untilAt(at, seen)) < shard.main.len() / rescue_window) {
+                // Warm, and the cursor is about to reach it. Cold entries are
+                // left where they are on purpose: the ring is where this cache
+                // forgets, and one that saves everything has stopped having a
+                // policy.
+                move = .{ .way = way, .slot = seen };
+            }
+
+            Counters.bump(&shard.stats.hits);
+            answer = e.value.len;
+            break;
         }
 
-        if (evicted) shard.stats.evicted += 1 else shard.stats.misses += 1;
-        return null;
+        if (answer == null) Counters.bump(if (evicted) &shard.stats.evicted else &shard.stats.misses);
+
+        // **The value is already in the caller's buffer, so this is policy
+        // rather than answer.** It checks the slot again because anything could
+        // have happened in between; if the entry has gone, there is nothing
+        // left to save and nothing to report.
+        if (move) |m| {
+            if (shard.promote(bucket, m.way, m.slot)) Counters.bump(&shard.stats.rescued);
+        }
+        return answer;
     }
 
     /// Forget a key. True when there was something to forget.
@@ -517,10 +1127,11 @@ pub const Store = struct {
         defer shard.lock.release();
 
         for (shard.bucketOf(hash)) |*slot| {
-            if (slot.gen == 0 or slot.fp != fp or !shard.live(slot.*)) continue;
-            const e = shard.entry(slot.*) orelse continue;
+            const seen = slot.load();
+            if (seen.gen == 0 or seen.fp != fp or !shard.live(seen)) continue;
+            const e = shard.entry(seen) orelse continue;
             if (e.space != space or !std.mem.eql(u8, e.key, key)) continue;
-            slot.* = .{};
+            slot.clear();
             return true;
         }
         return false;
@@ -532,30 +1143,72 @@ pub const Store = struct {
         for (self.shards) |*shard| {
             shard.lock.take();
             defer shard.lock.release();
-            @memset(shard.slots, .{});
+            // A slot at a time rather than one `memset`, because a lookup that
+            // holds nothing may be reading any of them.
+            for (shard.slots) |*slot| slot.clear();
         }
     }
 
     pub fn stats(self: *Store) Stats {
         var total: Stats = .{};
         for (self.shards) |*shard| {
-            shard.lock.take();
-            defer shard.lock.release();
-            total.hits += shard.stats.hits;
-            total.misses += shard.stats.misses;
-            total.evicted += shard.stats.evicted;
-            total.expired += shard.stats.expired;
-            total.puts += shard.stats.puts;
-            total.refused += shard.stats.refused;
+            // No lock: the counters are atomic and nothing here branches on
+            // them, so the answer is a sum over a moving target either way.
+            const one = shard.stats.read();
+            total.hits += one.hits;
+            total.misses += one.misses;
+            total.evicted += one.evicted;
+            total.expired += one.expired;
+            total.puts += one.puts;
+            total.refused += one.refused;
+            total.rescued += one.rescued;
         }
         return total;
     }
 
-    /// Sixteen bits, because the slot is eight bytes and the key comparison
-    /// behind it is what decides. A collision here costs one wasted key
-    /// compare against the ring; it can never cost a wrong answer.
-    fn fingerprint(hash: u64) u16 {
-        return @as(u16, @truncate(hash >> 32)) | 1;
+    /// Fourteen bits, the other two having gone to `Slot.freq`. The key
+    /// comparison behind it is what decides, so a collision here costs one
+    /// wasted compare against the ring and can never cost a wrong answer.
+    fn fingerprint(hash: u64) u14 {
+        return @as(u14, @truncate(hash >> 32)) | 1;
+    }
+
+    /// Which of a bucket's eight ways carry this fingerprint and have been
+    /// written, as a bit per way.
+    ///
+    /// **A bucket is one cache line and it has already arrived**, so the old
+    /// loop was not paying for memory — it was paying for eight branches the
+    /// processor could not predict, on a line it already had. Comparing the
+    /// eight as one vector and then visiting only the ways that matched turns
+    /// that into two instructions and a `ctz` per real candidate.
+    ///
+    /// The shifts are `Slot`'s layout, which a packed struct fixes: `off` in
+    /// bits 0–31, `gen` in 32–47, `fp` in 48–61, `freq` in 62–63. A `gen` of
+    /// zero means the way was never written, which is why it is part of the
+    /// test rather than a separate one.
+    /// **The eight loads are atomic because somebody is always writing this
+    /// line** (ADR 0188), and `unordered` because that is the weakest thing
+    /// that is still not a race. A plain 64-byte read of the bucket is what
+    /// this wants to be and it measured 16% faster on one thread; it is also a
+    /// data race beside a `put`'s slot store, and this module's answer to "is
+    /// that fine in practice" is written on its own header. `unordered` is the
+    /// ordering LLVM has for exactly this — a load that may see any one write
+    /// but never half of two — and it is free where the vector load is free.
+    ///
+    /// Whatever it returns is a list of candidates, not an answer: every way it
+    /// names is loaded again and its whole key compared, so the worst a stale
+    /// or reordered read can do is cost a probe or miss one.
+    fn matching(bucket: []Slot, fp: u14) u8 {
+        const Lanes = @Vector(ways, u64);
+        var words: [ways]u64 = undefined;
+        inline for (0..ways) |i| {
+            words[i] = @atomicLoad(u64, @as(*const u64, @ptrCast(&bucket[i])), .unordered);
+        }
+        const v: Lanes = words;
+        const fps = (v >> @as(Lanes, @splat(48))) & @as(Lanes, @splat(0x3fff));
+        const gens = (v >> @as(Lanes, @splat(32))) & @as(Lanes, @splat(0xffff));
+        const hit = (fps == @as(Lanes, @splat(fp))) & (gens != @as(Lanes, @splat(0)));
+        return @bitCast(hit);
     }
 };
 
@@ -659,13 +1312,51 @@ test "the ring forgets the oldest first, and says eviction rather than miss" {
     }
 
     var out: [1024]u8 = undefined;
-    try testing.expectEqual(@as(?usize, null), store.get(1, "k0", &out));
+    // **Not `k0`.** A cache with room admits everything, so the first entries
+    // in went into `main` and stayed; the doorkeeper only engaged once `main`
+    // was full. What got forgotten is the oldest thing that arrived after
+    // that, which is the middle of this run rather than the start of it.
+    const mid = try std.fmt.bufPrint(&key, "k{d}", .{200});
+    try testing.expectEqual(@as(?usize, null), store.get(1, mid, &out));
     try testing.expect(store.stats().evicted >= 1);
 
     // And the newest is still there, which is what makes the above eviction
     // rather than a cache that simply lost everything.
     const last = try std.fmt.bufPrint(&key, "k{d}", .{399});
     try testing.expect(store.get(1, last, &out) != null);
+}
+
+test "a working set that moves takes the old one's place" {
+    // The property the pinning question is really about. `main` only advances
+    // when something is promoted into it, so a cache written to and never read
+    // holds its first entries indefinitely. That is harmless — nothing is
+    // asking for them — but it must not survive traffic moving on, or the
+    // cache would be a museum of whatever it saw first.
+    var store = try Store.open(testing.allocator, .{ .bytes = 256 << 10, .shards = 1 });
+    defer store.deinit();
+
+    var out: [64]u8 = undefined;
+    var key: [32]u8 = undefined;
+
+    // An early working set, read enough to be promoted.
+    for (0..2_000) |i| {
+        const k = try std.fmt.bufPrint(&key, "old{d}", .{i});
+        _ = store.put(1, k, "v", 0);
+        _ = store.get(1, k, &out);
+        _ = store.get(1, k, &out);
+    }
+    try testing.expect(store.get(1, "old1000", &out) != null);
+
+    // Traffic moves to a different set of keys, read the same way.
+    for (0..20_000) |i| {
+        const k = try std.fmt.bufPrint(&key, "new{d}", .{i});
+        _ = store.put(1, k, "v", 0);
+        _ = store.get(1, k, &out);
+        _ = store.get(1, k, &out);
+    }
+
+    try testing.expectEqual(@as(?usize, null), store.get(1, "old1000", &out));
+    try testing.expect(store.get(1, "new19999", &out) != null);
 }
 
 test "an entry past its time is a miss, and the slot is freed on the way out" {
@@ -687,22 +1378,137 @@ test "an entry that will not fit before the end starts again at the beginning" {
     var store = try Store.open(testing.allocator, .{ .bytes = 64 << 10, .shards = 1 });
     defer store.deinit();
 
-    // Put the write cursor where the next entry cannot fit, which is the one
-    // moment the ring goes round. An entry is never split across the seam, so
-    // what has to hold is that the pass number moves with it — a slot from
-    // the pass before must stop being live at the right instant, and not one
-    // entry early or late.
-    const shard = &store.shards[0];
-    const before = shard.gen;
-    shard.head = @intCast(shard.ring.len - 8);
-
+    // A value that still fits, so what is being watched is the wrap and not a
+    // refusal. It goes through whichever region `put` chooses, and the round
+    // trip below is what says the wrap did not cut it in half.
     const value = "a" ** 300 ++ "b" ** 300;
+    var key: [32]u8 = undefined;
+    for (0..400) |i| {
+        _ = store.put(1, try std.fmt.bufPrint(&key, "k{d}", .{i}), value, 0);
+    }
     try testing.expect(store.put(1, "wrapped", value, 0));
-    try testing.expectEqual(before + 1, shard.gen);
 
     var out: [1024]u8 = undefined;
     const n = store.get(1, "wrapped", &out) orelse return error.TestExpectedHit;
     try testing.expectEqualStrings(value, out[0..n]);
+}
+
+test "a region that cannot fit an entry before its end starts again at its start" {
+    // The wrap is a region's own rule, and which region a `put` lands in is a
+    // different decision made above it — so this asks the region directly.
+    var r: Region = .init(100, 1000);
+    try testing.expectEqual(@as(u32, 100), r.reserve(500));
+    try testing.expectEqual(@as(u32, 600), r.reserve(300));
+    try testing.expectEqual(@as(u16, 1), r.mark().gen);
+
+    // 900 + 200 is past `to`, so it starts again at `from` and the pass number
+    // moves with it — never past zero, which is how a slot says "never
+    // written".
+    try testing.expectEqual(@as(u32, 100), r.reserve(200));
+    try testing.expectEqual(@as(u16, 2), r.mark().gen);
+
+    // And a slot from the pass before stops being live at the right instant,
+    // not one entry early or late.
+    try testing.expect(r.live(.{ .off = 600, .gen = 1 }));
+    try testing.expect(!r.live(.{ .off = 100, .gen = 1 }));
+    try testing.expect(r.live(.{ .off = 100, .gen = 2 }));
+    try testing.expect(!r.live(.{ .off = 100, .gen = 0 }));
+}
+
+test "a slot the cursor has just passed is a ghost, and one from long ago is not" {
+    // The ghost queue this cache does not pay for: a dead slot is already a
+    // record that the key was here and the ring took it (ADR 0188).
+    var r: Region = .init(0, 1000);
+    _ = r.reserve(400); // off 0, pass 1
+    _ = r.reserve(400); // off 400, pass 1
+    _ = r.reserve(400); // wraps: off 0, pass 2, head 400
+
+    const m = r.mark();
+    // Written on pass 1 at 0, and pass 2's cursor has gone past it.
+    try testing.expect(Region.ghostAt(m, .{ .off = 0, .gen = 1 }));
+    // Written on pass 1 at 400, still ahead of pass 2's cursor — live, not a
+    // ghost.
+    try testing.expect(!Region.ghostAt(m, .{ .off = 400, .gen = 1 }));
+    try testing.expect(Region.liveAt(m, .{ .off = 400, .gen = 1 }));
+    // Nothing written on this pass is a ghost, and a way never written is not
+    // a ghost either.
+    try testing.expect(!Region.ghostAt(m, .{ .off = 0, .gen = 2 }));
+    try testing.expect(!Region.ghostAt(m, .{ .off = 0, .gen = 0 }));
+
+    // **The window is one lap and it is what makes this a policy.** A slot two
+    // passes back is a key the cache stopped knowing anything about, not a key
+    // that just came back.
+    try testing.expect(!Region.ghostAt(.{ .head = 400, .gen = 9 }, .{ .off = 0, .gen = 7 }));
+}
+
+test "a key that is read again survives a flood of keys that are not" {
+    // The property the two regions exist for. Before them a cache forgot in
+    // write order alone, so a key asked for constantly died at the same moment
+    // as one nobody ever asked for twice — and a flood of the second kind took
+    // the whole cache with it.
+    var store = try Store.open(testing.allocator, .{ .bytes = 1 << 20, .shards = 1 });
+    defer store.deinit();
+
+    var out: [64]u8 = undefined;
+    var key: [32]u8 = undefined;
+
+    // **Fill it first, and that is not setup.** While `main` is still filling
+    // every put goes straight past the doorkeeper on purpose, so a flood into
+    // an empty cache measures nothing this test is about. It also used to hide
+    // the result: the wanted key landed on `main`'s very first byte, the flood
+    // filled `main` exactly once, and the key survived by sitting precisely on
+    // the cursor with no margin at all. One extra byte written to `main` and it
+    // failed. Warming first gives it the nine tenths of the ring it should have.
+    for (0..30_000) |i| {
+        _ = store.put(1, try std.fmt.bufPrint(&key, "warm{d}", .{i}), "x" ** 32, 0);
+    }
+
+    // Read twice, which is what gets it out of the doorkeeper and into main.
+    _ = store.put(1, "wanted", "the value", 0);
+    try testing.expect(store.get(1, "wanted", &out) != null);
+    try testing.expect(store.get(1, "wanted", &out) != null);
+
+    // Now write far more one-shot keys than the ring can hold, reading each
+    // one exactly never. Ten laps of `small` and one of the whole ring.
+    for (0..200_000) |i| {
+        _ = store.put(1, try std.fmt.bufPrint(&key, "flood{d}", .{i}), "x" ** 32, 0);
+    }
+
+    const n = store.get(1, "wanted", &out) orelse return error.TestExpectedHit;
+    try testing.expectEqualStrings("the value", out[0..n]);
+
+    // And the flood really did lap the ring, or the assertion above passed
+    // because nothing was ever under pressure.
+    try testing.expect(store.stats().evicted > 0 or store.stats().puts > 100_000);
+}
+
+test "a key already past the doorkeeper is not sent back through it by a refresh" {
+    // A cache in front of anything spends most of its writes refreshing keys
+    // it already holds. Writing one again used to send it back to `small`,
+    // where the tenth of the ring laps ten times as fast — so a key hot enough
+    // to be refreshed constantly was also the one being demoted constantly.
+    var store = try Store.open(testing.allocator, .{ .bytes = 1 << 20, .shards = 1 });
+    defer store.deinit();
+
+    var out: [64]u8 = undefined;
+    var key: [32]u8 = undefined;
+    for (0..30_000) |i| {
+        _ = store.put(1, try std.fmt.bufPrint(&key, "warm{d}", .{i}), "x" ** 32, 0);
+    }
+
+    _ = store.put(1, "hot", "first", 0);
+    try testing.expect(store.get(1, "hot", &out) != null);
+    try testing.expect(store.get(1, "hot", &out) != null);
+
+    // Refreshed, then flooded. If the refresh had put it back in the
+    // doorkeeper, ten laps of `small` would take it.
+    _ = store.put(1, "hot", "second", 0);
+    for (0..60_000) |i| {
+        _ = store.put(1, try std.fmt.bufPrint(&key, "later{d}", .{i}), "x" ** 32, 0);
+    }
+
+    const n = store.get(1, "hot", &out) orelse return error.TestExpectedHit;
+    try testing.expectEqualStrings("second", out[0..n]);
 }
 
 test "a budget that is not a power of two is spent rather than rounded away" {
@@ -742,4 +1548,122 @@ test "asking for more entries takes them out of the ring rather than out of the 
 
 test "a cache too small to work says so rather than rounding itself up" {
     try testing.expectError(error.TooSmall, Store.open(testing.allocator, .{ .bytes = 1024 }));
+}
+
+test "every shard the cache allocated is one a key can reach" {
+    // `shard_mask` is a mask rather than a modulo, so a shard count that is
+    // not a power of two names shards nothing can hash to. The budget is
+    // clamped by `total_cap / 4096`, which is where a non-power-of-two came
+    // from: 64 KiB on the default `shards` allocated twelve and could reach
+    // eight, and the four it could not were a third of the whole budget.
+    for ([_]usize{ 64 << 10, 96 << 10, 128 << 10, 192 << 10, 512 << 10, 4 << 20 }) |budget| {
+        for ([_]usize{ 1, 4, 16, 64, 256 }) |asked| {
+            var store = Store.open(testing.allocator, .{ .bytes = budget, .shards = asked }) catch continue;
+            defer store.deinit();
+
+            // The property itself, said directly. Everything below is the
+            // demonstration that it is the property that matters.
+            try testing.expect(std.math.isPowerOfTwo(store.shards.len));
+
+            var key: [32]u8 = undefined;
+            for (0..20_000) |i| {
+                _ = store.put(1, std.fmt.bufPrint(&key, "k{d}", .{i}) catch unreachable, "v", 0);
+            }
+            // Every shard's ring cursor moved, which is the same statement as
+            // "a key reached it" and is per shard, which the counters are not:
+            // they are per thread now (ADR 0188).
+            for (store.shards) |*s| {
+                const moved = s.small.mark().head != s.small.from or
+                    s.main.mark().head != s.main.from or s.main.mark().gen != 1;
+                try testing.expect(moved);
+            }
+        }
+    }
+}
+
+/// One thread of the soak below. Outside the test block because a test body
+/// cannot be spawned onto a thread.
+const Racer = struct {
+    store: *Store,
+    seed: u64,
+    hits: u64 = 0,
+    wrong: u64 = 0,
+
+    const keys = 2_000;
+    const longest = 400;
+
+    /// The value's length and every byte of it come from the key's number, so
+    /// half of one entry and half of another is caught, and so is a value read
+    /// out of somebody else's bytes.
+    fn valueLen(id: u32) usize {
+        return 8 + (id * 37) % longest;
+    }
+
+    fn run(r: *Racer) void {
+        var prng: std.Random.DefaultPrng = .init(r.seed);
+        const rnd = prng.random();
+        var key: [24]u8 = undefined;
+        var val: [longest + 8]u8 = undefined;
+        var out: [longest + 8]u8 = undefined;
+
+        for (0..120_000) |_| {
+            const id = rnd.uintLessThan(u32, keys);
+            const k = std.fmt.bufPrint(&key, "k:{d}", .{id}) catch unreachable;
+            const want: u8 = @as(u8, @truncate(id)) ^ 0x5a;
+
+            // One write in four, so the cursor never stops moving.
+            if (rnd.uintLessThan(u8, 4) == 0) {
+                const n = valueLen(id);
+                std.mem.writeInt(u64, val[0..8], id, .little);
+                @memset(val[8..n], want);
+                _ = r.store.put(7, k, val[0..n], 0);
+                continue;
+            }
+
+            const n = r.store.get(7, k, &out) orelse continue;
+            r.hits += 1;
+            if (n != valueLen(id) or std.mem.readInt(u64, out[0..8], .little) != id) {
+                r.wrong += 1;
+                continue;
+            }
+            for (out[8..n]) |b| if (b != want) {
+                r.wrong += 1;
+                break;
+            };
+        }
+    }
+};
+
+test "a lookup that holds no lock never hands back a value that is not the key's" {
+    // **The test the lock-free read path exists to survive** (ADR 0188). A
+    // `get` copies bytes out of the ring with nothing held and then asks the
+    // region's cursor whether a `put` was writing over them while it read. This
+    // is what says that second question is load-bearing rather than decoration.
+    //
+    // A small budget and values of every length, so the ring laps hard and
+    // entries never line up. Deleting the second cursor read and running the
+    // same shape for six seconds instead of this one's fraction of a second
+    // produced 14,564 wrong answers on sixteen threads and 519 on eight; with
+    // it, 310 million verified hits and none.
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+
+    var store = try Store.open(testing.allocator, .{ .bytes = 128 << 10, .shards = 2 });
+    defer store.deinit();
+
+    var racers: [4]Racer = undefined;
+    var threads: [racers.len]std.Thread = undefined;
+    for (&racers, 0..) |*r, i| r.* = .{ .store = &store, .seed = 1 + i * 7919 };
+    for (&threads, 0..) |*t, i| t.* = try std.Thread.spawn(.{}, Racer.run, .{&racers[i]});
+    for (threads) |t| t.join();
+
+    var hits: u64 = 0;
+    var wrong: u64 = 0;
+    for (racers) |r| {
+        hits += r.hits;
+        wrong += r.wrong;
+    }
+    try testing.expectEqual(@as(u64, 0), wrong);
+    // And it really did answer things, or the assertion above passed because
+    // the cache never held anything.
+    try testing.expect(hits > 1_000);
 }

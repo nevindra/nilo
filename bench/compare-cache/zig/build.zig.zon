@@ -1,0 +1,13 @@
+.{
+    .name = .cache_zig_compare,
+    .version = "0.0.0",
+    .fingerprint = 0x6a930c7d19e23551,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .cachezig = .{
+            .url = "https://github.com/karlseguin/cache.zig/archive/refs/heads/master.tar.gz",
+            .hash = "cache-0.0.0-winRwDLWAABqv6hvZ4_kz7a2Xz-waZfPAkjPeabMnASO",
+        },
+    },
+    .paths = .{""},
+}

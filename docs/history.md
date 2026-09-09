@@ -39,6 +39,80 @@ What did it, in order of worth: a **JSON writer generated from the type**, since
 
 A third kind of number needs no machine: how the work grows. Finding the end of a request head restarted from byte zero on every read, so a head dribbled in a byte at a time cost a pass per byte — quadratic, and reachable by any client that chooses to be slow. Route matching re-split the request path for every route it tried. Both were fixed on that basis rather than on a benchmark.
 
+## The competitor's win that was explained before it was read
+
+`nilo_cache` was measured against seven other caches and lost one axis: Rust's
+[quick_cache](https://github.com/arthurprs/quick-cache) reads about twice as
+fast on eight threads. The explanation written down at the time was that
+quick_cache keeps values in its hash table and so pays one cache miss where
+nilo pays two — which fitted the number, matched a known entry on nilo's own
+roadmap, and was **wrong**. Its `map` is a `HashTable<Token>` holding a `u32`;
+the key and value live in a separate slab, and its lookup is two dependent
+loads exactly like nilo's.
+
+Reading the source instead gave the real answer and it was somewhere else
+entirely: **quick_cache's `get` takes its shard lock shared and writes one
+relaxed atomic, and nilo's takes the lock exclusively and writes three things,
+one of which is a whole-entry `memcpy`.** Four builds of `cache/` measured side
+by side put the lock at 10%, the writes at 16%, both at 32% — and raising the
+shard count, which is what the file had been reaching for, at 5–8%. On one
+thread the two caches are level, so none of it was per-operation work.
+
+Two habits come out of it. **An explanation that fits the number is not
+evidence**, especially when it also happens to confirm something already on the
+roadmap; that combination is what stopped anybody opening `shard.rs` for a day.
+And **a benchmark comparing two libraries has to give both the same shape of
+memory**: `bench/cache_bench.zig` opens a 64 MiB store for 50,000 keys, so nilo
+was carrying an 11 MiB table against quick_cache's 1 MiB, which was most of the
+single-threaded gap and none of the eight-threaded one. The numbers and the
+four builds are in [`bench/result/cache.md`](../bench/result/cache.md) §5.
+
+## Three ways of copying the answer, and the one that was not a lock
+
+Acting on the finding above took three attempts, and the two that failed are
+worth more than the one that worked.
+
+**A reader-writer lock is the obvious answer and it is not the answer.** Sharing
+the shard lock was +11% on eight threads and −11% on one: two atomic
+read-modify-writes per lookup is a large fraction of what a 30 ns lookup costs,
+and a single thread pays them with nothing to gain. Its first version was worse
+than that — 2.5% *slower* than the exclusive lock it replaced — because moving
+the promotion out of the read made it re-find the key, and an eighth of reads
+paying a second lock and a second scan costs more than seven eighths gain from
+overlapping.
+
+**Taking nothing at all was worth 12% more than sharing, on both thread
+counts.** The ring already holds the fact a lock was being held to establish: a
+cursor that only goes forwards, published before a byte is copied. A read copies
+the value out and then reads that cursor again; if it has passed the entry,
+those bytes were being written over while they were read, and the answer is
+thrown away. [ADR 0188](./adr/0188-a-lookup-asks-the-cursor-afterwards-instead-of-taking-a-lock.md)
+is the decision. **+13.3% on eight threads, unchanged on one.**
+
+Then the lesson that cost the most time. The first working lock-free version was
+**13% slower on one thread**, and three rounds of guessing blamed the lock, the
+validation and the promotion in turn. A ladder of seven builds put it on
+something nobody had listed: **an atomic load is one the compiler may not fold,
+hoist or vectorise.** Eight `monotonic` loads of a bucket cannot become the two
+vector loads a plain read becomes, and reading a region's cursor twice two lines
+apart cannot be common-subexpressioned away. Neither costs an instruction on
+paper and together they were 18%. Weakening the bucket scan to `unordered` and
+passing the cursor rather than re-reading it gave all of it back.
+
+**And the proof is the control, not the run.** The soak reported 542 million
+verified hits with none wrong, which on its own says nothing: the same soak with
+the second cursor read deleted reported 14,564 wrong answers, then 2,864, then
+519. A check that has never fired proves nothing about a path that has never
+raced, which is [ADR 0033](./adr/0033-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md)
+arriving again from a different direction.
+
+One more thing fell out of it. A test asserting that a key read twice survives a
+flood of keys read never had been passing **on a zero-byte margin**: the key sat
+on `main`'s very first byte, the flood filled `main` exactly once, and the cursor
+stopped precisely on it. One extra byte written to `main` failed it, and the
+ghost queue wrote about two thousand. The test was not wrong about the property;
+it was measuring `filling`, which admits everything, rather than the doorkeeper.
+
 ## Guards that were only ever observed passing
 
 Three times a guard turned out not to be guarding anything, and each time it was found by accident. Separately each read as bad luck; side by side the shape is visible, and it became [ADR 0033](./adr/0033-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md): **a check that has only been seen to pass and a check that cannot fail look identical from the outside**, because passing is the default state of both.
@@ -2787,3 +2861,31 @@ long after that as the custom plan wins
 ([ADR 0183](./adr/0183-a-filter-that-is-absent-is-not-a-filter-that-is-null.md)).
 **The exponential was in the binary rather than in the SQL**, which is not where
 it was being looked for.
+
+## A cache that scored 100% was hiding its policy, not proving it worked
+
+**A benchmark that draws its keys uniformly at random cannot see an eviction
+policy at all.** Under uniform random every key is equally likely next, so
+which entries were read recently says nothing about which will be read again,
+and every policy scores the same: the theoretical optimum. `bench/cache_bench.zig`
+drew its keys this way, and `nilo_cache` scored 100% of the achievable ceiling
+on it. On Zipf 0.99 traffic the same cache scored 78%. The straight line
+[ADR 0138](./adr/0138-a-cache-holds-its-bytes-under-a-lock-it-can-spin-on.md)
+read as "there is no cliff" was true of what it measured, and what it measured
+was the harness. **A benchmark that cannot distinguish two designs will report
+that the worse one is fine.**
+
+**Every number this module had ever published was taken on a 2-core Xeon, and
+the concurrency question could not be asked there.** Re-measured on eight
+cores, the shard count was worth 64% of throughput and the lock everyone had
+blamed for the contention was worth 1.4%. The lock was right the whole time;
+the machine measuring it just had no cores to contend over.
+
+**A whole sweep this cycle was run in Debug, because `zig build bench-cache`
+does not imply `-Doptimize=ReleaseFast`.** It reported 178 ns for an operation
+that costs 24, and the shape of the table looked the same either way, which is
+why it stood as a baseline before anyone checked.
+
+The decision is
+[ADR 0187](./adr/0187-a-cache-that-admits-everything-forgets-what-mattered.md);
+this keeps the sentence and the link, not the story.

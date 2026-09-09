@@ -67,7 +67,7 @@ other module's.
 | [`nilo_id`](#nilo_id-identifiers) | needs no loop | quiet. Two questions about scope, one gap nobody has hit |
 | [`nilo_config`](#nilo_config-settings) | needs no loop | reading a name the field is not called |
 | [`nilo_pw`](#nilo_pw-hashing-a-password) | needs no loop | a Cost floor that weighs the wrong half, and a patch `std` should have |
-| [`nilo_cache`](#nilo_cache-an-expiring-cache-in-this-process) | needs no loop | a read that costs two cache misses where a Go map costs one |
+| [`nilo_cache`](#nilo_cache-an-expiring-cache-in-this-process) | needs no loop | a read that writes, so readers queue, and an evicted-key record nothing reads |
 | [`nilo_jwt`](#nilo_jwt-checking-somebody-elses-token) | needs no loop | no number against a verification, and only RS256 |
 | [`nilo_fetch`](#nilo_fetch-calling-somebody-elses-api) | borrows the loop | 4,139 bytes of stack per idle connection, and nothing measured through TLS |
 | [`nilo_http`](#nilo_http-the-server) | owns the loop | a megabyte of request arena held per connection, nothing that reads a `Forwarded` header, and a long tail |
@@ -307,42 +307,64 @@ copy of somebody else's crypto to get it
 ## `nilo_cache`: an expiring cache in this process
 
 A ring of bytes with a table over it, sized once and never grown
-([ADR 0138](./adr/0138-a-cache-holds-its-bytes-under-a-lock-it-can-spin-on.md)).
+([ADR 0138](./adr/0138-a-cache-holds-its-bytes-under-a-lock-it-can-spin-on.md)),
+admitting a new entry through a tenth of that ring until something asks for it
+twice ([ADR 0187](./adr/0187-a-cache-that-admits-everything-forgets-what-mattered.md)).
 It imports nothing, so `zig test cache/cache.zig` is the whole of its suite,
 and a program that is not a server can take it on its own.
 
 ### Next
 
-**1. A read costs two dependent cache misses where a Go map costs one, and
-that is the whole of the small-value gap.** A slot points at a ring, so a
-lookup misses on the bucket and then again on the entry. go-cache keeps the key
-beside the probe and misses once, which is worth between a third and a half on
-values of a few dozen bytes ([`bench/result/cache.md`](../bench/result/cache.md)).
-Closing it means entries in the table, which is the design that cannot bound
-its own memory — so it would be a second structure beside this one rather than
-a change to it.
+**1. Nobody has attributed the 60% still between nilo and quick_cache on eight
+threads.** Taking the lock off the read path
+([ADR 0188](./adr/0188-a-lookup-asks-the-cursor-afterwards-instead-of-taking-a-lock.md))
+closed the gap from 1.81× to 1.60×, and on one thread the two are 1.12× apart —
+so what is left is scaling rather than per-operation work. A ceiling build with
+no lock and no writes at all did not reach quick_cache either, which is what
+says the remaining cause is not on the list anybody has written down.
+
+**Waiting on: a profile.** `perf` on both binaries, not another guess. This is
+the one entry here that should not be acted on before it is measured.
+
+**2. Counting a read costs 4.2% on eight threads and 7.0% on one.** The
+increment has to be atomic now that a read holds no lock, and there is no
+cheaper exact version: per-thread counter lanes were built with a thread-local
+and with a lane hashed off the stack address, and measured 1.5% better on eight
+threads and 3% worse on one. quick_cache's answer is to put its counters behind
+a cargo feature that is off by default. Doing the same here is a build flag and
+a documented default, not a measurement.
+
+**Waiting on: a decision** about whether `Stats` may be absent.
+
+**3. A read costs two dependent cache misses where a hash map costs one.** A
+slot points at a ring, so a lookup misses on the bucket and then again on the
+entry: 29.3 ns against `std.StringHashMap`'s 11.9 with the same keys in the same
+loop. Closing it means entries in the table, which is the design that cannot
+bound its own memory — so it would be a second structure beside this one rather
+than a change to it. **This entry used to claim it was the only lever worth more
+than a few percent, and that was wrong**: quick_cache pays two dependent loads
+as well, and beats nilo on reader parallelism instead.
 
 **Waiting on: a caller.** Nobody has a workload where the difference decides
 anything, and the memory this buys instead is the reason the module exists.
 
-**2. The clock is read on every `get`, whether or not anything in the Space
-expires.** `CLOCK_MONOTONIC_COARSE` is about 5ns of a 230ns operation. Skipping
-it needs the shard to know whether any entry it holds has an expiry, and
-reading that flag outside the lock is a race worth about 2%.
+**4. The clock is read on every `get`, whether or not anything in the Space
+expires.** `CLOCK_MONOTONIC_COARSE` is 1.6 ns of a 24 ns operation, so about
+4%. Skipping it needs the shard to know whether any entry it holds has an
+expiry, and reading that flag outside the lock is a race.
 
-**Waiting on: a number**, taken on a machine with cores to spare rather than
-this one.
+**Waiting on: a caller.** Four percent is not worth a race until somebody is
+short of it.
+
+**5. The doorkeeper's share of the ring is a tenth, and the sweep behind that
+was three points on one trace shape.** A fifth and a twentieth were both worse
+on Zipf 0.99, which is not the same as a tenth being right. Growing `small`
+while promotions are rare — an adaptive share rather than a constant — has not
+been tried.
+
+**Waiting on: a number**, across more than one trace shape.
 
 ### Known gaps
-
-**Nothing has been measured on a machine that is not a two-core shared box.**
-Every ratio in `bench/result/cache.md` is from two cores with an operating
-system also wanting one, and neither side of the go-cache comparison could be
-pinned because there was nowhere to pin to. The ranges are wide enough that a
-single run of either side would have been misleading, and they should be
-re-taken before being quoted anywhere else.
-
-**Waiting on: a machine.**
 
 **A value of `[]const u8` is the only shape that is not flat.** A struct with a
 `[]const u8` field in it is refused by name, and the caller encodes it. The

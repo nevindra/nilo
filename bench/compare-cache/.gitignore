@@ -1,1 +1,5 @@
 go/cache-go
+rust/target/
+zig/zig-out/
+zig/.zig-cache/
+zig/zig-pkg/

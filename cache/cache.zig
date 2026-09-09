@@ -22,10 +22,40 @@
 //! ## What it holds, and what that costs
 //!
 //! **One number decides the memory and it never moves.** `bytes` is the ring
-//! the values live in; the table that points at them is 16 bytes an entry on
-//! top, and `store.bytesHeld()` is the sum. Nothing is allocated after
-//! `open`, nothing grows, and there is no sweep — an entry goes when its time
-//! is up or when the ring writes over it, whichever comes first.
+//! the values live in; the table that points at them is 8 bytes an entry on
+//! top, and `store.bytesHeld()` is the sum. Nothing is allocated after `open`,
+//! nothing grows, and there is no sweep — an entry goes when its time is up or
+//! when the ring writes over it, whichever comes first.
+//!
+//! That number is the whole of it, which is worth saying because the two Go
+//! caches of this shape mean something narrower by it: freecache and bigcache
+//! bound the bytes their *values* take and put the index on top, unbounded, so
+//! 200,000 entries on a 12 MiB budget cost them 25.2 and 28.5 MiB of RSS
+//! against this module's 12.0.
+//!
+//! ## What it keeps when it cannot keep everything
+//!
+//! **A new entry has to be asked for twice before it gets the run of the
+//! ring.** A shard's ring is in two parts: a new entry lands in `small`, a
+//! tenth of it, and a key read again while it is still there is copied into
+//! `main` and gets the other nine tenths. A key nobody asks for twice never
+//! leaves the tenth it arrived in.
+//!
+//! This is what stops a flood of one-shot keys from flushing the entries worth
+//! keeping, and it is most of what the cache is worth: on Zipf 0.99 at 512 KiB
+//! it answers 75.4% of lookups where forgetting in write order alone answered
+//! 67.0%, which is **two to three times less memory for the same hit rate**
+//! (ADR 0187). `Stats.rescued` counts it happening.
+//!
+//! Two consequences to know about rather than discover:
+//!
+//! - **A cache with room still admits freely.** The doorkeeper is skipped
+//!   while `main` has never been round, because a tenth in front of nine empty
+//!   tenths is not admission control, it is throwing away room.
+//! - **`main` moves only when something is promoted into it**, so a cache
+//!   written to and never read holds its first entries indefinitely. Nothing
+//!   is asking for them and a TTL still expires them on read, but "the ring
+//!   forgets the oldest first" is no longer the whole story.
 //!
 //! **Nothing allocates per operation, and the signature is what says so.** A
 //! flat value comes back by value; a `[]const u8` comes back in an array the
@@ -52,9 +82,17 @@
 //! whose misses are misses is being asked about keys nobody wrote.
 //!
 //! Sizing, measured rather than guessed
-//! ([`spike/cache_ring/`](../spike/cache_ring/)): hit rate is ring bytes over
-//! working-set bytes, to within a point, at every size tried — there is no
-//! cliff. A ring at 1.6× the working set is where the number stopped moving.
+//! ([`bench/result/cache.md`](../bench/result/cache.md)): on Zipf 0.99 a ring
+//! at a fortieth of the working set answers 63.9% of lookups and one at a
+//! fifth answers 94.1%. **Ask for the hit rate you want rather than for a
+//! multiple of the data**, and read `stats()` to find out whether you got it.
+//!
+//! An earlier version of this paragraph said hit rate was ring bytes over
+//! working-set bytes with no cliff, which was true of the benchmark that
+//! produced it and not of traffic: it drew its keys uniformly at random, and
+//! under uniform random every policy scores the same and that score is the
+//! ratio. It is kept here as a warning rather than deleted, because that
+//! sentence stood for a year (ADR 0187).
 //!
 //! ## What it will not do
 //!
@@ -68,7 +106,9 @@
 //! keeps**: a lock is held across a `memcpy` and nothing else, ever. Zig
 //! 0.16's `std.Io.Mutex` needs an `Io` a module in this layer does not have,
 //! so the lock spins — and a critical section with nothing in it that waits
-//! always finishes and releases (ADR 0138).
+//! always finishes and releases (ADR 0138). **A `get` does not take it at
+//! all** (ADR 0188): it copies the value out and then asks the ring's write
+//! cursor whether anything wrote over those bytes while it read them.
 
 const std = @import("std");
 

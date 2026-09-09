@@ -129,6 +129,7 @@ zig build smoke-tls -Dnetwork   # a real HTTPS endpoint — NOT part of test
 zig build examples     # build all nine examples
 zig build fuzz -- --iterations 1000000 --seed 0x…   # generated requests at the parser
 zig build bench-cache  # what a cache operation costs, and what an entry weighs
+zig build bench-cache-hitrate  # what fraction of lookups it answers, against the best it could
 zig build bench-sql    # what a prepared statement is worth: SQLite always, Postgres if reachable
 zig build bench-sql-server  # a server reading Postgres per request, for wrk/oha
 zig build bench-fetch-server # what an outbound call costs, with its controls

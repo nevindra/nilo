@@ -132,6 +132,14 @@ fn measure(
     // below it, measured a cache somebody else had emptied and reported 0%
     // hits at 7.4 million lookups a second. A miss is fast, which is exactly
     // what makes that shape of mistake read like a good number.
+    //
+    // **Warming per row was not enough, and the third version of this comment
+    // is a fresh store per row.** A warm-up fills a cache that is empty; it
+    // cannot undo a cache the row above filled with something else. Once a
+    // store has been round once it stops admitting freely, so `get_page`
+    // warming after `put_flat` had written ten million carts retained a tenth
+    // of its pages and reported 18.8% hits — again a good-looking number, and
+    // again for a reason that had nothing to do with the row.
     warm(store, keys, span, work);
 
     var stop: std.atomic.Value(bool) = .init(false);
@@ -162,9 +170,14 @@ fn measure(
     const per_s = @as(f64, @floatFromInt(ops)) * 1_000_000.0 / @as(f64, @floatFromInt(took));
     const ns = @as(f64, @floatFromInt(took)) * 1000.0 * @as(f64, @floatFromInt(threads_n)) /
         @as(f64, @floatFromInt(ops));
-    std.debug.print("  {s: <20} {d: >2} threads  {d: >12.0} ops/s  {d: >7.1} ns/op  hits {d: >5.1}%\n", .{
-        label, threads_n, per_s, ns, pct(hits, ops),
-    });
+    // `rescued` says whether the policy did anything at all on this row: it
+    // counts entries a read moved out of the write cursor's way, so zero means
+    // every entry died in write order and the two regions bought nothing.
+    const s = store.stats();
+    std.debug.print(
+        "  {s: <20} {d: >2} threads  {d: >12.0} ops/s  {d: >7.1} ns/op  hits {d: >5.1}%  kept {d: >5.1}%\n",
+        .{ label, threads_n, per_s, ns, pct(hits, ops), pct(s.rescued, s.puts + s.rescued) },
+    );
 }
 
 /// **Only what the row about to run will read.** Warming both Spaces meant a
@@ -331,32 +344,26 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const keys = try Keys.build(gpa, keys_n);
     defer keys.free(gpa);
 
-    var store = try cache.open(gpa, .{ .bytes = 64 << 20 });
-    defer store.deinit();
+    std.debug.print("nilo_cache: {d} keys, {d} MiB of ring\n\n", .{ keys_n, 64 });
+    std.debug.print("what one operation costs (a fresh store per row, warmed first)\n", .{});
 
-    // A second store small enough for its table and its ring to sit in the
-    // processor's cache. The difference between the two is the answer to
-    // "how much of an operation is the lookup and how much is memory".
-    var small = try cache.open(gpa, .{ .bytes = 256 << 10, .entries = 4096, .shards = 4 });
-    defer small.deinit();
+    {
+        // A store small enough for its table and its ring to sit in the
+        // processor's cache. The difference between this row and `get_flat`
+        // below is the answer to "how much of an operation is the lookup and
+        // how much is memory".
+        var small = try cache.open(gpa, .{ .bytes = 256 << 10, .entries = 4096 });
+        defer small.deinit();
+        try measure(gpa, &small, &keys, .get_flat, threads_n, seconds, 2_000, "get_flat in cache");
+    }
 
-    std.debug.print("nilo_cache: {d} keys, {d} MiB of ring, {d} bytes held in all\n\n", .{
-        keys_n,
-        64,
-        store.bytesHeld(),
-    });
-
-    std.debug.print("what one operation costs (each row warmed first)\n", .{});
-    try measure(gpa, &small, &keys, .get_flat, threads_n, seconds, 2_000, "get_flat in cache");
     for ([_]Work{ .get_flat, .put_flat, .mixed_flat, .get_page, .mixed_page }) |work| {
+        var store = try cache.open(gpa, .{ .bytes = 64 << 20 });
+        defer store.deinit();
         try measure(gpa, &store, &keys, work, threads_n, seconds, keys_n, @tagName(work));
     }
 
     std.debug.print("\nwhat one entry costs to hold\n", .{});
     for ([_]usize{ 16, 64, 256, 1024 }) |len| try perEntry(gpa, len);
 
-    const s = store.stats();
-    std.debug.print("\nhits {d}  misses {d}  evicted {d}  eviction rate {d:.1}%\n", .{
-        s.hits, s.misses, s.evicted, s.evictionRate() * 100,
-    });
 }

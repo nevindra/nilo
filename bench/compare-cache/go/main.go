@@ -232,6 +232,12 @@ func main() {
 		bench(arg(2, 1), arg(3, 3))
 	case "mem":
 		mem(arg(2, 200000))
+	case "others":
+		benchOthers(arg(2, 1), arg(3, 3))
+	case "othersmem":
+		memOthers(arg(2, 200000))
+	case "hitrate":
+		hitrate()
 	default:
 		fmt.Println("unknown mode", os.Args[1])
 	}

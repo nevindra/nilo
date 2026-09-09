@@ -448,6 +448,35 @@ rows — which turned out to be four gaps that only close together.
   now. **What you have to change:** delete the `@setEvalBranchQuota` you added
   to your own `register` to get round it.
 
+- **A shard count clamped to something other than a power of two made part of
+  `nilo_cache`'s memory budget unreachable**
+  ([ADR 0187](./docs/adr/0187-a-cache-that-admits-everything-forgets-what-mattered.md)).
+  `shard_mask` is `shards.len - 1` used as a bitmask, which is a true modulo
+  only when the shard count is a power of two. `Store.open` rounded the
+  requested count up to a power of two and then clamped it down to
+  `total_cap / 4096`, which can land on any number at all. At the 64 KiB
+  minimum budget on the old default `shards`, 33% of the memory was never
+  reachable; at 192 KiB with `shards = 64` it was 78%. `bytesHeld()` counted
+  all of it, so the number the module's own headline promise is made of was
+  counting memory that could never hold anything. Fixed by flooring the clamp
+  to a power of two; the property is now a test.
+
+- **`nilo_cache` reads 13% faster on eight threads, because a lookup no longer
+  takes the shard's lock**
+  ([ADR 0188](./docs/adr/0188-a-lookup-asks-the-cursor-afterwards-instead-of-taking-a-lock.md)).
+  Every `get` used to take the lock exclusively, so eight readers queued behind
+  each other. A read now copies the value out with nothing held and then reads
+  the region's write cursor a second time: if it has passed the entry, some
+  `put` was writing over those bytes while they were read, and the answer is
+  discarded. 124.5–124.9M reads a second against 108.8–110.7M, four interleaved
+  rounds a side, and unchanged on one thread. Hit rate is up 0.1 to 0.3 points
+  at every size as well, because a key the ring has seen before now skips the
+  doorkeeper. **Nothing to change**: the API, the memory and the budget are the
+  same. Two things are worth knowing. `Stats.evicted` now also counts the rare
+  read whose bytes a `put` overwrote mid-copy, so it is no longer only about the
+  ring being too small. And `Store.stats()` takes no lock, so it is a sum over a
+  moving target rather than a snapshot.
+
 ### New
 
 - **`nilo.FromHeader("X-Staff-Id", T)` — one request header, as a typed
@@ -529,6 +558,43 @@ rows — which turned out to be four gaps that only close together.
   `plan`, `createMissing` and `generate` skip it; `db.checking` still holds it
   against the live schema. The snapshot records it, so a program that starts
   building one is a visible line in the file rather than a silent change.
+
+### Changed
+
+- **`cache.Options.shards` defaults to 64 rather than 16**
+  ([ADR 0187](./docs/adr/0187-a-cache-that-admits-everything-forgets-what-mattered.md)).
+  Nine reads to a write on eight cores: 87.4M ops/s at the old default, 125.0M
+  at the new one. No hit-rate cost at any budget measured; single-thread cost
+  is 5%. Nothing to change unless you set `.shards` yourself.
+
+- **`nilo_cache`'s eviction policy changed: an entry now earns its place by
+  being read a second time.** A new entry lands in a small region, a tenth of
+  each shard's ring, and is promoted into the other nine tenths only the next
+  time it is read. On Zipf 0.99 traffic the hit rate went from 67.0% to 75.6%
+  at 512 KiB and from 52.4% to 64.2% at 128 KiB, which is 2 to 3 times less
+  memory for the same hit rate. **What you might notice:** a cache that is
+  written to and never read now holds its first entries indefinitely, rather
+  than forgetting the oldest one first.
+
+- **The table takes a sixth of `.bytes` rather than a quarter**, so the ring
+  takes five sixths rather than three quarters. A quarter bought about twice as
+  many slots as the ring could ever fill. Nothing to change: it is the same
+  memory holding the same entries at the same hit rate, 7.5% faster on one
+  thread and 5% on eight. Set `.entries` yourself if the split is wrong for
+  what you store.
+
+- **`cache.Stats` gained a `rescued` field**: entries a read moved out of the
+  write cursor's way before it reached them. Zero means the eviction policy
+  is doing nothing.
+
+- **Cost of all of it together: single-threaded throughput is 8% to 10% lower,
+  and eight-thread throughput is 29% to 50% higher.** The right side of that
+  trade for a module whose caller is a server, and the wrong side for a
+  single-threaded program. Against the Go caches that answer the same question,
+  eight threads now reads 135.0–136.0M a second where freecache reads
+  46.8–47.0M and bigcache 51.4–52.2M, on 64.3 bytes an entry against their
+  132.0 and 149.4. Full numbers in
+  [`bench/result/cache.md`](./bench/result/cache.md).
 
 ## 0.3.0
 
