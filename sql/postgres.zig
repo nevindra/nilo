@@ -653,6 +653,14 @@ pub const Wire = struct {
 fn translate(conn: *pg.Conn, err: anyerror) wire.Error {
     if (conn.err) |server| {
         if (std.mem.eql(u8, server.code, "23505")) return error.AlreadyExists;
+        // The three other codes in class 23 a caller routinely branches on
+        // (ADR 0184). `23503` is the one that matters most: it is the only
+        // member of the class that is ordinarily a race rather than a bug, and
+        // it used to arrive as `ConstraintViolated` beside a check somebody
+        // wrote and a null the code should never have sent.
+        if (std.mem.eql(u8, server.code, "23503")) return error.ForeignKeyViolated;
+        if (std.mem.eql(u8, server.code, "23502")) return error.NotNullViolated;
+        if (std.mem.eql(u8, server.code, "23514")) return error.CheckViolated;
         if (std.mem.startsWith(u8, server.code, "23")) return error.ConstraintViolated;
         // `57014` is `query_canceled`, which Postgres sends both for a
         // `statement_timeout` and for a `pg_cancel_backend` from somewhere

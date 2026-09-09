@@ -83,3 +83,34 @@ pub const Report = struct {
 pub const Rename = struct {
     name: Str,
 };
+
+/// A pure join table, for the `.key` conflict target: its key is the two
+/// columns and there is no `id` at all, which is the shape ADR 0186 is about.
+pub const UserTag = struct {
+    pub const nilo_table = .{ .name = "user_tags", .key = .{ .user_id, .tag } };
+
+    user_id: i64,
+    tag: Str,
+};
+
+/// The two sides of the `.exists` example. They are here rather than being
+/// `User` and `Order` because an `.exists` reads its join out of a
+/// `.references`, and the guide's own `User` is declared on the page (see the
+/// header) — so nothing in this file may point at it.
+pub const Partner = struct {
+    pub const nilo_table = .{ .name = "partners", .key = .id };
+
+    id: i64,
+    name: Str,
+};
+
+pub const PartnerCapability = struct {
+    pub const nilo_table = .{
+        .name = "partner_capabilities",
+        .key = .{ .partner_id, .capability },
+        .references = .{ .partner_id = .{ Partner, .id } },
+    };
+
+    partner_id: i64,
+    capability: Str,
+};

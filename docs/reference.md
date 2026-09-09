@@ -428,9 +428,35 @@ a form or a query string is a compile error naming the route. Give what comes in
 a struct of its own, spelled the way the wire spells it.
 
 A renamed struct nilo's own writer cannot reach is refused as well. One shape it
-does not recognise — a tuple, an array of bytes, an untagged union, a type with
-its own `jsonStringify`, anything past eight deep — sends the whole value to
-`std.json`, which does not read the marker.
+does not recognise — a tuple, an array of bytes, an untagged union, a type that
+writes its own JSON and says nothing about it, anything past eight deep — sends
+the whole value to `std.json`, which does not read the marker.
+
+**A type that writes its own JSON *and says what it looks like* is a leaf rather
+than one of those**, and that is the difference between a marker that can be used
+here and one that cannot
+([ADR 0182](./adr/0182-a-leaf-that-says-what-it-is-can-be-carried.md)). A
+`nilo_openapi` may only name `"string"`, `"integer"`, `"number"` or `"boolean"`,
+so a type carrying one has promised its JSON is a single scalar — which is the
+promise the writer needs to keep writing the object around it. `sql.Uuid`,
+`sql.Timestamp`, `sql.AsText` and `id.Uuid` are all leaves, so a Row-shaped
+response holding any of them can rename its fields:
+
+```zig
+const Contact = struct {
+    pub const nilo_json = .{ .rename_all = .camelCase };
+
+    id: sql.Uuid,            // still "id", and still 36 characters
+    full_name: nilo.Str,     // goes out as "fullName"
+    created_at: sql.Timestamp,  // "createdAt", still RFC 3339
+};
+```
+
+It is also worth 33% of such a response whether or not anything is renamed:
+`covers` is answered for the *whole* value, so one leaf used to send every string
+beside it to `std.json` as well — 250ns → 165ns on a 305-byte row with three
+uuids in it ([`bench/result/http.md`](../bench/result/http.md)). Your own type
+gets the same by writing the same two declarations.
 
 **The marker is per type, not inherited.** A struct renames its own fields; a
 union renames its *variants* and leaves a payload struct's fields to that
@@ -2366,6 +2392,10 @@ could see. It lives in the request's arena, so a watcher keeping one past the
 request copies it, and it still never reaches the client
 ([ADR 0025](./adr/0025-every-failure-answers-with-the-same-json-body.md)).
 
+**`sql.problem(c)` is the same struct asked for from the other end** — by the
+call that failed rather than by an observer of every call. See
+[Errors](#errors).
+
 `db.nilo_start(io, limits)` is what `listen()` calls; a program starting a `Db`
 by hand passes `.off` and the pool's waits are bounded by nothing.
 `db.nilo_stop()` is the other half, and `listen()` calls that too — after the
@@ -2567,11 +2597,12 @@ request ([ADR 0041](./adr/0041-a-module-sits-where-the-loop-puts-it.md)).
 | `db.select(User, c, .{ … })` | `![]User` |
 | `db.one(User, c, .{ … })` | `!?User` — a handler returning this answers 404, and the document says so. Carries its own `LIMIT 1`, so a `.limit` beside it is refused |
 | `db.find(User, c, id)` | `!?User` — the same, on the column the Row's `.key` names. Takes the key itself, not a condition |
+| `db.page(User, c, .{ .where = …, .order = …, .limit = 20 })` | `!Page(User)` — `.rows` and `.total`, in one statement. `.limit` and `.order` are required; see below |
 | `db.count(User, c, .{ .where = … })` | `!usize`. `.where` only, and optional — no condition counts the table |
 | `db.exists(User, c, .{ .where = … })` | `!bool` — `SELECT EXISTS(…)`, so it stops at the first match |
 | `db.insert(User, c, .{ .email = … })` | `!User` — the stored row, generated key included. A subset of the columns |
 | `db.insertMany(User, c, rows)` | `![]User` — a whole batch in one statement, back in the order it was sent. `rows` is a `[]const Line`, `Line` a named struct of the columns being written; see below |
-| `db.insertOrIgnore(User, c, .{ … }, .email)` | `!?User` — the stored row, or `null` when one was already there. `ON CONFLICT … DO NOTHING` |
+| `db.insertOrIgnore(User, c, .{ … }, .key)` | `!?User` — the stored row, or `null` when one was already there. `ON CONFLICT … DO NOTHING`. `.key` is the Row's own key; a column name is for a unique index that is not the key |
 | `db.insertOrUpdate(User, c, .{ … }, .email)` | `!User` — stored, or the existing row with these values written over it. `ON CONFLICT … DO UPDATE` |
 | `db.update(User, c, .{ .set = …, .where = … })` | `!usize` — rows changed. Both halves required |
 | `db.updateMany(User, c, rows)` | `![]User` — a whole batch in one statement, found by the Row's key. No `.where`: the join is the condition; see below |
@@ -2636,6 +2667,37 @@ to `updateReturningOne`: the `.where` is yours, an `UPDATE` matching several row
 updates all of them, and what changes is the shape of the answer.
 
 Both exist on a `Tx` too.
+
+**`db.page` is a `select` carrying the count the condition matched before the
+`.limit` cut it** ([ADR 0185](./adr/0185-a-page-knows-what-it-left-out.md)):
+
+```zig
+const found = try db.page(Order, c, .{
+    .where = .{ .status = "open" },
+    .order = .{ .id = .asc },
+    .limit = 20,
+    .offset = 40,
+});
+// found.rows is []Order, found.total is every order that matched.
+```
+
+```sql
+SELECT "id", "status", count(*) OVER () FROM "orders"
+  WHERE "status" = $1 ORDER BY "id" ASC LIMIT 20 OFFSET $2
+```
+
+**A `db.count` beside a `db.select` is two statements against a table somebody
+else can write between**, so the total and the rows can disagree with nothing
+saying so. A window function rides on the page and cannot. It costs one integer
+read per statement rather than per row, and a condition matching nothing answers
+with no rows and a total of zero.
+
+`.limit` and `.order` are both required, and `.lock` is refused. With no ceiling
+this is the whole table and the total is `rows.len`; with no order Postgres owes
+the `LIMIT` nothing, so two requests for the same page can hold one row twice and
+miss another; and `FOR UPDATE` beside a window function is a run-time error from
+Postgres. `tx.page` is the same call inside a transaction. `sql.Page(Row)` is the
+answer's type, for a handler returning one.
 
 ### A batch
 
@@ -2714,6 +2776,7 @@ Different fields are ANDed. Several operators on one field are ANDed too.
 | `.deleted_at = null` | `IS NULL` |
 | `.deleted_at = .{ .ne = null }` | `IS NOT NULL` |
 | `.handle = .{ .not_distinct_from = maybe }` | `IS NOT DISTINCT FROM $1` — `=` with null treated as a value. **The one operator an optional may reach**; `.distinct_from` is its negation |
+| `.status = sql.given(maybe)` | `($1 IS NULL OR "status" = $1)` — the term is in the statement when the filter carried a value and out of it when it did not. See below |
 | `.any = .{ .{ … }, .{ … } }` | OR, bracketed. Not `.or`, which is a keyword — so `any` is a reserved column name |
 | `.exists = .{ .{ .in = Other, .where = .{ … } } }` | `EXISTS (SELECT 1 FROM …)`, joined on the `.references` `Other` declares. `.not_exists` negates; both are reserved column names, and both nest inside `.any` |
 
@@ -2730,6 +2793,49 @@ or branch
 null-safe pair is the exception because its statement does **not** change
 when the value turns out to be null: `"handle" IS NOT DISTINCT FROM $1` is
 the same six words either way, so nothing is left until run time.
+
+**And a filter that is absent is a different question from one that is null.**
+`.status = null` asks for the rows whose status is nothing; a screen with a
+search box and three dropdowns wants *no condition on status at all*, which is
+the opposite. `sql.given` is that, and it is a word rather than an optional so
+the two stay tellable apart
+([ADR 0183](./adr/0183-a-filter-that-is-absent-is-not-a-filter-that-is-null.md)):
+
+```zig
+const found = try db.page(Partner, c, .{
+    .where = .{
+        .name = .{ .icontains = sql.given(filter.search) },
+        .exists = .{
+            .{ .in = PartnerCapability, .where = .{ .capability = sql.given(filter.capability) } },
+        },
+    },
+    .order = .{ .name = .asc },
+    .limit = 20,
+});
+```
+
+```sql
+($1 IS NULL OR "name" ILIKE …) AND ($2 IS NULL OR EXISTS (SELECT 1 FROM …))
+```
+
+**One statement, one parameter list and one prepared plan however the screen is
+set**, which is what the guard buys over a statement per combination of filters.
+Postgres folds `$1 IS NULL` away while a custom plan is in use — which is the
+first five executions and for as long after that as the custom plan wins — so
+the term that *is* set plans as if the guard were not written. `SET
+plan_cache_mode = force_custom_plan` is the lever if one query disagrees.
+
+Inside an `.exists` it drops the **whole subquery**, not one term of it: with the
+term dropped the subquery would ask whether *any* joined row exists, which
+excludes every row that has none. For the same reason it cannot sit beside a
+condition that is always there in one `.exists` — write a second entry.
+
+Six things are Refusals, each with its own sentence: a `sql.given` inside
+`.any` (OR reverses what dropping means), on `.in` (a list that may be absent is
+the empty list, which `.in` already reads), on `not_distinct_from` (which takes
+an optional already), on a value that is not optional, beside a fixed condition
+in one `.exists`, and in the condition of an `UPDATE` or a `DELETE` — where a
+term that may not be there is the whole table.
 
 ### A row in another table
 
@@ -2964,12 +3070,48 @@ than the process.
 
 | | |
 |---|---|
-| `error.AlreadyExists` | a unique violation. **409** by default — the only one with a default |
-| `error.ConstraintViolated` | foreign key, check or not-null. 500: usually the code is wrong |
+| `error.AlreadyExists` | a unique violation (`23505`). **409** by default — the only one with a default |
+| `error.ForeignKeyViolated` | `23503` — a row this statement names is not there, or a row it removes is still named by another. No default status: a 409 for a delete that lost a race, a 400 for an insert naming a parent that never existed |
+| `error.NotNullViolated` | `23502`. 500: a Row and a table that disagree |
+| `error.CheckViolated` | `23514` — a `CHECK` somebody wrote on purpose, so the endpoint that tripped it usually knows what it means |
+| `error.ConstraintViolated` | the rest of class 23 — an exclusion constraint, a `RESTRICT` |
 | `error.Disconnected` | the database went away, or was never there |
 | `error.TimedOut` | a statement ran past `tx.deadline`. No default status — what a deadline means is the handler's to decide |
 | `error.Locked` | a `.lock = .update_nowait` found a row somebody else is holding. No default status — a held row is a 409, a 503 or a retry depending on the endpoint |
 | `error.QueryFailed` | anything else. The server's own words are on `Sent.problem` for a watcher and in the log; they never reach the client ([ADR 0146](./adr/0146-a-statement-that-failed-says-what-the-database-said.md)) |
+
+Both Wires answer the same word for the same failure. SQLite's extended result
+codes name the three above natively, which is what lets a handler tested against
+SQLite branch on what Postgres will send it.
+
+**`sql.problem(c)` is what the name cannot carry** — *which* unique index fired
+([ADR 0184](./adr/0184-a-failure-belongs-to-the-call-that-caused-it.md)):
+
+```zig
+db.delete(Staff, c, .{ .where = .{ .id = id } }) catch |err| switch (err) {
+    error.ForeignKeyViolated => return nilo.fail.conflict(
+        "{s} was given something to do a moment ago and can no longer be deleted.",
+        .{name},
+    ),
+    else => return err,
+};
+```
+
+```zig
+const said = sql.problem(c) orelse return err;
+if (std.mem.eql(u8, said.constraint, "staff_email_key")) …
+```
+
+It answers a `sql.Problem` — `code`, `constraint`, `detail`,
+`message` — for the last statement **this fiber** ran, and null when it worked.
+It belongs to the call rather than to the `Db`, which is one Service shared by
+every request in flight: it is bound to the fiber, every statement clears it, and
+a Scope that is not the one the failure happened under gets null rather than
+somebody else's row. Read it in the `catch` — it lives as long as the request
+does, and the next statement replaces it.
+
+`db.watching` is unchanged and is still the way to see *every* statement. The two
+answer different questions.
 
 ### Migrations
 

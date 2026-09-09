@@ -265,8 +265,24 @@ field.
 
 A renamed struct nilo's own writer cannot reach is refused too. It errs narrow on
 purpose, so one shape it does not recognise — a tuple, an array of bytes, an
-untagged union, a type with its own `jsonStringify`, anything past eight deep —
-sends the whole value to `std.json`, which does not read the marker.
+untagged union, a type that writes its own JSON and says nothing about it,
+anything past eight deep — sends the whole value to `std.json`, which does not
+read the marker.
+
+**A type that writes its own JSON and says what it looks like is not one of
+those.** `sql.Uuid`, `sql.Timestamp`, `sql.AsText` and `id.Uuid` all carry a
+`nilo_openapi` beside their `jsonStringify`, and a marker may only name a scalar
+— so nilo knows the value is one string or one number and keeps writing the
+object around it
+([ADR 0182](../adr/0182-a-leaf-that-says-what-it-is-can-be-carried.md)). A Row
+holding uuids can rename its fields, which is the ordinary case and was the
+whole reason this reopened.
+
+That also makes such a response faster whether or not it renames anything, and
+by more than it sounds: the writer is chosen for the *whole* value, so one field
+it would not touch used to send every string beside it to `std.json` too.
+**250ns → 165ns on a 305-byte row with three uuids in it.** Your own type gets
+the same by writing the same two declarations.
 
 **The marker is per type, not inherited.** A struct renames its own fields; a
 union renames its *variants* and leaves a payload struct's fields to that

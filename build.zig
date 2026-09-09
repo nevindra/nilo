@@ -192,6 +192,26 @@ const sql_refusals = [_]Refusal{
         .says = "the condition on `handle` was given a ?[]const u8.",
     },
     .{
+        .name = "given_beside_a_condition_in_an_exists",
+        .says = "an entry of `.exists` over given_beside_a_condition_in_an_exists.Capability holds a `sql.given` beside another condition.",
+    },
+    .{
+        .name = "given_inside_an_any",
+        .says = "an alternative of `.any` holds a `sql.given`.",
+    },
+    .{
+        .name = "given_on_a_delete",
+        .says = "the condition on a delete on given_on_a_delete.Partner holds a `sql.given`.",
+    },
+    .{
+        .name = "given_on_a_list",
+        .says = "the condition on `id` (as `in`) was given a `sql.given`.",
+    },
+    .{
+        .name = "given_on_a_value_that_is_always_there",
+        .says = "`sql.given` was handed a []const u8, which is not an optional.",
+    },
+    .{
         .name = "insert_unknown_column",
         .says = "insert_unknown_column.User has no column `emial`, asked for in an insert.",
     },
@@ -202,6 +222,22 @@ const sql_refusals = [_]Refusal{
     .{
         .name = "update_empty_set",
         .says = "`.set` on update_empty_set.User is empty.",
+    },
+    .{
+        .name = "page_that_locks_its_rows",
+        .says = "`db.page` on page_that_locks_its_rows.Order was given a `.lock`.",
+    },
+    .{
+        .name = "page_without_a_limit",
+        .says = "`db.page` on page_without_a_limit.Order was given no `.limit`.",
+    },
+    .{
+        .name = "page_without_an_order",
+        .says = "`db.page` on page_without_an_order.Order was given no `.order`.",
+    },
+    .{
+        .name = "upsert_key_is_also_a_column",
+        .says = "an upsert on upsert_key_is_also_a_column.ApiKey was given `.key` as its conflict target, and upsert_key_is_also_a_column.ApiKey has a column of that name.",
     },
     .{
         .name = "upsert_nothing_to_set",

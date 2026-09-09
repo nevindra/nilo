@@ -177,12 +177,17 @@ pub fn statusFor(err: anyerror) u16 {
 
         error.Unauthorized => 401,
         error.Forbidden => 403,
-        // `AlreadyExists` is `nilo_sql`'s, and it is the only one of that
-        // module's four errors given a row here. A unique violation means
-        // the client asked for something that is already there, and that is
-        // true whatever the request around it was; a foreign key or check
-        // violation usually means the code is wrong, so those stay 500 and
-        // the handler decides (ADR 0039).
+        // `AlreadyExists` is `nilo_sql`'s, and it is the only error of that
+        // module's given a row here. A unique violation means the client
+        // asked for something that is already there, and that is true
+        // whatever the request around it was.
+        //
+        // **Every other constraint failure stays 500 and the handler
+        // decides**, `ForeignKeyViolated` included (ADR 0039, ADR 0184).
+        // That one is a 409 for a delete that lost a race and a 400 for an
+        // insert naming a parent that was never there, and nothing here can
+        // tell those apart — which is the reason it has a name rather than a
+        // row.
         //
         // Naming it costs no dependency. A Zig error is a member of one
         // global set, so this file can match on the name without importing

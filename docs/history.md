@@ -2709,3 +2709,81 @@ consulted because the root of a test build is the compiler's own runner. **A
 finding parked in the file where it was found is a finding the next person pays
 for again**; it is in `docs/reference.md` next to `connect_on_init` now, which is
 where somebody wiring a suite up to a real database is already reading.
+
+## A feature that shipped and could not be used
+
+[ADR 0181](./adr/0181-a-field-name-is-a-spelling-too.md) landed `rename_all` on
+a struct's fields, with three Refusals around it, tests in both modes, a
+benchmark line saying it costs nothing, and an entry in every file the
+convention asks for. **No response in the product it was written for could use
+it.** The port tried the change, hit a compile error on all ten of its response
+structs, and reverted.
+
+The refusal was correct. `covers` sends a value to `std.json` when one shape in
+it is not nilo's to write, and `std.json` does not read the marker — so a
+renamed struct that falls back would go out spelled as written while the
+document promised otherwise. What nobody checked is **which types that describes
+in a real program**: four of them are nilo's own, and one of the four is
+`sql.Uuid`. The reporting port has 145 uuid columns, so the answer was *every
+response it sends*.
+
+Two things went wrong here and they are different sizes.
+
+**The small one: the feature was tested against types written for the test.**
+Every struct in `http/json.zig`'s test block is a plain struct of scalars and
+slices, because that is what is convenient to write inside a test. A single
+`sql.Uuid` in one of them would have failed on the day it landed. `http/` cannot
+import `sql/`, which is the layering working as designed, and the answer is the
+one `spike/leaf_json/` now uses — a four-field stand-in carrying the same two
+declarations, since the contract between the modules *is* those two declarations
+and nothing else (ADR 0046).
+
+**The large one: the reach of a check was never asked about.** `covers` answering
+false is not local. It is a property of the *whole* value, so refusing one type
+costs every string beside it — the same finding ADR 0085 recorded for unions,
+which is in `bench/result/http.md` two sections above the one this added. Both
+say it and neither said it as a rule. **Ask what fraction of real values a
+comptime check refuses, not whether the check is correct.** It was correct both
+times.
+
+Closing it was one line of question — *does it write its own JSON **and say what
+that JSON looks like**?* — and it was worth 33% of a 305-byte response for every
+caller, most of whom had not asked for anything
+([ADR 0182](./adr/0182-a-leaf-that-says-what-it-is-can-be-carried.md)).
+
+And the measurement itself had the mistake on the list: `-O ReleaseFast` given
+once applies to the root module only, so the first reading was 1,989ns against
+1,423ns. The ratio survived and the absolutes were eight times the truth, which
+is exactly the failure mode "say what the number was measured *through*" is
+about — this time the answer was *a Debug build of the thing being measured*.
+
+## The list endpoint was four gaps, not four conveniences
+
+An optional search box. An optional dropdown. A total beside the rows. A key
+written twice. Filed as four items, and the port said plainly that the first
+three only pay off together: either one alone leaves the query in `db.raw`.
+
+That is worth keeping because of how the four were found. None came from a
+feature nobody had built — `.icontains` shipped in ADR 0173, `.exists` in
+ADR 0171, `db.count` has been there since ADR 0039, and `nilo_table.key` since
+ADR 0172. **Every piece existed and the endpoint was still raw**, because the
+pieces do not compose at the one place a product actually assembles them.
+
+The reading that matters: a feature list is not a coverage measure. The way to
+find out whether a surface reaches an ordinary job is to write the ordinary job,
+which is what the port did and what a test suite of individually-good calls
+never will. `partner.list` was one function and it needed four separate
+decisions.
+
+**One of the four went the other way and is worth the same attention.** The
+report asked for the page and its total as *two comptime plans and a runtime
+pick*, and that is a reasonable design — it is what a query builder would do. It
+was rejected because each plan carries its own parameter list, so each carries
+its own values tuple, so `fill` is instantiated once per combination with the
+Row's whole read loop inside it: four filters on a screen is sixteen copies per
+call site. The guard form the port already writes by hand is one statement, and
+Postgres folds it back to the same plan for the first five executions and for as
+long after that as the custom plan wins
+([ADR 0183](./adr/0183-a-filter-that-is-absent-is-not-a-filter-that-is-null.md)).
+**The exponential was in the binary rather than in the SQL**, which is not where
+it was being looked for.

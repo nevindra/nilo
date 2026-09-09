@@ -9,9 +9,9 @@ in [`docs/history.md`](./docs/history.md); what is coming is in
 
 ## Unreleased
 
-Twenty-five things a real port hit, in the order they cost it the most. Needs
-Zig 0.16, as 0.3.0 does. Each entry says what you have to change; the account of
-why is in the ADR it links.
+Thirty things a real port hit, in the order they cost it the most. Needs Zig
+0.16, as 0.3.0 does. Each entry says what you have to change; the account of why
+is in the ADR it links.
 
 Six of them came from the same port a week later, once it had used the first
 eleven and reached its first hard seam — an event bus. One more it reported —
@@ -19,11 +19,17 @@ five places where it wrote the untyped call while a typed one existed, with no
 error message behind any of them — is a named failure mode rather than a change:
 [ADR 0168](./docs/adr/0168-an-escape-hatch-that-costs-nothing-teaches-nothing.md).
 
-**The last eight are that lesson applied on purpose.** The port built nothing new
+**Eight of them are that lesson applied on purpose.** The port built nothing new
 for them: it put one question to the 6,281 lines it already had — *what does nilo
 make us write* — and eight answers came back. Seven have no error message behind
 them at all. Every one of those compiled, passed and read as ordinary code, which
 is the only reason they took a sweep to find.
+
+**The last five are what happened when it tried to use them.** One is a feature
+that shipped and could not be used at all by the product it was written for, and
+finding that out took the port half an hour and a `git revert`. The other four
+are the ordinary list endpoint — a search box, a dropdown, and a count beside the
+rows — which turned out to be four gaps that only close together.
 
 - **`nilo_sql`: six shapes a listing page needed, and one of them was a wrong
   answer rather than a missing one.** Each is a widening of a shape that was
@@ -278,6 +284,133 @@ is the only reason they took a sweep to find.
   `std.testing.log_level` is what turns it down, and the reference now says so
   next to `connect_on_init` — including the thing that costs an afternoon first,
   that `std_options` in a tested file is never consulted.
+
+- **A type that writes its own JSON and says what it looks like is a leaf now,
+  not a wall**
+  ([ADR 0182](./docs/adr/0182-a-leaf-that-says-what-it-is-can-be-carried.md)).
+  **You get this without asking, and it is the largest of the five.** `covers`
+  refused any type carrying `jsonStringify`, and it is answered for the *whole*
+  value — so one `sql.Uuid`, `sql.Timestamp`, `sql.AsText` or `id.Uuid` anywhere
+  in a response sent the entire struct to `std.json`, strings included. A port
+  with 145 uuid columns had no response on the fast path at all.
+
+  A type carrying `nilo_openapi` beside `jsonStringify` has already promised its
+  JSON is one scalar, which is the promise the writer needs to keep writing the
+  object around it. So the leaf goes to `std.json` and the rest does not:
+  **250ns → 165ns on a 305-byte contact row with three uuids in it**, byte-for-
+  byte identical output ([`bench/result/http.md`](./bench/result/http.md)).
+
+  It also reopens `rename_all` on a struct, which is what reported this. Every
+  response in that product held a uuid, so ADR 0181's fallback refusal fired on
+  every one of them — correctly, and it made the feature unusable. `jsonStringify`
+  with no `nilo_openapi` beside it is still a wall, and still refused.
+
+- **A filter that is absent is not a filter that is null: `sql.given`**
+  ([ADR 0183](./docs/adr/0183-a-filter-that-is-absent-is-not-a-filter-that-is-null.md)).
+  A condition still cannot hold an optional — a null reaching `= $1` matches
+  nothing and says nothing, which is ADR 0044 and is not moving. What could not
+  be spelled is the other question, *no condition on this column at all*:
+
+  ```zig
+  .where = .{
+      .name = .{ .icontains = sql.given(filter.search) },
+      .status = sql.given(filter.status),
+  }
+  ```
+
+  ```sql
+  ($1 IS NULL OR "name" ILIKE '%' || $1 || '%') AND ($2 IS NULL OR "status" = $2)
+  ```
+
+  **One statement, one parameter list, one prepared plan**, however the screen is
+  set — the alternative, one statement per combination of filters, is 2ⁿ of each
+  and a plan cache that thrashes as somebody clicks the dropdowns. Two optional
+  filters used to be four arms of `db.select` beside four of `db.count`.
+
+  Inside an `.exists` it drops the whole subquery rather than one term of it,
+  because dropping the term would leave the subquery asking whether *any* joined
+  row exists — which excludes every row that has none. It is refused beside a
+  fixed condition in the same `.exists`, inside `.any`, on `.in`, on
+  `not_distinct_from`, on a value that is not optional, and in the condition of
+  an `UPDATE` or a `DELETE`.
+
+- **`db.page` — a page and its total in one statement**
+  ([ADR 0185](./docs/adr/0185-a-page-knows-what-it-left-out.md)).
+
+  ```zig
+  const found = try db.page(Order, c, .{
+      .where = .{ .status = "open" },
+      .order = .{ .id = .asc },
+      .limit = 20,
+      .offset = page * 20,
+  });
+  // found.rows is []Order, found.total is every order that matched.
+  ```
+
+  The documented shape was `db.count` beside `db.select`, and the round trip is
+  the smaller half of what is wrong with it: **two statements against a table
+  somebody else can write between**, so the screen says "20 of 47" while holding
+  20 of 46 and nothing says so. `count(*) OVER ()` rides on the page and cannot.
+  One integer read per statement, not per row.
+
+  `.limit` and `.order` are both required and `.lock` is refused — a page with no
+  ceiling is the whole table, a page with no order can hold one row twice across
+  two requests, and `FOR UPDATE` beside a window function is a run-time error
+  from Postgres. `tx.page` is the same call inside a transaction.
+
+  **With `sql.given` this is the ordinary list endpoint in one typed call**, and
+  the two only pay off together — either alone leaves the query raw.
+
+- **A caller can read what the database said about its own statement**
+  ([ADR 0184](./docs/adr/0184-a-failure-belongs-to-the-call-that-caused-it.md)).
+  **Breaking if you catch `error.ConstraintViolated` for a foreign key.** Class
+  23 arrived as one word for a race, a check somebody wrote and a null the code
+  should never have sent. Three of them are named now:
+
+  | | |
+  |---|---|
+  | `23503` | `error.ForeignKeyViolated` |
+  | `23502` | `error.NotNullViolated` |
+  | `23514` | `error.CheckViolated` |
+
+  `error.AlreadyExists` (`23505`) is unchanged and is still the only one with a
+  default status. `ForeignKeyViolated` deliberately has none: it is a 409 for a
+  delete that lost a race and a 400 for an insert naming a parent that was never
+  there, and nothing in `http/` can tell those apart. Both Wires answer the same
+  word — SQLite's extended result codes name all three natively.
+
+  `sql.problem(c)` is the other half, for the question a name cannot answer:
+  *which* unique index fired.
+
+  ```zig
+  db.delete(Staff, c, .{ .where = .{ .id = id } }) catch |err| switch (err) {
+      error.ForeignKeyViolated => return fail.conflict(
+          "{s} was given something to do a moment ago and can no longer be deleted.",
+          .{name},
+      ),
+      else => return err,
+  };
+  ```
+
+  It belongs to the call rather than to the `Db`, which is shared by every
+  request in flight: it is bound to the fiber, cleared by every statement, and
+  answers null to a Scope that is not the one the failure happened under. Read it
+  in the `catch`; it lives as long as the request does.
+
+- **`.key` as a conflict target**
+  ([ADR 0186](./docs/adr/0186-a-key-is-named-once.md)).
+
+  ```zig
+  try tx.insertOrIgnore(rows.StaffRole, c, .{ .staff_id = id, .role = role }, .key);
+  ```
+
+  A Row has named its key since ADR 0172 and the call site spelled the same tuple
+  a second time. The two could disagree, and the way they disagree does not fail:
+  a key that gains a column and a call site that does not is a statement
+  conflicting on the **old** columns, which inserts a duplicate where it used to
+  ignore one. Spelling the columns out still works and is still right for what
+  the reference says it is for — a unique index that is not the key. A Row with a
+  column called `key` is a Refusal naming both readings.
 
 ### Fixed
 

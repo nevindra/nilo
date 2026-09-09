@@ -154,14 +154,33 @@ const known = [_][]const u8{ "where", "order", "limit", "offset", "lock" };
 /// has none to give away.
 const known_one = [_][]const u8{ "where", "order", "offset", "lock" };
 
+/// The same list without `.lock`, for a page — `FOR UPDATE` and a window
+/// function cannot be in one statement, and Postgres says so at run time.
+const known_page = [_][]const u8{ "where", "order", "limit", "offset" };
+
 /// How many rows the caller is asking for. `one` is not a `select` somebody
 /// narrowed: the ceiling is the module's rather than the caller's, which is
 /// why writing a second one is a Refusal instead of a silent argument.
-const Answers = enum { many, first };
+///
+/// `page` is a select carrying the count the condition matched before the
+/// `LIMIT` cut it ([ADR 0185](../docs/adr/0185-a-page-knows-what-it-left-out.md)).
+const Answers = enum { many, first, page };
 
 /// Compile a `SELECT` for `Row` in `D`'s grammar from the options type `O`.
 pub fn select(comptime D: type, comptime Row: type, comptime O: type) Statement {
     return comptime rowsOf(D, Row, O, .many);
+}
+
+/// The same statement with `count(*) OVER ()` on the end of the column list,
+/// for `db.page` ([ADR 0185](../docs/adr/0185-a-page-knows-what-it-left-out.md)).
+///
+/// **One statement rather than two, and that is the property rather than the
+/// round trip.** A `db.count` beside a `db.select` is two statements against a
+/// table somebody else can write between, so the count and the rows can
+/// disagree with nothing saying so. A window function rides on the page and
+/// cannot.
+pub fn page(comptime D: type, comptime Row: type, comptime O: type) Statement {
+    return comptime rowsOf(D, Row, O, .page);
 }
 
 /// The same statement with `LIMIT 1` on the end, for `db.one`.
@@ -193,14 +212,57 @@ fn rowsOf(
                 "  It answers with one row or with none, and compiles its own " ++
                 "`LIMIT 1`. A page of rows is `db.select`.",
         );
+        // A page with no ceiling is the whole table, and the window function
+        // it paid for answers `rows.len` (ADR 0185).
+        if (answers == .page and !@hasField(O, "limit")) @compileError(
+            "nilo: `db.page` on " ++ @typeName(Row) ++ " was given no `.limit`.\n" ++
+                "  A page is a slice of the rows and a total for the rest of them. With no " ++
+                "ceiling it is the whole table, and the `count(*) OVER ()` it costs answers " ++
+                "what `rows.len` already says.\n" ++
+                "  Add `.limit = 20`, or use `db.select`.",
+        );
+        // A page with no order is a page whose contents change between
+        // requests: Postgres owes no order to a `LIMIT` that did not ask for
+        // one, so two pages can hold the same row and miss another. It
+        // compiles, it passes, and the list is wrong.
+        if (answers == .page and !@hasField(O, "order")) @compileError(
+            "nilo: `db.page` on " ++ @typeName(Row) ++ " was given no `.order`.\n" ++
+                "  `LIMIT` without `ORDER BY` takes whichever rows the planner reached " ++
+                "first, and that can differ between two requests for the same page — so " ++
+                "one row is on both pages and another is on neither.\n" ++
+                "  Add `.order = .{ .<column> = .asc }`, on a column no two rows share.",
+        );
+        // Said before `assertOptions`, so the caller gets the reason rather
+        // than a list of what a page takes: this one is not a clause nobody
+        // implemented, it is two clauses SQL will not put in one statement.
+        if (answers == .page and @hasField(O, "lock")) @compileError(
+            "nilo: `db.page` on " ++ @typeName(Row) ++ " was given a `.lock`.\n" ++
+                "  `FOR UPDATE` and a window function cannot be in one statement, and " ++
+                "`count(*) OVER ()` is how a page carries its total — Postgres refuses the " ++
+                "pair at run time, on whichever request got there first.\n" ++
+                "  A page is a read. Hold the rows with `tx.select` once you know which " ++
+                "ones they are.",
+        );
         assertOptions(
             Row,
             O,
-            if (answers == .first) &known_one else &known,
-            if (answers == .first) "`db.one`" else "a select",
+            switch (answers) {
+                .first => &known_one,
+                .page => &known_page,
+                .many => &known,
+            },
+            switch (answers) {
+                .first => "`db.one`",
+                .page => "`db.page`",
+                .many => "a select",
+            },
         );
 
-        var sql: []const u8 = "SELECT " ++ columnList(D, Row) ++
+        // The total the condition matched, before `LIMIT` cut it, read off the
+        // same pass as the rows — the same text in both Dialects, because a
+        // window function is SQL:2003 and SQLite has had them since 3.25.
+        const total = if (answers == .page) ", count(*) OVER ()" else "";
+        var sql: []const u8 = "SELECT " ++ columnList(D, Row) ++ total ++
             " FROM " ++ relation(D, Row);
 
         var paths: []const where_mod.Path = &.{};
@@ -522,10 +584,41 @@ fn deleting(
                 "  That empties the table. If it is meant, `db.raw` says so where " ++
                 "somebody reading the code can see it.",
         );
+        assertNothingDroppable(Row, params, "a delete on");
 
         if (returning) sql = sql ++ " RETURNING " ++ columnList(D, Row);
         break :blk .{ .sql = sql, .paths = paths, .params = params };
     };
+}
+
+
+/// **A condition that may not be there is not a condition an `UPDATE` or a
+/// `DELETE` may narrow itself with**
+/// ([ADR 0183](../docs/adr/0183-a-filter-that-is-absent-is-not-a-filter-that-is-null.md)).
+///
+/// `sql.given` drops its term when the value is null, and the whole point of
+/// the two refusals above is that what stands between one of these statements
+/// and the whole table is written down rather than left to a value that may
+/// not arrive. A `.where` of `.{ .id = sql.given(maybe) }` is a `DELETE FROM
+/// people` on the day `maybe` is null, and it compiles.
+fn assertNothingDroppable(
+    comptime Row: type,
+    comptime params: []const where_mod.Param,
+    comptime what: []const u8,
+) void {
+    comptime {
+        for (params) |p| {
+            if (!p.droppable) continue;
+            @compileError(
+                "nilo: the condition on " ++ what ++ " " ++ @typeName(Row) ++
+                    " holds a `sql.given`.\n" ++
+                    "  A term that drops when its value is null is how a filter is " ++
+                    "written, and what narrows " ++ what ++ " is not a filter: with no " ++
+                    "value it is the whole table, and nothing says so.\n" ++
+                    "  Branch on the optional, or narrow on something that is always there.",
+            );
+        }
+    }
 }
 
 /// `INSERT`, with the Row's own column list as the `RETURNING` clause.
@@ -859,19 +952,48 @@ pub fn insertOrUpdate(
     return comptime upserting(D, Row, V, on, .update);
 }
 
-/// The columns a conflict is judged on, out of `.email` or
+/// The word that means *the columns the Row already says identify it*.
+///
+/// Reserved as a conflict target rather than as a column name: a Row with a
+/// column called `key` is refused only where the two would both apply, which
+/// is here, and everywhere else `key` stays an ordinary column.
+pub const key_target = "key";
+
+/// The columns a conflict is judged on, out of `.key`, `.email` or
 /// `.{ .tenant_id, .email }`.
 ///
 /// An enum literal rather than a string because that is how a column is
 /// already named everywhere else a caller writes one — `.key = .id` in a
 /// `nilo_table`, `.{ .email = … }` in a condition. A tuple is the composite
 /// case, and there is no third spelling.
+///
+/// **`.key` is the Row's own key, read off the `nilo_table` that declares it**
+/// ([ADR 0186](../docs/adr/0186-a-key-is-named-once.md)). Before it, a join
+/// table spelled its composite key twice — once in `nilo_table` and once at
+/// every call site — and the two copies could disagree. A key that gains a
+/// column and a call site that does not is a statement conflicting on the
+/// *old* columns, which does not fail: it inserts a duplicate where it used to
+/// ignore one.
 fn conflictColumns(comptime Row: type, comptime on: anytype) []const []const u8 {
     comptime {
         const On = @TypeOf(on);
         var names: []const []const u8 = &.{};
 
-        if (On == @TypeOf(.enum_literal)) {
+        if (On == @TypeOf(.enum_literal) and std.mem.eql(u8, @tagName(on), key_target)) {
+            // A column really called `key` is the one thing this word cannot
+            // also mean, and it is a Refusal rather than a guess: a table of
+            // API keys is an ordinary table to have.
+            if (row_mod.hasColumn(Row, key_target)) @compileError(
+                "nilo: an upsert on " ++ @typeName(Row) ++ " was given `." ++ key_target ++
+                    "` as its conflict target, and " ++ @typeName(Row) ++ " has a column of " ++
+                    "that name.\n" ++
+                    "  `." ++ key_target ++ "` means the Row's own key, which here is " ++
+                    row_mod.keyList(Row) ++ ".\n" ++
+                    "  Write `.{ ." ++ key_target ++ " }` for the column itself, or name the " ++
+                    "key's columns one by one.",
+            );
+            names = row_mod.keysOf(Row);
+        } else if (On == @TypeOf(.enum_literal)) {
             names = &[_][]const u8{@tagName(on)};
         } else switch (@typeInfo(On)) {
             .@"struct" => |s| {
@@ -880,7 +1002,8 @@ fn conflictColumns(comptime Row: type, comptime on: anytype) []const []const u8 
                     "nilo: an upsert on " ++ @typeName(Row) ++ " was given an empty conflict " ++
                         "target.\n" ++
                         "  Name the column the unique constraint is on: " ++
-                        "`db.insertOrIgnore(Row, c, values, .email)`.",
+                        "`db.insertOrIgnore(Row, c, values, .email)` — or `." ++ key_target ++
+                        "` for the Row's own key, which is " ++ row_mod.keyList(Row) ++ ".",
                 );
                 for (s.fields) |f| {
                     const value = @field(on, f.name);
@@ -903,7 +1026,10 @@ fn notAConflictTarget(comptime Row: type, comptime On: type) noreturn {
         "nilo: an upsert on " ++ @typeName(Row) ++ " was given a " ++ @typeName(On) ++
             " as its conflict target.\n" ++
             "  It takes the column the unique constraint is on, written the way a key is: " ++
-            "`.email`, or `.{ .tenant_id, .email }` for one spanning two columns.",
+            "`.email`, or `.{ .tenant_id, .email }` for one spanning two columns.\n" ++
+            "  `." ++ key_target ++ "` is the Row's own key, which is " ++ row_mod.keyList(Row) ++
+            " here, and is what you want unless the constraint is a unique index that is not " ++
+            "the key.",
     );
 }
 
@@ -1213,6 +1339,7 @@ fn updating(
                 "  That rewrites every row in the table. If it is meant, `db.raw` says " ++
                 "so where somebody reading the code can see it.",
         );
+        assertNothingDroppable(Row, params, "an update on");
 
         if (returning) sql = sql ++ " RETURNING " ++ columnList(D, Row);
         break :blk .{ .sql = sql, .paths = paths, .params = params };
@@ -2343,4 +2470,43 @@ test "the two dialects judge a column against the types their database has" {
     // `unnest` the database has never heard of.
     try testing.expectEqualStrings("int8[]", Pg.arrayOf(i64).?);
     try testing.expectEqual(@as(?[]const u8, null), Lite.arrayOf(i64));
+}
+
+test "an upsert can conflict on the key the Row already declares" {
+    // Item 57: the tuple was written twice, once in `nilo_table` and once at
+    // the call site, and the two could disagree (ADR 0186).
+    const StaffRole = struct {
+        pub const nilo_table = .{
+            .name = "staff_roles",
+            .key = .{ .staff_id, .role },
+            .managed = false,
+        };
+
+        staff_id: i64,
+        role: []const u8,
+    };
+
+    const values = @TypeOf(.{ .staff_id = 1, .role = "admin" });
+    const said = comptime insertOrIgnore(Pg, StaffRole, values, .key);
+    const spelled = comptime insertOrIgnore(Pg, StaffRole, values, .{ .staff_id, .role });
+
+    try testing.expectEqualStrings(
+        "INSERT INTO \"staff_roles\" (\"staff_id\", \"role\") VALUES ($1, $2)" ++
+            " ON CONFLICT (\"staff_id\", \"role\") DO NOTHING" ++
+            " RETURNING \"staff_id\", \"role\"",
+        said.sql,
+    );
+    // The whole claim of the item: the short spelling is the long one, so the
+    // two cannot drift apart when the key gains a column.
+    try testing.expectEqualStrings(spelled.sql, said.sql);
+}
+
+test "a Row whose key is one column conflicts on that column" {
+    const values = @TypeOf(.{ .email = "a@b.c", .age = 30 });
+    try testing.expectEqualStrings(
+        "INSERT INTO \"users\" (\"email\", \"age\") VALUES ($1, $2)" ++
+            " ON CONFLICT (\"id\") DO NOTHING" ++
+            " RETURNING \"id\", \"email\", \"age\", \"created_at\"",
+        comptime insertOrIgnore(Pg, User, values, .key).sql,
+    );
 }

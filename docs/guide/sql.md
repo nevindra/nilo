@@ -321,6 +321,66 @@ plain `[]const u8` is an ordinary condition, and so is every `.set` and every
 `insert` — `SET handle = $1` with NULL in it means exactly one thing
 ([ADR 0044](../adr/0044-a-condition-holds-a-value-not-a-maybe.md)).
 
+## A filter nobody set
+
+A search box that is empty is not a search for nothing. `.status = null` asks
+for the rows whose status is null; a filter nobody set wants **no condition on
+status at all**, which is the opposite — one matches a handful of rows and the
+other matches every one.
+
+`sql.given` is that, and it is a word rather than an optional so the two stay
+tellable apart
+([ADR 0183](../adr/0183-a-filter-that-is-absent-is-not-a-filter-that-is-null.md)):
+
+<!-- compiles: body -->
+```zig
+// search: ?[]const u8 and least_age: ?i32, straight off the query string.
+const found = try db.page(User, c, .{
+    .where = .{
+        .email = .{ .icontains = sql.given(search) },
+        .age = .{ .gte = sql.given(least_age) },
+    },
+    .order = .{ .id = .asc },
+    .limit = 20,
+});
+```
+
+```sql
+($1 IS NULL OR "email" ILIKE …) AND ($2 IS NULL OR "age" >= $2)
+```
+
+**One statement whatever the screen is set to**, so one parameter list and one
+prepared plan. The alternative — a statement per combination of filters — is
+four for two filters and sixteen for four, each with its own parameter tuple.
+Postgres folds `$1 IS NULL` away while it is planning with the actual values,
+which it does for the first five executions and for as long after that as the
+custom plan wins, so a filter that *is* set plans as if the guard were not
+written.
+
+Inside an `.exists` it drops the **whole subquery**, not the term:
+
+<!-- compiles: body -->
+```zig
+// capability: ?nilo.Str — the dropdown nobody has touched yet.
+const partners = try db.page(Partner, c, .{
+    .where = .{ .exists = .{
+        .{ .in = PartnerCapability, .where = .{ .capability = sql.given(capability) } },
+    } },
+    .order = .{ .name = .asc },
+    .limit = 20,
+});
+```
+
+With the term dropped instead, the subquery would ask whether the partner has
+*any* capability row — which quietly excludes every partner that has none. For
+the same reason a `sql.given` cannot sit beside a condition that is always there
+in one `.exists`; write a second entry.
+
+It is refused inside `.any` (OR reverses what dropping a term means), on `.in`
+and `not_distinct_from`, on a value that is not optional, and **in the condition
+of an `UPDATE` or a `DELETE`** — there a term that may not be there is the whole
+table.
+
 ## Wiring it up
 
 <!-- compiles -->
@@ -583,16 +643,45 @@ quietly dropped. A `count` with no condition counts the table.
 the database stops at the first matching row instead of counting every one of
 them to settle a question the first one settles.
 
-The condition goes through the same walker `select` uses, which is the point:
-a page and its total are one condition written once, and a column misspelled
-in either is the same compile error.
+The condition goes through the same walker `select` uses, so a column
+misspelled in either is the same compile error.
+
+## A page and its total
+
+A trimmed list has to say what it trimmed. `db.page` answers both numbers out
+of one statement:
 
 <!-- compiles: body -->
 ```zig
-const where = .{ .status = "open" };
-const total = try db.count(Order, c, .{ .where = where });
-const page  = try db.select(Order, c, .{ .where = where, .order = .{ .id = .asc }, .limit = 20 });
+const found = try db.page(Order, c, .{
+    .where = .{ .status = "open" },
+    .order = .{ .id = .asc },
+    .limit = 20,
+    .offset = 40,
+});
+// found.rows is []Order, found.total is every order that matched.
 ```
+
+```sql
+SELECT "id", "status", count(*) OVER () FROM "orders"
+  WHERE "status" = $1 ORDER BY "id" ASC LIMIT 20 OFFSET $2
+```
+
+**The round trip is the smaller half of why.** A `db.count` beside a
+`db.select` is two statements against a table somebody else can write between,
+so the screen says *"20 of 47"* while holding 20 of 46 and nothing says so.
+`count(*) OVER ()` rides on the page and cannot come apart from it
+([ADR 0185](../adr/0185-a-page-knows-what-it-left-out.md)). It costs one integer
+read per statement rather than per row: the window function answers the same
+number on every row, so only the first is read.
+
+`.limit` and `.order` are both required. With no ceiling this is the whole
+table and the total is `rows.len`; with no order, Postgres owes the `LIMIT`
+nothing, so two requests for the same page can hold one row twice and miss
+another. `.lock` is refused — `FOR UPDATE` and a window function cannot be in
+one statement. `tx.page` is the same call inside a transaction.
+
+`db.count` is still the call when you want a total and no rows.
 
 ## Why writing the limit out is worth it
 
@@ -830,6 +919,20 @@ required to be the Row's key — an email is the ordinary case and is usually
 not — and nothing on this side can check that a constraint exists, because a
 constraint is not a column and a Row cannot name one. Postgres refuses the
 statement if there is none.
+
+**When it *is* the key, write `.key`**
+([ADR 0186](../adr/0186-a-key-is-named-once.md)):
+
+<!-- compiles: body -->
+```zig
+_ = try tx.insertOrIgnore(UserTag, c, .{ .user_id = id, .tag = tag_name }, .key);
+```
+
+A join table already names its composite key in `nilo_table`, and spelling the
+tuple again at the call site is two copies that can disagree — a key that gains
+a column and a call site that does not is a statement conflicting on the *old*
+columns, which inserts a duplicate where it used to ignore one. A Row that also
+has a column called `key` is a compile error naming both readings.
 
 **They are two calls rather than one call with an option**, because the answer
 is a different shape. `DO NOTHING` stores no row, and `RETURNING` on a row
@@ -1636,13 +1739,16 @@ design, including why a version is one `.zig` file and not a `.sql` one.
 
 ## Errors
 
-The module raises six, and they read:
+The module raises nine, and they read:
 
 | | |
 |---|---|
 | `error.AlreadyExists` | a unique violation — **409** by default |
+| `error.ForeignKeyViolated` | a row this statement names is not there, or a row it removes is still named by another. No default |
+| `error.NotNullViolated` | a `NOT NULL` column was sent a null — 500 |
+| `error.CheckViolated` | a `CHECK` said no |
+| `error.ConstraintViolated` | whatever is left — an exclusion constraint, a `RESTRICT` |
 | `error.Locked` | a `.lock = .update_nowait` found a row somebody else holds. No default |
-| `error.ConstraintViolated` | foreign key, check or not-null — 500 |
 | `error.Disconnected` | the database went away, or was never there |
 | `error.TimedOut` | a statement ran past the `tx.deadline` you set |
 | `error.QueryFailed` | anything else. The server's text is logged, never sent |
@@ -1660,6 +1766,40 @@ const made = db.insert(User, c, .{ .email = email }) catch |err| switch (err) {
     else => return err,
 };
 ```
+
+**`ForeignKeyViolated` has no default for the same reason, and it is the one
+worth knowing about.** It is the only constraint failure that is routinely a
+race rather than a bug: a delete guarded by a count is right up until somebody
+adds a child row between the two statements.
+
+<!-- compiles: body -->
+```zig
+_ = db.delete(User, c, .{ .where = .{ .id = id } }) catch |err| switch (err) {
+    error.ForeignKeyViolated => return nilo.fail.conflict(
+        "{s} placed an order a moment ago and can no longer be deleted. " ++
+            "Deactivate them instead.",
+        .{name},
+    ),
+    else => return err,
+};
+```
+
+**And when the name is not enough, `sql.problem(c)` is what the database
+actually said** ([ADR 0184](../adr/0184-a-failure-belongs-to-the-call-that-caused-it.md)).
+A table with two unique indexes on it raises one error for both; the
+`constraint` field is what says which:
+
+```zig
+const said = sql.problem(c) orelse return err;
+if (std.mem.eql(u8, said.constraint, "users_email_key")) {
+    return nilo.fail.conflict("that email is already listed", .{});
+}
+```
+
+It answers for the last statement **this fiber** ran, and null when it worked.
+Read it in the `catch`: it lives as long as the request does, and the next
+statement replaces it. `db.watching` is the other end of the same information
+and is for logging every statement rather than branching on one.
 
 ## It is not an ORM
 

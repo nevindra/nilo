@@ -69,6 +69,42 @@ fn refuseRenameOnTheFallback(comptime T: type) void {
     }
 }
 
+/// Whether `T` writes its own JSON **and says what that JSON looks like** —
+/// `jsonStringify` beside a `nilo_openapi` naming a scalar
+/// ([ADR 0182](../docs/adr/0182-a-leaf-that-says-what-it-is-can-be-carried.md)).
+///
+/// Such a type is a **leaf**: the generated writer hands the value itself to
+/// `std.json` and keeps writing the object around it, rather than giving up on
+/// the whole response. `sql.Uuid`, `sql.Timestamp`, `sql.AsText` and `id.Uuid`
+/// are all one, which is what makes the difference: a product whose every key
+/// is a uuid had no response this file could write at all, so `rename_all` was
+/// refused on every one of them (ADR 0181) and the fast writer never ran.
+///
+/// **`nilo_openapi` is the gate rather than `jsonStringify` alone**, and the
+/// two halves are the same sentence read twice. A marker may only name
+/// `"string"`, `"integer"`, `"number"` or `"boolean"` (`openapi.toldOf`), so a
+/// type carrying one has already promised its JSON is a single scalar with
+/// nothing nested inside it — which is exactly the promise this needs to keep
+/// writing the punctuation on both sides of it. A type that writes its own
+/// JSON and says nothing about it stays `std.json`'s whole value, as it was.
+fn writesItsOwnScalar(comptime T: type) bool {
+    comptime {
+        if (!hasDecl(T, "jsonStringify")) return false;
+        if (!hasDecl(T, "nilo_openapi")) return false;
+        const said = T.nilo_openapi;
+        if (!@hasField(@TypeOf(said), "type")) return false;
+        // Read here rather than deferred to `openapi.zig`, which is the file
+        // that owns the refusal: a marker with a `type` this does not know is
+        // left to `std.json` exactly as it was, so a badly written one changes
+        // no byte and still gets its own sentence the moment it reaches a
+        // document.
+        for ([_][]const u8{ "string", "integer", "number", "boolean" }) |kind| {
+            if (std.mem.eql(u8, said.type, kind)) return true;
+        }
+        return false;
+    }
+}
+
 /// Whether the generated writer handles `T`. Deliberately narrow: a type
 /// this does not recognise is `std.json`'s to write, and the cost of being
 /// wrong here is a response that differs from what nilo used to send.
@@ -96,6 +132,10 @@ const max_depth = 8;
 
 fn coversWithin(comptime T: type, comptime depth: usize) bool {
     if (depth >= max_depth) return false;
+    // Asked first, and before the depth of anything inside it matters: a leaf
+    // is written by `std.json` whole, so what its fields look like is not this
+    // walk's business (ADR 0182).
+    if (writesItsOwnScalar(T)) return true;
     // Reading the marker is what checks it, and this is the line that makes the
     // check happen at all: a `.tag` on a struct describes nothing and would
     // otherwise sit there doing nothing in silence.
@@ -165,6 +205,10 @@ fn coversWithin(comptime T: type, comptime depth: usize) bool {
 }
 
 fn writeValue(comptime T: type, w: *std.Io.Writer, value: T) std.Io.Writer.Error!void {
+    // A leaf writes itself, and `std.json` is what calls it — so the bytes are
+    // the ones this file's contract promises, and the object around it stays
+    // this file's to write (ADR 0182).
+    if (comptime writesItsOwnScalar(T)) return std.json.Stringify.value(value, .{}, w);
     if (T == Str) return writeText(w, value.view());
     if (comptime isByteSlice(T)) return writeText(w, value);
 
@@ -815,4 +859,87 @@ test "a union with a variant the writer cannot touch falls back whole" {
         }
     };
     comptime std.debug.assert(!covers(Writes));
+}
+
+/// A stand-in for the four types item 46 was actually about — `sql.Uuid`,
+/// `sql.Timestamp`, `sql.AsText` and `id.Uuid`. Spelled out here rather than
+/// imported because `http/` may not name `sql/`, and the contract between them
+/// is two declarations by name and nothing else (ADR 0046, ADR 0076).
+const Key = struct {
+    bytes: [4]u8,
+
+    pub const nilo_openapi = .{ .type = "string", .format = "uuid" };
+
+    pub fn jsonStringify(self: Key, jw: anytype) !void {
+        var text: [8]u8 = undefined;
+        for (self.bytes, 0..) |b, i| {
+            _ = std.fmt.bufPrint(text[i * 2 ..][0..2], "{x:0>2}", .{b}) catch unreachable;
+        }
+        try jw.write(&text);
+    }
+};
+
+test "a type that writes its own JSON and says what it looks like is a leaf, not a wall" {
+    // The whole of ADR 0182: this used to answer false, and one such field
+    // anywhere sent the entire response to `std.json`.
+    comptime std.debug.assert(covers(Key));
+    comptime std.debug.assert(covers(struct { id: Key, name: []const u8 }));
+    comptime std.debug.assert(covers(struct { id: ?Key, ids: []const Key }));
+
+    // And every one of them is still byte-for-byte what `std.json` writes,
+    // which is the contract at the top of this file.
+    try expectSame(Key{ .bytes = .{ 0xde, 0xad, 0xbe, 0xef } });
+    try expectSame(struct { id: Key, name: []const u8 }{
+        .id = .{ .bytes = .{ 1, 2, 3, 4 } },
+        .name = "wati",
+    });
+    try expectSame(struct { id: ?Key, name: []const u8 }{ .id = null, .name = "wati" });
+}
+
+test "a leaf that says nothing about its JSON still takes the value with it" {
+    // The line is `nilo_openapi`, not `jsonStringify`. A type that writes
+    // itself and never says what it wrote is the shape this file cannot
+    // describe, so it stays `std.json`'s whole value exactly as it was.
+    const Quiet = struct {
+        n: u32,
+        pub fn jsonStringify(self: @This(), jw: anytype) !void {
+            try jw.write(self.n);
+        }
+    };
+    comptime std.debug.assert(!covers(Quiet));
+    comptime std.debug.assert(!covers(struct { inner: Quiet }));
+
+    // Nor does a marker naming a shape that is not a scalar — there is no such
+    // marker today, and if there ever is one this file has to keep writing the
+    // punctuation around a value it cannot see the end of.
+    const Object = struct {
+        n: u32,
+        pub const nilo_openapi = .{ .type = "object" };
+        pub fn jsonStringify(self: @This(), jw: anytype) !void {
+            try jw.write(self.n);
+        }
+    };
+    comptime std.debug.assert(!covers(Object));
+}
+
+test "a struct of keys can say how its fields are spelled" {
+    // Item 46, reopened: every response in the reporting product holds at
+    // least one `sql.Uuid`, so `rename_all` was refused on every one of them
+    // while the document promised the renamed keys (ADR 0181, ADR 0182).
+    const Contact = struct {
+        pub const nilo_json = .{ .rename_all = .camelCase };
+
+        id: Key,
+        full_name: []const u8,
+        partner_id: Key,
+    };
+
+    try expectJson(
+        "{\"id\":\"01020304\",\"fullName\":\"Wati\",\"partnerId\":\"0a0b0c0d\"}",
+        Contact{
+            .id = .{ .bytes = .{ 1, 2, 3, 4 } },
+            .full_name = "Wati",
+            .partner_id = .{ .bytes = .{ 10, 11, 12, 13 } },
+        },
+    );
 }

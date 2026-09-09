@@ -156,6 +156,14 @@ pub const Db = db.Db;
 /// values, which is the decision rather than the first version.
 pub const Sent = db.Sent;
 
+/// What `db.page` answers with: the rows on this page and how many the
+/// condition matched before the `.limit` cut it
+/// ([ADR 0185](../docs/adr/0185-a-page-knows-what-it-left-out.md)).
+///
+/// Naming it is for a caller keeping one in a struct of their own — a handler
+/// returning `!sql.Page(Order)` sends `{"rows":[…],"total":47}`.
+pub const Page = db.Db.Page;
+
 /// What `db.watching` takes: `fn (sql.Sent) void`.
 pub const Watcher = db.Watcher;
 
@@ -259,10 +267,60 @@ pub const Error = wire.Error;
 /// one past the request copies it.
 pub const Problem = wire.Problem;
 
+/// What the database said about the last statement **this fiber** ran, or
+/// null when it worked
+/// ([ADR 0184](../docs/adr/0184-a-failure-belongs-to-the-call-that-caused-it.md)).
+///
+/// ```zig
+/// db.delete(Staff, c, .{ .where = .{ .id = id } }) catch |err| switch (err) {
+///     error.ForeignKeyViolated => return nilo.fail.conflict(
+///         "{s} was given something to do a moment ago and can no longer be deleted.",
+///         .{name},
+///     ),
+///     else => return err,
+/// };
+/// ```
+///
+/// `Error` is the word to switch on and this is what to read after it —
+/// `problem.constraint` names *which* unique index fired, which is the half
+/// an error name cannot carry. Read it in the `catch`: it lives as long as
+/// the request does, and the next statement on this fiber replaces it.
+pub const problem = db.lastProblem;
+
 /// What a transaction is begun with, and what a read holds on to. Both are
 /// written as literals at the call — `db.begin(c, .{ .isolation = .serializable })`,
 /// `.lock = .update` — so naming either type is for a caller keeping one in a
 /// struct of their own.
+/// A value a condition only has *sometimes*: the term is in the statement
+/// when the filter carried one, and out of it when it did not
+/// ([ADR 0183](../docs/adr/0183-a-filter-that-is-absent-is-not-a-filter-that-is-null.md)).
+///
+/// ```zig
+/// const found = try db.page(Partner, c, .{
+///     .where = .{
+///         .name = .{ .icontains = sql.given(filter.search) },
+///         .exists = .{.{ .in = PartnerCapability, .where = .{
+///             .capability = sql.given(filter.capability),
+///         } }},
+///     },
+///     .order = .{ .name = .asc },
+///     .limit = 20,
+/// });
+/// ```
+///
+/// **Absent and null are two different questions.** `.status = null` is `IS
+/// NULL` and asks for the rows whose status is nothing; this asks for no
+/// condition on status at all. Nobody with a search box wants the first.
+///
+/// Inside an `.exists` it drops the whole subquery, and it has to be the only
+/// condition in that subquery — the ADR says why. It is refused in the
+/// condition of an `UPDATE` or a `DELETE`, and inside `.any`.
+pub const given = where.given;
+
+/// The type `sql.given` produces, for a caller naming one in a struct of
+/// their own.
+pub const Given = where.Given;
+
 pub const Begin = wire.Begin;
 pub const Isolation = wire.Isolation;
 pub const Lock = dialect.Lock;
@@ -282,6 +340,13 @@ pub fn selectFor(comptime Row: type, comptime Options: type) statement.Statement
 /// call rather than to the caller.
 pub fn oneFor(comptime Row: type, comptime Options: type) statement.Statement {
     return comptime statement.one(Postgres, Row, Options);
+}
+
+/// The same `SELECT` with `count(*) OVER ()` on the end of its column list,
+/// which is what `db.page` compiles (ADR 0185). `.limit` and `.order` are
+/// both required and `.lock` is refused.
+pub fn pageFor(comptime Row: type, comptime Options: type) statement.Statement {
+    return comptime statement.page(Postgres, Row, Options);
 }
 
 /// `SELECT count(*)`, and `SELECT EXISTS(…)`. Both take a condition and

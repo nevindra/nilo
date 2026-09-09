@@ -158,8 +158,30 @@ pub const Error = error{
     /// — 409 — because it is the one whose meaning does not change with the
     /// request around it.
     AlreadyExists,
-    /// A foreign key, check or not-null constraint was violated. No default:
-    /// all three usually mean the code is wrong rather than the client.
+    /// A foreign key was violated — a row this statement names is not there,
+    /// or a row it removes is still named by another
+    /// ([ADR 0184](../docs/adr/0184-a-failure-belongs-to-the-call-that-caused-it.md)).
+    ///
+    /// **The one class-23 failure that is routinely a race rather than a bug**,
+    /// and the reason it has a name of its own: a delete guarded by a count is
+    /// correct right up until somebody writes a child row between the two
+    /// statements, and the sentence that answers that is *"was given something
+    /// to do a moment ago"* rather than a 500.
+    ///
+    /// No default status. It is a 409 for the delete above and a 400 for an
+    /// insert naming a parent that was never there.
+    ForeignKeyViolated,
+    /// A `NOT NULL` column was sent a null. Almost always the code is wrong —
+    /// a Row and a table that disagree — which is why it has no default status
+    /// either.
+    NotNullViolated,
+    /// A `CHECK` constraint said no. Named because a check is a rule somebody
+    /// wrote down on purpose, so the endpoint that tripped it usually knows
+    /// what it means.
+    CheckViolated,
+    /// The rest of class 23 — an exclusion constraint, a `RESTRICT`. No
+    /// default: what is left usually means the code is wrong rather than the
+    /// client.
     ConstraintViolated,
     /// The connection went away, or was never there.
     Disconnected,

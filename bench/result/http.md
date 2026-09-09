@@ -234,6 +234,62 @@ is for. Its one weakness is that it copies `writeString` and `nextEscape` out of
 `http/json.zig` rather than importing them, so it measures the shape of the
 writer rather than the exact bytes the framework ships.
 
+### What a uuid in the response was costing
+
+The same finding as the section above, reached from the other side and two
+years' worth of responses wider. `covers` refused any type carrying its own
+`jsonStringify`, and four of those are nilo's own: `sql.Uuid`, `sql.Timestamp`,
+`sql.AsText` and `id.Uuid`. Since `covers` is answered for the **whole** value,
+one of them anywhere in a response sent the entire struct to `std.json` —
+strings included, which is the part the generated writer exists for.
+
+The port that reported it has **145 `uuid` columns across 59 tables**, so this
+was every response it sends.
+
+One contact row, 305 bytes: three uuids, four strings, a bool and an integer.
+
+| | ns, across three runs |
+|---|---|
+| **A** `std.json`, whole value — what nilo sent | 244–254 |
+| **B** generated writer, leaf handed to `std.json` — [ADR 0182](../../docs/adr/0182-a-leaf-that-says-what-it-is-can-be-carried.md) | 161–169 |
+| **C** *control:* the same struct with the uuids already text | 102–121 |
+
+**33% off**, and C says where the rest of it is: the gap between B and C is the
+three `jsonStringify` calls, which is the leaf itself and is not going anywhere.
+That is a smaller multiple than the union row above (2.8×) for the honest
+reason — a `Uuid` is 36 characters of a 305-byte payload, so less of the
+response was ever on the slow path than a union's whole struct is.
+
+Both rows say the same thing, which is worth stating once: **`covers` answering
+false is never local.** It is a property of the whole value, so the cost of a
+type it will not touch is paid by every string beside it. That is the argument
+for spending effort on what `covers` accepts rather than on what the writer does
+once it has accepted something.
+
+200,000 iterations per row, ReleaseFast on every module, on the machine above.
+
+```
+zig run -O ReleaseFast --dep nilo_json_writer -Mroot=spike/leaf_json/main.zig \
+  -O ReleaseFast --dep nilo_core -Mnilo_json_writer=http/json.zig \
+  -O ReleaseFast -Mnilo_core=core/core.zig
+```
+
+`-O ReleaseFast` before **every** `-M` is not decoration: given once it applies
+to the root module only, and the first reading of this had A at 1,989ns and B at
+1,423ns — a ratio that survived and absolutes that were eight times the truth.
+[`spike/leaf_json/`](../../spike/leaf_json/) imports `http/json.zig` rather than
+copying it, which is the one thing `spike/union_json/` could not do, and it
+asserts the two paths produce identical bytes before it times either.
+
+### Can it be pushed further?
+
+Row C is the floor for this payload and B is 50ns over it, all of it in three
+`std.json` leaf calls. Closing that would mean nilo writing `Uuid`'s 36
+characters itself, which it cannot: the type is `nilo_id`'s and `http/` never
+learns it exists (ADR 0046). A `nilo_json_write` a leaf could declare would do
+it and is not worth 50ns on a 305-byte response — filed here rather than built,
+so the next person starts from the number.
+
 ### What checking every response header costs
 
 Run to settle one question:

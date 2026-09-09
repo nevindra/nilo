@@ -37,3 +37,14 @@ pub var month: i32 = undefined;
 pub var tags: []const []const u8 = undefined;
 pub var schema_sql: []const u8 = undefined;
 pub var url: []const u8 = undefined;
+
+// The filters a screen may or may not have set, for the `sql.given` block —
+// optionals on purpose, because that is the whole subject of that section
+// (ADR 0183).
+pub var search: ?[]const u8 = undefined;
+pub var least_age: ?i32 = undefined;
+pub var capability: ?Str = undefined;
+
+// The one value the `.key` conflict-target block binds beside the user's id.
+// Not `tag`, which two snippets further down already use as a loop capture.
+pub var tag_name: []const u8 = undefined;

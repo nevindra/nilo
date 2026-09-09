@@ -73,6 +73,87 @@ const reserved = [_][]const u8{ any_field, exists_field, not_exists_field };
 /// The names an `.exists` entry may carry.
 const exists_known = [_][]const u8{ "in", "on", "where" };
 
+/// A value a condition only has *sometimes* — the term is in the statement
+/// when there is one, and out of it when there is not
+/// ([ADR 0183](../docs/adr/0183-a-filter-that-is-absent-is-not-a-filter-that-is-null.md)).
+///
+/// ```zig
+/// .where = .{
+///     .name = .{ .icontains = sql.given(filter.search) },
+///     .status = sql.given(filter.status),
+/// }
+/// ```
+///
+/// **Absent and null are two different questions**, which is why this is a
+/// word rather than an optional the operators started taking. `.status = null`
+/// is `IS NULL` and means *the rows whose status is nothing*; this means *no
+/// condition on status at all*. Nobody with a search box wants the first, and
+/// ADR 0044 is why the second could not be spelled: an optional reaching `=`
+/// sends `= NULL`, which runs, matches nothing, and says nothing.
+///
+/// What it compiles to is the guard a hand-written statement uses:
+///
+/// ```sql
+/// ($1::text IS NULL OR "name" ILIKE '%' || $1 || '%')
+/// ```
+///
+/// One statement rather than one per combination of filters, so the plan cache
+/// holds one entry and the parameter list is the same however the screen is
+/// set. The ADR has the numbers and the alternative it rejected.
+pub fn Given(comptime T: type) type {
+    return struct {
+        /// Read by name, the way every other marker in this repository is.
+        /// The type it holds, so a walker that found one knows what the term
+        /// is being written for without unwrapping the field.
+        pub const nilo_given = T;
+
+        /// What a nilo compile error calls this type (ADR 0122).
+        pub const nilo_type_name = "nilo.sql.Given";
+
+        value: ?T,
+    };
+}
+
+/// Wrap an optional so a condition drops its term when there is no value.
+///
+/// The argument has to be an optional: a value that is always there is an
+/// ordinary condition, and writing this around one would compile to a guard
+/// that is never taken.
+pub fn given(value: anytype) Given(GivenValue(@TypeOf(value))) {
+    return .{ .value = value };
+}
+
+/// The type inside the optional `given` was handed.
+fn GivenValue(comptime T: type) type {
+    comptime {
+        return switch (@typeInfo(T)) {
+            .optional => |o| o.child,
+            .null => @compileError(
+                "nilo: `sql.given(null)` is a term that is never there.\n" ++
+                    "  It takes the optional itself — `sql.given(filter.status)` — and " ++
+                    "leaves the term out when there is no value. A column compared against " ++
+                    "nothing is `.status = null`, which is `IS NULL`.",
+            ),
+            else => @compileError(
+                "nilo: `sql.given` was handed a " ++ @typeName(T) ++ ", which is not an " ++
+                    "optional.\n" ++
+                    "  A value that is always there is an ordinary condition: write " ++
+                    "`.status = value`. `sql.given` is for the one a filter may not carry.",
+            ),
+        };
+    }
+}
+
+/// Whether `T` is a `Given`, and what it holds.
+pub fn givenValue(comptime T: type) ?type {
+    comptime {
+        return switch (@typeInfo(T)) {
+            .@"struct" => if (@hasDecl(T, "nilo_given")) T.nilo_given else null,
+            else => null,
+        };
+    }
+}
+
 /// A route from the root of the where struct to one value, as the field names
 /// to follow. Comptime, so `each` can unroll it into `@field` calls.
 pub const Path = []const []const u8;
@@ -102,10 +183,19 @@ pub const Param = struct {
     /// the list is.
     list: bool = false,
     /// Whether the value binds as an optional even though the column is not
-    /// one. Set by `distinct_from` and by nothing else: it is the only
-    /// operator whose SQL does not change when its value turns out to be
-    /// null, so it is the only one an optional may reach (`nullSafeSpelling`).
+    /// one. Set by `distinct_from`, and by `sql.given`: both are spellings
+    /// whose SQL does not change when the value turns out to be null, which
+    /// is the property that lets an optional reach a placeholder at all
+    /// (`nullSafeSpelling`, ADR 0183).
     nullable: bool = false,
+    /// Whether the term this parameter belongs to disappears when the value
+    /// is null — `sql.given`
+    /// ([ADR 0183](../docs/adr/0183-a-filter-that-is-absent-is-not-a-filter-that-is-null.md)).
+    ///
+    /// Read by `statement.zig`, which refuses one in the condition of an
+    /// `UPDATE` or a `DELETE`: what stands between those and the whole table
+    /// is not something to leave to a value that may not arrive.
+    droppable: bool = false,
 
     /// The `column` of a parameter that is not a column.
     pub const none = "";
@@ -278,6 +368,17 @@ const State = struct {
     /// table and bind it as a column of another, which compiles.
     qualifier: []const u8 = "",
     inner: ?type = null,
+    /// Set while the walk is inside a `sql.given`: the value lives one field
+    /// deeper than the path says, and the parameter binds as an optional
+    /// whatever its column is (ADR 0183).
+    ///
+    /// **On the State for the same reason the qualifier is**: the path and the
+    /// two flags have to move together, and there is one walk.
+    dropping: bool = false,
+    /// Set while the walk is inside an `.exists`, where a `given` drops the
+    /// whole subquery rather than one term of it — so the term writes no guard
+    /// of its own and `oneExists` writes one around the lot.
+    in_group: bool = false,
 
     fn take(self: *State, comptime path: Path, comptime param: Param) usize {
         if (self.count == max_params) @compileError(
@@ -290,7 +391,17 @@ const State = struct {
         // Filled here rather than at the six call sites, so a parameter
         // written inside an `.exists` cannot be recorded as the outer Row's.
         if (owned.of == null) owned.of = self.inner;
-        self.paths[self.count] = path;
+        // The same argument for the other two: a `given` is recognised in one
+        // place and every `take` under it carries the flags, so no operator
+        // has to remember to set them (ADR 0183).
+        if (self.dropping) {
+            owned.droppable = true;
+            owned.nullable = true;
+        }
+        // The value is the optional inside the wrapper, so the path a Wire
+        // reads by is one field longer than the one the walk built.
+        const written = if (self.dropping) path ++ &[_][]const u8{"value"} else path;
+        self.paths[self.count] = written;
         self.params[self.count] = owned;
         self.count += 1;
         const n = self.next;
@@ -377,7 +488,23 @@ fn anyOf(
         var out: []const u8 = "(";
         for (info.fields, 0..) |f, i| {
             if (i > 0) out = out ++ " OR ";
+            const before = state.count;
             const sub = walk(D, Row, f.type, path ++ &[_][]const u8{f.name}, state);
+            // **`.any` is OR, and that reverses what dropping a term means**
+            // (ADR 0183). Everywhere else a term that is not there widens the
+            // answer; an alternative that is not there narrows it, because the
+            // rows it would have matched are gone. Two opposite meanings for
+            // one word is what this refuses.
+            for (state.params[before..state.count]) |p| {
+                if (p.droppable) @compileError(
+                    "nilo: an alternative of `.any` holds a `sql.given`.\n" ++
+                        "  `.any` is OR, so an alternative that is not there makes the " ++
+                        "condition match *fewer* rows — the opposite of what a filter " ++
+                        "nobody set should do, and of what `sql.given` means everywhere " ++
+                        "else.\n" ++
+                        "  Put the optional filter beside the `.any` rather than inside it.",
+                );
+            }
             if (sub.len == 0) @compileError(
                 "nilo: one of `.any`'s alternatives is empty.\n" ++
                     "  An empty condition matches every row, which makes the whole " ++
@@ -523,8 +650,14 @@ fn oneExists(
         // against the outer Row again.
         const was_qualifier = state.qualifier;
         const was_inner = state.inner;
+        const was_group = state.in_group;
+        const before = state.count;
+        const guard = state.next;
         state.qualifier = inner_rel ++ ".";
         state.inner = Inner;
+        // A `given` in here drops the whole subquery rather than one term of
+        // it, so the terms write no guards of their own (ADR 0183).
+        state.in_group = true;
         // The **type** of the condition, because that is what a walk reads —
         // the mirror of the line above, and the one place the two are easy to
         // mix up.
@@ -537,6 +670,26 @@ fn oneExists(
         );
         state.qualifier = was_qualifier;
         state.inner = was_inner;
+        state.in_group = was_group;
+
+        // **A `given` inside an `.exists` is the whole test, or it is a
+        // Refusal** (ADR 0183). Dropping one term of the subquery would leave
+        // it asking whether *any* joined row exists, which excludes every row
+        // with none — the opposite of no filter, and it compiles.
+        var droppable = 0;
+        for (state.params[before..state.count]) |p| {
+            if (p.droppable) droppable += 1;
+        }
+        if (droppable > 0 and state.count - before > 1) @compileError(
+            "nilo: an entry of `." ++ word ++ "` over " ++ @typeName(Inner) ++
+                " holds a `sql.given` beside another condition.\n" ++
+                "  Inside a subquery a `sql.given` is what makes the whole `" ++
+                (if (negate) "NOT EXISTS" else "EXISTS") ++ "` drop, because dropping one " ++
+                "term of it would leave it asking whether any joined row exists at all — " ++
+                "which excludes every row that has none.\n" ++
+                "  Write a second `." ++ word ++ "` entry for the condition that is always " ++
+                "there.",
+        );
 
         if (inside.len == 0) @compileError(
             "nilo: an entry of `." ++ word ++ "` has an empty `.where`.\n" ++
@@ -545,11 +698,17 @@ fn oneExists(
                 "column answers without a subquery.",
         );
 
-        return (if (negate) "NOT EXISTS (SELECT 1 FROM " else "EXISTS (SELECT 1 FROM ") ++
+        const test_sql = (if (negate) "NOT EXISTS (SELECT 1 FROM " else "EXISTS (SELECT 1 FROM ") ++
             inner_rel ++ " WHERE " ++
             inner_rel ++ "." ++ D.quote(link.inner) ++ " = " ++
             outer_rel ++ "." ++ D.quote(link.outer) ++
             " AND " ++ inside ++ ")";
+        if (droppable == 0) return test_sql;
+        // The guard the terms inside did not write, around the whole test.
+        // Nested inside another `.exists` it belongs to that one instead, and
+        // the outer walk is what writes it.
+        if (was_group) return test_sql;
+        return "(" ++ D.placeholder(guard) ++ " IS NULL OR " ++ test_sql ++ ")";
     }
 }
 
@@ -682,6 +841,26 @@ fn condition(
         // `= NULL` is never true in SQL, so reading it the other way would
         // produce a condition that silently matches nothing.
         if (@typeInfo(T) == .null) return quoted ++ " IS NULL";
+
+        // A term that is only there when the filter carried a value
+        // ([ADR 0183](../docs/adr/0183-a-filter-that-is-absent-is-not-a-filter-that-is-null.md)).
+        // Asked before `assertNotOptional`, because a `Given` is a struct
+        // holding an optional rather than an optional, and before
+        // `operatorsOf`, which would read it as a value being compared whole.
+        if (givenValue(T)) |Held| {
+            const n = state.next;
+            const was = state.dropping;
+            state.dropping = true;
+            const term = condition(D, Row, column, Held, path, state);
+            state.dropping = was;
+            // Inside an `.exists` the guard goes around the whole subquery
+            // instead, because a term that drops there would leave the
+            // subquery asking whether *any* joined row exists. `oneExists`
+            // writes that one.
+            if (state.in_group) return term;
+            return "(" ++ D.placeholder(n) ++ " IS NULL OR " ++ term ++ ")";
+        }
+
         assertNotOptional(column, null, T);
 
         if (operatorsOf(T)) |ops| {
@@ -922,6 +1101,42 @@ fn operator(
                 row_mod.ColumnType(Row, column),
                 false,
             );
+        }
+
+        // The same as the one in `condition`, one level down: `.name = .{
+        // .icontains = sql.given(search) }` is the shape a search box has
+        // (ADR 0183). Placed after `nullSafeSpelling`, whose operators already
+        // take an optional and mean something else by it.
+        if (givenValue(op.T)) |Held| {
+            if (nullSafeSpelling(op.name) != null) @compileError(
+                "nilo: the condition on `" ++ column ++ "` (as `" ++ op.name ++
+                    "`) was given a `sql.given`.\n" ++
+                    "  `" ++ op.name ++ "` already takes an optional and treats null as an " ++
+                    "ordinary value, so it is one statement either way — there is no term " ++
+                    "for `sql.given` to drop.\n" ++
+                    "  Write `." ++ column ++ " = .{ ." ++ op.name ++ " = maybe }`.",
+            );
+            if (listSpelling(op.name) != null) @compileError(
+                "nilo: the condition on `" ++ column ++ "` (as `" ++ op.name ++
+                    "`) was given a `sql.given`.\n" ++
+                    "  `" ++ op.name ++ "` takes a list, and a list that may be absent is " ++
+                    "the empty list — which `" ++ op.name ++ "` already reads as *no row " ++
+                    "matches*.\n" ++
+                    "  Pass an empty slice, or branch.",
+            );
+            const n = state.next;
+            const was = state.dropping;
+            state.dropping = true;
+            // `operator` builds the path from `prefix` itself, and `take`
+            // appends the wrapper's own field — so the value is read at
+            // `.where.<column>.<operator>.value`.
+            const term = operator(D, Row, column, quoted, .{
+                .name = op.name,
+                .T = Held,
+            }, prefix, state);
+            state.dropping = was;
+            if (state.in_group) return term;
+            return "(" ++ D.placeholder(n) ++ " IS NULL OR " ++ term ++ ")";
         }
 
         assertNotOptional(column, op.name, op.T);
@@ -1524,4 +1739,80 @@ test "a counter walks every value once, which is what a Wire will do" {
     }.f;
     try each(p, w, &seen, bump);
     try testing.expectEqual(@as(usize, 3), seen);
+}
+
+// -- a filter that is absent ---------------------------------------------
+
+/// What `dialect.pattern` wraps `$1` in so a `%` a user typed is a per cent
+/// sign rather than a wildcard. Spelled once here because two of the tests
+/// below are about the guard around it rather than about the escaping.
+const escaped_one = "replace(replace(replace($1, '\\', '\\\\'), '%', '\\%'), '_', '\\_')";
+
+test "a filter that may be absent guards its own term" {
+    // Item 54: `.age = maybe` was a Refusal, and the advice it gave — branch —
+    // is four arms for two optional filters, each repeating the order, the
+    // limit, the offset and the count beside it (ADR 0183).
+    const p = comptime plan(Pg, User, @TypeOf(.{
+        .age = given(@as(?i32, null)),
+    }), 1);
+    try testing.expectEqualStrings("($1 IS NULL OR \"age\" = $1)", p.sql);
+    // One parameter, whichever way the filter goes — which is what makes this
+    // one statement rather than one per combination of filters.
+    try testing.expectEqual(@as(usize, 1), p.paths.len);
+    try testing.expect(p.params[0].droppable);
+    try testing.expect(p.params[0].nullable);
+    // The value is read one field deeper than the condition is written, which
+    // is where the wrapper keeps it.
+    try testing.expectEqual(@as(usize, 2), p.paths[0].len);
+    try testing.expectEqualStrings("age", p.paths[0][0]);
+    try testing.expectEqualStrings("value", p.paths[0][1]);
+}
+
+test "an operator takes one too, and the fixed terms beside it are untouched" {
+    const p = comptime plan(Pg, User, @TypeOf(.{
+        .email = .{ .icontains = given(@as(?[]const u8, null)) },
+        .age = .{ .gt = @as(i32, 18) },
+    }), 1);
+    try testing.expectEqualStrings(
+        "($1 IS NULL OR \"email\" ILIKE '%' || " ++ escaped_one ++ " || '%' ESCAPE '\\')" ++
+            " AND \"age\" > $2",
+        p.sql,
+    );
+    try testing.expect(p.params[0].droppable);
+    try testing.expect(!p.params[1].droppable);
+    try testing.expectEqualStrings("value", p.paths[0][p.paths[0].len - 1]);
+}
+
+test "a filter inside an exists drops the subquery rather than a term of it" {
+    // Dropping the term would leave the subquery asking whether any joined row
+    // exists at all, which excludes every partner with no capabilities — the
+    // opposite of no filter, and it compiles (ADR 0183).
+    try testing.expectEqualStrings(
+        "($1 IS NULL OR EXISTS (SELECT 1 FROM \"partner_capabilities\"" ++
+            " WHERE \"partner_capabilities\".\"partner_id\" = \"partners\".\"id\"" ++
+            " AND \"partner_capabilities\".\"capability\" = $1))",
+        partnerSql(.{ .exists = .{
+            .{ .in = Capability, .where = .{ .capability = given(@as(?[]const u8, null)) } },
+        } }),
+    );
+}
+
+test "the whole of the reporting product's list endpoint is one statement" {
+    // A search box and a dropdown, either of which may be empty, over a
+    // partner list. Four arms of `db.select` beside four of `db.count`
+    // becomes this.
+    const p = comptime plan(Pg, Partner, @TypeOf(.{
+        .name = .{ .icontains = given(@as(?[]const u8, null)) },
+        .exists = .{
+            .{ .in = Capability, .where = .{ .capability = given(@as(?[]const u8, null)) } },
+        },
+    }), 1);
+    try testing.expectEqual(@as(usize, 2), p.paths.len);
+    try testing.expectEqualStrings(
+        "($1 IS NULL OR \"name\" ILIKE '%' || " ++ escaped_one ++ " || '%' ESCAPE '\\')" ++
+            " AND ($2 IS NULL OR EXISTS (SELECT 1 FROM \"partner_capabilities\"" ++
+            " WHERE \"partner_capabilities\".\"partner_id\" = \"partners\".\"id\"" ++
+            " AND \"partner_capabilities\".\"capability\" = $2))",
+        p.sql,
+    );
 }

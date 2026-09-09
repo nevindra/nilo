@@ -195,6 +195,82 @@ pub const Sent = struct {
 /// would need a lock this module cannot see.
 pub const Watcher = *const fn (Sent) void;
 
+/// The last statement's failure, for the fiber that ran it
+/// ([ADR 0184](../docs/adr/0184-a-failure-belongs-to-the-call-that-caused-it.md)).
+///
+/// **A watcher sees every statement and a caller sees one.** That is the split
+/// `db.watching` gets right for logging and wrong for a branch: an observer
+/// cannot tell a caller's own failure from a concurrent one on another
+/// connection, and the caller is the only thing that knows what sentence the
+/// failure deserves — *"was given something to do a moment ago and can no
+/// longer be deleted"* rather than a 500.
+///
+/// **It is not a field on the `Db`, and that is the whole design.** A `Db` is
+/// one Service shared by every request in flight, so a slot on it would be the
+/// last failure *anywhere*. This is `threadlocal`, and a fiber owns its thread
+/// for as long as it is running — a fiber only moves when it suspends, and
+/// there is no suspension point between a statement failing and the `catch`
+/// that reads this.
+///
+/// **Cleared by every statement, not only by a failing one.** The strings live
+/// in the request arena, which is reset between requests on the same
+/// connection, so a slot only ever written on failure would hand back freed
+/// bytes to whoever asked after a statement that worked.
+threadlocal var recent: Recent = .{};
+
+const Recent = struct {
+    problem: ?wire_mod.Problem = null,
+    /// The arena the strings in `problem` were copied into. Two fibers are two
+    /// connections and two arenas, so comparing this against the caller's is
+    /// what makes a problem left behind by a fiber that moved unreadable
+    /// rather than wrong.
+    arena: ?std.mem.Allocator = null,
+};
+
+/// What every statement leaves behind, success included.
+fn remember(arena: std.mem.Allocator, problem: ?wire_mod.Problem) void {
+    recent.problem = problem;
+    recent.arena = if (problem == null) null else arena;
+}
+
+/// What the database said about the last statement **this fiber** ran, or null
+/// when it worked (ADR 0184).
+///
+/// ```zig
+/// db.delete(Staff, c, .{ .where = .{ .id = id } }) catch |err| switch (err) {
+///     error.ForeignKeyViolated => return fail.conflict(
+///         "{s} was given something to do a moment ago and can no longer be " ++
+///             "deleted. Set them inactive instead.",
+///         .{name},
+///     ),
+///     else => return err,
+/// };
+/// ```
+///
+/// The error set is what to switch on and this is what to read afterwards —
+/// `problem.constraint` is the field that says *which* unique index fired,
+/// which is the half an error name cannot carry.
+///
+/// **It lives as long as the request does and no longer**, like every other
+/// string a statement produced. Read it in the `catch`; keep a copy if it has
+/// to outlive the handler.
+/// Named `lastProblem` here and exported as `sql.problem`, because `problem`
+/// is what every statement in this file already calls the slot it passes to
+/// the Wire — and a file-scope declaration of that name shadows fifteen of
+/// them.
+pub fn lastProblem(c: anytype) ?wire_mod.Problem {
+    comptime core.checkScope(@TypeOf(c), "sql.problem");
+    const held = recent.problem orelse return null;
+    const mine = recent.arena orelse return null;
+    const asked = c.arena();
+    // A fiber that moved between the failure and this call left its problem on
+    // the other thread, and whatever is here belongs to somebody else's
+    // request. Two pointers rather than a lock, and the answer is null rather
+    // than a plausible sentence about the wrong row.
+    if (mine.ptr != asked.ptr or mine.vtable != asked.vtable) return null;
+    return held;
+}
+
 /// A ready-made watcher: one `std.log.debug` line per statement, in the
 /// module's own scope.
 ///
@@ -464,6 +540,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// nobody could get a word out of (ADR 0146).
         fn told(
             self: *const Self,
+            arena: std.mem.Allocator,
             started: ?i64,
             sql: []const u8,
             plan: ?[]const u8,
@@ -471,6 +548,11 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             failed: bool,
             problem: ?wire_mod.Problem,
         ) void {
+            // Before either early return below, because this is not the
+            // watcher's half: a `Db` with no watcher and a `Db` with timing off
+            // both still owe the caller an answer about the statement it just
+            // ran (ADR 0184).
+            remember(arena, problem);
             const f = self.watch orelse return;
             const at = started orelse return;
             const took = core.monotonicMicros() - at;
@@ -498,20 +580,21 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             plan: ?[]const u8,
             values: anytype,
         ) !usize {
+            const arena = c.arena();
             const started = self.timing();
             const w = try self.wireOf();
             var problem: ?wire_mod.Problem = null;
             const changed = if (tx) |t|
-                t.exec(c.arena(), sql, values, plan, &problem) catch |err| {
-                    self.told(started, sql, plan, null, true, problem);
+                t.exec(arena, sql, values, plan, &problem) catch |err| {
+                    self.told(arena, started, sql, plan, null, true, problem);
                     return err;
                 }
             else
-                w.exec(c.arena(), sql, values, plan, &problem) catch |err| {
-                    self.told(started, sql, plan, null, true, problem);
+                w.exec(arena, sql, values, plan, &problem) catch |err| {
+                    self.told(arena, started, sql, plan, null, true, problem);
                     return err;
                 };
-            self.told(started, sql, plan, changed, false, null);
+            self.told(arena, started, sql, plan, changed, false, null);
             return changed;
         }
 
@@ -747,6 +830,56 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             return @intCast(n);
         }
 
+        /// A page of rows, and how many the condition matched before the
+        /// `.limit` cut it — in one statement
+        /// ([ADR 0185](../docs/adr/0185-a-page-knows-what-it-left-out.md)).
+        ///
+        /// ```zig
+        /// const found = try db.page(Order, c, .{
+        ///     .where = .{ .status = "open" },
+        ///     .order = .{ .id = .asc },
+        ///     .limit = 20,
+        ///     .offset = page * 20,
+        /// });
+        /// // found.rows is []Order, found.total is every order that matched.
+        /// ```
+        ///
+        /// **One statement rather than two, and the round trip is the smaller
+        /// half of why.** `db.count` beside `db.select` is two statements
+        /// against a table somebody else can write between, so the total and
+        /// the rows can disagree and nothing says so — a list that reads
+        /// *"20 of 47"* while holding 20 of 46. `count(*) OVER ()` rides on
+        /// the page and cannot.
+        ///
+        /// It costs one integer read per statement rather than per row: the
+        /// window function answers the same number on every row, so only the
+        /// first is read. A condition matching nothing answers with no rows
+        /// and a total of zero.
+        ///
+        /// **`.limit` and `.order` are both required.** With no ceiling this is
+        /// the whole table and the total is `rows.len`; with no order,
+        /// Postgres owes the `LIMIT` nothing, so two requests for the same
+        /// page can hold one row twice and miss another. `.lock` is refused
+        /// too — `FOR UPDATE` and a window function cannot be in one
+        /// statement.
+        pub fn page(self: *Self, comptime Row: type, c: anytype, options: anytype) !Page(Row) {
+            comptime core.checkScope(@TypeOf(c), "db.page");
+            const stmt = comptime statement.page(D, Row, @TypeOf(options));
+            var total: i64 = 0;
+            const rows = try filling(
+                Row,
+                stmt.reserve,
+                self,
+                null,
+                c,
+                stmt.sql,
+                self.planOf(stmt),
+                try valuesOf(stmt, Row, options, c),
+                &total,
+            );
+            return .{ .rows = rows, .total = total };
+        }
+
         /// Whether any row matches `options`.
         ///
         /// `EXISTS` rather than `count(…) > 0`: the database stops at the
@@ -783,17 +916,18 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                     "run until it closed. Lock the rows with `tx.select` and work through " ++
                     "what comes back.");
             const stmt = comptime statement.select(D, Row, @TypeOf(options));
+            const arena = c.arena();
             const w = try self.wireOf();
             const started = self.timing();
             var problem: ?wire_mod.Problem = null;
             const rows = w.run(
-                c.arena(),
+                arena,
                 stmt.sql,
                 try valuesOf(stmt, Row, options, c),
                 self.planOf(stmt),
                 &problem,
             ) catch |err| {
-                self.told(started, stmt.sql, self.planOf(stmt), null, true, problem);
+                self.told(arena, started, stmt.sql, self.planOf(stmt), null, true, problem);
                 return err;
             };
             // **What a watcher is told here is the statement opening**, with
@@ -801,7 +935,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             // nothing in this call sees the last one. A stream that is slow to
             // *open* is the half worth reporting, and it is the half this can
             // report honestly (ADR 0137).
-            self.told(started, stmt.sql, self.planOf(stmt), null, false, null);
+            self.told(arena, started, stmt.sql, self.planOf(stmt), null, false, null);
             // Counted only once the statement is away, so a `stream` that
             // never opened is not a `stream` that was never closed.
             if (traps_enabled) self.hold(&self.open_streams, .Add);
@@ -1036,6 +1170,17 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// constraint or index on. Postgres refuses the statement at run time
         /// if it has not — nothing on this side can know, because the
         /// constraint is not a column and a Row cannot name one.
+        ///
+        /// **`.key` is the Row's own key**, read off the `nilo_table` that
+        /// already declares it, and is what a join table wants
+        /// ([ADR 0186](../docs/adr/0186-a-key-is-named-once.md)):
+        ///
+        /// ```zig
+        /// try db.insertOrIgnore(StaffRole, c, .{ .staff_id = id, .role = role }, .key);
+        /// ```
+        ///
+        /// Spelling the columns out is still there for what it is for — a
+        /// unique index that is not the key.
         pub fn insertOrIgnore(
             self: *Self,
             comptime Row: type,
@@ -1465,6 +1610,29 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 );
             }
 
+            /// A page of rows and the total behind it, inside the
+            /// transaction (ADR 0185). The reason to want it here is the one
+            /// the call exists for: a repeatable-read transaction is the other
+            /// way to make a count and a page agree, and it costs a
+            /// transaction where this costs a clause.
+            pub fn page(self: *Tx, comptime Row: type, c: anytype, options: anytype) !Page(Row) {
+                comptime core.checkScope(@TypeOf(c), "tx.page");
+                const stmt = comptime statement.page(D, Row, @TypeOf(options));
+                var total: i64 = 0;
+                const rows = try filling(
+                    Row,
+                    stmt.reserve,
+                    self.db,
+                    &self.inner,
+                    c,
+                    stmt.sql,
+                    self.db.planOf(stmt),
+                    try valuesOf(stmt, Row, options, c),
+                    &total,
+                );
+                return .{ .rows = rows, .total = total };
+            }
+
             pub fn insertOrIgnore(
                 self: *Tx,
                 comptime Row: type,
@@ -1563,6 +1731,30 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 return self.db.execTold(&self.inner, c, sql, null, try rawValuesOf(values, c));
             }
         };
+
+        /// What `db.page` answers with: the rows on this page, and how many
+        /// the condition matched before the `.limit` cut it
+        /// ([ADR 0185](../docs/adr/0185-a-page-knows-what-it-left-out.md)).
+        ///
+        /// A type of its own rather than an out-parameter, for the reason
+        /// `db.one` is not `db.select`: the shape of the answer changed, and
+        /// a caller that has to remember to read a second thing is a caller
+        /// who will forget.
+        ///
+        /// The rows live in the request arena, like every other row. `total`
+        /// is an `i64` because that is what `count(*)` is on both databases,
+        /// and it is never negative.
+        pub fn Page(comptime Row: type) type {
+            return struct {
+                /// What a nilo compile error calls this type (ADR 0122).
+                pub const nilo_type_name = "nilo.sql.Page";
+
+                rows: []Row,
+                /// Every row the condition matched, `.limit` and `.offset`
+                /// ignored. What a trimmed list needs to say *"20 of 47"*.
+                total: i64,
+            };
+        }
 
         /// Rows pulled one at a time, each borrowed from the read buffer.
         pub fn Streamed(comptime Row: type) type {
@@ -1726,6 +1918,28 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             plan: ?[]const u8,
             values: anytype,
         ) ![]Row {
+            return filling(Row, reserve, db, tx, c, sql, plan, values, null);
+        }
+
+        /// The same, with somewhere to put the column a page carries past its
+        /// Row ([ADR 0185](../docs/adr/0185-a-page-knows-what-it-left-out.md)).
+        ///
+        /// **One extra `readColumn`, on the first row only**, because
+        /// `count(*) OVER ()` is the same number on every row of the result —
+        /// so a page costs one integer read rather than one per row, and a
+        /// statement that matched nothing leaves the slot at the zero it was
+        /// given.
+        fn filling(
+            comptime Row: type,
+            reserve: ?usize,
+            db: *Self,
+            tx: ?*W.Tx,
+            c: anytype,
+            sql: []const u8,
+            plan: ?[]const u8,
+            values: anytype,
+            total: ?*i64,
+        ) ![]Row {
             comptime row_mod.assertRow(Row);
             const arena = c.arena();
             // The Db rather than the Wire, so that the one funnel every read
@@ -1738,12 +1952,12 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
 
             var rows = if (tx) |t|
                 t.run(arena, sql, values, plan, &problem) catch |err| {
-                    db.told(started, sql, plan, null, true, problem);
+                    db.told(arena, started, sql, plan, null, true, problem);
                     return err;
                 }
             else
                 w.run(arena, sql, values, plan, &problem) catch |err| {
-                    db.told(started, sql, plan, null, true, problem);
+                    db.told(arena, started, sql, plan, null, true, problem);
                     return err;
                 };
             // Whatever happens below, the connection goes back usable —
@@ -1757,16 +1971,30 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             // **once per statement** rather than once per row, and asked at
             // the first moment both drivers can answer it (ADR 0134).
             if (try w.next(&rows)) {
-                wideEnough(Row, w, &rows) catch |err| {
-                    db.told(started, sql, plan, null, true, null);
+                wideEnough(Row, if (total == null) 0 else 1, w, &rows) catch |err| {
+                    db.told(arena, started, sql, plan, null, true, null);
                     return err;
                 };
+                // Read once rather than per row: `count(*) OVER ()` is the
+                // same number on every row of the result (ADR 0185).
+                if (total) |slot| {
+                    slot.* = readColumn(
+                        w,
+                        &rows,
+                        i64,
+                        comptime row_mod.columnsOf(Row).len,
+                        c,
+                    ) catch |err| {
+                        db.told(arena, started, sql, plan, null, true, null);
+                        return err;
+                    };
+                }
                 while (true) {
                     var filled: Row = undefined;
                     inline for (comptime row_mod.columnsOf(Row), 0..) |column, i| {
                         const F = comptime row_mod.ColumnType(Row, column);
                         @field(filled, column) = readColumn(w, &rows, F, i, c) catch |err| {
-                            db.told(started, sql, plan, null, true, null);
+                            db.told(arena, started, sql, plan, null, true, null);
                             return err;
                         };
                     }
@@ -1774,7 +2002,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                     if (!try w.next(&rows)) break;
                 }
             }
-            db.told(started, sql, plan, out.items.len, false, null);
+            db.told(arena, started, sql, plan, out.items.len, false, null);
             return out.toOwnedSlice(arena);
         }
 
@@ -1794,10 +2022,10 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// A list *longer* than the Row is not refused: reading the first N
         /// columns of a wider result is what `SELECT *` into a narrow Row
         /// means, and nothing about it is out of range.
-        fn wideEnough(comptime Row: type, w: *W, rows: *const W.Rows) !void {
+        fn wideEnough(comptime Row: type, extra: usize, w: *W, rows: *const W.Rows) !void {
             const wanted = comptime row_mod.columnsOf(Row).len;
             const answered = w.width(rows);
-            if (answered >= wanted) return;
+            if (answered >= wanted + extra) return;
             std.log.warn(
                 "nilo_sql: a statement answered with {d} column(s), and {s} reads {d} " ++
                     "by position. A `SELECT` list has to name at least the Row's columns, " ++
@@ -1829,12 +2057,12 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
 
             var rows = if (tx) |t|
                 t.run(arena, sql, values, plan, &problem) catch |err| {
-                    db.told(started, sql, plan, null, true, problem);
+                    db.told(arena, started, sql, plan, null, true, problem);
                     return err;
                 }
             else
                 w.run(arena, sql, values, plan, &problem) catch |err| {
-                    db.told(started, sql, plan, null, true, problem);
+                    db.told(arena, started, sql, plan, null, true, problem);
                     return err;
                 };
             defer w.drain(&rows);
@@ -1843,17 +2071,17 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             // driver and Postgres disagree about what was sent, which is not
             // something to paper over with a zero.
             if (!try w.next(&rows)) {
-                db.told(started, sql, plan, null, true, null);
+                db.told(arena, started, sql, plan, null, true, null);
                 return error.QueryFailed;
             }
             const answer = w.read(&rows, T, 0) catch |err| {
-                db.told(started, sql, plan, null, true, null);
+                db.told(arena, started, sql, plan, null, true, null);
                 return err;
             };
             // One row, which is what an aggregate is — the count in it is the
             // answer rather than the number of rows, and a watcher reading
             // `rows` gets what a `SELECT` would have given it.
-            db.told(started, sql, plan, 1, false, null);
+            db.told(arena, started, sql, plan, 1, false, null);
             return answer;
         }
 
@@ -5167,4 +5395,202 @@ test "updateReturningOne is the PATCH shape: the row as it now is, or null" {
         .{ .set = .{ .email = "nobody@example.dev" }, .where = .{ .id = @as(i64, 404) } },
     ));
     try tx.commit();
+}
+
+test "the caller can read what the database said about its own statement" {
+    // Item 55: a watcher got the whole `Problem` and the call site got
+    // `error.QueryFailed`, which is the right split for a log and the wrong
+    // one for a branch (ADR 0184).
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .refuses = .{
+        .message = "duplicate key value violates unique constraint \"staff_email_key\"",
+        .code = "23505",
+        .constraint = "staff_email_key",
+    } };
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    // No watcher installed, which is the case the item is about: reading the
+    // failure must not cost a `db.watching` nobody wanted.
+    _ = db.select(Person, &run, .{}) catch {
+        const said = lastProblem(&run) orelse return error.NoProblemReported;
+        // The half an error name cannot carry: *which* unique index fired.
+        try testing.expectEqualStrings("staff_email_key", said.constraint);
+        try testing.expectEqualStrings("23505", said.code);
+        return;
+    };
+    return error.StatementShouldHaveFailed;
+}
+
+test "a statement that worked leaves no problem behind it" {
+    // The strings live in the request arena, which is reset between requests
+    // on one connection — so a slot only ever written on failure would hand
+    // back freed bytes after a statement that worked.
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+
+    db.wire = .{ .refuses = .{ .message = "boom", .code = "23503" } };
+    _ = db.select(Person, &run, .{}) catch {};
+    try testing.expect(lastProblem(&run) != null);
+
+    db.wire = .{ .refuses = null, .answers = 0 };
+    _ = try db.select(Person, &run, .{});
+    try testing.expectEqual(@as(?wire_mod.Problem, null), lastProblem(&run));
+}
+
+test "a problem left by somebody else's request is not this one's to read" {
+    // Two Scopes are two arenas, which is what makes a fiber that moved
+    // between the failure and the `catch` answer null rather than a plausible
+    // sentence about the wrong row.
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .refuses = .{ .message = "boom", .code = "23505" } };
+
+    var mine = nilo.Run.init(testing.allocator);
+    defer mine.deinit();
+    var theirs = nilo.Run.init(testing.allocator);
+    defer theirs.deinit();
+
+    _ = db.select(Person, &mine, .{}) catch {};
+    try testing.expect(lastProblem(&mine) != null);
+    try testing.expectEqual(@as(?wire_mod.Problem, null), lastProblem(&theirs));
+}
+
+test "a page carries the total the condition matched, in one statement" {
+    // Item 56: a `db.count` beside a `db.select` is two statements against a
+    // table somebody else can write between, so the total and the rows can
+    // disagree with nothing saying so (ADR 0185).
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    var db: SqliteDb = .init(
+        testing.allocator,
+        "file:paged-list?mode=memory&cache=shared",
+        .{ .size = 2 },
+    );
+    defer db.deinit();
+    try db.nilo_start(threaded.io(), .off);
+
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    _ = try db.exec(&run, accounts_ddl, .{});
+
+    for (0..7) |i| {
+        var mail: [16]u8 = undefined;
+        var bytes: [16]u8 = @splat(0);
+        bytes[15] = @intCast(i);
+        _ = try db.insert(SqliteAccount, &run, .{
+            .public = types.Uuid.v4(bytes),
+            .email = try std.fmt.bufPrint(&mail, "n{d}@example.dev", .{i}),
+        });
+    }
+
+    const first = try db.page(SqliteAccount, &run, .{
+        .order = .{ .id = .asc },
+        .limit = 3,
+    });
+    try testing.expectEqual(@as(usize, 3), first.rows.len);
+    try testing.expectEqual(@as(i64, 7), first.total);
+    try testing.expectEqualStrings("n0@example.dev", first.rows[0].email.view());
+
+    // The last page is short and the total is the same number, which is the
+    // whole of what a trimmed list needs to say "7 of 7".
+    const last = try db.page(SqliteAccount, &run, .{
+        .order = .{ .id = .asc },
+        .limit = 3,
+        .offset = @as(i64, 6),
+    });
+    try testing.expectEqual(@as(usize, 1), last.rows.len);
+    try testing.expectEqual(@as(i64, 7), last.total);
+
+    // A condition that narrows narrows the total with it — the count is the
+    // page's own `WHERE`, which is the property two statements cannot hold.
+    const narrowed = try db.page(SqliteAccount, &run, .{
+        .where = .{ .email = "n2@example.dev" },
+        .order = .{ .id = .asc },
+        .limit = 3,
+    });
+    try testing.expectEqual(@as(usize, 1), narrowed.rows.len);
+    try testing.expectEqual(@as(i64, 1), narrowed.total);
+
+    // And nothing matching is an empty page with a total of zero rather than
+    // a statement that could not answer.
+    const none = try db.page(SqliteAccount, &run, .{
+        .where = .{ .email = "nobody@example.dev" },
+        .order = .{ .id = .asc },
+        .limit = 3,
+    });
+    try testing.expectEqual(@as(usize, 0), none.rows.len);
+    try testing.expectEqual(@as(i64, 0), none.total);
+}
+
+test "a page reads the same columns a select does, and one more" {
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"email\", \"nickname\", \"age\", count(*) OVER ()" ++
+            " FROM \"people\" WHERE \"age\" > $1 ORDER BY \"id\" ASC LIMIT 20 OFFSET 40",
+        comptime statement.page(dialect.Postgres, Person, @TypeOf(.{
+            .where = .{ .age = .{ .gt = 18 } },
+            .order = .{ .id = .asc },
+            .limit = 20,
+            .offset = 40,
+        })).sql,
+    );
+}
+
+test "an optional filter narrows when it is set and drops when it is not" {
+    // Items 54 and 56 together, which is the pair the report filed them as:
+    // an optional filter and a total in one statement is the ordinary list
+    // endpoint (ADR 0183, ADR 0185).
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    var db: SqliteDb = .init(
+        testing.allocator,
+        "file:optional-filter?mode=memory&cache=shared",
+        .{ .size = 2 },
+    );
+    defer db.deinit();
+    try db.nilo_start(threaded.io(), .off);
+
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    _ = try db.exec(&run, accounts_ddl, .{});
+
+    for ([_][]const u8{ "wati@example.dev", "budi@example.dev", "wati@other.dev" }, 0..) |mail, i| {
+        var bytes: [16]u8 = @splat(0);
+        bytes[15] = @intCast(i);
+        _ = try db.insert(SqliteAccount, &run, .{
+            .public = types.Uuid.v4(bytes),
+            .email = mail,
+        });
+    }
+
+    const Filter = struct { search: ?[]const u8 = null };
+
+    // Set: the term is in the statement.
+    const set: Filter = .{ .search = "wati" };
+    const narrowed = try db.page(SqliteAccount, &run, .{
+        .where = .{ .email = .{ .icontains = where_mod.given(set.search) } },
+        .order = .{ .id = .asc },
+        .limit = 10,
+    });
+    try testing.expectEqual(@as(usize, 2), narrowed.rows.len);
+    try testing.expectEqual(@as(i64, 2), narrowed.total);
+
+    // Absent: the same statement, the same parameter list, and the term is
+    // not applied — every row, rather than the nothing `= NULL` would have
+    // matched (ADR 0044 is what that refusal was protecting).
+    const unset: Filter = .{};
+    const all = try db.page(SqliteAccount, &run, .{
+        .where = .{ .email = .{ .icontains = where_mod.given(unset.search) } },
+        .order = .{ .id = .asc },
+        .limit = 10,
+    });
+    try testing.expectEqual(@as(usize, 3), all.rows.len);
+    try testing.expectEqual(@as(i64, 3), all.total);
 }

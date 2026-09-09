@@ -1080,10 +1080,14 @@ fn translate(conn: zqlite.Conn, err: anyerror) wire.Error {
         // The one error with a default answer — 409 — because its meaning
         // does not change with the request around it.
         error.ConstraintUnique, error.ConstraintPrimaryKey => error.AlreadyExists,
+        // The three the extended codes can name, which the Postgres side names
+        // by SQLSTATE (ADR 0184). **Both Wires answer the same word for the
+        // same failure**, which is the property that lets a handler tested
+        // against SQLite branch on what Postgres will send it.
+        error.ConstraintForeignKey => error.ForeignKeyViolated,
+        error.ConstraintNotNull => error.NotNullViolated,
+        error.ConstraintCheck => error.CheckViolated,
         error.Constraint,
-        error.ConstraintCheck,
-        error.ConstraintForeignKey,
-        error.ConstraintNotNull,
         error.ConstraintTrigger,
         error.ConstraintRowId,
         error.ConstraintDatatype,
@@ -1504,8 +1508,9 @@ test "a unique violation is AlreadyExists and every other constraint is not" {
             ));
 
             // A NOT NULL is a constraint too, and it is not a 409: it usually
-            // means the code is wrong rather than the client.
-            try testing.expectError(error.ConstraintViolated, w.exec(
+            // means the code is wrong rather than the client. It has a name of
+            // its own since ADR 0184, so a handler can say which one fired.
+            try testing.expectError(error.NotNullViolated, w.exec(
                 gpa,
                 "INSERT INTO t(id, email) VALUES (3, NULL)",
                 .{},
@@ -1659,3 +1664,71 @@ test "a reader refuses a write, which is what makes routing safe to get wrong" {
 /// rather than a shared in-memory database, and the path has to reach a
 /// closure `withIo` calls as a plain function.
 var tmp_sub_path: [@typeInfo(@FieldType(std.testing.TmpDir, "sub_path")).array.len]u8 = undefined;
+
+test "each constraint a caller branches on arrives under its own name" {
+    // Item 55: `23503` used to arrive as `ConstraintViolated` beside a check
+    // somebody wrote and a null the code should never have sent, so the one
+    // failure in class 23 that is routinely a race could not be told from the
+    // two that mean the program is wrong (ADR 0184).
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var w = try openTest(io, "file:named-constraints?mode=memory&cache=shared", 2);
+            defer w.close();
+            const gpa = testing.allocator;
+
+            _ = try w.exec(gpa, "PRAGMA foreign_keys = ON", .{}, null, null);
+            _ = try w.exec(
+                gpa,
+                "CREATE TABLE staff(id INTEGER PRIMARY KEY, age INTEGER CHECK (age > 0))",
+                .{},
+                null,
+                null,
+            );
+            _ = try w.exec(
+                gpa,
+                "CREATE TABLE task(id INTEGER PRIMARY KEY, staff_id INTEGER NOT NULL " ++
+                    "REFERENCES staff(id))",
+                .{},
+                null,
+                null,
+            );
+            _ = try w.exec(gpa, "INSERT INTO staff(id, age) VALUES (1, 30)", .{}, null, null);
+
+            // A child naming a parent that is not there.
+            try testing.expectError(error.ForeignKeyViolated, w.exec(
+                gpa,
+                "INSERT INTO task(id, staff_id) VALUES (1, 99)",
+                .{},
+                null,
+                null,
+            ));
+
+            // And the other direction, which is the one the report was about:
+            // a delete that lost a race with somebody adding work.
+            _ = try w.exec(gpa, "INSERT INTO task(id, staff_id) VALUES (2, 1)", .{}, null, null);
+            try testing.expectError(error.ForeignKeyViolated, w.exec(
+                gpa,
+                "DELETE FROM staff WHERE id = 1",
+                .{},
+                null,
+                null,
+            ));
+
+            try testing.expectError(error.CheckViolated, w.exec(
+                gpa,
+                "INSERT INTO staff(id, age) VALUES (2, -1)",
+                .{},
+                null,
+                null,
+            ));
+
+            try testing.expectError(error.NotNullViolated, w.exec(
+                gpa,
+                "INSERT INTO task(id, staff_id) VALUES (3, NULL)",
+                .{},
+                null,
+                null,
+            ));
+        }
+    }.run);
+}
