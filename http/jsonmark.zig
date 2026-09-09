@@ -205,10 +205,16 @@ fn checkTag(comptime T: type, comptime key: []const u8) void {
                     "  Give it a struct of its own, or leave the variant empty (`" ++ arm.name ++
                     ",`) to send `{\"" ++ key ++ "\":\"" ++ arm.name ++ "\"}` on its own.",
             );
-            for (payload.@"struct".fields) |f| {
-                if (std.mem.eql(u8, f.name, key)) @compileError(
+            // Compared against the name the field goes out under rather than
+            // the one it is written as, because a payload struct may rename its
+            // own fields (ADR 0181) — and it is the wire spelling that would
+            // land on the tag's key.
+            for (payload.@"struct".fields, wireNames(Payload)) |f, on_the_wire| {
+                if (std.mem.eql(u8, on_the_wire, key)) @compileError(
                     "nilo: `" ++ type_names.of(T) ++ "`'s `.tag` is \"" ++ key ++ "\" and its variant `" ++
-                        arm.name ++ "` already has a field called `" ++ f.name ++ "`, so that key would " ++
+                        arm.name ++ "` already has a field called `" ++ f.name ++ "`" ++
+                        (if (std.mem.eql(u8, f.name, on_the_wire)) "" else ", which goes out as \"" ++
+                            on_the_wire ++ "\"") ++ ", so that key would " ++
                         "be written twice and a reader would pick one of them.\n" ++
                         "  Rename the tag, or rename the field.",
                 );
@@ -226,6 +232,10 @@ fn checkTag(comptime T: type, comptime key: []const u8) void {
 /// and `fromSpan` returns whichever variant the `inline for` reaches first —
 /// which is declaration order, and nothing anywhere says so.
 ///
+/// On a struct it is the same mistake with the same shape: two fields under one
+/// key means the object carries that key twice, and which one a reader takes is
+/// its business ([ADR 0181](../docs/adr/0181-a-field-name-is-a-spelling-too.md)).
+///
 /// `O(n²)` over the names the type already produces, all of it while
 /// compiling, on a path that never reaches a binary. A union of eight variants
 /// is 28 comparisons of short literals, once.
@@ -234,13 +244,18 @@ fn checkRenames(comptime T: type, comptime c: Case) void {
         const fields = switch (@typeInfo(T)) {
             .@"enum" => |e| e.fields,
             .@"union" => |u| u.fields,
-            // `rename_all` only ever renames a variant or an enum value —
-            // a payload struct's own fields are left alone — so on anything
-            // else there is nothing here that could collide.
+            // A struct renames its own fields and nothing else — the payload
+            // struct of a renamed *variant* is still left alone, which is the
+            // line `json.zig`'s own test names (ADR 0181).
+            .@"struct" => |s| s.fields,
             else => return,
         };
         const m = Mark{ .rename_all = c };
-        const what = if (@typeInfo(T) == .@"enum") "value" else "variant";
+        const what = switch (@typeInfo(T)) {
+            .@"enum" => "value",
+            .@"union" => "variant",
+            else => "field",
+        };
         for (fields, 0..) |a, i| {
             const spelled = wire(a.name, m);
             for (fields[i + 1 ..]) |b| {
@@ -296,8 +311,9 @@ pub fn wire(comptime name: []const u8, comptime mark: ?Mark) []const u8 {
 }
 
 /// The names of `T`'s fields as they go out, in declaration order. What the
-/// API description lists as an enum's choices, and what the reader matches
-/// against.
+/// API description lists as an enum's choices, what the reader matches against,
+/// and — since [ADR 0181](../docs/adr/0181-a-field-name-is-a-spelling-too.md) —
+/// the keys a struct's own object carries.
 pub fn wireNames(comptime T: type) []const []const u8 {
     comptime {
         const mark = of(T);
@@ -305,10 +321,63 @@ pub fn wireNames(comptime T: type) []const []const u8 {
         const fields = switch (@typeInfo(T)) {
             .@"enum" => |e| e.fields,
             .@"union" => |u| u.fields,
-            else => @compileError("nilo: `" ++ type_names.of(T) ++ "` has no variants to name."),
+            .@"struct" => |s| s.fields,
+            else => @compileError("nilo: `" ++ type_names.of(T) ++ "` has no fields to name."),
         };
         for (fields) |f| names = names ++ [_][]const u8{wire(f.name, mark)};
         return names;
+    }
+}
+
+/// The first struct at or inside `T` that renames its own fields, or null
+/// ([ADR 0181](../docs/adr/0181-a-field-name-is-a-spelling-too.md)).
+///
+/// **What it is for: refusing one on the way *in*.** `rename_all` on a struct
+/// is a write spelling — `json.write` sends the renamed keys and the API
+/// description promises them — and `std.json` reads a body into the field names
+/// as they are written. A type used for both would send `fullName` and refuse
+/// to read it back, and nothing would say so until a client built from the
+/// document got a 400 naming every field.
+///
+/// A *union* is not this, and neither is an enum: both read back through
+/// `jsonParseFor`, which is the supported way in (ADR 0085). Only a struct has
+/// no reader, and only a struct is answered here.
+///
+/// Eight deep, the same ceiling `covers` and `schemaWithin` have and for the
+/// same reason — a type holding a list of its own type has no bottom.
+pub fn renamedFieldsWithin(comptime T: type) ?type {
+    comptime {
+        return renamedWithin(T, 0);
+    }
+}
+
+fn renamedWithin(comptime T: type, comptime depth: usize) ?type {
+    comptime {
+        if (depth >= 8) return null;
+        switch (@typeInfo(T)) {
+            .@"struct" => |s| {
+                if (of(T)) |m| {
+                    if (m.rename_all != null) return T;
+                }
+                for (s.fields) |f| {
+                    if (renamedWithin(f.type, depth + 1)) |found| return found;
+                }
+                return null;
+            },
+            .@"union" => |u| {
+                for (u.fields) |f| {
+                    if (renamedWithin(f.type, depth + 1)) |found| return found;
+                }
+                return null;
+            },
+            .optional => |o| return renamedWithin(o.child, depth + 1),
+            .array => |a| return renamedWithin(a.child, depth + 1),
+            .pointer => |p| return switch (p.size) {
+                .slice, .one => renamedWithin(p.child, depth + 1),
+                else => null,
+            },
+            else => return null,
+        }
     }
 }
 
@@ -335,6 +404,19 @@ pub fn parseFor(comptime T: type) @TypeOf(Reader(T).parse) {
         );
         // Checked here rather than where it is used, so it fires on the line
         // somebody wrote instead of on the first request that carries one.
+        //
+        // A struct gets its own sentence, because since ADR 0181 it is a thing
+        // somebody can reasonably have written — a response type with
+        // `rename_all` on it — and the answer is not "add a tag".
+        if (m.tag == null and @typeInfo(T) == .@"struct") @compileError(
+            "nilo: `" ++ type_names.of(T) ++ "` hands nilo's JSON reader a `" ++ marker ++
+                "` that only renames its fields, and renaming a struct's fields is a **write**" ++
+                " spelling (ADR 0181).\n" ++
+                "  There is nothing for the reader to do differently: nilo writes the renamed" ++
+                " keys and `std.json` reads the body into the field names as they are written.\n" ++
+                "  Take the `jsonParse` line off, and keep this type for what goes out. A body" ++
+                " coming in is its own struct, spelled the way the wire spells it.",
+        );
         if (m.tag == null and @typeInfo(T) != .@"enum") @compileError(
             "nilo: `" ++ type_names.of(T) ++ "` hands nilo's JSON reader a `" ++ marker ++
                 "` with only `rename_all` on it, and it is a " ++ @tagName(@typeInfo(T)) ++ ".\n" ++

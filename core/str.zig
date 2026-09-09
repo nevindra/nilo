@@ -143,6 +143,38 @@ pub const Str = struct {
         return std.mem.eql(u8, self.view(), other);
     }
 
+    /// The contents with whitespace taken off both ends, borrowed the way
+    /// `view()` is.
+    ///
+    /// The set is `std.ascii.whitespace` — space, tab, newline, carriage
+    /// return, vertical tab and form feed — rather than a literal written
+    /// here, so there is one answer to *what counts as blank* and it is not
+    /// this file's opinion.
+    pub fn trimmed(self: Str) []const u8 {
+        return std.mem.trim(u8, self.view(), &std.ascii.whitespace);
+    }
+
+    /// Whether there is nothing here but whitespace
+    /// ([ADR 0175](../docs/adr/0175-required-text-arrives-as-two-spaces.md)).
+    ///
+    /// **This is the check in front of every write that takes a name, a title
+    /// or a body**, because required text arrives as `"  "` in the ordinary
+    /// case rather than the rare one: a form field the person tabbed through,
+    /// a paste that brought its newline along. `len() == 0` does not catch
+    /// either of them.
+    ///
+    /// A read of the bytes rather than a validation rule, which is the line
+    /// `len()` and `eql()` already draw — what a blank field *means* is the
+    /// caller's, and nilo has nothing to say about whether it is a 422.
+    ///
+    /// It is here rather than in a caller's own helper for the reason the
+    /// charset is `std.ascii.whitespace` above: a copy that drops `\n` accepts
+    /// a comment whose whole body is a newline, and the required field then
+    /// holds a string every screen renders as empty.
+    pub fn blank(self: Str) bool {
+        return self.trimmed().len == 0;
+    }
+
     /// Parse as a base-10 integer.
     pub fn int(self: Str, comptime T: type) std.fmt.ParseIntError!T {
         return std.fmt.parseInt(T, self.view(), 10);
@@ -253,6 +285,48 @@ test "a Str prints with {f}, and printing a dead one still trips the trap" {
 
     var buf: [64]u8 = undefined;
     try testing.expectEqualStrings("path=/users/42", try std.fmt.bufPrint(&buf, "path={f}", .{s}));
+}
+
+test "text that is nothing but whitespace is blank, and the empty string is too" {
+    var lifetime = Lifetime{};
+    try testing.expect(Str.fromRequest("", &lifetime).blank());
+    try testing.expect(Str.fromRequest("  ", &lifetime).blank());
+    try testing.expect(Str.fromRequest("\t", &lifetime).blank());
+    // The one a hand-written charset drops, and the one it is dropped from: a
+    // comment body that is a single newline is required text that renders as
+    // an empty screen (ADR 0175).
+    try testing.expect(Str.fromRequest("\n", &lifetime).blank());
+    try testing.expect(Str.fromRequest("\r\n", &lifetime).blank());
+    try testing.expect(Str.fromRequest(" \t\r\n\x0b\x0c", &lifetime).blank());
+
+    try testing.expect(!Str.fromRequest("wati", &lifetime).blank());
+    try testing.expect(!Str.fromRequest("  wati  ", &lifetime).blank());
+    // A non-breaking space is not ASCII whitespace and is not treated as any:
+    // it is a character somebody typed, and guessing otherwise would be this
+    // file deciding what a name may contain.
+    try testing.expect(!Str.fromRequest("\u{00a0}", &lifetime).blank());
+}
+
+test "trimmed borrows the middle and leaves the contents alone" {
+    var lifetime = Lifetime{};
+    try testing.expectEqualStrings("wati", Str.fromRequest("  wati\n", &lifetime).trimmed());
+    try testing.expectEqualStrings("a b", Str.fromRequest("\ta b\r\n", &lifetime).trimmed());
+    try testing.expectEqualStrings("", Str.fromRequest("   ", &lifetime).trimmed());
+
+    // Borrowed, not copied — the same bytes the Str is holding.
+    const s = Str.fromRequest("  wati  ", &lifetime);
+    try testing.expectEqual(s.view().ptr + 2, s.trimmed().ptr);
+}
+
+test "reading a dead Str as blank still trips the trap" {
+    if (!trap_enabled) return;
+    var lifetime = Lifetime{};
+    const s = Str.fromRequest("  ", &lifetime);
+    try testing.expect(s.blank());
+    lifetime.end();
+    // `blank` goes through `view()`, so a Str read after its request is the
+    // same panic every other read gets rather than a quiet `true`.
+    try testing.expect(!s.alive());
 }
 
 test "int" {

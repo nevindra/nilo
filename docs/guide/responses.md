@@ -213,9 +213,8 @@ const Rule = struct { id: u32, severity: Severity, condition: Condition };
 
 A variant carrying nothing is the tag on its own — `{"signal":"disabled"}`.
 
-**`rename_all` spells a name the way the wire wants it.** It applies to an
-enum's tags and to a union's variant names, both of which are *values* in the
-JSON. It does not touch field names, which are keys.
+**`rename_all` spells a name the way the wire wants it.** An enum's tags, a
+union's variant names, and a struct's field names.
 
 | | `not_found` becomes |
 |---|---|
@@ -229,7 +228,49 @@ JSON. It does not touch field names, which are keys.
 The first two join the words rather than keeping the underscore, which is what
 serde does and what the names literally say. `.SCREAMING_SNAKE_CASE` is the one
 that keeps it. There is no `.snake_case`, because that is what a Zig field name
-already is.
+already is. Two names that land on one is a compile error — it would put the
+same key in an object twice.
+
+### A response whose keys are camelCase
+
+Your Rows are snake_case because Postgres is, and your wire is camelCase because
+the browser is. Saying so once beats a mapping function written out field by
+field, which is what a DTO layer is — and which nothing holds against the Row it
+came from, so a column added to the Row reaches the wire only if somebody
+remembers the second file
+([ADR 0181](../adr/0181-a-field-name-is-a-spelling-too.md)).
+
+<!-- compiles -->
+```zig
+const Contact = struct {
+    pub const nilo_json = .{ .rename_all = .camelCase };
+
+    id: u32,
+    full_name: []const u8,   // goes out as "fullName"
+    partner_id: u32,         // and "partnerId"
+};
+```
+
+The API description says the same keys, so a generated client reads what the
+server sends. It costs nothing per request: the name is settled while compiling
+either way.
+
+**It is a spelling for what goes *out*.** `std.json` picks the parser for a body
+and reads it into the field names as they are written, so a struct with
+`rename_all` used as a request body, a form or a query string is a compile error
+naming the route — that route would document `fullName` and answer 400 to a
+client that sent it. Give what comes in a struct of its own, spelled the way the
+wire spells it. One direction that works beats two that can disagree about one
+field.
+
+A renamed struct nilo's own writer cannot reach is refused too. It errs narrow on
+purpose, so one shape it does not recognise — a tuple, an array of bytes, an
+untagged union, a type with its own `jsonStringify`, anything past eight deep —
+sends the whole value to `std.json`, which does not read the marker.
+
+**The marker is per type, not inherited.** A struct renames its own fields; a
+union renames its *variants* and leaves a payload struct's fields to that
+struct's own marker; a nested struct that says nothing keeps its own spelling.
 
 **Why the second line.** Writing needs no `jsonParse` — nilo makes the call, so
 it reads the marker itself. Reading does, because `std.json` is what picks a

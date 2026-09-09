@@ -34,6 +34,28 @@ pub const Str = @import("nilo_core").Str;
 /// wants one, `nilo_sql` included.
 pub const Run = @import("nilo_core").Run;
 
+/// A Scope with its type erased, for a callback stored as a function pointer
+/// ([ADR 0177](../docs/adr/0177-a-scope-that-crosses-a-function-pointer.md)).
+///
+/// ```zig
+/// const Reaction = *const fn (scope: *nilo.AnyScope, payload: []const u8) anyerror!void;
+///
+/// var erased = nilo.AnyScope.of(c);   // or `.of(&run)` outside a request
+/// try reaction(&erased, payload);
+/// ```
+///
+/// Zig has no closures, so anything with a bus, a queue or a job registry
+/// stores a function pointer — and a function pointer cannot be generic over
+/// the Scope it runs under, which is what a reaction written for the server and
+/// tested under a `Run` needs. This is that wrapper, offered once rather than
+/// rewritten per caller.
+///
+/// **The ordinary Scope is unchanged**: `db.select(Row, c, …)` still takes
+/// `anytype` and still costs no indirect call (ADR 0041). The vtable is paid
+/// for only where somebody erases one, and it borrows — an `AnyScope` may not
+/// outlive the `Ctx` or `Run` it was made from.
+pub const AnyScope = @import("nilo_core").AnyScope;
+
 /// Percent coding, both directions
 /// ([ADR 0066](../docs/adr/0066-percent-is-needed-by-two-layers.md)).
 ///
@@ -636,6 +658,39 @@ test "a fail function inside blocking reaches the request that made the call" {
     // And the slot the call was handed is put back, so it cannot leak into
     // whatever this thread picks up next.
     try std.testing.expect(bulkhead.slot() == @as(*anyopaque, @ptrCast(&in_flight)));
+}
+
+test "a Ctx can be erased, and a callback allocates through it into the request" {
+    // The half `core/scope.zig` cannot check: `Ctx.arena` and `Ctx.str` take a
+    // `*const Ctx`, and the erasure casts a `*anyopaque` back to `*Ctx` — a
+    // coercion that either works here or nowhere (ADR 0177). Driven through a
+    // real request rather than asserted about, because what is being tested is
+    // that the memory really is the request's.
+    const Reaction = *const fn (scope: *AnyScope, note: []const u8) anyerror![]const u8;
+    const react: Reaction = struct {
+        fn run(scope: *AnyScope, note: []const u8) anyerror![]const u8 {
+            const kept = try scope.arena().dupe(u8, note);
+            return scope.str(kept).view();
+        }
+    }.run;
+
+    const handler = struct {
+        fn show(c: *Ctx) anyerror!void {
+            var erased = AnyScope.of(c);
+            try c.sendText(200, try react(&erased, "through a function pointer"));
+        }
+    }.show;
+
+    var app = App.init(std.testing.allocator);
+    defer app.deinit();
+    try app.get("/erased", handler);
+
+    var client = try testing.Client.init(std.testing.allocator, .{});
+    defer client.deinit();
+
+    const answer = try client.get(&app, "/erased");
+    try std.testing.expectEqual(@as(u16, 200), answer.status);
+    try std.testing.expectEqualStrings("through a function pointer", answer.body);
 }
 
 test "every type this module exports is named the way the import line names it" {

@@ -264,6 +264,135 @@ pub const Run = struct {
     }
 };
 
+/// A Scope that has been type-erased, for the one place a shape checked while
+/// compiling cannot reach: the other side of a function pointer
+/// ([ADR 0177](../docs/adr/0177-a-scope-that-crosses-a-function-pointer.md)).
+///
+/// ```zig
+/// // The bus stores this, and it is one type whether it is called from a
+/// // request or from a `Run` in a test.
+/// const Reaction = *const fn (scope: *nilo.AnyScope, payload: []const u8) anyerror!void;
+///
+/// fn notify(scope: *nilo.AnyScope, payload: []const u8) !void {
+///     const copy = try scope.arena().dupe(u8, payload);
+///     …
+/// }
+///
+/// var erased = nilo.AnyScope.of(c);   // or `.of(&run)`
+/// try reaction(&erased, payload);
+/// ```
+///
+/// **This is not a second way to write a handler, and it is not the Scope
+/// getting a vtable.** ADR 0041 keeps the ordinary Scope a shape checked while
+/// compiling because a vtable would put an indirect call on every allocation a
+/// module makes; every call in nilo and in `nilo_sql` still takes `anytype` and
+/// still costs nothing. This is one erased wrapper, made by whoever is about to
+/// cross a function pointer, and paid for only there.
+///
+/// **Why anything needs it.** Zig has no closures, so a callback is a function
+/// pointer and a function pointer cannot be generic over the Scope it runs
+/// under (ADR 0166). Anything with a bus, a queue or a job registry hits this,
+/// and the alternative is that each of them writes the same fifty lines of
+/// pointer-and-vtable — each copy a fresh chance to hand a handler the wrong
+/// lifetime.
+///
+/// **It borrows and owns nothing.** The pointer inside is the Scope's own, so
+/// an `AnyScope` may not outlive the `Ctx` or `Run` it was made from. In
+/// practice it is a local beside the call, which is the only shape that is
+/// obviously right.
+///
+/// `resolve` is deliberately not here: it is generic over the type asked for,
+/// so it cannot cross a function pointer any more than `entropy` could — which
+/// is why `entropyInto` exists and is what this carries instead.
+pub const AnyScope = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.AnyScope";
+
+    _scope: *anyopaque,
+    _table: *const Table,
+
+    /// The three calls a Scope makes across a function pointer. `arena` and
+    /// `str` are what `check` above asks of every Scope; `entropyInto` is the
+    /// third because minting a key is what a reaction does that a query does
+    /// not, and it is spelled `Into` rather than `entropy` because a function
+    /// pointer names one return type and `![n]u8` is a different one per width
+    /// (ADR 0166).
+    pub const Table = struct {
+        arena: *const fn (*anyopaque) std.mem.Allocator,
+        str: *const fn (*anyopaque, []const u8) Str,
+        entropyInto: *const fn (*anyopaque, []u8) anyerror!void,
+    };
+
+    /// Erase `scope`, which is a `*Ctx` or a `*Run`.
+    ///
+    /// The table is a comptime constant per Scope type, so this is two stores
+    /// and no allocation.
+    pub fn of(scope: anytype) AnyScope {
+        const P = @TypeOf(scope);
+        comptime check(P, "nilo.AnyScope.of");
+        comptime {
+            const info = @typeInfo(P);
+            if (info != .pointer or info.pointer.size != .one) @compileError(
+                "nilo: `nilo.AnyScope.of` was given a " ++ @typeName(P) ++ " by value, and an " ++
+                    "erased Scope holds a pointer to the one it was made from.\n" ++
+                    "  Pass the `*Ctx` the handler was given, or `&run`.",
+            );
+            if (!@hasDecl(info.pointer.child, "entropyInto")) @compileError(
+                "nilo: `nilo.AnyScope.of` needs a Scope with `entropyInto`, and " ++
+                    @typeName(P) ++ " has `entropy` alone.\n" ++
+                    "  A function pointer names one return type, so the erased call is the one" ++
+                    " that takes a buffer rather than the one that answers `![n]u8` (ADR 0166).\n" ++
+                    "  `*Ctx` and `nilo.Run` both have it.",
+            );
+        }
+        const S = @typeInfo(P).pointer.child;
+
+        const erased = struct {
+            const table: Table = .{
+                .arena = takeArena,
+                .str = takeStr,
+                .entropyInto = takeEntropy,
+            };
+            fn takeArena(p: *anyopaque) std.mem.Allocator {
+                return S.arena(@ptrCast(@alignCast(p)));
+            }
+            fn takeStr(p: *anyopaque, bytes: []const u8) Str {
+                return S.str(@ptrCast(@alignCast(p)), bytes);
+            }
+            fn takeEntropy(p: *anyopaque, buf: []u8) anyerror!void {
+                return S.entropyInto(@ptrCast(@alignCast(p)), buf);
+            }
+        };
+        return .{ ._scope = @ptrCast(@constCast(scope)), ._table = &erased.table };
+    }
+
+    pub fn arena(self: *AnyScope) std.mem.Allocator {
+        return self._table.arena(self._scope);
+    }
+
+    pub fn str(self: *AnyScope, bytes: []const u8) Str {
+        return self._table.str(self._scope, bytes);
+    }
+
+    /// `n` bytes of randomness, the width said where the call is written.
+    ///
+    /// The same spelling `Ctx` and `Run` have, so a function body written
+    /// against one of those compiles against this — which is the whole point of
+    /// the erasure and would be lost if the only call here were the buffer one.
+    pub fn entropy(self: *AnyScope, comptime n: usize) ![n]u8 {
+        var out: [n]u8 = undefined;
+        try self.entropyInto(&out);
+        return out;
+    }
+
+    /// The same bytes at a width nobody said while compiling — what the vtable
+    /// actually carries (ADR 0166).
+    pub fn entropyInto(self: *AnyScope, buf: []u8) !void {
+        return self._table.entropyInto(self._scope, buf);
+    }
+};
+
 /// Two `@typeName` results naming the same type.
 ///
 /// The pointer comparison is the one that fires: `@typeName` of one type is
@@ -436,6 +565,103 @@ test "a Run with no Io fills no buffer and says why" {
 
     var buf: [10]u8 = undefined;
     try testing.expectError(error.NoIo, run.entropyInto(&buf));
+}
+
+test "an erased Scope is still a Scope, and hands out the memory of the one it wraps" {
+    var run = Run.init(testing.allocator);
+    defer run.deinit();
+
+    // The property the whole type exists for: what `db.select` asks of a Scope
+    // is asked of this one too, so a function written against `anytype` takes
+    // it without knowing it was erased.
+    check(*AnyScope, "a test");
+
+    var erased = AnyScope.of(&run);
+    const copied = try erased.arena().dupe(u8, "wati");
+    const text = erased.str(copied);
+    try testing.expectEqualStrings("wati", text.view());
+
+    // And it is the *same* arena, not one of its own — the pointer the erasure
+    // holds is the Run's.
+    try testing.expect(erased.arena().ptr == run.arena().ptr);
+}
+
+test "text stamped through an erased Scope goes stale when the tick ends" {
+    if (!str_mod.trap_enabled) return;
+    var run = Run.init(testing.allocator);
+    defer run.deinit();
+
+    var erased = AnyScope.of(&run);
+    const text = erased.str(try erased.arena().dupe(u8, "this tick"));
+    try testing.expect(text.alive());
+    // Stamped by the Run through the vtable, so the Run's own reset is what
+    // ends it. An erasure that quietly stamped nothing would pass every test
+    // that only reads the bytes, which is why this one asks the trap.
+    run.reset();
+    try testing.expect(!text.alive());
+}
+
+test "an erased Scope mints a key, which is what a reaction needs and a query does not" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    var run = Run.initIo(testing.allocator, threaded.io());
+    defer run.deinit();
+
+    var erased = AnyScope.of(&run);
+    const first = try erased.entropy(10);
+    const second = try erased.entropy(10);
+    try testing.expect(!std.mem.eql(u8, &first, &second));
+
+    // The width a vtable could not have named, which is why the table carries
+    // `entropyInto` and `entropy` is written on top of it here.
+    var wanted: usize = 32;
+    _ = &wanted;
+    const buf = try erased.arena().alloc(u8, wanted);
+    @memset(buf, 0);
+    try erased.entropyInto(buf);
+    var all_zero = true;
+    for (buf) |b| {
+        if (b != 0) all_zero = false;
+    }
+    try testing.expect(!all_zero);
+
+    // And a Run with no Io says so through the erasure exactly as it does
+    // without one.
+    var without = Run.init(testing.allocator);
+    defer without.deinit();
+    var blind = AnyScope.of(&without);
+    try testing.expectError(error.NoIo, blind.entropy(10));
+}
+
+test "a callback stored as a function pointer runs under whichever Scope it is handed" {
+    // This is the shape the type was built for, written out: one function
+    // pointer, two Scopes, and no generic anywhere. Before this it was fifty
+    // lines of vtable per caller (ADR 0177).
+    const Reaction = *const fn (scope: *AnyScope, note: []const u8) anyerror!Str;
+    const react: Reaction = struct {
+        fn run(scope: *AnyScope, note: []const u8) anyerror!Str {
+            const kept = try scope.arena().dupe(u8, note);
+            return scope.str(kept);
+        }
+    }.run;
+
+    var first = Run.init(testing.allocator);
+    defer first.deinit();
+    var second = Run.init(testing.allocator);
+    defer second.deinit();
+
+    var a = AnyScope.of(&first);
+    var b = AnyScope.of(&second);
+    try testing.expectEqualStrings("in the first", (try react(&a, "in the first")).view());
+    try testing.expectEqualStrings("in the second", (try react(&b, "in the second")).view());
+
+    // Two Scopes, two lifetimes, and the erasure kept them apart: ending one
+    // tick leaves the other's text alive.
+    if (!str_mod.trap_enabled) return;
+    const held = try react(&b, "still here");
+    first.reset();
+    try testing.expect(held.alive());
 }
 
 test "entropyInto is the same bytes as entropy, at a width nobody said while compiling" {

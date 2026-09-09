@@ -46,6 +46,20 @@ pub const v4 = Uuid.v4;
 /// into every page it has.
 pub const v7 = Uuid.v7;
 
+/// The same key, minted from the Scope already in hand
+/// ([ADR 0176](../docs/adr/0176-a-key-that-can-be-printed-and-a-key-that-can-be-made.md)):
+///
+/// ```zig
+/// const key = try id.v7Now(c);
+/// _ = try db.insert(User, c, .{ .id = key, .email = form.email });
+/// ```
+///
+/// The randomness is the Scope's and the millisecond is this module's, which
+/// is the pair every `create` in a program writes out otherwise. `v7` above is
+/// still there for a caller who has the millisecond already — a backfill, a
+/// key made for a row that existed before it did.
+pub const v7Now = Uuid.v7Now;
+
 test {
     _ = uuid;
 }

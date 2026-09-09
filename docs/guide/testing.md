@@ -143,13 +143,55 @@ look rather than only send.
 | `answer.header("content-type")` | case-insensitive, `null` if absent |
 | `answer.body` | the bytes after the head — still chunk-framed if it was a stream |
 | `answer.text(&buf)` | the body as a client sees it, framing undone |
+| `answer.bytes(arena)` | the same, into memory the arena owns |
+| `answer.json(T, arena)` | the body read back as a value |
 | `answer.raw` | everything, exactly as it went on the wire |
 | `answer.head` | the status line and headers |
 | `answer.chunked` | whether it arrived in chunks |
 | `answer.keep_alive` | whether the connection could have carried another request |
 
+**`answer.json` is there because nilo already decided how the value was
+written** — walking a `std.json.Value` to pull one field out of a create was four
+lines at every call site
+([ADR 0180](../adr/0180-a-response-is-read-back-the-way-it-was-written.md)):
+
+```zig
+const made = try answer.json(struct { id: []const u8 }, arena);
+try testing.expectEqual(@as(usize, 36), made.id.len);
+```
+
+It undoes chunk framing first and copies everything into the arena, so what comes
+back survives the next request on the same client. Fields it was not asked about
+are ignored — you are asking a question about part of the response, not asserting
+its whole shape. When the shape *is* what you are asserting, ask for
+`std.json.Value`.
+
 A client may be reused for as many requests as you like; each one gets a fresh
 arena, exactly as a real connection does between requests.
+
+### An App and a Client together
+
+Most test files build the same pair. `Wired` is that pair:
+
+```zig
+var wired = try nilo.testing.Wired.init(testing.allocator, .{});
+defer wired.deinit();
+
+try wired.app.provide(&db);
+try wired.app.post("/partners", createPartner);
+
+const answer = try wired.post("/partners", "{\"name\":\"Wati\"}");
+try testing.expectEqual(@as(u16, 201), answer.status);
+```
+
+`wired.app` is a plain `App`, so routes, services, groups and `docs()` are
+registered exactly as they are anywhere else — nothing here is a second API, and
+no database is assumed. Every `Client` call is on it without the `&app`:
+`wired.get`, `.post`, `.postWith`, `.request`, `.sendRequest`, `.send`,
+`.setHeader`, `.cookie`.
+
+`Client` is still there and is still the answer when one test needs two of them
+against one App — two addresses, two cookie jars.
 
 `Client.init(gpa, .{ .response_bytes = 1 << 20 })` for a stream that produces a
 lot — an answer that doesn't fit is truncated rather than failing.

@@ -52,6 +52,7 @@ const patch_mod = @import("patch.zig");
 const bound_mod = @import("bound.zig");
 const filebody = @import("filebody.zig");
 const json_mod = @import("json.zig");
+const mark = @import("jsonmark.zig");
 
 const Ctx = ctx_mod.Ctx;
 const Str = str_mod.Str;
@@ -773,6 +774,7 @@ fn rolesOf(
                             orMeantAsAParam(param_names, used),
                     );
                     body_at = i;
+                    checkNotRenamed(pattern, readInto(roles[i], P), "request body");
                 },
                 // A form *is* the body — the same bytes, read by a different
                 // rule — so the two are one slot and asking for both is the
@@ -789,6 +791,7 @@ fn rolesOf(
                     );
                     form_at = i;
                     const Fields = readInto(roles[i], P);
+                    checkNotRenamed(pattern, Fields, "form");
                     form_mod.checkFields(Fields, if (roles[i] == .form)
                         "the `Form(" ++ naming.of(Fields) ++ ")` on route \"" ++ pattern ++ "\""
                     else
@@ -804,6 +807,7 @@ fn rolesOf(
                             "and ask for that.",
                     );
                     query_at = i;
+                    checkNotRenamed(pattern, readInto(roles[i], P), "query string");
                     checkQueryFields(pattern, readInto(roles[i], P), i);
                 },
                 // Checked here, at the first place anybody names the type,
@@ -839,6 +843,35 @@ fn rolesOf(
         );
         const frozen = roles;
         return &frozen;
+    }
+}
+
+/// Refuse a struct that renames its fields where a request is *read*
+/// ([ADR 0181](../docs/adr/0181-a-field-name-is-a-spelling-too.md)).
+///
+/// `rename_all` on a struct is a spelling for what goes out: `json.write` sends
+/// the renamed keys and the API description promises them. Nothing renames on
+/// the way in — `std.json` chooses the parser for a body and reads it into the
+/// field names as they are written — so a type used for both would send
+/// `fullName`, document `fullName`, and answer 400 to a client that sent it.
+///
+/// **A refusal rather than a second mechanism**, which is the whole of the
+/// decision. One direction that works beats two that can disagree about one
+/// field, and the two would be told apart by nothing a reader can see at the
+/// call site.
+fn checkNotRenamed(comptime pattern: []const u8, comptime T: type, comptime what: []const u8) void {
+    comptime {
+        const Renamed = mark.renamedFieldsWithin(T) orelse return;
+        @compileError(
+            "nilo: the " ++ what ++ " on route \"" ++ pattern ++ "\" is read into `" ++
+                naming.of(Renamed) ++ "`, which renames its fields — and a renamed field name is a " ++
+                "spelling for what goes out (ADR 0181).\n" ++
+                "  nilo writes the renamed keys and the API description promises them; nothing " ++
+                "renames on the way in, so a client sending what the document says would be a 400 " ++
+                "naming every field.\n" ++
+                "  Keep this type for the response, and give what comes in a struct of its own, " ++
+                "spelled the way the wire spells it.",
+        );
     }
 }
 

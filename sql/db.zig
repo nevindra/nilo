@@ -577,13 +577,23 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 // `connect_on_init` said, so *both* of them got the one
                 // about the URL — which sent people to check a URL that was
                 // correct while their database was down.
-                if (isUrlProblem(err)) std.log.err(
+                //
+                // **`warn` rather than `err`, for the reason `sqlite.read`'s
+                // is one and `wireOf`'s before it**
+                // ([ADR 0178](../docs/adr/0178-a-suite-whose-database-is-down-is-not-a-suite-that-failed.md)):
+                // `std.log.err` fails the test runner for every test that
+                // provokes it, and this line runs once per test in a suite
+                // whose database is not running. The error is returned and is
+                // what the caller acts on — `nilo_start` is the one call here
+                // that both logs and returns, so the line is a diagnostic
+                // beside the answer rather than the answer itself.
+                if (isUrlProblem(err)) std.log.warn(
                     "nilo could not read the database URL \"{s}\" ({s}). This is the URL " ++
                         "itself rather than the database: the scheme has to be `postgres://` " ++
                         "or `postgresql://`, and the only parameters understood are `sslmode` " ++
                         "and `tcp_user_timeout`.",
                     .{ redacted(self.url), @errorName(err) },
-                ) else std.log.err(
+                ) else std.log.warn(
                     "nilo could not open {d} of the {d} connections to \"{s}\" ({s}). " ++
                         "`connect_on_init` is {d}, so startup dials that many and stops when it " ++
                         "cannot — the database may be down, the credentials wrong, or `size` " ++
@@ -618,6 +628,14 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 return;
             };
             if (problems != 0 and self.opts.schema_mismatch_is_fatal) {
+                // **This one stays at `err` while the two above dropped to
+                // `warn`, and the line between them is worth stating**
+                // ([ADR 0178](../docs/adr/0178-a-suite-whose-database-is-down-is-not-a-suite-that-failed.md)).
+                // A database that is not running is a fact about the machine
+                // the suite is on; a Row that disagrees with its table is a
+                // broken program, and a test runner going red for it is the
+                // correct answer rather than noise. `checkSchema` lists each
+                // one at `err` for the same reason.
                 std.log.err(
                     "nilo found {d} disagreement(s) between a Row and its table, listed above. " ++
                         "Each one is a request that would have failed later; fix them, or set " ++
@@ -832,6 +850,42 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             // parameter that meant something different here than in
             // `db.select` would be two rules for one type.
             return fill(Row, null, self, null, c, sql, self.rawPlanOf(sql), try rawValuesOf(values, c));
+        }
+
+        /// `db.raw` for a statement whose `WHERE` holds a key: the first row,
+        /// or null
+        /// ([ADR 0179](../docs/adr/0179-a-statement-with-a-key-in-it-has-a-single-row-answer.md)).
+        ///
+        /// ```zig
+        /// fn card(db: *sql.Db, c: *nilo.Ctx, id: sql.Uuid) !?WorkItemCard {
+        ///     return db.rawOne(WorkItemCard, c, work_item_card, .{id});
+        /// }
+        /// ```
+        ///
+        /// **`db.one` is this for the typed select and there was no `rawOne`**,
+        /// so the same three lines were written at every call site: take the
+        /// slice, test its length, hand back `found[0]`. `?Row` is already a
+        /// 404 in the typed layer (ADR 0024), so what the handler wants is
+        /// `!?T` and what it had was a slice to unwrap.
+        ///
+        /// **No `LIMIT 1` is added**, which is the whole of how this differs
+        /// from `db.one`. This module did not write the statement and has
+        /// nowhere honest to put one — a `LIMIT` after a `UNION ALL` or inside
+        /// a CTE means something else, and appending text to somebody else's
+        /// SQL is the thing `db.raw` exists not to do. So a statement matching
+        /// many rows still costs every one of them; it is a shorter way to
+        /// write the unwrap, not a cheaper statement.
+        pub fn rawOne(
+            self: *Self,
+            comptime Row: type,
+            c: anytype,
+            comptime sql: []const u8,
+            values: anytype,
+        ) !?Row {
+            comptime core.checkScope(@TypeOf(c), "db.rawOne");
+            comptime rawcheck.assertList(D, Row, sql, "db.rawOne");
+            const found = try fill(Row, null, self, null, c, sql, self.rawPlanOf(sql), try rawValuesOf(values, c));
+            return if (found.len == 0) null else found[0];
         }
 
         /// A statement that answers with **nothing**, and the number of rows
@@ -1058,6 +1112,37 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             comptime core.checkScope(@TypeOf(c), "db.updateReturning");
             const stmt = comptime statement.updateReturning(D, Row, @TypeOf(options));
             return fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
+        }
+
+        /// The same, for a `.where` that holds a key: the row as it now is, or
+        /// null
+        /// ([ADR 0179](../docs/adr/0179-a-statement-with-a-key-in-it-has-a-single-row-answer.md)).
+        ///
+        /// ```zig
+        /// fn rename(db: *sql.Db, c: *nilo.Ctx, id: sql.Uuid, in: Rename) !?Partner {
+        ///     return db.updateReturningOne(Partner, c, .{
+        ///         .set = .{ .name = in.name },
+        ///         .where = .{ .id = id },
+        ///     });
+        /// }
+        /// ```
+        ///
+        /// **The condition is the caller's and this changes nothing about it.**
+        /// The statement is the same `UPDATE … RETURNING`, sent unchanged, with
+        /// the same rows coming back; what differs is that the answer is `?Row`
+        /// rather than a slice the handler has to unwrap. Null is *no row
+        /// matched*, which in a PATCH endpoint is the 404 the typed layer
+        /// already writes for it (ADR 0024).
+        ///
+        /// A `.where` that matches several rows updates all of them and this
+        /// hands back the first, exactly as `db.one` does for a condition on a
+        /// column that is not unique. It is the shape of the call site rather
+        /// than a promise about the statement.
+        pub fn updateReturningOne(self: *Self, comptime Row: type, c: anytype, options: anytype) !?Row {
+            comptime core.checkScope(@TypeOf(c), "db.updateReturningOne");
+            const stmt = comptime statement.updateReturning(D, Row, @TypeOf(options));
+            const changed = try fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
+            return if (changed.len == 0) null else changed[0];
         }
 
         /// Delete every row matching `options`, and say how many there were.
@@ -1419,6 +1504,14 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 return fill(Row, stmt.reserve, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
             }
 
+            /// `db.updateReturningOne` inside the transaction (ADR 0179).
+            pub fn updateReturningOne(self: *Tx, comptime Row: type, c: anytype, options: anytype) !?Row {
+                comptime core.checkScope(@TypeOf(c), "tx.updateReturningOne");
+                const stmt = comptime statement.updateReturning(D, Row, @TypeOf(options));
+                const changed = try fill(Row, stmt.reserve, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
+                return if (changed.len == 0) null else changed[0];
+            }
+
             pub fn delete(self: *Tx, comptime Row: type, c: anytype, options: anytype) !usize {
                 comptime core.checkScope(@TypeOf(c), "tx.delete");
                 const stmt = comptime statement.delete(D, Row, @TypeOf(options));
@@ -1446,6 +1539,21 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 comptime core.checkScope(@TypeOf(c), "tx.raw");
                 comptime rawcheck.assertList(D, Row, sql, "tx.raw");
                 return fill(Row, null, self.db, &self.inner, c, sql, self.db.rawPlanOf(sql), try rawValuesOf(values, c));
+            }
+
+            /// `db.rawOne` inside the transaction: the first row of a statement
+            /// this module did not write, or null (ADR 0179).
+            pub fn rawOne(
+                self: *Tx,
+                comptime Row: type,
+                c: anytype,
+                comptime sql: []const u8,
+                values: anytype,
+            ) !?Row {
+                comptime core.checkScope(@TypeOf(c), "tx.rawOne");
+                comptime rawcheck.assertList(D, Row, sql, "tx.rawOne");
+                const found = try fill(Row, null, self.db, &self.inner, c, sql, self.db.rawPlanOf(sql), try rawValuesOf(values, c));
+                return if (found.len == 0) null else found[0];
             }
 
             /// `db.exec` inside the transaction: a statement that answers with
@@ -4923,4 +5031,140 @@ test "a Db that never started can still be stopped" {
     // one that refused the boot reaches `stopAll` having opened nothing.
     db.nilo_stop();
     try testing.expect(db.wire == null);
+}
+
+test "rawOne answers with the row or with null, so a key lookup is not an unwrap" {
+    // What this replaces, written out six times across four files before it
+    // existed (ADR 0179):
+    //
+    //     const found = try db.raw(Row, c, "…", .{id});
+    //     return if (found.len > 0) found[0] else null;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    var db: SqliteDb = .init(
+        testing.allocator,
+        "file:raw-one?mode=memory&cache=shared",
+        .{ .size = 2 },
+    );
+    defer db.deinit();
+    try db.nilo_start(threaded.io(), .off);
+
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    _ = try db.exec(&run, accounts_ddl, .{});
+
+    const key = try types.Uuid.parse("01a01077-5ce8-7932-b42b-a05431a5c4c8");
+    _ = try db.insert(SqliteAccount, &run, .{ .public = key, .email = "wati@example.dev" });
+
+    const Card = struct {
+        pub const nilo_table = .projection;
+        id: i64,
+        email: nilo.Str,
+    };
+    const statement_text = "SELECT id, email FROM accounts WHERE public = ?1";
+
+    const found = (try db.rawOne(Card, &run, statement_text, .{key})).?;
+    try testing.expectEqualStrings("wati@example.dev", found.email.view());
+
+    // Null rather than an empty slice, which is what makes `!?T` a 404 in the
+    // typed layer with nothing written in the handler (ADR 0024).
+    try testing.expectEqual(
+        @as(?Card, null),
+        try db.rawOne(Card, &run, statement_text, .{types.Uuid.nil}),
+    );
+
+    // And inside a transaction, which is the other pair of call sites.
+    var tx = try db.begin(&run, .{});
+    errdefer tx.rollback();
+    const in_tx = (try tx.rawOne(Card, &run, statement_text, .{key})).?;
+    try testing.expectEqualStrings("wati@example.dev", in_tx.email.view());
+    try testing.expectEqual(
+        @as(?Card, null),
+        try tx.rawOne(Card, &run, statement_text, .{types.Uuid.nil}),
+    );
+    try tx.commit();
+}
+
+test "rawOne hands back the first row when a statement matches several" {
+    // Stated rather than left to be discovered: no `LIMIT 1` is appended,
+    // because this module did not write the statement and has nowhere honest
+    // to put one (ADR 0179). It is the shape of the call site, not a promise
+    // about the query.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    var db: SqliteDb = .init(
+        testing.allocator,
+        "file:raw-one-many?mode=memory&cache=shared",
+        .{ .size = 2 },
+    );
+    defer db.deinit();
+    try db.nilo_start(threaded.io(), .off);
+
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    _ = try db.exec(&run, accounts_ddl, .{});
+
+    for (0..3) |_| _ = try db.insert(SqliteAccount, &run, .{
+        .public = types.Uuid.nil,
+        .email = "someone@example.dev",
+    });
+
+    const Card = struct {
+        pub const nilo_table = .projection;
+        id: i64,
+    };
+    const first = (try db.rawOne(Card, &run, "SELECT id FROM accounts ORDER BY id", .{})).?;
+    try testing.expectEqual(@as(i64, 1), first.id);
+}
+
+test "updateReturningOne is the PATCH shape: the row as it now is, or null" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    var db: SqliteDb = .init(
+        testing.allocator,
+        "file:update-returning-one?mode=memory&cache=shared",
+        .{ .size = 2 },
+    );
+    defer db.deinit();
+    try db.nilo_start(threaded.io(), .off);
+
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    _ = try db.exec(&run, accounts_ddl, .{});
+
+    const made = try db.insert(SqliteAccount, &run, .{
+        .public = types.Uuid.nil,
+        .email = "wati@example.dev",
+    });
+
+    const renamed = (try db.updateReturningOne(SqliteAccount, &run, .{
+        .set = .{ .email = "sari@example.dev" },
+        .where = .{ .id = made.id },
+    })).?;
+    try testing.expectEqualStrings("sari@example.dev", renamed.email.view());
+
+    // A key that is not there changed nothing, and null is the 404 the handler
+    // wanted rather than an empty slice it has to test the length of.
+    try testing.expectEqual(@as(?SqliteAccount, null), try db.updateReturningOne(
+        SqliteAccount,
+        &run,
+        .{ .set = .{ .email = "nobody@example.dev" }, .where = .{ .id = @as(i64, 404) } },
+    ));
+
+    var tx = try db.begin(&run, .{});
+    errdefer tx.rollback();
+    const in_tx = (try tx.updateReturningOne(SqliteAccount, &run, .{
+        .set = .{ .email = "third@example.dev" },
+        .where = .{ .id = made.id },
+    })).?;
+    try testing.expectEqualStrings("third@example.dev", in_tx.email.view());
+    try testing.expectEqual(@as(?SqliteAccount, null), try tx.updateReturningOne(
+        SqliteAccount,
+        &run,
+        .{ .set = .{ .email = "nobody@example.dev" }, .where = .{ .id = @as(i64, 404) } },
+    ));
+    try tx.commit();
 }

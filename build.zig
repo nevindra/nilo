@@ -164,6 +164,13 @@ const sql_refusals = [_]Refusal{
         .name = "sqlite_weaker_isolation",
         .says = "the sqlite dialect has no .read_committed isolation level.",
     },
+    // `nilo_id`'s, and it is here because that module has no table of its own:
+    // `sql.Uuid` is the same declaration, and the framework's refusals are built
+    // against `nilo_http` alone (ADR 0176).
+    .{
+        .name = "uuid_v7now_without_a_scope",
+        .says = "`id.v7Now` needs somewhere to get randomness from, and u32 has no `entropy`.",
+    },
     .{
         .name = "any_empty",
         .says = "`.any` is empty.",
@@ -810,8 +817,20 @@ const refusals = [_]Refusal{
         .says = "`json_rename_all_collides_on_an_enum.Severity` asks for `.rename_all = .lowercase`, and its values `not_found` and `notfound` both come out as \"notfound\".",
     },
     .{
+        .name = "json_rename_all_collides_on_a_struct",
+        .says = "`json_rename_all_collides_on_a_struct.Contact` asks for `.rename_all = .lowercase`, and its fields `full_name` and `fullname` both come out as \"fullname\".",
+    },
+    .{
         .name = "json_rename_all_collides_on_a_union",
         .says = "`json_rename_all_collides_on_a_union.Channel` asks for `.rename_all = .UPPERCASE`, and its variants `web_hook` and `webhook` both come out as \"WEBHOOK\".",
+    },
+    .{
+        .name = "json_rename_all_on_a_request_body",
+        .says = "the request body on route \"/contacts\" is read into `json_rename_all_on_a_request_body.NewContact`, which renames its fields — and a renamed field name is a spelling for what goes out (ADR 0181).",
+    },
+    .{
+        .name = "json_rename_all_on_a_shape_that_falls_back",
+        .says = "`json_rename_all_on_a_shape_that_falls_back.Contact` renames its fields, and this value goes to `std.json`, which does not read the marker (ADR 0181).",
     },
     .{
         .name = "json_rename_all_is_already_zig",
@@ -3098,7 +3117,7 @@ pub fn build(b: *std.Build) void {
     // pass, and believe a `sql/refusals/` file had been checked.
     const refusals_step = b.step(
         "refusals",
-        "Check the framework's 109 compile errors — see refusals-sql, -s3, -config, -pw, -cache for the rest",
+        "Check the framework's 116 compile errors — see refusals-sql, -s3, -config, -pw, -cache for the rest",
     );
     for (refusals) |refusal| {
         const module = b.createModule(.{

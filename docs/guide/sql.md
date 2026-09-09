@@ -772,19 +772,29 @@ changed in between:
 <!-- compiles -->
 ```zig
 fn rename(db: *sql.Db, c: *nilo.Ctx, id: i64, body: Rename) !?User {
-    const changed = try db.updateReturning(User, c, .{
+    return db.updateReturningOne(User, c, .{
         .set = .{ .name = body.name },
         .where = .{ .id = id },
     });
-    return if (changed.len == 0) null else changed[0];
 }
 ```
 
-`deleteReturning` is the other half, for a delete that has to report or log
-what it took. Both answer with a slice, because nothing in a condition says
-how many rows it matches — the single-row shape is the length check above.
-The clause they add is the `SELECT` list this module already writes, so
-neither costs a statement the compiler did not settle.
+`updateReturning` is the same statement answering with the slice, for a `.where`
+that means to match many rows. `deleteReturning` is the other half, for a delete
+that has to report or log what it took. The clause they add is the `SELECT` list
+this module already writes, so none of them costs a statement the compiler did
+not settle.
+
+**`updateReturningOne` is the unwrap, not a narrower statement**
+([ADR 0179](../adr/0179-a-statement-with-a-key-in-it-has-a-single-row-answer.md)).
+The `.where` is yours: an `UPDATE` matching several rows updates all of them, and
+this hands back the first. What it saves is `if (changed.len == 0) null else
+changed[0]` at every call site — and `!?User` is already a 404 in the typed
+layer, so the handler above is the whole endpoint.
+
+`db.rawOne` is the same shape for a statement you wrote yourself. **It adds no
+`LIMIT 1`**, unlike `db.one`: this module did not write the statement and has
+nowhere honest to put one.
 
 ### Writing a row that may already be there
 

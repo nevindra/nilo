@@ -36,6 +36,12 @@ pub const trap_enabled = str_mod.trap_enabled;
 pub const Run = scope_mod.Run;
 pub const checkScope = scope_mod.check;
 
+/// A Scope with its type erased, for the one place a shape checked while
+/// compiling cannot reach: the other side of a function pointer
+/// ([ADR 0177](../docs/adr/0177-a-scope-that-crosses-a-function-pointer.md)).
+/// The ordinary Scope is unchanged and still costs nothing.
+pub const AnyScope = scope_mod.AnyScope;
+
 pub const nowMicros = clock_mod.nowMicros;
 pub const nowMillis = clock_mod.nowMillis;
 pub const monotonicMicros = clock_mod.monotonicMicros;

@@ -389,18 +389,59 @@ const Condition = union(enum) {
 | | |
 |---|---|
 | `.tag` | the discriminator's key. A `union(enum)` only: the variant's name goes under it, and the variant's own fields go beside it in the same object |
-| `.rename_all` | how a variant's name or an enum's tag is spelled on the wire. Not field names |
+| `.rename_all` | how a name is spelled on the wire — an enum's tag, a union's variant, or **a struct's field names** |
 
 `.rename_all` takes `.lowercase`, `.UPPERCASE`, `.camelCase`, `.PascalCase`,
 `.SCREAMING_SNAKE_CASE` and `.@"kebab-case"`. The first two join the words
 (`not_found` → `notfound`); `.SCREAMING_SNAKE_CASE` keeps the underscore. There
 is no `.snake_case` — that is what a Zig field name already is, and asking for
-it is a compile error rather than a no-op.
+it is a compile error rather than a no-op. Two names that land on one is also a
+compile error, in every shape: it would put the same key in an object twice.
+
+### A struct that renames its fields
+
+A Row is snake_case because Postgres is and a wire is camelCase because the
+browser is. Saying so once beats a mapping function written out field by field,
+which is what a DTO layer is and which nothing holds against the Row it came from
+([ADR 0181](./adr/0181-a-field-name-is-a-spelling-too.md)):
+
+<!-- compiles -->
+```zig
+const Contact = struct {
+    pub const nilo_json = .{ .rename_all = .camelCase };
+
+    id: u32,
+    full_name: []const u8,   // goes out as "fullName"
+    partner_id: u32,         // and "partnerId"
+};
+```
+
+The API description says the same keys, so a generated client reads what the
+server sends. It costs nothing per request: the name is a comptime string either
+way, written as part of the same call the punctuation is in.
+
+**It is a spelling for what goes *out*, and using one for what comes in is a
+Refusal.** `std.json` chooses the parser for a body and reads it into the field
+names as they are written, so such a type would document `fullName` and answer
+400 to a client that sent it. A struct with `rename_all` used as a request body,
+a form or a query string is a compile error naming the route. Give what comes in
+a struct of its own, spelled the way the wire spells it.
+
+A renamed struct nilo's own writer cannot reach is refused as well. One shape it
+does not recognise — a tuple, an array of bytes, an untagged union, a type with
+its own `jsonStringify`, anything past eight deep — sends the whole value to
+`std.json`, which does not read the marker.
+
+**The marker is per type, not inherited.** A struct renames its own fields; a
+union renames its *variants* and leaves a payload struct's fields to that
+struct's own marker; a nested struct that says nothing keeps its own spelling.
 
 `nilo.jsonParseFor(@This())` is the reader, and it is a second line because
 `std.json` picks the parser for a type and nothing can add a declaration to a
 type you wrote. Only needed if the type arrives in a request; sending needs
-nothing. Adding it to a type with no `nilo_json` is a compile error.
+nothing. Adding it to a type with no `nilo_json` is a compile error, and so is
+adding it to a struct that only renames — there is nothing for the reader to do
+differently.
 
 Without a marker a `union(enum)` is externally tagged — `{"metrics":{…}}`, what
 `std.json` writes — and it is written by nilo's own writer either way. An
@@ -615,8 +656,24 @@ directory.
 | `s.eql(other)` | compare against a `[]const u8` |
 | `s.int(T)` | parse as base-10 |
 | `s.len()` | |
+| `s.trimmed()` | the bytes with whitespace off both ends, borrowed |
+| `s.blank()` | whether there is nothing but whitespace — including nothing at all |
 | `s.keep(gpa)` | a copy that outlives the request; the caller frees it |
 | `Str.static(bytes)` | text that already outlives any request — what a test uses |
+
+`{f}` prints one: `std.log.info("path={f}", .{c.path()})`. `{s}` cannot be made
+to work, because Zig reserves it for byte slices and a `Str` is a struct.
+
+**`blank()` is the check in front of a write that takes a name, a title or a
+body**, because required text arrives as `"  "` in the ordinary case rather than
+the rare one — a field somebody tabbed through, a paste that brought its newline
+along ([ADR 0175](./adr/0175-required-text-arrives-as-two-spaces.md)). The set is
+`std.ascii.whitespace`, which includes the `\n` a hand-written `" \t\r\n"` drops
+about half the time; a comment whose entire body is a newline is required text
+that renders as an empty screen.
+
+It is a read of the bytes and not a validation rule — whether a blank title is a
+422 stays yours, the same line `len()` and `eql()` already draw.
 
 ## `Run`
 
@@ -732,6 +789,46 @@ than an error from inside the module.
 `nilo_core` is the module both live in. A project importing `nilo` never has to
 name it — `nilo.Str` and `nilo.Run` are the same declarations — but a program
 with no server in it can depend on `nilo_core` alone.
+
+### `AnyScope`
+
+A Scope with its type erased, for the one place the shape above cannot reach:
+**the other side of a function pointer**
+([ADR 0177](./adr/0177-a-scope-that-crosses-a-function-pointer.md)). Zig has no
+closures, so a bus, a queue or a job registry stores a callback as a function
+pointer — and a function pointer names one type per argument, so a reaction
+cannot be generic over the Scope it runs under while still running under a
+request *and* under a `Run` in a test.
+
+```zig
+const Reaction = *const fn (scope: *nilo.AnyScope, payload: []const u8) anyerror!void;
+
+fn notify(scope: *nilo.AnyScope, payload: []const u8) !void {
+    const kept = try scope.arena().dupe(u8, payload);
+    _ = try db.insert(Notice, scope, .{ .body = kept });
+}
+
+var erased = nilo.AnyScope.of(c);   // or `.of(&run)` outside a request
+try reaction(&erased, payload);
+```
+
+| | |
+|---|---|
+| `nilo.AnyScope.of(scope)` | erase a `*Ctx` or a `*Run`. Two stores, no allocation |
+| `erased.arena()` | the wrapped Scope's, through the vtable |
+| `erased.str(bytes)` | the same, stamped with the wrapped Scope's lifetime |
+| `erased.entropy(n)` | `![n]u8` |
+| `erased.entropyInto(buf)` | `!void`, and the one the vtable actually carries |
+
+It passes the Scope check, so `db.select(Row, &erased, …)` works — a reaction can
+query. `resolve` is not here: it is generic over the type asked for, so it cannot
+cross a function pointer either.
+
+**It borrows.** The pointer inside is the Scope's own, so an `AnyScope` may not
+outlive the `Ctx` or `Run` it was made from — in practice it is a local beside the
+call. **And the ordinary Scope is unchanged**: every call in nilo and in
+`nilo_sql` still takes `anytype` and still costs no indirect call. The vtable is
+paid for only where somebody erases one.
 
 ## `nilo_core.percent`
 
@@ -1030,9 +1127,7 @@ straight into an insert. Nothing here allocates and nothing here does IO.
 ```zig
 const id = @import("nilo_id");
 
-// `nowMillis` answers an `i64` — a clock reads backwards as well as forwards —
-// and a v7 takes the six bytes of a `u64`.
-const key = id.v7(try c.entropy(id.Uuid.v7_entropy), @intCast(nilo.nowMillis()));
+const key = try id.v7Now(c);   // a *Ctx, or a `nilo.Run` built with `initIo`
 _ = try db.insert(Doc, c, .{ .id = key, .title = nilo.Str.static("notes") });
 ```
 
@@ -1040,6 +1135,7 @@ where `Doc.id` is a `sql.Uuid`, which is this same type.
 
 | | |
 |---|---|
+| `id.v7Now(scope)` | `!Uuid` — sortable, from the Scope's randomness and the clock |
 | `id.v4(entropy)` | random — 122 bits of the `[16]u8` you pass in |
 | `id.v7(entropy, ms)` | sortable — `ms` in the first six bytes, then the `[10]u8` |
 | `u.toText()` | `[36]u8` by value: `550e8400-e29b-41d4-a716-446655440000` |
@@ -1049,6 +1145,23 @@ where `Doc.id` is a `sql.Uuid`, which is this same type.
 | `u.millis()` | `?u64` — the millisecond a v7 carries, null for anything else |
 | `u.eql(other)`, `u.isNil()`, `id.Uuid.nil` | |
 | `id.Uuid.byte_len`, `.text_len`, `.v4_entropy`, `.v7_entropy` | 16, 36, 16, 10 |
+
+**`{f}` prints one**, which is what a refusal naming the record it could not find
+wants ([ADR 0176](./adr/0176-a-key-that-can-be-printed-and-a-key-that-can-be-made.md)):
+
+```zig
+return nilo.fail.notFound("partner {f} not found", .{id});
+```
+
+`{s}` cannot be made to work — Zig reserves it for byte slices and a `Uuid` is a
+struct — and `writeText` is a method, so it answers a writer you already hold and
+answers nothing to a format string.
+
+**`v7Now` is the call for a key and `v7` is the call for a key at a time you
+chose** — a backfill, a row that existed before its id did. `v7Now` is
+`c.entropy(…)` and the clock, which is the pair every `create` writes out
+otherwise, `@intCast` included. On a `Run` built by `init` rather than `initIo`
+it is `error.NoIo`, which is what `scope.entropy` answers on its own.
 
 A `Uuid` in a returned struct leaves as its text rather than as sixteen
 numbers, and one in a Row is written and read as the `uuid` column.
@@ -2027,7 +2140,50 @@ stops a checked-in file and a running server describing two different APIs.
 | `answer.header(name)` | case-insensitive, the first of that name |
 | `answer.headerAt(name, n)` / `.headerCount(name)` | for the ones a response repeats |
 | `answer.setCookie(name)` | the whole `Set-Cookie` line that sets it |
-| `answer.text(&buf)` | the body with chunk framing undone |
+| `answer.text(&buf)` | the body with chunk framing undone, into a buffer you sized |
+| `answer.bytes(arena)` | the same, into memory the arena owns |
+| `answer.json(T, arena)` | `!T` — the body read back as a value ([ADR 0180](./adr/0180-a-response-is-read-back-the-way-it-was-written.md)) |
+
+**`answer.json` is there because nilo already decided how the value was
+written**, so a test asking what came back should not have to reach for
+`std.json` and walk a `Value`:
+
+```zig
+const made = try answer.json(struct { id: []const u8 }, arena);
+```
+
+It de-chunks first, and everything is copied into `arena` so what comes back
+outlives the client's response buffer and the next request on it. **Unknown
+fields are ignored**, which is the opposite of the rule on the way in and
+deliberately: an unknown field in a *request* is the client's typo and is a 400
+naming it, while a response with more fields than the test asked about is the
+ordinary case. Ask for `std.json.Value` when the shape itself is what is being
+asserted.
+
+### An App and a Client, wired together
+
+```zig
+var wired = try nilo.testing.Wired.init(testing.allocator, .{});
+defer wired.deinit();
+
+try wired.app.provide(&db);
+try wired.app.post("/partners", createPartner);
+
+const answer = try wired.post("/partners", body);
+```
+
+| | |
+|---|---|
+| `Wired.init(gpa, options)` | the same `Options` a `Client` takes |
+| `wired.app` | a plain `App` — every registration call is the one documented above |
+| `wired.get(path)` / `post(path, body)` / `postWith(…)` / `request(…)` | the `Client` calls, without the `&app` |
+| `wired.sendRequest(r)` / `send(raw)` / `setHeader(n, v)` / `cookie(n)` | likewise |
+| `wired.deinit()` | the client, then the App |
+
+**The routes and the services stay yours**, which is where the line is: `app` is
+a field rather than something behind methods, so nothing here is a second API and
+no database is assumed. `Client` is unchanged and is still the answer when a test
+needs two of them against one App — two addresses, two cookie jars.
 
 A WebSocket route has no answer to read, so it has a driver of its own
 ([ADR 0113](./adr/0113-a-websocket-route-can-be-driven-from-a-test.md)):
@@ -2238,6 +2394,29 @@ the socket, with p99 halved ([`bench/result/sql.md`](../bench/result/sql.md)).
 | `schema_mismatch_is_fatal` | whether a Row that disagrees with its table stops startup. Default true |
 | `prepared` | whether a statement is kept prepared on the connection it went down. Default true |
 
+**A suite whose database is not running: turn the log level down, and do it with
+`std.testing.log_level`.** A `Db` that cannot dial says so at `warn` and returns
+the error ([ADR 0178](./adr/0178-a-suite-whose-database-is-down-is-not-a-suite-that-failed.md)),
+but pg.zig logs its own connect failure at `err` — and the Zig test runner counts
+a logged `err` as a failed test, so a suite that skipped 95 tests exactly as it
+meant to still exits 1.
+
+```zig
+test "…" {
+    const previous = std.testing.log_level;
+    std.testing.log_level = .warn;
+    defer std.testing.log_level = previous;
+    …
+}
+```
+
+`std.testing.log_level` is a plain `pub var` the runner compares against on every
+line. **`std_options` in a tested file is never consulted** and this is the thing
+to know before spending an afternoon on it: the root of a test build is the
+compiler's own `test_runner.zig`, which declares `std_options` itself, so a copy
+in your file is dead code that appears to work whenever the build runner caches
+the step and skips the binary.
+
 `sql.Named("replica")` is a **second `Db` type**, so a second database is a
 second service and which pool a statement takes is written in the handler's
 argument list. Nothing routes between them: an automatic reader needs health
@@ -2397,10 +2576,12 @@ request ([ADR 0041](./adr/0041-a-module-sits-where-the-loop-puts-it.md)).
 | `db.update(User, c, .{ .set = …, .where = … })` | `!usize` — rows changed. Both halves required |
 | `db.updateMany(User, c, rows)` | `![]User` — a whole batch in one statement, found by the Row's key. No `.where`: the join is the condition; see below |
 | `db.updateReturning(User, c, .{ .set = …, .where = … })` | `![]User` — the rows as they now are. One statement where an update and a select are two and a race |
+| `db.updateReturningOne(User, c, .{ .set = …, .where = … })` | `!?User` — the same for a `.where` holding a key, so a PATCH endpoint is one call and null is its 404 |
 | `db.delete(User, c, .{ .where = … })` | `!usize` — rows deleted. `.where` required |
 | `db.deleteReturning(User, c, .{ .where = … })` | `![]User` — the rows that were removed |
 | `db.stream(User, c, .{ … })` | rows one at a time; see below |
 | `db.raw(User, c, sql, .{ … })` | `![]User` — a statement this module will not write. `sql` is **comptime**: the `SELECT` list is counted against the Row's fields and each column that plainly has a name is checked against the field in its position, and the statement is kept prepared like every other ([ADR 0148](./adr/0148-a-raw-statement-is-counted-while-compiling.md)) |
+| `db.rawOne(User, c, sql, .{ … })` | `!?User` — the same, for a statement whose `WHERE` holds a key. **No `LIMIT 1` is added**; see below |
 | `db.exec(c, sql, .{ … })` | `!usize` — a statement that answers with *nothing*, and the rows it changed. `CREATE TABLE`, `CREATE INDEX`, `PRAGMA`, `VACUUM`. No Row, because none is being filled ([ADR 0078](./adr/0078-a-uuid-is-whatever-the-database-stores.md)) |
 | `db.begin(c, .{})` | `!Tx`. `.{ .isolation = …, .read_only = … }` rides on the `BEGIN`; see below |
 
@@ -2433,6 +2614,28 @@ const rows = try db.raw(Invoice, c, "SELECT id, total::text FROM invoices", .{})
 An aliased expression — `sum(amount)::text AS total` — is already an expression
 rather than a column path, so it passes. What the check refuses is the shape
 that could only ever be wrong.
+
+**`rawOne` and `updateReturningOne` are the unwrap, not a narrower statement**
+([ADR 0179](./adr/0179-a-statement-with-a-key-in-it-has-a-single-row-answer.md)).
+A statement whose `WHERE` holds a primary key answers with one row or none, and
+what the handler wants is `!?T` — `?Row` is already a 404 in the typed layer. So
+this:
+
+```zig
+const found = try db.raw(Card, c, card_sql, .{id});
+return if (found.len > 0) found[0] else null;
+```
+
+becomes `return db.rawOne(Card, c, card_sql, .{id});`.
+
+**Unlike `db.one`, no `LIMIT 1` is added.** This module did not write the
+statement and has nowhere honest to put one — a `LIMIT` after a `UNION ALL` or
+inside a CTE means something else. A statement that matches many rows still
+costs every one of them and this hands back the first. The same reading applies
+to `updateReturningOne`: the `.where` is yours, an `UPDATE` matching several rows
+updates all of them, and what changes is the shape of the answer.
+
+Both exist on a `Tx` too.
 
 ### A batch
 

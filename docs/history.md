@@ -2653,3 +2653,59 @@ about for the conflict target.
 **A rule stated for one column does not survive the column becoming a list**,
 and the places to check are the ones that said "the key" and meant it.
 
+## Eight items from a round that built nothing
+
+The seventh round from the same port asked one question of 6,281 lines that were
+already written and already passing — *what does nilo make us write* — and got
+eight answers. **Seven of the eight have no error message behind them.** Every
+one compiled, passed, and read as ordinary code; the eighth is a build that
+exits 1 while reporting that no test failed.
+
+That is the number worth keeping, because it settles what a quiet round means.
+The `project` round before it was first written up as "zero findings", said
+approvingly, when what it meant was that nothing had blocked anybody and nobody
+had gone looking. **A finding you can only get to by sweeping is not a smaller
+finding than one that stopped a build** — the six duplicated `raw` unwraps behind
+[ADR 0179](./adr/0179-a-statement-with-a-key-in-it-has-a-single-row-answer.md)
+and the 77 hand-mapped fields behind
+[ADR 0181](./adr/0181-a-field-name-is-a-spelling-too.md) had each been paid for
+at every call site for months.
+
+The distribution differs from round one's, and in a way that says where the
+framework now is. Round one was *a mechanism stopping one clause short*, three
+times. This one is **a call that does not exist**, six times, and each was
+answerable by naming the pair a caller was already writing: entropy plus the
+clock, the slice plus the length test, `App` plus `Client`, `trim` plus the
+charset. None needed a design nobody had.
+
+**Two of the eight are one decision.** `Uuid` could not be printed and could not
+be made, and both are the same sentence — a type carrying a value the caller has
+to take apart to use
+([ADR 0176](./adr/0176-a-key-that-can-be-printed-and-a-key-that-can-be-made.md)).
+`writeText` and `testing.show` had each landed in the two rounds before and
+neither reached `{f}`, because a method answers a writer you already hold and
+`show` answers a failure message. **Two near misses in a row are a sign the shape
+is wrong, not that the third attempt needs to be bigger.**
+
+## The build step that reported a failure nobody had
+
+`nilo_start` logged its connect failure at `std.log.err` and returned it. The
+Zig test runner counts a logged `err` as a failed test, so a suite whose database
+was simply not running skipped 95 tests exactly as it meant to, failed none, and
+exited 1 behind 190 error lines
+([ADR 0178](./adr/0178-a-suite-whose-database-is-down-is-not-a-suite-that-failed.md)).
+
+The rule was already written here twice — `db.wireOf`'s comment and
+`sqlite.read`'s, both saying `warn` rather than `err` and both giving this exact
+reason. **A rule that lives in two comments and no build step gets applied where
+somebody remembered it.** `nilo_start` is the one call in that module that both
+logs and returns, and it is the one that was missed.
+
+Half of it was never nilo's: pg.zig logs its own. What answers that is
+`std.testing.log_level`, and where that was written down is the header of
+`http/test_root.zig` — a file no caller opens. The same header carries the thing
+that costs an afternoon first, that `std_options` in a tested file is never
+consulted because the root of a test build is the compiler's own runner. **A
+finding parked in the file where it was found is a finding the next person pays
+for again**; it is in `docs/reference.md` next to `connect_on_init` now, which is
+where somebody wiring a suite up to a real database is already reading.

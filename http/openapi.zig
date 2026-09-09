@@ -334,10 +334,17 @@ fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
                 // describe and this deliberately does not try to.
                 if (s.is_tuple) break :blk held(.unknown);
 
+                // The keys are the names that go out, which is not the same as
+                // the field names once `rename_all` is in play — the same
+                // sentence the enum arm above makes, now true of a struct too
+                // ([ADR 0181](../docs/adr/0181-a-field-name-is-a-spelling-too.md)).
+                // A document that named `full_name` while the server sent
+                // `fullName` is the failure ADR 0076 already recorded once.
+                const said = mark.of(T);
                 var fields: []const Field = &.{};
                 for (s.fields) |f| {
                     fields = fields ++ [_]Field{.{
-                        .name = f.name,
+                        .name = mark.wire(f.name, said),
                         .schema = schemaWithin(f.type, depth + 1),
                         .required = f.default_value_ptr == null,
                     }};
@@ -1411,6 +1418,23 @@ test "a renamed variant is described by the name that goes out, not the Zig one"
     };
     try expectSchema(Channel,
         \\{"oneOf":[{"allOf":[{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]},{"type":"object","properties":{"kind":{"type":"string","enum":["web-hook"]}},"required":["kind"]}]}],"discriminator":{"propertyName":"kind"}}
+    );
+}
+
+test "a renamed struct is described by the keys it actually sends" {
+    // The half that has to move with the writer or the document lies. ADR 0076
+    // is this failure once already: a `Uuid` went out as 36 characters and was
+    // described as an object with a `bytes` field, and every generated client
+    // that read one broke.
+    const Contact = struct {
+        pub const nilo_json = .{ .rename_all = .camelCase };
+
+        id: u32,
+        full_name: Str,
+        email_address: ?Str = null,
+    };
+    try expectSchema(Contact,
+        \\{"type":"object","properties":{"id":{"type":"integer"},"fullName":{"type":"string"},"emailAddress":{"anyOf":[{"type":"string"},{"type":"null"}]}},"required":["id","fullName"]}
     );
 }
 

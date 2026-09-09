@@ -9,15 +9,21 @@ in [`docs/history.md`](./docs/history.md); what is coming is in
 
 ## Unreleased
 
-Seventeen things a real port hit, in the order they cost it the most. Needs Zig
-0.16, as 0.3.0 does. Each entry says what you have to change; the account of why
-is in the ADR it links.
+Twenty-five things a real port hit, in the order they cost it the most. Needs
+Zig 0.16, as 0.3.0 does. Each entry says what you have to change; the account of
+why is in the ADR it links.
 
-The last six came from the same port a week later, once it had used the first
+Six of them came from the same port a week later, once it had used the first
 eleven and reached its first hard seam — an event bus. One more it reported —
 five places where it wrote the untyped call while a typed one existed, with no
 error message behind any of them — is a named failure mode rather than a change:
 [ADR 0168](./docs/adr/0168-an-escape-hatch-that-costs-nothing-teaches-nothing.md).
+
+**The last eight are that lesson applied on purpose.** The port built nothing new
+for them: it put one question to the 6,281 lines it already had — *what does nilo
+make us write* — and eight answers came back. Seven have no error message behind
+them at all. Every one of those compiled, passed and read as ordinary code, which
+is the only reason they took a sweep to find.
 
 - **`nilo_sql`: six shapes a listing page needed, and one of them was a wrong
   answer rather than a missing one.** Each is a widening of a shape that was
@@ -145,6 +151,133 @@ error message behind any of them — is a named failure mode rather than a chang
   Every example infers it from `db.begin`, so the name never had to be written
   until a function of yours took one — `fn append(self: *Bus, tx: *sql.Db.Tx, …)`.
   Documentation only; `sql.Tx` never existed.
+
+- **A struct can say how its field names are spelled on the wire**
+  ([ADR 0181](./docs/adr/0181-a-field-name-is-a-spelling-too.md)). `rename_all`
+  renamed an enum tag and a union variant and stopped at field names, so the port
+  carried 10 response structs, 77 fields, 5 mapping functions written out field
+  by field and 5 arena loops — and the whole job of all of it was `full_name`
+  becoming `fullName`. Nothing held a Row field against the DTO field carrying
+  it, so a column added to a Row reached the wire only if somebody remembered a
+  second file.
+
+  ```zig
+  const Contact = struct {
+      pub const nilo_json = .{ .rename_all = .camelCase };
+
+      id: u32,
+      full_name: []const u8,   // "fullName"
+  };
+  ```
+
+  The API description says the same keys, and it costs nothing per request — the
+  name is a comptime string either way.
+
+  **What you have to change: nothing, unless you were using one type in both
+  directions.** This is a spelling for what goes *out*. `std.json` chooses the
+  parser for a body and reads it into the field names as they are written, so a
+  renamed struct used as a request body, a form or a query string is now a
+  compile error naming the route — that route would have documented `fullName`
+  and answered 400 to a client that sent it. Give what comes in a struct of its
+  own.
+
+  A renamed struct that nilo's own writer cannot reach is refused too. One shape
+  it does not recognise — a tuple, an array of bytes, an untagged union, a type
+  with its own `jsonStringify`, anything past eight deep — sends the whole value
+  to `std.json`, which does not read the marker; the keys would go out unrenamed
+  while the document promised otherwise.
+
+- **`db.rawOne` and `db.updateReturningOne`**
+  ([ADR 0179](./docs/adr/0179-a-statement-with-a-key-in-it-has-a-single-row-answer.md)).
+  `db.one` is the typed select's answer to *this row or none*; `raw` and
+  `updateReturning` had none, so a statement with a primary key in its `WHERE`
+  ended in the same unwrap six times in four files:
+
+  ```zig
+  const found = try db.raw(Card, c, card_sql, .{id});
+  return if (found.len > 0) found[0] else null;
+  ```
+
+  Both answer `!?T`, which is already a 404 in the typed layer, and both exist on
+  a `Tx`. **`rawOne` adds no `LIMIT 1`** — this module did not write the
+  statement and has nowhere honest to put one — so it is a shorter unwrap rather
+  than a cheaper query.
+
+- **`id.v7Now(scope)` — a key from the Scope in hand**
+  ([ADR 0176](./docs/adr/0176-a-key-that-can-be-printed-and-a-key-that-can-be-made.md)).
+  Minting one was two lines and a cast, six times in one context, and neither
+  half is a decision a caller makes:
+
+  ```zig
+  const key = try id.v7Now(c);   // was: id.v7(try c.entropy(…), @intCast(nilo.nowMillis()))
+  ```
+
+  `id.v7(entropy, ms)` stays, for a key at a time you chose. On a `Run` built by
+  `init` rather than `initIo` this is `error.NoIo`.
+
+- **A `Uuid` prints with `{f}`** (same ADR). Every refusal that named the record
+  it could not find was `{s}` with `&id.toText()`. `writeText` is a method, so it
+  answers a writer you already hold and answers nothing to a format string;
+  `format` is what `{f}` looks for.
+
+  ```zig
+  return nilo.fail.notFound("partner {f} not found", .{id});
+  ```
+
+- **`nilo.AnyScope` — a Scope that can cross a function pointer**
+  ([ADR 0177](./docs/adr/0177-a-scope-that-crosses-a-function-pointer.md)). Zig
+  has no closures, so a bus, a queue or a job registry stores a callback as a
+  function pointer — and one cannot be generic over the Scope it runs under while
+  still running under a request *and* under a `Run` in a test. The port wrote 57
+  lines of pointer-and-vtable for it, and so would anything else with a bus.
+
+  ```zig
+  var erased = nilo.AnyScope.of(c);   // or `.of(&run)`
+  try reaction(&erased, payload);
+  ```
+
+  It passes the Scope check, so a reaction can query. **The ordinary Scope is
+  unchanged**: ADR 0041 stands, every call still takes `anytype`, and the vtable
+  is paid for only where somebody erases one.
+
+- **`Str.blank()` and `Str.trimmed()`**
+  ([ADR 0175](./docs/adr/0175-required-text-arrives-as-two-spaces.md)).
+  `std.mem.trim(u8, s.view(), " \t\r\n").len == 0` was written eight times in one
+  context, with the charset spelled out in six of them. Required text arrives as
+  `"  "` in the ordinary case rather than the rare one, and a copy that drops
+  `\n` accepts a comment whose whole body is a newline — a required field that
+  every screen renders as empty, with nothing failing. The set is
+  `std.ascii.whitespace`. A read of the bytes, not a validation rule.
+
+- **`answer.json(T, arena)` and `nilo.testing.Wired`**
+  ([ADR 0180](./docs/adr/0180-a-response-is-read-back-the-way-it-was-written.md)).
+  An `Answer` handed back bytes, so pulling one field out of a create meant
+  reaching for `std.json` and walking a `Value`. nilo already decided how the
+  value was written:
+
+  ```zig
+  const made = try answer.json(struct { id: []const u8 }, arena);
+  ```
+
+  It de-chunks first and copies into the arena; `answer.bytes(arena)` is the raw
+  half. Unknown fields are ignored, which is the opposite of the rule on the way
+  in and deliberately so. `Wired` holds an `App` and a `Client` together —
+  `wired.app` stays a plain field, so routes and services are registered exactly
+  as before and no database is assumed.
+
+- **A `Db` that cannot dial warns rather than errs**
+  ([ADR 0178](./docs/adr/0178-a-suite-whose-database-is-down-is-not-a-suite-that-failed.md)).
+  The Zig test runner counts a logged `err` as a failed test, so a suite that
+  skipped 95 tests exactly as it meant to still exited 1 behind 190 log lines.
+  `nilo_start` returns the error either way, which is what the caller acts on —
+  the same argument `sqlite.read` and `db.wireOf` already make in comments. A Row
+  that disagrees with its table still logs at `err`, because that is a broken
+  program rather than a machine without a database on it.
+
+  The other half is not nilo's: pg.zig logs its own connect failure at `err`.
+  `std.testing.log_level` is what turns it down, and the reference now says so
+  next to `connect_on_init` — including the thing that costs an afternoon first,
+  that `std_options` in a tested file is never consulted.
 
 ### Fixed
 

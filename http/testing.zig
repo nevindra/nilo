@@ -197,6 +197,47 @@ pub const Answer = struct {
             rest = rest[start + size + 2 ..];
         }
     }
+
+    /// The body as the client sees it, into memory the caller owns — `text`
+    /// without having to size a buffer for it first
+    /// ([ADR 0180](../docs/adr/0180-a-response-is-read-back-the-way-it-was-written.md)).
+    ///
+    /// A chunked body decodes to fewer bytes than it was framed in, so one
+    /// allocation the size of the framed body is always enough and there is no
+    /// growing.
+    pub fn bytes(self: Answer, arena: std.mem.Allocator) ![]const u8 {
+        return self.text(try arena.alloc(u8, self.body.len));
+    }
+
+    /// The body read back as `T`
+    /// ([ADR 0180](../docs/adr/0180-a-response-is-read-back-the-way-it-was-written.md)).
+    ///
+    /// ```zig
+    /// const made = try answer.json(struct { id: []const u8 }, arena);
+    /// ```
+    ///
+    /// **nilo already decided how the value was written**, so a test asking
+    /// what came back should not have to reach for `std.json` and walk a
+    /// `Value` — pulling one field out of a create was four lines and an
+    /// `.?.string` at every call site. `std.json.Value` still works here and is
+    /// the right `T` when the shape is what is being asserted.
+    ///
+    /// **Unknown fields are ignored, which is the opposite of the rule on the
+    /// way in**, and the difference is who owns the extra field. A request body
+    /// with a field nilo does not know is the client's typo and is a 400 naming
+    /// it; a *response* with more fields than the test asked about is the
+    /// ordinary case — the test is asking a question about part of it. A test
+    /// that means to assert the whole shape asks for `std.json.Value` and
+    /// compares that.
+    ///
+    /// Everything is copied into `arena`, so what comes back outlives the
+    /// client's response buffer and the next request on it.
+    pub fn json(self: Answer, comptime T: type, arena: std.mem.Allocator) !T {
+        return std.json.parseFromSliceLeaky(T, arena, try self.bytes(arena), .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
+        });
+    }
 };
 
 /// A value rendered the way it goes over the wire, for a failure message
@@ -599,6 +640,99 @@ pub const Client = struct {
             _ = self.jar.orderedRemove(i);
             return;
         }
+    }
+};
+
+/// An App and a Client, held together, so a test that drives requests is three
+/// lines of setup rather than eight
+/// ([ADR 0180](../docs/adr/0180-a-response-is-read-back-the-way-it-was-written.md)).
+///
+/// ```zig
+/// var wired = try nilo.testing.Wired.init(testing.allocator, .{});
+/// defer wired.deinit();
+///
+/// try wired.app.provide(&db);
+/// try wired.app.post("/partners", createPartner);
+///
+/// const answer = try wired.post("/partners", "{\"name\":\"Wati\"}");
+/// try testing.expectEqual(@as(u16, 201), answer.status);
+/// ```
+///
+/// **The routes and the services stay yours**, which is where the line is.
+/// `app` is a plain field rather than something hidden behind methods, so every
+/// registration call is the one the reference already documents and none of
+/// them is wrapped. What this owns is the pair — building both, tearing both
+/// down in the right order, and knowing which `App` each request goes to.
+///
+/// **It is the same `Client`, and it is still there.** A test that drives two
+/// clients against one App — two addresses, two cookie jars — makes them itself
+/// with `Client.init`, exactly as before. This is the shape nine tests in ten
+/// have, offered once rather than written per file.
+pub const Wired = struct {
+    /// What a nilo compile error calls this type (ADR 0122).
+    pub const nilo_type_name = "nilo.testing.Wired";
+
+    app: App,
+    client: Client,
+
+    pub fn init(gpa: std.mem.Allocator, options: Options) !Wired {
+        return .{ .app = App.init(gpa), .client = try Client.init(gpa, options) };
+    }
+
+    /// The client first, then the App — the order a `defer` pair would have
+    /// run them in, and the one that matters if the client ever holds anything
+    /// the App handed it.
+    pub fn deinit(self: *Wired) void {
+        self.client.deinit();
+        self.app.deinit();
+    }
+
+    pub fn get(self: *Wired, path: []const u8) !Answer {
+        return self.client.get(&self.app, path);
+    }
+
+    pub fn post(self: *Wired, path: []const u8, body: []const u8) !Answer {
+        return self.client.post(&self.app, path, body);
+    }
+
+    /// A POST that says what its body is — what a form has to send (ADR 0031).
+    pub fn postWith(
+        self: *Wired,
+        path: []const u8,
+        content_type: []const u8,
+        body: []const u8,
+    ) !Answer {
+        return self.client.postWith(&self.app, path, content_type, body);
+    }
+
+    pub fn request(
+        self: *Wired,
+        method: []const u8,
+        path: []const u8,
+        body: []const u8,
+    ) !Answer {
+        return self.client.request(&self.app, method, path, body);
+    }
+
+    /// A request described field by field, for a header or a method the four
+    /// above do not cover.
+    pub fn sendRequest(self: *Wired, r: Request) !Answer {
+        return self.client.sendRequest(&self.app, r);
+    }
+
+    /// The whole request written out, byte for byte.
+    pub fn send(self: *Wired, raw_request: []const u8) !Answer {
+        return self.client.send(&self.app, raw_request);
+    }
+
+    /// Send this header with every request from now on.
+    pub fn setHeader(self: *Wired, name: []const u8, value: []const u8) !void {
+        return self.client.setHeader(name, value);
+    }
+
+    /// What the cookie jar holds for `name`, or null.
+    pub fn cookie(self: *const Wired, name: []const u8) ?[]const u8 {
+        return self.client.cookie(name);
     }
 };
 
@@ -1177,6 +1311,139 @@ test "a chunked answer reassembles into what the handler wrote" {
 
     var buf: [64]u8 = undefined;
     try testing.expectEqualStrings("one two", try answer.text(&buf));
+}
+
+const Made = struct { id: []const u8, name: []const u8, seats: u32 };
+
+fn created(c: *@import("ctx.zig").Ctx) anyerror!void {
+    try c.sendJson(201, Made{
+        .id = "01a01077-5ce8-7932-b42b-a05431a5c4c8",
+        .name = "Wati",
+        .seats = 3,
+    });
+}
+
+fn streamedJson(c: *@import("ctx.zig").Ctx) anyerror!void {
+    var body = try c.stream(200, "application/json");
+    try body.writeAll("{\"id\":\"seven\",");
+    try body.flush();
+    try body.writeAll("\"name\":\"Sari\",\"seats\":1}");
+    try body.finish();
+}
+
+test "an answer is read back as a value, not walked as a std.json.Value" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/partners", created);
+
+    var client = try Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const answer = try client.post(&app, "/partners", "");
+    try testing.expectEqual(@as(u16, 201), answer.status);
+
+    // The whole shape...
+    const whole = try answer.json(Made, arena.allocator());
+    try testing.expectEqualStrings("Wati", whole.name);
+    try testing.expectEqual(@as(u32, 3), whole.seats);
+
+    // ...and the one field a test usually wants out of a create, which was
+    // four lines and an `.?.string` before this (ADR 0180).
+    const id = (try answer.json(struct { id: []const u8 }, arena.allocator())).id;
+    try testing.expectEqualStrings("01a01077-5ce8-7932-b42b-a05431a5c4c8", id);
+
+    // `std.json.Value` still works and is the right `T` when the shape itself
+    // is what is being asserted.
+    const held = try answer.json(std.json.Value, arena.allocator());
+    try testing.expectEqual(@as(usize, 3), held.object.count());
+}
+
+test "json de-chunks first, so a streamed response reads back like any other" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/partner", streamedJson);
+
+    var client = try Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const answer = try client.get(&app, "/partner");
+    try testing.expect(answer.chunked);
+    // Read straight off `answer.body` this would be chunk framing and a parse
+    // error; `bytes` is what `text` is with the buffer sized for you.
+    try testing.expectEqualStrings(
+        "{\"id\":\"seven\",\"name\":\"Sari\",\"seats\":1}",
+        try answer.bytes(arena.allocator()),
+    );
+    try testing.expectEqualStrings("Sari", (try answer.json(Made, arena.allocator())).name);
+}
+
+test "what json hands back outlives the next request on the same client" {
+    // The reason everything is copied into the arena: `answer.body` points into
+    // the client's one response buffer, which the next request writes over.
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/partners", created);
+    try app.get("/thing", plain);
+
+    var client = try Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const first = try client.post(&app, "/partners", "");
+    const held = try first.json(Made, arena.allocator());
+
+    _ = try client.get(&app, "/thing");
+    try testing.expectEqualStrings("Wati", held.name);
+}
+
+test "an App and a Client wired together drive the same requests" {
+    var wired = try Wired.init(testing.allocator, .{});
+    defer wired.deinit();
+
+    try wired.app.post("/partners", created);
+    try wired.app.get("/thing", plain);
+    try wired.app.get("/echo", echoHeaders);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const made = try wired.post("/partners", "");
+    try testing.expectEqual(@as(u16, 201), made.status);
+    try testing.expectEqualStrings("Wati", (try made.json(Made, arena.allocator())).name);
+
+    const thing = try wired.get("/thing");
+    try testing.expectEqualStrings("body text", thing.body);
+
+    // The sticky header goes on the Client underneath, which is the point of
+    // the field being a plain one: nothing here is a second API.
+    try wired.setHeader("X-Staff-Id", "seven");
+    const echoed = try wired.request("GET", "/echo", "");
+    try testing.expect(std.mem.indexOf(u8, echoed.body, "X-Staff-Id=seven;") != null);
+
+    const described = try wired.sendRequest(.{ .path = "/thing" });
+    try testing.expectEqual(@as(u16, 201), described.status);
+}
+
+test "a wired client keeps its jar when it was asked for one" {
+    var wired = try Wired.init(testing.allocator, .{ .cookies = true });
+    defer wired.deinit();
+    try wired.app.get("/sign-in", setsACookie);
+
+    _ = try wired.get("/sign-in");
+    try testing.expectEqualStrings("t", wired.cookie("session").?);
+}
+
+fn setsACookie(c: *@import("ctx.zig").Ctx) anyerror!void {
+    try c.setCookie(.{ .name = "session", .value = "t" });
+    try c.sendText(200, "ok");
 }
 
 fn echoHeaders(c: *@import("ctx.zig").Ctx) anyerror!void {

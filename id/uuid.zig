@@ -104,6 +104,35 @@ pub const Uuid = struct {
         return out.marked(7);
     }
 
+    /// The same key, from the Scope that is already in hand
+    /// ([ADR 0176](../docs/adr/0176-a-key-that-can-be-printed-and-a-key-that-can-be-made.md)).
+    ///
+    /// ```zig
+    /// const key = try id.v7Now(c);   // or a `nilo.Run` built with `initIo`
+    /// ```
+    ///
+    /// **Minting a key is the most common thing any program does, and it was
+    /// two lines and a cast.** The entropy comes from the Scope and the
+    /// millisecond from the clock, and neither half is a decision a caller
+    /// makes — so writing them out at every `create` is six copies of one line,
+    /// each carrying an `@intCast` that exists only because `nowMillis`
+    /// answers `i64` and the field above is a `u48`.
+    ///
+    /// **The clock is read here rather than borrowed from `nilo_core`**, which
+    /// is the whole of what this call costs. This module imports nothing at all
+    /// and that is what keeps `zig test id/id.zig` true (ADR 0043), so the
+    /// alternative to twelve lines of `clock_gettime` is an import that moves
+    /// the module out of its layer. `http/bulkhead.zig` reads the monotonic
+    /// clock beside `core/clock.zig` for the same reason and says so.
+    ///
+    /// `scope` is a `*Ctx` or a `*nilo.Run` — anything with `entropy`. On a
+    /// `Run` built by `init` rather than `initIo` this is `error.NoIo`, which
+    /// is the same answer `scope.entropy` gives on its own.
+    pub fn v7Now(scope: anytype) !Uuid {
+        comptime checkMints(@TypeOf(scope));
+        return v7(try scope.entropy(v7_entropy), @intCast(nowMillis()));
+    }
+
     /// Which version this claims to be. `4` and `7` are the two written
     /// here; anything read out of a database or parsed from text may say
     /// something else, and it is reported rather than judged.
@@ -145,6 +174,26 @@ pub const Uuid = struct {
 
     pub fn writeText(self: Uuid, w: *std.Io.Writer) !void {
         try w.writeAll(&self.toText());
+    }
+
+    /// Print it: `std.log.info("partner {f}", .{id})`
+    /// ([ADR 0176](../docs/adr/0176-a-key-that-can-be-printed-and-a-key-that-can-be-made.md)).
+    ///
+    /// `writeText` above is the same thirty-six characters and is a *method*,
+    /// so it answers a caller who already holds a writer and answers nothing at
+    /// all to `{f}`. Zig looks for a declaration called `format` and finds one
+    /// or gives up; there is no third spelling that works.
+    ///
+    /// `Str` was given this for the same reason and its comment says why:
+    /// printing the value is the first thing anybody writes, and without it the
+    /// refusal that names the record it could not find is `{s}` with
+    /// `&id.toText()` — an ampersand and a call, at every call site, in the one
+    /// place where a reader is being told what went wrong.
+    ///
+    /// `{s}` cannot be made to work: Zig reserves it for byte slices and a
+    /// `Uuid` is a struct.
+    pub fn format(self: Uuid, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        return w.writeAll(&self.toText());
     }
 
     /// Text back into sixteen bytes. Hyphens are skipped wherever they are
@@ -219,6 +268,67 @@ pub const Uuid = struct {
         return out;
     }
 };
+
+/// Refuse anything `v7Now` cannot get randomness out of, in nilo's own words.
+///
+/// It asks for `entropy` and not for a whole Scope, because that is the whole
+/// of what this call uses — and because a second reading of *what a Scope is*,
+/// living in a module that cannot import `core/scope.zig`, is a rule that can
+/// drift from the one the compiler is really enforcing.
+fn checkMints(comptime T: type) void {
+    comptime {
+        const Holder = switch (@typeInfo(T)) {
+            .pointer => |p| if (p.size == .one) p.child else T,
+            else => T,
+        };
+        const advice =
+            "\n  Pass the `*Ctx` the handler was given, or a `nilo.Run` built with" ++
+            " `Run.initIo(gpa, io)` if there is no request.";
+
+        const has = switch (@typeInfo(Holder)) {
+            .@"struct", .@"union", .@"enum", .@"opaque" => @hasDecl(Holder, "entropy"),
+            else => false,
+        };
+        if (!has) @compileError("nilo: `id.v7Now` needs somewhere to get randomness from, and " ++
+            @typeName(T) ++ " has no `entropy`.\n" ++
+            "  A v7 key is a millisecond and 74 random bits; the clock is this module's and" ++
+            " the randomness is the caller's, because entropy is IO and nothing down here" ++
+            " owns an event loop (ADR 0042)." ++ advice);
+    }
+}
+
+/// Milliseconds since 1970-01-01 UTC, for `v7Now` and nothing else.
+///
+/// **A second copy of `core/clock.zig`'s, on purpose.** This module imports
+/// nothing at all — that is what `zig build layering` holds and what keeps
+/// `zig test id/id.zig` running with no module graph (ADR 0043) — so naming
+/// `nilo_core` to save twelve lines would cost the property that decides which
+/// layer this is in. `http/bulkhead.zig` keeps its own monotonic clock beside
+/// Core's for the same reason.
+///
+/// The two cannot drift in a way that matters: both are `CLOCK_REALTIME`, and
+/// what a caller gets from either is the same instant.
+fn nowMillis() i64 {
+    if (@import("builtin").os.tag == .windows) @compileError(
+        "nilo: `id.v7Now` cannot read the wall clock on Windows.\n" ++
+            "  The rest of this module works there; this call is the one thing that needs" ++
+            " an operating system. `id.v7(entropy, ms)` takes the millisecond from you" ++
+            " instead (ADR 0045).",
+    );
+
+    var ts: std.posix.timespec = undefined;
+    switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
+        .SUCCESS => {},
+        // `CLOCK_REALTIME` with a valid pointer has no failure POSIX admits to,
+        // so this is a broken kernel rather than a condition — the same reading
+        // `core/clock.zig` gives it, and the same answer: stopping beats
+        // handing back a plausible wrong time for ever.
+        else => |e| std.debug.panic("nilo: the system clock could not be read ({s})", .{@tagName(e)}),
+    }
+
+    return @as(i64, @intCast(ts.sec)) * std.time.ms_per_s +
+        @divFloor(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+}
 
 // -- tests ---------------------------------------------------------------
 
@@ -324,6 +434,77 @@ test "a Uuid reads itself from request text, and says no rather than erroring" {
     try testing.expectEqual(@as(?Uuid, null), Uuid.nilo_parse("550e8400"));
     try testing.expectEqual(@as(?Uuid, null), Uuid.nilo_parse("not-a-uuid"));
     try testing.expectEqual(@as(?Uuid, null), Uuid.nilo_parse(""));
+}
+
+test "a Uuid prints with {f}, which is what a refusal naming a record needs" {
+    const u = try Uuid.parse("550e8400-e29b-41d4-a716-446655440000");
+    var buf: [80]u8 = undefined;
+    try testing.expectEqualStrings(
+        "partner 550e8400-e29b-41d4-a716-446655440000 not found",
+        try std.fmt.bufPrint(&buf, "partner {f} not found", .{u}),
+    );
+    // And it is the same thirty-six characters `writeText` writes, because two
+    // spellings of one value that disagreed would be worse than one.
+    var into: std.Io.Writer = .fixed(buf[0..Uuid.text_len]);
+    try u.writeText(&into);
+    try testing.expectEqualStrings(&u.toText(), into.buffered());
+}
+
+/// A stand-in for a Scope, which is the most this module can hold: `Ctx` is
+/// `nilo_http`'s and `Run` is `nilo_core`'s, and importing either is the thing
+/// that would move this module out of its layer (ADR 0043). What `v7Now` uses
+/// is `entropy` and nothing else, which is exactly what this has.
+const Minting = struct {
+    seed: u64,
+
+    fn entropy(self: *Minting, comptime n: usize) ![n]u8 {
+        return seeded(n, self.seed);
+    }
+};
+
+test "v7Now takes the randomness from the Scope and the millisecond from the clock" {
+    var scope: Minting = .{ .seed = 11 };
+    const key = try Uuid.v7Now(&scope);
+
+    try testing.expectEqual(@as(u4, 7), key.version());
+    try testing.expectEqual(@as(u8, 0x80), key.bytes[8] & 0xc0);
+
+    // The time it carries is now, which is the half a caller would otherwise
+    // have written out — and the assertion is a window rather than an equality
+    // because the two reads straddle a millisecond.
+    const now = nowMillis();
+    const carried: i64 = @intCast(key.millis().?);
+    try testing.expect(carried <= now);
+    try testing.expect(now - carried < 1_000);
+
+    // And the entropy is where `v7` puts it: the last ten bytes, version and
+    // variant bits aside.
+    const raw = seeded(Uuid.v7_entropy, 11);
+    try testing.expectEqual(raw[0] & 0x0f, key.bytes[6] & 0x0f);
+    try testing.expectEqualSlices(u8, raw[3..], key.bytes[9..]);
+}
+
+test "a Scope that cannot mint says so rather than inventing a key" {
+    // The error is the Scope's, passed through untouched: `v7Now` has nothing
+    // to add to it and nothing to do without it.
+    const Broken = struct {
+        fn entropy(_: *@This(), comptime n: usize) ![n]u8 {
+            return error.NoIo;
+        }
+    };
+    var broken: Broken = .{};
+    try testing.expectError(error.NoIo, Uuid.v7Now(&broken));
+}
+
+test "two keys minted in a row sort the way they were made, or tie" {
+    var first: Minting = .{ .seed = 1 };
+    var second: Minting = .{ .seed = 2 };
+    const a = try Uuid.v7Now(&first);
+    const b = try Uuid.v7Now(&second);
+    // Same millisecond is the ordinary case here and is a tie rather than a
+    // failure — a v7 is sortable *across* milliseconds and not within one,
+    // which the `v7` comment says at length.
+    try testing.expect(std.mem.order(u8, a.bytes[0..6], b.bytes[0..6]) != .gt);
 }
 
 test "a Uuid leaves a JSON body as its text rather than as sixteen numbers" {

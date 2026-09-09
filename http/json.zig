@@ -35,7 +35,38 @@ const mark = @import("jsonmark.zig");
 pub fn write(w: *std.Io.Writer, value: anytype) std.Io.Writer.Error!void {
     const T = @TypeOf(value);
     if (comptime covers(T)) return writeValue(T, w, value);
+    comptime refuseRenameOnTheFallback(T);
     return std.json.Stringify.value(value, .{}, w);
+}
+
+/// A struct that renames its fields cannot be written by `std.json`, which does
+/// not read the marker
+/// ([ADR 0181](../docs/adr/0181-a-field-name-is-a-spelling-too.md)).
+///
+/// **The fallback is the hole this closes.** `covers` errs narrow on purpose:
+/// one field it does not recognise — an array of bytes, an untagged union, a
+/// tuple, a type with its own `jsonStringify`, anything past eight deep — sends
+/// the whole value to `std.json`. A renamed struct anywhere in that value would
+/// then go out spelled the way it is written, while `openapi.schemaWithin`
+/// promised the renamed keys, and nothing would fail.
+///
+/// So it is a compile error rather than a quiet disagreement, which is the same
+/// answer ADR 0076 reached for a type that writes its own JSON and describes its
+/// fields.
+fn refuseRenameOnTheFallback(comptime T: type) void {
+    comptime {
+        const Renamed = mark.renamedFieldsWithin(T) orelse return;
+        @compileError(
+            "nilo: `" ++ @import("names.zig").of(Renamed) ++ "` renames its fields, and this " ++
+                "value goes to `std.json`, which does not read the marker (ADR 0181).\n" ++
+                "  `covers` sends the whole value to `std.json` when one shape in it is not " ++
+                "nilo's to write: a tuple, an array of bytes, an untagged union, a type with " ++
+                "its own `jsonStringify`, or anything nested more than eight deep.\n" ++
+                "  The keys would go out spelled as they are written while the API description " ++
+                "promised the renamed ones. Take `rename_all` off, or take out the shape that " ++
+                "cannot be written here.",
+        );
+    }
 }
 
 /// Whether the generated writer handles `T`. Deliberately narrow: a type
@@ -187,8 +218,14 @@ fn writeValue(comptime T: type, w: *std.Io.Writer, value: T) std.Io.Writer.Error
                             return w.writeAll(comptime "{\"" ++ k ++ "\":\"" ++ arm ++ "\"}");
                         }
                         try w.writeAll(comptime "{\"" ++ k ++ "\":\"" ++ arm ++ "\"");
+                        // The payload's *own* marker names its fields, not the
+                        // union's — a union's `rename_all` renames variants and
+                        // stops there, which is the line `a tag and a case
+                        // together rename the variant but not its fields` holds
+                        // (ADR 0085, ADR 0181).
+                        const inner = comptime mark.of(Payload);
                         inline for (@typeInfo(Payload).@"struct".fields) |f| {
-                            try w.writeAll(comptime ",\"" ++ f.name ++ "\":");
+                            try w.writeAll(comptime ",\"" ++ mark.wire(f.name, inner) ++ "\":");
                             try writeValue(f.type, w, @field(payload, f.name));
                         }
                         return w.writeByte('}');
@@ -205,10 +242,18 @@ fn writeValue(comptime T: type, w: *std.Io.Writer, value: T) std.Io.Writer.Error
 
         .@"struct" => |s| {
             if (s.fields.len == 0) return w.writeAll("{}");
+            // What the type said its keys are spelled as
+            // ([ADR 0181](../docs/adr/0181-a-field-name-is-a-spelling-too.md)).
+            // Null for the types that said nothing, which is nearly all of them
+            // and costs the same as it always did: the name is settled while
+            // compiling either way, so a renamed struct writes exactly as much
+            // as a plain one.
+            const m = comptime mark.of(T);
             inline for (s.fields, 0..) |f, i| {
                 // The brace or comma, the quoted name and the colon are one
                 // string settled while compiling.
-                try w.writeAll(comptime (if (i == 0) "{\"" else ",\"") ++ f.name ++ "\":");
+                try w.writeAll(comptime (if (i == 0) "{\"" else ",\"") ++
+                    mark.wire(f.name, m) ++ "\":");
                 try writeValue(f.type, w, @field(value, f.name));
             }
             return w.writeByte('}');
@@ -639,6 +684,116 @@ test "a renamed enum inside a struct is renamed there too" {
     try expectJson(
         \\{"id":3,"severity":"CRITICAL"}
     , Alert{ .id = 3, .severity = .critical });
+}
+
+test "a struct that says its case sends its field names in it" {
+    // What this replaces, counted in one caller's port: 10 response structs, 77
+    // fields, 5 mapping functions written out field by field and 5 arena loops,
+    // and the whole job of all of it was `full_name` becoming `fullName`
+    // (ADR 0181).
+    const Contact = struct {
+        pub const nilo_json = .{ .rename_all = .camelCase };
+
+        id: u32,
+        full_name: []const u8,
+        partner_id: u32,
+        email_address: ?[]const u8,
+    };
+
+    try expectJson(
+        \\{"id":7,"fullName":"Wati","partnerId":3,"emailAddress":null}
+    , Contact{ .id = 7, .full_name = "Wati", .partner_id = 3, .email_address = null });
+
+    // A field with no underscore in it is untouched, which is most of them.
+    const Plain = struct {
+        pub const nilo_json = .{ .rename_all = .camelCase };
+        id: u32,
+        name: []const u8,
+    };
+    try expectJson(
+        \\{"id":1,"name":"Sari"}
+    , Plain{ .id = 1, .name = "Sari" });
+
+    // And a struct that says nothing is still byte-for-byte std.json's, which
+    // is the contract this whole file rests on.
+    try expectSame(struct { full_name: []const u8 }{ .full_name = "Wati" });
+}
+
+test "a renamed struct nested inside another is renamed where it sits" {
+    const Partner = struct {
+        pub const nilo_json = .{ .rename_all = .camelCase };
+        partner_id: u32,
+        display_name: []const u8,
+    };
+    // The outer struct says nothing, so its own fields are written as they are
+    // — the marker is per type rather than inherited, which is the same rule a
+    // union's `rename_all` already follows about its payload's fields.
+    const Page = struct {
+        total_count: u32,
+        items: []const Partner,
+    };
+
+    try expectJson(
+        \\{"total_count":2,"items":[{"partnerId":1,"displayName":"Wati"},{"partnerId":2,"displayName":"Sari"}]}
+    , Page{ .total_count = 2, .items = &.{
+        .{ .partner_id = 1, .display_name = "Wati" },
+        .{ .partner_id = 2, .display_name = "Sari" },
+    } });
+}
+
+test "every case a struct can ask for, on one field" {
+    const Lower = struct {
+        pub const nilo_json = .{ .rename_all = .lowercase };
+        not_found: u32,
+    };
+    const Upper = struct {
+        pub const nilo_json = .{ .rename_all = .UPPERCASE };
+        not_found: u32,
+    };
+    const Pascal = struct {
+        pub const nilo_json = .{ .rename_all = .PascalCase };
+        not_found: u32,
+    };
+    const Screaming = struct {
+        pub const nilo_json = .{ .rename_all = .SCREAMING_SNAKE_CASE };
+        not_found: u32,
+    };
+    const Kebab = struct {
+        pub const nilo_json = .{ .rename_all = .@"kebab-case" };
+        not_found: u32,
+    };
+
+    try expectJson("{\"notfound\":1}", Lower{ .not_found = 1 });
+    try expectJson("{\"NOTFOUND\":1}", Upper{ .not_found = 1 });
+    try expectJson("{\"NotFound\":1}", Pascal{ .not_found = 1 });
+    try expectJson("{\"NOT_FOUND\":1}", Screaming{ .not_found = 1 });
+    try expectJson("{\"not-found\":1}", Kebab{ .not_found = 1 });
+}
+
+test "the payload of a tagged variant is renamed by its own marker, not by the union's" {
+    // The line ADR 0085 drew and ADR 0181 kept: a union's `rename_all` renames
+    // variants, and a payload's own marker is what renames the payload's
+    // fields. Two markers, each about its own type.
+    const Inner = struct {
+        pub const nilo_json = .{ .rename_all = .camelCase };
+        target_url: []const u8,
+    };
+    const Channel = union(enum) {
+        pub const nilo_json = .{ .tag = "kind", .rename_all = .@"kebab-case" };
+
+        web_hook: Inner,
+        discord_dm: struct { user_id: u32 },
+    };
+
+    try expectJson(
+        \\{"kind":"web-hook","targetUrl":"https://example.dev/hook"}
+    , Channel{ .web_hook = .{ .target_url = "https://example.dev/hook" } });
+
+    // The variant whose payload says nothing keeps its own spelling, which is
+    // what the pre-existing test at the top of this pair asserts.
+    try expectJson(
+        \\{"kind":"discord-dm","user_id":7}
+    , Channel{ .discord_dm = .{ .user_id = 7 } });
 }
 
 test "a union with a variant the writer cannot touch falls back whole" {
