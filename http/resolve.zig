@@ -42,7 +42,7 @@
 //! nothing and runs the code it ran before (ADR 0018).
 
 const std = @import("std");
-const names = @import("names.zig");
+const naming = @import("names.zig");
 const ctx_mod = @import("ctx.zig");
 const service_mod = @import("service.zig");
 const fail = @import("fail.zig");
@@ -176,7 +176,7 @@ fn checkResolvable(comptime V: type, comptime being_resolved: []const type) void
             // Two types each declaring the other as an argument. Left alone
             // this is a compiler that expands for ever rather than a message.
             @compileError(
-                "nilo: the resolved value `" ++ names.of(V) ++ "` is worked out from itself — " ++
+                "nilo: the resolved value `" ++ naming.of(V) ++ "` is worked out from itself — " ++
                     loop(being_resolved, V) ++ "\n" ++
                     "  Break the loop: one of these resolvers should take a `*Ctx` and read what " ++
                     "it needs directly, rather than asking for the other value.",
@@ -187,15 +187,15 @@ fn checkResolvable(comptime V: type, comptime being_resolved: []const type) void
         const info = @typeInfo(Fn).@"fn";
 
         const Returned = info.return_type orelse @compileError(
-            "nilo: the resolver on `" ++ names.of(V) ++ "` has no return type.",
+            "nilo: the resolver on `" ++ naming.of(V) ++ "` has no return type.",
         );
         const Produced = switch (@typeInfo(Returned)) {
             .error_union => |u| u.payload,
             else => Returned,
         };
         if (Produced != V) @compileError(
-            "nilo: the resolver on `" ++ names.of(V) ++ "` returns " ++ names.of(Produced) ++
-                ", not " ++ names.of(V) ++ ".\n" ++
+            "nilo: the resolver on `" ++ naming.of(V) ++ "` returns " ++ naming.of(Produced) ++
+                ", not " ++ naming.of(V) ++ ".\n" ++
                 "  A type's `" ++ marker ++ "` is how that type is worked out from a request, so " ++
                 "it has to hand back that type.",
         );
@@ -209,7 +209,7 @@ fn rolesOf(comptime V: type, comptime params: []const std.builtin.Type.Fn.Param)
         var roles: [params.len]Role = undefined;
         for (params, 0..) |p, i| {
             const P = p.type orelse @compileError(
-                "nilo: argument " ++ num(i + 1) ++ " of the resolver on `" ++ names.of(V) ++
+                "nilo: argument " ++ num(i + 1) ++ " of the resolver on `" ++ naming.of(V) ++
                     "` has no type.",
             );
             roles[i] = roleOf(V, P, i);
@@ -226,8 +226,8 @@ fn roleOf(comptime V: type, comptime P: type, comptime i: usize) Role {
     if (@typeInfo(P) == .pointer and @typeInfo(P).pointer.size == .one) return .service;
 
     @compileError(
-        "nilo: argument " ++ num(i + 1) ++ " of the resolver on `" ++ names.of(V) ++ "` is a " ++
-            names.of(P) ++ ", which a resolver cannot be given.\n" ++
+        "nilo: argument " ++ num(i + 1) ++ " of the resolver on `" ++ naming.of(V) ++ "` is a " ++
+            naming.of(P) ++ ", which a resolver cannot be given.\n" ++
             "  A resolver belongs to the request, not to a route, so there is no `:id` for it to " ++
             "be handed and no query struct to fill in.\n" ++
             "  What it can ask for: a `*Ctx`, a service (`*Db`), a `std.mem.Allocator` for the " ++
@@ -247,11 +247,11 @@ fn fnTypeOf(comptime V: type, comptime F: type) type {
 
 fn notAFunction(comptime V: type, comptime F: type) noreturn {
     @compileError(
-        "nilo: `" ++ names.of(V) ++ "." ++ marker ++ "` is a " ++ names.of(F) ++
+        "nilo: `" ++ naming.of(V) ++ "." ++ marker ++ "` is a " ++ naming.of(F) ++
             ", not a function.\n" ++
             "  It is the function that works the value out from a request:\n" ++
             "      pub const " ++ marker ++ " = authenticate;   // fn (c: *Ctx) !" ++
-            names.of(V) ++ "\n" ++
+            naming.of(V) ++ "\n" ++
             "  The function's name, not a call to it.",
     );
 }
@@ -264,9 +264,9 @@ fn loop(comptime being_resolved: []const type, comptime V: type) []const u8 {
         for (being_resolved) |T| {
             if (!started and T != V) continue;
             started = true;
-            out = out ++ names.of(T) ++ " → ";
+            out = out ++ naming.of(T) ++ " → ";
         }
-        return out ++ names.of(V);
+        return out ++ naming.of(V);
     }
 }
 

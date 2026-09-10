@@ -216,19 +216,13 @@ pub const Answer = struct {
     /// const made = try answer.json(struct { id: []const u8 }, arena);
     /// ```
     ///
-    /// **nilo already decided how the value was written**, so a test asking
-    /// what came back should not have to reach for `std.json` and walk a
-    /// `Value` — pulling one field out of a create was four lines and an
-    /// `.?.string` at every call site. `std.json.Value` still works here and is
-    /// the right `T` when the shape is what is being asserted.
+    /// `std.json.Value` is still the right `T` when the shape itself is what
+    /// is being asserted.
     ///
     /// **Unknown fields are ignored, which is the opposite of the rule on the
-    /// way in**, and the difference is who owns the extra field. A request body
-    /// with a field nilo does not know is the client's typo and is a 400 naming
-    /// it; a *response* with more fields than the test asked about is the
-    /// ordinary case — the test is asking a question about part of it. A test
-    /// that means to assert the whole shape asks for `std.json.Value` and
-    /// compares that.
+    /// way in.** A request body carrying a field nilo does not know is the
+    /// client's typo and gets a 400; a response with more fields than the test
+    /// asked about is the ordinary case.
     ///
     /// Everything is copied into `arena`, so what comes back outlives the
     /// client's response buffer and the next request on it.
@@ -248,24 +242,13 @@ pub const Answer = struct {
 /// errdefer std.debug.print("row: {f}\n", .{nilo.testing.show(row)});
 /// ```
 ///
-/// **`std.testing` prints with `{any}`, and `{any}` is the specifier that
-/// means *do not call the type's own formatter*.** So a `Uuid` comes out as
-/// sixteen decimal numbers and a `[]const u8` as its bytes — on a schema with
-/// many uuid columns, nearly every row asserted on prints as noise. That is
-/// not `std`'s bug and there is nothing below this layer that can decide
-/// otherwise; what this layer has is a rendering for every type it carries,
-/// and JSON is it. `Uuid.jsonStringify` writes text, `Str` writes a string, a
-/// `Timestamp` writes RFC 3339, a `Decimal` its digits.
+/// `std.testing` prints with `{any}`, which is the specifier that means *do
+/// not call the type's own formatter* — so a `Uuid` comes out as sixteen
+/// decimal numbers. This renders each type the way it goes over the wire
+/// instead: `Uuid` as text, `Str` as a string, a `Timestamp` as RFC 3339.
 ///
-/// **A renderer rather than an assertion, and that is the whole shape.** An
-/// `expectEqual` of nilo's own pulls in the rest of the assertion surface
-/// behind it — `expectEqualDeep`, `expectEqualSlices`, `expectError` — where
-/// every one nilo does not have looks like a gap and every one it does have
-/// has to follow `std.testing`. And it would not have helped the failure this
-/// was reported from, which was an `expectError` that found a payload rather
-/// than two values that differed. One thing that hands back text works in
-/// `expect`, in `expectError`, and in the `std.debug.print` somebody reaches
-/// for while poking about, which is where it gets used most.
+/// A renderer rather than an assertion of nilo's own, which is the whole
+/// shape and is what the ADR argues.
 ///
 /// **Nothing is allocated.** It writes straight into whatever writer is
 /// formatting it. For an actual `[]const u8`,
@@ -1122,13 +1105,13 @@ const testing = std.testing;
 
 // ---- the WebSocket harness (ADR 0113) ----
 
-const websocket_mod = @import("websocket.zig");
+const websocket = @import("websocket.zig");
 
 fn wsEcho(c: *@import("ctx.zig").Ctx) anyerror!void {
     return c.upgrade(wsEchoLoop, {});
 }
 
-fn wsEchoLoop(socket: *websocket_mod.Socket) anyerror!void {
+fn wsEchoLoop(socket: *websocket.Socket) anyerror!void {
     while (try socket.receive()) |message| {
         try socket.send(message.kind, message.data);
     }

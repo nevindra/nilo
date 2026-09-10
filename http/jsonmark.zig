@@ -49,7 +49,7 @@
 //! 104-byte one 85ns → 25ns ([`bench/result/http.md`](../bench/result/http.md)).
 
 const std = @import("std");
-const type_names = @import("names.zig");
+const naming = @import("names.zig");
 
 /// The declaration a type writes to say how its JSON is spelled.
 pub const marker = "nilo_json";
@@ -111,7 +111,7 @@ pub fn of(comptime T: type) ?Mark {
         const Said = @TypeOf(said);
         const info = @typeInfo(Said);
         if (info != .@"struct") @compileError(
-            "nilo: `" ++ type_names.of(T) ++ "`'s `" ++ marker ++ "` is a " ++ type_names.of(Said) ++
+            "nilo: `" ++ naming.of(T) ++ "`'s `" ++ marker ++ "` is a " ++ naming.of(Said) ++
                 ", and it says how this type's JSON is spelled, so it is written as a struct.\n" ++
                 "    pub const " ++ marker ++ " = .{ .tag = \"signal\" };",
         );
@@ -123,7 +123,7 @@ pub fn of(comptime T: type) ?Mark {
             } else if (std.mem.eql(u8, f.name, "rename_all")) {
                 mark.rename_all = caseOf(T, said.rename_all);
             } else @compileError(
-                "nilo: `" ++ type_names.of(T) ++ "`'s `" ++ marker ++ "` has a field `" ++ f.name ++
+                "nilo: `" ++ naming.of(T) ++ "`'s `" ++ marker ++ "` has a field `" ++ f.name ++
                     "`, which is not something it can say.\n" ++
                     "  A marker says two things: `tag`, the key the variant's name goes under, " ++
                     "and `rename_all`, how a name is spelled on the wire.\n" ++
@@ -132,7 +132,7 @@ pub fn of(comptime T: type) ?Mark {
         }
 
         if (mark.tag == null and mark.rename_all == null) @compileError(
-            "nilo: `" ++ type_names.of(T) ++ "`'s `" ++ marker ++ "` is empty, so it says nothing " ++
+            "nilo: `" ++ naming.of(T) ++ "`'s `" ++ marker ++ "` is empty, so it says nothing " ++
                 "about this type's JSON and nothing changes.\n" ++
                 "  Either say what it is for, or take the declaration off:\n" ++
                 "    pub const " ++ marker ++ " = .{ .tag = \"signal\" };        // a tagged union\n" ++
@@ -151,7 +151,7 @@ fn caseOf(comptime T: type, comptime said: anytype) Case {
     comptime {
         const name = @tagName(said);
         if (std.mem.eql(u8, name, "snake_case")) @compileError(
-            "nilo: `" ++ type_names.of(T) ++ "` asks for `.rename_all = .snake_case`, which is what a " ++
+            "nilo: `" ++ naming.of(T) ++ "` asks for `.rename_all = .snake_case`, which is what a " ++
                 "Zig field name already is, so it would change nothing.\n" ++
                 "  Leave `rename_all` off to send the field names as they are written.\n" ++
                 "  For the shouted version, `.SCREAMING_SNAKE_CASE` keeps the underscores.",
@@ -162,7 +162,7 @@ fn caseOf(comptime T: type, comptime said: anytype) Case {
                 known = known ++ (if (i == 0) "" else ", ") ++ "." ++ f.name;
             }
             @compileError(
-                "nilo: `" ++ type_names.of(T) ++ "` asks for `.rename_all = ." ++ name ++
+                "nilo: `" ++ naming.of(T) ++ "` asks for `.rename_all = ." ++ name ++
                     "`, which is not a case nilo writes.\n" ++
                     "  The ones it does: " ++ known ++ ".",
             );
@@ -176,17 +176,17 @@ fn checkTag(comptime T: type, comptime key: []const u8) void {
     comptime {
         const info = @typeInfo(T);
         if (info != .@"union") @compileError(
-            "nilo: `" ++ type_names.of(T) ++ "` says `.tag = \"" ++ key ++ "\"`, which puts the name of " ++
+            "nilo: `" ++ naming.of(T) ++ "` says `.tag = \"" ++ key ++ "\"`, which puts the name of " ++
                 "the live variant into the JSON — and this is a " ++ @tagName(info) ++ ", which has no variants.\n" ++
                 "  `tag` belongs on a `union(enum)`. On anything else the marker says only `rename_all`.",
         );
         if (info.@"union".tag_type == null) @compileError(
-            "nilo: `" ++ type_names.of(T) ++ "` says `.tag = \"" ++ key ++ "\"` and is an untagged union, " ++
+            "nilo: `" ++ naming.of(T) ++ "` says `.tag = \"" ++ key ++ "\"` and is an untagged union, " ++
                 "so nothing in it knows which variant is live and there is no name to write.\n" ++
                 "  Write it as `union(enum)` and nilo can send and read it.",
         );
         if (key.len == 0) @compileError(
-            "nilo: `" ++ type_names.of(T) ++ "`'s `.tag` is the empty string, so the variant's name would " ++
+            "nilo: `" ++ naming.of(T) ++ "`'s `.tag` is the empty string, so the variant's name would " ++
                 "go under a key with no name.\n" ++
                 "    pub const " ++ marker ++ " = .{ .tag = \"signal\" };",
         );
@@ -199,8 +199,8 @@ fn checkTag(comptime T: type, comptime key: []const u8) void {
             if (Payload == void) continue;
             const payload = @typeInfo(Payload);
             if (payload != .@"struct") @compileError(
-                "nilo: `" ++ type_names.of(T) ++ "`'s variant `" ++ arm.name ++ "` carries a " ++
-                    type_names.of(Payload) ++ ", and an internally tagged union writes the variant's " ++
+                "nilo: `" ++ naming.of(T) ++ "`'s variant `" ++ arm.name ++ "` carries a " ++
+                    naming.of(Payload) ++ ", and an internally tagged union writes the variant's " ++
                     "fields beside the tag — so the variant has to have fields.\n" ++
                     "  Give it a struct of its own, or leave the variant empty (`" ++ arm.name ++
                     ",`) to send `{\"" ++ key ++ "\":\"" ++ arm.name ++ "\"}` on its own.",
@@ -211,7 +211,7 @@ fn checkTag(comptime T: type, comptime key: []const u8) void {
             // land on the tag's key.
             for (payload.@"struct".fields, wireNames(Payload)) |f, on_the_wire| {
                 if (std.mem.eql(u8, on_the_wire, key)) @compileError(
-                    "nilo: `" ++ type_names.of(T) ++ "`'s `.tag` is \"" ++ key ++ "\" and its variant `" ++
+                    "nilo: `" ++ naming.of(T) ++ "`'s `.tag` is \"" ++ key ++ "\" and its variant `" ++
                         arm.name ++ "` already has a field called `" ++ f.name ++ "`" ++
                         (if (std.mem.eql(u8, f.name, on_the_wire)) "" else ", which goes out as \"" ++
                             on_the_wire ++ "\"") ++ ", so that key would " ++
@@ -261,7 +261,7 @@ fn checkRenames(comptime T: type, comptime c: Case) void {
             for (fields[i + 1 ..]) |b| {
                 if (!std.mem.eql(u8, spelled, wire(b.name, m))) continue;
                 @compileError(
-                    "nilo: `" ++ type_names.of(T) ++ "` asks for `.rename_all = ." ++ @tagName(c) ++
+                    "nilo: `" ++ naming.of(T) ++ "` asks for `.rename_all = ." ++ @tagName(c) ++
                         "`, and its " ++ what ++ "s `" ++ a.name ++ "` and `" ++ b.name ++
                         "` both come out as \"" ++ spelled ++ "\".\n" ++
                         "  Two of them under one name on the wire is not a spelling problem: a reader " ++
@@ -322,7 +322,7 @@ pub fn wireNames(comptime T: type) []const []const u8 {
             .@"enum" => |e| e.fields,
             .@"union" => |u| u.fields,
             .@"struct" => |s| s.fields,
-            else => @compileError("nilo: `" ++ type_names.of(T) ++ "` has no fields to name."),
+            else => @compileError("nilo: `" ++ naming.of(T) ++ "` has no fields to name."),
         };
         for (fields) |f| names = names ++ [_][]const u8{wire(f.name, mark)};
         return names;
@@ -396,7 +396,7 @@ fn renamedWithin(comptime T: type, comptime depth: usize) ?type {
 pub fn parseFor(comptime T: type) @TypeOf(Reader(T).parse) {
     comptime {
         const m = of(T) orelse @compileError(
-            "nilo: `" ++ type_names.of(T) ++ "` asks for nilo's JSON reader and has no `" ++ marker ++
+            "nilo: `" ++ naming.of(T) ++ "` asks for nilo's JSON reader and has no `" ++ marker ++
                 "`, so there is nothing for the reader to do differently from `std.json`.\n" ++
                 "  Say what its JSON looks like first, then hand the reader over:\n" ++
                 "    pub const " ++ marker ++ " = .{ .tag = \"signal\" };\n" ++
@@ -409,7 +409,7 @@ pub fn parseFor(comptime T: type) @TypeOf(Reader(T).parse) {
         // somebody can reasonably have written — a response type with
         // `rename_all` on it — and the answer is not "add a tag".
         if (m.tag == null and @typeInfo(T) == .@"struct") @compileError(
-            "nilo: `" ++ type_names.of(T) ++ "` hands nilo's JSON reader a `" ++ marker ++
+            "nilo: `" ++ naming.of(T) ++ "` hands nilo's JSON reader a `" ++ marker ++
                 "` that only renames its fields, and renaming a struct's fields is a **write**" ++
                 " spelling (ADR 0181).\n" ++
                 "  There is nothing for the reader to do differently: nilo writes the renamed" ++
@@ -418,7 +418,7 @@ pub fn parseFor(comptime T: type) @TypeOf(Reader(T).parse) {
                 " coming in is its own struct, spelled the way the wire spells it.",
         );
         if (m.tag == null and @typeInfo(T) != .@"enum") @compileError(
-            "nilo: `" ++ type_names.of(T) ++ "` hands nilo's JSON reader a `" ++ marker ++
+            "nilo: `" ++ naming.of(T) ++ "` hands nilo's JSON reader a `" ++ marker ++
                 "` with only `rename_all` on it, and it is a " ++ @tagName(@typeInfo(T)) ++ ".\n" ++
                 "  Renaming a variant changes the key `std.json` looks for, which nilo cannot read " ++
                 "back without a tag to find it by. Add one:\n" ++
@@ -852,14 +852,14 @@ test "a renamed enum is read back by the name it goes out under" {
 }
 
 test "a marked union survives a round trip through a struct" {
-    const json = @import("json.zig");
+    const json_mod = @import("json.zig");
 
     const Rule = struct { id: u32, condition: Condition };
     const rule = Rule{ .id = 3, .condition = .{ .logs = .{ .query = "level:error", .count_over = 5 } } };
 
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
-    try json.write(&out.writer, rule);
+    try json_mod.write(&out.writer, rule);
     try testing.expectEqualStrings(
         \\{"id":3,"condition":{"signal":"logs","query":"level:error","count_over":5}}
     , out.written());

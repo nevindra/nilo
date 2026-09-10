@@ -594,14 +594,10 @@ pub const Wake = struct {
     /// hands. What the loop does with them next is write a completion
     /// through `c.group.owner` into a frame that has been handed back.
     ///
-    /// That is where the SIGTERM nobody came back from was: an executor
-    /// thread at 100% with no syscall outstanding, and no plain HTTP
-    /// connection ever affected because nothing but a WebSocket arms either
-    /// half. `bench/shutdown.py` at 24 connections a run puts it at **23 of
-    /// 25 without this call and 0 of 25 with it**. zio's own
-    /// `CompletionQueue` test cancels after a timeout for exactly this
-    /// reason — the queue owns pointers the loop is using, and the owner has
-    /// to say when it is done with them.
+    /// That is where the SIGTERM nobody came back from was.
+    /// `bench/shutdown.py` at 24 connections a run puts it at **23 of 25
+    /// without this call and 0 of 25 with it**. Only a WebSocket arms either
+    /// half, which is why no plain HTTP connection was ever affected.
     ///
     /// Nothing to do for a connection that never waited, which is every
     /// ordinary request: a branch, no lock and no syscall.
@@ -651,13 +647,8 @@ const stack_margin = 512;
 /// ([ADR 0063](../../docs/adr/0063-a-handlers-stack-is-per-connection.md)).
 /// The frames that took it there have long since returned; the pages have not.
 ///
-/// **ADR 0063 recorded this as blocked on zio and it never was.** It looked for
-/// the running fiber through `runtime.getCurrentTaskOrNull`, which is not
-/// re-exported, and concluded there was no supported way. There is, by another
-/// door: `zio.coro.Coroutine.getCurrent()` is public in the pinned v0.17.0 and
-/// carries `context.stack_info`, which is `base` and `limit`. The upstream ask
-/// ([zio#677](https://github.com/lalinsky/zio/issues/677)) was answered by
-/// pointing at it.
+/// `zio.coro.Coroutine.getCurrent()` is public in the pinned v0.17.0 and
+/// carries `context.stack_info` — `base` and `limit`.
 ///
 /// Three things make the arithmetic safe, and they are the whole reason this is
 /// allowed to exist at all — zio carves 64 stacks out of one slab, so a range

@@ -54,7 +54,7 @@ const bulkhead = @import("bulkhead.zig");
 const cookie_mod = @import("cookie.zig");
 const ctx_mod = @import("ctx.zig");
 const fail = @import("fail.zig");
-const names = @import("names.zig");
+const naming = @import("names.zig");
 const core = @import("nilo_core");
 
 const Ctx = ctx_mod.Ctx;
@@ -188,7 +188,7 @@ fn sizeOf(comptime T: type) usize {
 
 fn unsupported(comptime T: type, comptime why: []const u8) noreturn {
     @compileError(
-        "nilo: `" ++ names.of(T) ++ "` cannot be part of a session, because it is " ++ why ++ ".\n" ++
+        "nilo: `" ++ naming.of(T) ++ "` cannot be part of a session, because it is " ++ why ++ ".\n" ++
             "  A session travels in a cookie and there is no row on the server to point at, so it " ++
             "has to be self-contained and of a size known while compiling.\n" ++
             "  What it can hold: integers, floats, bools, enums, `[N]u8` arrays, optionals of " ++
@@ -479,17 +479,17 @@ pub fn Session(comptime T: type) type {
     // the person wrote rather than a field eight frames down.
     comptime {
         if (@typeInfo(T) != .@"struct") @compileError(
-            "nilo: the `Session(" ++ names.of(T) ++ ")` is not a struct.\n" ++
+            "nilo: the `Session(" ++ naming.of(T) ++ ")` is not a struct.\n" ++
                 "  A session is a struct of your own, one field per thing you want to remember:\n" ++
                 "      const Signed = struct { user: u32, admin: bool = false };",
         );
         if (@typeInfo(T).@"struct".fields.len == 0) @compileError(
-            "nilo: the `Session(" ++ names.of(T) ++ ")` has no fields, so it would remember " ++
+            "nilo: the `Session(" ++ naming.of(T) ++ ")` has no fields, so it would remember " ++
                 "nothing.",
         );
         _ = sizeOf(T);
         if (cookieSize(T) > max_cookie_bytes) @compileError(std.fmt.comptimePrint(
-            "nilo: a `Session(" ++ names.of(T) ++ ")` would be {d} bytes in the cookie, and the " ++
+            "nilo: a `Session(" ++ naming.of(T) ++ ")` would be {d} bytes in the cookie, and the " ++
                 "most that fits is {d}.\n" ++
                 "  A browser drops a cookie this big without saying so, which would look like a " ++
                 "session that never works rather than one that is too large.\n" ++
@@ -505,7 +505,7 @@ pub fn Session(comptime T: type) type {
 
         /// What a nilo compile error calls this type, which is the name the
         /// reader's own import line gives it (ADR 0122).
-        pub const nilo_type_name = "nilo.Session(" ++ names.of(T) ++ ")";
+        pub const nilo_type_name = "nilo.Session(" ++ naming.of(T) ++ ")";
 
         /// What arrived, if anything readable did.
         value: ?T,

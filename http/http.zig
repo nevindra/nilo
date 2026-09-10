@@ -712,7 +712,7 @@ test "every type this module exports is named the way the import line names it" 
     // the rest are functions until somebody applies them, so there is no type
     // here to ask. Their markers are held by the tests in the files that
     // declare them.
-    const names = @import("names.zig");
+    const naming = @import("names.zig");
     // Exports that are somebody else's type rather than one of nilo's, where
     // giving it a nilo name would be a lie. `panic` is `std.debug.FullPanic`,
     // and `@typeName` spells it `debug.FullPanic(…)` with no `std.` in front,
@@ -737,7 +737,7 @@ test "every type this module exports is named the way the import line names it" 
         const spelled = @typeName(value);
         if (comptime std.mem.indexOfScalar(u8, spelled, '.') == null) continue;
         if (comptime std.mem.startsWith(u8, spelled, "std.")) continue;
-        if (comptime !names.covers(value)) {
+        if (comptime !naming.covers(value)) {
             @compileError(
                 "nilo: `nilo." ++ decl.name ++ "` prints as `" ++ spelled ++
                     "` in a compile error, which names a file the reader never imported.\n" ++
@@ -795,7 +795,11 @@ test {
     _ = @import("metrics.zig");
     _ = @import("allowance.zig");
     _ = @import("deadline.zig");
+    _ = @import("headers.zig");
     _ = @import("app.zig");
+    _ = @import("serve.zig");
+    _ = @import("wiring.zig");
+    _ = @import("behaviour.zig");
     // Last, and the only one here that stands a real server up. Nothing else
     // in this suite opens a socket at all (ADR 0086).
     _ = @import("live.zig");

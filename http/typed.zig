@@ -38,7 +38,8 @@
 
 const std = @import("std");
 const naming = @import("names.zig");
-const converting = @import("convert.zig");
+const headers_mod = @import("headers.zig");
+const convert_mod = @import("convert.zig");
 const ctx_mod = @import("ctx.zig");
 const form_mod = @import("form.zig");
 const http1 = @import("http1.zig");
@@ -150,95 +151,10 @@ pub fn Status(comptime code: u16, comptime T: type) type {
 /// One header on a `Response`.
 pub const Header = http1.Header;
 
-/// The headers a `Response` carries, held by value rather than pointed at.
-///
-/// That is the whole reason this type exists. `headers: []const Header` read
-/// beautifully and was a use-after-return: a list written in the handler
-/// lives in the handler's own stack frame, and nilo reads it after the
-/// handler has returned. With every value a literal the compiler puts the
-/// list in static memory and it happens to work; with a computed one — and a
-/// `Location` never is a literal — `Debug` gets away with it and release
-/// segfaults ([ADR 0019](../docs/adr/0019-a-response-owns-its-headers.md)).
-///
-/// `of` copies while the list is still alive, which is why it has to be
-/// called where the list is written:
-///
-/// ```zig
-/// .headers = .of(&.{
-///     .{ .name = "Location", .value = try std.fmt.allocPrint(arena, "/users/{d}", .{id}) },
-/// }),
-/// ```
-///
-/// What is copied is the two slices, not the bytes they point at, so the
-/// usual rule still holds for the *value*: a literal, something a Service
-/// owns, or something built in the request arena. `c.setHeader` remains the
-/// way to set a header without a count to think about.
-pub const Headers = struct {
-    /// What a nilo compile error calls this type, which is the name the
-    /// reader's own import line gives it (ADR 0122).
-    pub const nilo_type_name = "nilo.Headers";
-
-    /// How many one response can carry. Enough for the ones a handler
-    /// actually decides — `Location`, a couple of `Set-Cookie`, a cache
-    /// directive — and small enough that carrying them by value is 264
-    /// bytes rather than something worth measuring. Past this, `c.setHeader`
-    /// has no limit.
-    pub const room = 8;
-
-    entries: [room]Header = undefined,
-    count: usize = 0,
-
-    /// Copy a list of headers written out in place. The list may be a
-    /// pointer to one (`&.{…}`, which is what reads best) or the tuple
-    /// itself; either way its length is known while compiling, which is what
-    /// lets a ninth header be a compile error rather than a surprise.
-    pub fn of(list: anytype) Headers {
-        // The `.one` is doing work: a slice is a pointer too, and
-        // dereferencing one is an error from inside this function rather
-        // than the message below — the exact failure ADR 0015 is about.
-        const items = switch (@typeInfo(@TypeOf(list))) {
-            .pointer => |p| if (p.size == .one) list.* else notAList(@TypeOf(list)),
-            else => list,
-        };
-        const count = comptime lengthOf(@TypeOf(items));
-        var made: Headers = .{ .count = count };
-        inline for (0..count) |i| {
-            made.entries[i] = .{ .name = items[i].name, .value = items[i].value };
-        }
-        return made;
-    }
-
-    /// The headers that were set, in the order they were written.
-    pub fn view(self: *const Headers) []const Header {
-        return self.entries[0..self.count];
-    }
-
-    fn lengthOf(comptime Items: type) usize {
-        comptime {
-            const count = switch (@typeInfo(Items)) {
-                .array => |a| a.len,
-                .@"struct" => |s| if (s.is_tuple) s.fields.len else notAList(Items),
-                else => notAList(Items),
-            };
-            if (count > room) @compileError(std.fmt.comptimePrint(
-                "nilo: a Response can carry {d} headers and this one was given {d}.\n" ++
-                    "  Set the rest with `c.setHeader`, which has no limit.",
-                .{ room, count },
-            ));
-            return count;
-        }
-    }
-
-    fn notAList(comptime Items: type) noreturn {
-        @compileError(
-            "nilo: Response headers have to be written out where they are set — " ++
-                ".of(&.{.{ .name = \"Location\", .value = where }}) — and this is a " ++
-                naming.of(Items) ++ ".\n" ++
-                "  A slice would not say how many there are until the program runs, and the " ++
-                "response has to hold them itself.",
-        );
-    }
-};
+/// The headers a `Response` carries. Declared in `headers.zig`, which is
+/// vocabulary rather than engine, and re-exported here because
+/// `nilo.Headers` is what a caller writes.
+pub const Headers = headers_mod.Headers;
 
 /// The query string, read into a struct of your own — the counterpart to a
 /// path param, for the things that are named rather than positional.
@@ -282,23 +198,16 @@ pub fn Query(comptime T: type) type {
 /// }
 /// ```
 ///
-/// `c.header("X-Staff-Id")` does the reading and is not the point. A path
-/// param, a query struct and a JSON body are all typed arguments that appear
-/// in the generated document; a header was a lookup that appeared nowhere, so
-/// a client generated from the document could not know the endpoint needed
-/// one. This is the same wrapper family, and it writes itself into the
-/// document as a header parameter.
+/// `c.header(name)` reads the same value; what this adds is that the header
+/// appears in the generated document, so a client made from it knows the
+/// endpoint needs one.
 ///
 /// **Absent is decided by the type, the way a query field decides it.** A
-/// `?T` is null when the header is not there; anything else is a 400 saying
-/// which header is required. Text that will not convert is the same 400 a
-/// query param gets, in the same words.
+/// `?T` is null when the header is not there; anything else is a 400 naming
+/// the header. Text that will not convert is a query param's 400, word for
+/// word.
 ///
-/// **`FromHeader` rather than `Header`, and that is not a preference.**
-/// `nilo.Header` is the response side — `Response.headers` is a list a
-/// handler writes — and has been since 0.2.0. ADR 0107 settled the same
-/// collision the other way for `Ctx.RequestHeader`; this name carries the
-/// direction for the same reason.
+/// Named `FromHeader` because `nilo.Header` is the response side (ADR 0107).
 pub fn FromHeader(comptime name: []const u8, comptime T: type) type {
     return struct {
         pub const nilo_header = .{ .name = name, .value = T };
@@ -941,7 +850,7 @@ fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Rol
     // is, and what a type says about itself wins over what its kind would
     // otherwise have meant (ADR 0142). Reading the marker is also what checks
     // its shape, so a `nilo_parse` written wrong is refused here.
-    if (comptime converting.parsesItself(P)) return .{ .param = 0 };
+    if (comptime convert_mod.parsesItself(P)) return .{ .param = 0 };
 
     return switch (@typeInfo(P)) {
         .int, .float, .bool, .@"enum" => .{ .param = 0 },
@@ -1016,7 +925,7 @@ fn checkHeaderValue(comptime pattern: []const u8, comptime P: type, comptime i: 
                 "`FromHeader(\"X-Staff-Id\", nilo.Str)`.",
         );
 
-        if (!converting.convertible(V)) @compileError(
+        if (!convert_mod.convertible(V)) @compileError(
             "nilo: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
                 "\" asks for the header \"" ++ named ++ "\" as a " ++ naming.of(V) ++
                 ", which request text cannot become.\n" ++
@@ -1070,14 +979,14 @@ fn checkQueryFields(comptime pattern: []const u8, comptime T: type, comptime i: 
         );
 
         for (info.fields) |f| {
-            if (converting.convertible(f.type)) continue;
+            if (convert_mod.convertible(f.type)) continue;
             // A list of them, which is `?tag=a,b` and `?tag=a&tag=b`
             // ([ADR 0164](../docs/adr/0164-a-query-parameter-that-is-a-list.md)).
             // Checked here rather than in `convertible`, because the answer is
             // different one slot over: a `Form(T)` reads a body this file does
             // not, and promising a list there would compile and fill nothing.
             if (queryList(f.type)) |Item| {
-                if (converting.convertible(Item)) continue;
+                if (convert_mod.convertible(Item)) continue;
                 @compileError(
                     "nilo: the field `" ++ f.name ++ ": " ++ naming.of(f.type) ++ "` of the " ++
                         "`Query(" ++ naming.of(T) ++ ")` on route \"" ++ pattern ++
@@ -1183,7 +1092,7 @@ fn paramValue(comptime P: type, c: *const Ctx, comptime name: []const u8) !P {
 /// `convert.zig`'s, because `bound.zig` has to give the same answer when it
 /// words the failure of one — and a list that fills here and reports as
 /// "cannot fail" over there ends at an `unreachable`.
-const queryList = converting.listElement;
+const queryList = convert_mod.listElement;
 
 /// How many values a query string holds for `name`, counting the pieces of
 /// each comma-joined one.
@@ -1254,7 +1163,7 @@ fn collectListCollecting(
     comptime Item: type,
     c: *const Ctx,
     comptime name: []const u8,
-    outcome: *converting.Outcome,
+    outcome: *convert_mod.Outcome,
 ) ![]const Item {
     const n = countList(c, name);
     if (n == 0) return &.{};
@@ -1269,7 +1178,7 @@ fn collectListCollecting(
             if (piece.len == 0) continue;
             const text = Str.fromRequest(piece, c._lifetime);
             var converted: Item = undefined;
-            if (converting.tryConvert(Item, .query, text, &converted)) |reason| {
+            if (convert_mod.tryConvert(Item, .query, text, &converted)) |reason| {
                 if (outcome.reason == null) {
                     outcome.given = text;
                     outcome.reason = reason;
@@ -1331,7 +1240,7 @@ fn queryValue(comptime T: type, c: *const Ctx) !T {
 fn queryValueCollecting(
     comptime T: type,
     c: *const Ctx,
-    outcomes: *[@typeInfo(T).@"struct".fields.len]converting.Outcome,
+    outcomes: *[@typeInfo(T).@"struct".fields.len]convert_mod.Outcome,
 ) T {
     var out: T = undefined;
     inline for (@typeInfo(T).@"struct".fields, 0..) |f, i| {
@@ -1360,7 +1269,7 @@ fn queryValueCollecting(
         } else if (c.query(f.name)) |s| {
             outcomes[i].given = s;
             var converted: Inner = undefined;
-            if (converting.tryConvert(Inner, .query, s, &converted)) |reason| {
+            if (convert_mod.tryConvert(Inner, .query, s, &converted)) |reason| {
                 outcomes[i].reason = reason;
                 if (f.defaultValue()) |default| @field(out, f.name) = default;
             } else {
@@ -1380,7 +1289,7 @@ fn queryValueCollecting(
 /// Turn one piece of request text into the type the handler asked for.
 /// Path params, query values and form fields all come through here, so all
 /// three say the same thing when the text does not fit (`convert.zig`).
-const convert = converting.convert;
+const convert = convert_mod.convert;
 
 fn sendResult(c: *Ctx, result: anytype) !void {
     const R = @TypeOf(result);

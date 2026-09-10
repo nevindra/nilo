@@ -836,13 +836,10 @@ pub const Dir = struct {
     /// division `openFile` already has: the Bulkhead says what the Engine can
     /// do, and what a name is allowed to be is a layer up.
     ///
-    /// The whole write is one call rather than an open, a writer and a close,
-    /// because that is the smaller thing to ask of an Engine: a `File` open
-    /// for writing is a second lifetime for every engine to get right, and
-    /// nothing here needs one.
-    ///
-    /// The fiber parks for the length of the call rather than the thread
-    /// blocking, which is why this is here and not behind `nilo.blocking`.
+    /// One call rather than an open, a writer and a close: a `File` open for
+    /// writing is a second lifetime for every engine to get right. The fiber
+    /// parks for it rather than the thread blocking, which is why this is here
+    /// and not behind `nilo.blocking`.
     pub fn writeFileAtomic(self: Dir, name: []const u8, bytes: []const u8) !void {
         const w = watchdog.waitingAnywhere();
         defer watchdog.waitedAnywhere(w);
@@ -894,20 +891,14 @@ pub const File = struct {
 /// Hand the physical pages behind a connection's buffers back to the kernel
 /// while it waits for the next request.
 ///
-/// A keep-alive connection is allocated its read and write buffers once and
-/// holds them until it closes, so every page it has ever touched stays
-/// resident for as long as the client keeps the connection open. Measured: a
-/// connection that has never been used costs 8,766 bytes, one that has served
-/// a 6-byte response costs 16,955, and one that has served a 982-byte response
-/// costs 21,114. The difference is buffer pages doing nothing.
+/// A keep-alive connection holds its read and write buffers until it closes,
+/// so every page it ever touched stays resident. Measured: never used 8,766
+/// bytes, after a 6-byte response 16,955, after a 982-byte response 21,114.
 ///
-/// The allocation itself stays, which is the point. Nothing here allocates or
-/// frees, so ADR 0018's per-request allocation invariant is untouched, and the
-/// buffer is still exactly as big as it was — the next request faults the pages
-/// back in as zeroes, which is all a buffer about to be overwritten needs to
-/// be. What it costs is one syscall per idle transition and a fault per page
-/// on the way back, which is why the caller only does this when the connection
-/// is actually about to wait.
+/// The allocation itself stays, which is the point — nothing here allocates or
+/// frees, so ADR 0018's per-request invariant is untouched and the pages fault
+/// back in as zeroes. It costs one syscall per idle transition, which is why
+/// the caller only does this when the connection is about to wait.
 ///
 /// Does nothing unless both buffers are empty. A pipelined request already
 /// sitting in the read buffer is live data, and so is a response that has not
@@ -923,18 +914,15 @@ pub fn releaseIdlePages(in: *std.Io.Reader, out: *std.Io.Writer) void {
 /// Hand back the pages behind a buffer that is not the connection's.
 ///
 /// A WebSocket's message ceiling is a buffer the *handler* declared, usually on
-/// its own stack, and a suspended fiber holds every page of its stack that it
-/// ever touched ([ADR 0063](../docs/adr/0063-a-handlers-stack-is-per-connection.md)).
-/// So a socket that once received a 60 KiB message held 60 KiB for as long as
-/// it stayed open, measured at 74,809 bytes per idle connection against 13,375
-/// for the same socket that never saw one.
+/// its own stack, and a suspended fiber holds every page it ever touched
+/// ([ADR 0063](../docs/adr/0063-a-handlers-stack-is-per-connection.md)) — a
+/// socket that once received a 60 KiB message measured 74,809 bytes idle
+/// against 13,375 for one that never saw one.
 ///
-/// The bounds are exact rather than guessed, which is the whole reason this is
-/// allowed to exist: `receive` is *handed* the slice, so there is no arithmetic
-/// from a stack's limit that could run one page into a neighbouring fiber's
-/// live stack. Aligned inward, so a 4 KiB buffer that straddles two pages
-/// covers no whole page and nothing happens — which is the right answer, since
-/// the case worth paying a syscall for is the big one.
+/// **The bounds are exact rather than guessed**, which is why this is allowed
+/// to exist: `receive` is *handed* the slice, so no arithmetic off a stack
+/// limit can run into a neighbouring fiber's live stack. Aligned inward, so a
+/// buffer that straddles two pages covers no whole page and nothing happens.
 ///
 /// The caller must be done with the bytes. `Socket.receive` does this only when
 /// it has no message half-collected and is about to park, at which point the

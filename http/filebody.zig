@@ -32,7 +32,7 @@ const builtin = @import("builtin");
 
 const bulkhead = @import("bulkhead.zig");
 const fail = @import("fail.zig");
-const typed = @import("typed.zig");
+const headers_mod = @import("headers.zig");
 const Ctx = @import("ctx.zig").Ctx;
 
 /// The declaration a `FileBody` carries, so the compile-time engine can tell
@@ -101,7 +101,7 @@ pub const FileBody = struct {
     /// the only answer: `inline` with a filename is what a PDF opening in a
     /// browser tab wants, and a field called `download_as` could only ever
     /// say one of the two.
-    headers: typed.Headers = .{},
+    headers: headers_mod.Headers = .{},
 };
 
 /// Whether `T` is a file answer, for the compile-time engine.
@@ -240,7 +240,7 @@ fn refuse(c: *Ctx, wrong: Wrong) fail.Error {
             "name {s} — so nothing was opened and the answer is a 404. A name reaching " ++
             "nilo comes from the application, so this is a request value that arrived " ++
             "somewhere unchecked.",
-        .{ @tagName(c.method), c._path, wrong.why() },
+        .{ @tagName(c.method), c.path().view(), wrong.why() },
     );
     return notThere(c);
 }
@@ -248,7 +248,7 @@ fn refuse(c: *Ctx, wrong: Wrong) fail.Error {
 /// The 404 all three ways of not having a file share, word for word — the
 /// same sentence `typed.sendValue` writes when a handler returns null.
 fn notThere(c: *Ctx) fail.Error {
-    return fail.notFound("there is no {s}", .{c._path});
+    return fail.notFound("there is no {s}", .{c.path().view()});
 }
 
 // ---- tests ----
@@ -256,6 +256,7 @@ fn notThere(c: *Ctx) fail.Error {
 const testing = std.testing;
 
 const App = @import("app.zig").App;
+const typed = @import("typed.zig");
 const openapi = @import("openapi.zig");
 const nilo_testing = @import("testing.zig");
 

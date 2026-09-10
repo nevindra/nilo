@@ -31,8 +31,7 @@
 
 const std = @import("std");
 const Ctx = @import("ctx.zig").Ctx;
-const http1 = @import("http1.zig");
-const names = @import("names.zig");
+const naming = @import("names.zig");
 const bulkhead = @import("bulkhead.zig");
 
 /// The latency boundaries a server gets without asking, in microseconds.
@@ -452,7 +451,7 @@ pub fn check(comptime options: Options) void {
 pub fn checkExposed(comptime name: []const u8, comptime P: type) void {
     comptime {
         if (P != *Counter and P != *const Counter) @compileError(
-            "nilo: app.expose(\"" ++ name ++ "\", …) was given a " ++ names.of(P) ++
+            "nilo: app.expose(\"" ++ name ++ "\", …) was given a " ++ naming.of(P) ++
                 ", and a number that handlers on several threads count on has to be an " ++
                 "atomic one.\n  Declare it `var " ++ name ++
                 ": std.atomic.Value(u64) = .init(0);` and pass `&" ++ name ++ "`.",

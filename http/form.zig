@@ -108,25 +108,18 @@ pub const Upload = struct {
     /// The `Dir` is a service opened once at startup, the same one a
     /// `FileBody` is handed to serve out of.
     ///
-    /// **`name` is yours to choose and `filename` is the client's**, which is
-    /// the distinction this exists to make hard to get wrong. A browser sends
-    /// whatever the machine it came from called the file and a stranger sends
-    /// whatever they like — `../../etc/cron.d/anything`, a NUL the kernel
-    /// truncates at, a drive letter on Windows. Handing `filename` straight in
-    /// is `error.NameNotAllowed` rather than a path resolved against the
-    /// directory, by the same check `sendFile` makes on the way out
+    /// **`name` is yours to choose and `filename` is the client's.** Handing
+    /// `filename` straight in is `error.NameNotAllowed`, not a path resolved
+    /// against the directory
     /// ([ADR 0123](../docs/adr/0123-a-file-is-written-by-the-engine.md)).
     ///
-    /// **The file is replaced, or it is not touched.** The bytes go to a
-    /// temporary name beside it and one rename puts them in place, so another
-    /// request serving that same name — through `sendFile`, out of the same
-    /// `nilo.Dir` — reads the old file or the new one and never the truncated
-    /// one that an open-and-write leaves on the disk while it writes.
+    /// **The file is replaced, or it is not touched.** A temporary name beside
+    /// it and one rename, so a request serving that same name reads the old
+    /// file or the new one and never a half-written one.
     ///
-    /// The fiber parks for the write and the executor thread goes on serving
-    /// every other connection it holds. Nothing is buffered, because the bytes
-    /// are already here: one write of `len()` bytes, and no buffer on a stack
-    /// the connection would then hold (ADR 0063).
+    /// The fiber parks for the write and its thread goes on serving. Nothing
+    /// is buffered — one write of `len()` bytes, and no buffer on a stack the
+    /// connection would then hold (ADR 0063).
     pub fn saveTo(self: Upload, dir: bulkhead.Dir, name: []const u8) !void {
         if (filebody.checkName(name) != null) return error.NameNotAllowed;
         try dir.writeFileAtomic(name, self.bytes.view());

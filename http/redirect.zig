@@ -22,9 +22,8 @@
 //! are, so building one in the request arena — or on the stack — is safe.
 
 const std = @import("std");
-const naming = @import("names.zig");
 
-const typed = @import("typed.zig");
+const headers_mod = @import("headers.zig");
 
 /// The declaration a `Redirect` carries, so the compile-time engine can tell
 /// one from an ordinary return value. Its value is the status.
@@ -57,7 +56,7 @@ pub fn Redirect(comptime status: u16) type {
 
         /// Headers to send with the redirect — a `Set-Cookie`, usually,
         /// which is how a sign-in answers: set the session and send them on.
-        headers: typed.Headers = .{},
+        headers: headers_mod.Headers = .{},
 
         /// The redirect itself. Written as a decl literal at the return, so
         /// the status stays in the signature where the document can read it:
@@ -76,7 +75,7 @@ pub fn Redirect(comptime status: u16) type {
         /// ```zig
         /// return .with("/welcome", .of(&.{.{ .name = "Set-Cookie", .value = session }}));
         /// ```
-        pub fn with(location: []const u8, headers: typed.Headers) Self {
+        pub fn with(location: []const u8, headers: headers_mod.Headers) Self {
             return .{ .location = location, .headers = headers };
         }
     };

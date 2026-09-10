@@ -15,7 +15,7 @@ const Ctx = @import("ctx.zig").Ctx;
 const mw = @import("middleware.zig");
 const fail = @import("fail.zig");
 const bulkhead = @import("bulkhead.zig");
-const json = @import("json.zig");
+const json_mod = @import("json.zig");
 
 /// How much of a line is written before it is handed to `std.log`. A path is
 /// the long part and a request head bounds it; past this the line is cut
@@ -79,12 +79,12 @@ pub fn with(comptime options: Options) mw.Middleware {
                 // would have mapped to. A WebSocket handler failing after
                 // its 101, or a stream failing mid-body, used to be logged
                 // as a 500 nobody sent.
-                const status = if (c._sent) c._status else statusOf(err);
+                const status = c.answered() orelse statusOf(err);
                 log(c, status, microsSince(started), nameOf(err));
                 return err;
             };
 
-            log(c, c._status, microsSince(started), null);
+            log(c, c.answered() orelse 0, microsSince(started), null);
         }
 
         /// `noinline` for the reason
@@ -153,7 +153,7 @@ fn writeLine(
     err_name: ?[]const u8,
 ) !void {
     const method = @tagName(c.method);
-    const path = c._path;
+    const path = c.path().view();
 
     switch (options.format) {
         .text => {
@@ -165,17 +165,17 @@ fn writeLine(
         // through the one escaper the response bodies use (`json.zig`).
         .json => {
             try w.writeAll("{\"method\":");
-            try json.writeString(w, method);
+            try json_mod.writeString(w, method);
             try w.writeAll(",\"path\":");
-            try json.writeString(w, path);
+            try json_mod.writeString(w, path);
             try w.print(",\"status\":{d},\"us\":{d}", .{ status, took });
             if (err_name) |name| {
                 try w.writeAll(",\"error\":");
-                try json.writeString(w, name);
+                try json_mod.writeString(w, name);
             }
             if (options.request_id) {
                 try w.writeAll(",\"request_id\":");
-                try json.writeString(w, c.requestId().view());
+                try json_mod.writeString(w, c.requestId().view());
             }
             try w.writeByte('}');
         },

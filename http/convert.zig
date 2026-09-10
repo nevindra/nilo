@@ -168,18 +168,11 @@ fn wrongParse(comptime T: type, comptime wrong: []const u8) noreturn {
 /// filled from a request. Answering here rather than at each call site is
 /// what keeps `Query(T)` and `Form(T)` agreeing on what a field may be.
 ///
-/// **A type that parses itself is on this list**, which it was not for two
-/// releases ([ADR 0158](../docs/adr/0158-one-arrival-one-answer.md)). The gap
-/// used to be argued as where `nilo_parse` stops — it makes a type a path
-/// param (ADR 0142), and a path param does not come through here — and the
-/// argument was about the mechanism rather than about the text: `/deals/:id`
-/// read a `sql.Uuid` and `?actor=<uuid>` refused one, off the same request
-/// line, for the same type. One arrival cannot mean two things.
-///
-/// The concern the old wording raised was the JSON body, and it answers
-/// itself: `std.json` fills a body, not this file. What this decides is a
-/// `Query(T)` and a `Form(T)`, both of which reach `tryConvert` — where the
-/// case has been handled since ADR 0142, ahead of its own switch.
+/// **A type that parses itself is on this list**, because one arrival cannot
+/// mean two things: `/deals/:id` and `?actor=<uuid>` read the same type off
+/// the same request line
+/// ([ADR 0158](../docs/adr/0158-one-arrival-one-answer.md)). A JSON body is
+/// not this file's — `std.json` fills that.
 pub fn convertible(comptime T: type) bool {
     const Inner = switch (@typeInfo(T)) {
         .optional => |o| o.child,

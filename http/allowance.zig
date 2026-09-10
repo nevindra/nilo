@@ -816,7 +816,7 @@ fn checkCounts(comptime o: anytype) void {
 
 const testing = std.testing;
 const App = @import("app.zig").App;
-const test_client = @import("testing.zig");
+const nilo_testing = @import("testing.zig");
 
 test "the table's arithmetic: a window that slides rather than resetting" {
     const o: Options = .{ .per_window = 4, .window_s = 60 };
@@ -978,7 +978,7 @@ test "a client past its allowance is refused, and the next client is not" {
     try app.use(with(.{ .per_window = 3, .window_s = 60, .name = "test-basic" }));
     try app.get("/thing", allowanceOk);
 
-    var client = try test_client.Client.init(testing.allocator, .{ .client_address = "203.0.113.7" });
+    var client = try nilo_testing.Client.init(testing.allocator, .{ .client_address = "203.0.113.7" });
     defer client.deinit();
 
     for (0..3) |_| {
@@ -992,7 +992,7 @@ test "a client past its allowance is refused, and the next client is not" {
     try testing.expect(std.mem.indexOf(u8, refused.body, "too many requests") != null);
 
     // Somebody else's allowance is their own.
-    var neighbour = try test_client.Client.init(testing.allocator, .{ .client_address = "198.51.100.4" });
+    var neighbour = try nilo_testing.Client.init(testing.allocator, .{ .client_address = "198.51.100.4" });
     defer neighbour.deinit();
     try testing.expectEqual(@as(u16, 200), (try neighbour.get(&app, "/thing")).status);
 }
@@ -1019,7 +1019,7 @@ test "a keyed allowance counts against the account, not the address" {
     // Two accounts behind one office NAT. Keyed on the address they would
     // share an allowance neither of them spent; keyed on the account they do
     // not, which is the whole point.
-    var office = try test_client.Client.init(testing.allocator, .{ .client_address = "203.0.113.7" });
+    var office = try nilo_testing.Client.init(testing.allocator, .{ .client_address = "203.0.113.7" });
     defer office.deinit();
 
     try office.setHeader("X-Account", "acct-alice");
@@ -1033,7 +1033,7 @@ test "a keyed allowance counts against the account, not the address" {
 
     // And the other way round: one account on a second machine is still one
     // account, where an address-keyed allowance would have given it two.
-    var laptop = try test_client.Client.init(testing.allocator, .{ .client_address = "198.51.100.4" });
+    var laptop = try nilo_testing.Client.init(testing.allocator, .{ .client_address = "198.51.100.4" });
     defer laptop.deinit();
     try laptop.setHeader("X-Account", "acct-alice");
     try testing.expectEqual(@as(u16, 429), (try laptop.get(&app, "/thing")).status);
@@ -1056,7 +1056,7 @@ test "a request with no key is skipped or refused, and the caller says which" {
     }));
     try lenient.get("/thing", allowanceOk);
 
-    var anonymous = try test_client.Client.init(testing.allocator, .{ .client_address = "203.0.113.7" });
+    var anonymous = try nilo_testing.Client.init(testing.allocator, .{ .client_address = "203.0.113.7" });
     defer anonymous.deinit();
     for (0..5) |_| {
         try testing.expectEqual(@as(u16, 200), (try anonymous.get(&lenient, "/thing")).status);
@@ -1141,7 +1141,7 @@ test "a route the allowance does not cover is not counted" {
     try app.get("/api/thing", allowanceOk);
     try app.get("/health", allowanceOk);
 
-    var client = try test_client.Client.init(testing.allocator, .{ .client_address = "203.0.113.8" });
+    var client = try nilo_testing.Client.init(testing.allocator, .{ .client_address = "203.0.113.8" });
     defer client.deinit();
 
     try testing.expectEqual(@as(u16, 200), (try client.get(&app, "/api/thing")).status);

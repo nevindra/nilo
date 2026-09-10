@@ -147,23 +147,15 @@ pub const Options = struct {
 /// which is the question `.navigations` asks before it answers with one
 /// (ADR 0109).
 ///
-/// Two tests, in the order a client makes them answerable. What a browser
-/// sends when somebody types a URL or clicks a link is an `Accept` naming
-/// `text/html`, and no asset request has one: a `<script src>`, a `<link>`
-/// and an `<img>` all send `*/*`, and a `fetch()` for JSON usually says so.
-/// That is the whole of the first test and it is exact.
+/// Two tests, in the order a client makes them answerable. First the exact
+/// one: a browser opening a page sends an `Accept` naming `text/html`, and no
+/// asset request does — `<script src>`, `<link>` and `<img>` all send `*/*`.
+/// Then, for a client that expressed no preference, the path: a last segment
+/// with an extension is an asset, one without is a deep link. That keeps
+/// `curl /users/42` on the page while `/app.abc123.js` becomes a 404.
 ///
-/// The second is for a client that expressed no preference — `curl`, a
-/// health checker, an old crawler — where the path is all there is to go on.
-/// A last segment with an extension in it is an asset, and one without is a
-/// deep link, which is the rule that keeps `curl /users/42` answering the
-/// page it answered before while `/app.abc123.js` becomes the 404 it should
-/// always have been.
-///
-/// What it does not catch is a `fetch()` that sends `*/*` to an extensionless
-/// path. That request is indistinguishable from a deep link at this layer and
-/// gets the page, exactly as it did before — said out loud in the guide
-/// rather than guessed at.
+/// What it cannot catch is a `fetch()` sending `*/*` to an extensionless path.
+/// That gets the page, and the guide says so rather than leaving it guessed.
 pub fn navigational(path: []const u8, accept_header: ?[]const u8) bool {
     return switch (accept_mod.asks(accept_header, "text/html")) {
         .named => true,
@@ -1033,24 +1025,12 @@ pub fn etagMatches(if_none_match: []const u8, etag: []const u8) bool {
 /// Whether an `If-Range` header matches `etag`, by the **strong** comparison
 /// RFC 9110 §13.1.5 requires there (ADR 0094).
 ///
-/// Three differences from `etagMatches`, and each of them is the difference
-/// between resuming a download and corrupting one.
-///
-/// **A `W/` tag never matches.** A weak validator means "close enough to reuse,
-/// not byte for byte the same", and byte for byte is exactly the claim a
-/// resumed download acts on: the client is about to staple these bytes onto the
-/// prefix it already has. nilo only ever writes strong tags
-/// (`etagForSpilled` says why), so reaching this takes a client that wraps a tag
-/// it was given — but the rule belongs in the comparison rather than in the
-/// luck of who is calling it.
-///
-/// **`*` never matches.** It means "any current representation", which is a
-/// useful thing to say about a conditional request and says nothing at all
-/// about whether this is the same file. Honouring it lets a bare `*` stand in
-/// for a comparison that never happened.
-///
-/// **A single tag, not a list.** `If-Range` carries one validator (RFC 9110
-/// §13.1.5), where `If-None-Match` carries a list.
+/// Three differences from `etagMatches`, each of them the difference between
+/// resuming a download and corrupting one. **A `W/` tag never matches** — a
+/// weak validator does not promise byte for byte, which is the claim a resumed
+/// download acts on. **`*` never matches**, or a bare `*` stands in for a
+/// comparison that never happened. **A single tag, not a list**: `If-Range`
+/// carries one validator where `If-None-Match` carries a list.
 ///
 /// An empty `etag` matches nothing, so a file with no tag takes the safe
 /// answer without its caller having to remember to check.

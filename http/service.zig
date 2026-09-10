@@ -13,7 +13,7 @@
 //! request is served, rather than at three in the morning.
 
 const std = @import("std");
-const names = @import("names.zig");
+const naming = @import("names.zig");
 
 const Limits = @import("nilo_core").Limits;
 
@@ -80,11 +80,11 @@ pub const Registry = struct {
 
         const params = @typeInfo(@TypeOf(T.nilo_start)).@"fn".params;
         if (params.len != 2 and params.len != 3) @compileError(
-            "nilo: " ++ names.of(T) ++ ".nilo_start takes " ++
+            "nilo: " ++ naming.of(T) ++ ".nilo_start takes " ++
                 std.fmt.comptimePrint("{d}", .{params.len}) ++
                 " parameters, and it has to take 2 or 3.\n" ++
-                "  fn nilo_start(self: *" ++ names.of(T) ++ ", io: std.Io) !void\n" ++
-                "  fn nilo_start(self: *" ++ names.of(T) ++ ", io: std.Io, limits: nilo_core.Limits) !void\n" ++
+                "  fn nilo_start(self: *" ++ naming.of(T) ++ ", io: std.Io) !void\n" ++
+                "  fn nilo_start(self: *" ++ naming.of(T) ++ ", io: std.Io, limits: nilo_core.Limits) !void\n" ++
                 "  The second form is for a service that bounds an outbound call with a deadline.",
         );
 
@@ -114,30 +114,30 @@ pub const Registry = struct {
 
         const info = @typeInfo(@TypeOf(T.nilo_stop));
         if (info != .@"fn") @compileError(
-            "nilo: " ++ names.of(T) ++ ".nilo_stop is not a function, and it has to be one.\n" ++
-                "  fn nilo_stop(self: *" ++ names.of(T) ++ ") void",
+            "nilo: " ++ naming.of(T) ++ ".nilo_stop is not a function, and it has to be one.\n" ++
+                "  fn nilo_stop(self: *" ++ naming.of(T) ++ ") void",
         );
         const f = info.@"fn";
         if (f.params.len != 1) @compileError(
-            "nilo: " ++ names.of(T) ++ ".nilo_stop takes " ++
+            "nilo: " ++ naming.of(T) ++ ".nilo_stop takes " ++
                 std.fmt.comptimePrint("{d}", .{f.params.len}) ++
                 " parameters, and it has to take 1.\n" ++
-                "  fn nilo_stop(self: *" ++ names.of(T) ++ ") void\n" ++
+                "  fn nilo_stop(self: *" ++ naming.of(T) ++ ") void\n" ++
                 "  It runs on the way out of `listen()`, so there is nothing else to hand it.",
         );
         if (f.params[0].type != *T) @compileError(
-            "nilo: " ++ names.of(T) ++ ".nilo_stop takes " ++
-                names.of(f.params[0].type orelse anyopaque) ++
-                ", and it has to take `*" ++ names.of(T) ++ "`.\n" ++
+            "nilo: " ++ naming.of(T) ++ ".nilo_stop takes " ++
+                naming.of(f.params[0].type orelse anyopaque) ++
+                ", and it has to take `*" ++ naming.of(T) ++ "`.\n" ++
                 "  A stop hook puts something down, so it needs the service it is putting down.",
         );
         // The type is deliberately not printed. An inferred error union has
         // no readable name — `names.of` renders it as the `@typeInfo` chain
         // that produced it — and naming it adds nothing the reader needs.
         if (f.return_type != void) @compileError(
-            "nilo: " ++ names.of(T) ++ ".nilo_stop returns something other than `void`, and " ++
+            "nilo: " ++ naming.of(T) ++ ".nilo_stop returns something other than `void`, and " ++
                 "a stop hook has to return `void`.\n" ++
-                "  fn nilo_stop(self: *" ++ names.of(T) ++ ") void\n" ++
+                "  fn nilo_stop(self: *" ++ naming.of(T) ++ ") void\n" ++
                 "  It runs from a `defer` on the way out of `listen()`, where there is nobody " ++
                 "left to hand a failure to. Log what went wrong and carry on.",
         );
@@ -169,17 +169,17 @@ pub const Registry = struct {
         const info = switch (@typeInfo(P)) {
             .pointer => |p| p,
             else => @compileError(
-                "nilo: app.provide() wants a pointer to a service, not " ++ names.of(P) ++
+                "nilo: app.provide() wants a pointer to a service, not " ++ naming.of(P) ++
                     ".\n  Services outlive the App, so what gets registered is a pointer to one: " ++
                     "`app.provide(&db)`.",
             ),
         };
         if (info.size != .one) @compileError(
-            "nilo: app.provide() wants a pointer to a single value, not " ++ names.of(P) ++ ".",
+            "nilo: app.provide() wants a pointer to a single value, not " ++ naming.of(P) ++ ".",
         );
 
         if (info.is_const and @hasDecl(info.child, "nilo_start")) @compileError(
-            "nilo: " ++ names.of(info.child) ++ " has a `nilo_start`, so it finishes building " ++
+            "nilo: " ++ naming.of(info.child) ++ " has a `nilo_start`, so it finishes building " ++
                 "itself when the server starts — and it was provided as `*const`, which " ++
                 "leaves it nothing to build into.\n  Provide it as `app.provide(&thing)` " ++
                 "with a `var`.",

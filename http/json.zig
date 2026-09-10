@@ -318,10 +318,9 @@ fn writeValue(comptime T: type, w: *std.Io.Writer, value: T) std.Io.Writer.Error
 /// `std.json` asks `utf8ValidateSlice` first and falls back to `[104,101]`, so
 /// that is what this asks and that is what this writes.
 ///
-/// The cost is the validation, and it is the same function `std.json` calls:
-/// a 32-byte-at-a-time scan that stops at the first byte over 0x7f, and the
-/// real UTF-8 walk only from there. Text a handler actually returns is ASCII
-/// or close to it, so the common case is one vector pass.
+/// The cost is the validation, the same function `std.json` calls: a
+/// 32-byte-at-a-time scan that only walks UTF-8 past the first byte over 0x7f,
+/// so ASCII is one vector pass.
 fn writeText(w: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
     if (!std.unicode.utf8ValidateSlice(text)) return writeByteArray(w, text);
     return writeString(w, text);

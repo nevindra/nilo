@@ -22,8 +22,8 @@ const websocket = @import("websocket.zig");
 const room_mod = @import("room.zig");
 const stream_mod = @import("stream.zig");
 const body_mod = @import("body.zig");
-const range = @import("range.zig");
-const router_mod = @import("router.zig");
+const range_mod = @import("range.zig");
+const router = @import("router.zig");
 const service_mod = @import("service.zig");
 
 const rounds = 300_000;
@@ -306,7 +306,7 @@ fn oneScale(gpa: std.mem.Allocator, shape: Shape, n: usize) !u64 {
         gpa.free(patterns);
     }
 
-    var r = router_mod.Router.init(gpa);
+    var r = router.Router.init(gpa);
     defer r.deinit();
 
     for (0..n) |i| {
@@ -503,7 +503,7 @@ fn longLived(gpa: std.mem.Allocator) !void {
 
     // Two things every request pays that no benchmark has ever looked at.
     t = clock();
-    for (0..rounds) |_| sink += @intFromBool(range.parse("bytes=100-200", 1000, true) != .whole);
+    for (0..rounds) |_| sink += @intFromBool(range_mod.parse("bytes=100-200", 1000, true) != .whole);
     const range_ns = (clock() - t) / rounds;
 
     ops("range: parse one", range_ns, null);

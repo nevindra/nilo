@@ -56,7 +56,6 @@
 //! see. Past the cap a buffer is returned to the allocator.
 
 const std = @import("std");
-const builtin = @import("builtin");
 
 /// How many **bytes** of spare buffer one executor keeps.
 ///

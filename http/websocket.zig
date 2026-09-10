@@ -41,7 +41,7 @@ const bulkhead = @import("bulkhead.zig");
 const watchdog = @import("watchdog.zig");
 const http1 = @import("http1.zig");
 const json_mod = @import("json.zig");
-const names = @import("names.zig");
+const naming = @import("names.zig");
 const room_mod = @import("room.zig");
 const scratch_mod = @import("scratch.zig");
 
@@ -223,7 +223,7 @@ pub fn checkLoop(comptime loop: anytype, comptime State: type) void {
     const info = switch (@typeInfo(Loop)) {
         .@"fn" => |f| f,
         else => @compileError("nilo: a WebSocket route runs a function on the socket, and " ++
-            names.of(Loop) ++ " is not one"),
+            naming.of(Loop) ++ " is not one"),
     };
     const wants: usize = if (State == void) 1 else 2;
     if (info.params.len != wants) {
@@ -234,27 +234,27 @@ pub fn checkLoop(comptime loop: anytype, comptime State: type) void {
         @compileError("nilo: a WebSocket loop takes " ++ (if (State == void)
             "*Socket and nothing else, because upgrade was given no state"
         else
-            "*Socket and the state passed to upgrade (" ++ names.of(State) ++ ")") ++
+            "*Socket and the state passed to upgrade (" ++ naming.of(State) ++ ")") ++
             "; this one takes " ++ num(info.params.len) ++ " argument" ++
             (if (info.params.len == 1) "" else "s"));
     }
     if (info.params[0].type != *Socket) {
         @compileError("nilo: a WebSocket loop's first argument is *nilo.Socket, not " ++
-            names.of(info.params[0].type orelse anyopaque));
+            naming.of(info.params[0].type orelse anyopaque));
     }
     if (State != void and info.params[1].type != State) {
-        @compileError("nilo: upgrade was given state of type " ++ names.of(State) ++
+        @compileError("nilo: upgrade was given state of type " ++ naming.of(State) ++
             ", and the loop's second argument is " ++
-            names.of(info.params[1].type orelse anyopaque));
+            naming.of(info.params[1].type orelse anyopaque));
     }
     if (@sizeOf(State) > state_max) {
         @compileError("nilo: a WebSocket loop may carry " ++ num(state_max) ++
-            " bytes of state and " ++ names.of(State) ++ " is " ++ num(@sizeOf(State)) ++
+            " bytes of state and " ++ naming.of(State) ++ " is " ++ num(@sizeOf(State)) ++
             "; put it in the request arena and carry a pointer to it");
     }
     if (@alignOf(State) > state_align) {
         @compileError("nilo: a WebSocket loop's state is aligned to " ++ num(state_align) ++
-            " bytes and " ++ names.of(State) ++ " needs " ++ num(@alignOf(State)));
+            " bytes and " ++ naming.of(State) ++ " needs " ++ num(@alignOf(State)));
     }
 }
 

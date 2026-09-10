@@ -15,11 +15,11 @@
 
 const std = @import("std");
 const http1 = @import("http1.zig");
-const middleware = @import("middleware.zig");
+const mw = @import("middleware.zig");
 const Ctx = @import("ctx.zig").Ctx;
 
-pub const CtxHandler = middleware.CtxHandler;
-pub const Middleware = middleware.Middleware;
+pub const CtxHandler = mw.CtxHandler;
+pub const Middleware = mw.Middleware;
 
 pub const max_params = 8;
 

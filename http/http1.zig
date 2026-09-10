@@ -186,29 +186,19 @@ const sized_body_step = 4096;
 /// Read a body of an announced length into one contiguous slice from `gpa`,
 /// **taking the memory as the bytes arrive rather than as they are promised.**
 ///
-/// `Content-Length` is a number a stranger typed. Committing it up front is
-/// what let a client announce a megabyte, send one byte a minute and hold a
-/// megabyte of the connection's arena for as long as it kept trickling —
-/// `body_timeout_ms` is a limit per *read* and not for the body, deliberately
-/// ([ADR 0023](../docs/adr/0023-a-deadline-belongs-to-an-operation-not-to-a-request.md)),
-/// so a client answering inside every window never trips it. Times the default
-/// `max_connections` of 10,000 that is ten gigabytes committed on the strength
-/// of a header.
+/// `Content-Length` is a number a stranger typed, and committing it up front
+/// let one connection hold a megabyte on the strength of a header — times the
+/// default `max_connections` of 10,000, ten gigabytes
+/// ([ADR 0023](../docs/adr/0023-a-deadline-belongs-to-an-operation-not-to-a-request.md)
+/// says why a per-read deadline does not catch it).
 ///
-/// **One page of proof, then the announcement.** A client gets a page of the
-/// arena for nothing; the rest is committed only once it has delivered that. So
-/// the amplification a stranger can buy goes from unbounded to 256× at the
-/// default `max_body`, and a connection that opens, announces and says nothing
-/// holds a page rather than a megabyte.
+/// **One page of proof, then the announcement.** A client gets a page for
+/// nothing and the rest only once it has delivered that, which caps the
+/// amplification at 256× the default `max_body`.
 ///
-/// **Two allocations rather than a growth loop, and that is a measurement
-/// rather than taste.** Reading in fixed 16 KiB steps into a `std.ArrayList`
-/// costs 35% of a 64 KiB body and 45% of a megabyte; explicit doubling saves
-/// almost none of that. The cost is not the copying — it is that every growth
-/// past the retained arena block is a fresh node from the page allocator, and
-/// on a two-core box an `mmap`/`munmap` pair with the TLB shootdown behind it
-/// is worth more than the whole rest of the request. Two allocations is one
-/// more than before and the shape is otherwise unchanged.
+/// **Two allocations rather than a growth loop**, because every growth past
+/// the retained arena block is a fresh `mmap`/`munmap` pair — 35% of a 64 KiB
+/// body, 45% of a megabyte.
 /// [`bench/result/http.md`](../bench/result/http.md) has all four runs.
 ///
 /// `gpa` is meant to be the request arena, on the same terms as
@@ -317,27 +307,12 @@ pub fn isReservedHeader(name: []const u8) bool {
 /// Headers a response may legitimately carry more than one of, and so the
 /// ones `Ctx.setHeader` must not treat as a replacement.
 ///
-/// There are two, for two different reasons.
-///
-/// **`Set-Cookie`, because folding is forbidden.** RFC 6265 §3 says a server
-/// sending two cookies has to send two `Set-Cookie` lines, and that they may
-/// not be folded into one comma-separated value the way every other repeatable
-/// header may. (A cookie's `Expires` attribute contains a comma. That is how it
-/// came to be true.) So "last one wins" would mean setting a session cookie and
-/// a preference cookie silently delivered only the second.
-///
-/// **`Vary`, because two layers each name their own axis** (ADR 0089). Last one
-/// wins is right when a second call is somebody *changing their mind*, and that
-/// is what it looks like from inside one function. It is not what happens here:
-/// the CORS middleware says `Vary: Origin` because the response depends on the
-/// origin, and then a gzipped static file says `Vary: Accept-Encoding` because
-/// it also depends on that — two independent facts about one response, and
-/// replacing threw the first away. A shared cache reading the result is then
-/// entitled to hand one origin's response to another. Unlike `Set-Cookie`,
-/// `Vary` is a list field (RFC 9110 §12.5.5), and RFC 9110 §5.3 has a
-/// recipient join repeated field lines with commas — so `Vary: Origin` plus
-/// `Vary: Accept-Encoding` *is* `Vary: Origin, Accept-Encoding`, and two lines
-/// is the spelling that costs no allocation.
+/// Two, for two reasons. `Set-Cookie` may not be folded into one
+/// comma-separated line at all (RFC 6265 §3), so replacing would deliver only
+/// the last cookie set. `Vary` may be folded, but two layers each name their
+/// own axis — CORS writes `Vary: Origin` and a gzipped file writes
+/// `Vary: Accept-Encoding` — and replacing throws the first away, which lets a
+/// shared cache hand one origin's response to another (ADR 0089).
 pub fn repeats(name: []const u8) bool {
     return std.ascii.eqlIgnoreCase(name, "set-cookie") or
         std.ascii.eqlIgnoreCase(name, "vary");
@@ -369,22 +344,14 @@ pub fn headerNameOk(name: []const u8) bool {
 /// *second header*, and a value carrying two produces a second **response**.
 /// That is the same shape `cookie.check` refuses a `;` for, one layer up.
 ///
-/// `obs-text` — everything from 0x80 — is allowed rather than refused. It is
-/// deprecated and it is also what a UTF-8 filename in a `Content-Disposition`
-/// is made of, and it cannot terminate a line, which is the only thing being
-/// defended here.
+/// `obs-text` — everything from 0x80 — is allowed: it is what a UTF-8 filename
+/// in a `Content-Disposition` is made of, and it cannot terminate a line. NUL
+/// and DEL cannot, NUL because it ends the string for anything downstream
+/// written in C.
 ///
-/// NUL and DEL cannot appear either, and NUL is the one with a consequence
-/// past this hop: it ends the string for anything downstream written in C,
-/// which makes "the header nilo sent" and "the header the proxy read" two
-/// different headers.
-///
-/// The shape all of this takes in an application is a `Location` built out of
-/// request data. `?next=/x%0d%0aSet-Cookie:%20admin=1` sets a cookie the
-/// application never wrote, and there is no line in the application where that
-/// cookie is set. nilo refused these bytes in two places already —
-/// `Ctx.requestId` for an id a client sent, `Cookie.check` for a cookie value
-/// — and what was left unguarded was the API an application actually writes.
+/// The shape this takes in an application is a `Location` built out of request
+/// data: `?next=/x%0d%0aSet-Cookie:%20admin=1` sets a cookie no line of the
+/// application ever wrote.
 pub fn headerValueOk(value: []const u8) bool {
     for (value) |ch| {
         if (ch == ' ' or ch == '\t') continue;
@@ -583,20 +550,15 @@ pub fn parseHead(head: []const u8, r: *Request) ParseError!void {
 /// asked once however the parse got here.
 ///
 /// There is one such rule and it is `Host`. **RFC 9112 §3.2 requires a 400 for
-/// an HTTP/1.1 request that carries none**, and the front end nilo assumes is
-/// there (ADR 0028) refuses one too — so serving it is nilo agreeing to answer
-/// a request nobody else agreed to, which is the shape ADR 0090 is about. It
-/// also matters one layer up: a `Host` a handler reads back into a `Location`
-/// or a link used to be text no layer had checked, and `Ctx.handshake` now
-/// compares an `Origin` against it.
+/// an HTTP/1.1 request that carries none**, and serving one anyway is nilo
+/// agreeing to answer a request no front end would (ADR 0101). It matters a
+/// layer up too: `Ctx.handshake` compares an `Origin` against this.
 ///
-/// HTTP/1.0 is left alone. `Host` was not required until 1.1, and a request
-/// that does not claim to speak it is not held to it.
+/// HTTP/1.0 is left alone — `Host` was not required until 1.1.
 ///
 /// An absolute-form target answers the rule on its own, because it **is** the
-/// authority — RFC 9112 §3.2 has an origin server ignore the header in favour
-/// of it (ADR 0120). A `Host` beside one is still read and a second one is
-/// still a 400; what changes is only that the request line can answer for it.
+/// authority (ADR 0120). A `Host` beside one is still read and a second one is
+/// still a 400.
 fn finish(r: *const Request) ParseError!void {
     if (r.minor_version == 1 and !r.has_host and r.authority.len == 0) return error.BadHeader;
     // Asked here rather than in the header arm, so the answer does not depend

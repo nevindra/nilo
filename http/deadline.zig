@@ -58,7 +58,7 @@ pub fn with(comptime ms: u32) mw.Middleware {
                 // whatever the failed read or write happened to raise. Only
                 // when nothing has gone out yet: a half-sent response cannot
                 // be taken back and turned into a 503.
-                if (c.overdue() and !c._sent) return fail.status(503, late, .{});
+                if (c.overdue() and c.answered() == null) return fail.status(503, late, .{});
                 return err;
             };
 
@@ -90,7 +90,7 @@ pub fn with(comptime ms: u32) mw.Middleware {
 const testing = std.testing;
 const App = @import("app.zig").App;
 const bulkhead = @import("bulkhead.zig");
-const test_client = @import("testing.zig");
+const nilo_testing = @import("testing.zig");
 
 fn holdFor(ms: u64) void {
     const until = bulkhead.monotonicNanos() + ms * std.time.ns_per_ms;
@@ -128,7 +128,7 @@ test "a handler that asks whether it is overdue is told, and its failure is a 50
     defer app.deinit();
     try app.with(with(10)).get("/report", overrunsAndNotices);
 
-    var client = try test_client.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
     const answer = try client.get(&app, "/report");
     try testing.expectEqual(@as(u16, 503), answer.status);
@@ -149,7 +149,7 @@ test "a handler that overruns without noticing still answers" {
     defer app.deinit();
     try app.with(with(10)).get("/report", overrunsAndDoesNot);
 
-    var client = try test_client.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
     try testing.expectEqual(@as(u16, 200), (try client.get(&app, "/report")).status);
 }
@@ -159,7 +159,7 @@ test "a handler inside its budget is not told anything" {
     defer app.deinit();
     try app.with(with(60_000)).get("/quick", insideItsBudget);
 
-    var client = try test_client.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
     try testing.expectEqual(@as(u16, 200), (try client.get(&app, "/quick")).status);
 }
@@ -169,7 +169,7 @@ test "a route with no deadline answers null, so asking is always safe" {
     defer app.deinit();
     try app.get("/quick", hasNoDeadlineAtAll);
 
-    var client = try test_client.Client.init(testing.allocator, .{});
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
     defer client.deinit();
     try testing.expectEqual(@as(u16, 200), (try client.get(&app, "/quick")).status);
 }

@@ -70,7 +70,7 @@ pub const Contents = struct {
 /// over a `Range`, and an `If-Range` that does not match turns a 206 back
 /// into a 200 rather than into a corrupt download.
 pub fn send(c: *Ctx, contents: Contents) !void {
-    std.debug.assert(!c._sent); // one request, one response
+    std.debug.assert(c.answered() == null); // one request, one response
 
     // The descriptor is this function's from here, and this is the only line
     // that gives it back — see the module comment.
@@ -148,8 +148,7 @@ fn writeBody(c: *Ctx, contents: Contents, status: u16, from: u64, len: u64) !voi
     // `pread` rather than state in the kernel.
     try reader.seekTo(from);
 
-    c._sent = true;
-    c._status = status;
+    c.markAnswered(status);
 
     // Putting the answer on the wire is nilo waiting on the client, not the
     // handler running — `Ctx.send`'s reason, and a two-gigabyte file taken
@@ -208,12 +207,12 @@ fn writeBody(c: *Ctx, contents: Contents, status: u16, from: u64, len: u64) !voi
     // the connection goes, which is the one recovery left once the head has
     // already gone out (ADR 0037).
     if (sent < len) {
-        c._force_close = true;
+        c.closeWhenDone();
         std.log.warn(
             "{s} {s} promised {d} bytes from a file and sent {d}; the file changed " ++
                 "underneath the response, so the connection is being closed rather than " ++
                 "framing a half body as a whole one",
-            .{ @tagName(c.method), c._path, len, sent },
+            .{ @tagName(c.method), c.path().view(), len, sent },
         );
     }
 }

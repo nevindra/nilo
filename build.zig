@@ -109,6 +109,46 @@ const layers = [_]Layer{
     .{ .root = "s3", .may_import = &.{ "nilo_core", "nilo_fetch", "s3_config" } },
 };
 
+/// The one layering rule `http/` can hold, and the account of why it is only
+/// one.
+///
+/// Every row in `layers` above is a module with a boundary around it. Inside
+/// `http/` there is no such stack: `app`, `ctx`, `router`, `typed`, `serve`,
+/// `wiring` and eleven more form **one strongly connected component** — each
+/// reaches each, and Zig's lazy analysis lets them. Writing a tier table over
+/// that would be writing down a hierarchy that is not there.
+///
+/// What *is* there is a boundary at its edge. Twenty-six files under `http/`
+/// name nothing in the core, which is what lets them be read on their own and
+/// several of them be run with a plain `zig test http/<file>.zig`. This step
+/// refuses the import that would pull one of them in, because that import is
+/// how the core got to seventeen in the first place.
+///
+/// **Test blocks are exempt and this step can see it**, unlike the `in_tests`
+/// lists above: an import below the file's first `test` is a test's, and a
+/// scan can find that line. `static.zig` reaches for `app.zig` there and is
+/// not refused.
+///
+/// A file leaves this list by having nothing in the core name it and by
+/// naming nothing in the core. That is the whole of the work, and the list
+/// getting shorter is the point of writing it down.
+const http_core = [_][]const u8{
+    "app",    "bound",  "ctx",      "filebody", "form",    "metrics",
+    "middleware", "openapi", "password", "resolve", "router", "sendfile",
+    "serve",  "session", "testing", "typed",   "wiring",
+};
+
+/// Files that sit **above** the core rather than below it, and so may name it.
+///
+/// The four middleware modules and the roots. A middleware is handed a `Ctx`
+/// and a `Next`, so naming `ctx.zig` and `middleware.zig` is downward for it;
+/// nothing in the core names any of them back, which is why they are not in
+/// the component.
+const http_above_core = [_][]const u8{
+    "logger", "cors",  "allowance", "deadline",
+    "http",   "behaviour", "live",  "profile", "fuzz", "fuzz_main", "test_root",
+};
+
 const Layer = struct {
     root: []const u8,
     may_import: []const []const u8,
@@ -1733,9 +1773,13 @@ const Layering = struct {
             .owner = b,
             .makeFn = make,
         }) };
-        b.step("layering", "Check that no module imports upward or sideways")
-            .dependOn(&self._step);
-        return &self._step;
+        const named = b.step("layering", "Check that no module imports upward or sideways");
+        named.dependOn(&self._step);
+        // The second half of the same question, one layer down: `http/` has no
+        // module boundaries inside it, so what it can hold is the edge of its
+        // core rather than a stack. `http_core` is the account.
+        named.dependOn(HttpCore.step(b));
+        return named;
     }
 
     _step: std.Build.Step,
@@ -1842,6 +1886,92 @@ const Layering = struct {
             }
         }
     };
+};
+
+/// The step that refuses a file outside `http/`'s core for naming one inside
+/// it. The table it reads is `http_core`, and the reason it exists is there.
+const HttpCore = struct {
+    fn step(b: *std.Build) *std.Build.Step {
+        const self = b.allocator.create(HttpCore) catch @panic("OOM");
+        self.* = .{ ._step = .init(.{
+            .id = .custom,
+            .name = "http-core",
+            .owner = b,
+            .makeFn = make,
+        }) };
+        return &self._step;
+    }
+
+    _step: std.Build.Step,
+
+    fn make(s: *std.Build.Step, _: std.Build.Step.MakeOptions) anyerror!void {
+        const b = s.owner;
+        const io = b.graph.io;
+        var refused: usize = 0;
+
+        var dir = b.build_root.handle.openDir(io, "http", .{ .iterate = true }) catch |err|
+            return s.fail("nilo: cannot read `http/`: {s}", .{@errorName(err)});
+        defer dir.close(io);
+
+        var walker = try dir.walk(b.allocator);
+        defer walker.deinit();
+
+        while (try walker.next(io)) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+
+            const name = entry.path[0 .. entry.path.len - ".zig".len];
+            if (listed(&http_core, name) or listed(&http_above_core, name)) continue;
+
+            const source = try dir.readFileAlloc(io, entry.path, b.allocator, .limited(4 << 20));
+            const tests = testsStart(source);
+
+            var at: usize = 0;
+            while (std.mem.indexOfPos(u8, source, at, "@import(\"")) |found| {
+                const from = found + "@import(\"".len;
+                const end = std.mem.indexOfScalarPos(u8, source, from, '"') orelse break;
+                at = end + 1;
+
+                if (found >= tests) continue;
+                if (Layering.notCode(source, found)) continue;
+
+                const named = source[from..end];
+                if (!std.mem.endsWith(u8, named, ".zig")) continue;
+                const bare = named[0 .. named.len - ".zig".len];
+                if (!listed(&http_core, bare)) continue;
+
+                refused += 1;
+                try s.addError("nilo: http/{s} imports `{s}` at line {d}, which is in the App's core.\n" ++
+                    "  A file outside that core stays outside it (see `http_core` in build.zig).\n" ++
+                    "  If the import is only a test's, move it below this file's first `test` block.", .{
+                    entry.path,
+                    named,
+                    std.mem.count(u8, source[0..found], "\n") + 1,
+                });
+            }
+        }
+
+        if (refused > 0) return error.MakeFailed;
+    }
+
+    /// Where the file's tests begin, or its end when it has none. A `test` at
+    /// column zero, which is what a top-level test block is.
+    fn testsStart(source: []const u8) usize {
+        var line: usize = 0;
+        while (line < source.len) {
+            const end = std.mem.indexOfScalarPos(u8, source, line, '\n') orelse source.len;
+            const text = source[line..end];
+            if (std.mem.startsWith(u8, text, "test \"") or std.mem.startsWith(u8, text, "test {"))
+                return line;
+            line = end + 1;
+        }
+        return source.len;
+    }
+
+    fn listed(of: []const []const u8, name: []const u8) bool {
+        for (of) |one| if (std.mem.eql(u8, one, name)) return true;
+        return false;
+    }
 };
 
 /// What somebody else's project downloads when it names this one.

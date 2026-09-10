@@ -11,7 +11,7 @@
 const std = @import("std");
 const body_mod = @import("body.zig");
 const bulkhead = @import("bulkhead.zig");
-const convert_mod = @import("convert.zig");
+const convert = @import("convert.zig");
 const cookie_mod = @import("cookie.zig");
 const http1 = @import("http1.zig");
 const json_mod = @import("json.zig");
@@ -316,6 +316,7 @@ pub const Ctx = struct {
         return Str.fromRequest(self._path, self._lifetime);
     }
 
+
     /// A path param from the route pattern: `/users/:id` → `param("id")`.
     /// Percent-decoded, so `/users/wati%20sari` gives `wati sari`.
     pub fn param(self: *const Ctx, name: []const u8) ?Str {
@@ -407,17 +408,12 @@ pub const Ctx = struct {
     /// while (it.next()) |h| { … }
     /// ```
     ///
-    /// `header(name)` is what almost every handler wants and this is the
-    /// other two cases. A middleware that does not know the names in advance
-    /// — a signing proxy, somebody else's tracing header, a `Forwarded`
-    /// reader — had to reach into `c._head`, which is an underscore field and
-    /// therefore nilo's to change. And a header sent **twice** was unreadable
-    /// at all, because `header` answers with the first and never says there
-    /// was a second.
+    /// The two cases `header(name)` cannot serve: a middleware that does not
+    /// know the names in advance, and a header sent **twice**, which `header`
+    /// answers the first of and never mentions the second (ADR 0107).
     ///
-    /// A wrapper over the same walk `header` does, so it costs the same
-    /// nothing: no list is built and no allocation happens, and a request
-    /// that never calls this pays for none of it.
+    /// The same walk `header` does, so it costs the same nothing — no list is
+    /// built and a request that never calls this pays for none of it.
     pub fn headers(self: *const Ctx) HeaderIterator {
         return .{
             ._inner = http1.HeaderIterator.from(self._head),
@@ -458,16 +454,10 @@ pub const Ctx = struct {
     /// while (it.next()) |q| { … }
     /// ```
     ///
-    /// `query(name)` is what almost every handler wants, and this is the case
-    /// it cannot serve: **a filter whose names are data**. `?filter[status]=
-    /// open&filter[owner]=7` has no list of names to ask for, and neither does
-    /// a request being logged, signed or forwarded whole. Both had to read
-    /// `c._query_params`, an underscore field and therefore nilo's to change
-    /// (ADR 0112).
-    ///
-    /// A name sent twice appears twice, in the order it was sent, which is the
-    /// other thing `query` cannot report: it answers with the first and never
-    /// says there was a second.
+    /// The case `query(name)` cannot serve: **a filter whose names are data**,
+    /// like `?filter[status]=open&filter[owner]=7`, or a request being logged
+    /// or forwarded whole (ADR 0112). A name sent twice appears twice, in the
+    /// order it was sent, which `query` also cannot report.
     ///
     /// Nothing is allocated. The parameters were split once, into the request
     /// arena, before the handler ran.
@@ -494,19 +484,13 @@ pub const Ctx = struct {
     /// is a 400 ([ADR 0101](../docs/adr/0101-a-request-nobody-else-would-answer-is-refused.md)) —
     /// **unless `listen(.{ .trusted_hops = … })` says a proxy stands in
     /// front**, in which case an `X-Forwarded-Host` it wrote is the answer.
-    /// With the default of zero that header is ignored, exactly as
-    /// `X-Forwarded-For` is, because a header a client can write is a header a
-    /// client can write: a forged one here ends up inside the password-reset
-    /// link somebody clicks.
+    /// With the default of zero that header is ignored, because a forged one
+    /// ends up inside the password-reset link somebody clicks.
     ///
-    /// A request whose target arrived in absolute form — `GET
-    /// http://example.com/users/7`, which a client talking to what it believes
-    /// is a proxy sends — is answered from the target instead, because RFC
-    /// 9112 §3.2 does not leave an origin server a choice about that
-    /// ([ADR 0120](../docs/adr/0120-a-target-is-read-in-the-form-it-arrived-in.md)).
-    /// A proxy nilo was told to trust still outranks it: `X-Forwarded-Host` is
-    /// what the deployment says the client asked for, and the authority is
-    /// what this hop was addressed as.
+    /// A target that arrived in absolute form — `GET http://example.com/x` —
+    /// is answered from the target instead (RFC 9112 §3.2,
+    /// [ADR 0120](../docs/adr/0120-a-target-is-read-in-the-form-it-arrived-in.md)).
+    /// A trusted proxy still outranks it.
     pub fn host(self: *const Ctx) Str {
         if (self._limits.trusted_hops > 0) {
             if (self.header("X-Forwarded-Host")) |sent| {
@@ -592,19 +576,14 @@ pub const Ctx = struct {
     /// const key = id.v7(try c.entropy(id.Uuid.v7_entropy), nilo.nowMillis());
     /// ```
     ///
-    /// **A method rather than a free function, and that is the design.**
-    /// Entropy comes from a syscall, and a syscall made straight from a
-    /// fiber stops every request sharing that thread (ADR 0002, ADR 0014).
-    /// This one goes through the Bulkhead, so the fiber parks on the
-    /// Engine's blocking pool and the detector is told the handler is not
-    /// the one holding it (ADR 0034). Being reachable only from a `Ctx` is
-    /// what says *this call costs a wait, and here is where the wait is
-    /// paid for* — which is why `nilo_id` takes its randomness as an
-    /// argument rather than fetching it: down there, nobody is paying.
+    /// **A method rather than a free function**, because entropy is a syscall
+    /// and a syscall straight off a fiber stops every request sharing that
+    /// thread. This one parks on the Engine's blocking pool instead
+    /// (ADR 0034). Reaching it only through a `Ctx` is what says the call
+    /// costs a wait — which is why `nilo_id` takes randomness as an argument.
     ///
-    /// By value rather than into a buffer the caller declares, so it fits
-    /// in the expression that uses it. `n` is comptime, the array is on the
-    /// stack, and nothing is allocated.
+    /// By value, so it fits in the expression that uses it: `n` is comptime,
+    /// the array is on the stack, nothing is allocated.
     ///
     /// A program with no loop in it needs none of this: `std.Io.randomSecure`
     /// is the same bytes, and there is no fiber to park.
@@ -908,7 +887,7 @@ pub const Ctx = struct {
         // An HTTP/1.0 client cannot be sent an interim response (RFC 9110
         // §15.2), and one that has already been answered is past the point
         // where a 100 would mean anything.
-        if (self._request.minor_version == 0 or self._sent) return;
+        if (self._request.minor_version == 0 or self.answered() != null) return;
         self._continued = true;
         try self._out.writeAll("HTTP/1.1 100 Continue\r\n\r\n");
         try self._out.flush();
@@ -1060,7 +1039,7 @@ pub const Ctx = struct {
     pub fn formCollecting(
         self: *Ctx,
         comptime T: type,
-        outcomes: *[@typeInfo(T).@"struct".fields.len]convert_mod.Outcome,
+        outcomes: *[@typeInfo(T).@"struct".fields.len]convert.Outcome,
     ) !T {
         const content_type = if (self.header("Content-Type")) |h| h.view() else null;
         const b = (try self.body()).view();
@@ -1083,7 +1062,7 @@ pub const Ctx = struct {
     pub fn jsonCollecting(
         self: *Ctx,
         comptime T: type,
-        outcomes: *[@typeInfo(T).@"struct".fields.len]convert_mod.Outcome,
+        outcomes: *[@typeInfo(T).@"struct".fields.len]convert.Outcome,
     ) !T {
         const b = (try self.body()).view();
         if (std.json.parseFromSliceLeaky(T, self._arena, b, .{})) |parsed| {
@@ -1095,6 +1074,44 @@ pub const Ctx = struct {
             return collectBadBody(T, self._arena, self._lifetime, b, err, outcomes);
         }
     }
+
+    /// The status this request has already been answered with, or null if
+    /// nothing has gone out yet.
+    ///
+    /// The seam everything that needs to know reaches through — a logger
+    /// writing the line, a `sendFile` asserting it is first, a deadline
+    /// deciding whether a 503 can still be sent. All of them used to read
+    /// `_sent` and `_status` in a pair, which is two fields to keep in step
+    /// and two ways to read one of them and forget the other.
+    pub fn answered(self: *const Ctx) ?u16 {
+        return if (self._sent) self._status else null;
+    }
+
+    /// Record that this request has been answered, and with what.
+    ///
+    /// The other half of `answered`, for the two places that put an answer on
+    /// the wire without going through `send` — `sendFile`, which writes the
+    /// head itself so a `Range` can be honoured, and the responses `serve`
+    /// assembles. Both used to set `_sent` and `_status` by hand, which is
+    /// the pair this seam exists to stop anybody keeping in step again.
+    pub fn markAnswered(self: *Ctx, status: u16) void {
+        self._sent = true;
+        self._status = status;
+    }
+
+    /// Say this connection cannot carry another request, whatever the headers
+    /// said.
+    ///
+    /// A response whose length nobody can work out — a stream with no
+    /// `Content-Length` and no chunking, a file the client stopped reading
+    /// halfway through — leaves the socket at a byte the next request cannot
+    /// start from. Written through here rather than by setting `_force_close`
+    /// from another file, because the flag is one direction only: nothing
+    /// takes it off again.
+    pub fn closeWhenDone(self: *Ctx) void {
+        self._force_close = true;
+    }
+
 
     /// Whether this connection is offered for another request.
     ///
@@ -1124,13 +1141,11 @@ pub const Ctx = struct {
     /// the case of Content-Length it is a request-smuggling bug.
     /// Content-Type is chosen through `send` instead.
     ///
-    /// **A value carrying `\r`, `\n` or `\0` is refused too**, with
+    /// **A value carrying `\r`, `\n` or `\0` is refused** with
     /// `error.BadHeaderValue`, and a name that is not a token with
-    /// `error.BadHeaderName`. Those bytes end the header line rather than
-    /// sitting in it, so a value built from request data would otherwise
-    /// write the rest of the response itself. See `http1.breaksTheLine` for
-    /// the shape of it. A handler that lets the error out sends a 500, which
-    /// is the right answer: the response it meant to send cannot be written.
+    /// `error.BadHeaderName`: those bytes end the header line rather than
+    /// sitting in it, so a value built from request data would write the rest
+    /// of the response itself (`http1.headerValueOk` has the shape).
     pub fn setHeader(self: *Ctx, name: []const u8, value: []const u8) !void {
         return self.putHeader(.{
             .name = try self._arena.dupe(u8, name),
@@ -1325,9 +1340,8 @@ pub const Ctx = struct {
     }
 
     pub fn send(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8) !void {
-        std.debug.assert(!self._sent); // one request, one response
-        self._sent = true;
-        self._status = status;
+        std.debug.assert(self.answered() == null); // one request, one response
+        self.markAnswered(status);
 
         // Putting the answer on the wire is nilo waiting on the client, not
         // the handler running. A client too slow to take a large response
@@ -1400,13 +1414,11 @@ pub const Ctx = struct {
     /// a whole file, part of one, or a client that walks away mid-transfer.
     /// The caller opens it and hands it over; after this call it is gone.
     ///
-    /// Everything a static file's answer carries, this carries too — an
-    /// `ETag`, a `Cache-Control` and `Accept-Ranges: bytes` on every answer,
-    /// a 304 for a matching `If-None-Match`, a 206 with a `Content-Range`
-    /// for a `Range`, and `If-Range` compared against the tag so a download
-    /// resumed against a file that has changed underneath starts again
-    /// rather than arriving corrupt (ADR 0021). The bytes go from the file
-    /// to the socket without passing through this process.
+    /// Everything a static file's answer carries, this carries too: `ETag`,
+    /// `Cache-Control`, `Accept-Ranges`, a 304, a 206 with `Content-Range`,
+    /// and `If-Range` checked so a resumed download of a changed file starts
+    /// again rather than arriving corrupt (ADR 0021). The bytes go from the
+    /// file to the socket without passing through this process.
     ///
     /// A handler that knows it is answering with a file before it runs
     /// returns `nilo.FileBody` instead, which is the same response and
@@ -1451,7 +1463,7 @@ pub const Ctx = struct {
         content_type: []const u8,
         options: stream_mod.Options,
     ) !stream_mod.Stream {
-        std.debug.assert(!self._sent); // one request, one response
+        std.debug.assert(self.answered() == null); // one request, one response
 
         // A length already says where the body stops, so there is nothing for
         // chunked framing to add and a head must not carry both. Otherwise
@@ -1461,8 +1473,7 @@ pub const Ctx = struct {
         const chunked = options.length == null and self._request.minor_version == 1;
         if (!chunked and options.length == null) self._force_close = true;
 
-        self._sent = true;
-        self._status = status;
+        self.markAnswered(status);
         self._took_over = true;
         self._stream = .{
             .chunked = chunked,
@@ -1504,13 +1515,10 @@ pub const Ctx = struct {
     /// }
     /// ```
     ///
-    /// **The loop is a function rather than the tail of the handler, and that
-    /// is a memory decision.** A handler that loops in place is suspended
-    /// 1,608 bytes inside the request machinery for the life of the socket —
-    /// the `Ctx`, the parsed head, the route match, none of which the loop can
-    /// reach and all of which a suspended fiber holds (ADR 0063). Handing the
-    /// loop back lets the request unwind first: measured, an upgraded
-    /// connection nobody has spoken to went from 9,290 bytes to 5,183.
+    /// The loop is a function rather than the tail of the handler so the
+    /// request can unwind first: a suspended fiber holds every byte of stack
+    /// it ever touched, and that is 9,290 bytes an idle socket against 5,183
+    /// (ADR 0063).
     ///
     /// `state` is what the handler knows and the loop needs — a name off the
     /// query, the room this path belongs to. Pass `{}` when there is nothing.
@@ -1565,7 +1573,7 @@ pub const Ctx = struct {
     /// loop and a hand-built `Ctx` need it and only one of them hands the loop
     /// back.
     fn handshake(self: *Ctx, options: websocket.Options) !websocket.Socket {
-        std.debug.assert(!self._sent); // one request, one response
+        std.debug.assert(self.answered() == null); // one request, one response
 
         if (self.method != .GET) {
             return fail.badRequest("a WebSocket handshake has to be a GET, not a {s}", .{@tagName(self.method)});
@@ -1616,8 +1624,7 @@ pub const Ctx = struct {
             return fail.badRequest("the handshake is missing Sec-WebSocket-Key", .{});
 
         // From here the answer is written, so nothing above may fail.
-        self._sent = true;
-        self._status = 101;
+        self.markAnswered(101);
         self._took_over = true;
         // The connection stops being HTTP at the blank line below, so it can
         // never carry another request.
@@ -1761,7 +1768,7 @@ fn collectBadBody(
     lifetime: *const str_mod.Lifetime,
     body: []const u8,
     err: anyerror,
-    outcomes: *[@typeInfo(T).@"struct".fields.len]convert_mod.Outcome,
+    outcomes: *[@typeInfo(T).@"struct".fields.len]convert.Outcome,
 ) !T {
     if (std.mem.trim(u8, body, " \t\r\n").len == 0) return fail.badRequest(
         "the request body is empty. This endpoint expects a JSON object with: {s}",
@@ -2150,6 +2157,24 @@ fn fits(comptime T: type, value: std.json.Value) bool {
     };
 }
 
+/// Everything before `sep`, or the whole of it when there is none.
+fn upTo(text: []const u8, sep: u8) []const u8 {
+    return if (std.mem.indexOfScalar(u8, text, sep)) |at| text[0..at] else text;
+}
+
+/// Whether this could be the authority of a URL: letters, digits, `.`, `-`,
+/// `:` for a port, and `[`/`]` for an IPv6 literal. Deliberately narrow —
+/// what it is guarding against is a forwarded value ending up inside a link
+/// in an email, so anything it is not sure about is not a host.
+fn isHostLike(text: []const u8) bool {
+    if (text.len == 0 or text.len > 253) return false;
+    for (text) |byte| switch (byte) {
+        'a'...'z', 'A'...'Z', '0'...'9', '.', '-', ':', '[', ']' => {},
+        else => return false,
+    };
+    return true;
+}
+
 /// Split a query string into decoded name/value pairs, in the request
 /// arena. Called once per request that has one; a request without a `?`
 /// never gets here and pays nothing.
@@ -2171,24 +2196,6 @@ fn fits(comptime T: type, value: std.json.Value) bool {
 /// Measured inside a request, `?q=hello%20world&sort=newest&page=3` went
 /// 263ns → 191ns. What is left is mostly the six `percent.decode` calls, one
 /// per name and value, and the one allocation the value with the `%20` needs.
-/// Everything before `sep`, or the whole of it when there is none.
-fn upTo(text: []const u8, sep: u8) []const u8 {
-    return if (std.mem.indexOfScalar(u8, text, sep)) |at| text[0..at] else text;
-}
-
-/// Whether this could be the authority of a URL: letters, digits, `.`, `-`,
-/// `:` for a port, and `[`/`]` for an IPv6 literal. Deliberately narrow —
-/// what it is guarding against is a forwarded value ending up inside a link
-/// in an email, so anything it is not sure about is not a host.
-fn isHostLike(text: []const u8) bool {
-    if (text.len == 0 or text.len > 253) return false;
-    for (text) |byte| switch (byte) {
-        'a'...'z', 'A'...'Z', '0'...'9', '.', '-', ':', '[', ']' => {},
-        else => return false,
-    };
-    return true;
-}
-
 pub fn parseQuery(arena: std.mem.Allocator, raw: []const u8) ![]const router.Param {
     if (raw.len == 0) return &.{};
 
