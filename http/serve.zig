@@ -269,7 +269,6 @@ pub noinline fn serveRequest(
     };
     in.toss(raw_head.len);
 
-
     const qmark = std.mem.indexOfScalar(u8, r.target, '?');
     const path = if (qmark) |i| r.target[0..i] else r.target;
     const raw_query = if (qmark) |i| r.target[i + 1 ..] else "";
@@ -942,6 +941,13 @@ noinline fn sendFailure(c: *Ctx, failure: *const fail.Failure, err: anyerror) !v
         }
         break :blk http1.statusPhrase(status);
     };
+
+    // Every 401 carries `WWW-Authenticate` (RFC 9110 §15.5.2), and the
+    // endpoint that read the header is the one that knows what to say in
+    // it (ADR 0191). A comptime string, so `setStaticHeader` is right.
+    if (failure.challenge) |with| {
+        c.setStaticHeader("WWW-Authenticate", std.mem.span(with)) catch {};
+    }
 
     var buf: [failure_body_max]u8 = undefined;
     var body: std.Io.Writer = .fixed(&buf);

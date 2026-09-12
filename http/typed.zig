@@ -46,6 +46,7 @@ const http1 = @import("http1.zig");
 const router = @import("router.zig");
 const service_mod = @import("service.zig");
 const fail = @import("fail.zig");
+const authorization_mod = @import("authorization.zig");
 const str_mod = @import("nilo_core");
 const resolve = @import("resolve.zig");
 const openapi = @import("openapi.zig");
@@ -232,6 +233,12 @@ const Role = union(enum) {
     /// Its own role rather than a flavour of `.query`, because two of them on
     /// one handler is ordinary and two query structs is not.
     header,
+    /// The `Authorization` header, read as one scheme and refused with a
+    /// challenge ([ADR 0191](../docs/adr/0191-an-authorization-header-a-handler-can-ask-for.md)).
+    /// Not a flavour of `.header`, because absent is a 401 rather than a
+    /// 400 and the document carries it as a security scheme, not a
+    /// parameter.
+    authorization,
     /// The body again, but as an HTML form rather than as JSON (ADR 0031).
     /// A separate role and not a flavour of `.body`, because the two are
     /// the same slot and asking for both has to be refused.
@@ -298,6 +305,7 @@ pub fn wrap(comptime pattern: []const u8, comptime f: anytype) router.CtxHandler
                     .body => args[i] = try c.json(P),
                     .query => args[i] = .{ .value = try queryValue(P.nilo_query, c) },
                     .header => args[i] = .{ .value = try headerValue(P, c) },
+                    .authorization => args[i] = try c.authorization(P.nilo_authorization),
                     .form => args[i] = .{ .value = try c.form(P.nilo_form) },
                     .arena => args[i] = c._arena,
                     .resolved => args[i] = try resolve.value(P, c),
@@ -392,6 +400,7 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
 
         var query: []const openapi.Field = &.{};
         var headers: []const openapi.Field = &.{};
+        var security: openapi.Security = .none;
         var body: ?*const openapi.Schema = null;
         var body_kind: openapi.BodyKind = .json;
         // Whether nilo can refuse this request before the handler runs.
@@ -440,6 +449,14 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
                 body_kind = if (form_mod.holdsAFile(Fields)) .multipart else .urlencoded;
                 can_reject = true;
             },
+            // A security scheme rather than a parameter, which is what a
+            // generated client reads to know it has to sign in — and a 401
+            // in the responses, since nilo writes one before the handler
+            // runs (ADR 0191).
+            .authorization => security = switch (p.type.?.nilo_authorization) {
+                .bearer => .bearer,
+                .basic => .basic,
+            },
             // Described exactly as the slot it binds — the request looks the
             // same on the wire either way — but `can_reject` stays false, and
             // that is the whole difference. nilo no longer refuses this
@@ -477,6 +494,7 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
             .params = path_params,
             .query = query,
             .headers = headers,
+            .security = security,
             .body = body,
             .body_kind = body_kind,
             .answer = answer,
@@ -813,6 +831,7 @@ fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Rol
         checkHeaderValue(pattern, P, i);
         return .header;
     }
+    if (comptime authorization_mod.is(P)) return .authorization;
     if (comptime hasNamedDecl(P, form_mod.marker)) return .form;
     // Before `.@"struct" => .body`, and with a message of its own: an
     // `Upload` in the argument list is somebody reaching for a file the way

@@ -338,6 +338,24 @@ pub const Query = @import("typed.zig").Query;
 /// 0.2.0.
 pub const FromHeader = @import("typed.zig").FromHeader;
 
+/// The `Authorization` header, as a typed argument that reads one scheme
+/// and refuses with the challenge a 401 has to carry
+/// ([ADR 0191](../docs/adr/0191-an-authorization-header-a-handler-can-ask-for.md)).
+///
+/// ```zig
+/// fn me(auth: nilo.Authorization(.bearer), issuer: *const Issuer) !Profile { … auth.value … }
+/// fn admin(auth: nilo.Authorization(.{ .basic = "admin" })) !void { … auth.user, auth.password … }
+/// ```
+///
+/// The scheme is matched the way RFC 9110 says — case-insensitively — and
+/// absent or the wrong scheme is a 401 with `WWW-Authenticate: Bearer` or
+/// `Basic realm="…"` on it. A refusal after reading — the token did not
+/// verify — is `nilo.Authorization(.bearer).refuse("…", .{})`, which is
+/// `fail.unauthorized` with the same header. In the document, a security
+/// scheme and a 401. A resolver has no argument list of its own and reads
+/// the same thing with `c.authorization(.bearer)`.
+pub const Authorization = @import("authorization.zig").Authorization;
+
 /// An HTML form body, read into a struct of yours — the same idea as
 /// `Query(T)`, on the body instead of the query string (ADR 0031).
 ///
@@ -789,6 +807,7 @@ test {
     _ = @import("testing.zig");
     _ = @import("middleware.zig");
     _ = @import("typed.zig");
+    _ = @import("authorization.zig");
     _ = @import("ctx.zig");
     _ = @import("logger.zig");
     _ = @import("cors.zig");

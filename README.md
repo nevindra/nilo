@@ -8,8 +8,8 @@
   <a href="https://ziglang.org/"><img alt="Zig 0.16" src="https://img.shields.io/badge/zig-0.16-f7a41d?style=flat-square&logo=zig&logoColor=white"></a>
   <a href="./CHANGELOG.md"><img alt="version 0.3.0" src="https://img.shields.io/badge/version-0.3.0-3b82f6?style=flat-square"></a>
   <a href="./docs/reference.md"><img alt="10 modules" src="https://img.shields.io/badge/modules-10-8957e5?style=flat-square"></a>
-  <a href="./refusals/README.md"><img alt="231 refusals" src="https://img.shields.io/badge/mistakes%20refused%20while%20compiling-231-e05d44?style=flat-square"></a>
-  <a href="./docs/adr/"><img alt="190 ADRs" src="https://img.shields.io/badge/decisions%20on%20file-190-6b7280?style=flat-square"></a>
+  <a href="./refusals/README.md"><img alt="233 refusals" src="https://img.shields.io/badge/mistakes%20refused%20while%20compiling-233-e05d44?style=flat-square"></a>
+  <a href="./docs/adr/"><img alt="191 ADRs" src="https://img.shields.io/badge/decisions%20on%20file-191-6b7280?style=flat-square"></a>
   <a href="./LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-16a34a?style=flat-square"></a>
 </p>
 
@@ -30,7 +30,7 @@ import what you use, and Zig never compiles the rest.
 |---|---|
 | **One rule** | a pointer is a service, a value is request data. There is no second rule. |
 | **One allocation** | per request. A test fails if it ever becomes two. |
-| **231 refusals** | mistakes that stop the build with a sentence nilo wrote, held in place by six build steps. |
+| **233 refusals** | mistakes that stop the build with a sentence nilo wrote, held in place by six build steps. |
 | **Zero glue** | routing, the 400, the 404, the OpenAPI document and the SQL all read the same struct. |
 
 > **0.3.0**, needs **Zig 0.16**. Coming from 0.2.0, there are eleven things to
@@ -554,7 +554,7 @@ been built, and no allocate-per-request version shipped in the meantime.
 
 An error message is a feature right up until somebody refactors it into mush.
 
-So this repository tests its error messages. There are **231 programs in it that
+So this repository tests its error messages. There are **233 programs in it that
 are supposed to fail to compile**, and six build steps checking the wording of
 every single failure:
 

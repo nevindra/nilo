@@ -172,13 +172,9 @@ const CurrentUser = struct {
 };
 
 fn authenticate(c: *nilo.Ctx, issuer: *const Issuer) !CurrentUser {
-    const header = c.header("Authorization") orelse
-        return nilo.fail.unauthorized("this endpoint needs a bearer token", .{});
-    const value = header.view();
-    if (!std.mem.startsWith(u8, value, "Bearer "))
-        return nilo.fail.unauthorized("this endpoint needs a bearer token", .{});
+    const auth = try c.authorization(.bearer);
 
-    const claims = jwt.verify(struct { sub: []const u8, email: []const u8 }, c.arena(), value["Bearer ".len..], .{
+    const claims = jwt.verify(struct { sub: []const u8, email: []const u8 }, c.arena(), auth.value.view(), .{
         .keys = &issuer.keys,
         .issuer = "https://accounts.google.com",
         .audience = issuer.audience,
@@ -186,7 +182,7 @@ fn authenticate(c: *nilo.Ctx, issuer: *const Issuer) !CurrentUser {
         .leeway_s = 60,
     }) catch |err| {
         std.log.info("token refused: {t}", .{err});
-        return nilo.fail.unauthorized("that token is not valid here", .{});
+        return nilo.Authorization(.bearer).refuse("that token is not valid here", .{});
     };
 
     return .{ .id = claims.sub, .email = claims.email };
@@ -196,6 +192,16 @@ fn me(user: CurrentUser) !CurrentUser {
     return user;
 }
 ```
+
+`c.authorization(.bearer)` is the `Authorization` header read as one scheme
+([the reference](../reference.md#authorizationscheme)): the scheme matched
+case-insensitively, the blanks trimmed, and absent or another scheme answered
+with a 401 that carries `WWW-Authenticate: Bearer` — the header every 401 has
+to carry and the one a hand-written `startsWith(value, "Bearer ")` forgets.
+`Authorization(.bearer).refuse` is `fail.unauthorized` with the same header
+on it, for the refusal that comes after reading. A handler that wants the
+token itself rather than the user asks for `nilo.Authorization(.bearer)` in
+its argument list and gets a security scheme in the OpenAPI document as well.
 
 `me` is still an ordinary function — `me(.{ .id = "7", .email = "…" })` in a
 test, with no token anywhere. Guarding a whole prefix is the same `c.resolve`

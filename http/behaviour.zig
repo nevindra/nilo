@@ -492,6 +492,174 @@ test "a header a handler asks for is a header the document promises" {
     try testing.expect(!optional.get("required").?.bool);
 }
 
+const authorization_mod = @import("authorization.zig");
+const Authorization = authorization_mod.Authorization;
+
+fn whoseToken(auth: Authorization(.bearer)) !Str {
+    return auth.value;
+}
+
+fn whoSignedIn(auth: Authorization(.{ .basic = "admin" })) ![]const u8 {
+    if (!std.mem.eql(u8, auth.password.view(), "hunter2")) {
+        return Authorization(.{ .basic = "admin" }).refuse("wrong password for {s}", .{auth.user.view()});
+    }
+    return auth.user.view();
+}
+
+test "a bearer token a handler asks for is the bytes after the scheme, whatever case the scheme came in" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/whose", whoseToken);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const plain = h.send(&app, "GET /whose HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer abc.def.ghi\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, plain.response, "HTTP/1.1 200"));
+    try testing.expect(std.mem.endsWith(u8, plain.response, "abc.def.ghi"));
+
+    // RFC 9110 §11.1: the scheme is case-insensitive. This is the first of
+    // the two mistakes the hand-written version made (ADR 0191).
+    const lower = h.send(&app, "GET /whose HTTP/1.1\r\nHost: t\r\nAuthorization: bearer abc.def.ghi\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, lower.response, "HTTP/1.1 200"));
+
+    // And blanks are not part of the token.
+    const loose = h.send(&app, "GET /whose HTTP/1.1\r\nHost: t\r\nAuthorization:   Bearer   abc.def.ghi  \r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, loose.response, "abc.def.ghi"));
+}
+
+test "a missing or mismatched Authorization header is a 401 that says what would have done" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/whose", whoseToken);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    // The second mistake: a 401 without `WWW-Authenticate` (RFC 9110 §15.5.2).
+    const missing = h.send(&app, "GET /whose HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, missing.response, "HTTP/1.1 401"));
+    try testing.expect(std.mem.indexOf(u8, missing.response, "\r\nWWW-Authenticate: Bearer\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, missing.response, "Bearer") != null);
+
+    const basic = h.send(&app, "GET /whose HTTP/1.1\r\nHost: t\r\nAuthorization: Basic YTpi\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, basic.response, "HTTP/1.1 401"));
+    try testing.expect(std.mem.indexOf(u8, basic.response, "WWW-Authenticate: Bearer") != null);
+    try testing.expect(std.mem.indexOf(u8, basic.response, "something else") != null);
+
+    const empty = h.send(&app, "GET /whose HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, empty.response, "HTTP/1.1 401"));
+    try testing.expect(std.mem.indexOf(u8, empty.response, "nothing after it") != null);
+}
+
+test "basic credentials are decoded and split at the first colon, and a refusal after reading carries the realm" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/admin", whoSignedIn);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    // "wati:hunter2"
+    const ok = h.send(&app, "GET /admin HTTP/1.1\r\nHost: t\r\nAuthorization: Basic d2F0aTpodW50ZXIy\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, ok.response, "HTTP/1.1 200"));
+    try testing.expect(std.mem.endsWith(u8, ok.response, "wati"));
+
+    // "wati:nope" — the handler's own refusal, through `T.refuse`, and the
+    // challenge is on it without the handler holding a Ctx.
+    const wrong = h.send(&app, "GET /admin HTTP/1.1\r\nHost: t\r\nAuthorization: Basic d2F0aTpub3Bl\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, wrong.response, "HTTP/1.1 401"));
+    try testing.expect(std.mem.indexOf(u8, wrong.response, "WWW-Authenticate: Basic realm=\"admin\"") != null);
+    try testing.expect(std.mem.indexOf(u8, wrong.response, "wrong password for wati") != null);
+
+    // "wati" — no colon, which RFC 7617 does not allow.
+    const nocolon = h.send(&app, "GET /admin HTTP/1.1\r\nHost: t\r\nAuthorization: Basic d2F0aQ==\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, nocolon.response, "HTTP/1.1 401"));
+    try testing.expect(std.mem.indexOf(u8, nocolon.response, "no colon") != null);
+
+    const junk = h.send(&app, "GET /admin HTTP/1.1\r\nHost: t\r\nAuthorization: Basic !!!\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, junk.response, "HTTP/1.1 401"));
+    try testing.expect(std.mem.indexOf(u8, junk.response, "not base64") != null);
+
+    // And absent carries the realm too, which is what makes a browser prompt.
+    const missing = h.send(&app, "GET /admin HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, missing.response, "WWW-Authenticate: Basic realm=\"admin\"") != null);
+}
+
+const TokenHolder = struct {
+    pub const nilo_resolve = fromHeader;
+
+    token: Str,
+
+    fn fromHeader(c: *ctx_mod.Ctx) !TokenHolder {
+        const auth = try c.authorization(.bearer);
+        return .{ .token = auth.value };
+    }
+};
+
+fn resolvedToken(holder: TokenHolder) !Str {
+    return holder.token;
+}
+
+test "a resolver reads the same header through the Ctx, and its 401 carries the same challenge" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/resolved", resolvedToken);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const ok = h.send(&app, "GET /resolved HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer t0k\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, ok.response, "t0k"));
+
+    const missing = h.send(&app, "GET /resolved HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, missing.response, "HTTP/1.1 401"));
+    try testing.expect(std.mem.indexOf(u8, missing.response, "WWW-Authenticate: Bearer") != null);
+}
+
+test "an Authorization a handler asks for is a security scheme the document promises, and a 401" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    app.docs(.{});
+    try app.get("/whose", whoseToken);
+    try app.get("/admin", whoSignedIn);
+    try app.get("/asking", whoIsAsking);
+
+    const json = try docsFor(&app);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+    defer parsed.deinit();
+
+    const paths = parsed.value.object.get("paths").?.object;
+    const whose = paths.get("/whose").?.object.get("get").?.object;
+    const requirement = whose.get("security").?.array.items[0].object;
+    try testing.expect(requirement.get("bearerAuth") != null);
+    try testing.expect(whose.get("responses").?.object.get("401") != null);
+    // Not a parameter: a generated client signs in, it does not fill a field.
+    try testing.expect(whose.get("parameters") == null);
+
+    const admin = paths.get("/admin").?.object.get("get").?.object;
+    try testing.expect(admin.get("security").?.array.items[0].object.get("basicAuth") != null);
+
+    // A route with no Authorization in its signature promises none.
+    const asking = paths.get("/asking").?.object.get("get").?.object;
+    try testing.expect(asking.get("security") == null);
+    try testing.expect(asking.get("responses").?.object.get("401") == null);
+
+    const schemes = parsed.value.object.get("components").?.object.get("securitySchemes").?.object;
+    try testing.expectEqualStrings("bearer", schemes.get("bearerAuth").?.object.get("scheme").?.string);
+    try testing.expectEqualStrings("basic", schemes.get("basicAuth").?.object.get("scheme").?.string);
+}
+
+test "a document with no Authorization anywhere lists no security scheme" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    app.docs(.{});
+    try app.get("/asking", whoIsAsking);
+
+    const json = try docsFor(&app);
+    try testing.expect(std.mem.indexOf(u8, json, "securitySchemes") == null);
+}
+
 // ---- stage 3: typed handlers, services, fail functions ----
 
 const Db = struct {
@@ -3959,12 +4127,12 @@ test "twenty named routes on one group is a program, not a branch budget" {
 
     const api = app.group("/api");
     inline for (.{
-        "listPartnerCapabilities", "addPartnerCapability",     "removePartnerCapability",
-        "listPartnerContacts",     "addPartnerContact",        "updatePartnerContact",
-        "listWorkItemLabels",      "addWorkItemLabel",         "removeWorkItemLabel",
-        "listWorkItemPartners",    "addWorkItemPartner",       "tickWorkItemChecklist",
-        "listCommitmentFacets",    "identifyCommitment",       "promiseCommitment",
-        "startCommitment",         "deliverCommitment",        "breakDownCommitment",
+        "listPartnerCapabilities", "addPartnerCapability", "removePartnerCapability",
+        "listPartnerContacts",     "addPartnerContact",    "updatePartnerContact",
+        "listWorkItemLabels",      "addWorkItemLabel",     "removeWorkItemLabel",
+        "listWorkItemPartners",    "addWorkItemPartner",   "tickWorkItemChecklist",
+        "listCommitmentFacets",    "identifyCommitment",   "promiseCommitment",
+        "startCommitment",         "deliverCommitment",    "breakDownCommitment",
         "changeCommitmentDueDate", "unfundCommitment",
     }, 0..) |name, i| {
         try api.named(name).tryRoute(.GET, std.fmt.comptimePrint("/thing/{d}", .{i}), docListUsers);
@@ -7026,4 +7194,3 @@ test "the arm the suite never builds in is checked anyway" {
     // right. These two must not agree.
     try testing.expect(wiring.modeFrom(.info, false) != wiring.modeFrom(.info, true));
 }
-

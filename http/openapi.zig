@@ -211,6 +211,10 @@ pub const Operation = struct {
     /// Empty for every route that reads its headers with `c.header`, which
     /// nilo cannot see and does not guess at.
     headers: []const Field = &.{},
+    /// The `Authorization` header the signature asks for, as the security
+    /// scheme a generated client signs in with
+    /// ([ADR 0191](../docs/adr/0191-an-authorization-header-a-handler-can-ask-for.md)).
+    security: Security = .none,
     body: ?*const Schema,
     body_kind: BodyKind = .json,
     answer: Answer,
@@ -223,6 +227,24 @@ pub const Operation = struct {
     /// Null is the derived name below
     /// ([ADR 0149](../docs/adr/0149-a-route-can-say-its-own-name.md)).
     name: ?[]const u8 = null,
+};
+
+/// The two schemes `nilo.Authorization(…)` reads. Both are `type: http` in
+/// the document, which is the one shape every generator handles.
+pub const Security = enum {
+    none,
+    bearer,
+    basic,
+
+    /// The name under `components.securitySchemes`, which is also what an
+    /// operation's `security` refers to.
+    fn name(self: Security) []const u8 {
+        return switch (self) {
+            .none => unreachable,
+            .bearer => "bearerAuth",
+            .basic => "basicAuth",
+        };
+    }
 };
 
 pub const Info = struct {
@@ -783,7 +805,16 @@ const Components = struct {
     /// the shape those failures take has to be described.
     fn anyFailure(ops: []const Operation) bool {
         for (ops) |op| {
-            if (op.can_reject or op.answer.not_found) return true;
+            if (op.can_reject or op.answer.not_found or op.security != .none) return true;
+        }
+        return false;
+    }
+
+    /// Whether any route signs in with `which`, and so whether that scheme
+    /// has to be described.
+    fn anySecurity(ops: []const Operation, which: Security) bool {
+        for (ops) |op| {
+            if (op.security == which) return true;
         }
         return false;
     }
@@ -853,7 +884,28 @@ pub fn write(w: *std.Io.Writer, ops: []const Operation, info: Info) !void {
         try w.writeAll("\":");
         try writeObject(w, &components, schema.object);
     }
-    try w.writeAll("}}}");
+    try w.writeByte('}');
+
+    // Only the schemes a route actually takes: a document that lists a
+    // scheme nothing uses is a document promising a sign-in that goes
+    // nowhere (ADR 0191).
+    var wrote_scheme = false;
+    for ([_]Security{ .bearer, .basic }) |which| {
+        if (!Components.anySecurity(ops, which)) continue;
+        try w.writeAll(if (wrote_scheme) "," else ",\"securitySchemes\":{");
+        wrote_scheme = true;
+        try w.print("\"{s}\":{{\"type\":\"http\",\"scheme\":\"{s}\"}}", .{
+            which.name(),
+            switch (which) {
+                .bearer => "bearer",
+                .basic => "basic",
+                .none => unreachable,
+            },
+        });
+    }
+    if (wrote_scheme) try w.writeByte('}');
+
+    try w.writeAll("}}");
 }
 
 /// The shape of every failure nilo assembles (ADR 0025). Written out here
@@ -928,8 +980,19 @@ fn writeOperation(w: *std.Io.Writer, components: *const Components, op: Operatio
         try w.writeAll("}}}");
     }
 
+    // Before the responses, and written whether or not the route can be
+    // refused for anything else: the 401 is nilo's, sent before the handler
+    // runs, so the document can promise it (ADR 0191).
+    if (op.security != .none) {
+        try w.print(",\"security\":[{{\"{s}\":[]}}]", .{op.security.name()});
+    }
+
     try w.writeAll(",\"responses\":{");
     try writeAnswer(w, components, op.answer);
+    if (op.security != .none) {
+        try writeFailure(w, "401", "no Authorization header, or not the scheme this endpoint " ++
+            "takes; WWW-Authenticate says which");
+    }
     if (op.can_reject) {
         try writeFailure(w, "400", "the request did not fit what this endpoint takes; " ++
             "the body says which part");

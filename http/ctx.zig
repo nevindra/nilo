@@ -30,6 +30,7 @@ const websocket = @import("websocket.zig");
 const percent = @import("nilo_core").percent;
 const fail = @import("fail.zig");
 const watchdog = @import("watchdog.zig");
+const authorization_mod = @import("authorization.zig");
 const Str = str_mod.Str;
 
 /// What one request is allowed to do. Filled from `listen()`'s options and
@@ -315,7 +316,6 @@ pub const Ctx = struct {
     pub fn path(self: *const Ctx) Str {
         return Str.fromRequest(self._path, self._lifetime);
     }
-
 
     /// A path param from the route pattern: `/users/:id` → `param("id")`.
     /// Percent-decoded, so `/users/wati%20sari` gives `wati sari`.
@@ -712,6 +712,16 @@ pub const Ctx = struct {
             }
         }
         return null;
+    }
+
+    /// The `Authorization` header, read as one scheme, or a 401 that says
+    /// which ([ADR 0191](../docs/adr/0191-an-authorization-header-a-handler-can-ask-for.md)).
+    /// For a resolver or a middleware, which have a Ctx and no argument
+    /// list; a handler writes `nilo.Authorization(.bearer)` in its own and
+    /// gets the document entry as well.
+    pub fn authorization(self: *Ctx, comptime which: authorization_mod.Scheme) !authorization_mod.Authorization(which) {
+        const raw: ?[]const u8 = if (self.header("Authorization")) |h| h.view() else null;
+        return authorization_mod.read(which, raw, self.arena(), self._lifetime);
     }
 
     /// The address the connection itself came from — the proxy's, when
@@ -1111,7 +1121,6 @@ pub const Ctx = struct {
     pub fn closeWhenDone(self: *Ctx) void {
         self._force_close = true;
     }
-
 
     /// Whether this connection is offered for another request.
     ///

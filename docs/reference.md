@@ -179,6 +179,7 @@ series at all. See [Metrics](./guide/metrics.md).
 | a type with `nilo_parse` | a path param too — `sql.Uuid` is one |
 | `Query(T)` | the query string as a struct |
 | `FromHeader("X-Staff-Id", T)` | one request header, converted like a path param |
+| `Authorization(.bearer)`, `Authorization(.{ .basic = "realm" })` | the `Authorization` header as one scheme — absent or another scheme is a 401 with the challenge on it |
 | `Form(T)` | the body as an HTML form — urlencoded or multipart |
 | `Bound(W)` | any of the three above, with its failures instead of a 400 |
 | `Session(T)` | the session, out of its cookie |
@@ -251,6 +252,45 @@ compiling — empty, or anything that is not a header token, is a Refusal.
 
 **`FromHeader` and not `Header`**: `nilo.Header` is the response side, and has
 been since 0.2.0.
+
+### `Authorization(scheme)`
+
+The `Authorization` header, read as the one scheme the endpoint takes
+([ADR 0191](./adr/0191-an-authorization-header-a-handler-can-ask-for.md)):
+
+<!-- compiles -->
+```zig
+fn whose(auth: nilo.Authorization(.bearer), db: *sql.Db, c: *nilo.Ctx) !User {
+    return try db.one(User, c, .{ .where = .{ .email = auth.value } }) orelse
+        return nilo.Authorization(.bearer).refuse("that token is not one of ours", .{});
+}
+
+fn admin(auth: nilo.Authorization(.{ .basic = "admin" })) !nilo.Status(204, void) {
+    if (!std.mem.eql(u8, auth.user.view(), "root")) {
+        return nilo.Authorization(.{ .basic = "admin" }).refuse("not for {s}", .{auth.user.view()});
+    }
+    return .{};
+}
+```
+
+| | |
+|---|---|
+| `.bearer` | `.value` is the token as sent — the bytes after the scheme, blanks trimmed, nothing decoded |
+| `.{ .basic = "realm" }` | `.user` and `.password`, base64 opened and split at the **first** colon. The realm is required (RFC 7617) and is what the browser's prompt shows |
+| `T.challenge` | the `WWW-Authenticate` value — `Bearer`, or `Basic realm="…"` |
+| `T.refuse(fmt, args)` | `fail.unauthorized` with `T.challenge` on it — for the refusal *after* reading, when the token did not verify or the password did not match |
+| `c.authorization(scheme)` | the same read from a resolver or a middleware, which have no argument list |
+
+The scheme is matched case-insensitively (RFC 9110 §11.1), and **every 401
+carries `WWW-Authenticate`** (§15.5.2) — the two things the hand-written six
+lines got wrong in both places this repository had them. Absent, another
+scheme, an empty token, Basic that is not base64 or has no colon: each is a
+401 saying which, before the handler runs. In the document, a `security`
+entry and a 401 rather than a parameter, so a generated client signs in.
+
+Bearer allocates nothing; Basic decodes into the request arena, once. There is
+no chain that also looks in the query string or a cookie, on purpose: a token
+in a query string is a token in every access log on the way here.
 
 ### A query field that is a list
 
@@ -503,6 +543,7 @@ value is not.
 | `c.host()` | `Str` — the host this request was addressed to. `X-Forwarded-Host` under `trusted_hops`, else the authority of an absolute-form target, else the `Host` header |
 | `c.scheme()` | `Str` — `"https"` or `"http"`, what the **client** used. `X-Forwarded-Proto` under `trusted_hops`, else always `"http"` |
 | `c.header(name)` | `?Str`, name matched case-insensitively. The **first** of that name |
+| `c.authorization(.bearer)` | `!Authorization(.bearer)` — the header as one scheme, or the 401 with the challenge on it. For a resolver; a handler asks in its argument list |
 | `c.headers()` | an iterator over every header, in arrival order — `while (it.next()) \|h\|`, `h.name` and `h.value` are `Str` |
 | `c.cookie(name)` | `?Str` — as the client sent it, nothing decoded. Allocates nothing |
 | `c.body()` | `!Str` — the whole body, up to `max_body` (1 MB) |

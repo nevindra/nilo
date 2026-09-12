@@ -567,14 +567,10 @@ const Caller = struct {
 };
 
 fn identify(c: *nilo.Ctx, keys: *const Keys) !Caller {
-    const header = c.header("Authorization") orelse
-        return fail.unauthorized("this endpoint wants an Authorization header", .{});
-    const bearer = "Bearer ";
-    const raw = header.view();
-    if (!std.mem.startsWith(u8, raw, bearer)) {
-        return fail.unauthorized("the Authorization header has to say \"Bearer <token>\"", .{});
-    }
-    const key = keys.lookUp(raw[bearer.len..]) orelse
+    // The header read as one scheme: absent or not `Bearer` is a 401 with
+    // `WWW-Authenticate` on it, before this line (ADR 0191).
+    const auth = try c.authorization(.bearer);
+    const key = keys.lookUp(auth.value.view()) orelse
         return fail.forbidden("that token is not one of ours", .{});
     return .{ .name = key.name, .scope = key.scope };
 }

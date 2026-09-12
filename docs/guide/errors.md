@@ -134,6 +134,7 @@ your handler looks like.
 | | |
 |---|---|
 | 400 | a path param that doesn't convert, a query param that doesn't fit, a body that isn't valid JSON, a form sent as the wrong encoding, a WebSocket upgrade that isn't one |
+| 401 | an `Authorization(…)` argument with no header behind it, another scheme, an empty token, or Basic that will not decode — with `WWW-Authenticate` saying what would have done ([Handlers](./handlers.md#what-a-handler-may-ask-for)) |
 | 403 | a WebSocket handshake from an origin the route did not name — [WebSocket](./websocket.md#which-pages-may-open-it) |
 | 404 | no route, and no static file |
 | 405 | the path exists under another method — with an `Allow` header |

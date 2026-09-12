@@ -506,6 +506,30 @@ rows — which turned out to be four gaps that only close together.
 
 ### New
 
+- **`nilo.Authorization(.bearer)` and `nilo.Authorization(.{ .basic = "realm" })`
+  — the `Authorization` header as a typed argument, refused with the challenge
+  a 401 has to carry**
+  ([ADR 0191](./docs/adr/0191-an-authorization-header-a-handler-can-ask-for.md)).
+  The scheme is matched case-insensitively, which RFC 9110 says it is, and
+  absent or another scheme is a 401 with `WWW-Authenticate: Bearer` or
+  `Basic realm="…"` on it — the header every 401 has to carry and the one both
+  hand-written copies in this repository left off. Basic is decoded and split
+  at the first colon into `.user` and `.password`.
+
+  ```zig
+  fn me(auth: nilo.Authorization(.bearer), issuer: *const Issuer) !Profile   // auth.value
+  fn admin(auth: nilo.Authorization(.{ .basic = "admin" })) !void            // auth.user, auth.password
+  ```
+
+  `T.refuse("…", .{})` is `fail.unauthorized` with the same header, for the
+  refusal after reading; `c.authorization(.bearer)` is the same read from a
+  resolver. In the OpenAPI document, a `security` entry and a 401 rather than
+  a parameter. Bearer allocates nothing; Basic decodes into the arena once; a
+  connection weighs what it weighed, because the challenge sits in padding
+  `Failure` already had. Two refusals: an empty Basic realm, and one with a
+  quote in it. **What to change**: nothing — but a `startsWith(value,
+  "Bearer ")` in a resolver is now three lines shorter and right.
+
 - **`nilo.FromHeader("X-Staff-Id", T)` — one request header, as a typed
   argument** ([ADR 0163](./docs/adr/0163-a-header-a-handler-can-be-given.md)).
   The same family as `Query(T)` and `Form(T)`, converted the same way, and —

@@ -1119,21 +1119,21 @@ proxy instead**, since that is the answer today and it is a good one.
 
 **Which of the small middleware everybody else ships earn a place here.** Fiber
 ships thirty-two. Setting aside the ones already queued above — CSRF, security
-headers, compression — and the allowance, what is left is `basicauth`, `keyauth`,
-`healthcheck`, `favicon`, `etag`, `cache`, `idempotency`, `responsetime`,
-`redirect` (a map of old paths to new), `rewrite`, `proxy` and `skip`. Gin adds
-only `BasicAuth` to that list. Most are between three and ten lines against
-nilo's own middleware shape, and that is the argument on both sides: cheap to
-ship, and cheap for an application to write, which is how a framework
-accumulates them without ever deciding to.
+headers, compression — the allowance, and the two that `Authorization(…)`
+covers as a typed argument rather than a middleware (`basicauth`, `keyauth`),
+what is left is `healthcheck`, `favicon`, `etag`, `cache`, `idempotency`,
+`responsetime`, `redirect` (a map of old paths to new), `rewrite`, `proxy` and
+`skip`. Most are between three and ten lines against nilo's own middleware
+shape, and that is the argument on both sides: cheap to ship, and cheap for an
+application to write, which is how a framework accumulates them without ever
+deciding to.
 
-Three are worth more than the rest, on the evidence of what people reach for
-first: basic auth, a health-check route, and an idempotency key. The last is
-the only one with a design under it, because it has to keep what it already
-answered somewhere, and nothing in this framework stores anything between
-requests.
+Two are worth more than the rest, on the evidence of what people reach for
+first: a health-check route, and an idempotency key. The second is the only
+one with a design under it, because it has to keep what it already answered
+somewhere, and nothing in this framework stores anything between requests.
 
-**What would settle it: one of the three arriving with its storage question
+**What would settle it: one of the two arriving with its storage question
 answered**, rather than the list being adopted as a list.
 
 ---

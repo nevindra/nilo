@@ -27,6 +27,8 @@ value is request data.**
 | `*Db`, `*const Config` | a [service](./services.md), matched by its type |
 | `u32`, `f64`, `Str`, `bool`, an enum | a path param, in the order they appear in the pattern |
 | `Query(T)` | the [query string](./requests.md#query-params), read into a struct of yours |
+| `FromHeader("X-Staff-Id", T)` | one request header, converted the way a path param is; `?T` when the client may not send it. `c.header` reads the same thing — what this adds is a parameter in the [OpenAPI document](./openapi.md) |
+| `Authorization(.bearer)`, `Authorization(.{ .basic = "realm" })` | the `Authorization` header as one scheme — `.value` for a token, `.user` and `.password` for Basic. Absent or another scheme is a 401 with `WWW-Authenticate` on it, before the handler runs; a security scheme in the document. See [Checking somebody else's token](./jwt.md#the-signed-in-user) |
 | `Form(T)` | the body as an [HTML form](./forms.md), urlencoded or multipart, read into a struct of yours |
 | `Bound(T)`, `Bound(Query(T))`, `Bound(Form(T))` | the same three, with [every field that failed](./forms.md#when-one-field-is-wrong-and-the-rest-are-fine) handed to the handler instead of the first one stopping the request |
 | `Session(T)` | a struct of yours [sealed into a cookie](./sessions.md) — a resolved value nilo supplies |

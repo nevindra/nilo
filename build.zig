@@ -737,6 +737,15 @@ const cache_refusals = [_]Refusal{
 /// the first line of the error it has to stop with. `says` leaves out the
 /// `nilo: ` prefix because the build step adds it — see the loop in `build`.
 const refusals = [_]Refusal{
+    // The two ways to name a Basic realm wrong (ADR 0191).
+    .{
+        .name = "authorization_realm_empty",
+        .says = "`Authorization(.{ .basic = \"\" })` names no realm.",
+    },
+    .{
+        .name = "authorization_realm_not_quotable",
+        .says = "the realm \"say \"hi\"\" of an `Authorization(.{ .basic = … })` has a character in it that a WWW-Authenticate header cannot carry.",
+    },
     .{
         .name = "allowance_above_what_a_slot_holds",
         .says = "an allowance above 1023 requests a window leaves too few bits for the fingerprint that tells two addresses apart.",

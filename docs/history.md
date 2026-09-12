@@ -2923,3 +2923,16 @@ why it stood as a baseline before anyone checked.
 The decision is
 [ADR 0187](./adr/0187-a-cache-that-admits-everything-forgets-what-mattered.md);
 this keeps the sentence and the link, not the story.
+
+## The six lines nobody typed wrong were wrong in both places
+
+**A framework that reads `Authorization: Bearer` by hand in its own example
+and its own guide had matched the scheme case-sensitively and answered 401
+without `WWW-Authenticate` in both.** Neither is a bug a test finds, because
+every client that mattered spelled the scheme the way the code expected and
+nothing checks a response for a header it does not have. What found it was
+reading a competitor's helper package to decide whether to copy it and
+looking for the equivalent here. **A check that runs perfectly against the
+clients you have is not a check.** The decision is
+[ADR 0191](./adr/0191-an-authorization-header-a-handler-can-ask-for.md);
+this keeps the sentence and the link.

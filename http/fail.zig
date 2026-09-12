@@ -37,12 +37,20 @@ pub const Failure = struct {
     pub const nilo_type_name = "nilo.Failure";
 
     status: u16 = 0,
-    n: usize = 0,
+    /// A `u8` and not a `usize`, so that the pointer below fits in the
+    /// padding this struct already had: `@sizeOf(Failure)` is 256 with or
+    /// without it, and a connection holds one (ADR 0191).
+    n: u8 = 0,
     buf: [max_message]u8 = undefined,
+    /// What a 401 says in `WWW-Authenticate`, when the failure came from
+    /// an endpoint that takes an `Authorization` header (ADR 0191). A
+    /// comptime string, so a pointer is the whole of it.
+    challenge: ?[*:0]const u8 = null,
 
     pub fn clear(self: *Failure) void {
         self.status = 0;
         self.n = 0;
+        self.challenge = null;
     }
 
     pub fn isSet(self: *const Failure) bool {
@@ -59,7 +67,7 @@ pub const Failure = struct {
         // An over-long message is truncated rather than dropped: half a
         // message is still far more use than a 500 with no explanation.
         w.print(fmt, args) catch {};
-        self.n = w.end;
+        self.n = @intCast(w.end);
     }
 };
 
@@ -110,6 +118,18 @@ pub fn badRequest(comptime fmt: []const u8, args: anytype) Error {
 
 pub fn unauthorized(comptime fmt: []const u8, args: anytype) Error {
     return status(401, fmt, args);
+}
+
+/// A 401 that says what would have been accepted: `with` goes out as the
+/// `WWW-Authenticate` header, which RFC 9110 §15.5.2 says every 401
+/// carries. `nilo.Authorization(…)` supplies it for the header it reads;
+/// `T.refuse` is this with the type's own challenge filled in (ADR 0191).
+pub fn challenge(comptime with: [:0]const u8, comptime fmt: []const u8, args: anytype) Error {
+    if (current()) |f| {
+        f.set(401, fmt, args);
+        f.challenge = with;
+    }
+    return error.Failed;
 }
 
 pub fn forbidden(comptime fmt: []const u8, args: anytype) Error {
@@ -250,4 +270,25 @@ test "the error mapping table" {
     try testing.expectEqual(@as(u16, 400), statusFor(error.InvalidCharacter));
     try testing.expectEqual(@as(u16, 413), statusFor(error.BodyTooLarge));
     try testing.expectEqual(@as(u16, 500), statusFor(error.SomethingUnrecognised));
+}
+
+test "a challenge is a 401 that remembers what would have been accepted, and clear forgets it" {
+    var failure = Failure{};
+    const previous = bulkhead.setFallbackSlot(&failure);
+    defer _ = bulkhead.setFallbackSlot(previous);
+
+    try testing.expectError(error.Failed, asUnion(challenge("Bearer", "no token", .{})));
+    try testing.expectEqual(@as(u16, 401), failure.status);
+    try testing.expectEqualStrings("no token", failure.message());
+    try testing.expectEqualStrings("Bearer", std.mem.span(failure.challenge.?));
+
+    failure.clear();
+    try testing.expect(failure.challenge == null);
+}
+
+test "the challenge lives in the padding a Failure already had" {
+    // The pointer is paid for by shrinking `n` to a byte, which the
+    // 240-byte buffer allows. A connection holds one Failure, so this is
+    // the per-connection number the feature must not move (ADR 0191).
+    try testing.expectEqual(@as(usize, 256), @sizeOf(Failure));
 }
