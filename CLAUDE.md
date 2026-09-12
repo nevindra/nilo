@@ -204,6 +204,16 @@ exactly like the deadlock above. It is finished and waiting for a browser:
 pass `--webui=127.0.0.1:9977` and open it. **Ten minutes with no CPU is either
 a deadlock or something waiting on you**, and nothing else.
 
+**And a build with no CPU, no process and no `Build Summary` was not stuck — it
+was killed with the machine.** That is what running out of memory looks like on
+macOS: no log, because the OS took the machine before the runner could write
+one. Read `vm.swapusage` first. The one time it happened here, the cause was a
+backend measured on x86_64 and applied to aarch64 (ADR 0189), and what found it
+was a guard that reads *physical footprint* — not `ps` RSS, which dropped to
+1.4 GB of a 5.3 GB process once the rest was compressed — and kills the
+compiler at a cap. `zig build --maxrss` does not do that: it schedules by
+claims, and a Compile step claims nothing unless `max_rss` is set.
+
 **And a build that is genuinely slow gets the same treatment as a stuck one:
 compare its CPU against its wall.** 110s of CPU finishing in 30.6s on sixteen
 cores means one step ran alone, which is how the thirty seconds of LLVM behind

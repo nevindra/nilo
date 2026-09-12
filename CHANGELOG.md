@@ -414,6 +414,16 @@ rows — which turned out to be four gaps that only close together.
 
 ### Fixed
 
+- **`zig build test` on an Apple Silicon machine no longer runs it out of
+  memory.** The `ReleaseSafe` test gates were on Zig's self-hosted backend
+  everywhere, on the strength of x86_64 figures; on aarch64 that backend takes a
+  290 MB compile past 15 GB and does not finish, and eight of those at `-j8`
+  took a 16 GB laptop down before printing a line. The self-hosted backend is
+  now named only on x86_64, where it was measured; everywhere else both modes
+  are Zig's default, which is LLVM. Nothing to change in a project that depends
+  on nilo — this is nilo's own suite
+  ([ADR 0189](./docs/adr/0189-a-backend-is-trusted-where-it-was-measured.md)).
+
 - **A `db.raw` reading a text column got the wire format and kept it as if it
   were digits**
   ([ADR 0154](./docs/adr/0154-a-raw-statement-cannot-cast-what-it-did-not-write.md)).

@@ -191,3 +191,37 @@ them down.
 
 Keep `--watch` for what it actually gives: not retyping the command, and a
 rebuild starting the moment a file is saved. Do not sell it as faster.
+
+## The same swap on a different machine
+
+**Not the machine in the header.** Apple M1 Pro, 8 cores, 16 GB, macOS, Zig
+0.16.0 (Homebrew `0.16.0_1`), commit `abb465a`. Recorded because the x86_64
+figures above were applied here unmeasured and the result was not a slower build
+but a dead machine, three times, before any output
+([ADR 0189](../../docs/adr/0189-a-backend-is-trusted-where-it-was-measured.md)).
+
+The compile is `pw/pw.zig`, a leaf with no module graph, a binary emitted, the
+machine otherwise quiet. Footprint is `top`'s physical footprint sampled once a
+second — **not `ps` RSS**, which read 1.4 GB of a 5.3 GB process once macOS had
+compressed the rest — with the compiler killed at a 4 GB cap:
+
+| mode | backend | peak footprint | wall | outcome |
+|---|---|---|---|---|
+| ReleaseSafe | `-fllvm` | 290 MB | 6s | finished, 561 KB |
+| ReleaseSafe | `-fno-llvm` | 4,022 MB, climbing | capped at 7s | — |
+| Debug | default | 229 MB | 2s | finished; LLVM's binary ±16 bytes |
+| Debug | `-fllvm` | 208 MB | 2s | finished |
+| Debug | `-fno-llvm` | 4,010 MB, climbing | capped at 7s | — |
+
+Uncapped, inside `zig build test -j1` the same day: the ReleaseSafe `pw`
+compile at 5.3 GB after 40s, and the step the runner moved on to at 15 GB when
+it was killed by hand. Zig's default on this architecture is LLVM in both
+modes — the `Debug` default row is LLVM's binary — so the one line that did
+anything was the forced `false` for ReleaseSafe, and it is now x86_64-only.
+
+What this does to the `zig build test` figures on this machine is not yet
+measured; the table above was taken to find the cause, not the cost. When it is
+measured it goes here, and the first thing to check is whether
+`--summary all`'s per-step peak RSS says the test compile of `http/http.zig`
+(2.3 GB, seen once in passing) wants a `max_rss` claim so the runner stops
+scheduling eight of them on sixteen gigabytes.

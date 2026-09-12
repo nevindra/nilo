@@ -2668,6 +2668,22 @@ interleaving is not a small result, it is not a result**, and knowing the rule
 is plainly no protection against skipping it when a number is the one you
 wanted.
 
+**And the figures were applied to a machine they were not taken on, three weeks
+later, and took it down three times.** ADR 0170 is x86_64 throughout, including
+the sentence "Debug is already on this backend", which on aarch64 is false —
+Zig's default there is LLVM in both modes. The forced `use_llvm = false` put the
+`ReleaseSafe` gates on an aarch64 backend that took a 290 MB compile past 15 GB
+and did not finish, and `-j8` ran eight of those at once on a 16 GB laptop.
+Nothing in the repository's own diagnostics could see it: there was no CPU time
+to compare against wall because there was no process, no `Build Summary`
+because macOS took the machine before the runner could write one, and `ps` read
+1.4 GB of a 5.3 GB process because the rest was in the compressor. It took a
+guard that read physical footprint and killed the compiler at a cap, and the
+first honest hypothesis — *is it the backend?* — came from the person whose
+machine it was, not from the tooling. **A number carries its architecture, and
+a `build.zig` that applies it elsewhere is quoting, not measuring**
+([ADR 0189](./adr/0189-a-backend-is-trusted-where-it-was-measured.md)).
+
 ## Two blockers that were sentences about one implementation
 
 Both of these sat under **Waiting on: a design** for a cycle, and neither design

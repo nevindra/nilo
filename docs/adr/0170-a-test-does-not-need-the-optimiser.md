@@ -1,5 +1,11 @@
 # A test does not need the optimiser
 
+> **Amended by [ADR 0189](./0189-a-backend-is-trusted-where-it-was-measured.md).**
+> Every figure below is x86_64. On aarch64 the same `use_llvm = false` took a
+> 290 MB compile past 15 GB and killed a 16 GB machine three times, so
+> `testBackend` now names the self-hosted backend only on x86_64. The trade
+> this file makes is unchanged where it was measured.
+
 `zig build test`, warm, after one edit under `http/`, took 30.6s. Thirty of
 those seconds were one step. `test-fetch-engine` builds `fetch/deadline.zig`
 against the whole module graph in both optimize modes, and the `ReleaseSafe`
@@ -82,7 +88,8 @@ release build. Half is not 94%, and the two are independent anyway.
 ## Consequences
 
 - `testBackend` in `build.zig`, named by all fourteen `addTest` sites. `Debug`
-  gets `null`, which is the default, so only the second mode changes.
+  gets `null`, which is the default, so only the second mode changes — and,
+  since ADR 0189, only on x86_64.
 - The gate runs the same tests. `zig build test-all` reports `382/382 steps
   succeeded; 2870/3052 tests passed (182 skipped)` through either backend,
   character for character. This was checked rather than assumed: a backend that
