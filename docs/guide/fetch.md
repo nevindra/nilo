@@ -145,6 +145,7 @@ Given to `init`, once:
 | `timeout_ms` | 30,000 | how long one whole call may take — connect, send, head and body. `0` is no limit |
 | `max_body` | 8 MiB | a longer body is `error.BodyTooLarge`, enforced while reading, so a `content-length` that lies cannot get past it |
 | `max_drain` | 64 KiB | how much of an unread body is worth reading to keep a pooled connection. Past it the connection is dropped instead |
+| `forward_request_id` | true | a call made under a `*Ctx` carries the request's id as `X-Request-Id`, so the service you called can log the same id you did. Under a `nilo.Run` there is no request and nothing is sent; a call that names its own `X-Request-Id` keeps it ([ADR 0196](../adr/0196-a-request-id-goes-out-with-the-call.md)) |
 
 **`max_in_flight` is the one that is not a nicety.** `std.http.Client`'s pool
 bounds *idle* connections and does not bound in-use ones at all, so without

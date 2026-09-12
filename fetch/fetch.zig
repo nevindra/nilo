@@ -72,6 +72,11 @@ const core = @import("nilo_core");
 
 const Str = core.Str;
 
+/// The header a request's id travels under (ADR 0196). nilo's own spelling,
+/// the one `Ctx.requestId` reads on the way in and the logger writes on the
+/// way out.
+pub const request_id_header = "X-Request-Id";
+
 /// A pooled HTTP client, held as a service for the life of the process.
 ///
 /// Registered with `app.provide(&client)` and asked for by type, the way every
@@ -111,6 +116,16 @@ pub const Client = struct {
         /// connection. Past this the connection is dropped instead: losing it
         /// costs one handshake, and reading it costs the whole body.
         max_drain: usize = 64 << 10,
+
+        /// Whether a call made under a request sends that request's id as
+        /// `X-Request-Id`, so the other side's log lines up with this one
+        /// ([ADR 0196](../docs/adr/0196-a-request-id-goes-out-with-the-call.md)).
+        ///
+        /// Read off the Scope: a `*Ctx` has an id and a `nilo.Run` has none,
+        /// so a call from a CLI or a scheduled tick sends nothing whatever
+        /// this says. A call that already carries an `X-Request-Id` of its
+        /// own in `Call.headers` keeps it.
+        forward_request_id: bool = true,
     };
 
     /// Per-call overrides. Everything null takes the client's own setting, so
@@ -214,10 +229,19 @@ pub const Client = struct {
         var ex: Exchange = .idle;
         defer ex.end();
 
+        // The request's id, when there is a request. One header, and for the
+        // ordinary call — no headers of its own — it lives in this array
+        // rather than in the arena (ADR 0196).
+        var one: [1]std.http.Header = undefined;
+        const headers = if (self.settings.forward_request_id)
+            try withRequestId(c, call.headers, &one)
+        else
+            call.headers;
+
         const head = try ex.begin(self, .{
             .method = method,
             .url = url,
-            .headers = call.headers,
+            .headers = headers,
             .body = if (body) |bytes| .{ .slice = bytes } else .none,
             .timeout_ms = call.timeout_ms,
             .redirect_buffer = &redirect_buffer,
@@ -228,6 +252,27 @@ pub const Client = struct {
             .status = head.status,
             .body = try ex.take(c, call.max_body orelse self.settings.max_body),
         };
+    }
+
+    /// `given` plus the Scope's request id, or `given` as it was: when the
+    /// Scope has no id, or the caller already named one.
+    ///
+    /// A call with no headers of its own costs nothing here — the one header
+    /// goes in `one`. A call that passes headers spends one bump of the
+    /// Scope's arena on the merge, which is the one allocation this decision
+    /// makes and the reason it is written down (ADR 0196).
+    fn withRequestId(c: anytype, given: []const std.http.Header, one: *[1]std.http.Header) Error![]const std.http.Header {
+        const S = @typeInfo(@TypeOf(c)).pointer.child;
+        const id = core.requestIdOf(S, c) orelse return given;
+        for (given) |h| if (std.ascii.eqlIgnoreCase(h.name, request_id_header)) return given;
+        if (given.len == 0) {
+            one[0] = .{ .name = request_id_header, .value = id.view() };
+            return one;
+        }
+        const merged = try c.arena().alloc(std.http.Header, given.len + 1);
+        @memcpy(merged[0..given.len], given);
+        merged[given.len] = .{ .name = request_id_header, .value = id.view() };
+        return merged;
     }
 
     /// Ask the deadline whether this failure is its doing.

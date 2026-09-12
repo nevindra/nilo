@@ -978,6 +978,7 @@ try reaction(&erased, payload);
 | `erased.str(bytes)` | the same, stamped with the wrapped Scope's lifetime |
 | `erased.entropy(n)` | `![n]u8` |
 | `erased.entropyInto(buf)` | `!void`, and the one the vtable actually carries |
+| `erased.requestId()` | `?Str` — the request's id when it was made from a `*Ctx`, `null` from a `Run` ([ADR 0196](./adr/0196-a-request-id-goes-out-with-the-call.md)) |
 
 It passes the Scope check, so `db.select(Row, &erased, …)` works — a reaction can
 query. `resolve` is not here: it is generic over the type asked for, so it cannot
@@ -1078,6 +1079,7 @@ no request. Handing over something that is neither is a Refusal naming the call.
 | `timeout_ms` | 30,000 | how long one whole call may take. `0` is no limit |
 | `max_body` | 8 MiB | a longer body is `error.BodyTooLarge`, enforced while reading |
 | `max_drain` | 64 KiB | how much of an unread body is worth reading to keep a pooled connection. Past it the connection is dropped |
+| `forward_request_id` | true | a call made under a `*Ctx` sends the request's id as `X-Request-Id`, so the other side's log lines up with this one. A `Run` has no id and sends none; a call naming its own `X-Request-Id` in `headers` keeps it ([ADR 0196](./adr/0196-a-request-id-goes-out-with-the-call.md)) |
 
 **`Client.Call`**, given per call: `headers`, and `timeout_ms` / `max_body` to
 override the settings above for one call.

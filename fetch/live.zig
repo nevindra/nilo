@@ -588,6 +588,115 @@ test "a header a caller adds is a header that arrives" {
     }.run);
 }
 
+/// A Scope that has a request id — the shape a `*Ctx` has, without `http/`
+/// in this file. `nilo_fetch` reads the id by declaration and never names
+/// `Ctx`, so this is exactly what it sees (ADR 0196).
+const Named = struct {
+    run: *core.Run,
+    id: []const u8,
+
+    pub fn arena(self: *Named) std.mem.Allocator {
+        return self.run.arena();
+    }
+    pub fn str(self: *Named, bytes: []const u8) core.Str {
+        return self.run.str(bytes);
+    }
+    pub fn requestId(self: *Named) core.Str {
+        return self.run.str(self.id);
+    }
+};
+
+test "a call made under a request carries the request's id, and one under a Run carries none" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var client = try started(io, .{});
+            defer client.deinit();
+
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+            var buf: [64]u8 = undefined;
+
+            // A Run: no request, no header.
+            {
+                canned.seen_len = 0;
+                var served = io.async(Canned.serveOne, .{&canned});
+                defer served.cancel(io) catch {};
+                _ = try client.get(&scope, try canned.url(&buf), .{});
+                served.await(io) catch {};
+                try testing.expect(std.mem.indexOf(u8, canned.seen[0..canned.seen_len], "X-Request-Id") == null);
+            }
+
+            // A request: its id, on a call that passed no headers of its own.
+            var named: Named = .{ .run = &scope, .id = "7f3a9c1e5b2d4086" };
+            {
+                canned.seen_len = 0;
+                var served = io.async(Canned.serveOne, .{&canned});
+                defer served.cancel(io) catch {};
+                _ = try client.get(&named, try canned.url(&buf), .{});
+                served.await(io) catch {};
+                try testing.expect(std.mem.indexOf(u8, canned.seen[0..canned.seen_len], "X-Request-Id: 7f3a9c1e5b2d4086") != null);
+            }
+
+            // And beside the caller's own headers, both arriving.
+            {
+                canned.seen_len = 0;
+                var served = io.async(Canned.serveOne, .{&canned});
+                defer served.cancel(io) catch {};
+                _ = try client.get(&named, try canned.url(&buf), .{
+                    .headers = &.{.{ .name = "Authorization", .value = "Bearer wati" }},
+                });
+                served.await(io) catch {};
+                const seen = canned.seen[0..canned.seen_len];
+                try testing.expect(std.mem.indexOf(u8, seen, "Bearer wati") != null);
+                try testing.expect(std.mem.indexOf(u8, seen, "X-Request-Id: 7f3a9c1e5b2d4086") != null);
+            }
+        }
+    }.run);
+}
+
+test "a caller's own X-Request-Id wins, and the setting turns the header off" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+            var named: Named = .{ .run = &scope, .id = "ours" };
+            var buf: [64]u8 = undefined;
+
+            {
+                var client = try started(io, .{});
+                defer client.deinit();
+                canned.seen_len = 0;
+                var served = io.async(Canned.serveOne, .{&canned});
+                defer served.cancel(io) catch {};
+                _ = try client.get(&named, try canned.url(&buf), .{
+                    .headers = &.{.{ .name = "x-request-id", .value = "theirs" }},
+                });
+                served.await(io) catch {};
+                const seen = canned.seen[0..canned.seen_len];
+                try testing.expect(std.mem.indexOf(u8, seen, "x-request-id: theirs") != null);
+                try testing.expect(std.mem.indexOf(u8, seen, "ours") == null);
+            }
+
+            {
+                var client = try started(io, .{ .forward_request_id = false });
+                defer client.deinit();
+                canned.seen_len = 0;
+                var served = io.async(Canned.serveOne, .{&canned});
+                defer served.cancel(io) catch {};
+                _ = try client.get(&named, try canned.url(&buf), .{});
+                served.await(io) catch {};
+                try testing.expect(std.mem.indexOf(u8, canned.seen[0..canned.seen_len], "X-Request-Id") == null);
+            }
+        }
+    }.run);
+}
+
 test "JSON parses into a struct of the caller's own" {
     try withIo(struct {
         fn run(io: std.Io) !void {

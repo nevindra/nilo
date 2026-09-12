@@ -312,16 +312,20 @@ pub const AnyScope = struct {
     _scope: *anyopaque,
     _table: *const Table,
 
-    /// The three calls a Scope makes across a function pointer. `arena` and
+    /// The four calls a Scope makes across a function pointer. `arena` and
     /// `str` are what `check` above asks of every Scope; `entropyInto` is the
     /// third because minting a key is what a reaction does that a query does
     /// not, and it is spelled `Into` rather than `entropy` because a function
     /// pointer names one return type and `![n]u8` is a different one per width
-    /// (ADR 0166).
+    /// (ADR 0166). `requestId` is the fourth, and the second that is optional
+    /// on the Scope behind it: a `Ctx` has one and a `Run` has none, and a
+    /// reaction that dials out wants to name the request that fired it
+    /// ([ADR 0196](../docs/adr/0196-a-request-id-goes-out-with-the-call.md)).
     pub const Table = struct {
         arena: *const fn (*anyopaque) std.mem.Allocator,
         str: *const fn (*anyopaque, []const u8) Str,
         entropyInto: *const fn (*anyopaque, []u8) anyerror!void,
+        requestId: *const fn (*anyopaque) ?Str,
     };
 
     /// Erase `scope`, which is a `*Ctx` or a `*Run`.
@@ -353,6 +357,7 @@ pub const AnyScope = struct {
                 .arena = takeArena,
                 .str = takeStr,
                 .entropyInto = takeEntropy,
+                .requestId = takeRequestId,
             };
             fn takeArena(p: *anyopaque) std.mem.Allocator {
                 return S.arena(@ptrCast(@alignCast(p)));
@@ -362,6 +367,12 @@ pub const AnyScope = struct {
             }
             fn takeEntropy(p: *anyopaque, buf: []u8) anyerror!void {
                 return S.entropyInto(@ptrCast(@alignCast(p)), buf);
+            }
+            // A Scope with no id answers null through the table rather than
+            // being refused: a `Run` is a Scope, and a reaction under one has
+            // no request to name.
+            fn takeRequestId(p: *anyopaque) ?Str {
+                return requestIdOf(S, @ptrCast(@alignCast(p)));
             }
         };
         return .{ ._scope = @ptrCast(@constCast(scope)), ._table = &erased.table };
@@ -373,6 +384,12 @@ pub const AnyScope = struct {
 
     pub fn str(self: *AnyScope, bytes: []const u8) Str {
         return self._table.str(self._scope, bytes);
+    }
+
+    /// The id of the request this Scope was made from, or null when it was
+    /// made from something that is not a request (ADR 0196).
+    pub fn requestId(self: *AnyScope) ?Str {
+        return self._table.requestId(self._scope);
     }
 
     /// `n` bytes of randomness, the width said where the call is written.
@@ -392,6 +409,18 @@ pub const AnyScope = struct {
         return self._table.entropyInto(self._scope, buf);
     }
 };
+
+/// What a Scope's `requestId` answers, as an optional whichever way it was
+/// declared. `Ctx.requestId` answers a `Str` — it mints one if it has to — and
+/// `AnyScope` answers `?Str`, so a caller that takes either Scope reads both
+/// through this ([ADR 0196](../docs/adr/0196-a-request-id-goes-out-with-the-call.md)).
+///
+/// Null for a Scope with no such declaration, which is what a `Run` is.
+pub fn requestIdOf(comptime S: type, scope: *S) ?Str {
+    if (comptime !@hasDecl(S, "requestId")) return null;
+    // A `Str` coerces into the `?Str` on the way out; a `?Str` is already one.
+    return scope.requestId();
+}
 
 /// Two `@typeName` results naming the same type.
 ///
@@ -632,6 +661,35 @@ test "an erased Scope mints a key, which is what a reaction needs and a query do
     defer without.deinit();
     var blind = AnyScope.of(&without);
     try testing.expectError(error.NoIo, blind.entropy(10));
+}
+
+test "an erased Scope carries the request id of the Scope it was made from, and none for a Run" {
+    var run = Run.init(testing.allocator);
+    defer run.deinit();
+    var blind = AnyScope.of(&run);
+    try testing.expect(blind.requestId() == null);
+    try testing.expect(requestIdOf(Run, &run) == null);
+
+    // The shape `Ctx` has: `requestId` answering a `Str`, minted or kept.
+    const Named = struct {
+        run: *Run,
+        pub fn arena(self: *@This()) std.mem.Allocator {
+            return self.run.arena();
+        }
+        pub fn str(self: *@This(), bytes: []const u8) Str {
+            return self.run.str(bytes);
+        }
+        pub fn entropyInto(self: *@This(), buf: []u8) !void {
+            return self.run.entropyInto(buf);
+        }
+        pub fn requestId(self: *@This()) Str {
+            return self.run.str("req-7f3a");
+        }
+    };
+    var named: Named = .{ .run = &run };
+    var erased = AnyScope.of(&named);
+    try testing.expectEqualStrings("req-7f3a", erased.requestId().?.view());
+    try testing.expectEqualStrings("req-7f3a", requestIdOf(Named, &named).?.view());
 }
 
 test "a callback stored as a function pointer runs under whichever Scope it is handed" {

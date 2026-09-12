@@ -35,6 +35,9 @@ pub const trap_enabled = str_mod.trap_enabled;
 
 pub const Run = scope_mod.Run;
 pub const checkScope = scope_mod.check;
+/// A Scope's request id as an optional, whichever way the Scope declares it —
+/// and null for one that declares none (ADR 0196).
+pub const requestIdOf = scope_mod.requestIdOf;
 
 /// A Scope with its type erased, for the one place a shape checked while
 /// compiling cannot reach: the other side of a function pointer

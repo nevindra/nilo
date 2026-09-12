@@ -6778,6 +6778,32 @@ test "an id that would smuggle something is ignored, not repeated" {
     try testing.expectEqual(@as(usize, 16), sentHeader(long.response, "X-Request-Id").?.len);
 }
 
+fn echoesItsErasedRequestId(c: *Ctx) ![]const u8 {
+    // What a reaction behind a function pointer sees, and what `nilo_fetch`
+    // reads by declaration: the same id, through the erasure (ADR 0196).
+    var erased = str_mod.AnyScope.of(c);
+    const id = erased.requestId() orelse return error.NoRequestId;
+    return id.view();
+}
+
+test "an erased Scope made from a request carries the request's id" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/x", echoesItsErasedRequestId);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const given = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\nX-Request-Id: abc-123\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, given.response, "abc-123"));
+    // No id sent: the one nilo mints, which is the same one `c.requestId()`
+    // would answer, sixteen hex digits.
+    const minted = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
+    const body = minted.response[minted.response.len - 16 ..];
+    for (body) |ch| try testing.expect(std.ascii.isHex(ch));
+}
+
 test "a request nobody asks about is given no id at all" {
     // The option costs a header on every response, so it is off by default
     // and `c.requestId()` is what a handler reaches for when it wants one.

@@ -718,6 +718,20 @@ rows — which turned out to be four gaps that only close together.
   one argument on the page about it. The README's badges said 218 refusals
   and 174 decisions where there are 231 and 190.
 
+- **A request's id goes out with every `nilo_fetch` call made under it.**
+  `client.get(c, …)` and the four beside it send `X-Request-Id` — the id a
+  proxy sent and nilo checked, or the one nilo minted — so the service on the
+  other end logs the same string you do
+  ([ADR 0196](./docs/adr/0196-a-request-id-goes-out-with-the-call.md)). Read
+  off the Scope by declaration, so a `nilo.Run` sends nothing and
+  `nilo_fetch` still names no `Ctx`; `nilo.AnyScope` carries it across a
+  function pointer as `erased.requestId()`. A call with no headers of its own
+  costs nothing for it; one that passes headers spends one bump of the request
+  arena on the merge. **If the service you call rejects headers it does not
+  know**, `fetch.Client.Settings.forward_request_id = false` sends none, and
+  a call naming its own `X-Request-Id` always keeps it. `Exchange.begin` is
+  untouched: a signed request sends exactly what it signed.
+
 - **A type can write its own answer.** Give a struct
   `pub const nilo_content_type = "application/xml";` and
   `pub fn nilo_write(self: T, w: *std.Io.Writer) !void`, return it from a

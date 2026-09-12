@@ -115,7 +115,10 @@ X-Request-Id: 4f2ba81c9d3e7a05
 Somebody reports "it failed around 14:02" and pastes the header; you grep for
 it. `c.requestId()` reaches the same id from inside a handler, so anything you
 log yourself can carry it too — and it works whether or not the logger is
-installed.
+installed. A call the handler makes through `nilo_fetch` carries it as well,
+as `X-Request-Id` on the outbound request, so the service on the other end
+can grep for the same string
+([ADR 0196](../adr/0196-a-request-id-goes-out-with-the-call.md)).
 
 If the proxy already sent an `X-Request-Id`, that one is used, so the id is the
 same on both sides. **A client's id is checked, not trusted**: up to 64 bytes of
