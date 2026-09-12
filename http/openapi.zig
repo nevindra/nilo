@@ -315,6 +315,15 @@ fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
             if (@hasDecl(T, "nilo_openapi")) return held(.{ .told = toldOf(T) });
             return held(.untold);
         }
+        // **And a type that writes its own body is not JSON at all**
+        // (ADR 0195): the bytes under its label are whatever `nilo_write`
+        // put there, and the only thing this document can say about them
+        // is what the type says with `nilo_openapi` — or that it said
+        // nothing, which is the same discipline as above.
+        if (@import("ownbody.zig").writesItsOwnBody(T)) {
+            if (@hasDecl(T, "nilo_openapi")) return held(.{ .told = toldOf(T) });
+            return held(.untold);
+        }
 
         return switch (@typeInfo(T)) {
             .bool => held(.boolean),
@@ -1175,7 +1184,7 @@ fn writeSchema(
         // document should be told it is a gap somebody can close rather than a
         // shape nobody could name (ADR 0076).
         .untold => try w.writeAll(
-            "{\"description\":\"This type writes its own JSON, and has not said what it looks like." ++
+            "{\"description\":\"This type writes its own body, and has not said what it looks like." ++
                 " Add `pub const nilo_openapi = .{ .type = \\\"string\\\" };` to it to describe the value it sends.\"}",
         ),
 
@@ -1617,7 +1626,7 @@ test "a custom writer that says nothing is visibly silent rather than confidentl
     // The one thing that must not happen: describing `secret`, which the
     // writer above never sends. That was the bug (ADR 0076).
     try testing.expect(std.mem.indexOf(u8, json, "secret") == null);
-    try testing.expect(std.mem.indexOf(u8, json, "writes its own JSON") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "writes its own body") != null);
     try testing.expect(std.mem.indexOf(u8, json, "nilo_openapi") != null);
 }
 

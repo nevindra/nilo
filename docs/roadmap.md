@@ -1069,23 +1069,6 @@ which is why ADR 0086 refused that shape rather than deferring it.
 **What would settle it: somebody who has written the loop twice** and can say
 which of those policies they had to pick, and what they picked.
 
-**Whether nilo answers in anything but JSON.** `c.sendJson`, a returned value
-and the API description are the whole serialisation story, beside
-`c.send(status, type, bytes)` for somebody who produced the bytes themselves.
-Gin ships XML, YAML, TOML, ProtoBuf and three JSON variants; Fiber ships XML,
-CBOR, MsgPack and JSONP, and lets the JSON encoder itself be replaced. Being
-JSON-only is a real decision here — it is part of what lets the signature
-settle the document
-([ADR 0017](./adr/0017-the-api-description-comes-from-the-signatures.md)) — and
-it has never been written as one, which is why this is here rather than in
-[Not coming](#not-coming).
-
-**What would settle it: an API that has to answer XML** because the consumer is
-somebody else's system that will not change. The question after that is whether
-the answer is `c.send` with a serialiser of the caller's, or a second writer
-inside this module — and the second costs binary size for every program that
-links it, the way the API description already does.
-
 **Whether a rule like "this is an email address" belongs in this repository.**
 `Bound` reports five reasons a field did not bind — `missing`, `not_a_number`,
 `not_true_or_false`, `not_a_choice`, `wrong_kind` — and `must` lets a handler
@@ -1741,6 +1724,17 @@ makes its failures legible
 is a refusal of templates, not of everything on that side of the line.**
 Whether some other convenience from the batteries-included world earns its
 place gets decided one feature at a time, against the two numbers above.
+
+**A serialiser for anything but JSON: XML, CSV, MsgPack, ProtoBuf.** Gin
+ships four and Fiber three, and nilo ships a declaration instead: a type
+carrying `nilo_content_type` and `nilo_write` goes out as whatever it writes,
+under its own label, and the document names it
+([ADR 0195](./adr/0195-a-type-can-write-its-own-answer.md)). What is refused
+is the reflection — a struct turned into XML elements by a rule nilo picked —
+because XML has namespaces, attributes and a dozen date encodings, and the
+consumer who needs XML is by definition the one who will not change to suit
+nilo's pick. The same goes for CSV's quoting and MsgPack's schema. The bytes
+are the caller's; the label and the description are what nilo adds.
 
 **A config file parser: TOML, YAML, or any other.** `nilo_config` reads the
 environment and hands `Fixed` to a program that has parsed something itself

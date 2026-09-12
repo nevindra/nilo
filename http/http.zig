@@ -845,6 +845,7 @@ test {
     _ = @import("allowance.zig");
     _ = @import("deadline.zig");
     _ = @import("maxbody.zig");
+    _ = @import("ownbody.zig");
     _ = @import("headers.zig");
     _ = @import("app.zig");
     _ = @import("serve.zig");

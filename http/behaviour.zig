@@ -869,6 +869,126 @@ test "a key without a request, reused on another request, or still in flight is 
     try testing.expectEqual(@as(u32, 1), counter.placed);
 }
 
+// ---- a type that writes its own answer (ADR 0195) ----
+
+const XmlInvoice = struct {
+    number: u32,
+    total: i64,
+
+    pub const nilo_content_type = "application/xml";
+    pub const nilo_openapi = .{ .type = "string" };
+
+    pub fn nilo_write(self: XmlInvoice, w: *std.Io.Writer) !void {
+        try w.print("<invoice><number>{d}</number><total>{d}</total></invoice>", .{ self.number, self.total });
+    }
+};
+
+/// The same, saying nothing about its shape: the document has to be
+/// visibly silent rather than confidently wrong.
+const CsvRow = struct {
+    a: u32,
+    b: u32,
+
+    pub const nilo_content_type = "text/csv";
+
+    pub fn nilo_write(self: CsvRow, w: *std.Io.Writer) !void {
+        try w.print("a,b\n{d},{d}\n", .{ self.a, self.b });
+    }
+};
+
+fn showXmlInvoice(id: u32) ?XmlInvoice {
+    if (id == 0) return null;
+    return .{ .number = id, .total = 1500 };
+}
+
+fn makeXmlInvoice(body: struct { total: i64 }) typed.Status(201, XmlInvoice) {
+    return .{ .value = .{ .number = 9, .total = body.total } };
+}
+
+fn showCsv() CsvRow {
+    return .{ .a = 1, .b = 2 };
+}
+
+fn keepXmlInvoice(key: typed.Idempotent(FakeReplays, .{}), counter: *OrderCounter) !XmlInvoice {
+    _ = key;
+    counter.placed += 1;
+    return .{ .number = counter.placed, .total = 10 };
+}
+
+test "a type carrying nilo_content_type and nilo_write goes out under its own label" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/invoices/:id", showXmlInvoice);
+    try app.post("/invoices", makeXmlInvoice);
+    try app.get("/rows.csv", showCsv);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const one = h.send(&app, "GET /invoices/7 HTTP/1.1\r\nHost: t\r\n\r\n").response;
+    try testing.expect(std.mem.startsWith(u8, one, "HTTP/1.1 200"));
+    try testing.expect(std.mem.indexOf(u8, one, "Content-Type: application/xml") != null);
+    try testing.expect(std.mem.endsWith(u8, one, "<invoice><number>7</number><total>1500</total></invoice>"));
+
+    // `?T` is still a 404 — the wrapper is taken apart before the type is
+    // asked to write, the same as for JSON.
+    const none = h.send(&app, "GET /invoices/0 HTTP/1.1\r\nHost: t\r\n\r\n").response;
+    try testing.expect(std.mem.startsWith(u8, none, "HTTP/1.1 404"));
+
+    // And so is a `Status(201, T)`.
+    const made = h.send(&app, "POST /invoices HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: 12\r\n\r\n{\"total\":42}").response;
+    try testing.expect(std.mem.startsWith(u8, made, "HTTP/1.1 201"));
+    try testing.expect(std.mem.indexOf(u8, made, "Content-Type: application/xml") != null);
+    try testing.expect(std.mem.endsWith(u8, made, "<total>42</total></invoice>"));
+
+    const csv = h.send(&app, "GET /rows.csv HTTP/1.1\r\nHost: t\r\n\r\n").response;
+    try testing.expect(std.mem.indexOf(u8, csv, "Content-Type: text/csv") != null);
+    try testing.expect(std.mem.endsWith(u8, csv, "a,b\n1,2\n"));
+}
+
+test "the document names the type's own content type, and its schema only when the type said one" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/invoices/:id", showXmlInvoice);
+    try app.get("/rows.csv", showCsv);
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try app.writeOpenApi(&out.writer);
+    const doc = out.written();
+
+    try testing.expect(std.mem.indexOf(u8, doc, "\"application/xml\":{\"schema\":{\"type\":\"string\"}}") != null);
+    // The CSV said nothing, so the document says nothing — `{}` and the
+    // note — rather than reflecting two integer fields nobody sends.
+    try testing.expect(std.mem.indexOf(u8, doc, "\"text/csv\":{\"schema\":{\"description\":\"This type writes its own body") != null);
+    try testing.expect(std.mem.indexOf(u8, doc, "\"text/csv\":{\"schema\":{\"type\":\"object\"") == null);
+}
+
+test "an idempotent route keeps an answer a type wrote itself, label and all" {
+    var replays = FakeReplays.init(testing.allocator);
+    defer replays.deinit();
+    var counter = OrderCounter{};
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&replays);
+    try app.provide(&counter);
+    try app.post("/orders", keepXmlInvoice);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const first = post(&h, &app, "x-1", "{}");
+    try testing.expect(std.mem.startsWith(u8, first, "HTTP/1.1 200"));
+    try testing.expect(std.mem.indexOf(u8, first, "Content-Type: application/xml") != null);
+    try testing.expect(std.mem.endsWith(u8, first, "<invoice><number>1</number><total>10</total></invoice>"));
+
+    const again = post(&h, &app, "x-1", "{}");
+    try testing.expect(std.mem.indexOf(u8, again, "Idempotent-Replayed: true") != null);
+    try testing.expect(std.mem.indexOf(u8, again, "Content-Type: application/xml") != null);
+    try testing.expect(std.mem.endsWith(u8, again, "<invoice><number>1</number><total>10</total></invoice>"));
+    try testing.expectEqual(@as(u32, 1), counter.placed);
+}
+
 test "what the handler failed with is not kept, so the retry runs it again" {
     var replays = FakeReplays.init(testing.allocator);
     defer replays.deinit();

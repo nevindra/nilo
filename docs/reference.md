@@ -421,6 +421,7 @@ builds one and pays nothing
 | `Response(T)` | a status chosen at runtime; the description says `default` |
 | `Redirect(code)` | that status and a `Location`, no body |
 | `FileBody` | a file on disk, opened and sent without being held in memory |
+| a type with `nilo_content_type` and `nilo_write` | 200, the bytes `nilo_write` wrote, under that content type — [below](#a-type-that-writes-its-own-answer) |
 
 ```zig
 Status(201, User){ .headers = .of(&.{…}), .value = user }
@@ -453,6 +454,47 @@ with `format: binary` whatever the content type is at run time. See
 [Responses](./guide/responses.md#files).
 
 `Headers` holds up to 8 by value; a ninth is a compile error.
+
+### A type that writes its own answer
+
+XML for a consumer that will not change, CSV for a spreadsheet, HTML from a
+template of your own: a type carrying two declarations goes out as whatever it
+writes, under the label it names
+([ADR 0195](./adr/0195-a-type-can-write-its-own-answer.md)).
+
+<!-- compiles -->
+```zig
+const Invoice = struct {
+    number: u32,
+    total: i64,
+
+    pub const nilo_content_type = "application/xml";
+    pub const nilo_openapi = .{ .type = "string" };
+
+    pub fn nilo_write(self: Invoice, w: *std.Io.Writer) !void {
+        try w.print("<invoice><number>{d}</number><total>{d}</total></invoice>", .{ self.number, self.total });
+    }
+};
+
+fn showInvoice(number: u32) ?Invoice {
+    if (number == 0) return null;
+    return .{ .number = number, .total = 1500 };
+}
+```
+
+Every wrapper works the way it does for JSON: `?Invoice` is a 404 when null,
+`Status(201, Invoice)` is a 201, `Response(Invoice)` carries headers, and an
+`Idempotent` route keeps the answer with its label. The body is written into
+the request arena the way a JSON one is — one allocation, the same one — and
+nothing is linked by a program with no such type.
+
+**Both declarations or neither.** One without the other is a compile error, and
+so is an empty content type, one with a control character in it, or a
+`nilo_write` with any other signature. The document names the content type and
+describes the body with `nilo_openapi` when the type carries one — `{}` and a
+note otherwise, the way a type that writes its own JSON is described. nilo
+knows nothing about XML, CSV or HTML and does not parse any of them on the way
+in; a body arriving in one of those is `c.body()`.
 
 ## JSON shapes
 

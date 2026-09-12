@@ -63,6 +63,7 @@ The return value becomes the response body:
 | `Response(T)` | a status picked while the handler runs, and headers |
 | `Redirect(status)` | that status and a `Location`, no body — [Responses](./responses.md#redirects) |
 | `FileBody`, `?FileBody` | a file on disk, sent without passing through your process; `?` is the same 404 — [Responses](./responses.md#files) |
+| a type with `nilo_content_type` and `nilo_write` | whatever it writes, under that label — XML, CSV, HTML of your own — [Responses](./responses.md#a-type-that-writes-its-own-answer) |
 | `!T` | any of the above, or a [failure](./errors.md) |
 
 ### "It might not be there": `?T`

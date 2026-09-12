@@ -718,6 +718,22 @@ rows — which turned out to be four gaps that only close together.
   one argument on the page about it. The README's badges said 218 refusals
   and 174 decisions where there are 231 and 190.
 
+- **A type can write its own answer.** Give a struct
+  `pub const nilo_content_type = "application/xml";` and
+  `pub fn nilo_write(self: T, w: *std.Io.Writer) !void`, return it from a
+  handler, and it goes out as whatever it wrote under that label — bare, in a
+  `?`, in a `Status(201, …)`, in a `Response(…)`, or kept by an `Idempotent`
+  route ([ADR 0195](./docs/adr/0195-a-type-can-write-its-own-answer.md)). The
+  document names the content type, and describes the body with the type's
+  `nilo_openapi` when it has one. Costs what a JSON answer costs — the same
+  arena buffer — and links nothing in a program with no such type. Five
+  refusals cover the pair written wrong: one declaration without the other,
+  an empty label, a label with a control character in it, a `nilo_write` of
+  another shape. What nilo does *not* do is reflect a struct into XML, and the
+  roadmap's [Not coming](./docs/roadmap.md#not-coming) now says why; the
+  question of answering anything but JSON, open since the roadmap was
+  written, is closed.
+
 - **`nilo.maxBody(bytes)` — how much body a route takes**, as a middleware on
   `with`, the way `nilo.deadline(ms)` is for time
   ([ADR 0193](./docs/adr/0194-a-route-can-say-how-much-body-it-takes.md)).

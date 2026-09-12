@@ -61,7 +61,7 @@ each gained one line.
 a custom writer and no marker becomes:
 
 ```json
-{"description":"This type writes its own JSON, and has not said what it looks like. Add `pub const nilo_openapi = .{ .type = \"string\" };` to it to describe the value it sends."}
+{"description":"This type writes its own body, and has not said what it looks like. Add `pub const nilo_openapi = .{ .type = \"string\" };` to it to describe the value it sends."}
 ```
 
 `{}` is JSON Schema for "anything", which is true. The description is there

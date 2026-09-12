@@ -56,6 +56,7 @@ const bound_mod = @import("bound.zig");
 const filebody = @import("filebody.zig");
 const json_mod = @import("json.zig");
 const mark = @import("jsonmark.zig");
+const ownbody = @import("ownbody.zig");
 
 const Ctx = ctx_mod.Ctx;
 const Str = str_mod.Str;
@@ -515,7 +516,7 @@ fn idempotentBegin(comptime P: type, c: *Ctx) !BeginOutcome {
     var it = record.eachHeader();
     while (it.next()) |h| try c.setHeader(h.name, h.value);
     try c.setStaticHeader(idempotent_mod.replayed_name, "true");
-    try c.send(record.status, record.kind.contentType(), record.body);
+    try c.send(record.status, record.contentType(), record.body);
     return .replayed;
 }
 
@@ -553,9 +554,16 @@ fn idempotentFinish(comptime P: type, c: *Ctx, begun: Begun, result: anytype) !v
     const B = @TypeOf(present);
 
     var kind: idempotent_mod.Kind = .empty;
+    var content_type: []const u8 = "";
     var body: []const u8 = "";
     if (B == void) {
         // nothing to render
+    } else if (comptime ownbody.writesItsOwnBody(B)) {
+        var out: std.Io.Writer.Allocating = try .initCapacity(c._arena, ctx_mod.json_hint);
+        try present.nilo_write(&out.writer);
+        kind = .own;
+        content_type = B.nilo_content_type;
+        body = out.written();
     } else if (B == Str) {
         kind = .text;
         body = present.view();
@@ -569,11 +577,11 @@ fn idempotentFinish(comptime P: type, c: *Ctx, begun: Begun, result: anytype) !v
         body = out.written();
     }
 
-    const record = idempotent_mod.encode(c._arena, kind, status, begun.fingerprint, own_headers, body) catch |err| switch (err) {
+    const record = idempotent_mod.encode(c._arena, kind, status, begun.fingerprint, own_headers, content_type, body) catch |err| switch (err) {
         error.TooLarge => {
             _ = replays.del(begun.under);
             std.log.warn("route \"{s}\" answered with more headers than an idempotency record holds; the answer was sent and not kept", .{c._path});
-            return sendKept(c, own_headers, status, kind, body);
+            return sendKept(c, own_headers, status, kind, content_type, body);
         },
         else => |e| return e,
     };
@@ -589,12 +597,12 @@ fn idempotentFinish(comptime P: type, c: *Ctx, begun: Begun, result: anytype) !v
             );
         },
     };
-    return sendKept(c, own_headers, status, kind, body);
+    return sendKept(c, own_headers, status, kind, content_type, body);
 }
 
-fn sendKept(c: *Ctx, own_headers: []const http1.Header, status: u16, kind: idempotent_mod.Kind, body: []const u8) !void {
+fn sendKept(c: *Ctx, own_headers: []const http1.Header, status: u16, kind: idempotent_mod.Kind, content_type: []const u8, body: []const u8) !void {
     for (own_headers) |h| try c.setHeader(h.name, h.value);
-    return c.send(status, kind.contentType(), body);
+    return c.send(status, if (kind == .own) content_type else kind.contentType(), body);
 }
 
 /// Which services this handler needs. Computed at compile time and used by
@@ -874,7 +882,7 @@ fn answerWith(comptime status: ?u16, comptime V: type) openapi.Answer {
         };
         return .{
             .status = status,
-            .content_type = contentTypeFor(Present),
+            .content_type = if (ownbody.writesItsOwnBody(Present)) Present.nilo_content_type else contentTypeFor(Present),
             .schema = openapi.schemaOf(Present),
             .not_found = Present != V,
         };
@@ -903,7 +911,28 @@ fn contentTypeFor(comptime T: type) []const u8 {
 pub fn check(comptime pattern: []const u8, comptime handler: anytype) void {
     comptime {
         router.validatePattern(pattern);
-        _ = rolesOf(pattern, @typeInfo(fnTypeOf(pattern, @TypeOf(handler))).@"fn".params);
+        const Fn = fnTypeOf(pattern, @TypeOf(handler));
+        _ = rolesOf(pattern, @typeInfo(Fn).@"fn".params);
+        checkAnswer(pattern, Fn);
+    }
+}
+
+/// What the return type has to get right, said at the route. Today that is
+/// one thing: a type that writes its own answer carries two declarations,
+/// and one without the other is refused here rather than sent as JSON with
+/// a label nobody chose (ADR 0195).
+fn checkAnswer(comptime pattern: []const u8, comptime Fn: type) void {
+    comptime {
+        const Returned = @typeInfo(Fn).@"fn".return_type orelse return;
+        var V = switch (@typeInfo(Returned)) {
+            .error_union => |u| u.payload,
+            else => Returned,
+        };
+        if (V == void) return;
+        if (hasNamedDecl(V, "nilo_response")) V = V.nilo_response;
+        if (V == void) return;
+        if (@typeInfo(V) == .optional) V = @typeInfo(V).optional.child;
+        ownbody.check(pattern, V);
     }
 }
 
@@ -1652,6 +1681,16 @@ fn sendValue(c: *Ctx, status: u16, value: anytype) !void {
     // `sendfile.send` — a 200, a 206, a 304 or a 416 — and no field on a
     // `Response(FileBody)` could be right about which.
     if (comptime filebody.isFileBody(T)) return filebody.send(c, value);
+    // A type that writes its own answer, under its own label (ADR 0195).
+    // Dispatched here, after every wrapper is taken apart, so `?T`,
+    // `Status(201, T)` and `Response(T)` all reach it the way they reach
+    // JSON. What it costs is what JSON costs: the same arena buffer, the
+    // same `send`.
+    if (comptime ownbody.writesItsOwnBody(T)) {
+        var out: std.Io.Writer.Allocating = try .initCapacity(c._arena, ctx_mod.json_hint);
+        try value.nilo_write(&out.writer);
+        return c.send(status, T.nilo_content_type, out.written());
+    }
     if (T == Str) return c.sendText(status, value.view());
     // The same question `contentTypeFor` asks, and it has to be the same
     // answer: a body sent as JSON under a `text/plain` label, or the other way

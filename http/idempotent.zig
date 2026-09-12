@@ -63,10 +63,16 @@ pub const Kind = enum(u8) {
     empty = 1,
     text = 2,
     json = 3,
+    /// A body the handler's type wrote itself, under a label of its own
+    /// (ADR 0195). The label is in the record, ahead of the body, because
+    /// no kind implies it.
+    own = 4,
 
+    /// The label the kind implies. Empty for `.own`, whose label is in the
+    /// record — ask `Record.contentType` for the one to send.
     pub fn contentType(self: Kind) []const u8 {
         return switch (self) {
-            .in_flight, .empty => "",
+            .in_flight, .empty, .own => "",
             .text => "text/plain",
             .json => "application/json",
         };
@@ -81,7 +87,15 @@ pub const Record = struct {
     status: u16,
     fingerprint: u64,
     headers: []const u8,
+    /// What an `.own` answer goes out as; empty for every other kind.
+    content_type: []const u8 = "",
     body: []const u8,
+
+    /// The label the replay goes out under: the kind's, or the one the
+    /// handler's type chose.
+    pub fn contentType(self: Record) []const u8 {
+        return if (self.kind == .own) self.content_type else self.kind.contentType();
+    }
 
     pub fn eachHeader(self: Record) HeaderIterator {
         return .{ .rest = self.headers };
@@ -116,20 +130,28 @@ pub fn marker(fingerprint: u64) [prefix]u8 {
     return out;
 }
 
-/// Encode a kept answer into `arena`. `headers` are the handler's own.
+/// Encode a kept answer into `arena`. `headers` are the handler's own, and
+/// `content_type` is read only for `.own` — the other kinds imply theirs.
 pub fn encode(
     arena: std.mem.Allocator,
     kind: Kind,
     status: u16,
     fingerprint: u64,
     headers: []const http1.Header,
+    content_type: []const u8,
     body: []const u8,
 ) ![]const u8 {
     var hlen: usize = 0;
     for (headers) |h| hlen += 4 + h.name.len + h.value.len;
     if (hlen > std.math.maxInt(u16)) return error.TooLarge;
+    // An `.own` answer keeps its label as one more length-prefixed string
+    // ahead of the body; a label longer than a header value is refused the
+    // same way a header is.
+    const labelled = kind == .own;
+    if (labelled and content_type.len > std.math.maxInt(u16)) return error.TooLarge;
+    const llen: usize = if (labelled) 2 + content_type.len else 0;
 
-    const out = try arena.alloc(u8, prefix + hlen + body.len);
+    const out = try arena.alloc(u8, prefix + hlen + llen + body.len);
     out[0] = @intFromEnum(kind);
     std.mem.writeInt(u16, out[1..3], status, .little);
     std.mem.writeInt(u64, out[3..11], fingerprint, .little);
@@ -142,6 +164,11 @@ pub fn encode(
         @memcpy(out[at + 4 + h.name.len ..][0..h.value.len], h.value);
         at += 4 + h.name.len + h.value.len;
     }
+    if (labelled) {
+        std.mem.writeInt(u16, out[at..][0..2], @intCast(content_type.len), .little);
+        @memcpy(out[at + 2 ..][0..content_type.len], content_type);
+        at += llen;
+    }
     @memcpy(out[at..][0..body.len], body);
     return out;
 }
@@ -150,16 +177,26 @@ pub fn encode(
 /// that were never a record — which is a miss, and the request runs.
 pub fn decode(bytes: []const u8) ?Record {
     if (bytes.len < prefix) return null;
-    if (bytes[0] > @intFromEnum(Kind.json)) return null;
+    if (bytes[0] > @intFromEnum(Kind.own)) return null;
     const kind: Kind = @enumFromInt(bytes[0]);
     const hlen = std.mem.readInt(u16, bytes[11..13], .little);
     if (bytes.len < prefix + hlen) return null;
+    var rest = bytes[prefix + hlen ..];
+    var content_type: []const u8 = "";
+    if (kind == .own) {
+        if (rest.len < 2) return null;
+        const llen = std.mem.readInt(u16, rest[0..2], .little);
+        if (rest.len < 2 + llen) return null;
+        content_type = rest[2..][0..llen];
+        rest = rest[2 + llen ..];
+    }
     return .{
         .kind = kind,
         .status = std.mem.readInt(u16, bytes[1..3], .little),
         .fingerprint = std.mem.readInt(u64, bytes[3..11], .little),
         .headers = bytes[prefix..][0..hlen],
-        .body = bytes[prefix + hlen ..],
+        .content_type = content_type,
+        .body = rest,
     };
 }
 
@@ -219,7 +256,7 @@ test "a kept answer comes back with its status, its headers and its body" {
     defer arena.deinit();
 
     const headers = [_]http1.Header{.{ .name = "Location", .value = "/orders/7" }};
-    const bytes = try encode(arena.allocator(), .json, 201, 0xabc, &headers, "{\"id\":7}");
+    const bytes = try encode(arena.allocator(), .json, 201, 0xabc, &headers, "", "{\"id\":7}");
     const back = decode(bytes).?;
     try testing.expectEqual(Kind.json, back.kind);
     try testing.expectEqual(@as(u16, 201), back.status);
@@ -230,6 +267,26 @@ test "a kept answer comes back with its status, its headers and its body" {
     try testing.expectEqualStrings("Location", h.name);
     try testing.expectEqualStrings("/orders/7", h.value);
     try testing.expect(it.next() == null);
+}
+
+test "an answer a type wrote itself keeps its label, and every other kind keeps none" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const own = try encode(arena.allocator(), .own, 200, 1, &.{}, "application/xml", "<a/>");
+    const back = decode(own).?;
+    try testing.expectEqual(Kind.own, back.kind);
+    try testing.expectEqualStrings("application/xml", back.contentType());
+    try testing.expectEqualStrings("<a/>", back.body);
+
+    // The label given to a JSON answer is not kept: its kind already says.
+    const json = try encode(arena.allocator(), .json, 200, 1, &.{}, "ignored", "{}");
+    try testing.expectEqualStrings("application/json", decode(json).?.contentType());
+    try testing.expectEqualStrings("{}", decode(json).?.body);
+
+    // An `.own` record cut short of its label is a miss rather than a
+    // label read out of the body.
+    try testing.expect(decode(own[0 .. prefix + 1]) == null);
 }
 
 test "a marker is a record with nothing in it but the fingerprint, and junk is a miss" {

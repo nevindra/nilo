@@ -331,6 +331,7 @@ reason to hang up.
 | `void` | no body, and no `Content-Type` either |
 | `Str`, `[]const u8` | `text/plain` |
 | `FileBody` | its `content_type`, `application/octet-stream` by default |
+| a type with `nilo_content_type` | that, and the bytes its `nilo_write` wrote — [below](#a-type-that-writes-its-own-answer) |
 | anything else | `application/json` |
 
 A failure — from a `fail.*` function, from an error, from nilo refusing a
@@ -338,6 +339,42 @@ request — is always `application/json`. See [Errors](./errors.md).
 
 For anything else, `c.send(status, content_type, bytes)`, or `c.stream(status,
 content_type)` when the length isn't known yet.
+
+## A type that writes its own answer
+
+nilo answers JSON, and it is not going to learn XML, CSV or a template
+language ([ADR 0195](../adr/0195-a-type-can-write-its-own-answer.md) says
+why). What it will do is send bytes a type of yours wrote, under a label the
+type names — which is what a consumer that only reads XML needs, and what a
+`*Ctx` handler calling `c.send` used to be the only way to get:
+
+<!-- compiles -->
+```zig
+const Invoice = struct {
+    number: u32,
+    total: i64,
+
+    pub const nilo_content_type = "application/xml";
+
+    pub fn nilo_write(self: Invoice, w: *std.Io.Writer) !void {
+        try w.print("<invoice><number>{d}</number><total>{d}</total></invoice>", .{ self.number, self.total });
+    }
+};
+
+fn showInvoice(number: u32) ?Invoice {
+    if (number == 0) return null;
+    return .{ .number = number, .total = 1500 };
+}
+```
+
+Return it the way you would return a struct — bare, in a `?`, in a
+`Status(201, …)` or a `Response(…)` — and the wrappers mean what they always
+mean. The difference from `c.send` is that the route is described: the
+document names `application/xml`, and says what the body looks like if the
+type adds `pub const nilo_openapi = .{ .type = "string" };`.
+
+Both declarations, or neither: a content type with no `nilo_write`, or the
+other way round, is a compile error naming the route.
 
 Static files get their type from the file extension — see
 [Static files](./static-files.md).

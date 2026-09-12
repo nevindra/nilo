@@ -852,6 +852,28 @@ const refusals = [_]Refusal{
         .name = "maxbody_of_no_bytes",
         .says = "a body limit of 0 bytes is not a limit, it is a route that refuses every body.",
     },
+    // The five ways of writing the pair a type that writes its own answer
+    // carries (ADR 0195).
+    .{
+        .name = "ownbody_content_type_without_write",
+        .says = "the handler for route \"/invoices/:id\" returns ownbody_content_type_without_write.Invoice, which names a `nilo_content_type` and has no `nilo_write`.",
+    },
+    .{
+        .name = "ownbody_write_without_content_type",
+        .says = "the handler for route \"/invoices/:id\" returns ownbody_write_without_content_type.Invoice, which has a `nilo_write` and no `nilo_content_type`.",
+    },
+    .{
+        .name = "ownbody_content_type_empty",
+        .says = "ownbody_content_type_empty.Invoice's `nilo_content_type` is empty, so its answer would go out with no label.",
+    },
+    .{
+        .name = "ownbody_content_type_with_a_newline",
+        .says = "ownbody_content_type_with_a_newline.Invoice's `nilo_content_type` has a control character in it, which would end the header line early.",
+    },
+    .{
+        .name = "ownbody_write_wrong_signature",
+        .says = "ownbody_write_wrong_signature.Invoice's `nilo_write` is not `fn (self: ownbody_write_wrong_signature.Invoice, w: *std.Io.Writer) !void`.",
+    },
     .{
         .name = "filebody_as_an_argument",
         .says = "argument 1 of the handler for route \"/invoices\" is a `nilo.FileBody`, which is what a handler answers *with* rather than something it is given.",
