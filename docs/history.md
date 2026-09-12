@@ -2936,3 +2936,20 @@ looking for the equivalent here. **A check that runs perfectly against the
 clients you have is not a check.** The decision is
 [ADR 0191](./adr/0191-an-authorization-header-a-handler-can-ask-for.md);
 this keeps the sentence and the link.
+
+## Comparing against the runtime found nothing; comparing against the framework found four
+
+**A read of tokio.rs, component by component, came back empty: five of its
+seven parts are layers nilo borrows from zio or refused in ADR 0028, and the
+comparison that produced anything was against what sits *on* tokio — axum,
+tower and actix-web.** Of that comparison, most of the list was already here
+under other names, and the four that were not each cost one field or one
+declaration: a per-route body limit, a type that writes its own answer, a
+request id that follows the call out, and a 503 past a count the server
+already kept. **Compare against the thing at your own altitude, and expect
+the result to be mostly "already have it" — the four that are left are the
+finding.** The decisions are
+[ADR 0194](./adr/0194-a-route-can-say-how-much-body-it-takes.md) through
+[ADR 0197](./adr/0197-a-server-past-its-limit-says-so-at-once.md); one of
+them closed a question the roadmap had carried since it was written, and
+closed it as a declaration rather than the serialiser the question assumed.
