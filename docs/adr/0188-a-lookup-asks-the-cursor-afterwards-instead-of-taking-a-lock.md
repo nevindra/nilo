@@ -1,5 +1,14 @@
 # A lookup asks the cursor afterwards instead of taking a lock
 
+> **Amended by [ADR 0190](./0190-an-ordering-is-proved-on-the-processor-that-runs-it.md).**
+> Every ordering below was argued against x86, and two of them — the cursor
+> store in `reserve` and the second cursor load in `settled` — hold the
+> compiler and not an aarch64 processor, which reorders the copy across
+> both. The reader now issues a load-load barrier on aarch64 and the writer
+> moves the cursor with a swap off x86; x86 is unchanged and the figures in
+> this file stand. The test named below is what caught it, on the first
+> machine that could.
+
 [ADR 0138](0138-a-cache-holds-its-bytes-under-a-lock-it-can-spin-on.md) put every
 cache operation behind one spin lock a shard, including reads. That is most of
 what separated this module from the fastest cache measured against it: on eight

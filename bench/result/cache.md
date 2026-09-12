@@ -741,3 +741,57 @@ bench/compare-cache/zig/zig-out/bin/cache-zig hitrate   # and `held`, which is �
 ```
 
 `-Doptimize=ReleaseFast` is not optional and is not the default. See §5.
+
+## 7. The lookup's proof, on a processor that reorders
+
+**Not the machine in the header.** Apple M1 Pro — 6 performance and 2
+efficiency cores, 16 GB, macOS, Zig 0.16.0 — and the first aarch64 machine
+this module's suite ever ran on. It failed: `test "a lookup that holds no lock
+never hands back a value that is not the key's"` reported 1–3 wrong answers in
+five of nine runs, because two of ADR 0188's orderings hold the compiler and
+not an ARM processor
+([ADR 0190](../../docs/adr/0190-an-ordering-is-proved-on-the-processor-that-runs-it.md)).
+
+Three variants of `cache/store.zig`, each its own `ReleaseFast` binary — and
+`ReleaseFast` checked from the binary, because the first set of these numbers
+was taken on `Debug` builds by mistake (`-O` placed after `-M` on the `zig
+build-exe` line applies to nothing) and read 310 ns a lookup against the 29 ns
+in §2. **A number ten times off the one it is replacing is a build mistake
+before it is a finding.** Interleaved, three rounds, two seconds a row; no
+pinning, which macOS does not offer, so the spread is wide and is quoted whole:
+
+| threads | | as shipped (wrong on ARM) | both sides RMW | reader `dmb ishld`, writer swap |
+|---|---|---|---|---|
+| 1 | get_flat in cache | 31.8–32.0M | 31.8–32.2M | 32.4–32.8M |
+| 1 | get_flat | 19.4–20.3M | 19.9–20.2M | 19.1–19.6M |
+| 1 | mixed_flat | 14.0–14.4M | 14.3–14.6M | 14.3–14.8M |
+| 1 | put_flat | 12.6–13.1M | 12.3–12.9M | 12.3–12.5M |
+| 1 | get_page | 4.4–4.6M | 4.3–4.6M | 4.0–4.6M |
+| 1 | mixed_page | 4.1–4.3M | 4.2–4.3M | 4.1–4.4M |
+| 8 | get_flat in cache | 43.1–44.0M | 28.4–28.8M | 42.2–43.7M |
+| 8 | get_flat | 42.3–44.0M | 29.0–29.4M | 42.9–43.5M |
+| 8 | mixed_flat | 30.1–33.2M | 24.7–25.6M | 29.8–30.7M |
+| 8 | put_flat | 10.6–11.3M | 10.1–11.6M | 10.3–10.8M |
+| 8 | get_page | 21.6–21.9M | 17.6–18.1M | 20.7–21.5M |
+| 8 | mixed_page | 16.0–16.4M | 13.2–15.2M | 15.8–16.1M |
+
+Eight threads on six performance cores, so two of them are on efficiency cores
+or sharing; the absolute figures are not comparable with §3's and are not meant
+to be. The comparison is across the columns:
+
+- **RMW on both sides** is correct and portable and loses **30–33%** of read
+  throughput at eight threads — every reader writes the cursor's line. One
+  thread does not see it: an uncontended `ldaddal` is as cheap as a load.
+- **The fence** is inside the spread of "as shipped" on ten of twelve rows, and
+  the two it is not — `get_flat in cache` +1.1%, `put_flat` −0.9% — point in
+  opposite directions by less than the rounds disagree with each other. Read it
+  as **unchanged**.
+
+That is the design: a load-load barrier is exactly the sentence the reader's
+proof was missing, and x86 — where ADR 0188's figures were taken — compiles it
+to nothing.
+
+For the record, `cache/clock.zig`'s clock on this platform: `MONOTONIC_RAW_APPROX`
+6.6 ns, `MONOTONIC` 23.6 ns, `MONOTONIC_RAW` 16.1 ns, `REALTIME` 15.1 ns. Same
+shape as §2's Linux pair (1.6 against 15.6); the coarse clock is the right one
+here too.

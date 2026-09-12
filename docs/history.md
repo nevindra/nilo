@@ -2684,6 +2684,24 @@ machine it was, not from the tooling. **A number carries its architecture, and
 a `build.zig` that applies it elsewhere is quoting, not measuring**
 ([ADR 0189](./adr/0189-a-backend-is-trusted-where-it-was-measured.md)).
 
+**The same machine then failed the one test ADR 0188 wrote so its lock-free
+lookup could not be wrong, and the ADR had said why in advance: "not for the
+processor — x86 would not reorder two stores."** Two of its orderings hold the
+compiler and nothing else; an aarch64 core reorders the copy across both, and
+the lookup handed back another key's bytes in five of nine runs. The portable
+fix is a read-modify-write on both sides and it costs a third of the read
+throughput at eight threads, which is the figure ADR 0188 measured on x86 when
+it rejected the same thing. A load-load barrier on the reader costs nothing
+measurable and compiles to nothing on x86
+([ADR 0190](./adr/0190-an-ordering-is-proved-on-the-processor-that-runs-it.md)).
+Two lessons, one of them already in this file under another name. **A proof
+about ordering carries its architecture the way a benchmark carries its
+machine**, and the thing to audit is the direction each `seq_cst` does *not*
+pin. And the first benchmark of the fix read 310 ns where §2 of `cache.md` says
+29, because `-OReleaseFast` placed after `-Mroot` on a `zig build-exe` line
+applies to nothing: **a number ten times off the one it replaces is a build
+mistake before it is a finding**, and the check is the binary's size.
+
 ## Two blockers that were sentences about one implementation
 
 Both of these sat under **Waiting on: a design** for a cycle, and neither design

@@ -414,6 +414,17 @@ rows — which turned out to be four gaps that only close together.
 
 ### Fixed
 
+- **`nilo_cache` could hand a lookup another key's bytes on an ARM machine.**
+  The lock-free lookup this release introduces (ADR 0188) proves an entry was not
+  being overwritten by reading the ring's cursor after the copy; on aarch64 the
+  processor may reorder the copy past that read, and the writer's `memcpy` past
+  its own cursor store, so the proof held the compiler and not the hardware.
+  One to three wrong answers per run of the suite on an M1 Pro; none on x86,
+  which does not reorder either. The reader issues a load-load barrier on
+  aarch64 now and the writer moves the cursor with a swap off x86. Measured at
+  no cost in either mode; x86 is byte-for-byte unchanged. Nothing to change
+  ([ADR 0190](./docs/adr/0190-an-ordering-is-proved-on-the-processor-that-runs-it.md)).
+
 - **`nilo_cache` compiles on macOS.** `clock.zig` named `CLOCK_MONOTONIC_COARSE`,
   which exists on Linux and nowhere else, so every build that reached the module
   — `test-cache`, `snippets` — stopped at one line. Darwin's name for the same

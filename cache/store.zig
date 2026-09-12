@@ -60,6 +60,7 @@
 //! waits, so a holder always finishes and releases.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const clock = @import("clock.zig");
 
 const Allocator = std.mem.Allocator;
@@ -321,7 +322,6 @@ const Counters = struct {
     }
 };
 
-
 /// A spin lock, and not by preference — see the header. One to a cache line,
 /// or two shards would share one and the sharding would buy nothing.
 ///
@@ -406,9 +406,21 @@ const Region = struct {
     /// has since passed the entry means the bytes just copied were being
     /// written over while they were read. Sequentially consistent because the
     /// question is precisely "did that happen *before* this", and a relaxed or
-    /// acquire load lets the compiler sink the copy below it. On x86 it is
-    /// still one `mov`.
+    /// acquire load lets the compiler sink the copy below it.
+    ///
+    /// **The compiler is not the only thing that reorders, and `seq_cst` on
+    /// this one load does not hold the processor** (ADR 0190). An acquire —
+    /// which is all a `seq_cst` load is to the hardware — keeps what comes
+    /// *after* it from moving up; it says nothing about the copy that came
+    /// *before* it moving down, and on aarch64 that is an ordinary thing for
+    /// two loads to do. x86 never noticed because it does not reorder loads
+    /// against loads, which is the whole reason this shipped. The `dmb ishld`
+    /// is the missing sentence: every load before it is complete before any
+    /// load after it. Measured at no cost on an M1 Pro — three interleaved
+    /// rounds, one and eight threads, inside the spread on every row — and it
+    /// compiles to nothing on x86, so ADR 0188's figures stand as taken.
     inline fn settled(r: *const Region) Mark {
+        if (comptime builtin.cpu.arch.isAARCH64()) asm volatile ("dmb ishld" ::: .{ .memory = true });
         return @bitCast(r.cursor.load(.seq_cst));
     }
 
@@ -431,7 +443,16 @@ const Region = struct {
     /// nothing had started writing here; if the store below could sink past the
     /// `memcpy` its caller does next, the lookup would be checking against a
     /// cursor that lied. Sequentially consistent is what says so to the
-    /// compiler as well as to the processor.
+    /// compiler.
+    ///
+    /// **It does not say so to every processor** (ADR 0190). To the hardware a
+    /// `seq_cst` store is a release: what came before it stays before it, and
+    /// the `memcpy` that comes *after* is free to land first — which on
+    /// aarch64 it does, and on x86, which keeps stores in order, it cannot.
+    /// So off x86 the cursor moves by a swap instead. A read-modify-write is
+    /// acquire and release at once, and nothing crosses it in either
+    /// direction. It is under the shard's lock, so nobody is contending for the
+    /// line, and a `put` measured the same with it as without.
     fn reserve(r: *Region, total: usize) u32 {
         var m = r.mark();
         if (m.head + total > r.to) {
@@ -443,7 +464,11 @@ const Region = struct {
         }
         const off = m.head;
         m.head += @intCast(total);
-        r.cursor.store(@bitCast(m), .seq_cst);
+        if (comptime builtin.cpu.arch == .x86_64) {
+            r.cursor.store(@bitCast(m), .seq_cst);
+        } else {
+            _ = r.cursor.swap(@bitCast(m), .seq_cst);
+        }
         return off;
     }
 
