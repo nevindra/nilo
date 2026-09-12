@@ -161,7 +161,7 @@ test "work registered before the server still runs when the services were starte
     defer app.deinit();
     try app.spawn(Ticker.run, .{&ticker});
 
-    // The order `guide/sql.md` recommends and ADR 0079 built: the services
+    // The order `guide/sql/` recommends and ADR 0079 built: the services
     // are finished with an `Io` of the caller's own so that a migration can
     // run, and only then does the server start. `startServices` is skipped
     // the second time round, and **this is the case that used to take the

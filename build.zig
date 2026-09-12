@@ -1233,7 +1233,7 @@ const Snippets = struct {
     /// leaves something behind, so a warm run of all 54 is ~30ms each and
     /// only a page that changed is re-analysed. That is the opposite of
     /// `refusals/` (ADR 0027) and it is why this can afford to grow — and it
-    /// did: marking `docs/guide/sql.md` more than tripled the table.
+    /// did: marking the SQL guide more than tripled the table.
     const pages = [_]Page{
         .{ .path = "README.md" },
         .{ .path = "docs/reference.md" },
@@ -1248,12 +1248,30 @@ const Snippets = struct {
         .{ .path = "docs/guide/metrics.md" },
         .{ .path = "docs/guide/middleware.md" },
         .{ .path = "docs/guide/responses.md" },
-        .{
-            .path = "docs/guide/sql.md",
-            .types = "docs/snippets/sql_types.zig",
-            .values = "docs/snippets/sql_values.zig",
-        },
+        // One page per module in the bottom layers, each against the shared
+        // world: its `Carts`, its `client` and `run`, its `Doc`.
+        .{ .path = "docs/guide/id.md" },
+        .{ .path = "docs/guide/jwt.md" },
+        .{ .path = "docs/guide/cache.md" },
+        .{ .path = "docs/guide/fetch.md" },
+        .{ .path = "docs/guide/s3.md" },
+        // The SQL guide is a folder, and its front page and every page after
+        // the first read the `User` its tables page declares — so each one
+        // carries that page's declarations in front of its own, which is
+        // what let the guide keep showing the struct once when it was split.
+        .{ .path = "docs/guide/sql/tables.md", .types = sql_types, .values = sql_values },
+        .{ .path = "docs/guide/sql/reading.md", .types = sql_types, .values = sql_values, .carries = &.{"docs/guide/sql/tables.md"} },
+        .{ .path = "docs/guide/sql/README.md", .types = sql_types, .values = sql_values, .carries = &.{ "docs/guide/sql/tables.md", "docs/guide/sql/reading.md" } },
+        .{ .path = "docs/guide/sql/writing.md", .types = sql_types, .values = sql_values, .carries = &.{"docs/guide/sql/tables.md"} },
+        .{ .path = "docs/guide/sql/transactions.md", .types = sql_types, .values = sql_values, .carries = &.{"docs/guide/sql/tables.md"} },
+        .{ .path = "docs/guide/sql/raw.md", .types = sql_types, .values = sql_values, .carries = &.{"docs/guide/sql/tables.md"} },
+        .{ .path = "docs/guide/sql/sqlite.md", .types = sql_types, .values = sql_values, .carries = &.{"docs/guide/sql/tables.md"} },
+        .{ .path = "docs/guide/sql/migrations.md", .types = sql_types, .values = sql_values, .carries = &.{"docs/guide/sql/tables.md"} },
+        .{ .path = "docs/guide/sql/running.md", .types = sql_types, .values = sql_values, .carries = &.{"docs/guide/sql/tables.md"} },
     };
+
+    const sql_types = "docs/snippets/sql_types.zig";
+    const sql_values = "docs/snippets/sql_values.zig";
 
     /// A page, and the world its snippets are compiled against.
     ///
@@ -1267,6 +1285,12 @@ const Snippets = struct {
         path: []const u8,
         types: []const u8 = "docs/snippets/types.zig",
         values: []const u8 = "docs/snippets/values.zig",
+        /// Pages whose marked declarations this one is read after, as if
+        /// they were above it on the same page. Their blocks are not
+        /// compiled again here — they have their own row for that — only
+        /// carried, so a page in a folder can name a type the page before it
+        /// showed.
+        carries: []const []const u8 = &.{},
     };
 
     const opens = "<!-- compiles";
@@ -1300,6 +1324,31 @@ const Snippets = struct {
             // struct { … }` above it can, and that is the one the statements
             // are usually about.
             var shapes: std.ArrayList(u8) = .empty;
+
+            // What the pages this one carries declared, read the same way
+            // and compiled nowhere: only the declarations are kept.
+            for (page.carries) |carried| {
+                var above = std.mem.splitScalar(u8, read(b, carried), '\n');
+                while (above.next()) |line| {
+                    const trimmed = std.mem.trim(u8, line, " \t\r");
+                    if (!std.mem.startsWith(u8, trimmed, opens)) continue;
+                    if (std.mem.indexOf(u8, trimmed, "body") != null) continue;
+                    _ = above.next() orelse break;
+                    var block: std.ArrayList(u8) = .empty;
+                    while (above.next()) |inside| {
+                        if (std.mem.startsWith(u8, std.mem.trim(u8, inside, " \t\r"), fence)) break;
+                        if (imports(inside)) continue;
+                        block.appendSlice(b.allocator, inside) catch @panic("OOM");
+                        block.append(b.allocator, '\n') catch @panic("OOM");
+                    }
+                    declared.appendSlice(b.allocator, block.items) catch @panic("OOM");
+                    declared.append(b.allocator, '\n') catch @panic("OOM");
+                    if (!declaresFn(block.items)) {
+                        shapes.appendSlice(b.allocator, block.items) catch @panic("OOM");
+                        shapes.append(b.allocator, '\n') catch @panic("OOM");
+                    }
+                }
+            }
 
             var lines = std.mem.splitScalar(u8, text, '\n');
             var at: usize = 0;
@@ -1491,11 +1540,14 @@ const Snippets = struct {
     }
 
     /// `docs/guide/sessions.md` → `sessions`, which is what the object is
-    /// called and therefore what a failure names.
+    /// called and therefore what a failure names. A page inside a folder of
+    /// the guide keeps the folder — `docs/guide/sql/reading.md` →
+    /// `sql_reading` — so two pages called `README.md` are two objects.
     fn slug(b: *std.Build, page: []const u8) []const u8 {
-        const base = std.fs.path.basename(page);
-        const dot = std.mem.lastIndexOfScalar(u8, base, '.') orelse base.len;
-        const name = b.allocator.dupe(u8, base[0..dot]) catch @panic("OOM");
+        const guide = "docs/guide/";
+        const within = if (std.mem.startsWith(u8, page, guide)) page[guide.len..] else std.fs.path.basename(page);
+        const dot = std.mem.lastIndexOfScalar(u8, within, '.') orelse within.len;
+        const name = b.allocator.dupe(u8, within[0..dot]) catch @panic("OOM");
         for (name) |*ch| {
             if (!std.ascii.isAlphanumeric(ch.*)) ch.* = '_';
         }

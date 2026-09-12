@@ -80,7 +80,7 @@ beside the routes, it starts after the port is taken and before the first
 connection is accepted.
 
 **It does not matter which order you start things in.** A program with a
-database does this ([Talking to a database](./sql.md)):
+database does this ([Making the tables](./sql/migrations.md)):
 
 ```zig
 try app.start(threaded.io());        // the pool is open from here

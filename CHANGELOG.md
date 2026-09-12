@@ -623,6 +623,32 @@ rows — which turned out to be four gaps that only close together.
   132.0 and 149.4. Full numbers in
   [`bench/result/cache.md`](./bench/result/cache.md).
 
+### Documentation
+
+- **Every module has a guide page now.** `nilo_fetch`, `nilo_s3`, `nilo_cache`,
+  `nilo_jwt` and `nilo_id` used to be reachable only through the reference;
+  each has a page under [`docs/guide/`](./docs/guide/) that says what it is
+  for, the whole of it in one example, every option with its default, what it
+  answers instead of a value, what it costs and what it will not do. Every
+  `zig` block on them that could be compiled is marked and is.
+
+- **The SQL guide is a folder.** `docs/guide/sql.md` had reached 1,825 lines;
+  it is [`docs/guide/sql/`](./docs/guide/sql/README.md) now, nine pages read
+  in order, with the same 48 checked snippets and one more on the front page.
+  A link to the old path is a link to the front page. `zig build snippets`
+  learned to carry one page's declarations in front of the next, which is what
+  let the guide keep showing each struct once.
+
+- **Five places the guide disagreed with itself are settled.** The cookies
+  page said sessions were entirely yours while the sessions page shipped
+  `Session(T)`; the handlers page's argument table had no `Form(T)`,
+  `Bound(…)` or `Session(T)` and its return table no `Redirect` or `FileBody`;
+  the errors page's table of statuses nilo writes for you was missing the
+  403, 408, 422, 429 and 500 that other pages described; the testing page
+  quoted build timings from before ADR 0170; `c.streamWith` was shown with
+  one argument on the page about it. The README's badges said 218 refusals
+  and 174 decisions where there are 231 and 190.
+
 ## 0.3.0
 
 Needs Zig 0.16, as 0.2.0 does. Each entry says what you have to change; the

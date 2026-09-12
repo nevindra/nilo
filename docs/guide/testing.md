@@ -226,9 +226,13 @@ sake: a Row that disagrees with its table passes an entire suite otherwise.
 ## Running the suite
 
 ```
-zig build test        # Debug — 0.8s, the one to keep hitting
-zig build test-all    # Debug and ReleaseSafe — 7.8s, before you push
+zig build test        # Debug, plus the refusals and every module's gate — the loop
+zig build test-all    # the same in ReleaseSafe as well — the gate, and what CI runs
 ```
+
+What each costs is measured rather than remembered:
+[`bench/result/build.md`](../../bench/result/build.md) has the numbers, and the
+levers when they move.
 
 nilo's own suite runs **in both `Debug` and `ReleaseSafe`**, and `-Doptimize=`
 cannot change that. That is not decoration: the bug that made

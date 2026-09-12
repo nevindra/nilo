@@ -146,13 +146,22 @@ fn authenticate(c: *nilo.Ctx, sessions: *Sessions, arena: std.mem.Allocator) !Si
 fn me(user: SignedIn) !Profile { … }   // and that is the whole wiring
 ```
 
-## Sessions are yours
+## Sessions
 
-nilo gives you the cookie. What goes in it, where it is stored and how it is
-signed is your application's — the same line it draws around authentication.
-[`examples/forms`](../../examples/forms/main.zig) shows the whole shape in
-about forty lines, with the session store as an ordinary
-[Service](./services.md).
+A session is the cookie's commonest job, and nilo has a shape for it:
+[`Session(T)`](./sessions.md) seals a struct of your own into one cookie,
+encrypted and signed, with nothing kept on the server. Reach for that first —
+it is a resolved value, so the handler asks for it by type and never reads the
+cookie itself.
+
+What `Session(T)` cannot do is be revoked early, because there is no row to go
+and mark ([Sessions](./sessions.md#what-it-cannot-do)). A session that has to
+be cut short from the server side is a store of your own — a token in the
+cookie and a table behind it — and that is an ordinary
+[Service](./services.md). [`examples/forms`](../../examples/forms/main.zig)
+is that shape in about forty lines. Which of the two you want is the one
+decision; nilo draws the same line around it that it draws around
+authentication and takes no side.
 
 ## Testing
 

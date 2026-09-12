@@ -27,6 +27,9 @@ value is request data.**
 | `*Db`, `*const Config` | a [service](./services.md), matched by its type |
 | `u32`, `f64`, `Str`, `bool`, an enum | a path param, in the order they appear in the pattern |
 | `Query(T)` | the [query string](./requests.md#query-params), read into a struct of yours |
+| `Form(T)` | the body as an [HTML form](./forms.md), urlencoded or multipart, read into a struct of yours |
+| `Bound(T)`, `Bound(Query(T))`, `Bound(Form(T))` | the same three, with [every field that failed](./forms.md#when-one-field-is-wrong-and-the-rest-are-fine) handed to the handler instead of the first one stopping the request |
+| `Session(T)` | a struct of yours [sealed into a cookie](./sessions.md) — a resolved value nilo supplies |
 | `std.mem.Allocator` | the request arena, freed when the request ends |
 | a type with `nilo_resolve` | a [resolved value](./middleware.md#resolved-values) — the signed-in user, usually |
 | any other struct | the [request body](./requests.md#json-bodies), parsed from JSON |
@@ -55,6 +58,8 @@ The return value becomes the response body:
 | `?T` | 200 with the value, or **404** when it is null |
 | `Status(code, T)` | that status, and headers if you set any |
 | `Response(T)` | a status picked while the handler runs, and headers |
+| `Redirect(status)` | that status and a `Location`, no body — [Responses](./responses.md#redirects) |
+| `FileBody`, `?FileBody` | a file on disk, sent without passing through your process; `?` is the same 404 — [Responses](./responses.md#files) |
 | `!T` | any of the above, or a [failure](./errors.md) |
 
 ### "It might not be there": `?T`

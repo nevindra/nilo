@@ -195,7 +195,7 @@ that step found seven mistakes in one five-line example, including a
 Unlike the refusals these cache, so marking one more costs almost nothing.
 
 A page whose own types are the subject may carry a prelude of its own — see
-`Snippets.pages` in `build.zig`, where `docs/guide/sql.md` points at
+`Snippets.pages` in `build.zig`, where every page under `docs/guide/sql/` points at
 [`docs/snippets/sql_types.zig`](./docs/snippets/sql_types.zig). Two things the
 step does for you, so that a published snippet reads like one: a declaration
 block's types reach the blocks of statements below it, and a local nothing

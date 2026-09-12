@@ -1,4 +1,4 @@
-//! The world every checked snippet in [the SQL guide](../guide/sql.md) is
+//! The world every checked snippet in [the SQL guide](../guide/sql/README.md) is
 //! compiled against (ADR 0083).
 //!
 //! A prelude of its own rather than the shared
@@ -10,7 +10,8 @@
 //! subject gets to own them.
 //!
 //! **`User` is deliberately not here.** The guide declares it in the first
-//! marked block on the page, and every block below it — statements included
+//! marked block of its tables page, and every block after it — statements
+//! included, and the pages that follow, which carry that page's declarations
 //! — is compiled with that declaration in front. Showing the struct once and
 //! then checking the page against the struct it showed is the whole point;
 //! a copy here would be a second `User` to keep in step, which is exactly

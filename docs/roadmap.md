@@ -1951,9 +1951,9 @@ than reading a list. Then a mark cannot be written anywhere the step will not
 read it, and imitation stops being able to carry a dead one. The cost is a
 directory walk at build time, on a step that already caches.
 
-`docs/guide/sql.md` is the page this matters most for and the one furthest from
-fixed: 48 Zig blocks, more than the README and the reference together, and not
-one of them marked.
+`docs/guide/sql/` is where this matters most: nine pages and 49 marked blocks,
+more than the README and the reference together, every one of them live only
+because its page was joined to the list by hand.
 
 **Waiting on: ready** for the instance, which is an afternoon rather than a
 line — adding a page to `pages` compiles nothing until a block on it is marked,

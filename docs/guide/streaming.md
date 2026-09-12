@@ -37,8 +37,8 @@ writes 1 piece or 200
 `finish()` is required: it writes the marker saying where the body ends. Forget
 it and nilo writes one so the connection stays usable, and logs that it had to.
 
-`c.streamWith(.{ .buffer = 16 * 1024 })` for a different buffer size; the default
-is 4 KB.
+`c.streamWith(200, "text/csv", .{ .buffer = 16 * 1024 })` for a different
+buffer size; the default is 4 KB.
 
 ## Server-sent events
 
