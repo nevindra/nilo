@@ -127,6 +127,7 @@ try v1.without(requireOperator).with(rateLimitSignups).post("/sign-up", signUp);
 | `body_grace_ms` | `10_000` — before the rate is asked for |
 | `write_timeout_ms` | `30_000` — any one write to the client |
 | `max_connections` | `10_000` — held at once, 4,669 bytes each when idle. `0` = no limit |
+| `max_in_flight` | `0` — the most requests answered at once; past it a request is a `503` with `Retry-After: 1` at once rather than a place in a queue. `0` = no limit ([ADR 0197](./adr/0197-a-server-past-its-limit-says-so-at-once.md)) |
 | `max_body` | `1024 * 1024` — the most `c.body()` reads into the arena. One route can say its own with [`nilo.maxBody(bytes)`](#nilomaxbody) |
 | `trusted_hops` | `0` — how many proxies stand in front, for `c.clientIp()` |
 | `trusted_proxies` | `&.{}` — **which** ones: CIDRs, bare addresses, `"private"`, `"loopback"`. Wins over `trusted_hops` ([ADR 0129](./adr/0129-a-proxy-is-trusted-by-which-one-it-is.md)) |
@@ -166,7 +167,7 @@ by exact code for the whole process, `nilo_requests_in_flight`, and anything
 `app.expose` was given.
 
 Counted per **route**, not per path — `/users/1` and `/users/2` are both
-`/users/:id`. Four slots are not routes: `<unmatched>`, `<method not allowed>`,
+`/users/:id`. Five slots are not routes: `<unmatched>`, `<method not allowed>`, `<shed>`,
 `<static file>` and `<unparsed>`. A route that has answered nothing has no
 series at all. See [Metrics](./guide/metrics.md).
 

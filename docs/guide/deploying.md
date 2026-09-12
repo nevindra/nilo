@@ -178,6 +178,30 @@ for as long as the send takes, and there is one of those per request in flight
 a number that was already being multiplied rather than a second one to budget
 for.
 
+## How many requests at once
+
+`max_in_flight` is the other unit: not sockets held but requests being
+answered. It is off by default. Set it, and a request whose head arrives while
+that many are already inside their handlers is answered `503` with
+`Retry-After: 1` at once and the connection closed — no queue, no wait, one
+write of a constant — so a balancer in front sends the retry to a replica with
+room and the requests already running finish on time
+([ADR 0197](../adr/0197-a-server-past-its-limit-says-so-at-once.md)).
+
+```zig
+try app.listen(.{ .max_in_flight = 256 });
+```
+
+Pick the number from `nilo_requests_in_flight` on the metrics page under real
+load, not from a guess: 256 is right for a 40 ms handler and wrong for a 4 s
+one, which is why there is no default. Shed requests are counted under
+`<shed>` on the same page, apart from the routes they never reached.
+
+This is different from `max_connections` on purpose. Over the connection limit
+nothing is read and nothing is written, because the accept loop must not
+stall; over the request limit the head is already read on a connection fiber,
+and a 503 is something a balancer can act on where a reset is not.
+
 ## How big a body may be
 
 `max_body` is the most `c.body()` will read into the request arena. Past it, a

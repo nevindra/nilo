@@ -798,6 +798,7 @@ pub const App = struct {
         // `handleRequest` with no server gets the defaults below.
         self.limits = .{
             .max_body = options_.max_body,
+            .max_in_flight = options_.max_in_flight,
             .trusted_hops = options_.trusted_hops,
             .trusted_proxies = self.trusted_proxies,
             .block_warning_ms = options_.block_warning_ms,

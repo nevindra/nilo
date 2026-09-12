@@ -43,7 +43,7 @@ the service, and `nilo_responses_total` answers that. Doing exact codes per rout
 as well would be four kilobytes a route against the hundred and twenty-eight
 bytes one costs now, for a table that is nearly all zeroes.
 
-## The four things that are not routes
+## The five things that are not routes
 
 A request that reached no route is still traffic, and it is counted under a name
 that says which kind:
@@ -54,11 +54,13 @@ that says which kind:
 | `<method not allowed>` | the path exists, the verb does not — a 405 |
 | `<static file>` | served out of a directory loaded by `static()` |
 | `<unparsed>` | a head that never became a request — a 400, 408 or 431 |
+| `<shed>` | a request refused for load: parsed, past `max_in_flight`, answered 503 before it was routed ([ADR 0197](../adr/0197-a-server-past-its-limit-says-so-at-once.md)) |
 
 They are told apart rather than added together because a spike against one
 unnamed bucket answers nothing. A wave of `<unmatched>` is a scanner or a deploy
 that dropped a route; a wave of `<method not allowed>` is a form posting to a
-`GET`; a wave of `<unparsed>` is something on the network. Those are three
+`GET`; a wave of `<unparsed>` is something on the network; a wave of `<shed>`
+is the machine, or the number `max_in_flight` was set to. Those are four
 different afternoons.
 
 ## Where the page lives, and who may read it

@@ -3397,6 +3397,60 @@ test "a request is counted against its route, not the path it arrived on" {
     try testing.expect(std.mem.indexOf(u8, page, "route=\"/metrics\"") == null);
 }
 
+// ---- refusing a request for load (ADR 0197) ----
+
+test "a request past max_in_flight is a 503 at once, and one inside it is answered" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    app.limits.max_in_flight = 2;
+    try app.get("/users/:id", testGetUser);
+    try app.metrics(.{});
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    // Two requests already inside their handlers, which a single-threaded
+    // harness cannot arrange by sending them, so the counter is set the way
+    // two parked fibers would have left it.
+    app.stop.in_flight.store(2, .release);
+    const shed = h.send(&app, "GET /users/7 HTTP/1.1\r\nHost: x\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, shed.response, "HTTP/1.1 503"));
+    try testing.expect(std.mem.indexOf(u8, shed.response, "Retry-After: 1") != null);
+    try testing.expect(std.mem.indexOf(u8, shed.response, "Connection: close") != null);
+    try testing.expect(std.mem.indexOf(u8, shed.response, "{\"error\":\"this server is answering as many requests as it was told to") != null);
+    try testing.expect(!shed.keep_alive);
+    // The counter is left where it was found: the shed request took a place
+    // and gave it back.
+    try testing.expectEqual(@as(u32, 2), app.stop.in_flight.load(.acquire));
+
+    // One finishes, and the next request is inside the limit.
+    app.stop.in_flight.store(1, .release);
+    const served = h.send(&app, "GET /users/7 HTTP/1.1\r\nHost: x\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, served.response, "HTTP/1.1 200"));
+    app.stop.in_flight.store(0, .release);
+
+    // Counted under its own name rather than the route it never reached.
+    const page = h.send(&app, "GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n").response;
+    try testing.expect(std.mem.indexOf(u8, page, "nilo_requests_total{method=\"\",route=\"<shed>\",status=\"5xx\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, page, "route=\"/users/:id\",status=\"5xx\"") == null);
+}
+
+test "with no max_in_flight nothing is shed, whatever the counter says" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/users/:id", testGetUser);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    app.stop.in_flight.store(10_000, .release);
+    defer app.stop.in_flight.store(0, .release);
+    const served = h.send(&app, "GET /users/7 HTTP/1.1\r\nHost: x\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, served.response, "HTTP/1.1 200"));
+}
+
 test "a path that is no route and a method that is not allowed are counted apart" {
     var app = App.init(testing.allocator);
     defer app.deinit();

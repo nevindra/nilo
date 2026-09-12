@@ -223,7 +223,7 @@ pub noinline fn serveRequest(
     // it. Not before: until the head arrived this connection was parked
     // in a read, holding no work, and counting that as something to wait
     // on would put the whole grace period behind every idle browser tab.
-    _ = self.stop.in_flight.fetchAdd(1, .acq_rel);
+    const already = self.stop.in_flight.fetchAdd(1, .acq_rel);
     defer _ = self.stop.in_flight.fetchSub(1, .acq_rel);
 
     var r = http1.Request{};
@@ -239,6 +239,18 @@ pub noinline fn serveRequest(
         record.finish(status);
         return .{ .keep_alive = false };
     };
+
+    // Past the limit on requests in flight, and said so now rather than
+    // after a queue (ADR 0197). `already` is what the atomic above handed
+    // back for free, so this is one comparison and no second load. Before
+    // the head is copied, before the router is asked: a shed request costs
+    // one write of a constant.
+    if (self.limits.max_in_flight != 0 and already >= self.limits.max_in_flight) {
+        sendFinal(out, RESPONSE_503_SHED);
+        record.at(metrics_mod.shed);
+        record.finish(503);
+        return .{ .keep_alive = false };
+    }
 
     // Every `Str` from this request points into the head, and the head is
     // sitting in the connection's read buffer — where the next read
@@ -516,6 +528,18 @@ const RESPONSE_415 = http1.staticResponse(415, "Unsupported Media Type", failure
 const RESPONSE_408 = http1.staticResponse(408, "Request Timeout", failure_content_type, staticFailure(408, "request head timed out"), false);
 
 const failure_content_type = "application/json";
+
+/// Sent when the server is already answering `max_in_flight` requests
+/// (ADR 0197). Assembled here rather than through `staticResponse` for the
+/// one header that function does not write: `Retry-After`, which is what
+/// tells a client and a balancer this is load rather than a fault.
+const RESPONSE_503_SHED = blk: {
+    const body = staticFailure(503, "this server is answering as many requests as it was told to; try again in a moment");
+    break :blk std.fmt.comptimePrint(
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nRetry-After: 1\r\n\r\n{s}",
+        .{ failure_content_type, body.len, body },
+    );
+};
 
 /// Room for the longest failure body there can be: a message at the Failure's
 /// ceiling where every byte needs the six-character `\u00xx` escape, plus the

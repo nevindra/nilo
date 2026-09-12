@@ -325,6 +325,23 @@ pub const Options = struct {
     /// the tab is open.
     max_connections: u32 = 10_000,
 
+    /// The most requests this process answers at once. 0, the default,
+    /// means no limit.
+    ///
+    /// Past it, a request whose head has arrived is answered `503` with
+    /// `Retry-After: 1` at once, and the connection is closed, so the
+    /// balancer in front can send the retry somewhere with room. Nothing
+    /// waits: a request over the limit costs one write of a constant and
+    /// is gone ([ADR 0197](../docs/adr/0197-a-server-past-its-limit-says-so-at-once.md)).
+    ///
+    /// Requests, not connections — `max_connections` is the other one. Ten
+    /// thousand idle keep-alive connections hold no work; a hundred requests
+    /// inside a slow handler are the load. `nilo_requests_in_flight` on the
+    /// metrics page is what the number should be set from, and there is no
+    /// default because 256 is right for a 40 ms handler and wrong for a 4 s
+    /// one.
+    max_in_flight: u32 = 0,
+
     /// Stop on Ctrl-C (SIGINT) and on SIGTERM, which is what a container
     /// runtime or a supervisor sends when it wants the process to go.
     ///

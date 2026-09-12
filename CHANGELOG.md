@@ -718,6 +718,17 @@ rows — which turned out to be four gaps that only close together.
   one argument on the page about it. The README's badges said 218 refusals
   and 174 decisions where there are 231 and 190.
 
+- **`listen(.{ .max_in_flight = 256 })` — a server past its limit says so at
+  once.** Past that many requests being answered, the next one is a `503`
+  with `Retry-After: 1` and `Connection: close` before it is routed, rather
+  than a place in a queue behind the pool
+  ([ADR 0197](./docs/adr/0197-a-server-past-its-limit-says-so-at-once.md)).
+  Off by default, and off costs one comparison on a value the request path
+  already had — the count a shutdown waits on. Counted under a fifth
+  fixed slot, `<shed>`, on the metrics page; pick the number from
+  `nilo_requests_in_flight` there. Requests, not connections:
+  `max_connections` is still the other one.
+
 - **A request's id goes out with every `nilo_fetch` call made under it.**
   `client.get(c, …)` and the four beside it send `X-Request-Id` — the id a
   proxy sent and nilo checked, or the one nilo minted — so the service on the

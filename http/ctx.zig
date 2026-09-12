@@ -39,6 +39,8 @@ const Str = str_mod.Str;
 /// directly gets, and they are `bulkhead.Options`' defaults.
 pub const Limits = struct {
     max_body: usize = 1024 * 1024,
+    /// The most requests answered at once; 0 is no limit (ADR 0197).
+    max_in_flight: u32 = 0,
     trusted_hops: u8 = 0,
     /// The networks `.trusted_proxies` named, parsed once at `listen()` and
     /// owned by the App (ADR 0129). Empty means the hop count decides, which

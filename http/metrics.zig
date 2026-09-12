@@ -87,7 +87,9 @@ pub const unparsed = 0;
 pub const unmatched = 1;
 pub const method_not_allowed = 2;
 pub const static_file = 3;
-pub const fixed_slots = 4;
+/// A request parsed and refused for load before it was routed (ADR 0197).
+pub const shed = 4;
+pub const fixed_slots = 5;
 
 /// Split out rather than merged into one "not a route" bucket, because the
 /// merged version answers nothing: a spike of 4xx against a single unnamed
@@ -98,6 +100,7 @@ const fixed_labels = [fixed_slots]Label{
     .{ .method = "", .route = "<unmatched>" },
     .{ .method = "", .route = "<method not allowed>" },
     .{ .method = "", .route = "<static file>" },
+    .{ .method = "", .route = "<shed>" },
 };
 
 /// `none`, then one per hundred. `none` is a request that ended without an
