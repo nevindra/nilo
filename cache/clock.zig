@@ -23,6 +23,18 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+/// The cheap monotonic clock, by the name each kernel gives it. Linux calls
+/// it `COARSE`; Darwin calls it `APPROX`, and its `RAW` is the one that NTP
+/// does not slew, which for a clock read only to be subtracted from itself is
+/// a property rather than a cost. Anywhere else gets the precise one, which is
+/// correct everywhere POSIX and costs the 22ns the header is about — a
+/// platform nilo has not measured on should be right before it is fast.
+const coarse: std.posix.clockid_t = switch (builtin.os.tag) {
+    .linux => .MONOTONIC_COARSE,
+    .macos, .ios, .tvos, .watchos, .visionos => .MONOTONIC_RAW_APPROX,
+    else => .MONOTONIC,
+};
+
 /// Seconds off a clock that only goes forwards. The number means nothing on
 /// its own; two of them subtracted mean exactly one thing.
 pub fn monotonicSeconds() i64 {
@@ -34,7 +46,7 @@ pub fn monotonicSeconds() i64 {
     );
 
     var ts: std.posix.timespec = undefined;
-    switch (std.posix.errno(std.posix.system.clock_gettime(.MONOTONIC_COARSE, &ts))) {
+    switch (std.posix.errno(std.posix.system.clock_gettime(coarse, &ts))) {
         .SUCCESS => {},
         // A valid pointer at a clock the kernel maintains has no failure
         // POSIX admits to, so this is a broken kernel rather than a

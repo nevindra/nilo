@@ -414,6 +414,12 @@ rows — which turned out to be four gaps that only close together.
 
 ### Fixed
 
+- **`nilo_cache` compiles on macOS.** `clock.zig` named `CLOCK_MONOTONIC_COARSE`,
+  which exists on Linux and nowhere else, so every build that reached the module
+  — `test-cache`, `snippets` — stopped at one line. Darwin's name for the same
+  cheap clock is `MONOTONIC_RAW_APPROX`; anywhere that has neither gets the
+  precise `MONOTONIC`, which is right before it is fast. Nothing to change.
+
 - **`zig build test` on an Apple Silicon machine no longer runs it out of
   memory.** The `ReleaseSafe` test gates were on Zig's self-hosted backend
   everywhere, on the strength of x86_64 figures; on aarch64 that backend takes a
