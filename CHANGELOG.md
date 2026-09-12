@@ -718,6 +718,16 @@ rows — which turned out to be four gaps that only close together.
   one argument on the page about it. The README's badges said 218 refusals
   and 174 decisions where there are 231 and 190.
 
+- **`nilo.maxBody(bytes)` — how much body a route takes**, as a middleware on
+  `with`, the way `nilo.deadline(ms)` is for time
+  ([ADR 0193](./docs/adr/0194-a-route-can-say-how-much-body-it-takes.md)).
+  `listen()`'s `max_body` used to be the one number for every route, so a
+  server with a 50 MB import had told its sign-in route to hold 50 MB too.
+  Bounds every read into the arena — `c.body()`, a JSON body, a `Form(T)` —
+  and not `c.bodyStream()`, which keeps its own `max_bytes`. Costs one store
+  into a field the `Ctx` already had; `maxBody(0)` is a compile error.
+  `c.giveBodyLimit(bytes)` is the same thing from a middleware of your own.
+
 ## 0.3.0
 
 Needs Zig 0.16, as 0.2.0 does. Each entry says what you have to change; the

@@ -193,6 +193,17 @@ This is the knob a reverse proxy in front cannot stand in for. A proxy can bring
 the limit **down** — most already do — but nothing in front of nilo can raise a
 limit inside it. An app taking uploads has to say so here.
 
+**One route can have its own number.** `listen()`'s is the server's, and an
+import that takes fifty megabytes should not make the sign-in beside it take
+fifty megabytes too:
+
+```zig
+try app.with(nilo.maxBody(50 << 20)).post("/import", importCsv);
+```
+
+It goes both ways — a route can say it takes *less* than `listen()` allows
+([ADR 0194](../adr/0194-a-route-can-say-how-much-body-it-takes.md)).
+
 ## Who the client is
 
 `c.peer()` is the address the connection came from. It is what the kernel says,

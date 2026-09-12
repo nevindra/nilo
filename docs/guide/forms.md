@@ -154,7 +154,9 @@ The whole body is read into the request arena, bounded by `listen()`'s
 `max_body` — **1 MB by default**. A form is read into a struct, and a struct is
 not something you can have half of.
 
-For an upload bigger than that, turn `max_body` up, or take the body in pieces
+For an upload bigger than that, turn `max_body` up — for the one route, with
+`app.with(nilo.maxBody(50 << 20))`, rather than for the whole server — or take
+the body in pieces
 yourself with [`c.bodyStream()`](./requests.md#bodies-too-big-to-hold), where
 nothing is held in memory at all. `Form(T)` is the convenient one; the stream
 is the one with no ceiling.

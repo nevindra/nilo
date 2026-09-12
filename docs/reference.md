@@ -127,7 +127,7 @@ try v1.without(requireOperator).with(rateLimitSignups).post("/sign-up", signUp);
 | `body_grace_ms` | `10_000` — before the rate is asked for |
 | `write_timeout_ms` | `30_000` — any one write to the client |
 | `max_connections` | `10_000` — held at once, 4,669 bytes each when idle. `0` = no limit |
-| `max_body` | `1024 * 1024` — the most `c.body()` reads into the arena |
+| `max_body` | `1024 * 1024` — the most `c.body()` reads into the arena. One route can say its own with [`nilo.maxBody(bytes)`](#nilomaxbody) |
 | `trusted_hops` | `0` — how many proxies stand in front, for `c.clientIp()` |
 | `trusted_proxies` | `&.{}` — **which** ones: CIDRs, bare addresses, `"private"`, `"loopback"`. Wins over `trusted_hops` ([ADR 0129](./adr/0129-a-proxy-is-trusted-by-which-one-it-is.md)) |
 | `session_secret` | `null` — 32 bytes, for `Session(T)`. The same on every instance |
@@ -614,6 +614,7 @@ value is not.
 | `c.overdue()` | whether the deadline `nilo.deadline(ms)` gave this route has passed. Always false without one |
 | `c.timeLeftMs()` | `?u32` — milliseconds left, `null` without a deadline, `0` once it has gone |
 | `c.giveDeadline(ms)` | set one by hand. `nilo.deadline(ms)` is what normally calls this |
+| `c.giveBodyLimit(bytes)` | how much body this request may read into the arena, over `listen()`'s `max_body`. `nilo.maxBody(bytes)` is what normally calls this; a body already read keeps the limit it was read under |
 | `c.service(*Db)` | `?*Db` |
 | `c.resolve(V)` | `!V` — a resolved value, worked out once per request |
 | `c.keepAlive()` | whether the connection will carry another request |
@@ -1981,6 +1982,7 @@ nilo.allowance.keyed(account, .{ .per_window = 1000,        // …counted agains
                         .on_null = .reject, .name = "" })    //   returns
 
 nilo.deadline(2000)                                         // how long a route gets
+nilo.maxBody(50 << 20)                                      // how much body it takes
 ```
 
 `origins` is a list because `Access-Control-Allow-Origin` carries one value:
@@ -2120,6 +2122,27 @@ budget. One that finishes late still answers — the work is done and correct �
 and the lateness is a log line
 ([ADR 0133](./adr/0133-a-route-can-say-how-long-it-has.md)). `deadline(0)` is a
 compile error.
+
+### `nilo.maxBody`
+
+**How much body a route takes**, as a middleware:
+
+```zig
+try app.with(nilo.maxBody(50 << 20)).post("/import", importCsv);
+try app.with(nilo.maxBody(1024)).post("/sign-in", signIn);
+```
+
+`listen()`'s `max_body` is one number for every route, and an import and a
+sign-in do not have the same budget. This is the same argument `nilo.deadline`
+makes about time, with the same answer: the route says. It bounds every read
+into the request arena — `c.body()`, a JSON body, a `Form(T)`, a `Bound(…)`
+of either — and a `Content-Length` past it is a 413 before a byte is read.
+Lowering is as ordinary as raising.
+
+**It does not touch `c.bodyStream()`**, which holds nothing in the arena and
+takes a `max_bytes` of its own
+([ADR 0194](./adr/0194-a-route-can-say-how-much-body-it-takes.md)).
+`maxBody(0)` is a compile error.
 
 ## `nilo.accept`
 

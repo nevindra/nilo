@@ -753,6 +753,19 @@ pub const Ctx = struct {
         self._deadlines.until_ns = if (ms == 0) 0 else bulkhead.monotonicNanos() + @as(u64, ms) * std.time.ns_per_ms;
     }
 
+    /// How much body this request may read into the arena, in place of
+    /// `listen()`'s `max_body`. `app.with(nilo.maxBody(bytes))` is the way to
+    /// say it for a route; this is what that middleware does
+    /// ([ADR 0193](../docs/adr/0194-a-route-can-say-how-much-body-it-takes.md)).
+    ///
+    /// Bounds every read into the arena — `body()`, `json`, a `Form(T)` —
+    /// and not `bodyStream()`, which holds nothing there and takes its own
+    /// `max_bytes`. Has to be called before the body is read; a body already
+    /// in the arena was read under the limit that stood at the time.
+    pub fn giveBodyLimit(self: *Ctx, bytes: usize) void {
+        self._limits.max_body = bytes;
+    }
+
     /// Whether this request has run out of the time it was given.
     ///
     /// Always false for a request with no deadline, so a handler may ask

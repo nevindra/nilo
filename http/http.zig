@@ -574,6 +574,14 @@ pub const allowance = @import("allowance.zig");
 /// is not ([ADR 0133](../docs/adr/0133-a-route-can-say-how-long-it-has.md)).
 pub const deadline = @import("deadline.zig").with;
 
+/// How much body a route takes: `app.with(nilo.maxBody(50 << 20)).post("/import", …)`.
+///
+/// `listen()`'s `max_body` is one number for every route, and an import and
+/// a sign-in do not have the same budget. Bounds every read into the arena
+/// and not `c.bodyStream()`, which has its own
+/// ([ADR 0193](../docs/adr/0194-a-route-can-say-how-much-body-it-takes.md)).
+pub const maxBody = @import("maxbody.zig").with;
+
 /// Static files, held in memory (ADR 0010). Used through `app.static()`;
 /// the module itself is here for its `Options`.
 /// What an `Accept` header says about one media type: `.named`, `.anything`,
@@ -836,6 +844,7 @@ test {
     _ = @import("metrics.zig");
     _ = @import("allowance.zig");
     _ = @import("deadline.zig");
+    _ = @import("maxbody.zig");
     _ = @import("headers.zig");
     _ = @import("app.zig");
     _ = @import("serve.zig");

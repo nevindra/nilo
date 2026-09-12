@@ -145,7 +145,7 @@ const http_core = [_][]const u8{
 /// nothing in the core names any of them back, which is why they are not in
 /// the component.
 const http_above_core = [_][]const u8{
-    "logger", "cors",      "allowance", "deadline",
+    "logger", "cors",      "allowance", "deadline",  "maxbody",
     "http",   "behaviour", "live",      "profile",
     "fuzz",   "fuzz_main", "test_root",
 };
@@ -847,6 +847,10 @@ const refusals = [_]Refusal{
     .{
         .name = "deadline_of_no_time",
         .says = "a deadline of 0 milliseconds is not a limit, it is a request that has already run out.",
+    },
+    .{
+        .name = "maxbody_of_no_bytes",
+        .says = "a body limit of 0 bytes is not a limit, it is a route that refuses every body.",
     },
     .{
         .name = "filebody_as_an_argument",
