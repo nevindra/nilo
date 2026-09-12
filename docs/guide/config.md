@@ -125,11 +125,14 @@ A Config is an ordinary struct, so it is an ordinary service:
 ```zig
 try app.provide(&settings);
 
-fn health(cfg: *const Settings) []const u8 {
-    return if (cfg.log_level == .debug) "loud" else "ok";
+fn verbosity(cfg: *const Settings) []const u8 {
+    return if (cfg.log_level == .debug) "loud" else "quiet";
 }
 ```
 
-`*const Settings` in a handler's arguments is the whole wiring. See
+`*const Settings` in a handler's arguments is the whole wiring. (A route
+that says whether the server is *ready* is not this — it is
+[`app.health`](./deploying.md#knowing-whether-it-is-ready), which asks the
+services rather than the settings.) See
 [Services](./services.md) for what else that slot takes, and
 [the reference](../reference.md#nilo_config) for the rest of the API.

@@ -737,6 +737,28 @@ const cache_refusals = [_]Refusal{
 /// the first line of the error it has to stop with. `says` leaves out the
 /// `nilo: ` prefix because the build step adds it — see the loop in `build`.
 const refusals = [_]Refusal{
+    // The four ways to ask for an answer nilo cannot keep (ADR 0193).
+    .{
+        .name = "idempotent_not_a_bytes_space",
+        .says = "the `Idempotent(u32, …)` on route \"/orders\" names u32 as where answers are kept, and it is not a Space.",
+    },
+    .{
+        .name = "idempotent_twice",
+        .says = "the handler for route \"/orders\" asks for the Idempotency-Key twice — argument 1 and argument 2.",
+    },
+    .{
+        .name = "idempotent_handler_writes_its_own_response",
+        .says = "the handler for route \"/orders\" takes an `Idempotent(…)` and returns nothing, so there is no answer to keep.",
+    },
+    .{
+        .name = "idempotent_handler_returns_a_file",
+        .says = "the handler for route \"/receipts\" takes an `Idempotent(…)` and returns a nilo.FileBody, which is not an answer nilo can keep.",
+    },
+    // A readiness hook of the wrong shape (ADR 0192).
+    .{
+        .name = "ready_hook_wrong_arity",
+        .says = "ready_hook_wrong_arity.Mailer.nilo_ready takes 1 parameters, and it has to take 2.",
+    },
     // The two ways to name a Basic realm wrong (ADR 0191).
     .{
         .name = "authorization_realm_empty",
@@ -1262,6 +1284,8 @@ const Snippets = struct {
         .{ .path = "docs/guide/id.md" },
         .{ .path = "docs/guide/jwt.md" },
         .{ .path = "docs/guide/cache.md" },
+        .{ .path = "docs/guide/idempotency.md" },
+        .{ .path = "docs/guide/deploying.md" },
         .{ .path = "docs/guide/fetch.md" },
         .{ .path = "docs/guide/s3.md" },
         // The SQL guide is a folder, and its front page and every page after
@@ -1531,13 +1555,15 @@ const Snippets = struct {
         var out: std.ArrayList(u8) = .empty;
         out.appendSlice(b.allocator, "export fn snippet() void {\n") catch @panic("OOM");
 
+        // Column 0 only, the way `declaresFn` reads it: an indented `pub fn`
+        // is a method inside a struct, and `_ = &method;` at the top level
+        // names nothing that exists.
         var lines = std.mem.splitScalar(u8, block, '\n');
         while (lines.next()) |line| {
-            const trimmed = std.mem.trimStart(u8, line, " \t");
-            const after = if (std.mem.startsWith(u8, trimmed, "pub fn "))
-                trimmed["pub fn ".len..]
-            else if (std.mem.startsWith(u8, trimmed, "fn "))
-                trimmed["fn ".len..]
+            const after = if (std.mem.startsWith(u8, line, "pub fn "))
+                line["pub fn ".len..]
+            else if (std.mem.startsWith(u8, line, "fn "))
+                line["fn ".len..]
             else
                 continue;
             const open = std.mem.indexOfScalar(u8, after, '(') orelse continue;

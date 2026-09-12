@@ -660,6 +660,284 @@ test "a document with no Authorization anywhere lists no security scheme" {
     try testing.expect(std.mem.indexOf(u8, json, "securitySchemes") == null);
 }
 
+// ---- the health route (ADR 0192) ----
+
+const ProbePool = struct {
+    up: bool,
+
+    pub fn nilo_ready(self: *ProbePool, _: *str_mod.AnyScope) ?[]const u8 {
+        return if (self.up) null else "the database is not answering";
+    }
+};
+
+test "the health route is ok while every service is ready, and names the one that is not" {
+    var pool = ProbePool{ .up = true };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&pool);
+    try app.health("/healthz");
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const ok = h.send(&app, "GET /healthz HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, ok.response, "HTTP/1.1 200"));
+    try testing.expect(std.mem.endsWith(u8, ok.response, "{\"status\":\"ok\"}"));
+    // A health answer a proxy remembers is about the past.
+    try testing.expect(std.mem.indexOf(u8, ok.response, "Cache-Control: no-store") != null);
+
+    pool.up = false;
+    const down = h.send(&app, "GET /healthz HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, down.response, "HTTP/1.1 503"));
+    try testing.expect(std.mem.indexOf(u8, down.response, "\"service\":\"behaviour.ProbePool\"") != null);
+    try testing.expect(std.mem.indexOf(u8, down.response, "\"why\":\"the database is not answering\"") != null);
+
+    // HEAD is what some balancers send, and it gets the status with no body.
+    const head = h.send(&app, "HEAD /healthz HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, head.response, "HTTP/1.1 503"));
+}
+
+test "the health route says stopping from the moment the server is told to stop" {
+    var pool = ProbePool{ .up = true };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&pool);
+    try app.health("/healthz");
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    app.stop.requested.store(true, .release);
+    const stopping = h.send(&app, "GET /healthz HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, stopping.response, "HTTP/1.1 503"));
+    try testing.expect(std.mem.endsWith(u8, stopping.response, "{\"status\":\"stopping\"}"));
+}
+
+// ---- answering once per Idempotency-Key (ADR 0193) ----
+
+/// The shape `Idempotent` asks of a Space, over a map: what `nilo_cache`'s
+/// bytes Space has, written here because `http/` names no cache.
+const FakeReplays = struct {
+    pub const Held = [max_bytes]u8;
+    pub const max_bytes: usize = 4096;
+
+    map: std.StringHashMap([]const u8),
+    gpa: std.mem.Allocator,
+
+    fn init(gpa: std.mem.Allocator) FakeReplays {
+        return .{ .map = .init(gpa), .gpa = gpa };
+    }
+
+    fn deinit(self: *FakeReplays) void {
+        var it = self.map.iterator();
+        while (it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            self.gpa.free(e.value_ptr.*);
+        }
+        self.map.deinit();
+    }
+
+    pub fn getInto(self: *FakeReplays, key: []const u8, out: []u8) ?[]const u8 {
+        const v = self.map.get(key) orelse return null;
+        if (v.len > out.len) return null;
+        @memcpy(out[0..v.len], v);
+        return out[0..v.len];
+    }
+
+    pub fn putIfAbsent(self: *FakeReplays, key: []const u8, value: []const u8) error{TooLarge}!bool {
+        if (self.map.contains(key)) return false;
+        try self.put(key, value);
+        return true;
+    }
+
+    pub fn put(self: *FakeReplays, key: []const u8, value: []const u8) error{TooLarge}!void {
+        if (value.len > max_bytes) return error.TooLarge;
+        const k = self.gpa.dupe(u8, key) catch return error.TooLarge;
+        const v = self.gpa.dupe(u8, value) catch return error.TooLarge;
+        if (self.map.fetchRemove(k)) |old| {
+            self.gpa.free(old.key);
+            self.gpa.free(old.value);
+        }
+        self.map.put(k, v) catch return error.TooLarge;
+    }
+
+    pub fn del(self: *FakeReplays, key: []const u8) bool {
+        const old = self.map.fetchRemove(key) orelse return false;
+        self.gpa.free(old.key);
+        self.gpa.free(old.value);
+        return true;
+    }
+};
+
+const OrderCounter = struct { placed: u32 = 0 };
+const KeptOrder = struct { sku: []const u8, qty: u32 };
+const PlacedOnce = struct { id: u32, sku: []const u8 };
+
+fn placeKeptOrder(key: typed.Idempotent(FakeReplays, .{}), body: KeptOrder, counter: *OrderCounter) !typed.Response(PlacedOnce) {
+    if (body.qty == 0) return fail.unprocessable("qty has to be at least 1", .{});
+    counter.placed += 1;
+    _ = key;
+    return .{
+        .status = 201,
+        .value = .{ .id = counter.placed, .sku = body.sku },
+        .headers = .of(&.{.{ .name = "Location", .value = "/orders/1" }}),
+    };
+}
+
+fn whoseOrder(c: *ctx_mod.Ctx) ?Str {
+    return c.header("X-Account");
+}
+
+fn placeForAccount(key: typed.Idempotent(FakeReplays, .{ .by = whoseOrder }), counter: *OrderCounter) !u32 {
+    _ = key;
+    counter.placed += 1;
+    return counter.placed;
+}
+
+fn post(h: *Harness, app: *App, key: []const u8, body: []const u8) []const u8 {
+    var buf: [512]u8 = undefined;
+    const raw = std.fmt.bufPrint(&buf, "POST /orders HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nIdempotency-Key: {s}\r\n\r\n{s}", .{ body.len, key, body }) catch unreachable;
+    return h.send(app, raw).response;
+}
+
+test "the first request with a key runs the handler and every retry gets its answer back" {
+    var replays = FakeReplays.init(testing.allocator);
+    defer replays.deinit();
+    var counter = OrderCounter{};
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&replays);
+    try app.provide(&counter);
+    try app.post("/orders", placeKeptOrder);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const first = post(&h, &app, "k-1", "{\"sku\":\"A1\",\"qty\":2}");
+    try testing.expect(std.mem.startsWith(u8, first, "HTTP/1.1 201"));
+    try testing.expect(std.mem.endsWith(u8, first, "{\"id\":1,\"sku\":\"A1\"}"));
+    try testing.expect(std.mem.indexOf(u8, first, "Idempotent-Replayed") == null);
+    try testing.expectEqual(@as(u32, 1), counter.placed);
+
+    // Same key, same body: the kept answer, the handler untouched, and the
+    // handler's own Location on it again.
+    const again = post(&h, &app, "k-1", "{\"sku\":\"A1\",\"qty\":2}");
+    try testing.expect(std.mem.startsWith(u8, again, "HTTP/1.1 201"));
+    try testing.expect(std.mem.endsWith(u8, again, "{\"id\":1,\"sku\":\"A1\"}"));
+    try testing.expect(std.mem.indexOf(u8, again, "Idempotent-Replayed: true") != null);
+    try testing.expect(std.mem.indexOf(u8, again, "Location: /orders/1") != null);
+    try testing.expect(std.mem.indexOf(u8, again, "Content-Type: application/json") != null);
+    try testing.expectEqual(@as(u32, 1), counter.placed);
+
+    // A new key is a new order.
+    const second = post(&h, &app, "k-2", "{\"sku\":\"B2\",\"qty\":1}");
+    try testing.expect(std.mem.endsWith(u8, second, "{\"id\":2,\"sku\":\"B2\"}"));
+    try testing.expectEqual(@as(u32, 2), counter.placed);
+}
+
+test "a key without a request, reused on another request, or still in flight is refused by name" {
+    var replays = FakeReplays.init(testing.allocator);
+    defer replays.deinit();
+    var counter = OrderCounter{};
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&replays);
+    try app.provide(&counter);
+    try app.post("/orders", placeKeptOrder);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const missing = h.send(&app, "POST /orders HTTP/1.1\r\nHost: t\r\nContent-Length: 21\r\n\r\n{\"sku\":\"A1\",\"qty\":2}").response;
+    try testing.expect(std.mem.startsWith(u8, missing, "HTTP/1.1 400"));
+    try testing.expect(std.mem.indexOf(u8, missing, "Idempotency-Key") != null);
+    try testing.expectEqual(@as(u32, 0), counter.placed);
+
+    _ = post(&h, &app, "k-1", "{\"sku\":\"A1\",\"qty\":2}");
+    // Same key, different body: a client bug, and not the old answer.
+    const reused = post(&h, &app, "k-1", "{\"sku\":\"Z9\",\"qty\":2}");
+    try testing.expect(std.mem.startsWith(u8, reused, "HTTP/1.1 422"));
+    try testing.expect(std.mem.indexOf(u8, reused, "different request") != null);
+    try testing.expectEqual(@as(u32, 1), counter.placed);
+
+    // A marker somebody else's request left is a 409, not a second run.
+    const marker = @import("idempotent.zig").marker(@import("idempotent.zig").fingerprintOf("POST", "/orders", "", "{\"sku\":\"C3\",\"qty\":1}"));
+    try replays.put("k-3", &marker);
+    const racing = post(&h, &app, "k-3", "{\"sku\":\"C3\",\"qty\":1}");
+    try testing.expect(std.mem.startsWith(u8, racing, "HTTP/1.1 409"));
+    try testing.expect(std.mem.indexOf(u8, racing, "still being answered") != null);
+    try testing.expectEqual(@as(u32, 1), counter.placed);
+}
+
+test "what the handler failed with is not kept, so the retry runs it again" {
+    var replays = FakeReplays.init(testing.allocator);
+    defer replays.deinit();
+    var counter = OrderCounter{};
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&replays);
+    try app.provide(&counter);
+    try app.post("/orders", placeKeptOrder);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const refused = post(&h, &app, "k-1", "{\"sku\":\"A1\",\"qty\":0}");
+    try testing.expect(std.mem.startsWith(u8, refused, "HTTP/1.1 422"));
+    try testing.expect(std.mem.indexOf(u8, refused, "Idempotent-Replayed") == null);
+    // The marker is gone, so the same key with a corrected body is a fresh
+    // request rather than a 422 about reuse.
+    const fixed = post(&h, &app, "k-1", "{\"sku\":\"A1\",\"qty\":1}");
+    try testing.expect(std.mem.startsWith(u8, fixed, "HTTP/1.1 201"));
+    try testing.expectEqual(@as(u32, 1), counter.placed);
+}
+
+test "a key is the caller's when `by` says whose, and a request with no caller is a 403" {
+    var replays = FakeReplays.init(testing.allocator);
+    defer replays.deinit();
+    var counter = OrderCounter{};
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&replays);
+    try app.provide(&counter);
+    try app.post("/orders", placeForAccount);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const alice = h.send(&app, "POST /orders HTTP/1.1\r\nHost: t\r\nX-Account: alice\r\nIdempotency-Key: k\r\nContent-Length: 0\r\n\r\n").response;
+    try testing.expect(std.mem.endsWith(u8, alice, "1"));
+    const bob = h.send(&app, "POST /orders HTTP/1.1\r\nHost: t\r\nX-Account: bob\r\nIdempotency-Key: k\r\nContent-Length: 0\r\n\r\n").response;
+    try testing.expect(std.mem.endsWith(u8, bob, "2"));
+    const alice_again = h.send(&app, "POST /orders HTTP/1.1\r\nHost: t\r\nX-Account: alice\r\nIdempotency-Key: k\r\nContent-Length: 0\r\n\r\n").response;
+    try testing.expect(std.mem.endsWith(u8, alice_again, "1"));
+    try testing.expect(std.mem.indexOf(u8, alice_again, "Idempotent-Replayed: true") != null);
+    try testing.expectEqual(@as(u32, 2), counter.placed);
+
+    const nobody = h.send(&app, "POST /orders HTTP/1.1\r\nHost: t\r\nIdempotency-Key: k\r\nContent-Length: 0\r\n\r\n").response;
+    try testing.expect(std.mem.startsWith(u8, nobody, "HTTP/1.1 403"));
+}
+
+test "an idempotent route promises the header, a 409 and a 422 in the document" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    app.docs(.{});
+    try app.post("/orders", placeKeptOrder);
+
+    const json = try docsFor(&app);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+    defer parsed.deinit();
+
+    const op = parsed.value.object.get("paths").?.object.get("/orders").?.object.get("post").?.object;
+    const key = op.get("parameters").?.array.items[0].object;
+    try testing.expectEqualStrings("Idempotency-Key", key.get("name").?.string);
+    try testing.expectEqualStrings("header", key.get("in").?.string);
+    try testing.expect(key.get("required").?.bool);
+    const responses = op.get("responses").?.object;
+    try testing.expect(responses.get("409") != null);
+    try testing.expect(responses.get("422") != null);
+}
+
 // ---- stage 3: typed handlers, services, fail functions ----
 
 const Db = struct {

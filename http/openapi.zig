@@ -215,6 +215,9 @@ pub const Operation = struct {
     /// scheme a generated client signs in with
     /// ([ADR 0191](../docs/adr/0191-an-authorization-header-a-handler-can-ask-for.md)).
     security: Security = .none,
+    /// Whether the route answers once per `Idempotency-Key`, and so can
+    /// answer 409 and 422 on the key alone (ADR 0193).
+    idempotent: bool = false,
     body: ?*const Schema,
     body_kind: BodyKind = .json,
     answer: Answer,
@@ -993,12 +996,18 @@ fn writeOperation(w: *std.Io.Writer, components: *const Components, op: Operatio
         try writeFailure(w, "401", "no Authorization header, or not the scheme this endpoint " ++
             "takes; WWW-Authenticate says which");
     }
+    if (op.idempotent) {
+        try writeFailure(w, "409", "a request with this Idempotency-Key is still being answered");
+    }
     if (op.can_reject) {
         try writeFailure(w, "400", "the request did not fit what this endpoint takes; " ++
             "the body says which part");
     }
     if (op.answer.not_found) {
         try writeFailure(w, "404", "there is no such thing");
+    }
+    if (op.idempotent) {
+        try writeFailure(w, "422", "this Idempotency-Key was already used for a different request");
     }
     try w.writeAll("}}");
 }

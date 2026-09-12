@@ -135,16 +135,17 @@ your handler looks like.
 |---|---|
 | 400 | a path param that doesn't convert, a query param that doesn't fit, a body that isn't valid JSON, a form sent as the wrong encoding, a WebSocket upgrade that isn't one |
 | 401 | an `Authorization(…)` argument with no header behind it, another scheme, an empty token, or Basic that will not decode — with `WWW-Authenticate` saying what would have done ([Handlers](./handlers.md#what-a-handler-may-ask-for)) |
-| 403 | a WebSocket handshake from an origin the route did not name — [WebSocket](./websocket.md#which-pages-may-open-it) |
+| 403 | a WebSocket handshake from an origin the route did not name — [WebSocket](./websocket.md#which-pages-may-open-it); an `Idempotent(…)` whose `by` found nobody behind the request |
 | 404 | no route, and no static file |
 | 405 | the path exists under another method — with an `Allow` header |
+| 409 | an `Idempotency-Key` that is still being answered — [Answering once](./idempotency.md) |
 | 408 | a request head or a body that stopped arriving inside the [deadlines](./deploying.md#deadlines) |
 | 413 | a body past `c.body()`'s megabyte, or a stream's `max_bytes` |
-| 422 | a `Bound(…)` argument whose handler answered `b.fail()` — [Forms](./forms.md#when-one-field-is-wrong-and-the-rest-are-fine) |
+| 422 | a `Bound(…)` argument whose handler answered `b.fail()` — [Forms](./forms.md#when-one-field-is-wrong-and-the-rest-are-fine); an `Idempotency-Key` reused on a different request |
 | 429 | an address past its [allowance](./middleware.md#when-one-client-asks-too-often), with a `Retry-After` |
 | 431 | a request head bigger than `read_buffer` |
 | 500 | a `Session(T)` asked for with no `session_secret` set, a header value with a control byte in it, a cookie value with a `;` |
-| 503 | the request was cancelled while waiting on a lock or a sleep |
+| 503 | the request was cancelled while waiting on a lock or a sleep; the [health page](./deploying.md#knowing-whether-it-is-ready) while a service is not ready or the server is stopping |
 
 Each of them names the thing that was wrong. See
 [Requests](./requests.md) for what the 400s actually say.

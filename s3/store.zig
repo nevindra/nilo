@@ -176,6 +176,17 @@ pub const Store = struct {
         try self.refresh(io, core.nowMillis());
     }
 
+    /// What the health route asks
+    /// ([ADR 0192](../docs/adr/0192-a-health-route-asks-the-services.md)).
+    /// Started is ready: `nilo_start` fetched the first credentials, so a
+    /// Store that reached here can sign. Not a request to the endpoint on
+    /// every probe — a balancer asks every second, and a HEAD to somebody
+    /// else's bucket at that rate is a bill and a rate limit, not a check.
+    pub fn nilo_ready(self: *Store, _: *core.AnyScope) ?[]const u8 {
+        if (!self.started) return "not started: `listen()` has not run";
+        return null;
+    }
+
     /// The signing key for `now`, and the session token that goes with it.
     ///
     /// The token is copied into `token_buf` while the lock is held. Anything

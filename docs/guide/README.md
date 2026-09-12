@@ -19,7 +19,7 @@ belongs to is decided by a single question — does it need the event loop?
 | **`nilo_fetch`** | calling somebody else's HTTP API from a handler | [Calling somebody else's API](./fetch.md) |
 | **`nilo_config`** | settings out of the environment, into a struct of yours | [Settings](./config.md) |
 | **`nilo_pw`** | password hashing: argon2id, stored as PHC | [Sessions](./sessions.md#a-session-is-not-authentication) |
-| **`nilo_cache`** | an expiring cache in this process, holding no pointers | [A cache in this process](./cache.md) |
+| **`nilo_cache`** | an expiring cache in this process, holding no pointers | [A cache in this process](./cache.md), and the Space that [Answering once](./idempotency.md) keeps its answers in |
 | **`nilo_jwt`** | checking somebody else's signed token: RS256 and a JWKS | [Checking somebody else's token](./jwt.md) |
 | **`nilo_id`** | UUIDs, v4 and v7 | [Identifiers](./id.md) |
 | **`nilo_core`** | `Str`, the Scope and the clock the rest share | [the reference](../reference.md#scope) |
@@ -73,6 +73,9 @@ const nilo = @import("nilo_http");
 16. [Work that is not a request](./background.md) — a summary written every
     minute or a queue drained every few seconds: a fiber of your own, owned by
     the server, and the shutdown that reaches it.
+17. [Answering once](./idempotency.md) — the `Idempotency-Key` header as a
+    typed argument: a retry gets the kept answer back, the order is placed
+    once, and the two refusals that keep a key honest.
 
 ## The other modules
 
@@ -81,7 +84,7 @@ what the module is for, the whole of it in one example, every option with
 its default, what it answers instead of a value, what it costs, and what it
 will not do.
 
-17. [Talking to a database](./sql/README.md) — `nilo_sql`: your struct is the
+18. [Talking to a database](./sql/README.md) — `nilo_sql`: your struct is the
     table, the query is a constant, and a misspelled column is a build error.
     Postgres and SQLite, written the same way. Nine pages, in order:
     [tables](./sql/tables.md), [reading](./sql/reading.md),
@@ -89,32 +92,32 @@ will not do.
     [past one table](./sql/raw.md), [SQLite](./sql/sqlite.md),
     [making the tables](./sql/migrations.md) and
     [running it](./sql/running.md).
-18. [Calling somebody else's API](./fetch.md) — `nilo_fetch`: one client for
+19. [Calling somebody else's API](./fetch.md) — `nilo_fetch`: one client for
     the whole program, a deadline on every call, a body that comes back in the
     request's own memory, and an `Exchange` for a body too big to hold.
-19. [Object storage](./s3.md) — `nilo_s3`: a bucket is a type, a key is not.
+20. [Object storage](./s3.md) — `nilo_s3`: a bucket is a type, a key is not.
     Reading, writing, streaming an object through, and a presigned URL or
     POST form for a browser that talks to the bucket itself.
-20. [A cache in this process](./cache.md) — `nilo_cache`: a typed keyspace
+21. [A cache in this process](./cache.md) — `nilo_cache`: a typed keyspace
     over one budget of memory, no pointer allowed in a value, a lookup that
     takes no lock, and a `stats()` that says why it is not hitting.
-21. [Checking somebody else's token](./jwt.md) — `nilo_jwt`: a JWT an identity
+22. [Checking somebody else's token](./jwt.md) — `nilo_jwt`: a JWT an identity
     provider signed, verified in the order that is safe and read into a struct
     of yours; the signed-in user as a resolved value; what a key rotation
     looks like from here.
-22. [Identifiers](./id.md) — `nilo_id`: a v7 for a key that sorts by when it
+23. [Identifiers](./id.md) — `nilo_id`: a v7 for a key that sorts by when it
     was made, what it does and does not order, and why the randomness is an
     argument.
 
 ## Shipping it
 
-23. [Testing](./testing.md) — handlers as ordinary functions, and the test
+24. [Testing](./testing.md) — handlers as ordinary functions, and the test
     client for the ones that write their answer.
-24. [OpenAPI](./openapi.md) — an API document written from the signatures.
-25. [Metrics](./metrics.md) — how many requests, at what statuses, how long;
+25. [OpenAPI](./openapi.md) — an API document written from the signatures.
+26. [Metrics](./metrics.md) — how many requests, at what statuses, how long;
     a Prometheus page in one call, and a counter of your own on it.
-26. [Deploying](./deploying.md) — startup errors, panics, graceful shutdown,
-    tuning, and what isn't here yet.
+27. [Deploying](./deploying.md) — startup errors, panics, graceful shutdown,
+    a health page the balancer can trust, tuning, and what isn't here yet.
 
 ## Also
 

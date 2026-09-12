@@ -47,6 +47,7 @@ const router = @import("router.zig");
 const service_mod = @import("service.zig");
 const fail = @import("fail.zig");
 const authorization_mod = @import("authorization.zig");
+const idempotent_mod = @import("idempotent.zig");
 const str_mod = @import("nilo_core");
 const resolve = @import("resolve.zig");
 const openapi = @import("openapi.zig");
@@ -220,6 +221,49 @@ pub fn FromHeader(comptime name: []const u8, comptime T: type) type {
     };
 }
 
+/// What `Idempotent(Replays, …)` takes beside the Space.
+pub const IdempotentOptions = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 0122).
+    pub const nilo_type_name = "nilo.IdempotentOptions";
+
+    /// Whose key it is. A function of one `*Ctx` answering the account, the
+    /// tenant, the API key — whatever tells two callers apart — or null for
+    /// a request with nobody behind it, which is a 403. Leave it null only
+    /// on an endpoint with one caller: two clients choosing the same key
+    /// must never see each other's answer.
+    by: ?*const fn (*Ctx) ?Str = null,
+};
+
+/// The `Idempotency-Key` header, as a typed argument that makes the route
+/// answer once per key
+/// ([ADR 0193](../docs/adr/0193-a-request-answered-once-is-answered-the-same-way-again.md)).
+///
+/// ```zig
+/// const Replays = cache.Space("orders-replay", []const u8, .{ .ttl_s = 86_400, .max_bytes = 16 << 10 });
+///
+/// fn placeOrder(key: nilo.Idempotent(Replays, .{ .by = account }), body: NewOrder, db: *sql.Db, c: *nilo.Ctx) !nilo.Status(201, Order)
+/// ```
+///
+/// The first request with a key runs the handler and keeps what it
+/// returned; every later one with that key gets the kept answer back with
+/// `Idempotent-Replayed: true`, and the handler does not run. No key is a
+/// 400, a key still being answered is a 409, a key reused on a different
+/// request is a 422. What the handler *failed* with is not kept. `Replays`
+/// is a `cache.Space` holding bytes, provided as a service; `.key` is the
+/// header as sent. The account of what it costs is in `idempotent.zig`.
+pub fn Idempotent(comptime Replays: type, comptime options: IdempotentOptions) type {
+    return struct {
+        pub const nilo_idempotent = .{ .replays = Replays, .by = options.by };
+        /// What a nilo compile error calls this type, which is the name the
+        /// reader's own import line gives it (ADR 0122).
+        pub const nilo_type_name = "nilo.Idempotent(" ++ naming.of(Replays) ++ ", …)";
+
+        /// The `Idempotency-Key` the client sent, as sent.
+        key: Str,
+    };
+}
+
 /// The role of one handler argument, decided at compile time.
 const Role = union(enum) {
     ctx,
@@ -239,6 +283,11 @@ const Role = union(enum) {
     /// 400 and the document carries it as a security scheme, not a
     /// parameter.
     authorization,
+    /// The `Idempotency-Key` header, and with it the whole of the route
+    /// answering once per key (ADR 0193). Its own role because it is the
+    /// one argument that can end the request before the handler runs with
+    /// a *success*, and the one that has to see the handler's answer after.
+    idempotent,
     /// The body again, but as an HTML form rather than as JSON (ADR 0031).
     /// A separate role and not a flavour of `.body`, because the two are
     /// the same slot and asking for both has to be refused.
@@ -268,10 +317,22 @@ pub fn wrap(comptime pattern: []const u8, comptime f: anytype) router.CtxHandler
     const params = @typeInfo(Fn).@"fn".params;
     const roles = comptime rolesOf(pattern, params);
     const param_names = comptime patternParamNames(pattern);
+    comptime if (idempotentAt(roles) != null) checkKeepable(pattern, Fn);
 
     const Wrapper = struct {
         fn run(c: *Ctx) anyerror!void {
             var args: std.meta.ArgsTuple(Fn) = undefined;
+            // Before anything else is read, because a replay reads nothing
+            // else: the kept answer goes out and the handler never runs
+            // (ADR 0193). `null` here means there is no such argument.
+            const replaying: ?Begun = if (comptime idempotentAt(roles)) |at|
+                switch (try idempotentBegin(params[at].type.?, c)) {
+                    .replayed => return,
+                    .fresh => |begun| begun,
+                }
+            else
+                null;
+
             inline for (params, 0..) |p, i| {
                 const P = p.type.?;
                 switch (comptime roles[i]) {
@@ -306,6 +367,7 @@ pub fn wrap(comptime pattern: []const u8, comptime f: anytype) router.CtxHandler
                     .query => args[i] = .{ .value = try queryValue(P.nilo_query, c) },
                     .header => args[i] = .{ .value = try headerValue(P, c) },
                     .authorization => args[i] = try c.authorization(P.nilo_authorization),
+                    .idempotent => args[i] = .{ .key = replaying.?.key },
                     .form => args[i] = .{ .value = try c.form(P.nilo_form) },
                     .arena => args[i] = c._arena,
                     .resolved => args[i] = try resolve.value(P, c),
@@ -330,10 +392,209 @@ pub fn wrap(comptime pattern: []const u8, comptime f: anytype) router.CtxHandler
                     },
                 }
             }
+            if (comptime idempotentAt(roles)) |at| {
+                return idempotentFinish(params[at].type.?, c, replaying.?, @call(.auto, f, args));
+            }
             return sendResult(c, @call(.auto, f, args));
         }
     };
     return Wrapper.run;
+}
+
+/// A kept answer is one the handler returned, so a handler that writes its
+/// own, or answers with a file or a redirect, cannot be idempotent this way
+/// (ADR 0193). Said at the route rather than on the first replay.
+fn checkKeepable(comptime pattern: []const u8, comptime Fn: type) void {
+    comptime {
+        if (returnsNothing(Fn)) @compileError(
+            "nilo: the handler for route \"" ++ pattern ++ "\" takes an `Idempotent(…)` and " ++
+                "returns nothing, so there is no answer to keep.\n" ++
+                "  A kept answer is one the handler returned: a struct, a `Status(code, T)`, a " ++
+                "`Response(T)`. A handler that writes its own response through the Ctx has " ++
+                "nothing nilo can send again.",
+        );
+        const Returned = @typeInfo(Fn).@"fn".return_type.?;
+        var V = switch (@typeInfo(Returned)) {
+            .error_union => |u| u.payload,
+            else => Returned,
+        };
+        if (@typeInfo(V) == .optional) V = @typeInfo(V).optional.child;
+        if (hasNamedDecl(V, "nilo_redirect") or filebody.isFileBody(V)) @compileError(
+            "nilo: the handler for route \"" ++ pattern ++ "\" takes an `Idempotent(…)` and " ++
+                "returns a " ++ naming.of(V) ++ ", which is not an answer nilo can keep.\n" ++
+                "  A file is sent from disk and a redirect is a status and a Location; what " ++
+                "is kept and sent again is a body the handler returned. Answer with the " ++
+                "thing that was made — the order, the receipt — and let the client follow it.",
+        );
+    }
+}
+
+/// Which argument is the `Idempotent(…)`, if any. At most one, which
+/// `rolesOf` holds.
+fn idempotentAt(comptime roles: []const Role) ?usize {
+    for (roles, 0..) |r, i| if (r == .idempotent) return i;
+    return null;
+}
+
+/// What `idempotentBegin` hands the rest of the request.
+const Begun = struct {
+    key: Str,
+    /// The Space's key: `by`, a NUL, the client's key — or the key alone.
+    under: []const u8,
+    fingerprint: u64,
+};
+
+const BeginOutcome = union(enum) { replayed, fresh: Begun };
+
+/// Read the key, claim it or find what was kept under it, and either send
+/// the kept answer or say the handler may run (ADR 0193).
+fn idempotentBegin(comptime P: type, c: *Ctx) !BeginOutcome {
+    const Replays = P.nilo_idempotent.replays;
+    const replays = c._services.get(*Replays) orelse {
+        std.log.warn(
+            "the Space {s} was never registered, and route \"{s}\" keeps its answers in it. " ++
+                "Call app.provide() on it before serving.",
+            .{ @typeName(Replays), c._path },
+        );
+        return fail.internal("the Space {s} was never registered; call app.provide() before app.listen()", .{@typeName(Replays)});
+    };
+
+    const key = c.header(idempotent_mod.header_name) orelse return fail.badRequest(
+        "this endpoint wants an {s} header, so that a request sent twice is answered once",
+        .{idempotent_mod.header_name},
+    );
+    if (key.len() == 0 or key.len() > idempotent_mod.max_key) return fail.badRequest(
+        "the {s} header has to be between 1 and {d} bytes",
+        .{ idempotent_mod.header_name, idempotent_mod.max_key },
+    );
+
+    const under: []const u8 = if (P.nilo_idempotent.by) |by| blk: {
+        const who = by(c) orelse return fail.forbidden(
+            "this endpoint keeps its answers per caller, and this request has no caller",
+            .{},
+        );
+        const joined = try c._arena.alloc(u8, who.len() + 1 + key.len());
+        @memcpy(joined[0..who.len()], who.view());
+        joined[who.len()] = 0;
+        @memcpy(joined[who.len() + 1 ..], key.view());
+        break :blk joined;
+    } else key.view();
+
+    // The body is read here, once, and the handler's `body: T` reads the
+    // same bytes: `c.body()` keeps what it read.
+    const raw = try c.body();
+    const fingerprint = idempotent_mod.fingerprintOf(@tagName(c.method), c._path, c._query, raw.view());
+
+    // The claim is what makes two requests racing for one key get one
+    // handler run between them: the cache takes the marker under its lock.
+    const claimed = replays.putIfAbsent(under, &idempotent_mod.marker(fingerprint)) catch |err| switch (err) {
+        error.TooLarge => unreachable, // a marker is thirteen bytes and `max_bytes` is at least 256
+    };
+    if (claimed) return .{ .fresh = .{ .key = key, .under = under, .fingerprint = fingerprint } };
+
+    // Somebody was first. Into the arena rather than a `Held` on the
+    // stack, which would be `max_bytes` per idle connection (ADR 0063).
+    const room = try c._arena.alloc(u8, Replays.max_bytes);
+    const kept = replays.getInto(under, room) orelse
+        // Gone between the claim and the read — evicted, or expired on the
+        // boundary. Nothing to replay, so this request is the first again.
+        return .{ .fresh = .{ .key = key, .under = under, .fingerprint = fingerprint } };
+    const record = idempotent_mod.decode(kept) orelse
+        return .{ .fresh = .{ .key = key, .under = under, .fingerprint = fingerprint } };
+
+    if (record.fingerprint != fingerprint) return fail.unprocessable(
+        "the {s} header {s} was already used for a different request; a key is for retrying one " ++
+            "request, not for sending another",
+        .{ idempotent_mod.header_name, key.view() },
+    );
+    if (record.kind == .in_flight) return fail.conflict(
+        "a request with {s} {s} is still being answered; ask again in a moment",
+        .{ idempotent_mod.header_name, key.view() },
+    );
+
+    var it = record.eachHeader();
+    while (it.next()) |h| try c.setHeader(h.name, h.value);
+    try c.setStaticHeader(idempotent_mod.replayed_name, "true");
+    try c.send(record.status, record.kind.contentType(), record.body);
+    return .replayed;
+}
+
+/// What the handler answered, kept and then sent — or not kept, when it
+/// failed, so the next retry runs it again (ADR 0193).
+fn idempotentFinish(comptime P: type, c: *Ctx, begun: Begun, result: anytype) !void {
+    const Replays = P.nilo_idempotent.replays;
+    const replays = c._services.get(*Replays).?; // `idempotentBegin` found it
+
+    const R = @TypeOf(result);
+    const value = if (@typeInfo(R) == .error_union) result catch |err| {
+        _ = replays.del(begun.under);
+        return err;
+    } else result;
+    const T = @TypeOf(value);
+
+    // The same reading `sendResult` does, with the answer rendered rather
+    // than sent so it can be kept first.
+    var own_headers: []const http1.Header = &.{};
+    var status: u16 = 200;
+    const inner = if (comptime hasNamedDecl(T, "nilo_response")) blk: {
+        own_headers = value.headers.view();
+        status = if (comptime hasNamedDecl(T, "nilo_status")) T.nilo_status else value.status;
+        break :blk value.value;
+    } else value;
+    const V = @TypeOf(inner);
+
+    const present = if (comptime @typeInfo(V) == .optional)
+        inner orelse {
+            _ = replays.del(begun.under);
+            return fail.notFound("there is no {s}", .{c._path});
+        }
+    else
+        inner;
+    const B = @TypeOf(present);
+
+    var kind: idempotent_mod.Kind = .empty;
+    var body: []const u8 = "";
+    if (B == void) {
+        // nothing to render
+    } else if (B == Str) {
+        kind = .text;
+        body = present.view();
+    } else if (comptime json_mod.isByteSlice(B)) {
+        kind = .text;
+        body = present;
+    } else {
+        var out: std.Io.Writer.Allocating = try .initCapacity(c._arena, ctx_mod.json_hint);
+        try json_mod.write(&out.writer, present);
+        kind = .json;
+        body = out.written();
+    }
+
+    const record = idempotent_mod.encode(c._arena, kind, status, begun.fingerprint, own_headers, body) catch |err| switch (err) {
+        error.TooLarge => {
+            _ = replays.del(begun.under);
+            std.log.warn("route \"{s}\" answered with more headers than an idempotency record holds; the answer was sent and not kept", .{c._path});
+            return sendKept(c, own_headers, status, kind, body);
+        },
+        else => |e| return e,
+    };
+    replays.put(begun.under, record) catch |err| switch (err) {
+        error.TooLarge => {
+            // The answer goes out either way; what is lost is the replay,
+            // and a retry runs the handler again. Said once per occurrence
+            // because the fix is a number in the Space.
+            _ = replays.del(begun.under);
+            std.log.warn(
+                "route \"{s}\" answered {d} bytes, more than the {d} its Space keeps; the answer was sent and not kept",
+                .{ c._path, record.len, Replays.max_bytes },
+            );
+        },
+    };
+    return sendKept(c, own_headers, status, kind, body);
+}
+
+fn sendKept(c: *Ctx, own_headers: []const http1.Header, status: u16, kind: idempotent_mod.Kind, body: []const u8) !void {
+    for (own_headers) |h| try c.setHeader(h.name, h.value);
+    return c.send(status, kind.contentType(), body);
 }
 
 /// Which services this handler needs. Computed at compile time and used by
@@ -401,6 +662,7 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
         var query: []const openapi.Field = &.{};
         var headers: []const openapi.Field = &.{};
         var security: openapi.Security = .none;
+        var idempotent = false;
         var body: ?*const openapi.Schema = null;
         var body_kind: openapi.BodyKind = .json;
         // Whether nilo can refuse this request before the handler runs.
@@ -457,6 +719,17 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
                 .bearer => .bearer,
                 .basic => .basic,
             },
+            // A required header parameter, the way a `FromHeader` is, plus
+            // the two answers only this route can give (ADR 0193).
+            .idempotent => {
+                headers = headers ++ [_]openapi.Field{.{
+                    .name = idempotent_mod.header_name,
+                    .schema = openapi.schemaOf([]const u8),
+                    .required = true,
+                }};
+                idempotent = true;
+                can_reject = true;
+            },
             // Described exactly as the slot it binds — the request looks the
             // same on the wire either way — but `can_reject` stays false, and
             // that is the whole difference. nilo no longer refuses this
@@ -495,6 +768,7 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
             .query = query,
             .headers = headers,
             .security = security,
+            .idempotent = idempotent,
             .body = body,
             .body_kind = body_kind,
             .answer = answer,
@@ -670,6 +944,7 @@ fn rolesOf(
         var body_at: ?usize = null;
         var form_at: ?usize = null;
         var query_at: ?usize = null;
+        var idempotent_at: ?usize = null;
         var wants_ctx = false;
 
         for (params, 0..) |p, i| {
@@ -743,6 +1018,15 @@ fn rolesOf(
                 // mistake belongs to the type, and would greet every route
                 // that asked for it.
                 .resolved => resolve.check(P),
+                .idempotent => {
+                    if (idempotent_at) |first| @compileError(
+                        "nilo: the handler for route \"" ++ pattern ++ "\" asks for the " ++
+                            "Idempotency-Key twice — argument " ++ num(first + 1) ++ " and argument " ++
+                            num(i + 1) ++ ".\n" ++
+                            "  A request has one key and one kept answer. Ask for it once.",
+                    );
+                    idempotent_at = i;
+                },
                 else => {},
             }
         }
@@ -832,6 +1116,10 @@ fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Rol
         return .header;
     }
     if (comptime authorization_mod.is(P)) return .authorization;
+    if (comptime hasNamedDecl(P, "nilo_idempotent")) {
+        idempotent_mod.checkSpace(P.nilo_idempotent.replays, pattern);
+        return .idempotent;
+    }
     if (comptime hasNamedDecl(P, form_mod.marker)) return .form;
     // Before `.@"struct" => .body`, and with a message of its own: an
     // `Upload` in the argument list is somebody reaching for a file the way

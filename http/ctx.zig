@@ -1133,8 +1133,14 @@ pub const Ctx = struct {
     pub fn keepAlive(self: *const Ctx) bool {
         if (self._force_close) return false;
         if (!self._request.keep_alive) return false;
-        const stopping = self._stopping orelse return true;
-        return !stopping.load(.acquire);
+        return !self.stopping();
+    }
+
+    /// Whether the server has been told to stop and is draining. What the
+    /// health route answers `stopping` on (ADR 0192).
+    pub fn stopping(self: *const Ctx) bool {
+        const flag = self._stopping orelse return false;
+        return flag.load(.acquire);
     }
 
     // ---- the response side ----

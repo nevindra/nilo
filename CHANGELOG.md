@@ -506,6 +506,51 @@ rows — which turned out to be four gaps that only close together.
 
 ### New
 
+- **`app.health("/healthz")` — a page that says whether this process can do
+  its job, by asking the services that know**
+  ([ADR 0192](./docs/adr/0192-a-health-route-asks-the-services.md)).
+  `200 {"status":"ok"}`, or `503` naming each service that is not ready and
+  why, or `503 {"status":"stopping"}` from the moment the server was told to
+  stop — so a balancer drains the instance before its listener closes. A
+  service joins in with `pub fn nilo_ready(self: *T, scope: *nilo_core.AnyScope)
+  ?[]const u8`: null is ready, a sentence is why not. **`sql.Db` sends
+  `SELECT 1` down the pool**, which is what turns a server started with
+  `connect_on_init = 0` over a database that is down into a 503 rather than a
+  200 over an empty pool; an `s3` Store answers whether it started. Nothing
+  per request that is not the probe; one arena allocation for the page.
+  `c.stopping()` is the flag it reads, public now. One refusal: a `nilo_ready`
+  of the wrong shape.
+
+- **`nilo.Idempotent(Replays, .{ .by = account })` — the `Idempotency-Key`
+  header as a typed argument, and with it the route answering once per key**
+  ([ADR 0193](./docs/adr/0193-a-request-answered-once-is-answered-the-same-way-again.md)).
+
+  ```zig
+  const Replays = cache.Space("orders-replay", []const u8, .{ .ttl_s = 86_400, .max_bytes = 16 << 10 });
+
+  fn placeOrder(key: nilo.Idempotent(Replays, .{ .by = account }), body: NewOrder, …) !nilo.Status(201, Order)
+  ```
+
+  The first request with a key runs the handler and keeps what it returned;
+  every retry with that key gets it back, byte for byte, with
+  `Idempotent-Replayed: true`, and the handler does not run. No key is a 400,
+  a key still being answered is a 409, a key reused on a different request is
+  a 422. What the handler *failed* with is not kept, so a retry after a
+  failure runs it again. `Replays` is a `nilo_cache` bytes Space — or any type
+  with the same six declarations — provided as a service; `.by` is whose key
+  it is. In the document, a required header and the two extra answers. On the
+  route that asks: one arena allocation to encode, one of `max_bytes` to
+  replay, nothing on the stack. Four refusals: not a bytes Space, the key
+  asked for twice, a handler that returns nothing, one that returns a file or
+  a redirect. [Answering once](./docs/guide/idempotency.md) is the page.
+
+- **`nilo_cache`: `space.putIfAbsent(key, value)` and `space.getInto(key, buf)`.**
+  The first stores only if the key is free and says whether it did — one shard
+  lock around the scan and the write, so two callers racing get one `true`
+  between them; `put` compiles to what it was. The second reads into a buffer
+  of your choosing rather than a `Held`, for a caller whose buffer is an arena.
+  Both exist because `Idempotent` needed them, and both are ordinary API.
+
 - **`nilo.Authorization(.bearer)` and `nilo.Authorization(.{ .basic = "realm" })`
   — the `Authorization` header as a typed argument, refused with the challenge
   a 401 has to carry**

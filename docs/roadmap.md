@@ -1119,22 +1119,19 @@ proxy instead**, since that is the answer today and it is a good one.
 
 **Which of the small middleware everybody else ships earn a place here.** Fiber
 ships thirty-two. Setting aside the ones already queued above — CSRF, security
-headers, compression — the allowance, and the two that `Authorization(…)`
-covers as a typed argument rather than a middleware (`basicauth`, `keyauth`),
-what is left is `healthcheck`, `favicon`, `etag`, `cache`, `idempotency`,
-`responsetime`, `redirect` (a map of old paths to new), `rewrite`, `proxy` and
-`skip`. Most are between three and ten lines against nilo's own middleware
-shape, and that is the argument on both sides: cheap to ship, and cheap for an
-application to write, which is how a framework accumulates them without ever
-deciding to.
+headers, compression — the allowance, and the four that are typed arguments or
+a route rather than middleware (`basicauth` and `keyauth` under
+`Authorization(…)`, `healthcheck` under `app.health`, `idempotency` under
+`Idempotent(…)`), what is left is `favicon`, `etag`, `cache`, `responsetime`,
+`redirect` (a map of old paths to new), `rewrite`, `proxy` and `skip`. Each is
+between three and ten lines against nilo's own middleware shape, and that is
+the argument on both sides: cheap to ship, and cheap for an application to
+write, which is how a framework accumulates them without ever deciding to.
+None of the eight has a design question under it, and `etag` on a dynamic
+response has the same allocation under it that compression does.
 
-Two are worth more than the rest, on the evidence of what people reach for
-first: a health-check route, and an idempotency key. The second is the only
-one with a design under it, because it has to keep what it already answered
-somewhere, and nothing in this framework stores anything between requests.
-
-**What would settle it: one of the two arriving with its storage question
-answered**, rather than the list being adopted as a list.
+**What would settle it: an application that wrote one of the eight wrong**,
+rather than the list being adopted as a list.
 
 ---
 

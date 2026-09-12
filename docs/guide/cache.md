@@ -76,6 +76,8 @@ entry, so a fingerprint collision cannot cross a Space boundary.
 | `space.putFor(key, value, ttl_s)` | for a life of its own. `0` is until the ring writes over it |
 | `space.get(key)` | `?V` for a flat value; `?[]const u8` and a `*Held` for bytes |
 | `space.del(key)` | `bool` — was there anything to forget |
+| `space.putIfAbsent(key, value)` | store only if the key is free, and say whether it was. One lock around the scan and the write, so two callers racing get one `true` between them — a claim, not a `get` and a `put`. What [`nilo.Idempotent`](./idempotency.md) claims a key with |
+| `space.getInto(key, buf)` | the bytes, into a buffer of your choosing rather than a `Held` — for a caller whose buffer is the request arena |
 | `store.stats()` | hits, and the three different ways of missing |
 | `store.bytesHeld()` | every byte it will ever hold, and it never moves |
 | `store.shardCount()` | how many it got, which is at most the `shards` asked for |

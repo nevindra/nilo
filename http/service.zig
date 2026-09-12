@@ -16,6 +16,7 @@ const std = @import("std");
 const naming = @import("names.zig");
 
 const Limits = @import("nilo_core").Limits;
+const AnyScope = @import("nilo_core").AnyScope;
 
 /// What a handler needs from the registry. Computed at compile time by the
 /// typed engine, then checked once at startup.
@@ -41,8 +42,11 @@ pub const Registry = struct {
     gpa: std.mem.Allocator,
     entries: std.ArrayList(Entry) = .empty,
 
-    const Entry = struct {
+    pub const Entry = struct {
         type_name: []const u8,
+        /// The same type as the reader's own import line spells it, for the
+        /// health page (ADR 0192). `type_name` is what the lookup compares.
+        name: []const u8,
         ptr: *anyopaque,
         is_const: bool,
         /// Set only for a service that declared `nilo_start`. Null is the
@@ -54,6 +58,10 @@ pub const Registry = struct {
         /// work on the Engine's loop has to take it off again before the
         /// loop is torn down (ADR 0151).
         stop: ?*const fn (*anyopaque) void = null,
+        /// Set only for a service that declared `nilo_ready`. Asked by the
+        /// health route and by nothing else, so a service with none costs
+        /// one null test per probe and nothing per request (ADR 0192).
+        ready: ?*const fn (*anyopaque, *AnyScope) ?[]const u8 = null,
     };
 
     /// The `nilo_start` hook, with the type erased so the registry can hold
@@ -150,6 +158,59 @@ pub const Registry = struct {
         }.call;
     }
 
+    /// The `nilo_ready` hook, erased the way `nilo_start` is
+    /// ([ADR 0192](../docs/adr/0192-a-health-route-asks-the-services.md)).
+    ///
+    /// **Null is ready, and a string is why not.** A bool would have made the
+    /// 503 a list of type names, and what an operator wants at three in the
+    /// morning is "the database is not answering" beside the name. The
+    /// string is a literal or lives as long as the Scope it was handed —
+    /// `scope.arena()` is there for one with a number in it.
+    ///
+    /// **A Scope and not an Io**, because the honest probe is a statement —
+    /// `SELECT 1` — and a statement wants somewhere to put its answer. The
+    /// hook takes the erased one so a Service can keep naming `anytype`
+    /// everywhere else and this registry can hold one kind of pointer
+    /// (ADR 0166).
+    fn readyHook(comptime T: type) ?*const fn (*anyopaque, *AnyScope) ?[]const u8 {
+        if (!@hasDecl(T, "nilo_ready")) return null;
+
+        const info = @typeInfo(@TypeOf(T.nilo_ready));
+        if (info != .@"fn") @compileError(
+            "nilo: " ++ naming.of(T) ++ ".nilo_ready is not a function, and it has to be one.\n" ++
+                "  fn nilo_ready(self: *" ++ naming.of(T) ++ ", scope: *nilo_core.AnyScope) ?[]const u8",
+        );
+        const f = info.@"fn";
+        const shape = comptime "\n  fn nilo_ready(self: *" ++ naming.of(T) ++ ", scope: *nilo_core.AnyScope) ?[]const u8\n" ++
+            "  Answer null when the service can do its job, and a sentence saying why when it cannot.";
+        if (f.params.len != 2) @compileError(
+            "nilo: " ++ naming.of(T) ++ ".nilo_ready takes " ++
+                std.fmt.comptimePrint("{d}", .{f.params.len}) ++
+                " parameters, and it has to take 2." ++ shape,
+        );
+        if (f.params[0].type != *T and f.params[0].type != *const T) @compileError(
+            "nilo: " ++ naming.of(T) ++ ".nilo_ready takes " ++
+                naming.of(f.params[0].type orelse anyopaque) ++
+                " first, and it has to take `*" ++ naming.of(T) ++ "`." ++ shape,
+        );
+        if (f.params[1].type != *AnyScope) @compileError(
+            "nilo: " ++ naming.of(T) ++ ".nilo_ready takes " ++
+                naming.of(f.params[1].type orelse anyopaque) ++
+                " second, and it has to take `*nilo_core.AnyScope`." ++ shape,
+        );
+        if (f.return_type != ?[]const u8) @compileError(
+            "nilo: " ++ naming.of(T) ++ ".nilo_ready returns something other than `?[]const u8`, " ++
+                "and a readiness hook answers null or the reason it is not ready." ++ shape,
+        );
+
+        return &struct {
+            fn call(erased: *anyopaque, scope: *AnyScope) ?[]const u8 {
+                const self: *T = @ptrCast(@alignCast(erased));
+                return T.nilo_ready(self, scope);
+            }
+        }.call;
+    }
+
     pub fn init(gpa: std.mem.Allocator) Registry {
         return .{ .gpa = gpa };
     }
@@ -191,10 +252,12 @@ pub const Registry = struct {
         }
         try self.entries.append(self.gpa, .{
             .type_name = type_name,
+            .name = comptime naming.of(info.child),
             .ptr = @ptrCast(@constCast(ptr)),
             .is_const = info.is_const,
             .start = startHook(info.child),
             .stop = stopHook(info.child),
+            .ready = readyHook(info.child),
         });
     }
 

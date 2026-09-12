@@ -843,6 +843,31 @@ pub const Store = struct {
     /// value cannot fit an entry — the caller's `Space` turns that into a
     /// named error rather than letting it pass quietly.
     pub fn put(self: *Store, space: u32, key: []const u8, value: []const u8, ttl_s: u32) bool {
+        return self.write(false, space, key, value, ttl_s) == .stored;
+    }
+
+    /// What `putIfAbsent` answers.
+    pub const Claim = enum { stored, taken, refused };
+
+    /// Store `value` under `key` **only if nothing live is there**, and say
+    /// which happened. The same key scan `put` already does, with one more
+    /// answer at the end of it, under the same shard lock — which is what
+    /// makes it a claim rather than a read followed by a write: two callers
+    /// racing for one key get one `.stored` and one `.taken`, whichever
+    /// thread each is on. An entry that has expired counts as absent.
+    ///
+    /// For the caller that has to do something exactly once per key — an
+    /// idempotency record, a lock over a job — and needs the cache to be the
+    /// thing that decides who was first
+    /// ([ADR 0193](../docs/adr/0193-a-request-answered-once-is-answered-the-same-way-again.md)).
+    pub fn putIfAbsent(self: *Store, space: u32, key: []const u8, value: []const u8, ttl_s: u32) Claim {
+        return self.write(true, space, key, value, ttl_s);
+    }
+
+    /// `put` and `putIfAbsent` are one function with a comptime flag, so
+    /// the ordinary write compiles to exactly what it was before the flag
+    /// existed — the branch it adds is on a constant.
+    fn write(self: *Store, comptime only_if_absent: bool, space: u32, key: []const u8, value: []const u8, ttl_s: u32) Claim {
         const total = header + key.len + value.len;
         const hash = std.hash.Wyhash.hash(space, key);
         const shard = self.shardFor(hash);
@@ -859,15 +884,18 @@ pub const Store = struct {
             shard.lock.take();
             defer shard.lock.release();
             Counters.bump(&shard.stats.refused);
-            return false;
+            return .refused;
         }
 
         // The clock and the header are built **before** the lock. Nothing that
         // waits may happen inside a critical section this module holds by
         // spinning, and `clock_gettime` is the one call in here that could
-        // (ADR 0138).
+        // (ADR 0138). A claim reads it once more for the same reason: the
+        // expiry test it makes inside the lock has to use a clock read
+        // outside it.
+        const now: u32 = if (ttl_s == 0 and !only_if_absent) 0 else self.elapsed();
         var head_bytes: [header]u8 = undefined;
-        std.mem.writeInt(u32, head_bytes[0..4], if (ttl_s == 0) 0 else self.elapsed() + ttl_s, .little);
+        std.mem.writeInt(u32, head_bytes[0..4], if (ttl_s == 0) 0 else now + ttl_s, .little);
         std.mem.writeInt(u32, head_bytes[4..8], space, .little);
         std.mem.writeInt(u16, head_bytes[8..10], @intCast(key.len), .little);
         std.mem.writeInt(u16, head_bytes[10..12], @intCast(value.len), .little);
@@ -914,6 +942,10 @@ pub const Store = struct {
             // it keeps the warmth it earned — a value being refreshed is the
             // same value as far as anybody asking for it is concerned.
             if (e.space == space and std.mem.eql(u8, e.key, key)) {
+                // The one answer a claim adds: somebody was first, and what
+                // they wrote has not expired. The lock is what makes this
+                // true at the moment it is said.
+                if (only_if_absent and (e.expires == 0 or now < e.expires)) return .taken;
                 chosen = i;
                 keep_freq = seen.freq;
                 displaced = false;
@@ -1007,7 +1039,7 @@ pub const Store = struct {
         };
         bucket[chosen].store(.{ .off = off, .gen = into.mark().gen, .fp = fp, .freq = keep_freq });
         Counters.bump(&shard.stats.puts);
-        return true;
+        return .stored;
     }
 
     /// Copy the value for `key` into `out`, and answer how many bytes that
@@ -1288,6 +1320,31 @@ test "putting the same key twice updates it rather than keeping both" {
     _ = store.put(1, "k", "after", 0);
     const n = store.get(1, "k", &out) orelse return error.TestExpectedHit;
     try testing.expectEqualStrings("after", out[0..n]);
+}
+
+test "a claim is taken by whoever was first, and an expired one is free again" {
+    var store = try Store.open(testing.allocator, .{ .bytes = 1 << 20, .shards = 1 });
+    defer store.deinit();
+
+    try testing.expectEqual(Store.Claim.stored, store.putIfAbsent(1, "job-7", "mine", 0));
+    try testing.expectEqual(Store.Claim.taken, store.putIfAbsent(1, "job-7", "theirs", 0));
+    var out: [16]u8 = undefined;
+    try testing.expectEqualStrings("mine", out[0..store.get(1, "job-7", &out).?]);
+
+    // An ordinary put still overwrites, and a claim after a delete is free.
+    try testing.expect(store.put(1, "job-7", "again", 0));
+    try testing.expect(store.del(1, "job-7"));
+    try testing.expectEqual(Store.Claim.stored, store.putIfAbsent(1, "job-7", "second", 0));
+
+    // A value too large is refused the way `put` refuses it, not taken.
+    const huge = "x" ** (1 << 20);
+    try testing.expectEqual(Store.Claim.refused, store.putIfAbsent(1, "big", huge, 0));
+
+    // And one that expired is nobody's: written with a one-second life and
+    // read back as absent once the clock has moved past it.
+    try testing.expectEqual(Store.Claim.stored, store.putIfAbsent(1, "brief", "a", 1));
+    store.opened_s -= 2;
+    try testing.expectEqual(Store.Claim.stored, store.putIfAbsent(1, "brief", "b", 1));
 }
 
 test "a deleted key is gone and says so" {

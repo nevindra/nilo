@@ -748,6 +748,26 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             self.wire = null;
         }
 
+        /// What the health route asks
+        /// ([ADR 0192](../docs/adr/0192-a-health-route-asks-the-services.md)).
+        /// A pool that is up is a pool that can answer `SELECT 1`, and
+        /// nothing short of sending one says so: `connect_on_init = 0` is a
+        /// server that starts with its database down, and this is where that
+        /// becomes a 503 rather than a 200 over a pool with nothing in it.
+        ///
+        /// One statement per probe, on the balancer's schedule rather than a
+        /// request's. It goes through `exec`, so it is prepared like any other
+        /// and a watcher sees it.
+        pub fn nilo_ready(self: *Self, scope: *core.AnyScope) ?[]const u8 {
+            if (self.wire == null) return "not started: `listen()` has not run";
+            _ = self.exec(scope, "SELECT 1", .{}) catch |err| return switch (err) {
+                error.Disconnected => "the database is not answering",
+                error.TimedOut => "the database took too long to answer",
+                else => "the database refused SELECT 1",
+            };
+            return null;
+        }
+
         // -- reading ---------------------------------------------------------
 
         /// Every row matching `options`, in the request's arena.
@@ -756,9 +776,8 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// carries the values (ADR 0039).
         pub fn select(self: *Self, comptime Row: type, c: anytype, options: anytype) ![]Row {
             comptime core.checkScope(@TypeOf(c), "db.select");
-            comptime assertUnlocked(Row, @TypeOf(options), "db.select",
-                "Begin one and ask there: `var tx = try db.begin(c, .{}); defer tx.deinit();` " ++
-                    "and then `tx.select(…)`.");
+            comptime assertUnlocked(Row, @TypeOf(options), "db.select", "Begin one and ask there: `var tx = try db.begin(c, .{}); defer tx.deinit();` " ++
+                "and then `tx.select(…)`.");
             const stmt = comptime statement.select(D, Row, @TypeOf(options));
             return fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
         }
@@ -773,9 +792,8 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// A `.limit` written alongside it is a Refusal.
         pub fn one(self: *Self, comptime Row: type, c: anytype, options: anytype) !?Row {
             comptime core.checkScope(@TypeOf(c), "db.one");
-            comptime assertUnlocked(Row, @TypeOf(options), "db.one",
-                "Begin one and ask there: `var tx = try db.begin(c, .{}); defer tx.deinit();` " ++
-                    "and then `tx.one(…)`.");
+            comptime assertUnlocked(Row, @TypeOf(options), "db.one", "Begin one and ask there: `var tx = try db.begin(c, .{}); defer tx.deinit();` " ++
+                "and then `tx.one(…)`.");
             const stmt = comptime statement.one(D, Row, @TypeOf(options));
             const found = try fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
             return if (found.len == 0) null else found[0];
@@ -910,11 +928,10 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             options: anytype,
         ) !Streamed(Row) {
             comptime core.checkScope(@TypeOf(c), "db.stream");
-            comptime assertUnlocked(Row, @TypeOf(options), "db.stream",
-                "There is no `tx.stream` to move this to, either: a result set held open " ++
-                    "keeps its connection busy, so nothing else in the transaction could " ++
-                    "run until it closed. Lock the rows with `tx.select` and work through " ++
-                    "what comes back.");
+            comptime assertUnlocked(Row, @TypeOf(options), "db.stream", "There is no `tx.stream` to move this to, either: a result set held open " ++
+                "keeps its connection busy, so nothing else in the transaction could " ++
+                "run until it closed. Lock the rows with `tx.select` and work through " ++
+                "what comes back.");
             const stmt = comptime statement.select(D, Row, @TypeOf(options));
             const arena = c.arena();
             const w = try self.wireOf();
@@ -3153,10 +3170,10 @@ fn isUrlProblem(err: anyerror) bool {
     const name = @errorName(err);
     for ([_][]const u8{
         // nilo's own, from `dialOpts`.
-        "InvalidUriScheme",     "UnsupportedSSLModeValue", "UnsupportedConnectionParam",
+        "InvalidUriScheme",    "UnsupportedSSLModeValue", "UnsupportedConnectionParam",
         // `std.Uri.parse`, and the integer parse behind `tcp_user_timeout`.
-        "UnexpectedCharacter",  "InvalidFormat",           "InvalidPort",
-        "InvalidCharacter",     "Overflow",
+        "UnexpectedCharacter", "InvalidFormat",           "InvalidPort",
+        "InvalidCharacter",    "Overflow",
     }) |known| {
         if (std.mem.eql(u8, name, known)) return true;
     }
@@ -4642,7 +4659,6 @@ test "a Db told to keep no plans sends none, whatever the statement is" {
     try testing.expectEqual(@as(?[]const u8, null), db.wire.?.last_plan);
 }
 
-
 // -- a second database ----------------------------------------------------
 
 /// A handler holding both. The signature is the routing: this one reads
@@ -4755,6 +4771,33 @@ const accounts_ddl =
     \\  email  TEXT NOT NULL
     \\)
 ;
+
+test "a Db answers the health page with SELECT 1, and says so before it has started" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    var db: SqliteDb = .init(
+        testing.allocator,
+        "file:ready-probe?mode=memory&cache=shared",
+        .{ .size = 1 },
+    );
+    defer db.deinit();
+
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    var scope = nilo.AnyScope.of(&run);
+
+    // Before `listen()` there is no pool, and the page has to say so rather
+    // than answer `ok` over nothing (ADR 0192).
+    try testing.expectEqualStrings("not started: `listen()` has not run", db.nilo_ready(&scope).?);
+
+    try db.nilo_start(threaded.io(), .off);
+    try testing.expect(db.nilo_ready(&scope) == null);
+
+    // And a Db that has been stopped is not ready again.
+    db.nilo_stop();
+    try testing.expect(db.nilo_ready(&scope) != null);
+}
 
 test "a uuid column is written and read back on the SQLite Wire" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});

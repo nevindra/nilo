@@ -132,6 +132,39 @@ pub fn Space(comptime name: []const u8, comptime V: type, comptime opts: Options
             return self.store.del(id, key);
         }
 
+        /// Store a value **only if the key is free**, and say whether it was:
+        /// true and it is yours, false and somebody was first. One shard lock
+        /// around the scan and the write, so two callers racing for a key get
+        /// one true between them — which is what makes this a claim rather
+        /// than a `get` followed by a `put`. An expired entry is free.
+        ///
+        /// A value too large is `error.TooLarge` the way `put` says it, and a
+        /// flat value cannot be. `nilo.Idempotent` is what this was built for
+        /// ([ADR 0193](../docs/adr/0193-a-request-answered-once-is-answered-the-same-way-again.md)).
+        pub const putIfAbsent = if (kind == .flat) claimFlat else claimBytes;
+
+        /// The same read as `get`, into a buffer of the caller's choosing
+        /// rather than into a `Held` — for a caller whose buffer is an arena
+        /// and whose stack is per connection (ADR 0063). `out` shorter than
+        /// the entry is a miss, the way `Held` can never be.
+        pub fn getInto(self: Self, key: []const u8, out: []u8) ?[]const u8 {
+            const n = self.store.get(id, key, out) orelse return null;
+            return out[0..n];
+        }
+
+        fn claimFlat(self: Self, key: []const u8, value: V) bool {
+            return self.store.putIfAbsent(id, key, flat.asBytes(V, &value), opts.ttl_s) == .stored;
+        }
+
+        fn claimBytes(self: Self, key: []const u8, value: []const u8) PutError!bool {
+            if (value.len > opts.max_bytes) return error.TooLarge;
+            return switch (self.store.putIfAbsent(id, key, value, opts.ttl_s)) {
+                .stored => true,
+                .taken => false,
+                .refused => error.TooLarge,
+            };
+        }
+
         fn putFlat(self: Self, key: []const u8, value: V) void {
             self.putFlatFor(key, value, opts.ttl_s);
         }
@@ -300,6 +333,31 @@ test "a deleted key is gone from its Space and only from it" {
 
     try testing.expectEqual(@as(?u64, null), hits.get("k"));
     try testing.expectEqual(@as(?u64, 2), views.get("k"));
+}
+
+test "a claim on a Space goes to whoever was first, and getInto reads without a Held" {
+    var store = try openStore();
+    defer store.deinit();
+
+    const Jobs = Space("job", []const u8, .{ .max_bytes = 64 });
+    const jobs = Jobs.open(&store);
+
+    try testing.expect(try jobs.putIfAbsent("nightly", "worker-1"));
+    try testing.expect(!try jobs.putIfAbsent("nightly", "worker-2"));
+
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("worker-1", jobs.getInto("nightly", &buf).?);
+    // A buffer too short is a miss rather than a partial read.
+    var short: [4]u8 = undefined;
+    try testing.expect(jobs.getInto("nightly", &short) == null);
+
+    try testing.expectError(error.TooLarge, jobs.putIfAbsent("big", "x" ** 65));
+
+    const Locks = Space("lock", u32, .{});
+    const locks = Locks.open(&store);
+    try testing.expect(locks.putIfAbsent("a", 1));
+    try testing.expect(!locks.putIfAbsent("a", 2));
+    try testing.expectEqual(@as(?u32, 1), locks.get("a"));
 }
 
 test "Held is the value's own size for a flat Space, and nothing at all" {

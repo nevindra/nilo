@@ -414,6 +414,57 @@ Two things go with this decision and are worth knowing before you need them:
 the handshake — and therefore **nilo cannot be a gRPC server**, since gRPC is
 HTTP/2. Neither follows from "no TLS" on its own, which is why both are here.
 
+## Knowing whether it is ready
+
+A load balancer, Kubernetes, or the script that restarts the process all ask
+the same question every second or so: *can this instance take traffic?*
+`app.health` answers it:
+
+<!-- compiles: body -->
+```zig
+try app.health("/healthz");
+```
+
+```
+GET /healthz
+200 {"status":"ok"}
+503 {"status":"unavailable","waiting":[{"service":"sql.Db","why":"the database is not answering"}]}
+503 {"status":"stopping"}
+```
+
+**Alive is not ready, and this route answers the second.** A route that says
+`ok` because the process is up sends traffic to a server whose database is
+down, and the application cannot write the honest version by hand because it
+does not know what the pool knows. So the page asks each service that
+declared `nilo_ready`, and the three modules that hold something answer:
+`sql.Db` sends `SELECT 1` down the pool and says what came back, an `s3`
+Store says whether it started, and a service with no hook — a config struct,
+a cache — is assumed ready. A service of your own joins in with one function
+([ADR 0192](../adr/0192-a-health-route-asks-the-services.md)):
+
+<!-- compiles -->
+```zig
+const Mailer = struct {
+    connected: bool = false,
+
+    pub fn nilo_ready(self: *Mailer, scope: *nilo.AnyScope) ?[]const u8 {
+        _ = scope;                       // an arena, for a reason with a number in it
+        return if (self.connected) null else "the mail relay has not accepted a connection yet";
+    }
+};
+```
+
+Null is ready; a sentence is why not, and it goes on the page beside the
+service's name. **The moment the server is told to stop, the page says
+`stopping`**, which is how a balancer learns to drain this instance before its
+listener closes rather than after — the other half of [Stopping](#stopping).
+Every answer carries `Cache-Control: no-store`.
+
+It is an ordinary route, like the metrics page: mount it where the balancer
+can reach it and nothing else needs to, and keep it out of the
+[logger](./middleware.md) if a line a second is noise. Nothing about it
+touches a request that is not the probe.
+
 ## Knowing whether it is working
 
 `app.metrics(.{})` puts a Prometheus page on `/metrics`: requests per route,

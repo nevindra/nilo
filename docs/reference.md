@@ -56,7 +56,7 @@ pub const panic = nilo.panic;                     // optional: name the request 
 |---|---|
 | `App.init(gpa)` | a new App. The allocator is for the App's furniture, not for requests |
 | `app.deinit()` | |
-| `app.provide(&thing)` | register a service, looked up later by its pointer type. A service may declare `pub fn nilo_start(self: *T, io: std.Io) !void` to finish building itself once there is an event loop ([ADR 0040](./adr/0040-a-service-that-needs-the-loop-is-finished-when-the-loop-exists.md)) and `pub fn nilo_stop(self: *T) void` to put it down again before the loop goes ([ADR 0151](./adr/0151-a-service-is-stopped-before-the-loop-is.md)). **A service that put work on the loop needs the second one**, or the loop cannot be torn down |
+| `app.provide(&thing)` | register a service, looked up later by its pointer type. A service may declare `pub fn nilo_start(self: *T, io: std.Io) !void` to finish building itself once there is an event loop ([ADR 0040](./adr/0040-a-service-that-needs-the-loop-is-finished-when-the-loop-exists.md)) and `pub fn nilo_stop(self: *T) void` to put it down again before the loop goes ([ADR 0151](./adr/0151-a-service-is-stopped-before-the-loop-is.md)). **A service that put work on the loop needs the second one**, or the loop cannot be torn down. A third, `pub fn nilo_ready(self: *T, scope: *nilo_core.AnyScope) ?[]const u8`, is what `app.health` asks ([ADR 0192](./adr/0192-a-health-route-asks-the-services.md)) |
 | `app.spawn(f, args)` | work that is not a request, started once the server is up ([ADR 0086](./adr/0086-work-that-is-not-a-request-belongs-to-the-server.md)) |
 | `app.use(mw)` | middleware, everywhere |
 | `app.useOn(prefix, mw)` | middleware, under a path prefix |
@@ -69,6 +69,7 @@ pub const panic = nilo.panic;                     // optional: name the request 
 | `app.static(url_prefix, dir_path)` | a directory, read into memory at startup |
 | `app.staticWith(url_prefix, dir_path, options)` | the same, with [options](#static-options) |
 | `app.docs(options)` | serve an [OpenAPI document](./guide/openapi.md) |
+| `app.health(path)` | a page that says whether this process can do its job — `200 {"status":"ok"}`, or `503` naming the services that are not ready and why, or `503 {"status":"stopping"}` once the server was told to stop. Asks every service that declared `pub fn nilo_ready(self: *T, scope: *nilo_core.AnyScope) ?[]const u8` — null is ready, a sentence is why not ([Deploying](./guide/deploying.md#knowing-whether-it-is-ready), [ADR 0192](./adr/0192-a-health-route-asks-the-services.md)) |
 | `app.metrics(options)` | count every request and serve the numbers at `/metrics`, Prometheus format ([Metrics](./guide/metrics.md), [ADR 0100](./adr/0100-the-route-table-is-the-registry.md)) |
 | `app.expose(name, kind, &atomic)` | publish a `std.atomic.Value(u64)` of your own on that page. `kind` is `.counter` or `.gauge` |
 | `app.listen(options)` | run until stopped. Stops the process on a startup error |
@@ -180,6 +181,7 @@ series at all. See [Metrics](./guide/metrics.md).
 | `Query(T)` | the query string as a struct |
 | `FromHeader("X-Staff-Id", T)` | one request header, converted like a path param |
 | `Authorization(.bearer)`, `Authorization(.{ .basic = "realm" })` | the `Authorization` header as one scheme — absent or another scheme is a 401 with the challenge on it |
+| `Idempotent(Replays, .{ .by = fn })` | the `Idempotency-Key` header, and with it the route answering once per key: a retry gets the kept answer back and the handler does not run |
 | `Form(T)` | the body as an HTML form — urlencoded or multipart |
 | `Bound(W)` | any of the three above, with its failures instead of a 400 |
 | `Session(T)` | the session, out of its cookie |
@@ -291,6 +293,52 @@ entry and a 401 rather than a parameter, so a generated client signs in.
 Bearer allocates nothing; Basic decodes into the request arena, once. There is
 no chain that also looks in the query string or a cookie, on purpose: a token
 in a query string is a token in every access log on the way here.
+
+### `Idempotent(Replays, options)`
+
+The `Idempotency-Key` header, as the argument that makes a route answer once
+per key ([ADR 0193](./adr/0193-a-request-answered-once-is-answered-the-same-way-again.md)):
+
+<!-- compiles -->
+```zig
+const Replays = cache.Space("orders-replay", []const u8, .{ .ttl_s = 86_400, .max_bytes = 16 << 10 });
+
+fn account(c: *nilo.Ctx) ?Str {
+    return c.header("X-Account");
+}
+
+const NewOrder = struct { sku: Str, qty: u32 };
+const Placed = struct { id: u64, sku: Str };
+
+fn placeOrder(key: nilo.Idempotent(Replays, .{ .by = account }), body: NewOrder) !nilo.Status(201, Placed) {
+    _ = key;                                 // the header as sent, if the handler wants it
+    return .{ .value = .{ .id = 7, .sku = body.sku } };
+}
+```
+
+The first request with a key runs the handler and **keeps what it returned** —
+status, the `Response(T)` headers of its own, the body. Every later request
+with that key gets the kept answer back, byte for byte, with
+`Idempotent-Replayed: true` on it, and the handler does not run. What the
+handler *failed* with is not kept, so a retry after a `fail.…` or an error
+runs it again.
+
+| | |
+|---|---|
+| `Replays` | where answers are kept: a `cache.Space` holding `[]const u8`, `app.provide`d. Any type with `getInto`, `putIfAbsent`, `put`, `del`, `max_bytes` and `Held` will do, which is what a table over Redis would carry |
+| `.by` | whose key it is — a function of one `*Ctx` answering `?Str`. Two callers choosing the same key must never see each other's answer, so leave it null only on an endpoint with one caller. Null from the function is a 403 |
+| `.key` | the header as sent |
+
+Before the handler runs, and each with the header named: **400** with no
+`Idempotency-Key` or one over 255 bytes; **409** when the same key is still
+being answered; **422** when the key is reused on a different request — the
+method, path, query and body are fingerprinted. In the document, a required
+header parameter and the two extra answers. A handler that returns nothing, a
+file or a redirect has no answer nilo can keep, and is a Refusal.
+
+On the route that asks, and nowhere else: one arena allocation of the
+Space's `max_bytes` to read a kept answer into, one to encode the answer being
+kept, and the JSON buffer the answer was taking anyway. Nothing on the stack.
 
 ### A query field that is a list
 
@@ -562,6 +610,7 @@ value is not.
 | `c.bodyStreamWith(.{ .max_bytes = … })` | the same, with a ceiling. Default 64 MB |
 | `c.peer()` | the address the connection came from — the proxy's, if there is one |
 | `c.clientIp()` | `Str` — the client, looking through `trusted_proxies` or `trusted_hops`. Empty on a unix socket with neither set |
+| `c.stopping()` | `bool` — the server has been told to stop and is draining. What the health page answers `stopping` on |
 | `c.overdue()` | whether the deadline `nilo.deadline(ms)` gave this route has passed. Always false without one |
 | `c.timeLeftMs()` | `?u32` — milliseconds left, `null` without a deadline, `0` once it has gone |
 | `c.giveDeadline(ms)` | set one by hand. `nilo.deadline(ms)` is what normally calls this |
@@ -1474,6 +1523,8 @@ const Carts = cache.Space("cart", Cart, .{ .ttl_s = 300 });
 | `space.putFor(key, value, ttl_s)` | for a life of its own. `0` is "until the ring writes over it" |
 | `space.get(key)` | `?V` for a flat value; `?[]const u8` and a `*Held` for bytes |
 | `space.del(key)` | `bool` — was there anything to forget |
+| `space.putIfAbsent(key, value)` | store only if the key is free, and say whether it was — `bool` for a flat value, `!bool` for bytes. One shard lock around the scan and the write, so two callers racing get one `true` between them. What `nilo.Idempotent` claims a key with ([ADR 0193](./adr/0193-a-request-answered-once-is-answered-the-same-way-again.md)) |
+| `space.getInto(key, buf)` | the bytes read as `get` reads them, into a buffer of your choosing rather than a `Held` — for a caller whose buffer is an arena |
 | `store.stats()` | hits, and the three different ways of missing |
 | `store.bytesHeld()` | every byte it will ever hold, and it never moves |
 | `store.shardCount()` | how many it got, which is at most the `shards` asked for |
@@ -2469,6 +2520,13 @@ pool lets go of the loop it was built on
 ([ADR 0151](./adr/0151-a-service-is-stopped-before-the-loop-is.md)). **A `Db`
 is not usable after `listen()` returns.** A program driving one by hand calls
 `deinit` as it always did.
+
+`db.nilo_ready(scope)` is what `app.health` asks: `SELECT 1` down the pool,
+and the reason when it did not come back — so a server started with
+`connect_on_init = 0` over a database that is down is a 503 on its health
+page rather than a 200 over an empty pool
+([ADR 0192](./adr/0192-a-health-route-asks-the-services.md)). An `s3` Store
+answers the same question with whether it started.
 
 `init` opens nothing. The pool is built by `listen()`, which is the only
 moment there is an event loop to dial through — so a server starts with its

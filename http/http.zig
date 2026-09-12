@@ -356,6 +356,26 @@ pub const FromHeader = @import("typed.zig").FromHeader;
 /// the same thing with `c.authorization(.bearer)`.
 pub const Authorization = @import("authorization.zig").Authorization;
 
+/// The `Idempotency-Key` header, as a typed argument that makes the route
+/// answer once per key
+/// ([ADR 0193](../docs/adr/0193-a-request-answered-once-is-answered-the-same-way-again.md)).
+///
+/// ```zig
+/// const Replays = cache.Space("orders-replay", []const u8, .{ .ttl_s = 86_400, .max_bytes = 16 << 10 });
+///
+/// fn placeOrder(key: nilo.Idempotent(Replays, .{ .by = account }), body: NewOrder, db: *sql.Db, c: *nilo.Ctx) !nilo.Status(201, Order)
+/// ```
+///
+/// The first request with a key runs the handler and keeps what it
+/// returned; a retry with the same key gets that answer back, with
+/// `Idempotent-Replayed: true`, and the handler does not run. No key is a
+/// 400, a key still being answered is a 409, a key reused on a different
+/// request is a 422. A failure is not kept, so a retry after one runs the
+/// handler again. `Replays` is any bytes Space with `putIfAbsent` — a
+/// `nilo_cache` one — provided as a service; `.by` is whose key it is.
+pub const Idempotent = @import("typed.zig").Idempotent;
+pub const IdempotentOptions = @import("typed.zig").IdempotentOptions;
+
 /// An HTML form body, read into a struct of yours — the same idea as
 /// `Query(T)`, on the body instead of the query string (ADR 0031).
 ///
@@ -808,6 +828,8 @@ test {
     _ = @import("middleware.zig");
     _ = @import("typed.zig");
     _ = @import("authorization.zig");
+    _ = @import("idempotent.zig");
+    _ = @import("health.zig");
     _ = @import("ctx.zig");
     _ = @import("logger.zig");
     _ = @import("cors.zig");

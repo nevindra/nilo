@@ -25,6 +25,7 @@ const password_mod = @import("password.zig");
 const metrics_mod = @import("metrics.zig");
 const serve = @import("serve.zig");
 const wiring = @import("wiring.zig");
+const health = @import("health.zig");
 
 /// Say so if the program was built in a mode its log level does not match.
 /// Lives in `wiring.zig`; re-exported because `nilo.warn…` is public API.
@@ -48,6 +49,17 @@ const Ctx = ctx_mod.Ctx;
 /// That is why it is a `listen()` option and not only this constant.
 pub const default_arena_keep = 16 * 1024;
 
+/// The health page (ADR 0192). A `*Ctx` handler rather than a typed one
+/// because what it reads is the registry itself, which no argument type
+/// names.
+fn healthRoute(c: *Ctx) anyerror!void {
+    var scope = str_mod.AnyScope.of(c);
+    var out: std.Io.Writer.Allocating = try .initCapacity(c.arena(), 256);
+    const outcome = try health.write(&out.writer, &scope, c._services.entries.items, c.stopping());
+    // A health answer a proxy remembers is a health answer about the past.
+    try c.setStaticHeader("Cache-Control", "no-store");
+    try c.send(@intFromEnum(outcome), health.content_type, out.written());
+}
 
 pub const App = struct {
     /// What a nilo compile error calls this type, which is the name the
@@ -600,7 +612,6 @@ pub const App = struct {
         try self.operations.append(self.gpa, op);
     }
 
-
     /// Serve a description of this API, worked out from the handler
     /// signatures (ADR 0017).
     ///
@@ -617,6 +628,24 @@ pub const App = struct {
     /// still gets its way.
     pub fn docs(self: *App, opts: openapi.Options) void {
         self.docs_options = opts;
+    }
+
+    /// Serve a page that says whether this process can do its job, by asking
+    /// every service that declared `nilo_ready`
+    /// ([ADR 0192](../docs/adr/0192-a-health-route-asks-the-services.md)).
+    ///
+    /// ```zig
+    /// try app.health("/healthz");
+    /// ```
+    ///
+    /// `200 {"status":"ok"}` when every service answers ready; `503` with
+    /// the ones that did not and why; `503 {"status":"stopping"}` from the
+    /// moment the server was told to stop, so a balancer drains this
+    /// instance before the listener goes. A service with no hook is assumed
+    /// ready. An ordinary route, like the metrics page: what protects it is
+    /// where you mount it.
+    pub fn health(self: *App, comptime path: []const u8) !void {
+        try self.get(path, healthRoute);
     }
 
     /// Count every request, and serve the numbers at `/metrics` in the format
@@ -685,7 +714,6 @@ pub const App = struct {
         if (self.metrics_table) |*t| t.exposed = self.exposed.items;
     }
 
-
     /// Every route this App answers, in the order they were registered
     /// ([ADR 0127](../docs/adr/0127-a-route-pattern-is-the-name-of-its-url.md)).
     ///
@@ -714,17 +742,6 @@ pub const App = struct {
     pub const writeOpenApi = wiring.writeOpenApi;
     pub const serveRequest = serve.serveRequest;
     pub const Served = serve.Served;
-
-
-
-
-
-
-
-
-
-
-
 
     /// Listen and serve until the server is stopped — by Ctrl-C, by a
     /// SIGTERM from whatever is supervising the process, or by `shutdown()`.
@@ -913,7 +930,6 @@ pub const App = struct {
         for (self.background.items) |b| try b.start(b.args);
     }
 
-
     /// Stop the server: `listen()` stops accepting, connections finish the
     /// request they are on and close, and `listen()` returns.
     ///
@@ -922,9 +938,6 @@ pub const App = struct {
     pub fn shutdown(self: *App) void {
         self.stop.request();
     }
-
-
-
 
     /// Handle exactly one request from `in`, writing the answer to `out`.
     /// Returns true if the connection may be used for another request.
@@ -948,14 +961,6 @@ pub const App = struct {
         serve.runHandover(&served);
         return served.keep_alive;
     }
-
-
-
-
-
-
-
-
 };
 
 /// One registered route, as much of it as is anybody's business from outside:
@@ -1340,7 +1345,6 @@ fn joined(comptime prefix: []const u8, comptime pattern: []const u8) []const u8 
         return prefix ++ pattern;
     }
 }
-
 
 // ---- tests: the one thing here that never leaves this file ----
 
