@@ -71,6 +71,7 @@ Measured stripped, `ReleaseFast`, on the examples in this repository.
 | Twenty findings from an application, closed together ([ADRs 0075](./0075-a-lazy-dependency-is-a-request.md)–[0084](./0084-a-library-can-tell-what-mode-the-program-was-built-in.md)) | +11,400 B | +17,272 B |
 | Counters ([ADR 0100](./0100-the-route-table-is-the-registry.md)) | +1,984 B | +1,984 B |
 | An allowance ([ADR 0114](./0114-an-allowance-is-a-table-sized-while-compiling.md)) | +0 | +0 |
+| A body limit per route, a type that writes its own answer, a request id on the way out, and a server that sheds past its limit ([ADRs 0194](./0194-a-route-can-say-how-much-body-it-takes.md)–[0197](./0197-a-server-past-its-limit-says-so-at-once.md)) | +896 B | +944 B |
 
 `nilo_fetch` is +0 on both examples because neither imports it, and that is the
 whole of the row rather than an accident: a module nothing names is never
@@ -135,6 +136,8 @@ The `nilo_sql` row is +0 for a reason worth stating rather than glossing: **no e
 The same pass costs +16,880 bytes on `bench/size/pg_only.zig` and +15,392 on `sqlite_only.zig`, which moves the published *difference* between them — what SQLite costs a program that uses it — from 524,840 to **523,352**. That number was quoted in four places and reproduced exactly twice; it is a different number now, and [`bench/result/sql.md`](../../bench/result/sql.md) carries the run.
 
 `orders`, the largest example, is 1,327,992 bytes stripped. It is not a row here because it has no before.
+
+The four-ADR row is one figure for the same reason the ten-ADR one is, and it is almost all one of the four: `a2bd844` → `b82f89a`, both trees built with `-Doptimize=ReleaseFast -Dstrip=true`, `hello` 922,840 → 923,736. On `hello` that is `.text` +608, `.rodata` +271 and `.data.rel.ro` +32 — the 503 a shed request is answered with, the comparison in front of it, and the fifth fixed slot in the metrics table, none of which the linker can drop because `serve.zig` always names them ([ADR 0197](./0197-a-server-past-its-limit-says-so-at-once.md)). The other three are `comptime` on a type or on a module nothing here imports, and cost the two examples nothing. `outbound`, the one example that imports `nilo_fetch`, is +2,416 — the same ~900 plus `.text` +1,456 for the header merge in [ADR 0196](./0196-a-request-id-goes-out-with-the-call.md), which is what a program that dials out pays.
 
 ## Consequences
 

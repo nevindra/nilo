@@ -163,6 +163,19 @@ your own that writes itself.
 **A custom writer that says nothing gets `{}` and a note** saying the writer is
 custom and how to describe it. Visibly silent, rather than confidently wrong.
 
+## A type that writes its own answer
+
+The same rule, one step further out. A type carrying `nilo_content_type` and
+`nilo_write` answers with whatever bytes it wrote, under its own label
+([Responses](./responses.md#a-type-that-writes-its-own-answer)), and the
+document says so: the response's content key is the type's own
+`application/xml` or `text/csv` rather than `application/json`, which is the
+first time the description names a content type it did not pick. The schema
+under it is whatever the type says with `nilo_openapi`, and `{}` with a note —
+*this type writes its own body, and has not said what it looks like* — when it
+says nothing. nilo cannot read a schema off a function that writes XML, and
+does not try ([ADR 0195](../adr/0195-a-type-can-write-its-own-answer.md)).
+
 **An alias is not a name.** `pub const NewDoc = Filing(Str);` reads well in Zig
 and the document still calls the shape `Filing_Str` — the name comes from the
 compiler's name for the instantiation, and a Zig alias creates no new one. Write

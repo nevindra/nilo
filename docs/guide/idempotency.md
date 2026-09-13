@@ -126,7 +126,10 @@ extra answers.
 
 **What the handler returned is kept, whatever the status.** A
 `Status(201, Order)`, a `Response(T)` with a `Location`, a
-`Status(409, Problem)` the handler chose — all kept, all replayed. **What the
+`Status(409, Problem)` the handler chose — all kept, all replayed. So is an
+answer a type wrote itself with `nilo_write`: the record carries its
+`nilo_content_type`, and the replay goes out under the same label
+([ADR 0195](../adr/0195-a-type-can-write-its-own-answer.md)). **What the
 handler failed with is not.** A `fail.conflict(…)`, a `fail.unprocessable(…)`,
 an `error.Disconnected` from the database: the answer goes out, the key is
 released, and the next retry runs the handler again — which is what a retry

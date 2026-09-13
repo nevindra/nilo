@@ -1864,6 +1864,14 @@ as either being right. Only the RFC settles that.
 closed at once, so the failure mode is a client that finds out immediately
 rather than an OOM kill that takes every in-flight request with it.
 
+**Nothing bounds how many requests one process answers at once, so a burst
+queues on the pool and every request in it is late.** `.max_in_flight`, off by
+default because the right number is the pool's and not nilo's. Past it the
+request is answered with a 503, `Retry-After: 1` and a closed connection before
+the router is asked, so the balancer moves on and the ones already running
+finish on time ([ADR 0197](./adr/0197-a-server-past-its-limit-says-so-at-once.md)).
+The gauge `nilo_requests_in_flight` is how an operator picks the number.
+
 **A file response holds a descriptor for as long as the send takes.** One per
 request in flight, so `.max_connections` bounds it, which is the same number an
 operator already multiplies for memory. It is closed on every exit from

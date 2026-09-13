@@ -62,6 +62,11 @@ connection, no allocation, no new atomic.
 **On**: the same comparison with a different right-hand side. The 503 is a
 compile-time constant written in one call.
 
+**Binary size: +896 bytes on `hello`, +944 on `rest`**, stripped `ReleaseFast`,
+and it is the one of the four decisions in this cycle the linker cannot drop:
+`serve.zig` always names the comparison, the constant and the fifth metrics
+slot. `.text` +608, `.rodata` +271. The row is in [ADR 0018](0018-the-trade-budget-has-three-axes.md).
+
 **What it does not cost is a queue.** tower's `Buffer` and actix's backlog
 both put refused work somewhere to wait; this puts it back on the wire. A
 queue is memory per queued request and a second timeout to tune, and the

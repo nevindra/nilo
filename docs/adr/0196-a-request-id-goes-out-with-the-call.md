@@ -60,6 +60,11 @@ on the calls that pass headers, and that is the wrong trade here.
 **Off by one field.** `fetch.Client.Settings.forward_request_id = false` sends
 nothing and merges nothing.
 
+**Binary size: +0 on a program that does not import `nilo_fetch`**, which is
+`hello` and `rest`, and about **+1,456 bytes of `.text`** on one that does —
+`examples/outbound`, stripped `ReleaseFast`, measured as the part of its
++2,416 that `hello` did not also pay ([ADR 0018](0018-the-trade-budget-has-three-axes.md)).
+
 **`c.requestId()` on a request nobody asked it of before** mints an id: sixteen
 shifts on a counter, no clock, no entropy. It is then kept on the `Ctx`, so
 the logger — if it is on — writes the same one.
