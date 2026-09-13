@@ -11,7 +11,7 @@ const std = @import("std");
 /// **Adding a module means adding a row here as well as to `.paths`.** Core
 /// shipped for a whole session with neither, and nothing noticed, because a
 /// list that does not name a directory cannot check it.
-const shipped_roots = [_][]const u8{ "core", "id", "config", "pw", "cache", "jwt", "fetch", "http", "sql", "s3" };
+const shipped_roots = [_][]const u8{ "core", "id", "config", "pw", "cache", "jwt", "fetch", "job", "http", "sql", "s3" };
 
 comptime {
     const manifest = @embedFile("build.zig.zon");
@@ -88,6 +88,19 @@ const layers = [_]Layer{
         // server has one (ADR 0065, ADR 0070). Same exception `sql` carries,
         // and the same weakness: the step cannot see that it is test-only.
         .in_tests = &.{"nilo_http"},
+    },
+    // The second Fitting (ADR 0198): a queue borrows the loop to wait on and
+    // owns no destination — the store it runs on is handed to it as a type,
+    // which is why `job/table.zig` sits on a `nilo_sql` Db and this row still
+    // names no `nilo_sql`. `job/live.zig` is the test root that does, for the
+    // reason `fetch/deadline.zig` names `nilo_http`: the one thing it tests
+    // is the table, and only a database has one. The Space a status is kept
+    // in is duck-typed the same way, so `nilo_cache` is here for the same
+    // root and no other file.
+    .{
+        .root = "job",
+        .may_import = &.{"nilo_core"},
+        .in_tests = &.{ "nilo_sql", "nilo_cache", "live_config" },
     },
     .{
         .root = "sql",
@@ -733,6 +746,61 @@ const cache_refusals = [_]Refusal{
     },
 };
 
+/// The same, for `job/refusals/`, hanging off `test-job` (ADR 0198, ADR 0199).
+/// Every one of these answers a question a queue would otherwise answer at
+/// three in the morning: a row nobody can run, a schedule with a policy
+/// nobody chose, a payload that cannot be read back.
+const job_refusals = [_]Refusal{
+    .{
+        .name = "job_without_a_name",
+        .says = "the job SendWelcome has no `nilo_job`, so it has no name to be stored under.",
+    },
+    .{
+        .name = "job_named_twice",
+        .says = "the jobs SendWelcome and SendAgain are both named \"send-welcome\".",
+    },
+    .{
+        .name = "job_payload_holds_a_pointer",
+        .says = "the job SendWelcome cannot carry `SendWelcome.user`, which is a pointer.",
+    },
+    .{
+        .name = "job_without_retry",
+        .says = "the job SendWelcome says nothing about `retry`, and a job that fails has to say what happens next.",
+    },
+    .{
+        .name = "job_run_takes_a_ctx",
+        .says = "the job SendWelcome's `run` takes *job_run_takes_a_ctx.Ctx second, and it takes a `*nilo.Run`.",
+    },
+    .{
+        .name = "job_run_asks_for_a_dep_nobody_gave",
+        .says = "the job SendWelcome's `run` asks for a *job_run_asks_for_a_dep_nobody_gave.Mailer, and `job.Jobs`'s `.deps` has no such thing.",
+    },
+    .{
+        .name = "job_pushed_but_not_listed",
+        .says = "`jobs.push` was handed a SendAgain, and this queue has no such job.",
+    },
+    .{
+        .name = "job_scheduled_without_overlap",
+        .says = "the scheduled job Nightly does not say what happens when a tick arrives while the last one is still running.",
+    },
+    .{
+        .name = "job_scheduled_without_missed",
+        .says = "the scheduled job Nightly does not say what happens to a tick that was missed while the process was down.",
+    },
+    .{
+        .name = "job_cron_out_of_range",
+        .says = "the schedule \"0 25 * * *\" has 25 in its hour field, and that field runs from 0 to 23.",
+    },
+    .{
+        .name = "job_push_in_on_memory",
+        .says = "`jobs.pushIn` was called on a queue over Memory, which cannot join a transaction.",
+    },
+    .{
+        .name = "job_scheduled_field_without_default",
+        .says = "the scheduled job Nightly has a field `day` with no default, and nobody pushes a scheduled job.",
+    },
+};
+
 /// One entry per file in `refusals/`: a program written wrong on purpose, and
 /// the first line of the error it has to stop with. `says` leaves out the
 /// `nilo: ` prefix because the build step adds it — see the loop in `build`.
@@ -1314,6 +1382,7 @@ const Snippets = struct {
         .{ .path = "docs/guide/deploying.md" },
         .{ .path = "docs/guide/fetch.md" },
         .{ .path = "docs/guide/s3.md" },
+        .{ .path = "docs/guide/jobs.md" },
         // The SQL guide is a folder, and its front page and every page after
         // the first read the `User` its tables page declares — so each one
         // carries that page's declarations in front of its own, which is
@@ -1811,6 +1880,25 @@ fn fetchFor(
 ) *std.Build.Module {
     return b.createModule(.{
         .root_source_file = b.path("fetch/fetch.zig"),
+        .target = target,
+        .optimize = mode,
+        .imports = &.{.{ .name = "nilo_core", .module = core_mod }},
+    });
+}
+
+/// A copy of `nilo_job` for one optimize mode (ADR 0198).
+///
+/// The second Fitting, and it takes its Core the way `fetchFor` does and for
+/// the same reason: a job's payload may carry a `Str`, and the `Str` a job
+/// parses back has to be the `Str` the handler that pushed it wrote.
+fn jobFor(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    mode: std.builtin.OptimizeMode,
+    core_mod: *std.Build.Module,
+) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("job/job.zig"),
         .target = target,
         .optimize = mode,
         .imports = &.{.{ .name = "nilo_core", .module = core_mod }},
@@ -2374,6 +2462,18 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "nilo_core", .module = nilo_core }},
     });
 
+    // The second Fitting: a queue, and a schedule (ADR 0198, ADR 0199).
+    // Registered rather than bound, like `nilo_fetch`: `nilo_http` never
+    // names it, so a program with no queue in it links no worker loop, no
+    // cron parser and no table. The store is a type parameter, which is how
+    // `job.Table(sql.Db)` works without this module importing `nilo_sql`.
+    const nilo_job = b.addModule("nilo_job", .{
+        .root_source_file = b.path("job/job.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "nilo_core", .module = nilo_core }},
+    });
+
     // The object store: a Service that dials, and the first module to import a
     // Fitting (ADR 0072). Registered rather than bound, like `nilo_fetch` —
     // nothing inside this repository imports it, and that is the point of the
@@ -2728,6 +2828,43 @@ pub fn build(b: *std.Build) void {
     }
     test_step.dependOn(test_fetch_engine_step);
 
+    // The second Fitting, proved the same way as the first: the worker loop
+    // runs under `std.Io.Threaded`, with `job.Memory` as its store and no
+    // Engine anywhere (ADR 0198). The half that needs a database is
+    // `test-job-sql`, below with the SQL module's own steps.
+    const test_job_step = b.step(
+        "test-job",
+        "Run nilo_job's tests — the worker loop on std.Io.Threaded, no Engine",
+    );
+    for (test_modes) |mode| {
+        const tests = b.addTest(.{
+            .root_module = jobFor(b, target, mode, coreFor(b, target, mode)),
+            .use_llvm = testBackend(target, mode),
+        });
+        test_job_step.dependOn(&b.addRunArtifact(tests).step);
+    }
+
+    const refusals_job_step = b.step(
+        "refusals-job",
+        "Check that each job mistake stops in nilo's own words",
+    );
+    for (job_refusals) |refusal| {
+        const module = b.createModule(.{
+            .root_source_file = b.path(b.fmt("job/refusals/{s}.zig", .{refusal.name})),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{
+                .{ .name = "nilo_job", .module = nilo_job },
+                .{ .name = "nilo_core", .module = nilo_core },
+            },
+        });
+        const refused = b.addObject(.{ .name = refusal.name, .root_module = module });
+        refused.expect_errors = .{ .contains = b.fmt("error: nilo: {s}", .{refusal.says}) };
+        refusals_job_step.dependOn(&refused.step);
+    }
+    test_job_step.dependOn(refusals_job_step);
+    test_step.dependOn(test_job_step);
+
     // The object store. It sits a layer above the Fitting and is tested the
     // same way: a real socket at both ends on `std.Io.Threaded`, with no
     // Engine anywhere. What is different is that the server on the other end
@@ -2877,6 +3014,16 @@ pub fn build(b: *std.Build) void {
     // against in-memory buffers.
     const test_sql_step = b.step("test-sql", "Run the SQL module's tests — no database needed");
     test_all_step.dependOn(test_sql_step);
+
+    // The queue's table, against a real one (ADR 0198). SQLite in memory
+    // always; Postgres when `DATABASE_URL` says where, the way `sql/live.zig`
+    // does. Hung off `test-sql` rather than `test`, because it builds the
+    // drivers `test` deliberately does not (ADR 0075).
+    const test_job_sql_step = b.step(
+        "test-job-sql",
+        "Run nilo_job's table against SQLite, and Postgres if reachable",
+    );
+    test_sql_step.dependOn(test_job_sql_step);
 
     // The SQL module's Refusals, held the same way the framework's are (ADR
     // 0027) and hung off `test-sql` rather than `test`. Every comptime check
@@ -3031,6 +3178,26 @@ pub fn build(b: *std.Build) void {
     const bench_sql = b.addExecutable(.{ .name = "nilo-bench-sql", .root_module = bench_sql_module });
     b.step("bench-sql", "Time a statement parsed every call against one prepared once")
         .dependOn(&b.addRunArtifact(bench_sql).step);
+
+    // What a claim costs on each store, which is what `poll_ms` rests on
+    // (ADR 0198). The same benchmark copy of the SQL module, so the drivers
+    // are built once for both.
+    const bench_job_module = b.createModule(.{
+        .root_source_file = b.path("bench/job.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .strip = stripMeasured(strip, .ReleaseFast),
+        .imports = &.{
+            .{ .name = "nilo_core", .module = bench_core },
+            .{ .name = "nilo_sql", .module = bench_nilo_sql },
+            .{ .name = "nilo_job", .module = jobFor(b, target, .ReleaseFast, bench_core) },
+            .{ .name = "live_config", .module = bench_live_config },
+        },
+    });
+    if (want_sql) bench_job_module.link_libc = true;
+    const bench_job = b.addExecutable(.{ .name = "nilo-bench-job", .root_module = bench_job_module });
+    b.step("bench-job", "Time a claim on each store: memory, SQLite, and Postgres if reachable")
+        .dependOn(&b.addRunArtifact(bench_job).step);
 
     // The same question under load, which is the one that decides whether a
     // Postgres wait costs a fiber or a thread (ADR 0059). Installed rather
@@ -3324,6 +3491,27 @@ pub fn build(b: *std.Build) void {
         });
         const deadline_tests = b.addTest(.{ .root_module = deadline_root, .use_llvm = testBackend(target, mode) });
         test_sql_step.dependOn(&b.addRunArtifact(deadline_tests).step);
+
+        // `job/live.zig`: the one root that names `nilo_sql` and `nilo_job`
+        // together. The same Core as the Db under test, so a `Str` in a
+        // payload is the `Str` a Row reads.
+        const job_live_root = b.createModule(.{
+            .root_source_file = b.path("job/live.zig"),
+            .target = target,
+            .optimize = mode,
+            .imports = &.{
+                .{ .name = "nilo_core", .module = core_mod },
+                .{ .name = "nilo_sql", .module = under_test },
+                .{ .name = "nilo_job", .module = jobFor(b, target, mode, core_mod) },
+                .{ .name = "nilo_cache", .module = cacheFor(b, target, mode) },
+            },
+        });
+        // The same `live_config` module the Db under test was given, rather
+        // than a second one made from the same options: two modules rooted in
+        // one file is a compile error, and it is the same URL either way.
+        job_live_root.addImport("live_config", under_test.import_table.get("live_config").?);
+        const job_live_tests = b.addTest(.{ .root_module = job_live_root, .use_llvm = testBackend(target, mode) });
+        test_job_sql_step.dependOn(&b.addRunArtifact(job_live_tests).step);
     }
 
     for (test_modes) |mode| {
@@ -3472,6 +3660,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "nilo_s3", .module = nilo_s3 },
                     .{ .name = "nilo_cache", .module = nilo_cache },
                     .{ .name = "nilo_jwt", .module = nilo_jwt },
+                    .{ .name = "nilo_job", .module = nilo_job },
                 },
             });
             const compiled = b.addObject(.{ .name = snippet.name, .root_module = module });

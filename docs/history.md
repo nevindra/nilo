@@ -2953,3 +2953,36 @@ finding.** The decisions are
 [ADR 0197](./adr/0197-a-server-past-its-limit-says-so-at-once.md); one of
 them closed a question the roadmap had carried since it was written, and
 closed it as a declaration rather than the serialiser the question assumed.
+
+## The third reason for a Redis arrived, and the answer was the table
+
+**ADR 0139 said the one reason left to reach for a Redis was several
+instances having to agree, and that nobody had brought one. The first one to
+arrive was a queue shared by several servers, and it was answered by the
+database they already share: `FOR UPDATE SKIP LOCKED` on a table is the
+coordinator, a unique index is the leader election, and the transaction that
+inserts the order is the outbox.** The lesson is the one ADR 0139 already
+half-stated — most of what is said to need a second service does not — with
+its third instance. The decisions are
+[ADR 0198](./adr/0198-a-queue-is-a-table-in-the-database-you-already-have.md)
+and [ADR 0199](./adr/0199-a-schedule-is-a-type-that-makes-the-caller-choose.md).
+
+Three things from building it, each kept as a sentence:
+
+- **A roadmap entry that asked for "somebody who has written the loop twice"
+  was closed by writing it a second time inside another feature.** The
+  schedule's three policies were not settled by an argument; they were
+  settled by `pushNext` needing an answer to each before it could be written.
+- **A worker loop that is never idle never reaches a cancellation point**, so
+  the first shutdown test hung a busy worker past its cancel. `io.checkCancel`
+  at the top of the loop is the whole fix, and it is the same shape CLAUDE.md
+  already asks of any wait: the giving-up path has to be reachable.
+- **The test runner's rule about `err` reached a new module before its first
+  test did**: a dead row logged at `err` made the suite that produced it
+  fail. `sql/db.zig`'s `enumOf` has the note; now `job.zig` has it too.
+
+The numbers are in [`bench/result/job.md`](../bench/result/job.md): a claim is
+54 µs of SQLite or 354 µs of Postgres across a Docker port on the two-core
+box, which is what `poll_ms = 1_000` rests on, and a claim that takes a row on
+Postgres is 1.2 ms — the number that makes batching the module's Next 1
+rather than a default.

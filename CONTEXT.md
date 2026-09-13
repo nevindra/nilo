@@ -1,6 +1,6 @@
 # nilo
 
-A toolkit for Zig — ten modules for the ordinary jobs, of which the largest is an HTTP server. It puts the comfort of writing code first, with performance as a consequence rather than the other way round. It is aimed at people who are used to Go or Node and are giving Zig a try.
+A toolkit for Zig — eleven modules for the ordinary jobs, of which the largest is an HTTP server. It puts the comfort of writing code first, with performance as a consequence rather than the other way round. It is aimed at people who are used to Go or Node and are giving Zig a try.
 
 ## Language
 
@@ -336,3 +336,29 @@ _Avoid_: JWKS as a noun on its own, keyring, key store, certificate
 **Claims**:
 A struct of the caller's own, one field per thing the application wants out of a token. Fields the token carries and the struct does not name are ignored. Separate from the registered claims — `iss`, `aud`, `exp`, `nbf` — which nilo checks whether or not the struct mentions them.
 _Avoid_: payload, body, subject, principal, identity
+
+### Jobs
+
+**Job**:
+A struct of the caller's own whose fields are the payload and whose `run` is the work, done later, on a worker, outside any request. Named by `nilo_job`, so a row pushed by one binary can be run by another that knows the name. Written to be safe to run twice, because it will be.
+_Avoid_: task, worker (for the job — a worker is what runs one), message, event, handler
+
+**Queue**:
+The table the jobs wait in — `nilo_jobs`, a Row like any other, in the database the program already has. Not a second service, not a Redis, and `job.Memory` is the same contract in this process for a test or a program that can lose it.
+_Avoid_: broker, bus, topic, stream, channel
+
+**Claim**:
+Taking the next due row and marking it running, in one statement, so that ten workers on ten machines take ten different rows. Postgres skips a locked row; SQLite has one writer and needs no skipping.
+_Avoid_: dequeue, pop, poll (which is the wait, not the take), fetch, reserve
+
+**Lease**:
+How long a claimed row stays somebody's before anybody else may take it. A worker that dies mid-run leaves a row whose lease runs out, which is the whole of why a job is at least once and never exactly once.
+_Avoid_: lock, visibility timeout, ack deadline, heartbeat
+
+**Dead**:
+A row that failed for the last time — every retry spent, or a payload this binary cannot read. Kept, with the error's name, until somebody retries or sweeps it. Not deleted, not hidden, and counted.
+_Avoid_: dead letter queue, DLQ, failed, poison, discarded
+
+**Schedule**:
+When a job that nobody pushes runs: a cron expression or an interval, in UTC, parsed while compiling. The next tick is a row with a unique key, so a schedule on ten instances is one row. A schedule declares what an overlap and a missed tick mean, or it does not compile.
+_Avoid_: cron job, timer, ticker, interval (for the whole — an interval is one kind of schedule), recurring task

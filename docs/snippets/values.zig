@@ -26,3 +26,8 @@ pub var carts: Carts = undefined;
 // without building either — what the JWKS fetch on the `nilo_jwt` page needs.
 pub var client: fetch.Client = undefined;
 pub var run: nilo.Run = undefined;
+
+// The queue a snippet about pushing says without opening one, and the
+// table it sits on.
+pub var table: job.Table(Db) = undefined;
+pub var jobs: Jobs = undefined;

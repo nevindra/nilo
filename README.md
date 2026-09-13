@@ -19,7 +19,7 @@ Zig gives you a compiler and not much else. Routing a request, reading settings
 out of the environment, hashing a password, creating a table, talking to
 Postgres: you write all of that yourself, or you don't ship.
 
-nilo is a toolkit for that layer. Ten modules, one idea. A plain function is a
+nilo is a toolkit for that layer. Eleven modules, one idea. A plain function is a
 route. A plain struct is a table. Nothing is annotated anywhere, because the
 signature and the field list already say everything nilo needs.
 
@@ -30,7 +30,7 @@ import what you use, and Zig never compiles the rest.
 |---|---|
 | **One rule** | a pointer is a service, a value is request data. There is no second rule. |
 | **One allocation** | per request. A test fails if it ever becomes two. |
-| **244 refusals** | mistakes that stop the build with a sentence nilo wrote, held in place by six build steps. |
+| **244 refusals** | mistakes that stop the build with a sentence nilo wrote, held in place by seven build steps. |
 | **Zero glue** | routing, the 400, the 404, the OpenAPI document and the SQL all read the same struct. |
 
 > **0.3.0**, needs **Zig 0.16**. Coming from 0.2.0, there are eleven things to
@@ -346,8 +346,8 @@ const exe = b.addExecutable(.{
 
 The package is `nilo` and the module is `nilo_http`. **There is no module called
 `nilo`**, because the name belongs to the project rather than to any one part of
-it. `nilo_sql`, `nilo_s3`, `nilo_fetch`, `nilo_cache`, `nilo_jwt`, `nilo_config`,
-`nilo_pw`, `nilo_id` and `nilo_core` are its siblings, and you add a line above
+it. `nilo_sql`, `nilo_s3`, `nilo_fetch`, `nilo_job`, `nilo_cache`, `nilo_jwt`,
+`nilo_config`, `nilo_pw`, `nilo_id` and `nilo_core` are its siblings, and you add a line above
 for each one you actually use. In your own code, alias it back to something
 short:
 
@@ -426,6 +426,7 @@ parts of it. [Contributing](#contributing) is what that takes.
 | **`nilo_sql`** | Postgres and SQLite. Your struct is the table, and it makes the table: reads, writes, transactions, streaming, the schema, the diff and the ledger | joins, aggregates and `GROUP BY`, which go through `db.raw`. A migration `down`. SQLite refuses batches, row locks, deadlines and case-sensitive matching, and says so while compiling |
 | **`nilo_s3`** | object storage: S3, MinIO, R2. Your bucket is a type. Get, put, range, stream, presigned GET and POST | `LIST`, `COPY`, multipart |
 | **`nilo_fetch`** | calling somebody else's HTTP API from inside a request: the policy in front of `std.http.Client` | retries, circuit breaker |
+| **`nilo_job`** | work that runs later, again, or on a schedule: a queue in the database you already have, a job that is a struct, a cron schedule parsed while compiling | priorities, exactly-once, time zones |
 | **`nilo_cache`** | an expiring cache in this process: `get`, `put`, TTLs, stats, on a fixed budget with nothing allocated per operation | pointers in a cached value, which is a compile error naming the field |
 | **`nilo_jwt`** | checking somebody else's signed token: RS256 and a JWKS | fetching the key set and refreshing it, which is a GET and a cache |
 | **`nilo_config`** | settings out of the environment, every bad one named at once | file parsing, and that's a decision |
@@ -446,9 +447,12 @@ process.
 
 **The way out is open.** `nilo_fetch` is how a handler dials out, and `nilo_s3`
 is the first module built on it
-([ADR 0070](./docs/adr/0070-a-fitting-borrows-the-loop.md)). Mail and a Redis
-client are unwritten but no longer blocked, which makes them the most useful
-thing an outside contributor could pick up.
+([ADR 0070](./docs/adr/0070-a-fitting-borrows-the-loop.md)); `nilo_job` is the
+second Fitting, and the queue it runs is a table in your database rather than
+a second service
+([ADR 0198](./docs/adr/0198-a-queue-is-a-table-in-the-database-you-already-have.md)).
+Mail is unwritten but no longer blocked, which makes it the most useful thing
+an outside contributor could pick up.
 [`docs/roadmap.md`](./docs/roadmap.md) has the queue, one list per module.
 
 **This isn't going to become a junk drawer**, because there is a bar:
@@ -554,14 +558,15 @@ been built, and no allocate-per-request version shipped in the meantime.
 
 An error message is a feature right up until somebody refactors it into mush.
 
-So this repository tests its error messages. There are **244 programs in it that
-are supposed to fail to compile**, and six build steps checking the wording of
+So this repository tests its error messages. There are **256 programs in it that
+are supposed to fail to compile**, and seven build steps checking the wording of
 every single failure:
 
 | Step | Programs | Over |
 |---|---|---|
 | `zig build refusals` | 129 | the framework |
 | `zig build refusals-sql` | 88 | queries, rows and schemas |
+| `zig build refusals-job` | 12 | jobs and schedules |
 | `zig build refusals-s3` | 10 | buckets and keys |
 | `zig build refusals-config` | 9 | settings |
 | `zig build refusals-cache` | 5 | cached values |

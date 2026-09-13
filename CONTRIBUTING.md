@@ -53,6 +53,8 @@ zig build test-pw      # only nilo_pw, the same way, plus its refusals
 zig build test-cache   # only nilo_cache, the same way, plus its refusals
 zig build test-jwt     # only nilo_jwt, both modes — no Engine, no module graph
 zig build test-fetch   # only nilo_fetch, both modes — a real socket, no Engine
+zig build test-job     # only nilo_job, both modes, plus its refusals — a worker loop on std.Io.Threaded, no Engine
+zig build test-job-sql # nilo_job over a SQLite table, and Postgres if DATABASE_URL reaches one; on test-sql
 zig build test-s3      # only nilo_s3, both modes, plus its refusals
 
 zig build run          # the benchmark server
@@ -81,17 +83,21 @@ work on their own, filters and all. That's not a nicety, it's the entry
 condition for that layer. If a change ever stops one of those commands working,
 the layering broke, not the test.
 
-`nilo_fetch` is one step short of that and for a stated reason — a Fitting
-borrows the loop ([ADR 0070](./docs/adr/0070-a-fitting-borrows-the-loop.md)). It
-needs `nilo_core` in the graph and nothing else:
+`nilo_fetch` and `nilo_job` are one step short of that and for a stated reason
+— a Fitting borrows the loop
+([ADR 0070](./docs/adr/0070-a-fitting-borrows-the-loop.md)). Each needs
+`nilo_core` in the graph and nothing else:
 
 ```
 zig test --dep nilo_core -Mroot=fetch/fetch.zig -Mnilo_core=core/core.zig
+zig test --dep nilo_core -Mroot=job/job.zig -Mnilo_core=core/core.zig
 ```
 
-That opens a real socket at both ends on `std.Io.Threaded`, with no engine
-anywhere. Same rule as above: if it ever needs one, the module is in the wrong
-layer.
+The first opens a real socket at both ends on `std.Io.Threaded`, with no
+engine anywhere, and the second runs a worker loop on it over `job.Memory`.
+Same rule as above: if either ever needs an engine, the module is in the wrong
+layer. `job/live.zig` names `nilo_sql` because the thing it tests is the
+table, and it is its own root — `zig build test-job-sql` — for that reason.
 
 Everything under `http/` reaches the engine and needs the module graph, so
 `zig build test` is the only way to run it. A few files are pure enough to run
@@ -137,16 +143,16 @@ the feature, and it needs a program that proves the message still says the right
 thing.
 
 That means a file in `refusals/` (or `sql/refusals/`, `config/refusals/`,
-`pw/refusals/`, `cache/refusals/`, `s3/refusals/`) and a row in the matching table in `build.zig`.
+`pw/refusals/`, `cache/refusals/`, `s3/refusals/`, `job/refusals/`) and a row in the matching table in `build.zig`.
 [`refusals/README.md`](./refusals/README.md) shows exactly how, including the
 trick for finding out what to put in `.says`: guess, run the **matching** step —
-`refusals`, `refusals-sql`, `refusals-config`, `refusals-pw`, `refusals-cache`
-or `refusals-s3`,
+`refusals`, `refusals-sql`, `refusals-config`, `refusals-pw`, `refusals-cache`,
+`refusals-s3` or `refusals-job`,
 because each one runs only its own table and a row added to one while another is
 running is a check that silently never ran —
 and read what it prints.
 
-**There are six tables now.** That warning gets sharper with each one, and the
+**There are seven tables now.** That warning gets sharper with each one, and the
 failure is silent by construction: the row is there, the file is there, and the
 step you ran never looked at either.
 

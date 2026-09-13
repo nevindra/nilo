@@ -70,6 +70,7 @@ other module's.
 | [`nilo_cache`](#nilo_cache-an-expiring-cache-in-this-process) | needs no loop | a read that writes, so readers queue, and an evicted-key record nothing reads |
 | [`nilo_jwt`](#nilo_jwt-checking-somebody-elses-token) | needs no loop | no number against a verification, and only RS256 |
 | [`nilo_fetch`](#nilo_fetch-calling-somebody-elses-api) | borrows the loop | 4,139 bytes of stack per idle connection, and nothing measured through TLS |
+| [`nilo_job`](#nilo_job-work-that-runs-later-again-or-on-a-schedule) | borrows the loop | workers on the wrong `Io` under one startup order, a claim per row, and UTC only |
 | [`nilo_http`](#nilo_http-the-server) | owns the loop | a megabyte of request arena held per connection, nothing that reads a `Forwarded` header, and a long tail |
 | [`nilo_sql`](#nilo_sql-postgres-and-sqlite) | borrows the loop | a migration library with no command that runs it, a `Timestamp` the two halves of SQLite disagree about, and a pool option dropped without a word |
 | [`nilo_s3`](#nilo_s3-object-storage) | borrows the loop | nothing measured through TLS, and no `LIST`, `COPY` or multipart |
@@ -507,6 +508,106 @@ thundering herd.
 number**, which is the same test every other feature here has had to pass.
 
 ---
+
+## `nilo_job`: work that runs later, again, or on a schedule
+
+A Fitting, and the second one: a queue over a table in the caller's database,
+with a worker loop written against `std.Io`
+([ADR 0198](./adr/0198-a-queue-is-a-table-in-the-database-you-already-have.md)),
+and a schedule that is a type making the caller choose
+([ADR 0199](./adr/0199-a-schedule-is-a-type-that-makes-the-caller-choose.md)).
+What it costs and where the number came from is in
+[`bench/result/job.md`](../bench/result/job.md).
+
+### Next
+
+**1. A claim takes one row, and a busy queue pays a round trip per job.** On
+the two-core box a Postgres claim that takes a row is 1.2 ms across a Docker
+port ([`bench/result/job.md`](../bench/result/job.md)); a claim of ten rows
+would spread that over ten. The price is ten rows held by one worker that may
+die — every one of them waits out the lease — and the number that decides it
+is throughput under several workers, which one connection cannot measure.
+
+**Waiting on: a machine** with cores, and a run of `bench-job` extended to
+several workers on it.
+
+### Known gaps
+
+**Under `app.start(io)` followed by `listen()`, the workers run on the
+caller's `Io`.** `nilo_start` runs once, in whichever phase came first
+(ADR 0079, ADR 0086), and a `Jobs` keeps the `Io` it was handed there. Under
+the published migrate-then-listen order that is the program's own
+`std.Io.Threaded`, and a worker's `sleep` on it holds an OS thread for
+`poll_ms` — inside a server whose fibers share that thread. Every Service has
+this property under that order; this is the first module where the thing
+started is a loop that sleeps, so it is the first where it costs something
+visible. The fix is repository-level rather than this module's: a second
+hook, or `listen()` re-handing the Engine's `Io` to services that were
+started under another.
+
+**Waiting on: a design** that does not become the second `nilo_start`
+ADR 0086 refused.
+
+**A schedule is UTC.** `0 3 * * *` is three in the morning in Greenwich, and
+a program in Jakarta writes `0 20 * * *` with a comment. A time zone is a
+table of rules that changes twice a year and a dependency to carry it.
+
+**Waiting on: a design** for tzdata without a dependency, or a caller for
+whom the comment is not enough.
+
+**`job.Memory` scans its slots.** 3–6 µs a claim over a few thousand fixed
+slots under a spin lock. Fine for a test and for the small program it is
+for; a heap would be 200 ns and an allocation-free heap somebody writes.
+
+**Waiting on: a caller** with a memory queue big enough to notice.
+
+**A `Str` parsed out of a payload carries no lifetime marker.** `Str.jsonParse`
+answers `static`, so the debug trap that catches a `Str` held past its
+request cannot catch one held past its tick. A job that copies a payload
+`Str` into something longer-lived compiles and runs; it would in a handler
+too, and there the trap fires in Debug. Stamping the parsed value with the
+Run's lifetime is one call, in the place `App` makes it for a body.
+
+**Waiting on: ready.**
+
+**Nothing sweeps finished rows.** `Table.sweep(scope, before)` deletes `done`
+rows older than a moment, and nothing calls it: a program that wants the
+table small runs it from a scheduled job of its own. Written down so nobody
+is surprised by a table that only grows.
+
+**Waiting on: accepted**, until somebody would rather have a `keep_done_s`
+setting than a three-line job.
+
+**A worker started under `app.start(io)` and never `listen()`ed is a worker
+nobody stops.** `serveOn(io)` for a worker process returns when cancelled,
+and cancelling it is the caller's — there is no signal handler here, because
+the one in `http/` belongs to the server. A worker binary writes the four
+lines that catch SIGTERM and cancel the future.
+
+**Waiting on: a caller** who has written those four lines twice.
+
+### Not decided
+
+**Whether a job may say how many of it run at once.** "At most two calls to
+the payment provider in flight" is a `nilo.Gate` inside `run` today, which
+works and is invisible to the queue: a third row is claimed, waits at the
+gate, and holds a worker while it does. A per-kind ceiling the claim
+respected would leave the worker free.
+
+**What would settle it: a caller** with a provider that rate-limits harder
+than their workers count.
+
+**Whether priority belongs here.** Rows come out in `run_at` order and
+nothing else. A `priority` column is one more `ORDER BY` term and one more
+thing every push has to decide.
+
+**What would settle it: a queue where the emails wait behind the reports.**
+
+**`LISTEN/NOTIFY` instead of polling.** A pushed row would wake a worker in
+microseconds rather than in `poll_ms`. Postgres only, one more thing the pool
+holds open, and the latency of a second has not hurt anybody yet.
+
+**What would settle it: a number** — who is waiting on that second.
 
 ## `nilo_http`: the server
 
@@ -1052,22 +1153,6 @@ the sort of disagreement nobody finds for a year.
 **What would settle it: a client that sends one.** An ETag is what every browser
 and CDN made this century sends, and a second validator for a case nobody has
 produced is a second thing to keep in step.
-
-**A schedule, rather than a loop around a sleep.** `app.spawn` starts work that
-is not a request and `nilo.sleep` paces it
-([ADR 0086](./adr/0086-work-that-is-not-a-request-belongs-to-the-server.md)),
-which covers "every so often" and nothing else. Wall-clock times, "at 03:00 on
-Sundays", and what happens when one run overruns the next are all arithmetic
-the caller writes today.
-
-Each of those is a policy with no answer that is right for everybody: whether a
-missed run is dropped or caught up, whether two may overlap, whether the first
-is at zero or at the interval. A type that made the caller state them would be
-a schedule worth having; an `every(ms, f)` that picked them quietly would not,
-which is why ADR 0086 refused that shape rather than deferring it.
-
-**What would settle it: somebody who has written the loop twice** and can say
-which of those policies they had to pick, and what they picked.
 
 **Whether a rule like "this is an email address" belongs in this repository.**
 `Bound` reports five reasons a field did not bind — `missing`, `not_a_number`,
@@ -1671,8 +1756,11 @@ Service rather than a tool module, and deliberately not the one built first
 ([ADR 0139](./adr/0139-an-in-process-cache-and-a-redis-client-are-two-modules.md)).
 Two of the three usual reasons to reach for a Redis are already gone here —
 a session is sealed into a cookie and an allowance is a table in this process —
-so what is left is several instances having to agree, and nobody has brought
-one. **The two will not share an interface**: what can fail differs, and hiding
+so what is left is several instances having to agree — and the first case of
+that to arrive, a queue shared by several servers, was answered by the
+database they already share rather than by a Redis
+([ADR 0198](./adr/0198-a-queue-is-a-table-in-the-database-you-already-have.md)).
+**The two will not share an interface**: what can fail differs, and hiding
 that turns "the cache is down" into "the cache is cold". Both existing Zig
 clients are alpha and neither has pub/sub, so a dependency would not hand over
 cross-instance fan-out either; ADR 0139 records what each one does have.
@@ -1680,7 +1768,7 @@ cross-instance fan-out either; ADR 0139 records what each one does have.
 **Waiting on: a caller.** Bring the deployment with more than one instance in
 it, not the patch.
 
-**Anything else that dials — a `nilo_mail`, a queue, a second store.** Nothing
+**Anything else that dials — a `nilo_mail`, a second store.** Nothing
 structural is in the way. Each is a Fitting or a Service by one question rather
 than a seam to design first: does it hold a connection to a named system, or is
 it given an address per call

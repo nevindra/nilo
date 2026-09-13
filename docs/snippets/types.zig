@@ -30,6 +30,7 @@ pub const fetch = @import("nilo_fetch");
 pub const s3 = @import("nilo_s3");
 pub const cache = @import("nilo_cache");
 pub const jwt = @import("nilo_jwt");
+pub const job = @import("nilo_job");
 
 pub const Str = nilo.Str;
 pub const Redirect = nilo.Redirect;
@@ -74,3 +75,54 @@ pub const SignIn = struct {
     email: Str,
     password: Str,
 };
+
+/// The job the jobs guide pushes at sign-up: what its first block declares,
+/// so every block after it compiles against the real thing. `Db` here is
+/// Postgres, and `job.Table` over it is the queue.
+pub const SendWelcome = struct {
+    pub const nilo_job = "send-welcome";
+    pub const retry: job.Retry = .{
+        .times = 5,
+        .backoff = .{ .exponential = .{ .from_ms = 1_000, .to_ms = 3_600_000 } },
+    };
+
+    user_id: i64,
+    email: Str,
+
+    // `database` where the page says `db`: a parameter may not shadow the
+    // `db` values.zig declares for the body snippets that follow this.
+    pub fn run(self: SendWelcome, scope: *nilo.Run, database: *Db) !void {
+        const user = try database.find(User, scope, self.user_id) orelse return;
+        try sendMail(scope, user.email, "Welcome");
+    }
+};
+
+/// The mail the guide's job sends — the caller's own, so a stub.
+pub fn sendMail(scope: *nilo.Run, to: Str, subject: []const u8) !void {
+    _ = scope;
+    _ = to;
+    _ = subject;
+}
+
+/// And the one that runs at three in the morning, with the two choices
+/// ADR 0199 makes the caller make.
+pub const Nightly = struct {
+    pub const nilo_job = "nightly-report";
+    pub const retry: job.Retry = .none;
+    pub const schedule = job.cron("0 3 * * *");
+    pub const overlap: job.Overlap = .skip;
+    pub const missed: job.Missed = .drop;
+
+    pub fn run(self: Nightly, scope: *nilo.Run, database: *Db) !void {
+        _ = self;
+        _ = scope;
+        _ = database;
+    }
+};
+
+/// The queue the jobs guide opens, provides and spawns.
+pub const Jobs = job.Jobs(.{
+    .kinds = .{ SendWelcome, Nightly },
+    .store = job.Table(Db),
+    .deps = struct { db: *Db },
+});

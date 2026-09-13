@@ -120,12 +120,15 @@ thing you spawn. Spawn a handful, not one per row in a table.
 
 ## What is not here
 
-There is no schedule language: no cron expressions, no "at 03:00 on Sundays",
-no policy for what happens when one tick overruns the next. `sleep` in a loop
-is the whole of it, and that is deliberate — every one of those policies has an
-answer that is right for somebody and wrong for somebody else, and the loop is
-written where you can read it. If you need wall-clock times, compute the next
-one and sleep until it.
+There is no schedule language here: no cron expressions, no "at 03:00 on
+Sundays", no policy for what happens when one tick overruns the next. `sleep`
+in a loop is the whole of it, and that is deliberate — every one of those
+policies has an answer that is right for somebody and wrong for somebody else,
+and the loop is written where you can read it. The place those policies *are*
+written is [`nilo_job`](./jobs.md), where a scheduled job declares what an
+overlap and a missed tick mean or it does not compile, and where a tick is a
+row that survives a restart. A fiber is for work that is a loop; a job is for
+work that is a row.
 
 There is also no way to send a message to another connection's socket from
 here. That is a `Room`, and it is [its own section](./websocket.md#sending-to-a-socket-you-dont-hold).

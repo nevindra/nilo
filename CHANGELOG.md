@@ -9,9 +9,62 @@ in [`docs/history.md`](./docs/history.md); what is coming is in
 
 ## Unreleased
 
-Thirty things a real port hit, in the order they cost it the most. Needs Zig
-0.16, as 0.3.0 does. Each entry says what you have to change; the account of why
-is in the ADR it links.
+Thirty things a real port hit, in the order they cost it the most, and one
+module on top of them. Needs Zig 0.16, as 0.3.0 does. Each entry says what you
+have to change; the account of why is in the ADR it links.
+
+- **`nilo_job`: a queue in the database you already have, and a schedule.**
+  The eleventh module, and the second Fitting
+  ([ADR 0198](./docs/adr/0198-a-queue-is-a-table-in-the-database-you-already-have.md),
+  [ADR 0199](./docs/adr/0199-a-schedule-is-a-type-that-makes-the-caller-choose.md)).
+  A job is a struct: its fields are the payload, `run` is the work, and every
+  pointer after the Run is a service the queue was handed at `open`.
+
+  ```zig
+  const SendWelcome = struct {
+      pub const nilo_job = "send-welcome";
+      pub const retry: job.Retry = .{ .times = 5, .backoff = .{ .exponential = .{ .from_ms = 1_000, .to_ms = 3_600_000 } } };
+
+      user_id: u64,
+      email: Str,
+
+      pub fn run(self: SendWelcome, scope: *nilo.Run, mail: *Mailer) !void {
+          try mail.send(scope, self.email, "Welcome");
+      }
+  };
+
+  const Jobs = job.Jobs(.{ .kinds = .{ SendWelcome, Nightly }, .store = job.Table(sql.Db), .deps = struct { mail: *Mailer } });
+  ```
+
+  `jobs.push(c, SendWelcome{ … }, .{})` from a handler, `jobs.pushIn(&tx, c, …)`
+  inside the transaction that made the work, `.after_ms` and `.at` for later,
+  `.unique` for at most one queued-or-running row per key. `Jobs.Row` goes in
+  `db.checking` and the migration like any other table; several servers share
+  it through `FOR UPDATE SKIP LOCKED`, a worker that dies gives its row up
+  when the lease runs out, and a failed `run` is retried the way the job said
+  and then is dead, with the error's name kept. **At least once**: write `run`
+  so that running it twice is safe.
+
+  A schedule is a job with three more lines, and two of them have no default:
+
+  ```zig
+  pub const schedule = job.cron("0 3 * * *");   // UTC, parsed while compiling
+  pub const overlap: job.Overlap = .skip;       // or .queue
+  pub const missed: job.Missed = .drop;         // or .catch_up
+  ```
+
+  `job.Memory` is the same contract in this process, for a test or for a
+  program that can lose its queue at a restart — full is `error.QueueFull`,
+  never an overwrite. `jobs.drain(&run)` runs everything due on the calling
+  thread, which is the whole of a test. A `cache.Space` of `job.Status` keeps
+  a state per row for a route to poll, and one of `job.Mark` in front of a
+  `.unique` key is a window: "at most one of these every thirty seconds".
+
+  `app.provide(&jobs)` and `app.spawn(Jobs.serve, .{&jobs})` start the
+  workers under the server; `jobs.serveOn(io)` is the same loop for a worker
+  process with no server in it. Twelve Refusals, `zig build test-job`,
+  `test-job-sql`, `bench-job`, and a page: [`docs/guide/jobs.md`](./docs/guide/jobs.md).
+  **Nothing changes for a program that does not import it.**
 
 Six of them came from the same port a week later, once it had used the first
 eleven and reached its first hard seam — an event bus. One more it reported —
