@@ -7,9 +7,9 @@
 <p align="center">
   <a href="https://ziglang.org/"><img alt="Zig 0.16" src="https://img.shields.io/badge/zig-0.16-f7a41d?style=flat-square&logo=zig&logoColor=white"></a>
   <a href="./CHANGELOG.md"><img alt="version 0.3.0" src="https://img.shields.io/badge/version-0.3.0-3b82f6?style=flat-square"></a>
-  <a href="./docs/reference.md"><img alt="10 modules" src="https://img.shields.io/badge/modules-10-8957e5?style=flat-square"></a>
-  <a href="./refusals/README.md"><img alt="244 refusals" src="https://img.shields.io/badge/mistakes%20refused%20while%20compiling-244-e05d44?style=flat-square"></a>
-  <a href="./docs/adr/"><img alt="197 ADRs" src="https://img.shields.io/badge/decisions%20on%20file-197-6b7280?style=flat-square"></a>
+  <a href="./docs/reference.md"><img alt="11 modules" src="https://img.shields.io/badge/modules-11-8957e5?style=flat-square"></a>
+  <a href="./refusals/README.md"><img alt="256 refusals" src="https://img.shields.io/badge/mistakes%20refused%20while%20compiling-256-e05d44?style=flat-square"></a>
+  <a href="./docs/adr/"><img alt="199 ADRs" src="https://img.shields.io/badge/decisions%20on%20file-199-6b7280?style=flat-square"></a>
   <a href="./LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-16a34a?style=flat-square"></a>
 </p>
 
@@ -30,12 +30,12 @@ import what you use, and Zig never compiles the rest.
 |---|---|
 | **One rule** | a pointer is a service, a value is request data. There is no second rule. |
 | **One allocation** | per request. A test fails if it ever becomes two. |
-| **244 refusals** | mistakes that stop the build with a sentence nilo wrote, held in place by seven build steps. |
+| **256 refusals** | mistakes that stop the build with a sentence nilo wrote, held in place by seven build steps. |
 | **Zero glue** | routing, the 400, the 404, the OpenAPI document and the SQL all read the same struct. |
 
 > **0.3.0**, needs **Zig 0.16**. Coming from 0.2.0, there are eleven things to
 > read before you deploy and
-> [Read this before deploying](./CHANGELOG.md#read-this-before-deploying) lists
+> [Read this before deploying](https://github.com/nevindra/nilo/releases/tag/v0.3.0#read-this-before-deploying) lists
 > them with the fix next to each. Coming from 0.1.0, start with
 > [Upgrading](https://github.com/nevindra/nilo/releases/tag/v0.2.0#upgrading-from-010)
 > instead.
