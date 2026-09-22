@@ -222,6 +222,12 @@ newest first.
 
 ### Fixed
 
+- A `Db` on the default `connect_on_init = 0` dials one connection at boot
+  whether or not it has a schema check, so `app.before` — a migration, a
+  key set — finds a pool with something to lend. An `unchecked` `Db` with
+  a `before` hook got `Disconnected` on every cold boot with the database
+  up ([ADR 0284](./docs/adr/0284-a-boot-dials-the-connection-its-work-needs.md)).
+
 - `app.tryStatic` and `app.tryStaticWith` on a directory that is not there
   hand back `error.StaticDirNotFound` and log nothing; the `error:` line
   belonged to `static`, which stops the process on it. A problem inside a

@@ -552,6 +552,31 @@ test "a Db told what to expect boots against a real Postgres and asks its ledger
     try testing.expect((try migrate.headVersion(&db, &run)) >= 0);
 }
 
+test "an unchecked Db on the defaults has a connection to lend the moment it starts" {
+    const gpa = testing.allocator;
+    const url = live_config.database_url orelse return error.SkipZigTest;
+
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+
+    // `connect_on_init` left at 0 and nothing to check: the shape a program
+    // whose tables are its own DDL writes, and then hands `app.before` a
+    // migration. Before ADR 0284 the pool reached that hook with nothing
+    // dialled and the hook got `Disconnected`, every cold boot. `size = 1`
+    // so that the one connection the boot dials is the whole pool, and the
+    // reconnector has nothing to fill from an OS thread `std.Io.Threaded`
+    // cannot park (the constraint `Live.open` states).
+    var db = db_mod.Db.init(gpa, url, .{ .size = 1, .unchecked = true });
+    defer db.deinit();
+    try db.nilo_start(threaded.io(), .off);
+    defer db.nilo_stop();
+
+    // What `app.before` does a moment after `nilo_start` returns.
+    var run: core.Run = .init(gpa);
+    defer run.deinit();
+    try testing.expectEqual(@as(?i64, 1), try db.rawOne(i64, &run, "SELECT 1::bigint", .{}));
+}
+
 // -- the write half, and the things built on it ---------------------------
 
 /// A `Db` wired to an already-open pool, plus an App and a Client to drive

@@ -410,11 +410,14 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             /// across threads; this is a constraint on a test harness rather
             /// than on a server.
             ///
-            /// **Zero and a `checking` list means one, not zero** (ADR
-            /// 0144). The check has to borrow a connection, and a pool that
-            /// dialled none had nothing to lend it, so the check that was
-            /// meant to stop a bad deploy became a warning. The dial is
-            /// still allowed to fail — the server starts either way.
+            /// **Zero means one dialled now and the rest lazily** (ADR
+            /// 0144, ADR 0284). The schema check, the version guard and
+            /// `app.before` all borrow a connection before the first
+            /// request, and a pool that dialled none had nothing to lend
+            /// them: the check that was meant to stop a bad deploy became a
+            /// warning, and a migration in `app.before` failed on every
+            /// cold boot. The dial is still allowed to fail — the server
+            /// starts either way, and says so.
             connect_on_init: u16 = 0,
             /// How long a caller waits for a free connection.
             timeout_ms: u32 = 10 * std.time.ms_per_s,
@@ -745,8 +748,18 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             // down does not stop the server: a dial that fails here falls
             // back to the pool the caller asked for and says in one line
             // that the check is not happening.
-            const has_check = self.check != null or self.expect != null;
-            const dialing_for_check = has_check and self.opts.connect_on_init == 0;
+            //
+            // **Every `Db` dials the one, not only a checked one**
+            // ([ADR 0284](../docs/adr/0284-a-boot-dials-the-connection-its-work-needs.md)).
+            // The check is not the only work that runs before the first
+            // request: `app.before` is the documented place for a migration
+            // or a key set, and it runs a moment after this returns. A pool
+            // that is still being filled by the reconnector answers
+            // `Disconnected` to it on every cold boot — an `unchecked` `Db`
+            // with `app.before` was that, deterministically. `nilo_start`
+            // cannot see what the App will run next, so it dials one for
+            // whatever that is.
+            const dialing_for_check = self.opts.connect_on_init == 0;
             var check_dial_failed = false;
 
             // **The one way to have no schema check is to say so** (ADR
@@ -776,10 +789,11 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 // written for it.
                 if (!isUrlProblem(err)) {
                     std.log.warn(
-                        "nilo could not dial the database to check the schema against it " ++
-                            "({s}), so it is starting without the check. `connect_on_init` " ++
-                            "is 0, which is what asks for a server that starts while its " ++
-                            "database is down.",
+                        "nilo could not dial the database for the work that runs at boot " ++
+                            "({s}), so it is starting without the schema check, and anything " ++
+                            "`app.before` asks of this database will find it down. " ++
+                            "`connect_on_init` is 0, which is what asks for a server that " ++
+                            "starts while its database is down.",
                         .{@errorName(err)},
                     );
                     check_dial_failed = true;

@@ -198,7 +198,7 @@ A query string is split before it is percent-decoded, so `password=p%26w` is
 | `Opts` | |
 |---|---|
 | `size` | connections held open. Default 10. The knob with a real curve behind it: 8 → 133k req/s, 16 → 148k, 32 → 180k, 64 → 206k, with p99 best at 32. Each one is a Postgres backend and a slot against `max_connections` |
-| `connect_on_init` | how many to dial during `listen()`. Default 0 — set it to `size` when driving a `Db` from a `std.Io.Threaded` ([ADR 0062](../adr/0062-a-pool-that-dialled-itself-whatever-it-was-told.md)) |
+| `connect_on_init` | how many to dial during `listen()`. Default 0, which dials one anyway — for the schema check, the version guard and `app.before`, all of which run before the first request — and fills the rest lazily; the one is allowed to fail ([ADR 0062](../adr/0062-a-pool-that-dialled-itself-whatever-it-was-told.md), [ADR 0144](../adr/0144-a-check-dials-the-connection-it-needs.md), [ADR 0284](../adr/0284-a-boot-dials-the-connection-its-work-needs.md)). Set it to `size` when driving a `Db` from a `std.Io.Threaded` |
 | `timeout_ms` | how long a caller waits for a free connection. Default 10,000. Bounded on SQLite too since [ADR 0135](../adr/0135-a-wait-for-a-connection-has-a-bound.md), where it needs the Engine to enforce it |
 | `schema_mismatch_is_fatal` | whether a Row that disagrees with its table stops startup. Default true |
 | `unchecked` | say so when this `Db` has no `checking` list on purpose. Default false, and then a `Db` that starts with `checking` never called warns once that the Rows will be checked by the first request that reads them ([ADR 0262](../adr/0262-a-db-with-no-schema-check-says-so-or-is-told.md)) |

@@ -3986,3 +3986,16 @@ linker error that is not nilo's and stops every quickstart on a new Arch.
 **The first stranger's application is the review the reference cannot give
 itself**, and the shape of every item was the same: the guide said how,
 and not what happens when the other choice is made.
+
+## A fix scoped to the caller that found it
+
+**ADR 0144's fix was scoped to the check, and the next boot-time reader
+found the same hole.** A query engine built on 0.5.0 — an `unchecked` `Db`,
+its tables its own DDL, a migration in `app.before` — got `Disconnected`
+every cold boot, Postgres up, on the documented path. The check had been
+given its connection; the hook had not, because the dial was gated on
+`self.check != null`. Now the boot dials the one for whatever runs next
+([ADR 0284](./adr/0284-a-boot-dials-the-connection-its-work-needs.md)).
+The live test that holds it goes red on the old rule — checked by putting
+the old rule back. **A fix scoped to the caller that found it is the bug
+with one caller subtracted.**
