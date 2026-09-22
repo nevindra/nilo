@@ -227,6 +227,11 @@ newest first.
   key set — finds a pool with something to lend. An `unchecked` `Db` with
   a `before` hook got `Disconnected` on every cold boot with the database
   up ([ADR 0284](./docs/adr/0284-a-boot-dials-the-connection-its-work-needs.md)).
+- The comptime count of a `raw` select list stopped at `WITHIN GROUP`,
+  reading its `GROUP` as `GROUP BY`, so `percentile_cont(0.5) WITHIN GROUP
+  (ORDER BY v) AS median, count(*) AS n` counted as one column and the Row
+  with two fields was refused. `GROUP` and `ORDER` end the list only with
+  their `BY`.
 
 - `app.tryStatic` and `app.tryStaticWith` on a directory that is not there
   hand back `error.StaticDirNotFound` and log nothing; the `error:` line

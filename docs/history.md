@@ -3999,3 +3999,13 @@ given its connection; the hook had not, because the dial was gated on
 The live test that holds it goes red on the old rule — checked by putting
 the old rule back. **A fix scoped to the caller that found it is the bug
 with one caller subtracted.**
+## The select-list counter read `WITHIN GROUP` as `GROUP BY`
+
+`GROUP` at depth 0 ended the list, so a percentile beside a count —
+`percentile_cont(0.5) WITHIN GROUP (ORDER BY v) AS median, count(*) AS n` —
+was one column, and the two-field Row was refused with a message about
+reordering the SELECT. The query engine that hit it worked round it with a
+CTE for a week before the cause was read. The counter now wants the `BY`.
+Same lesson as ADR 0154's `*`: **a keyword is a keyword in a position, and
+the scanner knows positions by depth alone** — a word that means two things
+at one depth needs the next word.

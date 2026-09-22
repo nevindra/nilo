@@ -508,12 +508,28 @@ fn listStart(comptime sql: []const u8) ?usize {
 
 /// The keywords that end a `SELECT` list. `FROM` covers almost everything;
 /// the rest are for a list with no table under it.
+///
+/// `GROUP` and `ORDER` only count with their `BY`, because both words
+/// stand on their own inside a list: `percentile_cont(0.5) WITHIN GROUP
+/// (ORDER BY v)` has a `GROUP` at depth 0 before its bracket opens, and
+/// reading it as `GROUP BY` ended the list one column early.
 fn endsList(comptime sql: []const u8, comptime i: usize) bool {
     comptime {
-        for ([_][]const u8{ "FROM", "WHERE", "GROUP", "ORDER", "LIMIT", "UNION", "HAVING", "WINDOW", "OFFSET" }) |word| {
+        for ([_][]const u8{ "FROM", "WHERE", "LIMIT", "UNION", "HAVING", "WINDOW", "OFFSET" }) |word| {
             if (wordAt(sql, i, word)) return true;
         }
-        return false;
+        return wordsAt(sql, i, "GROUP", "BY") or wordsAt(sql, i, "ORDER", "BY");
+    }
+}
+
+/// `first`, whitespace, `second` — two whole words in a row at `i`.
+fn wordsAt(comptime sql: []const u8, comptime i: usize, comptime first: []const u8, comptime second: []const u8) bool {
+    comptime {
+        if (!wordAt(sql, i, first)) return false;
+        var j = i + first.len;
+        if (j >= sql.len or !std.ascii.isWhitespace(sql[j])) return false;
+        while (j < sql.len and std.ascii.isWhitespace(sql[j])) j += 1;
+        return wordAt(sql, j, second);
     }
 }
 
@@ -747,6 +763,18 @@ test "a RETURNING list is read when there is no select" {
 
 test "a statement with neither is not counted rather than refused" {
     try testing.expectEqual(@as(?usize, null), comptime scan("SHOW transaction_read_only").count);
+}
+
+test "WITHIN GROUP is part of a column, and GROUP BY is where the list ends" {
+    const found = comptime scan(
+        "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY v) AS median, count(*) AS n FROM t GROUP BY k",
+    );
+    try testing.expectEqual(@as(?usize, 2), found.count);
+    try testing.expectEqualStrings("median", found.names[0]);
+    try testing.expectEqualStrings("n", found.names[1]);
+    // A list with no table under it still stops at the clause.
+    try testing.expectEqual(@as(?usize, 1), comptime scan("SELECT 1 ORDER BY 1").count);
+    try testing.expectEqual(@as(?usize, 2), comptime scan("SELECT a, b FROM t GROUP\n  BY a").count);
 }
 
 test "a select list with no FROM under it still ends where it ends" {
