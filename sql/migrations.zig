@@ -252,10 +252,16 @@ pub fn checkName(name: []const u8) !void {
 pub const Options = struct {
     /// What to call it, in `snake_case`. Becomes part of the file name.
     name: []const u8,
-    /// Write steps that lose data. **Without it `generate` refuses**, and the
-    /// `Outcome` says which steps were the reason, so the ask is made at the
-    /// command line by somebody who has read them.
-    allow_destructive: bool = false,
+    /// The steps that lose data which may be written, each by its target:
+    /// `orders` for a table, `orders.note` for a column, `extension:pgcrypto`.
+    /// **A destructive step not named here holds the whole version back**,
+    /// and so does a name that matches no step, and the `Outcome` lists both,
+    /// so the ask is made at the command line by somebody who has read them.
+    ///
+    /// Names rather than a switch, because a switch also covers the drop
+    /// nobody read: a field renamed without `.was` is a dropped column in the
+    /// same list as the one that was meant.
+    drop: []const []const u8 = &.{},
     /// What the generated files call the SQL module in their `@import`.
     module: []const u8 = default_module,
     /// Forget the snapshot and derive version 1 from nothing, rewriting the
@@ -301,6 +307,12 @@ pub const Outcome = struct {
     /// closes it, and `check` refuses until then
     /// ([ADR 123](../docs/adr/123-a-migration-is-a-diff-against-a-snapshot.md)).
     twins_deferred: bool = false,
+    /// The destructive steps' targets `Options.drop` did not name. Any at
+    /// all and nothing was written.
+    unnamed: []const []const u8 = &.{},
+    /// The names in `Options.drop` no destructive step has. Any at all and
+    /// nothing was written: it is usually a typo for the drop that was meant.
+    stray: []const []const u8 = &.{},
 
     /// The schema and the types already agree.
     pub fn isEmpty(self: Outcome) bool {
@@ -360,11 +372,13 @@ pub fn generate(
     // is what makes `check`'s "any `db generate` writes them" true. A schema
     // that has not moved is exactly when a stale `.sql` is easiest to leave
     // behind: nothing else in this command has anything to do.
-    if (change.isEmpty() or change.problems.len > 0 or
-        (change.destructive() and !opts.allow_destructive))
-    {
+    const unnamed = try change.unnamed(gpa, opts.drop);
+    const stray: []const []const u8 = if (change.isEmpty()) &.{} else try change.stray(gpa, opts.drop);
+    if (change.isEmpty() or change.problems.len > 0 or unnamed.len > 0 or stray.len > 0) {
         return .{
             .plan = change,
+            .unnamed = unnamed,
+            .stray = stray,
             .twins = try writeSql(gpa, io, dir, D, opts.versions, state.entries),
         };
     }
@@ -456,7 +470,9 @@ fn baseline(
     // A diff against nothing is every `CREATE TABLE` and no `DROP`, so this
     // cannot fire today. It is here so that the day the baseline diff learns to
     // write something destructive, `--drop` still guards it.
-    if (change.destructive() and !opts.allow_destructive) return .{ .plan = change };
+    const unnamed = try change.unnamed(gpa, opts.drop);
+    const stray = try change.stray(gpa, opts.drop);
+    if (unnamed.len > 0 or stray.len > 0) return .{ .plan = change, .unnamed = unnamed, .stray = stray };
 
     const file = try std.fmt.allocPrint(gpa, "0001_{s}.zig", .{opts.name});
     const rewrote = here != null;
@@ -558,10 +574,21 @@ pub fn renderSql(
         \\-- It carries its own ledger row, so a database brought to head this way
         \\-- is a database `db.expecting(manifest.head)` will serve.
         \\
-        \\BEGIN;
-        \\
         \\
     , .{source});
+    // What `migrate.apply` does through `wire.Begin.rebuilding`: with foreign
+    // keys on, the DROP in a table rebuild deletes the old table's rows first
+    // and every `ON DELETE CASCADE` pointing at it fires.
+    if (comptime !D.can_alter_column) try w.writeAll(
+        \\-- Foreign keys off for the version, as `db migrate` runs it: dropping a
+        \\-- table to rebuild it would otherwise delete the rows pointing at it.
+        \\-- The check before COMMIT prints any row left pointing at nothing, and
+        \\-- a script cannot stop on it, so read what it prints.
+        \\PRAGMA foreign_keys = OFF;
+        \\
+        \\
+    );
+    try w.writeAll("BEGIN;\n\n");
 
     try w.print("{s};\n\n", .{comptime ddl.createIfMissing(D, migrate.Applied)});
 
@@ -588,7 +615,10 @@ pub fn renderSql(
     // Zero milliseconds, because nobody timed it. The column is what an
     // operator reads when they ask which migration is the slow one, and a
     // number invented here would be a worse answer than none.
-    try w.print("', {s}, 0);\n\nCOMMIT;\n", .{D.now_default});
+    try w.print("', {s}, 0);\n\n", .{D.now_default});
+    if (comptime !D.can_alter_column) try w.writeAll("PRAGMA foreign_key_check;\n\n");
+    try w.writeAll("COMMIT;\n");
+    if (comptime !D.can_alter_column) try w.writeAll("\nPRAGMA foreign_keys = ON;\n");
     return aw.toOwnedSlice();
 }
 
@@ -729,8 +759,33 @@ pub fn renderVersion(
         \\
     , .{ opts.module, number, name });
 
+    try writeDropped(w, steps);
     try writeGenerated(w, steps);
     return aw.toOwnedSlice();
+}
+
+/// Which losses were named at the command line, above the steps that make
+/// them. The steps say `.destructive = true` one at a time; this is the line
+/// a reviewer reads first.
+fn writeDropped(w: *std.Io.Writer, steps: []const Step) !void {
+    var any = false;
+    for (steps, 0..) |s, i| {
+        if (!s.destructive or s.target.len == 0) continue;
+        const seen = for (steps[0..i]) |earlier| {
+            if (earlier.destructive and std.mem.eql(u8, earlier.target, s.target)) break true;
+        } else false;
+        if (seen) continue;
+        try w.writeAll(if (any) "," else "// Written with `--drop ");
+        try w.writeAll(s.target);
+        any = true;
+    }
+    if (!any) return;
+    try w.writeAll(
+        \\`. Each of those loses data
+        \\// that nothing brings back, and somebody named it.
+        \\
+        \\
+    );
 }
 
 /// Replace a version file's generated block and keep every byte outside it.
@@ -858,6 +913,7 @@ fn writeEscaped(w: *std.Io.Writer, text: []const u8) !void {
 
 const testing = std.testing;
 const Pg = @import("dialect.zig").Postgres;
+const Lite = @import("dialect.zig").SQLite;
 const core = @import("nilo_core");
 const types = @import("types.zig");
 
@@ -1084,6 +1140,24 @@ test "a destructive step is not written until somebody asks for it by name" {
     try testing.expect(held.plan.destructive());
     try testing.expectEqual(@as(?[]const u8, null), held.file);
     try testing.expectError(error.FileNotFound, box.slurp("0002_drop_note.zig"));
+    // And it says what to name, which is the whole of the fix.
+    try testing.expectEqual(@as(usize, 1), held.unnamed.len);
+    try testing.expectEqualStrings("orgs.note", held.unnamed[0]);
+
+    // A name that matches nothing holds it back too: it is usually a typo for
+    // the drop that was meant, and writing the rest would read as done.
+    const typo = try generate(
+        box.a(),
+        box.io(),
+        box.dir(),
+        Pg,
+        comptime migrate.desiredOf(Pg, .{ .tables = &.{Narrow} }),
+        .{ .name = "drop_note", .drop = &.{ "orgs.note", "orgs.notes" } },
+    );
+    try testing.expect(typo.wasHeld());
+    try testing.expectEqual(@as(usize, 1), typo.stray.len);
+    try testing.expectEqualStrings("orgs.notes", typo.stray[0]);
+    try testing.expectError(error.FileNotFound, box.slurp("0002_drop_note.zig"));
 
     const asked = try generate(
         box.a(),
@@ -1091,13 +1165,38 @@ test "a destructive step is not written until somebody asks for it by name" {
         box.dir(),
         Pg,
         comptime migrate.desiredOf(Pg, .{ .tables = &.{Narrow} }),
-        .{ .name = "drop_note", .allow_destructive = true },
+        .{ .name = "drop_note", .drop = &.{"orgs.note"} },
     );
     try testing.expectEqualStrings("0002_drop_note.zig", asked.file.?);
 
-    // And the file says so where a reviewer will see it.
+    // And the file says so where a reviewer will see it: on the step, and in
+    // one line at the top naming what was dropped.
     const text = try box.slurp("0002_drop_note.zig");
     try testing.expect(std.mem.indexOf(u8, text, ".destructive = true,") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "// Written with `--drop orgs.note`.") != null);
+}
+
+test "a SQLite twin runs its version with foreign keys off and checks them before the commit" {
+    const gpa = testing.allocator;
+    const text = try renderSql(gpa, Lite, .{
+        .number = 2,
+        .name = "rebuild",
+        .steps = &.{.{ .kind = .data, .why = "rebuild", .sql = "DROP TABLE \"old\"" }},
+    }, "rebuild", "abc", "0002_rebuild.zig");
+    defer gpa.free(text);
+
+    const off = std.mem.indexOf(u8, text, "PRAGMA foreign_keys = OFF;").?;
+    const begin = std.mem.indexOf(u8, text, "BEGIN;").?;
+    const checked = std.mem.indexOf(u8, text, "PRAGMA foreign_key_check;").?;
+    const commit = std.mem.indexOf(u8, text, "COMMIT;").?;
+    const on = std.mem.indexOf(u8, text, "PRAGMA foreign_keys = ON;").?;
+    // Off before the BEGIN, because SQLite ignores it inside a transaction.
+    try testing.expect(off < begin and begin < checked and checked < commit and commit < on);
+
+    // Postgres drops nothing a key points at, so its twin has none of it.
+    const pg = try renderSql(gpa, Pg, .{ .number = 2, .name = "x", .steps = &.{} }, "x", "abc", "0002_x.zig");
+    defer gpa.free(pg);
+    try testing.expect(std.mem.indexOf(u8, pg, "PRAGMA") == null);
 }
 
 test "a version name that is not safe as a path and an identifier is refused" {

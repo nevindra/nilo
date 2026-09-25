@@ -32,12 +32,14 @@ A program that wants no ledger and no version files stays on the left edge of th
 4. **A foreign key's two sides are one Zig type**, whether the target is a Row or a table named as text; the check for the second runs where every Row is, in the Schema. [ADR 181](../adr/181-the-marker-has-two-kinds-of-word.md)
 5. **A rename is written in the type** (`.was`), never asked at a prompt. [ADR 123](../adr/123-a-migration-is-a-diff-against-a-snapshot.md)
 6. **A version is steps in one Zig file**, generated block between two markers, hand-written `before` and `after` around it; no hash in the file, a chained hash computed by `chainOf`. [ADR 123](../adr/123-a-migration-is-a-diff-against-a-snapshot.md)
-7. **Forward only.** No `down`; a destructive step needs `--drop`. [ADR 123](../adr/123-a-migration-is-a-diff-against-a-snapshot.md)
+7. **Forward only.** No `down`; a destructive step is written only when `--drop` names it, and a type that does not widen is destructive. [ADR 123](../adr/123-a-migration-is-a-diff-against-a-snapshot.md)
 8. **Authoring is Zig, applying need not be.** Every version has a `.sql` twin with the ledger row in it, and `check` fails on a stale one. [ADR 123](../adr/123-a-migration-is-a-diff-against-a-snapshot.md)
 9. **The binary knows its schema version** and refuses a database behind it; a database ahead is allowed. [ADR 123](../adr/123-a-migration-is-a-diff-against-a-snapshot.md)
 10. **An older snapshot is read, not refused.** A new marker word is a snapshot field with a default and costs nothing; a renamed field costs a mirror struct until 1.0. [ADR 123](../adr/123-a-migration-is-a-diff-against-a-snapshot.md)
 11. **A table this program only reads is `.managed = false`**: checked at boot, never built or dropped. [ADR 130](../adr/130-a-table-this-program-reads-and-does-not-build.md)
 12. **An insert that leaves out a column nothing fills does not compile.** `.default`, `.filled` or an optional field says who fills it. [ADR 181](../adr/181-the-marker-has-two-kinds-of-word.md)
+
+13. **A run refuses edited history, and on SQLite runs with foreign keys off.** `applyPending` reads the ledger once, stops on a version recorded under another hash, and begins each SQLite version with `.rebuilding`, so the `DROP` in a table rebuild cascades into nothing and the COMMIT checks every reference. [ADR 123](../adr/123-a-migration-is-a-diff-against-a-snapshot.md)
 
 ## Decisions
 

@@ -890,6 +890,7 @@ transaction belongs to the pool it came out of; `sql.Tx` does not exist.
 | | |
 |---|---|
 | `db.begin(c, .{ .isolation = …, .read_only = … })` | both ride on the `BEGIN` itself, so neither costs a round trip. `.isolation` is `.read_committed`, `.repeatable_read` or `.serializable`; left out means whatever the server is set to |
+| `db.begin(c, .{ .rebuilding = true })` | SQLite only: foreign keys off for the transaction and checked once before the COMMIT, which answers `error.ForeignKeyViolated` for a row pointing at nothing. What rebuilding a table needs, and what `migrate.apply` asks for. A compile error on Postgres |
 | `tx.deadline(ms)` | bound every statement after it, for the life of this transaction. `error.TimedOut` past it |
 | `tx.savepoint()` | `!Savepoint` — a mark one part of the transaction can be undone back to; see below |
 
@@ -1321,7 +1322,12 @@ instead. **A column that moved three ways gets one `Problem` naming all three**,
 because what it needs is one rewrite and not three.
 
 `Plan.destructive()` and `Plan.needsBackfill()` are the two questions a command
-asks before writing a file out. A column added `NOT NULL` **with a `.default`
+asks before writing a file out. `Plan.unnamed(gpa, names)` is the destructive
+steps' targets that `names` leaves out, and `Plan.stray(gpa, names)` is the
+names no destructive step has; both empty is what lets `generate` write. A
+destructive step's `target` is `orders`, `orders.note` or `extension:pgcrypto`.
+A `change_type` is destructive unless the type widens (`int4` to `int8`,
+`float4` to `float8`, an integer into `numeric`, `varchar` into `text`). A column added `NOT NULL` **with a `.default`
 needs no backfill**, which is the case ADR 123 named as the one moment a
 default is load-bearing.
 
@@ -1329,8 +1335,6 @@ default is load-bearing.
 
 ```zig
 const chain = try sql.migrate.chainOf(arena, manifest.versions);
-
-try sql.migrate.ensureLedger(&db, &run);
 const ran = try sql.migrate.applyPending(&db, &run, chain);
 ```
 
@@ -1368,7 +1372,13 @@ together get.
 
 `migrate.applyPending(&db, &run, chain)` is the whole list, in order, one
 transaction each, answering how many ran. That is the in-process runner a
-single-file SQLite application calls from `app.before`, inside `listen()`.
+single-file SQLite application calls from `app.before`, inside `listen()`. It
+makes the ledger if it is not there and reads it once: a version recorded under
+another hash stops it before anything runs, `error.SchemaDrift`, and a version
+already recorded is skipped without a transaction. On SQLite each version
+begins with `.rebuilding`, so a table rebuild's `DROP` does not cascade into the
+rows pointing at it. `migrate.ensureLedger` is the first half on its own, under
+the same lock.
 `migrate.drift(&db, &run, chain)` answers which applied versions have been
 edited since — a `Drift` per version with what the ledger recorded and what the
 steps hash to now.
@@ -1450,8 +1460,10 @@ Zig nothing has compiled yet. The `Outcome` says so with `twins_deferred`, and
 `db check` asks for the file after the rebuild.
 
 An `Outcome` says which of three things happened. `isEmpty()` means the Rows and
-the migrations already agree. `wasHeld()` means the version was not written
-because something in it loses data and `allow_destructive` was not set. Anything
+the migrations already agree. `wasHeld()` means the version was not written:
+the diff reported a `Problem`, or something in it loses data that
+`Options.drop` did not name (`.unnamed`), or `Options.drop` named something it
+does not drop (`.stray`). Anything
 else wrote the file named in `.file`.
 
 | | |
@@ -1516,7 +1528,7 @@ rather than calling `std.process.exit`.
 
 | Command | What it does |
 |---|---|
-| `generate --name <snake_case> [--drop] [--baseline]` | diff the Rows against the snapshot and write the next version. No database |
+| `generate --name <snake_case> [--drop <what>,…] [--baseline]` | diff the Rows against the snapshot and write the next version. No database |
 | `check` | the same diff, written nowhere, plus any stale `.sql` twin. Exit 1 when they disagree. No database |
 | `status [--sql]` | which versions this database has. `--sql` prints the waiting statements |
 | `migrate` | apply what is waiting, one transaction per version, behind the lock |
@@ -1531,11 +1543,13 @@ something to do — a diff `check` found, a version `generate` held back, drift
 against the ledger, versions waiting. `2` the command line was wrong. A CI job
 branches on those without reading a word.
 
-`--drop` is what stands between a renamed field and a dropped column.
-`generate` writes nothing at all when a step loses data and the flag is absent:
-it prints the steps, says which one it is refusing, and exits 1. Run it again
-with `--drop` and the generated file records that you did, as
-`.destructive = true` on the step.
+`--drop` is what stands between a renamed field and a dropped column, and it
+**names what it drops**: `--drop users.nickname,notes,extension:pgcrypto`.
+`generate` writes nothing at all when a step loses data that is not named, or
+when a name matches nothing: it prints each loss with its statement, then the
+command with the names filled in, and exits 1. Run that and the generated file
+records it, in a `// Written with --drop …` line at the top and as
+`.destructive = true` on each step. A bare `--drop` names nothing.
 
 `status` marks a version `edited` rather than `applied` when its file no longer
 hashes to what ran. It is the command people type first, so it is the one that

@@ -317,6 +317,10 @@ pub fn Wire(comptime opts_in: Options) type {
             wire: *Self,
             at: usize,
             done: bool = false,
+            /// Begun with `.rebuilding`: foreign keys are off on the writer
+            /// until this ends, and go back on before it is released
+            /// (`wire.Begin.rebuilding`).
+            rebuilding: bool = false,
 
             pub fn run(
                 self: *Tx,
@@ -435,6 +439,21 @@ pub fn Wire(comptime opts_in: Options) type {
                 }
                 self.done = true;
                 defer self.wire.release(self.at);
+                defer self.restore();
+                if (self.rebuilding) {
+                    // The check the statements did not make as they ran.
+                    // A row pointing at nothing is refused here rather than
+                    // committed, which is SQLite's own recipe for a rebuild.
+                    const broken = self.wire.brokenReference(self.at) catch |err| {
+                        self.wire.command(self.at, "ROLLBACK") catch {};
+                        return err;
+                    };
+                    if (broken) {
+                        std.log.warn("{s}", .{wire.rebuild_broke_reference});
+                        self.wire.command(self.at, "ROLLBACK") catch {};
+                        return error.ForeignKeyViolated;
+                    }
+                }
                 self.wire.command(self.at, "COMMIT") catch |err| {
                     // **A COMMIT SQLite refused leaves the transaction open**
                     // — a deferred foreign key that is still broken, a
@@ -454,9 +473,24 @@ pub fn Wire(comptime opts_in: Options) type {
                 self.done = true;
                 self.wire.conns[self.at].aborted = false;
                 defer self.wire.release(self.at);
+                defer self.restore();
                 self.wire.command(self.at, "ROLLBACK") catch |err| {
                     std.log.err(
                         "nilo_sql: a transaction could not be rolled back ({s}).",
+                        .{@errorName(err)},
+                    );
+                };
+            }
+
+            /// Foreign keys back on, after a `.rebuilding` transaction and
+            /// before the writer is released. The pragma is a no-op inside a
+            /// transaction, so it has to come after the COMMIT or ROLLBACK.
+            fn restore(self: *Tx) void {
+                if (!self.rebuilding) return;
+                self.wire.command(self.at, "PRAGMA foreign_keys = ON") catch |err| {
+                    std.log.err(
+                        "nilo_sql: foreign keys could not be turned back on after a rebuild ({s}); " ++
+                            "the writer goes on without them until the process restarts.",
                         .{@errorName(err)},
                     );
                 };
@@ -1030,9 +1064,32 @@ pub fn Wire(comptime opts_in: Options) type {
             const begin_text = if (opts_.read_only) "BEGIN" else "BEGIN IMMEDIATE";
             const at = if (opts_.read_only) try self.takeReader(begin_text) else try self.takeWriter(begin_text);
             errdefer self.release(at);
+            if (opts_.rebuilding) {
+                if (comptime opts_.read_only) @compileError(
+                    "nilo: a transaction cannot be both .read_only and .rebuilding.\n" ++
+                        "  `.rebuilding` is for a version that drops and remakes tables, which is a write.",
+                );
+                // Before the BEGIN, because inside a transaction SQLite
+                // accepts this pragma and does nothing with it.
+                try self.command(at, "PRAGMA foreign_keys = OFF");
+            }
+            errdefer if (opts_.rebuilding) self.command(at, "PRAGMA foreign_keys = ON") catch {};
             try self.command(at, if (opts_.read_only) "BEGIN" else "BEGIN IMMEDIATE");
             self.conns[at].aborted = false;
-            return .{ .wire = self, .at = at };
+            return .{ .wire = self, .at = at, .rebuilding = opts_.rebuilding };
+        }
+
+        /// Whether `PRAGMA foreign_key_check` finds any row pointing at a row
+        /// that is not there. One row is enough to refuse, so only one is read.
+        fn brokenReference(self: *Self, at: usize) wire.Error!bool {
+            const conn = self.conns[at].handle;
+            return onThread(firstBroken, .{conn}) catch |err| translate(conn, err);
+        }
+
+        fn firstBroken(conn: zqlite.Conn) !bool {
+            const found = try conn.row("PRAGMA foreign_key_check", .{}) orelse return false;
+            found.deinit();
+            return true;
         }
 
         /// SQLite gives every transaction snapshot isolation and serialises

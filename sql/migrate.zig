@@ -469,6 +469,16 @@ pub const Step = struct {
     why: []const u8,
     /// Running it loses data that nothing can bring back.
     destructive: bool = false,
+    /// What a destructive step loses, as `--drop` names it: `orders` for a
+    /// table, `orders.note` for a column, `extension:pgcrypto` for an
+    /// extension. Empty on every other step, and not part of the hash, which
+    /// covers the SQL alone.
+    ///
+    /// **`--drop` names these rather than switching on**, because a switch
+    /// covers the drop nobody read. A field renamed without `.was` is a
+    /// dropped column and an added one, and the version that says so sits
+    /// beside the drop that was meant, in the same list.
+    target: []const u8 = "",
     /// It can fail on a table that already has rows, and the failure is loud.
     /// A `NOT NULL` column added to a populated table is the whole of this.
     needs_backfill: bool = false,
@@ -494,13 +504,42 @@ pub const Plan = struct {
     }
 
     /// Whether anything in it loses data. `generate` refuses to write a plan
-    /// that does until the caller says so at the command line, and records the
-    /// saying in the generated file's header.
+    /// that does until the caller names each loss at the command line, and
+    /// records the names in the generated file's header.
     pub fn destructive(self: Plan) bool {
         for (self.steps) |s| {
             if (s.destructive) return true;
         }
         return false;
+    }
+
+    /// The destructive steps' targets that `named` does not list, in plan
+    /// order. Empty is what lets `generate` write the version.
+    pub fn unnamed(self: Plan, gpa: std.mem.Allocator, named: []const []const u8) ![]const []const u8 {
+        var out: std.ArrayList([]const u8) = .empty;
+        for (self.steps) |s| {
+            if (!s.destructive) continue;
+            if (hasName(named, s.target)) continue;
+            if (hasName(out.items, s.target)) continue;
+            try out.append(gpa, s.target);
+        }
+        return out.items;
+    }
+
+    /// The names in `named` that no destructive step has as its target.
+    ///
+    /// **A name that matches nothing is refused rather than ignored.** It is
+    /// usually a typo for the drop that was meant, and ignoring it writes a
+    /// version with that drop still missing, which reads as done.
+    pub fn stray(self: Plan, gpa: std.mem.Allocator, named: []const []const u8) ![]const []const u8 {
+        var out: std.ArrayList([]const u8) = .empty;
+        for (named) |n| {
+            const matched = for (self.steps) |s| {
+                if (s.destructive and std.mem.eql(u8, s.target, n)) break true;
+            } else false;
+            if (!matched) try out.append(gpa, n);
+        }
+        return out.items;
     }
 
     pub fn needsBackfill(self: Plan) bool {
@@ -621,6 +660,7 @@ pub fn plan(
             .sql = try dropTableSql(gpa, old),
             .why = try std.fmt.allocPrint(gpa, "drop {s}, which no Row describes", .{old.table}),
             .destructive = true,
+            .target = try targetOf(gpa, old.schema, old.table, null),
         });
     }
 
@@ -652,6 +692,7 @@ pub fn plan(
             .sql = try ddl.dropExtension(gpa, name),
             .why = try std.fmt.allocPrint(gpa, "drop extension {s}, which the schema no longer names, and everything it made", .{name}),
             .destructive = true,
+            .target = try std.fmt.allocPrint(gpa, "extension:{s}", .{name}),
         });
     }
 
@@ -659,6 +700,14 @@ pub fn plan(
         .steps = try steps.toOwnedSlice(gpa),
         .problems = try problems.toOwnedSlice(gpa),
     };
+}
+
+/// What `--drop` calls a table or one of its columns: `orders`,
+/// `billing.orders`, `orders.note`.
+fn targetOf(gpa: std.mem.Allocator, schema: ?[]const u8, table: []const u8, column: ?[]const u8) ![]const u8 {
+    const qualified = if (schema) |s| try std.fmt.allocPrint(gpa, "{s}.{s}", .{ s, table }) else table;
+    const c = column orelse return qualified;
+    return std.fmt.allocPrint(gpa, "{s}.{s}", .{ qualified, c });
 }
 
 fn hasName(list: []const []const u8, name: []const u8) bool {
@@ -774,7 +823,10 @@ fn diffTable(
                         "when the table is created. The four statements are CREATE a new " ++
                         "table with the shape you want, INSERT INTO it SELECT from the old " ++
                         "one, DROP the old one, ALTER TABLE RENAME the new one. Write them " ++
-                        "as a step, and recreate the indexes: they go with the table.",
+                        "as a step, and recreate the indexes: they go with the table. " ++
+                        "`db migrate` runs a version with foreign keys off, so the DROP does " ++
+                        "not delete the rows pointing at the old table; run by hand, " ++
+                        "`PRAGMA foreign_keys = OFF` goes before the BEGIN.",
                     .{ t.desc.table, c.name, try whatMoved(gpa, c, was), D.name },
                 ),
             });
@@ -783,14 +835,29 @@ fn diffTable(
 
         if (comptime D.can_alter_column) if (shape_changed or default_changed) {
             if (!std.mem.eql(u8, c.sql_type, was.sql_type)) {
+                // **Only a widening goes through on its own.** Anything else
+                // either refuses rows the old type held, which is the loud
+                // case, or converts them into something else, which is the
+                // quiet one: `numeric(10,2)` to `numeric(10,1)` rounds every
+                // row, `float8` to `float4` drops digits, `timestamptz` to
+                // `timestamp` moves every value by the server's zone. None of
+                // them can be told apart from here, so all of them are named
+                // at the command line like a dropped column is.
+                const safe = widens(was.sql_type, c.sql_type);
                 try steps.append(gpa, .{
                     .kind = .change_type,
                     .sql = try ddl.alterType(D, gpa, t.desc, c),
-                    .why = try std.fmt.allocPrint(
+                    .why = if (safe) try std.fmt.allocPrint(
                         gpa,
                         "{s}.{s} becomes {s}, from {s}",
                         .{ t.desc.table, c.name, c.sql_type, was.sql_type },
+                    ) else try std.fmt.allocPrint(
+                        gpa,
+                        "{s}.{s} becomes {s}, from {s}, which can refuse, round or reinterpret the rows already there",
+                        .{ t.desc.table, c.name, c.sql_type, was.sql_type },
                     ),
+                    .destructive = !safe,
+                    .target = if (safe) "" else try targetOf(gpa, t.desc.schema, t.desc.table, c.name),
                 });
             }
             if (c.nullable != was.nullable) {
@@ -832,6 +899,12 @@ fn diffTable(
         }
     }
 
+    // **An index that is going goes before a column that is going.** Postgres
+    // drops a column's indexes with it, so a `DROP INDEX` after the column was
+    // a statement about an index that was no longer there and failed the
+    // version. SQLite will not drop an indexed column at all.
+    try dropGoneIndexes(gpa, D, t, old, steps);
+
     for (old.columns) |oc| {
         if (t.desc.column(oc.name) != null) continue;
         if (wasRenamed(renamed.items, oc.name)) continue;
@@ -844,6 +917,7 @@ fn diffTable(
                 .{ t.desc.table, oc.name },
             ),
             .destructive = true,
+            .target = try targetOf(gpa, t.desc.schema, t.desc.table, oc.name),
         });
     }
 
@@ -851,6 +925,69 @@ fn diffTable(
     try diffChecks(gpa, D, t, old, steps, problems);
     try diffTriggers(gpa, D, t, old, steps);
     try diffReferences(gpa, t, old, problems);
+}
+
+/// Whether every value `from` can hold is a value `to` holds unchanged.
+///
+/// **A short list on purpose**, and anything not on it is destructive. What is
+/// here is what the Postgres documentation calls binary-coercible or what
+/// cannot round: a wider integer, `float4` to `float8`, an integer or a bounded
+/// `numeric` into an unbounded one, a `varchar` into `text` or into a longer
+/// `varchar`. Case and spacing are the snapshot's own, because both sides were
+/// written by the same Dialect.
+fn widens(from: []const u8, to: []const u8) bool {
+    const ints = [_][]const u8{ "int2", "int4", "int8" };
+    if (rank(&ints, from)) |f| {
+        if (rank(&ints, to)) |g| return g > f;
+        return std.mem.eql(u8, to, "numeric");
+    }
+    if (std.mem.eql(u8, from, "float4")) return std.mem.eql(u8, to, "float8");
+    if (std.mem.startsWith(u8, from, "numeric")) {
+        if (std.mem.eql(u8, to, "numeric")) return true;
+        const f = precision(from) orelse return false;
+        const g = precision(to) orelse return false;
+        // Room for every digit before the point, and every digit after it.
+        return g.scale >= f.scale and g.digits - g.scale >= f.digits - f.scale;
+    }
+    if (std.mem.startsWith(u8, from, "varchar")) {
+        if (std.mem.eql(u8, to, "text") or std.mem.eql(u8, to, "varchar")) return true;
+        const f = length(from) orelse return false;
+        const g = length(to) orelse return false;
+        return g >= f;
+    }
+    return false;
+}
+
+fn rank(list: []const []const u8, name: []const u8) ?usize {
+    for (list, 0..) |n, i| {
+        if (std.mem.eql(u8, n, name)) return i;
+    }
+    return null;
+}
+
+/// The `n` of `varchar(n)`.
+fn length(sql_type: []const u8) ?u32 {
+    const open = std.mem.indexOfScalar(u8, sql_type, '(') orelse return null;
+    if (!std.mem.eql(u8, sql_type[0..open], "varchar")) return null;
+    const close = std.mem.indexOfScalarPos(u8, sql_type, open, ')') orelse return null;
+    return std.fmt.parseInt(u32, std.mem.trim(u8, sql_type[open + 1 .. close], " "), 10) catch null;
+}
+
+const Precision = struct { digits: u32, scale: u32 };
+
+/// The `p` and `s` of `numeric(p, s)`; `numeric(p)` has a scale of nought.
+fn precision(sql_type: []const u8) ?Precision {
+    const open = std.mem.indexOfScalar(u8, sql_type, '(') orelse return null;
+    if (!std.mem.eql(u8, sql_type[0..open], "numeric")) return null;
+    const close = std.mem.indexOfScalarPos(u8, sql_type, open, ')') orelse return null;
+    var parts = std.mem.splitScalar(u8, sql_type[open + 1 .. close], ',');
+    const p = std.fmt.parseInt(u32, std.mem.trim(u8, parts.next() orelse return null, " "), 10) catch return null;
+    const s = if (parts.next()) |text|
+        std.fmt.parseInt(u32, std.mem.trim(u8, text, " "), 10) catch return null
+    else
+        0;
+    if (s > p) return null;
+    return .{ .digits = p, .scale = s };
 }
 
 /// What about a column is not what the snapshot recorded, as one phrase for
@@ -994,7 +1131,7 @@ fn diffIndexes(
         try steps.append(gpa, .{
             .kind = .create_index,
             .sql = sqlFor(t, u.name),
-            .why = try std.fmt.allocPrint(gpa, "unique {s}", .{u.name}),
+            .why = try std.fmt.allocPrint(gpa, "unique {s}; writes to {s} wait while it builds", .{ u.name, t.desc.table }),
         });
     }
     for (t.desc.indexes) |x| {
@@ -1008,11 +1145,22 @@ fn diffIndexes(
         try steps.append(gpa, .{
             .kind = .create_index,
             .sql = sqlFor(t, x.name),
-            .why = try std.fmt.allocPrint(gpa, "index {s}", .{x.name}),
+            // A version is one transaction, and `CONCURRENTLY` refuses one,
+            // so this build locks writes out; the roadmap has the way past.
+            .why = try std.fmt.allocPrint(gpa, "index {s}; writes to {s} wait while it builds", .{ x.name, t.desc.table }),
         });
     }
 
-    // Dropped: in the snapshot, named by nothing the types declare.
+}
+
+/// Dropped: in the snapshot, named by nothing the types declare.
+fn dropGoneIndexes(
+    gpa: std.mem.Allocator,
+    comptime D: type,
+    t: Table,
+    old: Desc,
+    steps: *std.ArrayList(Step),
+) !void {
     for (old.uniques) |u| {
         if (findUnique(t.desc.uniques, u.name) != null) continue;
         try steps.append(gpa, .{
@@ -1063,7 +1211,10 @@ fn diffChecks(
                         "four statements are CREATE a new table with the constraint you " ++
                         "want, INSERT INTO it SELECT from the old one, DROP the old one, " ++
                         "ALTER TABLE RENAME the new one. Write them as a step, and recreate " ++
-                        "the indexes: they go with the table.",
+                        "the indexes: they go with the table. " ++
+                        "`db migrate` runs a version with foreign keys off, so the DROP does " ++
+                        "not delete the rows pointing at the old table; run by hand, " ++
+                        "`PRAGMA foreign_keys = OFF` goes before the BEGIN.",
                     .{ ck.name, D.name },
                 ),
             });
@@ -1383,6 +1534,10 @@ pub const Error = error{
     /// `addMissingColumns` found a required column with no default, which is
     /// an `ALTER` that fails on a table with rows in it. Nothing was sent.
     NeedsBackfill,
+    /// `applyPending` found a version the ledger has under another hash: its
+    /// steps were edited after it ran. Nothing was applied, including the
+    /// versions after it, which were written against what it used to say.
+    SchemaDrift,
 };
 
 /// The key `pg_advisory_xact_lock` takes.
@@ -1529,11 +1684,28 @@ fn hasNamed(columns: []const wire_mod.Column, name: []const u8) bool {
     return false;
 }
 
-/// The ledger, made if it is not there. One statement, and it is the same
-/// `CREATE TABLE IF NOT EXISTS` any other table gets.
+/// The ledger, made if it is not there: the same `CREATE TABLE IF NOT
+/// EXISTS` any other table gets, behind the lock `apply` takes.
+///
+/// **The lock is not ceremony.** Two Postgres sessions running `CREATE TABLE
+/// IF NOT EXISTS` for the same new table at the same moment can both pass
+/// the "not there" check, and the second fails on the catalog's own unique
+/// index, which arrives as `AlreadyExists`. Ten replicas booting against a
+/// fresh database is exactly that moment. Four round trips instead of one, at
+/// boot and in the `db` command, and nowhere else.
 pub fn ensureLedger(db: anytype, scope: anytype) !void {
     const D = comptime DialectOf(@TypeOf(db));
-    _ = try db.exec(scope, comptime ddl.createIfMissing(D, Applied), .{});
+    const create = comptime ddl.createIfMissing(D, Applied);
+    const lock = comptime D.advisoryLock(lock_key);
+    if (lock == null) {
+        _ = try db.exec(scope, create, .{});
+        return;
+    }
+    var tx = try db.begin(scope, .{});
+    defer tx.deinit();
+    _ = try tx.exec(scope, lock.?, .{});
+    _ = try tx.exec(scope, create, .{});
+    try tx.commit();
 }
 
 /// The narrow Row `headVersion` reads. It borrows `Applied`'s table, so the
@@ -1644,7 +1816,12 @@ pub fn apply(
     // number here goes in a column an operator reads to find the slow
     // migration ([ADR 041](../docs/adr/041-core-knows-what-time-it-is.md)).
     const started = core.monotonicMicros();
-    var tx = try db.begin(scope, .{});
+    // On SQLite, foreign keys off until the COMMIT checks them once: a
+    // version that rebuilds a table drops the old one, and with them on that
+    // DROP deletes every row first and fires every `ON DELETE CASCADE`
+    // pointing at it (`wire.Begin.rebuilding`). A dialect that alters a
+    // column in place has no rebuild to protect.
+    var tx = try db.begin(scope, .{ .rebuilding = !D.can_alter_column });
     errdefer tx.rollback();
 
     if (comptime D.advisoryLock(lock_key)) |held| _ = try tx.exec(scope, held, .{});
@@ -1673,12 +1850,54 @@ pub fn apply(
 /// every single-file SQLite application, and plenty of Postgres ones. One
 /// transaction per version, each behind the same advisory lock, so ten
 /// replicas booting together still run each version once.
+///
+/// **The ledger is read once, before anything runs**, and it answers two
+/// things. A version recorded under another hash was edited after it ran,
+/// and nothing is applied: the versions after it were written against what
+/// it used to say, which is `db migrate`'s refusal made where a program
+/// migrates itself (`Error.SchemaDrift`). And a version already recorded is
+/// skipped without a transaction, so a boot with nothing to do is one read
+/// rather than a BEGIN, a lock and a COMMIT per version. A version that is
+/// not recorded still goes through `apply`, which checks again under the
+/// lock, because another process may have applied it since.
 pub fn applyPending(db: anytype, scope: anytype, chain: Chain) !usize {
+    comptime core.checkScope(@TypeOf(scope), "migrate.applyPending");
+    try ensureLedger(db, scope);
+    const recorded = try db.select(Recorded, scope, .{ .order = .{ .version = .asc } });
+
+    for (chain.versions, chain.hashes) |v, hash| {
+        const row = findVersion(recorded, v.number) orelse continue;
+        if (std.mem.eql(u8, row.hash, hash)) continue;
+        std.log.warn(
+            "nilo_sql: version {d} ({s}) has been edited since it was applied here: the ledger " ++
+                "has it as {s} and the binary as {s}. Nothing was applied. Put that version " ++
+                "back, and write what you meant as a new one; `db verify` lists every version it moved.",
+            .{ v.number, v.name, row.hash[0..@min(16, row.hash.len)], hash[0..16] },
+        );
+        return Error.SchemaDrift;
+    }
+
     var ran: usize = 0;
     for (chain.versions, chain.hashes) |v, hash| {
+        if (findVersion(recorded, v.number) != null) continue;
         if (try apply(db, scope, v, hash)) ran += 1;
     }
     return ran;
+}
+
+/// The two columns of the ledger `applyPending` reads. Narrow, so a boot does
+/// not carry every name and timestamp across.
+const Recorded = struct {
+    pub const nilo_table = Applied;
+    version: i64,
+    hash: []const u8,
+};
+
+fn findVersion(recorded: []const Recorded, number: i64) ?Recorded {
+    for (recorded) |r| {
+        if (r.version == number) return r;
+    }
+    return null;
 }
 
 /// A version whose recorded hash is not the hash of the steps in the binary.
@@ -2210,6 +2429,135 @@ test "a column that left the Row is a drop, and the plan says it loses data" {
     try testing.expect(change.destructive());
 }
 
+test "a dropped column is named by its table and column, and a dropped table by its name" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const Wide = struct {
+        pub const nilo_table = .{ .name = "orgs", .key = .id };
+        id: i64,
+        note: ?[]const u8,
+    };
+    const Gone = struct {
+        pub const nilo_table = .{ .name = "notes", .key = .id };
+        id: i64,
+    };
+    const Narrow = struct {
+        pub const nilo_table = .{ .name = "orgs", .key = .id };
+        id: i64,
+    };
+
+    const before = try snapshotFrom(a, Pg, &.{ Wide, Gone });
+    const change = try plan(a, Pg, comptime desiredOf(Pg, .{ .tables = &.{Narrow} }), before);
+
+    // What `--drop` takes, and what a held version prints for it to take.
+    const unnamed = try change.unnamed(a, &.{});
+    try testing.expectEqual(@as(usize, 2), unnamed.len);
+    try testing.expectEqualStrings("orgs.note", unnamed[0]);
+    try testing.expectEqualStrings("notes", unnamed[1]);
+    try testing.expectEqual(@as(usize, 0), (try change.unnamed(a, &.{ "notes", "orgs.note" })).len);
+    // A name for something this plan does not drop is its own answer.
+    const stray = try change.stray(a, &.{ "orgs.note", "orgs.nte" });
+    try testing.expectEqual(@as(usize, 1), stray.len);
+    try testing.expectEqualStrings("orgs.nte", stray[0]);
+}
+
+test "an index on a dropped column is dropped before the column is" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const Before = struct {
+        pub const nilo_table = .{
+            .name = "orgs",
+            .key = .id,
+            .unique = .{.{ .columns = .{.slug} }},
+            .index = .{.region},
+        };
+        id: i64,
+        slug: []const u8,
+        region: []const u8,
+    };
+    const After = struct {
+        pub const nilo_table = .{ .name = "orgs", .key = .id };
+        id: i64,
+    };
+
+    const before = try snapshotFrom(a, Pg, &.{Before});
+    const change = try plan(a, Pg, comptime desiredOf(Pg, .{ .tables = &.{After} }), before);
+
+    // Postgres drops a column's indexes with it, so a `DROP INDEX` after the
+    // column named an index that was gone and failed the whole version; and
+    // SQLite will not drop an indexed column at all.
+    var first_column: ?usize = null;
+    var last_index: usize = 0;
+    for (change.steps, 0..) |s, i| switch (s.kind) {
+        .drop_column => {
+            if (first_column == null) first_column = i;
+        },
+        .drop_index => last_index = i,
+        else => {},
+    };
+    try testing.expect(first_column != null);
+    try testing.expect(last_index < first_column.?);
+}
+
+test "a type that widens goes through, and one that may not fit has to be named" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const Before = struct {
+        pub const nilo_table = .{ .name = "readings", .key = .id };
+        id: i64,
+        count: i32,
+        total: i64,
+        ratio: f64,
+    };
+    const After = struct {
+        pub const nilo_table = .{ .name = "readings", .key = .id };
+        id: i64,
+        count: i64, // wider: every int4 is an int8
+        total: i32, // narrower: a row over two billion is refused
+        ratio: f32, // narrower: every row loses digits, quietly
+    };
+
+    const before = try snapshotFrom(a, Pg, &.{Before});
+    const change = try plan(a, Pg, comptime desiredOf(Pg, .{ .tables = &.{After} }), before);
+
+    try testing.expectEqual(@as(usize, 3), change.steps.len);
+    for (change.steps) |s| try testing.expectEqual(Kind.change_type, s.kind);
+    try testing.expect(!change.steps[0].destructive);
+    try testing.expectEqualStrings("", change.steps[0].target);
+    try testing.expect(change.steps[1].destructive);
+    try testing.expectEqualStrings("readings.total", change.steps[1].target);
+    try testing.expect(change.steps[2].destructive);
+    try testing.expectEqualStrings("readings.ratio", change.steps[2].target);
+}
+
+test "widening is a short list, and everything off it is a loss" {
+    try testing.expect(widens("int2", "int4"));
+    try testing.expect(widens("int4", "int8"));
+    try testing.expect(widens("int8", "numeric"));
+    try testing.expect(widens("float4", "float8"));
+    try testing.expect(widens("varchar(20)", "text"));
+    try testing.expect(widens("varchar(20)", "varchar(40)"));
+    try testing.expect(widens("numeric(10,2)", "numeric(12,2)"));
+    try testing.expect(widens("numeric(10,2)", "numeric"));
+
+    try testing.expect(!widens("int8", "int4"));
+    try testing.expect(!widens("float8", "float4"));
+    try testing.expect(!widens("int8", "float8")); // past 2^53 it rounds
+    try testing.expect(!widens("text", "varchar(40)"));
+    try testing.expect(!widens("varchar(40)", "varchar(20)"));
+    try testing.expect(!widens("numeric(10,2)", "numeric(10,1)")); // rounds every row
+    try testing.expect(!widens("numeric(10,2)", "numeric(10,3)")); // one digit less before the point
+    try testing.expect(!widens("int8", "numeric(10,0)"));
+    try testing.expect(!widens("timestamptz", "timestamp"));
+    try testing.expect(!widens("text", "int8"));
+}
+
 test "`.was` turns the same change into one rename, and the data comes with it" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
@@ -2350,11 +2698,14 @@ test "an index whose columns changed is a new name, so it is one drop and one cr
     const before = try snapshotFrom(a, Pg, &.{Before});
     const change = try plan(a, Pg, comptime desiredOf(Pg, .{ .tables = &.{After} }), before);
 
+    // The old one goes first, with every index that is going: they go before
+    // the columns, and a column that went could have been under this one.
+    // One transaction either way, so nobody sees the table with neither.
     try testing.expectEqual(@as(usize, 2), change.steps.len);
-    try testing.expectEqual(Kind.create_index, change.steps[0].kind);
-    try testing.expect(std.mem.indexOf(u8, change.steps[0].sql, "orgs_name_at_idx") != null);
-    try testing.expectEqual(Kind.drop_index, change.steps[1].kind);
-    try testing.expectEqualStrings("DROP INDEX \"orgs_name_idx\"", change.steps[1].sql);
+    try testing.expectEqual(Kind.drop_index, change.steps[0].kind);
+    try testing.expectEqualStrings("DROP INDEX \"orgs_name_idx\"", change.steps[0].sql);
+    try testing.expectEqual(Kind.create_index, change.steps[1].kind);
+    try testing.expect(std.mem.indexOf(u8, change.steps[1].sql, "orgs_name_at_idx") != null);
 }
 
 test "a unique that starts ignoring case keeps its name and is rebuilt" {

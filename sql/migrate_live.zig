@@ -1029,6 +1029,127 @@ test "a version edited after it ran is drift, and so is every version after it" 
     try testing.expect(!std.mem.eql(u8, moved[0].recorded, moved[0].now));
 }
 
+test "applyPending runs nothing once a version it has run was edited, not even the new one" {
+    const gpa = testing.allocator;
+    var fx = try Fixture.init(gpa, "pending-drift");
+    defer fx.deinit(gpa);
+
+    const a = fx.run.arena();
+    const one: []const migrate.Version = &.{
+        .{ .number = 1, .name = "make_a", .steps = &.{
+            .{ .kind = .create_table, .sql = "CREATE TABLE \"a\" (\"id\" INTEGER)", .why = "" },
+        } },
+    };
+    // No `ensureLedger` first: the in-process runner makes its own.
+    try testing.expectEqual(@as(usize, 1), try migrate.applyPending(&fx.db, &fx.run, try migrate.chainOf(a, one)));
+
+    // Version 1 edited after it ran, and a version 2 written after it. The
+    // second was written against a schema the first no longer describes.
+    const edited: []const migrate.Version = &.{
+        .{ .number = 1, .name = "make_a", .steps = &.{
+            .{ .kind = .create_table, .sql = "CREATE TABLE \"a\" (\"id\" BIGINT)", .why = "" },
+        } },
+        .{ .number = 2, .name = "make_b", .steps = &.{
+            .{ .kind = .create_table, .sql = "CREATE TABLE \"b\" (\"id\" INTEGER)", .why = "" },
+        } },
+    };
+    try testing.expectError(
+        migrate.Error.SchemaDrift,
+        migrate.applyPending(&fx.db, &fx.run, try migrate.chainOf(a, edited)),
+    );
+    try testing.expectEqual(@as(i64, 1), try migrate.headVersion(&fx.db, &fx.run));
+    // `db migrate` refused this already; a program migrating itself at boot
+    // used to apply version 2 on top of it.
+    try testing.expectEqual(@as(usize, 0), (try fx.db.liveColumns(&fx.run, null, "b")).len);
+}
+
+const Parent = struct {
+    pub const nilo_table = .{ .name = "parents", .key = .id };
+    id: i64,
+    name: []const u8,
+};
+
+const Child = struct {
+    pub const nilo_table = .{
+        .name = "children",
+        .key = .id,
+        .references = .{ .parent_id = .{ Parent, .id, .cascade } },
+    };
+    id: i64,
+    parent_id: i64,
+};
+
+/// Two parents and a child of each, with `ON DELETE CASCADE` between them:
+/// the shape a table rebuild on SQLite used to empty.
+fn family(fx: *Fixture) !void {
+    try migrate.ensureLedger(&fx.db, &fx.run);
+    try migrate.createMissing(&fx.db, &fx.run, .{ .tables = &.{ Parent, Child } });
+    _ = try fx.db.insert(Parent, &fx.run, .{ .id = 1, .name = "one" });
+    _ = try fx.db.insert(Parent, &fx.run, .{ .id = 2, .name = "two" });
+    _ = try fx.db.insert(Child, &fx.run, .{ .id = 1, .parent_id = 1 });
+    _ = try fx.db.insert(Child, &fx.run, .{ .id = 2, .parent_id = 2 });
+}
+
+test "a version that rebuilds a table keeps the rows pointing at it" {
+    const gpa = testing.allocator;
+    var fx = try Fixture.init(gpa, "rebuild");
+    defer fx.deinit(gpa);
+    try family(fx);
+
+    // The four statements the diff's own Problem spells out for a column
+    // SQLite cannot change in place.
+    var digest: [64]u8 = undefined;
+    const v, const hash = lone(1, "rebuild_parents", &.{
+        .{ .kind = .data, .why = "", .sql = "CREATE TABLE \"parents_new\" (\"id\" INTEGER PRIMARY KEY NOT NULL, \"name\" TEXT NOT NULL)" },
+        .{ .kind = .data, .why = "", .sql = "INSERT INTO \"parents_new\" SELECT \"id\", \"name\" FROM \"parents\"" },
+        .{ .kind = .data, .why = "", .sql = "DROP TABLE \"parents\"" },
+        .{ .kind = .data, .why = "", .sql = "ALTER TABLE \"parents_new\" RENAME TO \"parents\"" },
+    }, &digest);
+    try testing.expect(try migrate.apply(&fx.db, &fx.run, v, hash));
+
+    // With foreign keys on, that DROP deleted both parents first and the
+    // cascade took both children with them, inside the version's own
+    // transaction, and the COMMIT kept it.
+    try testing.expectEqual(@as(usize, 2), (try fx.db.select(Child, &fx.run, .{})).len);
+    try testing.expectEqual(@as(usize, 2), (try fx.db.select(Parent, &fx.run, .{})).len);
+
+    // And they are on again for everything after: a child of nobody is refused.
+    try testing.expectError(
+        error.ForeignKeyViolated,
+        fx.db.insert(Child, &fx.run, .{ .id = 3, .parent_id = 99 }),
+    );
+    // Still pointed at the rebuilt table, by name.
+    _ = try fx.db.delete(Parent, &fx.run, .{ .where = .{ .id = 1 } });
+    try testing.expectEqual(@as(usize, 1), (try fx.db.select(Child, &fx.run, .{})).len);
+}
+
+test "a version that leaves a row pointing at nothing is refused at its commit, and keeps nothing" {
+    const gpa = testing.allocator;
+    var fx = try Fixture.init(gpa, "rebuild-broken");
+    defer fx.deinit(gpa);
+    try family(fx);
+
+    // A copy that skipped a row. With foreign keys off nothing stops it as it
+    // runs, so the check before the COMMIT is the whole of what does.
+    var digest: [64]u8 = undefined;
+    const v, const hash = lone(1, "lossy_rebuild", &.{
+        .{ .kind = .data, .why = "", .sql = "CREATE TABLE \"parents_new\" (\"id\" INTEGER PRIMARY KEY NOT NULL, \"name\" TEXT NOT NULL)" },
+        .{ .kind = .data, .why = "", .sql = "INSERT INTO \"parents_new\" SELECT \"id\", \"name\" FROM \"parents\" WHERE \"id\" = 2" },
+        .{ .kind = .data, .why = "", .sql = "DROP TABLE \"parents\"" },
+        .{ .kind = .data, .why = "", .sql = "ALTER TABLE \"parents_new\" RENAME TO \"parents\"" },
+    }, &digest);
+    try testing.expectError(error.ForeignKeyViolated, migrate.apply(&fx.db, &fx.run, v, hash));
+
+    try testing.expectEqual(@as(i64, 0), try migrate.headVersion(&fx.db, &fx.run));
+    try testing.expectEqual(@as(usize, 2), (try fx.db.select(Parent, &fx.run, .{})).len);
+    try testing.expectEqual(@as(usize, 2), (try fx.db.select(Child, &fx.run, .{})).len);
+    // And the writer went back with its foreign keys on.
+    try testing.expectError(
+        error.ForeignKeyViolated,
+        fx.db.insert(Child, &fx.run, .{ .id = 3, .parent_id = 99 }),
+    );
+}
+
 test "`status` says `edited` for a version whose file no longer matches what ran" {
     const gpa = testing.allocator;
     var fx = try Fixture.init(gpa, "status");

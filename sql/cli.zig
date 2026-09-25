@@ -62,8 +62,13 @@ pub const Request = struct {
     command: Command,
     /// `--name`, for `generate`.
     name: []const u8 = "",
-    /// `--drop`. Nothing that loses data is written without it.
-    allow_destructive: bool = false,
+    /// `--drop orders.note,extension:pgcrypto`: the losses this version may
+    /// make, by name, comma-separated. Nothing that loses data is written
+    /// unless it is named here (`migrations.Options.drop`).
+    drop: []const u8 = "",
+    /// `--drop` with no names after it. It drops nothing, and the refusal
+    /// says so beside the names it wanted.
+    drop_bare: bool = false,
     /// `--dir`, which almost nobody sets.
     dir: []const u8 = "migrations",
     /// `--sql`, for `status`: print the statements rather than a summary.
@@ -82,6 +87,8 @@ pub const ParseError = error{
     /// `generate` with no `--name`. A version called `0007_.zig` helps nobody
     /// six months later, which is why this is refused rather than defaulted.
     NoName,
+    /// `--drop` twice. The names go in one, comma-separated.
+    DropTwice,
 };
 
 /// Read `argv[1..]`. The program name is not passed in.
@@ -96,7 +103,16 @@ pub fn parse(args: []const []const u8) ParseError!Request {
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--drop")) {
-            req.allow_destructive = true;
+            if (req.drop.len > 0 or req.drop_bare) return ParseError.DropTwice;
+            // A flag after it, or nothing, is a `--drop` that names nothing:
+            // kept rather than refused here, so `generate` can answer with
+            // the names this version wants.
+            if (i + 1 == args.len or std.mem.startsWith(u8, args[i + 1], "--")) {
+                req.drop_bare = true;
+            } else {
+                i += 1;
+                req.drop = args[i];
+            }
         } else if (std.mem.eql(u8, arg, "--sql")) {
             req.sql_only = true;
         } else if (std.mem.eql(u8, arg, "--baseline")) {
@@ -125,6 +141,10 @@ pub fn explain(w: *std.Io.Writer, err: ParseError) !u8 {
             "db: `generate` needs `--name`. A version called `0007_.zig` helps " ++
                 "nobody six months from now.\n\n",
         ),
+        ParseError.DropTwice => try w.writeAll(
+            "db: `--drop` once, with every name in it comma-separated: " ++
+                "`--drop orders.note,extension:pgcrypto`.\n\n",
+        ),
     }
     try usage(w);
     return misused;
@@ -135,10 +155,12 @@ pub fn usage(w: *std.Io.Writer) !void {
         \\Migrations for this project. The schema is the Rows; these move a
         \\database to match them.
         \\
-        \\  generate --name <snake_case> [--drop] [--baseline]
+        \\  generate --name <snake_case> [--drop <what>,…] [--baseline]
         \\        Diff the Rows against migrations/snapshot.zon and write the
-        \\        next version. Needs no database. `--drop` is required before
-        \\        anything that loses data is written.
+        \\        next version. Needs no database. Anything that loses data is
+        \\        written only once `--drop` names it: `orders` for a table,
+        \\        `orders.note` for a column or a type that may not fit, and
+        \\        `extension:pgcrypto`. Without the names it says which.
         \\
         \\        `--baseline` ignores the snapshot, derives version 1 from
         \\        nothing and rewrites it in place. It keeps everything outside
@@ -251,7 +273,7 @@ pub fn Tool(comptime Db: type, comptime schema: migrate.Schema) type {
 
             const out = migrations.generate(a, io, dir, D, desired, .{
                 .name = req.name,
-                .allow_destructive = req.allow_destructive,
+                .drop = try dropList(a, req.drop),
                 .baseline = req.baseline,
                 .versions = versions,
             }) catch |err| switch (err) {
@@ -292,7 +314,8 @@ pub fn Tool(comptime Db: type, comptime schema: migrate.Schema) type {
                 try writeTwins(w, req, out);
                 return ok;
             }
-            return try held(w, out.plan, req.dir);
+            try writeHeld(w, out, req);
+            return acted;
         }
 
         /// The three ways `--baseline` refuses, each naming the file it is
@@ -517,30 +540,75 @@ pub fn Tool(comptime Db: type, comptime schema: migrate.Schema) type {
             try writeDrift(w, moved);
             return acted;
         }
-
-        fn held(w: *std.Io.Writer, change: migrate.Plan, dir: []const u8) !u8 {
-            if (change.problems.len > 0) {
-                try w.writeAll("Nothing written. The diff will not write these:\n\n");
-                try writeProblems(w, change.problems);
-                return acted;
-            }
-
-            try w.writeAll(
-                "Nothing written. Some of this loses data that nothing brings back:\n\n",
-            );
-            for (change.steps) |s| {
-                if (!s.destructive) continue;
-                try w.print("  {s}\n    {s}\n", .{ s.why, s.sql });
-            }
-            try w.print(
-                "\nThe rest of the version is fine. Run it again with `--drop` when you " ++
-                    "have read the above, and the generated file in {s}/ will say that " ++
-                    "you did.\n",
-                .{dir},
-            );
-            return acted;
-        }
     };
+}
+
+/// `--drop`'s value as the list `migrations.Options.drop` takes: split on
+/// commas, trimmed, empties left out.
+fn dropList(a: std.mem.Allocator, text: []const u8) ![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.splitScalar(u8, text, ',');
+    while (it.next()) |piece| {
+        const name = std.mem.trim(u8, piece, " ");
+        if (name.len > 0) try out.append(a, name);
+    }
+    return out.items;
+}
+
+/// Why `generate` wrote nothing, and the command that would write it.
+///
+/// **The command is printed whole**, names and all, because the names are
+/// what the person has to read before they type them: a field renamed without
+/// `.was` shows up here as a column dropped, beside the one that was meant.
+fn writeHeld(w: *std.Io.Writer, out: migrations.Outcome, req: Request) !void {
+    const change = out.plan;
+    if (change.problems.len > 0) {
+        try w.writeAll("Nothing written. The diff will not write these:\n\n");
+        try writeProblems(w, change.problems);
+        return;
+    }
+
+    if (out.stray.len > 0) {
+        try w.writeAll("Nothing written. `--drop` names something this version does not drop:\n\n");
+        for (out.stray) |name| try w.print("  {s}\n", .{name});
+        try w.writeAll("\nWhat it drops is:\n\n");
+        var any = false;
+        for (change.steps) |s| {
+            if (!s.destructive) continue;
+            try w.print("  {s}\n", .{s.target});
+            any = true;
+        }
+        if (!any) try w.writeAll("  nothing\n");
+        try w.writeAll("\nA name that matches nothing is usually a typo for the one that was meant.\n");
+        return;
+    }
+
+    if (req.drop_bare) try w.writeAll(
+        "`--drop` names what it drops, and on its own it names nothing.\n\n",
+    );
+    try w.writeAll(
+        "Nothing written. Some of this loses data that nothing brings back:\n\n",
+    );
+    for (change.steps) |s| {
+        if (!s.destructive) continue;
+        try w.print("  {s}  {s}\n", .{ s.target, s.why });
+        try writeIndented(w, s.sql);
+    }
+    try w.print(
+        "\nThe rest of the version is fine. When you have read the above, name each " ++
+            "one to write it:\n\n  db generate --name {s} --drop ",
+        .{req.name},
+    );
+    for (out.unnamed, 0..) |name, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll(name);
+    }
+    try w.print(
+        "\n\nA column you meant to rename is one of these too: give the field " ++
+            "`.was` instead, and it is a rename. The generated file in {s}/ says " ++
+            "which names you gave.\n",
+        .{req.dir},
+    );
 }
 
 /// Every line of the SQL, indented — not just the first.
@@ -595,11 +663,24 @@ fn writeSteps(w: *std.Io.Writer, steps: []const migrate.Step) !void {
     for (steps) |s| {
         try w.print("  {t}  {s}\n", .{ s.kind, s.why });
         try writeIndented(w, s.sql);
-        if (s.needs_backfill) try w.writeAll(
-            "    ^ this fails on a table that already has rows. It wants a " ++
-                "`.kind = .data` step in front of it.\n",
-        );
+        if (s.needs_backfill) try w.writeAll(backfillHint(s.kind));
     }
+}
+
+/// What a step flagged `needs_backfill` wants, by kind: the fix is different
+/// for each, and the one it used to give for all of them — a data step in
+/// front — cannot fill a column that does not exist yet.
+fn backfillHint(kind: migrate.Kind) []const u8 {
+    return switch (kind) {
+        .add_column => "    ^ this fails on a table that already has rows: nothing can fill a " ++
+            "column before it exists. Give the field a `.default` in the marker, or " ++
+            "ship it optional first and make it required in a later version, after a " ++
+            "`.kind = .data` step has filled it.\n",
+        .change_null => "    ^ this fails while any row holds a null. A `.kind = .data` step " ++
+            "in `before` that fills them goes first.\n",
+        else => "    ^ this fails on a table that already has rows breaking it. A " ++
+            "`.kind = .data` step in `before` that moves those rows goes first.\n",
+    };
 }
 
 fn writeProblems(w: *std.Io.Writer, problems: []const migrate.Problem) !void {
@@ -730,11 +811,19 @@ test "the command line reads into a request, and a bad one says which part" {
     const gen = try parse(&.{ "generate", "--name", "add_nickname" });
     try testing.expectEqual(Command.generate, gen.command);
     try testing.expectEqualStrings("add_nickname", gen.name);
-    try testing.expect(!gen.allow_destructive);
+    try testing.expectEqualStrings("", gen.drop);
+    try testing.expect(!gen.drop_bare);
     try testing.expectEqualStrings("migrations", gen.dir);
 
-    const dropped = try parse(&.{ "generate", "--name", "drop_note", "--drop" });
-    try testing.expect(dropped.allow_destructive);
+    const dropped = try parse(&.{ "generate", "--name", "drop_note", "--drop", "orgs.note,orgs" });
+    try testing.expectEqualStrings("orgs.note,orgs", dropped.drop);
+    const bare = try parse(&.{ "generate", "--drop", "--name", "drop_note" });
+    try testing.expect(bare.drop_bare);
+    try testing.expectEqualStrings("drop_note", bare.name);
+    try testing.expectError(
+        ParseError.DropTwice,
+        parse(&.{ "generate", "--name", "x", "--drop", "a", "--drop", "b" }),
+    );
 
     const elsewhere = try parse(&.{ "check", "--dir", "db/versions" });
     try testing.expectEqualStrings("db/versions", elsewhere.dir);
@@ -977,4 +1066,79 @@ test "a twin that could not be written says what to do, rather than saying nothi
         .plan = .{ .steps = &.{}, .problems = &.{} },
     });
     try testing.expectEqual(@as(usize, 0), q.buffered().len);
+}
+
+test "a held version names every loss, and prints the command that writes it" {
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+
+    const steps = [_]migrate.Step{
+        .{ .kind = .add_column, .why = "add orgs.label", .sql = "ALTER TABLE \"orgs\" ADD COLUMN \"label\" text" },
+        .{
+            .kind = .drop_column,
+            .why = "drop orgs.name, which no field reads",
+            .sql = "ALTER TABLE \"orgs\" DROP COLUMN \"name\"",
+            .destructive = true,
+            .target = "orgs.name",
+        },
+        .{
+            .kind = .drop_table,
+            .why = "drop notes, which no Row describes",
+            .sql = "DROP TABLE \"notes\"",
+            .destructive = true,
+            .target = "notes",
+        },
+    };
+    try writeHeld(&w, .{
+        .plan = .{ .steps = &steps, .problems = &.{} },
+        .unnamed = &.{ "orgs.name", "notes" },
+    }, .{ .command = .generate, .name = "tidy", .drop_bare = true });
+
+    const text = w.buffered();
+    try testing.expect(std.mem.indexOf(u8, text, "on its own it names nothing") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "  orgs.name  drop orgs.name") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "db generate --name tidy --drop orgs.name,notes\n") != null);
+    // The step that loses nothing is not in the list of what does.
+    try testing.expect(std.mem.indexOf(u8, text, "add orgs.label") == null);
+    // And the case this exists for: a rename that was written as a drop.
+    try testing.expect(std.mem.indexOf(u8, text, "`.was`") != null);
+}
+
+test "a name --drop gave that matches nothing is refused beside the names that would" {
+    var buf: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+
+    const steps = [_]migrate.Step{.{
+        .kind = .drop_column,
+        .why = "drop orgs.note",
+        .sql = "ALTER TABLE \"orgs\" DROP COLUMN \"note\"",
+        .destructive = true,
+        .target = "orgs.note",
+    }};
+    try writeHeld(&w, .{
+        .plan = .{ .steps = &steps, .problems = &.{} },
+        .stray = &.{"orgs.notes"},
+    }, .{ .command = .generate, .name = "tidy", .drop = "orgs.notes" });
+
+    const text = w.buffered();
+    try testing.expect(std.mem.indexOf(u8, text, "does not drop:\n\n  orgs.notes\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "What it drops is:\n\n  orgs.note\n") != null);
+}
+
+test "a backfill hint says the fix for its kind, not one fix for all of them" {
+    // An added column cannot be filled by a step in front of it, because it
+    // is not there yet. That was the advice once, for every kind.
+    try testing.expect(std.mem.indexOf(u8, backfillHint(.add_column), "`.default`") != null);
+    try testing.expect(std.mem.indexOf(u8, backfillHint(.add_column), "optional first") != null);
+    try testing.expect(std.mem.indexOf(u8, backfillHint(.change_null), "in `before`") != null);
+    try testing.expect(std.mem.indexOf(u8, backfillHint(.create_check), "in `before`") != null);
+}
+
+test "--drop's names are split on commas, with the spaces and empties left out" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const list = try dropList(arena.allocator(), " orgs.note, ,extension:pgcrypto,");
+    try testing.expectEqual(@as(usize, 2), list.len);
+    try testing.expectEqualStrings("orgs.note", list[0]);
+    try testing.expectEqualStrings("extension:pgcrypto", list[1]);
 }

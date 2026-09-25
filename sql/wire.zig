@@ -325,7 +325,32 @@ pub const Begin = struct {
     /// saying for a report or an export: it lets Postgres skip work, and it
     /// turns a write nobody meant to make into an error rather than a change.
     read_only: bool = false,
+    /// SQLite only: foreign keys are off for the statements in this
+    /// transaction and checked once, with `PRAGMA foreign_key_check`, before
+    /// the COMMIT, which answers `error.ForeignKeyViolated` if a row points at
+    /// nothing.
+    ///
+    /// **It is what rebuilding a table needs**, and `migrate.apply` asks for it
+    /// on every version. SQLite cannot change a column in place, so a changed
+    /// column is CREATE a new table, copy the rows, DROP the old one, RENAME.
+    /// With foreign keys on, that DROP deletes every row of the old table
+    /// first, and every `ON DELETE CASCADE` pointing at it fires: the child
+    /// rows go, inside the transaction, and the COMMIT keeps it. SQLite's own
+    /// documentation gives this recipe, and the pragma cannot be set inside a
+    /// transaction, so it is an option on the `BEGIN` rather than a statement.
+    ///
+    /// Postgres refuses it while compiling: `DROP TABLE` there refuses a table
+    /// something points at rather than emptying it first.
+    rebuilding: bool = false,
 };
+
+/// What a `.rebuilding` commit that found a row pointing at nothing says
+/// before it answers `error.ForeignKeyViolated`.
+pub const rebuild_broke_reference =
+    "nilo_sql: a rebuilding transaction left a row pointing at a row that is not there " ++
+    "(`PRAGMA foreign_key_check` found it); it was rolled back rather than committed. " ++
+    "A table rebuilt with its rows copied keeps every key, so the usual cause is a copy " ++
+    "that skipped some rows.";
 
 /// One thing to do with a savepoint. Comptime at every call, so a driver's
 /// switch over it disappears.

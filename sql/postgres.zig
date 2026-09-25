@@ -417,6 +417,12 @@ pub const Wire = struct {
     /// socket is a constant this file assembled while compiling.
     pub fn begin(self: *Wire, arena: std.mem.Allocator, comptime opts: wire.Begin) wire.Error!Tx {
         _ = arena;
+        if (comptime opts.rebuilding) @compileError(
+            "nilo: `.rebuilding` is not available on the postgres dialect.\n" ++
+                "  It turns SQLite's foreign keys off so that dropping a table does not delete " ++
+                "the rows pointing at it. Postgres refuses to drop a table something points at, " ++
+                "and changes a column in place, so there is nothing to turn off.",
+        );
         const w = self.limits.waiting();
         defer self.limits.waited(w);
         var conn = self.pool.acquire() catch |err| return acquireFailed(self.io, err);

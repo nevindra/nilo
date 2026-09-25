@@ -141,6 +141,10 @@ Behaviour that is wrong today. Each entry was found by reading a design page aga
 
 **Needs:** what `squash` writes into the ledger of a database that is already past it. Rewriting rows is out — that is the thing `verify` exists to catch.
 
+**An index on a big live Postgres table cannot be built without blocking its writes.** Every version is one transaction, and Postgres refuses `CREATE INDEX CONCURRENTLY` inside one, so a generated `create_index` on an existing table takes a lock that makes every write to it wait until the build finishes. On a table of a few thousand rows that is milliseconds; on one of fifty million it is an outage. The step's `why` says so today, and that is a warning rather than a way out. The way out is a step that runs outside its version's transaction and is recorded in the ledger on its own, because a `CONCURRENTLY` build that fails halfway leaves an invalid index behind that has to be dropped before the next attempt.
+
+**Needs:** a caller with a table that size, and a decision on how a step outside the transaction is recorded when the version around it fails.
+
 **Nothing reports how the pool is doing.** `app.metrics` counts requests, statuses and durations ([ADR 079](./adr/079-the-route-table-is-the-registry.md)); a `Db` counts nothing. Connections in use, how long a caller waited for one, statements run, and how many the pool threw away are the questions an operator asks first when a service slows down, and the last of them is already reachable — `postgres.dirtyConnections()` parses it out of pg.zig's own metrics text and is marked test-facing because nothing else reveals it.
 
 **Needs:** a shape that does not become a second metrics registry. `app.metrics` is the shape and a `Db` is a Service, which knows nothing about an App — so where the numbers meet is the question, not how to count them.

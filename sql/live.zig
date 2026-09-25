@@ -4300,6 +4300,66 @@ test "a plan a migration changed the answer of is prepared again, and inside a t
     }
 }
 
+/// A table whose columns a generated plan drops, indexes and all.
+const tidy_table = "nilo_live_tidy_" ++ mode_suffix;
+
+test "a plan that drops an indexed column runs on Postgres, index first" {
+    const gpa = testing.allocator;
+    const url = live_config.database_url orelse return error.SkipZigTest;
+
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    var db = db_mod.Db.init(gpa, url, .{ .size = 1, .connect_on_init = 1, .unchecked = true });
+    defer db.deinit();
+    try db.nilo_start(threaded.io(), .off);
+    defer db.nilo_stop();
+
+    var run: core.Run = .init(gpa);
+    defer run.deinit();
+
+    const Before = struct {
+        pub const nilo_table = .{
+            .name = tidy_table,
+            .key = .id,
+            .unique = .{.{ .columns = .{.slug} }},
+            .index = .{.region},
+        };
+        id: i64,
+        slug: []const u8,
+        region: []const u8,
+        count: i32,
+    };
+    const After = struct {
+        pub const nilo_table = .{ .name = tidy_table, .key = .id };
+        id: i64,
+        count: i64,
+    };
+
+    _ = try db.exec(&run, "DROP TABLE IF EXISTS \"" ++ tidy_table ++ "\"", .{});
+    defer _ = db.exec(&run, "DROP TABLE IF EXISTS \"" ++ tidy_table ++ "\"", .{}) catch {};
+    try migrate.createMissing(&db, &run, .{ .tables = &.{Before} });
+    _ = try db.insert(Before, &run, .{ .id = 1, .slug = "a", .region = "eu", .count = 7 });
+
+    const a = run.arena();
+    const before = try migrate.snapshotOf(a, dialect.Postgres, 1, comptime migrate.desiredOf(dialect.Postgres, .{ .tables = &.{Before} }));
+    const change = try migrate.plan(a, dialect.Postgres, comptime migrate.desiredOf(dialect.Postgres, .{ .tables = &.{After} }), before);
+    try testing.expectEqual(@as(usize, 0), change.problems.len);
+    // int4 to int8 widens, so the two drops are the only losses to name.
+    const unnamed = try change.unnamed(a, &.{});
+    try testing.expectEqual(@as(usize, 2), unnamed.len);
+
+    // In one transaction, the way `apply` sends a version. A `DROP INDEX`
+    // after the column had taken its index with it failed here and undid
+    // the lot.
+    var tx = try db.begin(&run, .{});
+    defer tx.deinit();
+    for (change.steps) |s| _ = try tx.exec(&run, s.sql, .{});
+    try tx.commit();
+
+    const kept = (try db.find(After, &run, @as(i64, 1))).?;
+    try testing.expectEqual(@as(i64, 7), kept.count);
+}
+
 test "a Db told to keep no plans still answers, one Parse at a time" {
     const gpa = testing.allocator;
     var live = (try Live.open(gpa)) orelse return error.SkipZigTest;

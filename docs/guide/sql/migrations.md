@@ -470,20 +470,30 @@ next person.
 <!-- compiles: body -->
 ```zig
 const chain = try sql.migrate.chainOf(run.arena(), &.{});
-
-try sql.migrate.ensureLedger(&db, &run);
 const ran = try sql.migrate.applyPending(&db, &run, chain);
 ```
 
-`nilo_migrations` is an ordinary Row. One version is one transaction: take the
-advisory lock, check whether this version is already there, run every step,
-write the row, commit. It is skipped when it was already applied, which is what
-nine of ten replicas booting together get — **the lock is not decoration**, and
-it is the part a hand-written runner usually leaves out.
+`nilo_migrations` is an ordinary Row, and `applyPending` makes it if it is not
+there. It reads the ledger once. A version already in it is skipped, so a boot
+with nothing to do is one query. One version that is not is one transaction:
+take the advisory lock, check again whether it is there, run every step, write
+the row, commit. That second check is what nine of ten replicas booting
+together hit. **The lock is not decoration**, and it is the part a hand-written
+runner usually leaves out.
 
 Each version's hash is taken over its own steps chained onto the one before it,
 so editing a migration that has already run moves that version and every version
-after it. `sql.migrate.drift` is what asks the database whether anybody has.
+after it. `applyPending` refuses to run anything when it finds one,
+`error.SchemaDrift`, because the versions after it were written against what it
+used to say. `sql.migrate.drift` lists them.
+
+**On SQLite each version runs with foreign keys off**, and they are checked
+once before its COMMIT. Changing a column there means rebuilding the table, and
+the `DROP TABLE` in a rebuild deletes the old table's rows first. With foreign
+keys on, every `ON DELETE CASCADE` pointing at it fires, and the child rows are
+gone when the version commits. With them off the children stay. A row left
+pointing at nothing, such as a copy that skipped some rows, answers
+`error.ForeignKeyViolated`, and the version is rolled back.
 
 The hash is not a field on the version. `chainOf` works the whole list out in
 one pass, because a hash somebody can type in is a hash somebody can type in
@@ -581,18 +591,34 @@ installed and in CI with no service container.
 something to do. `2` the command line was wrong. `db check` in a pipeline needs
 no output parsing at all.
 
-Removing a field is the one thing `generate` will not do quietly:
+Losing data is the one thing `generate` will not do quietly. A dropped field,
+a dropped Row and a column type that may not fit are each written only once
+you name them:
 
 ```console
 $ db generate --name drop_nickname
 Nothing written. Some of this loses data that nothing brings back:
 
-  drop users.nickname, which no field reads
+  users.nickname  drop users.nickname, which no field reads
     ALTER TABLE "users" DROP COLUMN "nickname"
 
-The rest of the version is fine. Run it again with `--drop` when you have read
-the above, and the generated file in migrations/ will say that you did.
+The rest of the version is fine. When you have read the above, name each one to write it:
+
+  db generate --name drop_nickname --drop users.nickname
+
+A column you meant to rename is one of these too: give the field `.was` instead,
+and it is a rename. The generated file in migrations/ says which names you gave.
 ```
+
+**The names are the point.** A field you renamed and forgot `.was` on shows up
+in this list as a dropped column, next to the one you meant to drop. A bare
+`--drop` used to write both. A name that matches nothing is refused too,
+because it is usually a typo for the one you meant.
+
+A column's type counts as a loss unless it widens: `i32` to `i64` goes
+through, `i64` to `i32` has to be named, and so does anything that could round
+or reinterpret a value. The list is in
+[ADR 123](../../adr/123-a-migration-is-a-diff-against-a-snapshot.md#forward-only).
 
 The generated file is Zig you can read, and it is exactly what runs: those
 steps, in that order, in one transaction.

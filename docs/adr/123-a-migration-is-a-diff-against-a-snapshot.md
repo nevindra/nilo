@@ -105,13 +105,23 @@ A parse that fails anyway is printed as `std.zon`'s own sentence with the line a
 
 ### Forward only
 
-There is no `down`. A generated one is a lie for anything destructive, the data is already gone, and a script nobody has ever run is the worst thing to reach for during an incident. `generate` refuses a destructive step until the caller asks with `--drop`, and records the ask in the generated file's header so a reviewer sees it.
+There is no `down`. A generated one is a lie for anything destructive, the data is already gone, and a script nobody has ever run is the worst thing to reach for during an incident.
+
+**`generate` refuses a destructive step until the caller names it**: `--drop orders.note,notes,extension:pgcrypto`, a column as `table.column`, a table by its name, an extension with `extension:` in front. The refusal prints every loss beside its statement and then the whole command with the names filled in, so what gets typed is what was read. A name that matches nothing holds the version back too, because it is usually a typo for the drop that was meant. The names go in a line at the top of the generated file, and `.destructive = true` stays on each step, so a reviewer sees both.
+
+Destructive means a table, a column or an extension dropped, and **a column type that does not widen**. The widenings are a short list: a wider integer, `float4` to `float8`, an integer or a bounded `numeric` into a wider or unbounded one, a `varchar` into `text` or a longer `varchar`. Anything else can refuse the rows already there, which is loud, or convert them, which is not: `numeric(10,2)` to `numeric(10,1)` rounds every row, `float8` to `float4` drops digits, `timestamptz` to `timestamp` moves every value by the server's zone. The statement carries no `USING`, so a type Postgres will not cast on its own still fails and asks for a step.
+
+A step flagged `needs_backfill` says what it wants for its kind. An added required column cannot be filled by a step in front of it, because it does not exist yet: it wants a `.default` in the marker, or to ship optional first and be made required a version later. A `NOT NULL` or a check that the rows break wants a `.kind = .data` step in `before`.
 
 The honest argument for `down` is the local loop, and its answer is two commands: `reset`, which drops the objects nilo owns and replays from zero, and `squash`, which folds applied history into one baseline. **Neither is built**; they are the debt forward-only creates, and the roadmap holds them. `--baseline` is not `reset`: it touches three files and no database.
 
 ### Applying: in process, and the binary knows its version
 
-`migrate.applyPending` runs in the boot phase, `app.before(f, args)`, which `listen()` runs on the services' loop after they start and before it takes a socket ([ADR 180](./180-work-that-needs-the-services-runs-on-their-loop.md)). That is what a SQLite program needs because there is no server to have run the DDL elsewhere. It reads the applied set in one round trip, applies each version in its own transaction, and takes one advisory lock (`pg_advisory_xact_lock`) inside the transaction, because the in-process path is exactly the case where ten replicas boot at once.
+`migrate.applyPending` runs in the boot phase, `app.before(f, args)`, which `listen()` runs on the services' loop after they start and before it takes a socket ([ADR 180](./180-work-that-needs-the-services-runs-on-their-loop.md)). That is what a SQLite program needs because there is no server to have run the DDL elsewhere. It makes the ledger if it is not there, reads the applied set in one round trip, applies each version in its own transaction, and takes one advisory lock (`pg_advisory_xact_lock`) inside the transaction, because the in-process path is exactly the case where ten replicas boot at once. The ledger's `CREATE TABLE IF NOT EXISTS` runs behind the same lock: two sessions creating the same new table at once can both pass the "not there" check, and the second fails on the catalog's unique index.
+
+**A version the ledger has under another hash stops the run before anything is applied** (`Error.SchemaDrift`). The versions after an edited one were written against what it used to say. `db migrate` has always refused this; a program migrating itself at boot applied on top of it until the one read of the ledger started answering both questions. A version already recorded is skipped without a transaction, so a boot with nothing to do costs that one read.
+
+**On SQLite each version runs with foreign keys off, and checked once before its COMMIT** (`wire.Begin.rebuilding`). SQLite changes a column by rebuilding the table: create the new one, copy the rows, drop the old one, rename. With foreign keys on, that drop deletes the old table's rows first, and every `ON DELETE CASCADE` pointing at it fires inside the version's own transaction. The children are gone and the COMMIT keeps it. The pragma does nothing inside a transaction, so it is an option on the `BEGIN`; `PRAGMA foreign_key_check` finding a row that points at nothing answers `error.ForeignKeyViolated` and rolls the version back. The `.sql` twin for SQLite carries the same pragmas around its `BEGIN` and `COMMIT`.
 
 The manifest holds the version list as comptime constants, so a server has its expected version as a number inside the binary, and one query at boot (`migrate.expect`) says whether the database agrees:
 
@@ -155,6 +165,14 @@ It needs one declaration on the Dialect contract, `columnType(T)`, beside `accep
 **Version files as `.sql`, one statement per file.** No lexer, and a first migration of ten tables at about thirty files.
 
 **Accepting the twin as an input**, so a version can be authored in SQL. Rejected above: a version nilo did not generate has no snapshot behind it.
+
+**`--drop` as a switch**, which is what it was. A switch covers the drop nobody read: a field renamed without `.was` is a dropped column and an added one, and it sat in the same list as the drop that was meant, behind the same flag. Naming each one costs a few words on a command line that already printed them.
+
+**`USING "col"::type` on every type change**, so a change Postgres will not cast on its own goes through. An explicit cast is exactly the conversion that truncates a `varchar` and rounds a `numeric` where the implicit one would have refused; it would have turned the loud failures into quiet ones.
+
+**Reading the ledger per version under the lock**, which is what `applyPending` did. Correct, and a BEGIN, a lock and a COMMIT for every version already applied, at every boot. The check under the lock is still made for a version that is not recorded, because another process may have applied it since the read.
+
+**`PRAGMA defer_foreign_keys` for a SQLite rebuild.** It defers the checks and not the actions, so the cascade still fires on the DROP.
 
 **A `.sql` copy beside the Zig file.** Refused at first as a pair that can drift. The twin is that copy, and what changed is that it drifts visibly: it is an output `check` compares against the Zig, not a second source.
 
