@@ -613,6 +613,7 @@ fn deleting(
         var sql: []const u8 = "DELETE FROM " ++ relation(D, Row);
         var paths: []const where_mod.Path = &.{};
         var params: []const where_mod.Param = &.{};
+        var narrowed = false;
 
         if (@hasField(O, "where")) {
             const p = where_mod.planAt(D, Row, @FieldType(O, "where"), 1, &.{"where"});
@@ -620,6 +621,7 @@ fn deleting(
                 sql = sql ++ " WHERE " ++ p.sql;
                 paths = p.paths;
                 params = p.params;
+                narrowed = true;
             }
         }
 
@@ -628,7 +630,13 @@ fn deleting(
         // rather than reached by leaving something off. `.where = .{}` counts
         // as leaving it off: an empty condition matches every row, and the
         // braces make it look like a decision was made.
-        if (paths.len == 0) @compileError(
+        //
+        // Asked of the condition's text rather than of its parameters: a
+        // condition that binds nothing — `.deleted_at = null` is `IS NULL` —
+        // narrows the statement as much as one that does, and was refused
+        // here as if it were not there. What a request can empty at run time
+        // is `narrowing`'s question in `db.zig`.
+        if (!narrowed) @compileError(
             "nilo: a delete on " ++ @typeName(Row) ++ " with no condition.\n" ++
                 "  That empties the table. If it is meant, `db.raw` says so where " ++
                 "somebody reading the code can see it.",
@@ -1483,21 +1491,23 @@ fn updating(
             next += 1;
         }
 
-        const before_where = paths.len;
+        var narrowed = false;
         if (@hasField(O, "where")) {
             const p = where_mod.planAt(D, Row, @FieldType(O, "where"), next, &.{"where"});
             if (!p.isEmpty()) {
                 sql = sql ++ " WHERE " ++ p.sql;
                 paths = paths ++ p.paths;
                 params = params ++ p.params;
+                narrowed = true;
             }
         }
 
         // The same rule `delete` follows, for the same reason: an update
         // with no condition rewrites every row in the table, and it is
         // reached by leaving something out rather than by writing something
-        // down. `.where = .{}` counts as leaving it out.
-        if (paths.len == before_where) @compileError(
+        // down. `.where = .{}` counts as leaving it out, and a condition that
+        // binds nothing (`IS NULL`) does not.
+        if (!narrowed) @compileError(
             "nilo: an update on " ++ @typeName(Row) ++ " with no condition.\n" ++
                 "  That rewrites every row in the table. If it is meant, `db.raw` says " ++
                 "so where somebody reading the code can see it.",

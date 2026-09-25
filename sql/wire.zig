@@ -210,10 +210,43 @@ pub const Error = error{
     /// every time it is set: a 504 for a report, a 503 for a health check, a
     /// 200 with less in it for a page that has a fallback.
     TimedOut,
+    /// The database rolled the whole transaction back so that the ones
+    /// running beside it stay consistent: a serialization failure (`40001`)
+    /// under `.repeatable_read` or `.serializable`, or a deadlock (`40P01`)
+    /// under any level. Also what a transaction gets when a migration changed
+    /// a statement's answer under a running server, since the plan it held is
+    /// the thing that went stale. Nothing the transaction did was kept, and
+    /// **running the whole transaction again is the answer** — the one
+    /// failure in this set for which the same code, sent again, is correct.
+    ///
+    /// Answered 503 by default, which says the same to a client: the request
+    /// was sound and may simply be sent again.
+    RolledBack,
     /// The database said no in a way this module does not translate. The text
     /// is logged; it does not reach the client (ADR 024).
     QueryFailed,
 };
+
+/// What a `COMMIT` on a transaction a failed statement had aborted says, on
+/// both Wires. The transaction is rolled back and the commit answers
+/// `error.QueryFailed`; the text is here so the two cannot drift.
+///
+/// **The mistake this names is the earlier one**: a statement's error caught
+/// and carried on past inside a transaction. On Postgres that statement
+/// aborted everything, and on SQLite the Wire holds it to the same rule, so a
+/// handler tested against either finds out the same way.
+pub const aborted_commit =
+    "nilo_sql: tx.commit() on a transaction a failed statement had aborted; it was rolled " ++
+    "back instead, and nothing in it was kept. A statement whose failure a handler means to " ++
+    "carry on past needs a savepoint around it: `var sp = try tx.savepoint();`, and " ++
+    "`sp.rollback()` where the error is caught.";
+
+/// What a statement sent into an aborted transaction says, on both Wires.
+pub const aborted_statement =
+    "nilo_sql: a statement was sent inside a transaction an earlier failed statement had " ++
+    "aborted, and was refused. A statement whose failure a handler means to carry on past " ++
+    "needs a savepoint around it: `var sp = try tx.savepoint();`, and `sp.rollback()` " ++
+    "where the error is caught.";
 
 /// What the database said about a statement it refused
 /// ([ADR 117](../docs/adr/117-a-statement-that-failed-says-what-the-database-said.md)).
@@ -273,12 +306,13 @@ pub const Isolation = enum {
     read_committed,
     /// Every statement sees rows committed before the *transaction* started,
     /// so two reads of the same row agree. A write that collides answers
-    /// `error.QueryFailed` with `40001` in the log.
+    /// `error.RolledBack`.
     repeatable_read,
     /// The above, and the transactions that commit are guaranteed to be
     /// equivalent to having run one at a time. What a transaction that reads
     /// something and then writes a decision about it needs, and it costs
-    /// retries: a serialisation failure is an ordinary outcome.
+    /// retries: a serialisation failure is an ordinary outcome, answered
+    /// `error.RolledBack` so that a handler can run the transaction again.
     serializable,
 };
 

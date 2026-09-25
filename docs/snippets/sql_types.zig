@@ -55,8 +55,8 @@ pub const Product = struct {
     name: Str,
 };
 
-/// A word with a unique index on it, which is what the savepoint example is
-/// about: one of these failing must not take the rest of the batch with it.
+/// A word with a unique index on it, for the examples of writing a row that
+/// may already be there.
 pub const Tag = struct {
     pub const nilo_table = .{ .name = "tags", .key = .id };
 

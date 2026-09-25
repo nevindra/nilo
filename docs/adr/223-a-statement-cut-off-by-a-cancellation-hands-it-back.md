@@ -63,7 +63,20 @@ the `ROLLBACK` cannot be sent at all (`ConnectionBusy`), the connection is
 dropped, and the server rolls the transaction back as it goes. Without a
 cancellation behind it, a rollback that fails is still logged as it was.
 
+**A `COMMIT` is held off too, for the opposite reason.** It is not cleanup,
+it is the one statement whose outcome the caller has to know. Cut off after
+it was written and before its answer was read, the transaction may have
+committed on the server while the caller hears `QueryFailed`, and a handler
+that retries on that writes the order twice. Held off, the `COMMIT` runs to
+its answer, and a cancellation that arrived first or meanwhile is re-armed for
+the caller's next cancellation point, the same hand-back as everywhere else.
+The cost is the round trip the `COMMIT` was going to take anyway.
+
 ## What was rejected
+
+**Letting a cancellation cut a `COMMIT` off like any other statement**, the
+rule until 2026-09. It answered `QueryFailed` for a transaction that may have
+landed, which is the one answer about a commit nobody can act on.
 
 **Add `Canceled` to `wire.Error`.** It is the more honest word, and it breaks
 every exhaustive switch over `wire.Error` in every caller for a case most of

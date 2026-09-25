@@ -770,6 +770,40 @@ test "a delete narrows the table and the next select sees it" {
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, answer.body, "@example.dev"));
 }
 
+test "a delete whose list arrived empty is refused before it is sent, rather than emptying the table" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    // "Delete everyone except these" on the day the list is empty. Sent, it
+    // is `"id" <> ALL('{}')`, true of every row.
+    const keep: []const i64 = &.{};
+    try testing.expectError(
+        error.QueryFailed,
+        stack.db.delete(Person, &run, .{ .where = .{ .id = .{ .not_in = keep } } }),
+    );
+    // A search box left empty, as the condition of a write.
+    try testing.expectError(error.QueryFailed, stack.db.update(Person, &run, .{
+        .set = .{ .age = @as(i32, 1) },
+        .where = .{ .email = .{ .contains = @as([]const u8, "") } },
+    }));
+    try testing.expectEqual(@as(usize, 3), try stack.db.count(Person, &run, .{}));
+
+    // Beside a term that narrows, the empty list narrows nothing more and
+    // the statement is an ordinary one: it is sent, and matches nothing here.
+    try testing.expectEqual(@as(usize, 0), try stack.db.delete(Person, &run, .{
+        .where = .{ .id = @as(i64, 999_999), .age = .{ .not_in = @as([]const i32, &.{}) } },
+    }));
+    // And a list with something in it is the delete it always was.
+    try testing.expectEqual(@as(usize, 0), try stack.db.delete(Person, &run, .{
+        .where = .{ .id = .{ .not_in = @as([]const i64, &.{ 1, 2, 3 }) } },
+    }));
+    try testing.expectEqual(@as(usize, 3), try stack.db.count(Person, &run, .{}));
+}
+
 fn rollbackAnInsert(db: *db_mod.Db, c: *nilo.Ctx) ![]Person {
     {
         var tx = try db.begin(c, .{});
@@ -2347,6 +2381,125 @@ test "a savepoint rolled back takes its work with it, and released keeps it" {
 
     try testing.expect(!try stack.db.exists(Person, &run, .{ .where = .{ .id = undone } }));
     try testing.expect(try stack.db.exists(Person, &run, .{ .where = .{ .id = kept } }));
+}
+
+test "a commit after a failed statement nobody undid is refused, and nothing in the transaction was kept" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const before_clash = scratch_id + 7;
+    defer _ = stack.db.delete(Person, &run, .{ .where = .{ .id = before_clash } }) catch {};
+    const dirty_before = try postgres.dirtyConnections();
+
+    {
+        var tx = try stack.db.begin(&run, .{});
+        defer tx.deinit();
+
+        _ = try tx.insert(Person, &run, .{
+            .id = before_clash,
+            .email = "lost@example.dev",
+            .age = @as(i32, 40),
+        });
+        // The mistake: the error caught and carried on past, with no
+        // savepoint around it. Postgres has aborted the transaction here.
+        if (tx.insert(Person, &run, .{
+            .id = @as(i64, 1),
+            .email = "clash@example.dev",
+            .age = @as(i32, 30),
+        })) |_| return error.TestUnexpectedResult else |err| try testing.expectEqual(error.AlreadyExists, err);
+
+        // Sent, this COMMIT is answered with the tag `ROLLBACK` and no error,
+        // and it used to come back as success.
+        try testing.expectError(error.QueryFailed, tx.commit());
+    }
+
+    // What the refusal protects: the handler was not told the first insert
+    // was kept, because it was not.
+    try testing.expect(!try stack.db.exists(Person, &run, .{ .where = .{ .id = before_clash } }));
+    // And the connection was rolled back and kept, not thrown away.
+    try testing.expectEqual(dirty_before, try postgres.dirtyConnections());
+}
+
+test "a statement after a failed one in the same transaction is answered 25P02, not a reconnect" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const dirty_before = try postgres.dirtyConnections();
+    {
+        var tx = try stack.db.begin(&run, .{});
+        defer tx.deinit();
+        try testing.expectError(error.AlreadyExists, tx.insert(Person, &run, .{
+            .id = @as(i64, 1),
+            .email = "clash@example.dev",
+            .age = @as(i32, 30),
+        }));
+        // pg.zig used to refuse this before it left the process, as a
+        // connection it could not use: `Disconnected`, and a reconnect.
+        try testing.expectError(error.QueryFailed, tx.select(Person, &run, .{ .where = .{ .id = @as(i64, 1) } }));
+        try testing.expectEqualStrings("25P02", db_mod.lastProblem(&run).?.code);
+    }
+    try testing.expectEqual(dirty_before, try postgres.dirtyConnections());
+}
+
+test "a serialization failure answers RolledBack, and the transaction run again goes through" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const id = scratch_id + 8;
+    _ = try stack.db.insert(Person, &run, .{
+        .id = id,
+        .email = "contended@example.dev",
+        .age = @as(i32, 30),
+    });
+    defer _ = stack.db.delete(Person, &run, .{ .where = .{ .id = id } }) catch {};
+
+    // The retry loop a handler writes, which it could not before: every
+    // failure here used to be `QueryFailed`, the same word as a typo.
+    var attempts: usize = 0;
+    while (true) {
+        attempts += 1;
+        var tx = try stack.db.begin(&run, .{ .isolation = .repeatable_read });
+        defer tx.deinit();
+
+        const seen = (try tx.one(Person, &run, .{ .where = .{ .id = id } })).?;
+        // Somebody else changes the row after this transaction's snapshot,
+        // on the pool's other connection — the first time round only.
+        if (attempts == 1) _ = try stack.db.update(Person, &run, .{
+            .set = .{ .age = .{ .plus = @as(i32, 1) } },
+            .where = .{ .id = id },
+        });
+
+        const wrote = tx.update(Person, &run, .{
+            .set = .{ .age = seen.age + 10 },
+            .where = .{ .id = id },
+        });
+        if (wrote) |_| {} else |err| switch (err) {
+            error.RolledBack => {
+                try testing.expectEqual(@as(usize, 1), attempts);
+                continue;
+            },
+            else => return err,
+        }
+        try tx.commit();
+        break;
+    }
+
+    try testing.expectEqual(@as(usize, 2), attempts);
+    // 30, one from the other writer, ten from the retry that read it.
+    const now = (try stack.db.one(Person, &run, .{ .where = .{ .id = id } })).?;
+    try testing.expectEqual(@as(i32, 41), now.age);
 }
 
 // -- the column type nothing checks at startup ----------------------------
@@ -4084,6 +4237,66 @@ test "statements interleaved on one connection keep their own prepared plans" {
         try testing.expect(try stack.db.exists(Person, &run, .{ .where = .{ .id = @as(i64, 2) } }));
 
         run.reset();
+    }
+}
+
+/// A table of its own, whose one column a test changes the type of under a
+/// running pool — the thing a migration does to a server still up.
+const stale_table = "nilo_live_stale_" ++ mode_suffix;
+
+const Labelled = struct {
+    pub const nilo_table = .{ .name = stale_table, .key = .id };
+    id: i64,
+    label: []const u8,
+};
+
+test "a plan a migration changed the answer of is prepared again, and inside a transaction answers RolledBack" {
+    const gpa = testing.allocator;
+    const url = live_config.database_url orelse return error.SkipZigTest;
+
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    // One connection, so the plan kept by the first read is the one every
+    // read after it meets.
+    var db = db_mod.Db.init(gpa, url, .{ .size = 1, .connect_on_init = 1, .unchecked = true });
+    defer db.deinit();
+    try db.nilo_start(threaded.io(), .off);
+    defer db.nilo_stop();
+
+    var run: core.Run = .init(gpa);
+    defer run.deinit();
+
+    _ = try db.exec(&run, "DROP TABLE IF EXISTS \"" ++ stale_table ++ "\"", .{});
+    _ = try db.exec(&run, "CREATE TABLE \"" ++ stale_table ++ "\" (id int8 PRIMARY KEY, label text NOT NULL)", .{});
+    defer _ = db.exec(&run, "DROP TABLE IF EXISTS \"" ++ stale_table ++ "\"", .{}) catch {};
+    _ = try db.exec(&run, "INSERT INTO \"" ++ stale_table ++ "\" VALUES (1, 'one')", .{});
+
+    // Prepared and kept.
+    try testing.expectEqualStrings("one", (try db.find(Labelled, &run, @as(i64, 1))).?.label);
+
+    // The migration. `text` to `varchar` changes the type the plan answers
+    // with, and Postgres refuses the kept plan from here on with `0A000`.
+    _ = try db.exec(&run, "ALTER TABLE \"" ++ stale_table ++ "\" ALTER COLUMN label TYPE varchar(40)", .{});
+
+    // Outside a transaction nothing was done before the statement, so it is
+    // deallocated and sent once more — the caller sees the row.
+    try testing.expectEqualStrings("one", (try db.find(Labelled, &run, @as(i64, 1))).?.label);
+    try testing.expectEqualStrings("one", (try db.find(Labelled, &run, @as(i64, 1))).?.label);
+
+    // Inside one the refusal has aborted the transaction, so the answer is
+    // the one that says to run it again.
+    _ = try db.exec(&run, "ALTER TABLE \"" ++ stale_table ++ "\" ALTER COLUMN label TYPE text", .{});
+    {
+        var tx = try db.begin(&run, .{});
+        defer tx.deinit();
+        try testing.expectError(error.RolledBack, tx.find(Labelled, &run, @as(i64, 1)));
+    }
+    // And run again, it goes through: the rollback dropped the stale plan.
+    {
+        var tx = try db.begin(&run, .{});
+        defer tx.deinit();
+        try testing.expectEqualStrings("one", (try tx.find(Labelled, &run, @as(i64, 1))).?.label);
+        try tx.commit();
     }
 }
 

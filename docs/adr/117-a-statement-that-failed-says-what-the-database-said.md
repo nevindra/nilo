@@ -32,17 +32,25 @@ A cancellation is the one failure that is neither reported as a refusal nor kept
 
 `Problem.message` always says something. When there is no server answer, the Zig error's own name goes in, `@errorName` points into the binary and needs no copy, so the statement that never left the process reports `CannotBindStruct` rather than nothing. SQLite has its own version of the hole, `sqlite3_errmsg` answers `"not an error"` when the failure never reached SQLite, so that answer is dropped for the error name too. `code`, `severity`, `detail`, `hint` and `constraint` default to `""` rather than `?`: SQLite has no SQLSTATE, no severity word and no separate hint, and inventing one would be this module making something up in a field whose only value is that it came from the database, so those stay empty and read the same way in a log line as a `null` would without making every reader unwrap. `detail` is named apart from `message` because it is usually the values that collided, data a request supplied, worth being able to see before turning it on. Every field is copied into the request's arena, because the driver's own pointer goes back to the pool on the next line, the rule every `Str` here already follows; an allocation failure while copying is not itself an error, since that would turn "the statement was refused" into "we ran out of memory telling you so" on a path that is already failing, and what cannot be copied is left empty.
 
-### The name: four SQLSTATE classes instead of one, and no new default status
+### The name: a SQLSTATE class a caller can act on gets a name, and a name gets a status only when the request cannot change what it means
 
-| SQLSTATE | | |
+| SQLSTATE | | default |
 |---|---|---|
-| `23505` | `error.AlreadyExists` | unchanged, the only one with a default status |
-| `23503` | `error.ForeignKeyViolated` | new |
-| `23502` | `error.NotNullViolated` | new |
-| `23514` | `error.CheckViolated` | new |
-| rest of class 23 | `error.ConstraintViolated` | exclusion, `RESTRICT` |
+| `23505` | `error.AlreadyExists` | 409 |
+| `23503` | `error.ForeignKeyViolated` | none |
+| `23502` | `error.NotNullViolated` | none |
+| `23514` | `error.CheckViolated` | none |
+| rest of class 23 | `error.ConstraintViolated` | none |
+| `40001`, `40P01` | `error.RolledBack` | 503 |
+| `0A000` *cached plan must not change result type*, inside a transaction | `error.RolledBack` | 503 |
+| the connection went, or never came | `error.Disconnected` | 503 |
+| `25P02`, a statement in an aborted transaction | `error.QueryFailed`, with a line naming the earlier failure | 500 |
 
-`23503` is the one that matters: it is the only member of the class that is routinely a race rather than a bug, a delete guarded by a count is correct right up until somebody writes a child row between the two statements. No new default status: `AlreadyExists` is still the only row in `fail.statusFor`, and `ForeignKeyViolated` deliberately has none, it is a 409 for the delete above and a 400 for an insert naming a parent that was never there, and nothing in `http/` can tell those apart, which is why it is a name rather than a status. Both Wires answer the same word for the same failure: SQLite's extended result codes name all three natively, so `sqlite.zig` is a switch where `postgres.zig` is a SQLSTATE comparison, which is what lets a handler tested against SQLite branch on what Postgres will send it.
+`23503` is the one that matters in class 23: it is the only member that is routinely a race rather than a bug, a delete guarded by a count is correct right up until somebody writes a child row between the two statements. It deliberately has no default status: it is a 409 for the delete above and a 400 for an insert naming a parent that was never there, and nothing in `http/` can tell those apart, which is why it is a name rather than a status.
+
+**`RolledBack` is the one error in the set where the same code, run again, is correct.** A serialization failure under `.repeatable_read` or `.serializable` and a deadlock under any level both mean Postgres rolled the whole transaction back to keep the ones beside it consistent. Before it had a name they were `QueryFailed`, the word a typo gets, so a handler that asked for `.serializable`, which [ADR 048](./048-contention-is-what-a-transaction-is-for.md) offers and which costs retries by definition, had no way to write the retry. A plan a running migration has changed the answer of lands on the same name inside a transaction: the refusal aborted it, and the next attempt prepares the statement fresh ([ADR 051](./051-a-statement-that-is-a-constant-can-be-prepared-once.md)). `40003`, *statement completion unknown*, is left out on purpose: it is the one member of class 40 that must not be answered with a name that says nothing was kept.
+
+`AlreadyExists`, `RolledBack` and `Disconnected` have a status in `fail.statusFor` because each means the same thing whatever the request was: the client asked for something already there, or the database gave the work up, or the database was not there. The last two are a 503 because the request was sound and the same request sent again may go through. Both Wires answer the same word for the same failure: SQLite's extended result codes name the class-23 three natively, so `sqlite.zig` is a switch where `postgres.zig` is a SQLSTATE comparison, which is what lets a handler tested against SQLite branch on what Postgres will send it.
 
 ### The constraint: `sql.problem(c)`, threadlocal, cleared by every statement
 
@@ -76,6 +84,10 @@ It is not a field on the `Db`: a `Db` is one Service shared by every request in 
 
 **A second set of calls**, `db.insertWatching(…)`, for the same reason. A parallel API for one field.
 
+**`AlreadyExists` as the only error with a default status.** Held until a serialization failure, a deadlock and a database that was down all reached a client as 500, the status that says the server has a bug, when what was true was that it was busy or waiting on its database. A default is refused only where the request decides what the error means; for these two it does not.
+
+**`RolledBack` as a flag on `QueryFailed`, read off `sql.problem(c).code`.** It is the one failure a handler is expected to branch on in a loop, and a branch that has to compare `"40001"` and `"40P01"` by hand, on the Postgres Wire only, is the Go code this ADR opened with.
+
 **The Bulkhead's fiber slot**, what `fail.zig` already uses. It lives in `http/`, and `sql/` may not name `nilo_http` ([ADR 038](./038-a-module-sits-where-the-loop-puts-it.md)); reproducing it here would be a second fiber registry that has to agree with the first.
 
 ## What it costs
@@ -99,3 +111,5 @@ Stack, separately from the four axes: 104 bytes per statement call, `@sizeOf(?Pr
 - `sql.problem` is `db.lastProblem` under another name, because `problem` is what every statement in `db.zig` already calls the slot it hands the Wire.
 - `db.watching` is unchanged and is still how every statement gets logged; `sql.problem` answers a different question, and now both can be asked.
 - **A caller catching `error.ConstraintViolated` for a foreign key stops catching it**, since that failure now arrives as `error.ForeignKeyViolated`. The one breaking edge, carried in `CHANGELOG.md`.
+- **A caller catching `error.QueryFailed` for a serialization failure or a deadlock stops catching it**, since those now arrive as `error.RolledBack`; and a handler that let `Disconnected` or `RolledBack` escape answers 503 where it answered 500. Both in `CHANGELOG.md`.
+- The log line for a statement the server refused is `warn`, not `err`: it is a request failing, and `err` is the level that says the server is refusing to start.

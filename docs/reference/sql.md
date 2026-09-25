@@ -1045,15 +1045,16 @@ than the process.
 
 | | |
 |---|---|
-| `error.AlreadyExists` | a unique violation (`23505`). **409** by default — the only one with a default |
+| `error.AlreadyExists` | a unique violation (`23505`). **409** by default |
 | `error.ForeignKeyViolated` | `23503` — a row this statement names is not there, or a row it removes is still named by another. No default status: a 409 for a delete that lost a race, a 400 for an insert naming a parent that never existed |
 | `error.NotNullViolated` | `23502`. 500: a Row and a table that disagree |
 | `error.CheckViolated` | `23514` — a `CHECK` somebody wrote on purpose, so the endpoint that tripped it usually knows what it means |
 | `error.ConstraintViolated` | the rest of class 23 — an exclusion constraint, a `RESTRICT` |
-| `error.Disconnected` | the database went away, or was never there |
+| `error.Disconnected` | the database went away, or was never there. **503** by default |
+| `error.RolledBack` | the database rolled the whole transaction back: a serialization failure (`40001`) under `.repeatable_read` or `.serializable`, a deadlock (`40P01`), or a plan a running migration changed the answer of. Nothing in it was kept, and running the whole transaction again is the answer. **503** by default |
 | `error.TimedOut` | a statement ran past `tx.deadline`. No default status — what a deadline means is the handler's to decide |
 | `error.Locked` | a `.lock = .update_nowait` found a row somebody else is holding. No default status — a held row is a 409, a 503 or a retry depending on the endpoint |
-| `error.QueryFailed` | anything else. The server's own words are on `Sent.problem` for a watcher and in the log; they never reach the client ([ADR 117](../adr/117-a-statement-that-failed-says-what-the-database-said.md)) |
+| `error.QueryFailed` | anything else, including a statement or a `tx.commit()` on a transaction an earlier failed statement aborted, and an `update` or `delete` whose condition the values it was given emptied. The server's own words are on `Sent.problem` for a watcher and in the log; they never reach the client ([ADR 117](../adr/117-a-statement-that-failed-says-what-the-database-said.md)) |
 
 Both Wires answer the same word for the same failure. SQLite's extended result
 codes name the three above natively, which is what lets a handler tested against

@@ -24,10 +24,10 @@
 //! nothing is listening on. Somebody working on an endpoint that never
 //! touches Postgres does not need Postgres running. The first request that
 //! *does* touch it gets `error.Disconnected`, which reaches the client as a
-//! 500 like any other error a handler did not catch — `AlreadyExists` is
-//! the only one of the four given an answer of its own (ADR 036), because
-//! it is the only one whose meaning does not change with the request around
-//! it. A handler that wants a 503 here says so with a fail function.
+//! 503. It is one of three errors given an answer of their own (ADR 036),
+//! with `AlreadyExists` and `RolledBack`, because their meaning does not
+//! change with the request around them: a database that is not there is
+//! not the request's fault, whatever the request was.
 //!
 //! **A `Db` with a `checking` list dials one anyway** (ADR 115). A pool of
 //! nothing has nothing for the check to borrow, so on `.{}` the check
@@ -1716,6 +1716,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// Refusal rather than a statement nobody meant to send.
         pub fn update(self: *Self, comptime Row: type, c: anytype, options: anytype) !usize {
             comptime core.checkScope(@TypeOf(c), "db.update");
+            try narrowing(Row, "db.update", options);
             const stmt = comptime statement.update(D, Row, @TypeOf(options));
             return self.execTold(null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
         }
@@ -1734,6 +1735,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// single-row shape.
         pub fn updateReturning(self: *Self, comptime Row: type, c: anytype, options: anytype) ![]Row {
             comptime core.checkScope(@TypeOf(c), "db.updateReturning");
+            try narrowing(Row, "db.updateReturning", options);
             const stmt = comptime statement.updateReturning(D, Row, @TypeOf(options));
             return fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
         }
@@ -1764,6 +1766,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// than a promise about the statement.
         pub fn updateReturningOne(self: *Self, comptime Row: type, c: anytype, options: anytype) !?Row {
             comptime core.checkScope(@TypeOf(c), "db.updateReturningOne");
+            try narrowing(Row, "db.updateReturningOne", options);
             const stmt = comptime statement.updateReturning(D, Row, @TypeOf(options));
             const changed = try fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
             return if (changed.len == 0) null else changed[0];
@@ -1772,6 +1775,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// Delete every row matching `options`, and say how many there were.
         pub fn delete(self: *Self, comptime Row: type, c: anytype, options: anytype) !usize {
             comptime core.checkScope(@TypeOf(c), "db.delete");
+            try narrowing(Row, "db.delete", options);
             const stmt = comptime statement.delete(D, Row, @TypeOf(options));
             return self.execTold(null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
         }
@@ -1784,6 +1788,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// back then never existed.
         pub fn deleteReturning(self: *Self, comptime Row: type, c: anytype, options: anytype) ![]Row {
             comptime core.checkScope(@TypeOf(c), "db.deleteReturning");
+            try narrowing(Row, "db.deleteReturning", options);
             const stmt = comptime statement.deleteReturning(D, Row, @TypeOf(options));
             return fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
         }
@@ -2148,12 +2153,14 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
 
             pub fn update(self: *Tx, comptime Row: type, c: anytype, options: anytype) !usize {
                 comptime core.checkScope(@TypeOf(c), "tx.update");
+                try narrowing(Row, "tx.update", options);
                 const stmt = comptime statement.update(D, Row, @TypeOf(options));
                 return self.db.execTold(&self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
             }
 
             pub fn updateReturning(self: *Tx, comptime Row: type, c: anytype, options: anytype) ![]Row {
                 comptime core.checkScope(@TypeOf(c), "tx.updateReturning");
+                try narrowing(Row, "tx.updateReturning", options);
                 const stmt = comptime statement.updateReturning(D, Row, @TypeOf(options));
                 return fill(Row, stmt.reserve, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
             }
@@ -2161,6 +2168,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             /// `db.updateReturningOne` inside the transaction (ADR 146).
             pub fn updateReturningOne(self: *Tx, comptime Row: type, c: anytype, options: anytype) !?Row {
                 comptime core.checkScope(@TypeOf(c), "tx.updateReturningOne");
+                try narrowing(Row, "tx.updateReturningOne", options);
                 const stmt = comptime statement.updateReturning(D, Row, @TypeOf(options));
                 const changed = try fill(Row, stmt.reserve, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
                 return if (changed.len == 0) null else changed[0];
@@ -2168,12 +2176,14 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
 
             pub fn delete(self: *Tx, comptime Row: type, c: anytype, options: anytype) !usize {
                 comptime core.checkScope(@TypeOf(c), "tx.delete");
+                try narrowing(Row, "tx.delete", options);
                 const stmt = comptime statement.delete(D, Row, @TypeOf(options));
                 return self.db.execTold(&self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
             }
 
             pub fn deleteReturning(self: *Tx, comptime Row: type, c: anytype, options: anytype) ![]Row {
                 comptime core.checkScope(@TypeOf(c), "tx.deleteReturning");
+                try narrowing(Row, "tx.deleteReturning", options);
                 const stmt = comptime statement.deleteReturning(D, Row, @TypeOf(options));
                 return fill(Row, stmt.reserve, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
             }
@@ -3072,6 +3082,32 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 std.log.err("nilo_sql: {s}", .{writer.buffered()});
             }
             return problems.items.len;
+        }
+
+        /// Refuse an `UPDATE` or a `DELETE` whose condition, with the values
+        /// this call was handed, narrows nothing (`where.filtersNothing`).
+        ///
+        /// **The run-time half of `update_without_condition`.** That Refusal
+        /// catches the statement written with nothing in `.where`; this
+        /// catches the one written with a condition that the request emptied
+        /// — a `.not_in` list that arrived empty, a pattern built from empty
+        /// text — which reaches every row just the same. Nothing is sent:
+        /// the answer is `error.QueryFailed` and a line naming the call.
+        ///
+        /// Free on the path that did not ask for it: a condition with no list
+        /// and no pattern in it is `false` while compiling, and this is one
+        /// comparison per list or pattern otherwise.
+        fn narrowing(comptime Row: type, comptime call: []const u8, options: anytype) !void {
+            if (!where_mod.filtersNothing(options.where)) return;
+            std.log.warn(
+                "nilo_sql: `" ++ call ++ "` on {s} was refused before it was sent: with the " ++
+                    "values it was given, its `.where` narrows nothing, so it would have reached " ++
+                    "every row of the table. An empty `.not_in` list and a pattern built from " ++
+                    "empty text are the ways there. If every row is meant, `db.raw` says so " ++
+                    "where somebody reading the code can see it.",
+                .{@typeName(Row)},
+            );
+            return error.QueryFailed;
         }
 
         /// The values a statement needs, in placeholder order, as the tuple
@@ -4354,12 +4390,12 @@ test "a select before the pool exists fails as an error, not as a crash" {
     var client = try nilo.testing.Client.init(testing.allocator, .{});
     defer client.deinit();
 
-    // 500 rather than 503 on purpose: only `AlreadyExists` carries a
-    // default answer (ADR 036), so this arrives the way any uncaught
-    // handler error does. What is being pinned here is that a Db whose
-    // `nilo_start` never ran refuses in words instead of reading a null.
+    // A Db whose `nilo_start` never ran refuses in words instead of reading
+    // a null, and the words are `Disconnected`, which answers 503 by
+    // default (ADR 036): the request was fine and the database was not
+    // there.
     const answer = try client.get(&app, "/people");
-    try testing.expectEqual(@as(u16, 500), answer.status);
+    try testing.expectEqual(@as(u16, 503), answer.status);
 }
 
 test "the parameter tuple is built from the paths the statement worked out" {
@@ -7499,4 +7535,162 @@ test "a streamed Row with a parent borrows the parent's columns too" {
     }
     try testing.expectEqual(@as(usize, 5), seen);
     try testing.expectEqual(@as(usize, 2), missing);
+}
+
+// -- a transaction a failed statement aborted ------------------------------
+
+/// A SQLite Db with the accounts table and one row in it, id 1.
+fn abortedDb(threaded: *std.Io.Threaded, comptime name: []const u8, run: *nilo.Run) !SqliteDb {
+    var db: SqliteDb = .init(
+        testing.allocator,
+        "file:" ++ name ++ "?mode=memory&cache=shared",
+        .{ .size = 2, .unchecked = true },
+    );
+    errdefer db.deinit();
+    try db.nilo_start(threaded.io(), .none);
+    _ = try db.exec(run, accounts_ddl, .{});
+    _ = try db.insert(SqliteAccount, run, .{ .id = @as(i64, 1), .public = types.Uuid.nil, .email = "one@example.dev" });
+    return db;
+}
+
+test "on SQLite, a commit after a failed statement nobody undid rolls back, as it does on Postgres" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    var db = try abortedDb(&threaded, "aborted-commit", &run);
+    defer db.deinit();
+
+    {
+        var tx = try db.begin(&run, .{});
+        defer tx.deinit();
+        _ = try tx.insert(SqliteAccount, &run, .{ .id = @as(i64, 2), .public = types.Uuid.nil, .email = "two@example.dev" });
+        // Caught and carried on past, with no savepoint. SQLite would keep the
+        // transaction going and commit row 2; Postgres would have aborted it
+        // and kept nothing. The Wire holds SQLite to Postgres's answer, so a
+        // handler tested here finds out what it will find out there.
+        try testing.expectError(error.AlreadyExists, tx.insert(SqliteAccount, &run, .{
+            .id = @as(i64, 1),
+            .public = types.Uuid.nil,
+            .email = "clash@example.dev",
+        }));
+        try testing.expectError(error.QueryFailed, tx.commit());
+    }
+    try testing.expectEqual(@as(usize, 1), try db.count(SqliteAccount, &run, .{}));
+
+    // The writer went back usable, with no transaction left open on it.
+    var tx = try db.begin(&run, .{});
+    defer tx.deinit();
+    _ = try tx.insert(SqliteAccount, &run, .{ .id = @as(i64, 3), .public = types.Uuid.nil, .email = "three@example.dev" });
+    try tx.commit();
+    try testing.expectEqual(@as(usize, 2), try db.count(SqliteAccount, &run, .{}));
+}
+
+test "on SQLite, a statement after a failed one is refused until a savepoint is rolled back to" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    var db = try abortedDb(&threaded, "aborted-statement", &run);
+    defer db.deinit();
+
+    var tx = try db.begin(&run, .{});
+    defer tx.deinit();
+
+    var sp = try tx.savepoint();
+    defer sp.deinit();
+    try testing.expectError(error.AlreadyExists, tx.insert(SqliteAccount, &run, .{
+        .id = @as(i64, 1),
+        .public = types.Uuid.nil,
+        .email = "clash@example.dev",
+    }));
+    // Postgres answers `25P02` here; SQLite is held to the same.
+    try testing.expectError(error.QueryFailed, tx.count(SqliteAccount, &run, .{}));
+    try testing.expectError(error.QueryFailed, tx.savepoint());
+
+    // The one way on: undo to a mark put down before the failure.
+    sp.rollback();
+    _ = try tx.insert(SqliteAccount, &run, .{ .id = @as(i64, 2), .public = types.Uuid.nil, .email = "two@example.dev" });
+    try tx.commit();
+    try testing.expectEqual(@as(usize, 2), try db.count(SqliteAccount, &run, .{}));
+}
+
+test "on SQLite, a commit refused by a deferred foreign key leaves no transaction open on the writer" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    var db = try abortedDb(&threaded, "deferred-fk", &run);
+    defer db.deinit();
+
+    const Note = struct {
+        pub const nilo_table = .{ .name = "notes", .key = .id };
+        id: i64,
+        account: i64,
+    };
+    _ = try db.exec(&run,
+        \\CREATE TABLE notes (
+        \\  id      INTEGER PRIMARY KEY NOT NULL,
+        \\  account INTEGER NOT NULL REFERENCES accounts (id) DEFERRABLE INITIALLY DEFERRED
+        \\)
+    , .{});
+
+    {
+        var tx = try db.begin(&run, .{});
+        defer tx.deinit();
+        // Accepted now, checked at COMMIT: the account is not there.
+        _ = try tx.insert(Note, &run, .{ .id = @as(i64, 1), .account = @as(i64, 404) });
+        try testing.expectError(error.ForeignKeyViolated, tx.commit());
+    }
+
+    // SQLite leaves the transaction open when it refuses a COMMIT. Were the
+    // writer back in the pool with it, this BEGIN would fail — or worse, run
+    // inside it.
+    var tx = try db.begin(&run, .{});
+    defer tx.deinit();
+    _ = try tx.insert(Note, &run, .{ .id = @as(i64, 2), .account = @as(i64, 1) });
+    try tx.commit();
+    try testing.expectEqual(@as(usize, 1), try db.count(Note, &run, .{}));
+}
+
+test "an update or a delete whose condition the request emptied is refused before it is sent" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    var db = try abortedDb(&threaded, "emptied-condition", &run);
+    defer db.deinit();
+    _ = try db.insert(SqliteAccount, &run, .{ .id = @as(i64, 2), .public = types.Uuid.nil, .email = "two@example.dev" });
+
+    const none: []const i64 = &.{};
+    const blank: []const u8 = "";
+    try testing.expectError(error.QueryFailed, db.delete(SqliteAccount, &run, .{ .where = .{ .id = .{ .not_in = none } } }));
+    try testing.expectError(error.QueryFailed, db.deleteReturning(SqliteAccount, &run, .{ .where = .{ .email = .{ .istarts_with = blank } } }));
+    try testing.expectError(error.QueryFailed, db.update(SqliteAccount, &run, .{
+        .set = .{ .email = "all@example.dev" },
+        .where = .{ .any = .{ .{ .id = @as(i64, 1) }, .{ .email = .{ .iends_with = blank } } } },
+    }));
+    try testing.expectError(error.QueryFailed, db.updateReturningOne(SqliteAccount, &run, .{
+        .set = .{ .email = "all@example.dev" },
+        .where = .{ .email = .{ .icontains = blank } },
+    }));
+    {
+        var tx = try db.begin(&run, .{});
+        defer tx.deinit();
+        try testing.expectError(error.QueryFailed, tx.delete(SqliteAccount, &run, .{ .where = .{ .id = .{ .not_in = none } } }));
+    }
+    try testing.expectEqual(@as(usize, 2), try db.count(SqliteAccount, &run, .{}));
+
+    // Narrowed by something else, the empty list is an ordinary term.
+    try testing.expectEqual(@as(usize, 1), try db.delete(SqliteAccount, &run, .{
+        .where = .{ .email = "two@example.dev", .id = .{ .not_in = none } },
+    }));
+    // An empty `in` matches nothing, which narrows as far as it goes.
+    try testing.expectEqual(@as(usize, 0), try db.delete(SqliteAccount, &run, .{ .where = .{ .id = .{ .in = none } } }));
+    // `not_icontains ""` is true of no row, so it narrows too.
+    try testing.expectEqual(@as(usize, 0), try db.delete(SqliteAccount, &run, .{ .where = .{ .email = .{ .not_icontains = blank } } }));
+    // And a condition that binds nothing is a condition: `IS NULL` used to be
+    // refused as if the `.where` were empty, because it takes no parameter.
+    try testing.expectEqual(@as(usize, 0), try db.delete(SqliteAccount, &run, .{ .where = .{ .email = null } }));
+    try testing.expectEqual(@as(usize, 1), try db.count(SqliteAccount, &run, .{}));
 }

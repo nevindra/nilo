@@ -140,6 +140,33 @@ And one on the way in: `sql.given` handed something that is not an optional is
 refused, because a value that is always there is an ordinary condition and the
 guard around it would never be taken.
 
+## A condition a request emptied is refused at run time
+
+`sql.given` is refused in an `UPDATE` or a `DELETE` because what narrows one
+of those must not depend on a value that may not arrive. Two operators reach
+the same place by a value that does arrive. `.not_in` with an empty list is
+`"id" <> ALL('{}')`, true of every row, so "delete everything except these"
+empties the table the day the list is empty. A pattern built from empty text,
+`.contains = ""`, is `LIKE '%%'`, true of every row with the column. Neither
+can be seen while compiling.
+
+So `update`, `delete` and their returning forms ask `where.filtersNothing`
+before they send anything, and a condition that narrows nothing with the
+values it was given is refused as `error.QueryFailed` with a line naming the
+call. The terms of a struct are ANDed, so one term that narrows is enough to
+send it: `.{ .tenant_id = t, .id = .{ .not_in = keep } }` with `keep` empty is
+the tenant's rows, which is what it says. The alternatives of `.any` are ORed,
+so one alternative that narrows nothing is enough to refuse. An empty `.in`
+narrows to nothing and a negated pattern of empty text is true of no row, so
+neither is refused. The walk is unrolled while compiling, so a condition with
+no list and no pattern in it costs nothing. A read is not checked: an empty
+filter that returns every row is a slow page, not lost data.
+
+The compile-time half moved with it. The "no condition" Refusal used to count
+parameters, so `.where = .{ .deleted_at = null }`, which is `IS NULL` and binds
+nothing, was refused as though the `.where` were empty. It asks whether the
+condition wrote any SQL now.
+
 ## Against ADR 017's four axes
 
 - **Allocations per request: zero.** The wrapper is a struct holding an

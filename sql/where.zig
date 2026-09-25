@@ -432,6 +432,92 @@ pub fn comptimeOnly(comptime T: type) bool {
     };
 }
 
+/// Whether a condition, with the values it was handed at run time, narrows
+/// nothing: every row of the table passes it.
+///
+/// **An `UPDATE` or a `DELETE` whose condition narrows nothing is the one with
+/// no condition, reached by a value rather than by leaving the condition
+/// out.** The compiler refuses the second (`update_without_condition`); this
+/// is how `statement.zig`'s callers refuse the first, because
+/// `.id = .{ .not_in = keep }` with `keep` empty is `"id" <> ALL('{}')`, true
+/// of every row, and a delete written to keep a list of rows empties the table
+/// the day the list arrives empty. A pattern built from empty text is the
+/// other way there: `.contains = ""` is `LIKE '%%'`, and matches every row
+/// that has the column at all.
+///
+/// Read structurally, the way the walk writes the SQL: the terms of a
+/// struct are ANDed, so it narrows nothing only when none of them does; the
+/// alternatives of `.any` are ORed, so one that narrows nothing is enough.
+/// Everything that is not a list or a pattern answers *narrows*, including a
+/// parent's conditions and an `.exists`, which is the direction to be wrong
+/// in. Unrolled while compiling, so a condition with no list and no pattern
+/// in it compiles to `return false`.
+pub fn filtersNothing(where: anytype) bool {
+    const W = @TypeOf(where);
+    const info = switch (@typeInfo(W)) {
+        .@"struct" => |s| s,
+        else => return false,
+    };
+    if (info.fields.len == 0) return true;
+    inline for (info.fields) |f| {
+        if (!termFiltersNothing(f.name, @field(where, f.name))) return false;
+    }
+    return true;
+}
+
+fn termFiltersNothing(comptime name: []const u8, value: anytype) bool {
+    const T = @TypeOf(value);
+    if (comptime std.mem.eql(u8, name, any_field)) {
+        inline for (@typeInfo(T).@"struct".fields) |alt| {
+            if (filtersNothing(@field(value, alt.name))) return true;
+        }
+        return false;
+    }
+    if (comptime std.mem.eql(u8, name, across_field)) {
+        const info = @typeInfo(T).@"struct";
+        if (!info.is_tuple) return entryFiltersNothing(value);
+        inline for (info.fields) |entry| {
+            if (!entryFiltersNothing(@field(value, entry.name))) return false;
+        }
+        return true;
+    }
+    if (comptime std.mem.eql(u8, name, exists_field) or std.mem.eql(u8, name, not_exists_field))
+        return false;
+    if (comptime operatorsOf(T) == null) return false;
+    return entryFiltersNothing(value);
+}
+
+/// A column's operators, or an `.across` entry's: ANDed, so the set narrows
+/// nothing only when every operator in it narrows nothing.
+fn entryFiltersNothing(ops: anytype) bool {
+    inline for (@typeInfo(@TypeOf(ops)).@"struct".fields) |f| {
+        if (comptime std.mem.eql(u8, f.name, across_columns)) continue;
+        if (!opFiltersNothing(f.name, @field(ops, f.name))) return false;
+    }
+    return true;
+}
+
+fn opFiltersNothing(comptime name: []const u8, value: anytype) bool {
+    if (comptime listSpelling(name)) |op| {
+        // An empty `in` matches no row, which narrows as far as it goes.
+        if (op == .in) return false;
+        return value.len == 0;
+    }
+    if (comptime patternSpelling(name)) |pattern| {
+        // `not_contains ""` is `NOT LIKE '%%'`, true of no row.
+        if (pattern.negate) return false;
+        return textLen(value) == 0;
+    }
+    return false;
+}
+
+fn textLen(value: anytype) usize {
+    const T = @TypeOf(value);
+    if (T == core.Str) return value.len();
+    if (comptime !isText(T)) return 1;
+    return value.len;
+}
+
 /// The type at the end of a path. Public because the parameter tuple a
 /// statement is run with is built out of these, one per placeholder, and
 /// that tuple's type has to exist before any of it is read (`db.zig`).
@@ -1684,12 +1770,13 @@ fn operator(
                     "for `sql.given` to drop.\n" ++
                     "  Write `." ++ column ++ " = .{ ." ++ op.name ++ " = maybe }`.",
             );
-            if (listSpelling(op.name) != null) @compileError(
+            if (listSpelling(op.name)) |list_op| @compileError(
                 "nilo: the condition on `" ++ column ++ "` (as `" ++ op.name ++
                     "`) was given a `sql.given`.\n" ++
                     "  `" ++ op.name ++ "` takes a list, and a list that may be absent is " ++
-                    "the empty list — which `" ++ op.name ++ "` already reads as *no row " ++
-                    "matches*.\n" ++
+                    "the empty list — which `" ++ op.name ++ "` already reads as " ++
+                    (if (list_op == .in) "*no row matches*" else "*every row matches*") ++
+                    ".\n" ++
                     "  Pass an empty slice, or branch.",
             );
             const n = state.next;
@@ -2591,4 +2678,42 @@ test "the whole of the reporting product's list endpoint is one statement" {
             " AND \"partner_capabilities\".\"capability\" = $2) OR $2 IS NULL)",
         p.sql,
     );
+}
+
+test "a condition narrows nothing only when every term it ANDs narrows nothing" {
+    const none: []const i64 = &.{};
+    const some: []const i64 = &.{ 1, 2 };
+    const blank: []const u8 = "";
+    const text: []const u8 = "ada";
+
+    // The two ways a request empties a term.
+    try testing.expect(filtersNothing(.{ .id = .{ .not_in = none } }));
+    try testing.expect(filtersNothing(.{ .name = .{ .icontains = blank } }));
+    try testing.expect(filtersNothing(.{ .name = .{ .starts_with = core.Str.static(blank) } }));
+
+    // And the terms that narrow whatever they are handed.
+    try testing.expect(!filtersNothing(.{ .id = .{ .not_in = some } }));
+    try testing.expect(!filtersNothing(.{ .id = .{ .in = none } }));
+    try testing.expect(!filtersNothing(.{ .name = .{ .not_icontains = blank } }));
+    try testing.expect(!filtersNothing(.{ .name = .{ .icontains = text } }));
+    try testing.expect(!filtersNothing(.{ .id = @as(i64, 7) }));
+    try testing.expect(!filtersNothing(.{ .deleted_at = null }));
+    try testing.expect(!filtersNothing(.{ .id = .{ .gt = 3 } }));
+
+    // AND: one term that narrows is enough to narrow.
+    try testing.expect(!filtersNothing(.{ .tenant = @as(i64, 1), .id = .{ .not_in = none } }));
+    // A column's own operators are ANDed the same way.
+    try testing.expect(!filtersNothing(.{ .id = .{ .not_in = none, .lt = 10 } }));
+    try testing.expect(filtersNothing(.{ .id = .{ .not_in = none }, .name = .{ .icontains = blank } }));
+
+    // OR: one alternative that narrows nothing is enough to narrow nothing.
+    try testing.expect(filtersNothing(.{ .any = .{ .{ .id = @as(i64, 1) }, .{ .id = .{ .not_in = none } } } }));
+    try testing.expect(!filtersNothing(.{ .any = .{ .{ .id = @as(i64, 1) }, .{ .id = .{ .not_in = some } } } }));
+
+    // `.across` is its operators, once per column, ORed across the columns.
+    try testing.expect(filtersNothing(.{ .across = .{ .columns = .{ .code, .name }, .icontains = blank } }));
+    try testing.expect(!filtersNothing(.{ .across = .{ .columns = .{ .code, .name }, .icontains = text } }));
+
+    // An `.exists` is judged to narrow, which is the direction to be wrong in.
+    try testing.expect(!filtersNothing(.{ .exists = .{ .on = .owner, .where = .{ .id = .{ .not_in = none } } } }));
 }

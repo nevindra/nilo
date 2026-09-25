@@ -249,6 +249,25 @@ pub fn Wire(comptime opts_in: Options) type {
             /// own `timeout_ms` already says how long it has been held at
             /// least.
             holder: []const u8 = "",
+            /// Whether a statement failed inside the transaction this
+            /// connection is holding, since its `BEGIN` or its last
+            /// `ROLLBACK TO SAVEPOINT`.
+            ///
+            /// **SQLite keeps a transaction going after a failed statement,
+            /// and Postgres does not, so the Wire holds SQLite to Postgres's
+            /// rule.** Left alone, a handler that caught `AlreadyExists`
+            /// without a savepoint and went on to commit would keep the rest
+            /// of its work here and lose all of it on Postgres, where the
+            /// failure aborted the transaction — and the test run against
+            /// this file would be the one telling it the code was right. Held
+            /// here, the statements after the failure are refused and the
+            /// commit rolls back, on both Wires, until a savepoint is rolled
+            /// back to.
+            ///
+            /// On the connection rather than the `Tx` because a failure can
+            /// arrive in `next`, stepping a result set that knows its
+            /// connection and not the transaction it belongs to.
+            aborted: bool = false,
 
             fn deinit(self: *Conn, gpa: std.mem.Allocator) void {
                 var it = self.kept.valueIterator();
@@ -308,8 +327,10 @@ pub fn Wire(comptime opts_in: Options) type {
                 problem: ?*?wire.Problem,
             ) wire.Error!Rows {
                 if (self.done) return error.QueryFailed;
+                try self.live();
                 const stmt, const kept = self.wire.stmtOn(self.at, sql, plan, values) catch |err| {
                     self.wire.said(self.at, err, arena, problem);
+                    self.wire.conns[self.at].aborted = true;
                     return err;
                 };
                 return .{
@@ -330,10 +351,20 @@ pub fn Wire(comptime opts_in: Options) type {
                 problem: ?*?wire.Problem,
             ) wire.Error!usize {
                 if (self.done) return error.QueryFailed;
+                try self.live();
                 return self.wire.execOn(self.at, sql, plan, values) catch |err| {
                     self.wire.said(self.at, err, arena, problem);
+                    self.wire.conns[self.at].aborted = true;
                     return err;
                 };
+            }
+
+            /// Refuse a statement on a transaction a failed one has aborted,
+            /// the way Postgres answers `25P02` (`Conn.aborted`).
+            fn live(self: *Tx) wire.Error!void {
+                if (!self.wire.conns[self.at].aborted) return;
+                std.log.warn("{s}", .{wire.aborted_statement});
+                return error.QueryFailed;
             }
 
             /// **Refused, and the dialect is named.**
@@ -374,6 +405,9 @@ pub fn Wire(comptime opts_in: Options) type {
             ) wire.Error!void {
                 _ = arena;
                 if (self.done) return error.QueryFailed;
+                // Undoing is the one statement an aborted transaction takes,
+                // and once it lands the transaction is live again.
+                if (op != .undo) try self.live();
 
                 const verb = switch (op) {
                     .mark => "SAVEPOINT ",
@@ -384,15 +418,33 @@ pub fn Wire(comptime opts_in: Options) type {
                 const sql = std.fmt.bufPrintZ(&buf, verb ++ name_prefix ++ "{d}", .{id}) catch
                     unreachable;
                 try self.wire.command(self.at, sql);
+                if (op == .undo) self.wire.conns[self.at].aborted = false;
             }
 
             const name_prefix = "nilo_sp_";
 
             pub fn commit(self: *Tx) wire.Error!void {
                 if (self.done) return;
+                // Rolled back rather than committed: Postgres would have kept
+                // none of it, and a handler tested here has to hear what it
+                // will hear there (`Conn.aborted`).
+                if (self.wire.conns[self.at].aborted) {
+                    self.rollback();
+                    std.log.warn("{s}", .{wire.aborted_commit});
+                    return error.QueryFailed;
+                }
                 self.done = true;
                 defer self.wire.release(self.at);
-                try self.wire.command(self.at, "COMMIT");
+                self.wire.command(self.at, "COMMIT") catch |err| {
+                    // **A COMMIT SQLite refused leaves the transaction open**
+                    // — a deferred foreign key that is still broken, a
+                    // `BUSY` on the WAL — and the writer was about to go back
+                    // to the pool with it, for the next request to run inside
+                    // somebody else's transaction. Rolled back first; one
+                    // that is no longer open refuses the ROLLBACK harmlessly.
+                    self.wire.command(self.at, "ROLLBACK") catch {};
+                    return err;
+                };
             }
 
             /// Cannot fail, because it is called from a `defer` on the way out
@@ -400,6 +452,7 @@ pub fn Wire(comptime opts_in: Options) type {
             pub fn rollback(self: *Tx) void {
                 if (self.done) return;
                 self.done = true;
+                self.wire.conns[self.at].aborted = false;
                 defer self.wire.release(self.at);
                 self.wire.command(self.at, "ROLLBACK") catch |err| {
                     std.log.err(
@@ -828,8 +881,14 @@ pub fn Wire(comptime opts_in: Options) type {
 
         pub fn next(self: *Self, rows: *Rows) wire.Error!bool {
             const stmt = rows.stmt;
-            return onThread(zqlite.Stmt.step, .{stmt}) catch |err|
-                translate(self.conns[rows.at].handle, err);
+            return onThread(zqlite.Stmt.step, .{stmt}) catch |err| {
+                // Stepping is where most of SQLite's failures arrive — an
+                // `INSERT … RETURNING` meets its constraint here, not when it
+                // is prepared — so a result set borrowed from a transaction
+                // marks it aborted from here (`Conn.aborted`).
+                if (!rows.owns_conn) self.conns[rows.at].aborted = true;
+                return translate(self.conns[rows.at].handle, err);
+            };
         }
 
         /// How many columns the row `next` just stopped on has.
@@ -972,6 +1031,7 @@ pub fn Wire(comptime opts_in: Options) type {
             const at = if (opts_.read_only) try self.takeReader(begin_text) else try self.takeWriter(begin_text);
             errdefer self.release(at);
             try self.command(at, if (opts_.read_only) "BEGIN" else "BEGIN IMMEDIATE");
+            self.conns[at].aborted = false;
             return .{ .wire = self, .at = at };
         }
 
@@ -1201,7 +1261,7 @@ fn translate(conn: zqlite.Conn, err: anyerror) wire.Error {
         // when it was routed to a reader, and the log line is the only place
         // that says so.
         error.ReadOnly => {
-            std.log.err(
+            std.log.warn(
                 "nilo_sql: a statement tried to write down a read-only connection. " ++
                     "`db.raw` is routed by its first keyword, so a write that does not " ++
                     "begin with a write verb lands on a reader: {s}",
@@ -1214,7 +1274,7 @@ fn translate(conn: zqlite.Conn, err: anyerror) wire.Error {
         else => {
             // The text never reaches the client (ADR 024); it goes here,
             // where whoever reads the log is the person who can fix it.
-            std.log.err("nilo_sql: {s} [{s}]", .{ conn.lastError(), @errorName(err) });
+            std.log.warn("nilo_sql: {s} [{s}]", .{ conn.lastError(), @errorName(err) });
             return error.QueryFailed;
         },
     };

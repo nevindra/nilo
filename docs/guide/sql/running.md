@@ -240,7 +240,7 @@ unique violation is `error.AlreadyExists` and a 409.
 
 ## Errors
 
-The module raises nine, and they read:
+The module raises ten, and they read:
 
 | | |
 |---|---|
@@ -250,15 +250,19 @@ The module raises nine, and they read:
 | `error.CheckViolated` | a `CHECK` said no |
 | `error.ConstraintViolated` | whatever is left — an exclusion constraint, a `RESTRICT` |
 | `error.Locked` | a `.lock = .update_nowait` found a row somebody else holds. No default |
-| `error.Disconnected` | the database went away, or was never there |
+| `error.Disconnected` | the database went away, or was never there — **503** by default |
+| `error.RolledBack` | the database rolled the transaction back — a serialization failure, a deadlock. Run it again ([Transactions](./transactions.md#when-the-database-rolls-it-back-for-you)) — **503** by default |
 | `error.TimedOut` | a statement ran past the `tx.deadline` you set |
 | `error.QueryFailed` | anything else. The server's text is logged, never sent |
 
-Only the first has a default answer, and that is on purpose. A duplicate
-email on a signup is a 409; the same code inside a background import is not
-an HTTP answer at all; on a table used to win a race it is the expected
-outcome. The module does not know which request it is inside, so it hands you
-an error that reads and lets you decide:
+Three have a default answer, and each one means the same thing whatever the
+request was. A duplicate is a conflict. A database that is not there, or
+that rolled the work back, is a 503, and the client may send the request
+again. The rest have no default, on purpose. A check that failed is a 422
+for one endpoint and a 500 for another, and the module does not know which
+request it is inside. So it hands you an error you can read and lets you
+decide. A default is only a default, too. Catch the error before it leaves
+the handler and the answer is yours:
 
 <!-- compiles: body -->
 ```zig

@@ -77,6 +77,27 @@ Types are not checked here: a comptime pass has no schema, so `SELECT id, email`
 
 **The break is deliberate and total.** A program that built SQL text at run time cannot call `db.raw` any more, and there is no second call with the old signature kept around: that would have left the unchecked path exactly where it was, under a name suggesting it is merely the one to reach for less often. What a caller who assembled text at run time does instead is assemble it at comptime, a `switch` over an enum of the orderings the application actually supports, a shape that also stops the injection nobody meant to allow.
 
+### A plan a migration made stale is prepared again
+
+A plan kept on a connection outlives the table it was prepared against. A
+migration that changes a column's type under a running server leaves every
+connection holding a plan Postgres now refuses with `0A000`, *cached plan
+must not change result type*, and before this each of them failed the
+statement that owned it on every use, until the pool happened to replace the
+connection. That is the middle of every rolling deploy.
+
+Outside a transaction nothing ran before the statement, so the Wire
+deallocates the plan and sends the statement once more, and the caller sees
+the rows. Once, and only on that refusal, read by its code and its message,
+because `0A000` is *feature_not_supported* and most of it has nothing to do
+with a plan. Inside a transaction the refusal has already aborted it, so the
+answer is `error.RolledBack`, whose meaning is *run the transaction again*
+([ADR 117](./117-a-statement-that-failed-says-what-the-database-said.md)),
+and the plan is deallocated once the rollback lets the connection take a
+statement. A connection that cannot deallocate it is dropped rather than
+returned, because the next prepare under the same name would collide with it.
+Nothing is paid on a statement that works: the check is on the failure path.
+
 ### Why there is an off switch
 
 A connection pooler in transaction mode: pgbouncer hands out a different server connection per transaction, so a statement prepared on one is missing on the next. `Opts.prepared = false` is the escape hatch, and it exists because that deployment is common rather than exotic. The failure it avoids is loud, Postgres says the prepared statement does not exist, which is why the default is the fast one; a silent failure mode would have argued the other way. `db.raw` under `.prepared = false` is covered by the same option.

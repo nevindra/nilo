@@ -26,12 +26,20 @@
 //! one. Both are held by `Rows.close`, which every path out of a query
 //! runs.
 //!
+//! **A prepared statement can outlive the table it was prepared against.**
+//! Every statement with a plan name is prepared once per connection and kept
+//! (ADR 051), so a migration that changes a column's type under a running
+//! server leaves each connection holding a plan Postgres now refuses with
+//! `0A000`, *cached plan must not change result type*. Outside a transaction
+//! the statement is deallocated and sent once more; inside one the
+//! transaction is already aborted, so it answers `error.RolledBack` and the
+//! plan is deallocated when the transaction ends (`stalePlan`).
+//!
 //! ## What is deliberately not here
 //!
-//! `LISTEN`/`NOTIFY`, `COPY`, and prepared-statement caching. The first two
-//! are outside this module's scope and reached by naming pg.zig directly,
-//! which `wire.zig` says is allowed and is why this seam is not called a
-//! Bulkhead. The third is a measurement nobody has taken yet.
+//! `LISTEN`/`NOTIFY` and `COPY`. Both are outside this module's scope and
+//! reached by naming pg.zig directly, which `wire.zig` says is allowed and is
+//! why this seam is not called a Bulkhead.
 
 const std = @import("std");
 const pg = @import("pg");
@@ -101,6 +109,25 @@ pub const Wire = struct {
         /// Set by whichever of `commit`/`rollback` got there first, so the
         /// second one does nothing and the connection is released once.
         done: bool = false,
+        /// Whether a statement failed at the server since `BEGIN` or since
+        /// the last `ROLLBACK TO SAVEPOINT`, which is exactly when Postgres
+        /// holds the transaction aborted. Read off the connection by `fresh`
+        /// before it forgets the error, because pg.zig's `.fail` is also what
+        /// a dead socket leaves and only a server that answered can be told
+        /// to roll back.
+        ///
+        /// **What `commit` asks before it sends anything.** A `COMMIT` on an
+        /// aborted transaction is answered with the command tag `ROLLBACK`
+        /// and no error, and pg.zig does not read the tag — so a handler that
+        /// caught a statement's error without a savepoint and went on to
+        /// commit was told the commit worked, answered 200, and kept none of
+        /// it.
+        aborted: bool = false,
+        /// A plan this transaction found Postgres no longer honours
+        /// (`stalePlan`), deallocated once the rollback has let the
+        /// connection take a statement again. A comptime plan name, so
+        /// holding the slice costs nothing.
+        stale: ?[]const u8 = null,
 
         /// Forget the last statement's server error before running the next.
         ///
@@ -118,7 +145,12 @@ pub const Wire = struct {
         /// (`BrokenPipe`, `ConnectionResetByPeer`); anything else would still
         /// read the stale code. This is the whole of what is wrong: the field
         /// is about a statement, so it is emptied when a statement starts.
+        ///
+        /// What the error said about the transaction is kept before the error
+        /// goes: a server that answered and left pg.zig in `.fail` has
+        /// aborted the transaction (`aborted`).
         fn fresh(self: *Tx) void {
+            if (self.conn.err != null and self.conn._state == .fail) self.aborted = true;
             self.conn.err = null;
         }
 
@@ -137,19 +169,35 @@ pub const Wire = struct {
         /// price of TCP, TLS and auth, on a path nothing was measuring.
         ///
         /// The two cases are told apart by whether the server answered:
-        /// `conn.err` is set only by an ErrorResponse, and `fresh` empties it
-        /// at the start of every statement — so a set `err` here means *this*
+        /// `conn.err` is set only by an ErrorResponse, and `fresh` turns that
+        /// into `aborted` before emptying it — so `aborted` here means a
         /// statement got a reply and the socket is alive. A transport failure
-        /// leaves it null and this does nothing, which is the case where
+        /// leaves it false and this does nothing, which is the case where
         /// destroying the connection is right.
         ///
+        /// **Every statement goes through here, not only the undo.** A
+        /// statement sent into an aborted transaction used to be refused by
+        /// pg.zig before it left the process, as `ConnectionBusy`, which this
+        /// file reports as `Disconnected` and which destroyed the connection.
+        /// Revived, it reaches the server and is answered `25P02` — *current
+        /// transaction is aborted* — which is the truth, costs no reconnect,
+        /// and is the answer the guide has always said a caller gets.
+        ///
         /// Delete this when pg.zig tells an aborted transaction apart from a
-        /// broken connection. It is the only place in nilo that reads
+        /// broken connection. It is the only place in nilo that writes
         /// `_state`, and `postgres.zig` is the one file allowed to (ADR 036).
         fn revive(self: *Tx) void {
-            if (self.conn.err == null) return;
+            if (!self.aborted) return;
             if (self.conn._state != .fail) return;
             self.conn._state = .transaction;
+        }
+
+        /// `fresh` then `revive`, which every statement on a transaction
+        /// starts with, in that order: the first reads what the last
+        /// statement left, and the second acts on it.
+        fn settle(self: *Tx) void {
+            self.fresh();
+            self.revive();
         }
 
         pub fn run(
@@ -161,16 +209,25 @@ pub const Wire = struct {
             problem: ?*?wire.Problem,
         ) wire.Error!Rows {
             if (self.done) return error.QueryFailed;
-            self.fresh();
+            self.settle();
             const w = self.wire.limits.waiting();
             errdefer self.wire.limits.waited(w);
             const result = self.conn.queryOpts(sql, opened(values), .{
                 .allocator = arena,
                 .cache_name = plan,
             }) catch |err| {
+                self.noteStale(plan);
                 return reported(self.wire.io, self.conn, err, arena, problem);
             };
             return .{ .conn = self.conn, .result = result, .owns_conn = false, .io = self.wire.io, .limits = self.wire.limits, .wait = w };
+        }
+
+        /// Remember a plan Postgres refused as stale, for `rollback` to
+        /// deallocate. It cannot be done here: the refusal aborted the
+        /// transaction, and an aborted transaction takes no `DEALLOCATE`.
+        fn noteStale(self: *Tx, plan: ?[]const u8) void {
+            const name = plan orelse return;
+            if (stalePlan(self.conn)) self.stale = name;
         }
 
         pub fn exec(
@@ -182,13 +239,14 @@ pub const Wire = struct {
             problem: ?*?wire.Problem,
         ) wire.Error!usize {
             if (self.done) return error.QueryFailed;
-            self.fresh();
+            self.settle();
             const w = self.wire.limits.waiting();
             defer self.wire.limits.waited(w);
             const count = self.conn.execOpts(sql, opened(values), .{
                 .allocator = arena,
                 .cache_name = plan,
             }) catch |err| {
+                self.noteStale(plan);
                 return reported(self.wire.io, self.conn, err, arena, problem);
             };
             return @intCast(count orelse 0);
@@ -207,7 +265,7 @@ pub const Wire = struct {
         /// on offer.
         pub fn deadline(self: *Tx, ms: u32) wire.Error!void {
             if (self.done) return error.QueryFailed;
-            self.fresh();
+            self.settle();
             var buf: [48]u8 = undefined;
             // `SET LOCAL statement_timeout = N` counts milliseconds, which is
             // the unit the argument is named for.
@@ -227,11 +285,10 @@ pub const Wire = struct {
         /// placeholders. So the alternative to printing it here is not a
         /// constant, it is not having savepoints.
         ///
-        /// `revive` before the undo, and only before the undo. Rolling back
-        /// to a savepoint is the one thing a caller does *because* the last
-        /// statement failed, so it is the path that finds the connection in
-        /// pg.zig's `.fail` — the same state `commit` and `rollback` have to
-        /// let it out of, and for the same reason.
+        /// Rolling back to a savepoint is the one thing a caller does
+        /// *because* the last statement failed, and it is the one statement
+        /// an aborted transaction takes: once it succeeds the transaction is
+        /// live again, so `aborted` is cleared.
         pub fn savepoint(
             self: *Tx,
             arena: std.mem.Allocator,
@@ -240,8 +297,10 @@ pub const Wire = struct {
         ) wire.Error!void {
             _ = arena;
             if (self.done) return error.QueryFailed;
-            if (op == .undo) self.revive();
-            self.fresh();
+            self.settle();
+            defer if (op == .undo and self.conn._state == .transaction) {
+                self.aborted = false;
+            };
 
             const verb = switch (op) {
                 .mark => "SAVEPOINT ",
@@ -263,16 +322,33 @@ pub const Wire = struct {
 
         pub fn commit(self: *Tx) wire.Error!void {
             if (self.done) return;
-            self.done = true;
-            // Before `fresh`, which is what the discrimination depends on.
-            // A COMMIT on an aborted transaction is a ROLLBACK as far as
-            // Postgres is concerned, and reaching the server to be told so
-            // beats destroying the connection to avoid asking.
-            self.revive();
             self.fresh();
+            // **An aborted transaction is rolled back and the commit fails.**
+            // Sent, the COMMIT would come back tagged `ROLLBACK` with no
+            // error, and the caller would be told that work it lost was kept
+            // (`aborted`).
+            if (self.aborted) {
+                // A ROLLBACK that could not be sent means the socket is gone
+                // as well, and that is the nearer truth: the server rolls the
+                // transaction back when the connection drops.
+                if (self.undo()) |_| return error.Disconnected;
+                std.log.warn("{s}", .{wire.aborted_commit});
+                return error.QueryFailed;
+            }
+            self.done = true;
             defer giveBack(self.wire.io, self.conn);
             const w = self.wire.limits.waiting();
             defer self.wire.limits.waited(w);
+            // **Held off from cancellation, the way a rollback is** (ADR 223).
+            // A COMMIT cut off after it was written and before its answer was
+            // read leaves nobody knowing whether the transaction landed: the
+            // server may have committed it, and the caller hears
+            // `QueryFailed`. Held off, it runs to its answer, and a
+            // cancellation that arrived meanwhile is put back for the
+            // caller's next cancellation point.
+            if (std.Io.checkCancel(self.wire.io)) |_| {} else |_| self.wire.io.recancel();
+            const was = self.wire.io.swapCancelProtection(.blocked);
+            defer _ = self.wire.io.swapCancelProtection(was);
             _ = self.conn.exec("COMMIT", .{}) catch |err| return translate(self.wire.io, self.conn, err);
         }
 
@@ -282,11 +358,24 @@ pub const Wire = struct {
         /// for, so that connection is destroyed rather than returned —
         /// which is what `release` does with one that is not idle.
         pub fn rollback(self: *Tx) void {
-            if (self.done) return;
+            const err = self.undo() orelse return;
+            std.log.err(
+                "nilo_sql: a transaction could not be rolled back ({s}). The connection " ++
+                    "is being dropped rather than returned to the pool.",
+                .{@errorName(err)},
+            );
+        }
+
+        /// The ROLLBACK, and the connection given back: what the ROLLBACK
+        /// failed with, or null when it landed — or when a cancellation is
+        /// what cut it off, which is a shutdown rather than a failure.
+        /// `commit` reads the answer; `rollback` can only log it.
+        fn undo(self: *Tx) ?anyerror {
+            if (self.done) return null;
             self.done = true;
             // The path this is here for: a statement failed, which is the
             // usual reason anybody rolls back at all.
-            self.revive();
+            self.settle();
             defer giveBack(self.wire.io, self.conn);
             const w = self.wire.limits.waiting();
             defer self.wire.limits.waited(w);
@@ -306,13 +395,17 @@ pub const Wire = struct {
                 // mid-answer, so the ROLLBACK cannot be sent at all. The
                 // connection is dropped either way, and the server rolls
                 // back when it goes: that is a shutdown, not a failure.
-                if (cancelled) return;
-                std.log.err(
-                    "nilo_sql: a transaction could not be rolled back ({s}). The connection " ++
-                        "is being dropped rather than returned to the pool.",
-                    .{@errorName(err)},
-                );
+                if (cancelled) return null;
+                return err;
             };
+            // The plan a stale refusal left behind, now that the connection
+            // takes statements again. One that cannot be deallocated would
+            // collide with its own name when it is prepared again, so the
+            // connection is marked for `release` to drop instead.
+            if (self.stale) |name| self.conn.deallocate(name) catch {
+                self.conn._state = .fail;
+            };
+            return null;
         }
     };
 
@@ -674,11 +767,11 @@ pub const Wire = struct {
         var conn = self.pool.acquire() catch |err| return acquireFailed(self.io, err);
         errdefer giveBack(self.io, conn);
 
-        const result = conn.queryOpts(sql, opened(values), .{
-            .allocator = arena,
-            .cache_name = plan,
-        }) catch |err| {
-            return reported(self.io, conn, err, arena, problem);
+        const opts: pg.Conn.QueryOpts = .{ .allocator = arena, .cache_name = plan };
+        const result = conn.queryOpts(sql, opened(values), opts) catch |err| retry: {
+            if (!replanned(conn, plan)) return reported(self.io, conn, err, arena, problem);
+            break :retry conn.queryOpts(sql, opened(values), opts) catch |again|
+                return reported(self.io, conn, again, arena, problem);
         };
         return .{ .conn = conn, .result = result, .io = self.io, .limits = self.limits, .wait = w };
     }
@@ -861,11 +954,11 @@ pub const Wire = struct {
         defer self.limits.waited(w);
         var conn = self.pool.acquire() catch |err| return acquireFailed(self.io, err);
         defer giveBack(self.io, conn);
-        const count = conn.execOpts(sql, opened(values), .{
-            .allocator = arena,
-            .cache_name = plan,
-        }) catch |err| {
-            return reported(self.io, conn, err, arena, problem);
+        const opts: pg.Conn.QueryOpts = .{ .allocator = arena, .cache_name = plan };
+        const count = conn.execOpts(sql, opened(values), opts) catch |err| retry: {
+            if (!replanned(conn, plan)) return reported(self.io, conn, err, arena, problem);
+            break :retry conn.execOpts(sql, opened(values), opts) catch |again|
+                return reported(self.io, conn, again, arena, problem);
         };
         return @intCast(count orelse 0);
     }
@@ -1019,6 +1112,38 @@ fn acquireFailed(io: std.Io, err: anyerror) wire.Error {
     return error.Disconnected;
 }
 
+/// Whether the statement that just failed was refused because the plan kept
+/// for it on this connection no longer describes what it answers.
+///
+/// Postgres keeps a prepared statement's result type and refuses to run it
+/// once a change to a table would alter that type — a migration's
+/// `ALTER COLUMN … TYPE` under a server still running the old binary is the
+/// ordinary way there. The code alone is not enough: `0A000` is
+/// *feature_not_supported*, and most of what it covers has nothing to do with
+/// a plan, so the message is read too.
+fn stalePlan(conn: *const pg.Conn) bool {
+    const server = conn.err orelse return false;
+    return std.mem.eql(u8, server.code, "0A000") and
+        std.mem.startsWith(u8, server.message, "cached plan must not change result type");
+}
+
+/// Drop a stale plan so the statement can be sent again, outside a
+/// transaction, where nothing was done before it and it may simply run once
+/// more. True when the statement is worth retrying.
+///
+/// **Once, and only on this refusal.** Every connection in the pool holds its
+/// own copy of the plan, so each finds out on its next use of it; a retry
+/// costs that one statement a `DEALLOCATE` and a fresh prepare, which is what
+/// the first use of the plan cost anyway. Anything else is answered as it
+/// was, and a second refusal of the retry is reported rather than retried.
+fn replanned(conn: *pg.Conn, plan: ?[]const u8) bool {
+    const name = plan orelse return false;
+    if (!stalePlan(conn)) return false;
+    conn.deallocate(name) catch return false;
+    conn.err = null;
+    return true;
+}
+
 fn translate(io: std.Io, conn: *pg.Conn, err: anyerror) wire.Error {
     // **A cancellation is handed back, not swallowed** (ADR 223). The fiber
     // was cancelled — a request that went away, a server shutting down — and
@@ -1054,13 +1179,53 @@ fn translate(io: std.Io, conn: *pg.Conn, err: anyerror) wire.Error {
         // `NOWAIT` that found the row held. It is the answer the statement
         // was written to get rather than a failure, so it gets a name.
         if (std.mem.eql(u8, server.code, "55P03")) return error.Locked;
+        // `40001` is a serialization failure and `40P01` a deadlock: Postgres
+        // rolled the whole transaction back so the ones beside it stay
+        // consistent. Nothing it did was kept and running it again is the
+        // answer, which a handler cannot do while this reads the same as a
+        // statement that is simply wrong. The rest of class 40 is left out on
+        // purpose: `40003` is *statement completion unknown*, which is the one
+        // thing this name must not claim.
+        if (std.mem.eql(u8, server.code, "40001") or std.mem.eql(u8, server.code, "40P01"))
+            return error.RolledBack;
+        // A plan kept on this connection that a migration has since changed
+        // the answer of, reaching here only inside a transaction — outside one
+        // `replanned` has already sent the statement again. The transaction
+        // is aborted and the plan is dropped when it ends, so running it
+        // again is the answer here too.
+        if (stalePlan(conn)) {
+            std.log.warn(
+                "nilo_sql: a prepared statement's result changed under it (a migration ran " ++
+                    "while this server was up); the transaction was rolled back and the " ++
+                    "statement will be prepared again.",
+                .{},
+            );
+            return error.RolledBack;
+        }
+        // Every statement after a failed one in the same transaction, until a
+        // rollback. What was wrong is the earlier failure the handler caught
+        // and carried on past, so that is what the line says.
+        if (std.mem.eql(u8, server.code, "25P02")) {
+            std.log.warn("{s}", .{wire.aborted_statement});
+            return error.QueryFailed;
+        }
         // The text never reaches the client (ADR 024); it goes here, where
-        // whoever is reading the log is the person who can fix it.
-        std.log.err("nilo_sql: {s} [{s}]", .{ server.message, server.code });
+        // whoever is reading the log is the person who can fix it. `warn`
+        // rather than `err`, because this is a request failing and `err` is
+        // the level that says the server is refusing to start.
+        std.log.warn("nilo_sql: {s} [{s}]", .{ server.message, server.code });
         return error.QueryFailed;
     }
     return switch (err) {
-        error.ConnectionBusy, error.ConnectionResetByPeer, error.BrokenPipe => error.Disconnected,
+        // `SocketUnconnected` is a write to a socket the peer has already
+        // closed: a statement sent into an aborted transaction is revived and
+        // written, so it meets a dead socket here rather than a `.fail` that
+        // pg.zig refuses as `ConnectionBusy`.
+        error.ConnectionBusy,
+        error.ConnectionResetByPeer,
+        error.BrokenPipe,
+        error.SocketUnconnected,
+        => error.Disconnected,
         // **Named rather than silent, and that is the fix**
         // ([ADR 117](../docs/adr/117-a-statement-that-failed-says-what-the-database-said.md)).
         // `conn.err` is null whenever the statement never left the process —
@@ -1071,7 +1236,7 @@ fn translate(io: std.Io, conn: *pg.Conn, err: anyerror) wire.Error {
         // error's own name is the whole of what was missing: `CannotBindStruct`
         // is three iterations of somebody's afternoon.
         else => {
-            std.log.err(
+            std.log.warn(
                 "nilo_sql: the driver refused a statement before it reached the database " ++
                     "({s}). The server said nothing because nothing arrived.",
                 .{@errorName(err)},

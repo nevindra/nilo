@@ -43,6 +43,36 @@ error: nilo: an update on User with no condition.
        so where somebody reading the code can see it.
 ```
 
+A condition can also end up empty because of what the request sent. Say a
+delete keeps a list of rows, `.where = .{ .id = .{ .not_in = keep } }`. On
+the day `keep` arrives empty, that is `"id" <> ALL('{}')`, which is true for
+every row. A search box left empty does the same through `.contains = ""`.
+The compiler cannot see a value, so **an `update` or a `delete` whose
+condition matches every row with the values it was given is refused before
+it is sent**, as `error.QueryFailed` with a line naming the call. An empty
+list next to a term that does narrow, such as
+`.{ .tenant_id = t, .id = .{ .not_in = keep } }`, is an ordinary condition
+and goes through.
+
+**A count goes up where it is stored, not where it was read.**
+`.set = .{ .views = .{ .plus = 1 } }` writes `SET "views" = "views" + $1`, and
+`.minus` is the other direction. The database does the arithmetic on the value
+the row holds when the statement runs. `.set = .{ .views = page.views + 1 }`
+sends the number the handler read earlier, so two requests that read the same
+number write the same answer, and one view is lost. Only a numeric column that
+is not optional takes either operator.
+
+<!-- compiles: body -->
+```zig
+// Take one, and only while there is one to take: the check and the change
+// are the same statement, so two requests cannot both get the last.
+const taken = try db.update(Item, c, .{
+    .set = .{ .qty = .{ .minus = 1 } },
+    .where = .{ .id = id, .qty = .{ .gt = 0 } },
+});
+if (taken == 0) return nilo.fail.conflict("out of stock", .{});
+```
+
 ## Many rows at once
 
 A loop of `db.insert` is a round trip per row, and inside a transaction it is

@@ -161,7 +161,9 @@ A unique violation is the opposite case. Left alone it would arrive as an unreco
 
 Translating them all inside this module was rejected. It does not know what the request is. `23505` on a signup is a 409; the same code inside a background import is not an HTTP answer at all; on a table used to win a race it is the expected outcome. Worse, it can come from any unique index reachable through a trigger, so a blanket 409 can tell a client that something is already taken when the collision was in a table it has never heard of.
 
-So the module raises errors that read — `error.AlreadyExists`, not `error.PgError23505` — and the handler decides. Exactly one gets a default row in ADR 004's table, `AlreadyExists` to 409, because it is the one whose meaning does not change with context. Foreign key, check and not-null violations stay 500: all three usually mean the code is wrong, not the client.
+So the module raises errors that read — `error.AlreadyExists`, not `error.PgError23505` — and the handler decides. Three get a default row in ADR 004's table, because their meaning does not change with context: `AlreadyExists` to 409, and `RolledBack` and `Disconnected` to 503. The last two are a transaction the database gave up to keep others consistent and a database that is not there; neither is the request's fault, and the same request sent again may succeed, which is what a 503 says. Foreign key, check and not-null violations stay 500: all three usually mean the code is wrong, not the client.
+
+Only `AlreadyExists` had a row at first, and `Disconnected` fell through to 500 with a handler expected to turn it into a 503 itself. None did, so a server whose database had gone away looked broken rather than unavailable to every client and every load balancer in front of it. `RolledBack` arrived with [ADR 117](117-a-statement-that-failed-says-what-the-database-said.md)'s split of class-40 errors out of `QueryFailed` and got the same row for the same reason.
 
 ## Whatever the handler did, the connection goes back usable
 

@@ -27,6 +27,11 @@ pub var tx: sql.Db.Tx = undefined;
 // A row already read, for the snippets that go on to change it.
 pub var user: User = undefined;
 
+// The lines an import brings in, for the savepoint block: each names a user
+// who may not be there, which is the failure no upsert can write around.
+pub const OrderLine = struct { user_id: i64, total: i64, status: []const u8 };
+pub var lines: []const OrderLine = undefined;
+
 // The values a condition binds. Named for what they are rather than for
 // where they came from: the page is about the statement, not the parsing.
 pub var id: i64 = undefined;

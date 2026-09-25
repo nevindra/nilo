@@ -11,10 +11,17 @@ var tx = try db.begin(c, .{});
 defer tx.deinit();                  // rolls back unless committed
 
 const order = try tx.insert(Order, c, .{ .user_id = user.id, .total = 4200, .status = "new" });
-_ = try tx.update(User, c, .{ .set = .{ .orders = user.orders + 1 }, .where = .{ .id = user.id } });
+_ = try tx.update(User, c, .{ .set = .{ .orders = .{ .plus = 1 } }, .where = .{ .id = user.id } });
 
 try tx.commit();
 ```
+
+`.{ .plus = 1 }` is `SET "orders" = "orders" + $1`: the database adds one to
+whatever the row holds when the statement runs. Writing
+`.orders = user.orders + 1` instead sends a number this handler read earlier,
+and two requests that read the same number both write the same answer, so
+one order goes uncounted. That is a lost update, and a transaction does not
+stop it on its own. See [Holding the rows you read](#holding-the-rows-you-read).
 
 `tx` carries the same calls `db` does, all down the one connection it holds.
 The `defer` is not decoration: a connection returned to the pool inside an
@@ -78,6 +85,53 @@ has to be read-committed can say so rather than hope.
 skip work, and a write nobody meant to make is refused by the server instead
 of quietly happening.
 
+## When the database rolls it back for you
+
+Under `.repeatable_read` or `.serializable`, two transactions that touch the
+same rows cannot both win. Postgres rolls one of them back with a
+serialization failure (`40001`). A deadlock (`40P01`) ends the same way under
+any level. Both come back as **`error.RolledBack`**. Nothing the transaction
+did was kept, and running the whole transaction again is the fix:
+
+<!-- compiles -->
+```zig
+fn takeOne(db: *sql.Db, c: *nilo.Ctx, id: i64) !void {
+    var attempt: u8 = 0;
+    while (true) : (attempt += 1) {
+        var tx = try db.begin(c, .{ .isolation = .serializable });
+        defer tx.deinit();
+
+        const item = try tx.one(Item, c, .{ .where = .{ .id = id } }) orelse
+            return nilo.fail.notFound("no item {d}", .{id});
+        if (tx.update(Item, c, .{ .set = .{ .qty = item.qty - 1 }, .where = .{ .id = id } })) |_| {
+            tx.commit() catch |err| switch (err) {
+                error.RolledBack => if (attempt < 3) continue else return err,
+                else => return err,
+            };
+            return;
+        } else |err| switch (err) {
+            error.RolledBack => if (attempt < 3) continue else return err,
+            else => return err,
+        }
+    }
+}
+```
+
+It can arrive from any statement, `COMMIT` included, which is why both are
+caught. `RolledBack` is the only error a statement returns where sending the
+same thing again is the right move. Every other error means something is
+wrong with the statement, and retrying it will not help. When a handler
+returns `RolledBack`, the client gets a 503, which tells it the same thing:
+send the request again.
+
+A migration that changes a column's type while a server is running is the
+other way to get here. Each connection kept the old plan for its statements
+([ADR 051](../../adr/051-a-statement-that-is-a-constant-can-be-prepared-once.md)),
+and Postgres refuses that plan now. Outside a transaction, nilo prepares the
+statement again and the caller never sees it. Inside one, the transaction is
+already aborted, so the answer is `RolledBack`, and the next attempt prepares
+the statement fresh.
+
 ## Holding the rows you read
 
 The read-modify-write every service ends up writing is a race unless the read
@@ -88,16 +142,36 @@ holds what it matched:
 var tx = try db.begin(c, .{});
 defer tx.deinit();
 
-const held = try tx.select(Item, c, .{ .where = .{ .id = id }, .lock = .update });
-if (held[0].qty == 0) return nilo.fail.conflict("out of stock", .{});
-_ = try tx.update(Item, c, .{ .set = .{ .qty = held[0].qty - 1 }, .where = .{ .id = id } });
+const held = try tx.one(Item, c, .{ .where = .{ .id = id }, .lock = .update }) orelse
+    return nilo.fail.notFound("no item {d}", .{id});
+if (held.qty == 0) return nilo.fail.conflict("out of stock", .{});
+_ = try tx.update(Item, c, .{ .set = .{ .qty = held.qty - 1 }, .where = .{ .id = id } });
 
 try tx.commit();
 ```
 
 ```sql
-SELECT "id", "sku", "qty" FROM "items" WHERE "id" = $1 FOR UPDATE
+SELECT "id", "sku", "qty" FROM "items" WHERE "id" = $1 LIMIT 1 FOR UPDATE
 ```
+
+`tx.one` answers `?Item`, so an id that is not there is a 404 rather than
+`held[0]` on an empty slice, which is a panic.
+
+When the decision fits in the `WHERE`, one statement does the same job with
+no lock and no transaction:
+
+<!-- compiles: body -->
+```zig
+const taken = try db.update(Item, c, .{
+    .set = .{ .qty = .{ .minus = 1 } },
+    .where = .{ .id = id, .qty = .{ .gt = 0 } },
+});
+if (taken == 0) return nilo.fail.conflict("out of stock", .{});
+```
+
+The row is checked and changed in one statement, so two requests cannot both
+take the last one. The lock is for the case where the decision needs more than
+a condition can say.
 
 Four locks, and they are four jobs:
 
@@ -137,23 +211,43 @@ error: nilo: `db.select` on Item was given a `.lock`, and there is no
 
 ## Undoing one statement without losing the transaction
 
-A statement that fails inside a transaction aborts **all** of it: everything
-after it answers `25P02` until somebody rolls the whole thing back. A
-savepoint is the way to try something and carry on.
+A statement that fails inside a transaction aborts **all** of it. Every
+statement after it answers `error.QueryFailed` (Postgres's `25P02`) until
+somebody rolls the whole thing back, and **`tx.commit()` answers
+`error.QueryFailed` too**: the transaction is rolled back, and nothing in it
+was kept. So catching a statement's error and carrying on is a mistake:
+
+```zig
+_ = tx.insert(Tag, c, .{ .name = tag }) catch |err| switch (err) {
+    error.AlreadyExists => {},   // the transaction is already aborted here
+    else => return err,
+};
+try tx.commit();                 // error.QueryFailed, and the other inserts are gone
+```
+
+On Postgres, a `COMMIT` sent after that point is answered `ROLLBACK` with
+no error. nilo refuses the commit instead of reporting a success that did
+not happen. SQLite would carry on after the failed statement, but nilo holds
+it to Postgres's rule, so a handler tested against SQLite fails the same way.
+
+When the only failure you expect is a duplicate, `insertOrIgnore` is one
+statement and nothing fails. A savepoint is for the other failures, the ones
+no upsert can write around:
 
 <!-- compiles: body -->
 ```zig
 var tx = try db.begin(c, .{});
 defer tx.deinit();
 
-for (tags) |tag| {
+for (lines) |line| {
     var sp = try tx.savepoint();
     defer sp.deinit();                       // undoes it, unless released
 
-    if (tx.insert(Tag, c, .{ .name = tag })) |_| {
+    if (tx.insert(Order, c, line)) |_| {
         try sp.release();                    // keep it
     } else |err| switch (err) {
-        error.AlreadyExists => sp.rollback(), // that tag was there; next one
+        // The user on this line is not there. Skip the line, keep the rest.
+        error.ForeignKeyViolated => sp.rollback(),
         else => return err,
     }
 }

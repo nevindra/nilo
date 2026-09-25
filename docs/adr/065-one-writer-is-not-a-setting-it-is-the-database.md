@@ -56,6 +56,25 @@ Both are real and are two different deployments rather than a range to split: a 
 
 The guard cannot be a Refusal: the worker count is a run-time value, usually derived from the machine's CPU count, and the reader count comes from configuration, so nothing in the compiler can see both. It is a startup check at `listen()`, in the same place the service registry is checked. The reader default is the worker count.
 
+### A transaction is held to Postgres's rule about a failed statement
+
+SQLite keeps a transaction going after a statement in it fails; Postgres
+aborts it, refuses every statement after it with `25P02`, and answers a
+`COMMIT` by rolling back. A handler that caught `AlreadyExists` without a
+savepoint and went on to commit kept the rest of its work here and lost all
+of it there, and the test suite run against this Wire was the one telling it
+the code was right. So the writer's connection carries `aborted`, set by any
+statement that fails inside the transaction, stepping included, since that is
+where an `INSERT … RETURNING` meets its constraint. While it is set a
+statement is refused as `QueryFailed` with the same line Postgres's `25P02`
+gets, and `commit` rolls back and answers `QueryFailed`. `ROLLBACK TO
+SAVEPOINT` clears it, as it does on Postgres ([ADR 043](./043-a-deadline-needs-a-connection-you-hold.md)).
+
+A `COMMIT` SQLite itself refuses, a deferred foreign key still broken or a
+`BUSY`, leaves the transaction open. The writer is rolled back before it goes
+back to the pool, where it used to go back mid-transaction for the next
+request to run inside.
+
 ### `tx.deadline` is refused on SQLite, naming the dialect
 
 [ADR 043](./043-a-deadline-needs-a-connection-you-hold.md) put `deadline` on the `Tx` because a deadline has to be set on the connection the statement will travel down. On Postgres that is a message to a server; SQLite has no server, and the only mechanism is `sqlite3_interrupt`, called from another thread while the statement runs. It needs a timer and a cross-thread poke, machinery this module does not have; it is connection-wide rather than statement-wide, so it would abort whatever else that connection is running, and under `.hop` the fiber that set the deadline is parked and cannot be woken to fire it anyway; and `busy_timeout` already covers the case that actually happens, waiting on a lock nobody is releasing. So `tx.deadline` is a Refusal naming the dialect, in the shape `.lock` already uses.

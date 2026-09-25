@@ -123,7 +123,8 @@ pool is built inside `listen()`, before the first connection is accepted.
 That has a consequence worth relying on: **your server starts with Postgres
 switched off.** Working on an endpoint that never touches the database does
 not mean starting a database first. The first request that *does* touch it
-gets `error.Disconnected`, which is the truth.
+gets `error.Disconnected`, which is the truth, and a handler that returns it
+answers 503: the request was fine, and the database was not there.
 
 Set `.connect_on_init = 2` if you would rather find out at startup — in
 production, that is usually what you want.

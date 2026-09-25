@@ -405,24 +405,20 @@ test "a unique violation followed by a dead socket is reported as the dead socke
 
     // The sentence the roadmap carried: a second statement after the socket
     // died. Before `fresh` this read the `23505` still on the connection and
-    // said `AlreadyExists` for an UPDATE nothing had refused. pg.zig refuses
-    // the statement in `.fail` before it reaches the socket, so what the cut
-    // buys this line is that `Disconnected` is the truth rather than a
-    // label; the test below is where the socket is actually reached.
+    // said `AlreadyExists` for an UPDATE nothing had refused. The transaction
+    // is aborted, so `revive` lets the statement out to be answered `25P02`,
+    // and what it meets is the cut socket: `Disconnected` is the truth.
     try testing.expectError(
         error.Disconnected,
         tx.exec(&h.run, "UPDATE \"" ++ table ++ "\" SET \"label\" = 'again' WHERE \"id\" = 1", .{}),
     );
 
-    // The dead half of `revive`: the transaction is aborted at the server
-    // *and* the socket is gone, and `err` is null because `fresh` emptied it
-    // and nothing answered. `revive` leaves the connection in `.fail`, the
-    // COMMIT is refused without touching the wire, and the pool throws the
-    // connection away — `pg_pool_dirty` moves by one, where the live-aborted
-    // case in `live.zig` holds it still. What this cannot see is a `revive`
-    // that wrongly let the connection out: a COMMIT written to a reset
-    // socket also fails and is also thrown away, and telling the two apart
-    // needs pg.zig's `pg_query` counter, which nothing here reads.
+    // The dead half of an aborted transaction: aborted at the server *and*
+    // the socket gone. The commit sends no COMMIT — the transaction is
+    // aborted, so it is rolled back instead — and the ROLLBACK cannot reach
+    // the server, which is what `Disconnected` says. The pool throws the
+    // connection away: `pg_pool_dirty` moves by one, where the live-aborted
+    // case in `live.zig` holds it still.
     try testing.expectError(error.Disconnected, tx.commit());
     try testing.expectEqual(dirty_before + 1, try sql.postgres.dirtyConnections());
 
@@ -448,13 +444,12 @@ test "a commit on an aborted transaction whose socket has since died reaches the
     h.proxy.cut(0);
 
     // The one path where a stale `err` and a real transport failure meet.
-    // `revive` sees the `23505` and, rightly on what it can know, lets the
-    // connection out of `.fail` — the server did answer that statement.
-    // `fresh` then empties `err`, and the COMMIT is the first thing to touch
-    // the socket since the reset: `ECONNRESET` on the write, `Disconnected`
-    // at the caller. Without `fresh` the same write failure would have been
-    // reported as the `AlreadyExists` still sitting on the connection —
-    // which is the bug, verbatim.
+    // `fresh` reads the `23505` as an aborted transaction and empties `err`,
+    // so the commit rolls back rather than committing, and the ROLLBACK is
+    // the first thing to touch the socket since the reset: `ECONNRESET` on
+    // the write, `Disconnected` at the caller. Without `fresh` the same write
+    // failure would have been reported as the `AlreadyExists` still sitting
+    // on the connection — which is the bug, verbatim.
     try testing.expectError(error.Disconnected, tx.commit());
     try testing.expectEqual(dirty_before + 1, try sql.postgres.dirtyConnections());
 

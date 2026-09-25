@@ -201,10 +201,18 @@ pub fn statusFor(err: anyerror) u16 {
 
         error.Unauthorized => 401,
         error.Forbidden => 403,
-        // `AlreadyExists` is `nilo_sql`'s, and it is the only error of that
+        // `AlreadyExists` is `nilo_sql`'s, and one of the three errors of that
         // module's given a row here. A unique violation means the client
         // asked for something that is already there, and that is true
         // whatever the request around it was.
+        //
+        // The other two say the same thing whatever the request was, too:
+        // `RolledBack` is a transaction the database gave up to keep the ones
+        // beside it consistent, and `Disconnected` is a database that is not
+        // there. Neither is the request's fault, and the same request sent
+        // again may well succeed, which is what a 503 tells a client. Both
+        // used to fall through to 500 — a server that looked broken while the
+        // truth was a server that was busy or waiting on its database.
         //
         // **Every other constraint failure stays 500 and the handler
         // decides**, `ForeignKeyViolated` included (ADR 036, ADR 117).
@@ -222,6 +230,7 @@ pub fn statusFor(err: anyerror) u16 {
         // fault and is worth retrying (ADR 022).
         error.BodyTooSlow => 408,
         error.Timeout, error.Canceled => 503,
+        error.RolledBack, error.Disconnected => 503,
 
         else => 500,
     };
@@ -274,6 +283,12 @@ test "the error mapping table" {
     try testing.expectEqual(@as(u16, 400), statusFor(error.InvalidCharacter));
     try testing.expectEqual(@as(u16, 413), statusFor(error.BodyTooLarge));
     try testing.expectEqual(@as(u16, 500), statusFor(error.SomethingUnrecognised));
+    // A database that gave a transaction up, or is not there, is not the
+    // request's fault, and the same request may go through if sent again.
+    try testing.expectEqual(@as(u16, 503), statusFor(error.RolledBack));
+    try testing.expectEqual(@as(u16, 503), statusFor(error.Disconnected));
+    // And a constraint failure other than a duplicate stays the handler's.
+    try testing.expectEqual(@as(u16, 500), statusFor(error.ForeignKeyViolated));
 }
 
 test "a challenge is a 401 that remembers what would have been accepted, and clear forgets it" {
