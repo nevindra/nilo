@@ -147,6 +147,8 @@ const Quiet = struct {
                 w.flush() catch return;
             },
             .trickle => {
+                // Each byte on the wire when it is written; see `noDelay`.
+                noDelay(stream.socket.handle);
                 w.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\n") catch return;
                 w.flush() catch return;
                 for (0..8) |_| {
@@ -162,6 +164,20 @@ const Quiet = struct {
         }
     }
 };
+
+/// Turn Nagle's algorithm off on a test server's socket, so a byte written
+/// every 60 ms leaves every 60 ms.
+///
+/// With it on, a one-byte write waits until the previous segment is
+/// acknowledged, and macOS delays its acknowledgements on loopback where
+/// Linux sends them at once. The gaps between bytes then stretch toward the
+/// 200 ms silence bound, and a body that is moving is called a stall: the
+/// trickle tests failed on every macOS run and passed on every Linux one.
+/// A failure to set it is ignored, and the test says what it saw.
+fn noDelay(handle: std.posix.socket_t) void {
+    const on: c_int = 1;
+    std.posix.setsockopt(handle, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, std.mem.asBytes(&on)) catch {};
+}
 
 /// Where the handler below points. Filled in before `listen()`, read on the
 /// event loop — a global because a handler takes its arguments by type and

@@ -537,6 +537,12 @@ pub const Canned = struct {
         var stream = try self.server.accept(self.io);
         defer stream.close(self.io);
         self.accepted += 1;
+        // Nagle's algorithm off, so each byte leaves when it is written. With
+        // it on, macOS holds a one-byte write for the loopback's delayed
+        // acknowledgement, the gaps stretch toward `stall_ms`, and the body
+        // this exists to prove is moving gets called a stall.
+        const on: c_int = 1;
+        std.posix.setsockopt(stream.socket.handle, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, std.mem.asBytes(&on)) catch {};
 
         var in_buf: [4 << 10]u8 = undefined;
         var out_buf: [4 << 10]u8 = undefined;
