@@ -29,6 +29,9 @@ in [`docs/history.md`](./docs/history.md); what is coming is in
 ### Added
 
 - **`db.deleteReturningOne` and `tx.deleteReturningOne`**: delete the one row the key or a unique pins and answer with it, or null. What taking a one-time token is, since the check and the removal are one statement; the sessions guide's password reset is written with it now (ADR 146).
+- **`.set = .{ .title = sql.given(body.title) }` is a PATCH in one statement.** It writes `COALESCE($1, "title")`, so a field the body left out keeps what the row holds. Refused on a column that may be NULL, where null is a value somebody may mean (ADR 149).
+- **`.set = .{ .updated_at = .now }` stamps a `sql.Timestamp` column with the database's clock**, the same expression `.default = .now` writes, with nothing bound. On Postgres it is the transaction's start, so every `.now` inside one `Tx` is one instant (ADR 181).
+- **`tx.composedOne`**, the one row of a composed statement inside a transaction, as `db.composedOne` is outside one (ADR 208).
 - **`sql.violated(c, Row, .{ .email })`**: whether the last statement broke the key or the `.unique` over those columns, checked against the marker while compiling. It accepts Postgres's constraint name and SQLite's column list alike, so a handler branching on which unique fired answers the same on both (ADR 117).
 
 - **`c.eventsFrom(rooms, .{})` is an event stream fed by Rooms, handed to the connection rather than kept by its handler.** Every post said into the rooms goes out as an event, a comment keeps a quiet connection speaking every 30 seconds, and the stream ends when the client goes or the server stops. It costs 5,184 bytes a connection, an idle connection's figure, where a stream a handler holds costs 21,566. One Room can hold WebSockets and event streams together; a binary post is counted as missed for a stream rather than sent (ADR 227).

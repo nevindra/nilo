@@ -47,6 +47,7 @@ const migrate = @import("migrate.zig");
 const postgres = @import("postgres.zig");
 const schema = @import("schema.zig");
 const types = @import("types.zig");
+const where_mod = @import("where.zig");
 const wire_mod = @import("wire.zig");
 
 const builtin = @import("builtin");
@@ -1227,6 +1228,43 @@ test "the same three types go out to a column and come back unchanged" {
             "\"settings\":{\"theme\":\"midnight\"}}]",
         answer.body,
     );
+}
+
+test "a patch keeps every column it was not given, and every .now in a transaction is one instant" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    // The body of a PATCH that carried `age` and not `email`. Each is
+    // `COALESCE($n, "column")`, so Postgres has to type the parameter from
+    // the column; a statement it could not type would stop here.
+    const email: ?[]const u8 = null;
+    const age: ?i32 = 37;
+    const patched = (try stack.db.updateReturningOne(Person, &run, .{
+        .set = .{ .email = where_mod.given(email), .age = where_mod.given(age) },
+        .where = .{ .id = @as(i64, 1) },
+    })).?;
+    try testing.expectEqualStrings("ada@example.dev", patched.email);
+    try testing.expectEqual(@as(i32, 37), patched.age);
+
+    // `now()` is the start of the transaction, so two rows stamped inside one
+    // carry the same instant, and both are later than the fixture's.
+    var tx = try stack.db.begin(&run, .{});
+    defer tx.deinit();
+    _ = try tx.update(Profile, &run, .{ .set = .{ .seen_at = .now }, .where = .{ .id = @as(i64, 1) } });
+    _ = try tx.update(Profile, &run, .{ .set = .{ .seen_at = .now }, .where = .{ .id = @as(i64, 2) } });
+    const stamped = try tx.select(Profile, &run, .{
+        .where = .{ .id = .{ .lte = @as(i64, 2) } },
+        .order = .{ .id = .asc },
+    });
+    try tx.commit();
+
+    try testing.expectEqual(@as(usize, 2), stamped.len);
+    try testing.expectEqual(stamped[0].seen_at.micros, stamped[1].seen_at.micros);
+    try testing.expect(stamped[0].seen_at.seconds() > 1_786_872_600);
 }
 
 /// `Profile` without its Json column, because a streamed row allocates
@@ -4583,6 +4621,19 @@ test "a statement composed at run time fills a Row by position and runs unnamed"
     try one.ident(table);
     const n = try stack.db.composedOne(i64, &run, one, .{});
     try testing.expectEqual(@as(i64, 3), n.?);
+
+    // The same inside a transaction, down the connection it holds: the row
+    // it inserted is one only it can see until it commits.
+    {
+        var tx = try stack.db.begin(&run, .{});
+        defer tx.deinit();
+        _ = try tx.exec(&run, "INSERT INTO " ++ table ++ " (id, email, age) VALUES (99, 'tx@example.dev', 1)", .{});
+        var in_tx = tx.compose(&run);
+        try in_tx.text("SELECT count(*)::bigint FROM ");
+        try in_tx.ident(table);
+        try testing.expectEqual(@as(i64, 4), (try tx.composedOne(i64, &run, in_tx, .{})).?);
+    }
+    try testing.expectEqual(@as(i64, 3), (try stack.db.composedOne(i64, &run, one, .{})).?);
 
     // A name that is not one never reaches the database, and neither does a
     // statement with more placeholders than values.

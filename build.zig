@@ -254,6 +254,14 @@ const sql_refusals = [_]Refusal{
         .says = "`updateReturningOne` on returning_one_on_a_column_not_unique.User has a condition that can match more than one row.",
     },
     .{
+        .name = "given_in_a_set_on_a_column_that_may_be_null",
+        .says = "`.set = .{ .nickname = sql.given(…) }` on given_in_a_set_on_a_column_that_may_be_null.User, whose `nickname` is ?[]const u8.",
+    },
+    .{
+        .name = "set_now_on_a_column_that_is_not_a_timestamp",
+        .says = "`.set = .{ .seen_at = .now }` on set_now_on_a_column_that_is_not_a_timestamp.User, whose `seen_at` is i64.",
+    },
+    .{
         .name = "upsert_on_a_column_no_unique_covers",
         .says = "an upsert on upsert_on_a_column_no_unique_covers.User conflicts on .{ .email }, and neither its key nor any `.unique` in its marker is over those columns.",
     },

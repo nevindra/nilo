@@ -1761,9 +1761,10 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// not `update`.
         ///
         /// The conflict target is a column the database has a unique
-        /// constraint or index on. Postgres refuses the statement at run time
-        /// if it has not — nothing on this side can know, because the
-        /// constraint is not a column and a Row cannot name one.
+        /// constraint or index on. On a table this program builds that is
+        /// the key or a `.unique` in the marker, and anything else does not
+        /// compile (ADR 151); on a `.managed = false` table the marker
+        /// cannot say, and Postgres refuses the statement at run time.
         ///
         /// **`.key` is the Row's own key**, read off the `nilo_table` that
         /// already declares it, and is what a join table wants
@@ -2373,6 +2374,18 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                     return fillScalar(Row, self.db, &self.inner, c, stmt.view(), null, try rawValuesOf(values, c));
                 }
                 return fill(Row, null, self.db, &self.inner, c, stmt.view(), null, try rawValuesOf(values, c));
+            }
+
+            /// `db.composedOne` inside the transaction (ADR 208).
+            pub fn composedOne(
+                self: *Tx,
+                comptime Row: type,
+                c: anytype,
+                stmt: composed_mod.Composed,
+                values: anytype,
+            ) !?Row {
+                const found = try self.composed(Row, c, stmt, values);
+                return if (found.len == 0) null else found[0];
             }
 
             /// `db.rawOrdered` inside the transaction: the caller's statement
@@ -7935,4 +7948,61 @@ test "a constraint's spellings are the Postgres name and SQLite's column list" {
     try testing.expectEqualStrings("members.org, members.handle", both[1]);
     const key = comptime constraintSpellings(Member, .id);
     try testing.expectEqualStrings("members_pkey", key[0]);
+}
+
+const Draft = struct {
+    pub const nilo_table = .{ .name = "drafts", .key = .id };
+
+    id: i64,
+    title: []const u8,
+    words: i32,
+    edited_at: types.Timestamp,
+};
+
+test "on SQLite, a patch keeps every column it was not given, and .now is the database's clock" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    var db: SqliteDb = .init(testing.allocator, "file:patched?mode=memory&cache=shared", .{ .size = 2, .unchecked = true });
+    defer db.deinit();
+    try db.nilo_start(threaded.io(), .none);
+    try migrate.createMissing(&db, &run, .{ .tables = &.{Draft} });
+
+    _ = try db.insert(Draft, &run, .{
+        .id = @as(i64, 1),
+        .title = "first",
+        .words = @as(i32, 10),
+        .edited_at = types.Timestamp.fromSeconds(0),
+    });
+
+    // The body of a PATCH that carried `words` and not `title`.
+    const title: ?[]const u8 = null;
+    const words: ?i32 = 12;
+    // SQLite's clock counts milliseconds through `julianday`, a float, and
+    // the CAST truncates: the stamp can land a millisecond under the true
+    // time. Two either side is still "the moment the statement ran" and not
+    // the zero the row was written with.
+    const before = types.Timestamp.now().micros - 2_000;
+    const patched = (try db.updateReturningOne(Draft, &run, .{
+        .set = .{ .title = where_mod.given(title), .words = where_mod.given(words), .edited_at = .now },
+        .where = .{ .id = @as(i64, 1) },
+    })).?;
+    const after = types.Timestamp.now().micros + 2_000;
+
+    try testing.expectEqualStrings("first", patched.title);
+    try testing.expectEqual(@as(i32, 12), patched.words);
+    try testing.expect(patched.edited_at.micros >= before);
+    try testing.expect(patched.edited_at.micros <= after);
+
+    // Every field absent is still a statement that matches the row, and it
+    // changes nothing but the stamp.
+    const none: ?i32 = null;
+    const again = (try db.updateReturningOne(Draft, &run, .{
+        .set = .{ .title = where_mod.given(title), .words = where_mod.given(none) },
+        .where = .{ .id = @as(i64, 1) },
+    })).?;
+    try testing.expectEqualStrings("first", again.title);
+    try testing.expectEqual(@as(i32, 12), again.words);
+    try testing.expectEqual(patched.edited_at.micros, again.edited_at.micros);
 }

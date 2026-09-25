@@ -9,7 +9,7 @@ none of it ([ADR 037](../adr/037-a-service-that-needs-the-loop-is-finished-when-
 
 **Two databases, one API.** `sql.Db` is Postgres and `sql.Sqlite(…)` is SQLite;
 everything on the rest of this page is written once and works against either.
-[SQLite](#sqlite) says what it takes to open one and lists the four things it
+[SQLite](#sqlite) says what it takes to open one and lists the five things it
 refuses.
 
 ```zig
@@ -564,7 +564,7 @@ pointing at `insertOrIgnore`.
 | `.where` | a condition; see below |
 | `.order` | `.{ .created_at = .desc }`, one column per field. `.asc_nulls_last` and its three siblings say where NULLs go, which the two databases otherwise disagree about. Or a value of an `sql.Ordering` for an order the request chose; see below |
 | `.limit` / `.offset` | a literal is baked into the SQL; a variable becomes a parameter. A literal limit is also the row ceiling, so the result list is allocated once |
-| `.set` | update only: columns to new values, or `.{ .views = .{ .plus = 1 } }` for arithmetic on the column's own value. A bare `null` on a nullable column is `= NULL` — no `@as(?T, null)` needed — where in `.where` the same null is `IS NULL` |
+| `.set` | update only: columns to new values, or `.{ .views = .{ .plus = 1 } }` for arithmetic on the column's own value. A bare `null` on a nullable column is `= NULL` — no `@as(?T, null)` needed — where in `.where` the same null is `IS NULL`. `.title = sql.given(maybe)` is `COALESCE($1, "title")`, the column kept when the value is null, refused on an optional column. `.updated_at = .now` is the database's clock on a `sql.Timestamp`, nothing bound |
 
 ### Conditions
 
@@ -881,10 +881,14 @@ _ = try tx.insert(Order, c, .{ … });
 try tx.commit();
 ```
 
-`tx` carries every read and write call above — `select`, `one`, `find`,
-`count`, `exists`, `insert`, `insertMany`, `update`, `updateMany`,
-`updateReturning`, `delete`, `deleteReturning`, `deleteReturningOne` and `raw` — all down the one
-connection it holds. Forgetting the `defer` is caught in Debug by a counter
+`tx` carries every read and write call above — `select`, `one`, `exactlyOne`,
+`find`, `page`, `count`, `exists`, `insert`, `insertMany`, `insertOrIgnore`,
+`insertOrUpdate`, `update`, `updateMany`, `updateReturning`,
+`updateReturningOne`, `delete`, `deleteReturning`, `deleteReturningOne`,
+`raw`, `rawOne`, `rawExactlyOne`, `rawOrdered`, `rawPage`, `exec`, `compose`,
+`composed` and `composedOne` — all down the one connection it holds. Not
+`stream`: a result set held open keeps the connection busy, so nothing else in
+the transaction could run until it closed. Forgetting the `defer` is caught in Debug by a counter
 asserted at `db.deinit()`.
 
 **The type is spelled `sql.Db.Tx`**, which only matters when a function of

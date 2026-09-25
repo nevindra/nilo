@@ -73,6 +73,55 @@ const taken = try db.update(Item, c, .{
 if (taken == 0) return nilo.fail.conflict("out of stock", .{});
 ```
 
+**A PATCH is one statement.** Its body is a struct of optionals, and a field
+the client left out is a column nothing should touch. `sql.given` in a `.set`
+says exactly that: the column takes the value when there is one and keeps
+what the row holds when there is not.
+
+<!-- compiles -->
+```zig
+const Draft = struct {
+    pub const nilo_table = .{ .name = "drafts", .key = .id };
+
+    id: i64,
+    title: nilo.Str,
+    words: i32,
+    edited_at: sql.Timestamp,
+};
+
+/// What the client sent. A field it left out is null.
+const DraftPatch = struct {
+    title: ?nilo.Str = null,
+    words: ?i32 = null,
+};
+
+fn patchDraft(db: *sql.Db, c: *nilo.Ctx, draft_id: i64, body: DraftPatch) !?Draft {
+    return db.updateReturningOne(Draft, c, .{
+        .set = .{
+            .title = sql.given(body.title),
+            .words = sql.given(body.words),
+            .edited_at = .now,
+        },
+        .where = .{ .id = draft_id },
+    });
+}
+```
+
+```sql
+UPDATE "drafts" SET "title" = COALESCE($1, "title"), "words" = COALESCE($2, "words"),
+  "edited_at" = now() WHERE "id" = $3 RETURNING …
+```
+
+One statement whichever fields arrived, so it is prepared once. A `sql.given`
+on a column that may be NULL does not compile: there, `null` in the body can
+mean *clear it*, and `COALESCE` would keep the old value and answer 200. Set
+that column with a plain value, where null writes NULL.
+
+`.now` is the database's clock, the same expression `.default = .now` writes,
+and it binds nothing. On Postgres it is the moment the transaction began, so
+every row one `Tx` stamps carries the same instant. It goes on a
+`sql.Timestamp` column; anywhere else it is refused.
+
 ## Many rows at once
 
 A loop of `db.insert` is a round trip per row, and inside a transaction it is

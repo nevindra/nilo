@@ -1451,6 +1451,61 @@ fn setOperator(
     }
 }
 
+/// Whether a `.set` field is `.now`: the column takes the moment the
+/// statement runs, written by the database as `D.now_default`, the same
+/// expression `.default = .{ .x = .now }` puts in the schema.
+///
+/// **The database's clock rather than the server's**, because a row stamped
+/// by two servers whose clocks disagree sorts in an order neither wrote. On
+/// Postgres `now()` is the start of the transaction, so every `.now` inside
+/// one `Tx` is the same instant; that is the answer a `created_at` and an
+/// `updated_at` written together want.
+///
+/// A column whose own type is an enum with a `now` in it is that enum's
+/// value, which is what `.now` meant there before this word existed.
+fn setsNow(comptime Row: type, comptime f: std.builtin.Type.StructField) bool {
+    comptime {
+        if (f.type != @TypeOf(.enum_literal)) return false;
+        const ptr = f.default_value_ptr orelse return false;
+        const word = @as(*const f.type, @ptrCast(@alignCast(ptr))).*;
+        if (!std.mem.eql(u8, @tagName(word), "now")) return false;
+        const F = row_mod.ColumnType(Row, f.name);
+        const C = switch (@typeInfo(F)) {
+            .optional => |o| o.child,
+            else => F,
+        };
+        if (C == types_mod.Timestamp) return true;
+        if (@typeInfo(C) == .@"enum") return false;
+        @compileError(
+            "nilo: `.set = .{ ." ++ f.name ++ " = .now }` on " ++ @typeName(Row) ++
+                ", whose `" ++ f.name ++ "` is " ++ @typeName(F) ++ ".\n" ++
+                "  `.now` is the moment the statement runs, so it goes in a `sql.Timestamp`.",
+        );
+    }
+}
+
+/// `sql.given` in a `.set` leaves the column as it is when the value is null,
+/// which is `COALESCE($n, "column")`: the PATCH a handler writes from a body
+/// whose every field is optional, as one constant statement.
+///
+/// **On a column that may be NULL it is refused**, because there null is
+/// also a value somebody may mean. `COALESCE` cannot tell *leave it* from
+/// *clear it*, so a request that asked to clear a nickname would answer
+/// success and keep the old one.
+fn assertKeepable(comptime Row: type, comptime column: []const u8) void {
+    comptime {
+        const F = row_mod.ColumnType(Row, column);
+        if (@typeInfo(F) == .optional) @compileError(
+            "nilo: `.set = .{ ." ++ column ++ " = sql.given(…) }` on " ++ @typeName(Row) ++
+                ", whose `" ++ column ++ "` is " ++ @typeName(F) ++ ".\n" ++
+                "  `sql.given` keeps the column when the value is null, and on a column " ++
+                "that may be NULL, null is also a value: a request that meant to clear " ++
+                "it would keep the old one. Set it with `." ++ column ++ " = value`, " ++
+                "where null writes NULL, in an update of its own.",
+        );
+    }
+}
+
 /// An operator only means something on a number, and on a column that has one.
 ///
 /// **The optional half is the one that costs a debugging session.**
@@ -1636,9 +1691,23 @@ fn updating(
                 row_mod.ColumnType(Row, f.name),
                 false,
             );
+            // The moment the statement runs, written by the database: no
+            // parameter, so nothing to bind and no clock read on this side.
+            if (setsNow(Row, f)) {
+                sql = sql ++ quoted ++ " = " ++ D.now_default;
+                continue;
+            }
             // Arithmetic on the column's own value, or a new value for it.
             // The column name goes into the fragment and only the operand is
             // bound, so the statement is the same constant either way.
+            if (where_mod.givenValue(f.type) != null) {
+                assertKeepable(Row, f.name);
+                sql = sql ++ quoted ++ " = COALESCE(" ++ bound ++ ", " ++ quoted ++ ")";
+                paths = paths ++ &[_]where_mod.Path{&[_][]const u8{ "set", f.name, "value" }};
+                params = params ++ &[_]where_mod.Param{.{ .column = f.name, .nullable = true }};
+                next += 1;
+                continue;
+            }
             if (setOperator(Row, f.name, f.type)) |op| {
                 assertCountable(Row, f.name, op);
                 sql = sql ++ quoted ++ " = " ++ quoted ++ " " ++ op.spelling ++ " " ++ bound;
@@ -2653,6 +2722,45 @@ test "both dialects spell the arithmetic the same, which is why it needs no decl
         "UPDATE \"users\" SET \"age\" = \"age\" + ?1 WHERE \"id\" = ?2",
         comptime update(Lite, User, @TypeOf(o)).sql,
     );
+}
+
+test "a set of .now is the database's clock, and binds nothing" {
+    const o = .{ .set = .{ .kind = "labour", .updated_at = .now }, .where = .{ .id = 7 } };
+    const pg = comptime update(Pg, RabLine, @TypeOf(o));
+    try testing.expectEqualStrings(
+        "UPDATE \"rab_lines\" SET \"kind\" = $1, \"updated_at\" = now() WHERE \"id\" = $2",
+        pg.sql,
+    );
+    try testing.expectEqual(@as(usize, 2), pg.paramCount());
+    try testing.expectEqualStrings("id", pg.params[1].column);
+    try testing.expectEqualStrings(
+        "UPDATE \"rab_lines\" SET \"kind\" = ?1, \"updated_at\" = " ++ Lite.now_default ++
+            " WHERE \"id\" = ?2",
+        comptime update(Lite, RabLine, @TypeOf(o)).sql,
+    );
+}
+
+test "a given in a set keeps the column when the value is null, which is a patch" {
+    const kind: ?[]const u8 = "labour";
+    const position: ?i32 = null;
+    const o = .{
+        .set = .{ .kind = where_mod.given(kind), .position = where_mod.given(position) },
+        .where = .{ .id = 7 },
+    };
+    const s = comptime update(Pg, RabLine, @TypeOf(o));
+    try testing.expectEqualStrings(
+        "UPDATE \"rab_lines\" SET \"kind\" = COALESCE($1, \"kind\"), " ++
+            "\"position\" = COALESCE($2, \"position\") WHERE \"id\" = $3",
+        s.sql,
+    );
+    // Bound as an optional even though the column is not one, and read one
+    // field deeper than it was written, out of the wrapper.
+    try testing.expect(s.params[0].nullable);
+    try testing.expect(!s.params[0].droppable);
+    try testing.expectEqual(@as(usize, 3), s.paths[0].len);
+    try testing.expectEqualStrings("value", s.paths[0][2]);
+    try testing.expectEqualStrings("labour", where_mod.valueAt(o, s.paths[0]).?);
+    try testing.expectEqual(@as(?i32, null), where_mod.valueAt(o, s.paths[1]));
 }
 
 test "an update's condition is the same language a select's is" {

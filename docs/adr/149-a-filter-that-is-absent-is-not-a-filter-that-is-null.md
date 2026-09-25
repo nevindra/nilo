@@ -167,6 +167,34 @@ parameters, so `.where = .{ .deleted_at = null }`, which is `IS NULL` and binds
 nothing, was refused as though the `.where` were empty. It asks whether the
 condition wrote any SQL now.
 
+## In a `.set`, the same word keeps the column
+
+A PATCH body is a struct of optionals, and each field the client left out is a
+column the handler must not touch. Written with `db.update`, that was the 2ᵏ
+arms again, one per combination of fields present, or a `db.raw`.
+
+`sql.given` in a `.set` is the same word asking the same question, *was a
+value handed over*, with the answer written where an assignment goes:
+
+```sql
+UPDATE "drafts" SET "title" = COALESCE($1, "title"), "words" = COALESCE($2, "words") WHERE "id" = $3
+```
+
+One statement and one parameter list, like the guard. The parameter binds as
+an optional and is not marked `droppable`, because nothing drops: the
+assignment is always in the statement and only its value is kept. Postgres
+types `$1` from the column beside it inside the `COALESCE`, so no cast is
+needed, and `sql/live.zig` runs it. A body with every field absent still
+matches its row and writes each column back as it was; the count says one
+row changed, and a trigger on the table fires.
+
+**It is refused on a column that may be NULL.** There, null is a value too:
+`{"nickname": null}` means *clear it*, and `COALESCE` cannot tell that from
+the field being absent, so the request would answer 200 and keep the old
+nickname. Telling the two apart needs a second value per field, which a
+`?T` does not carry. Until a caller needs it, the column is set with a plain
+`.nickname = value` in an update of its own.
+
 ## Against ADR 017's four axes
 
 - **Allocations per request: zero.** The wrapper is a struct holding an
@@ -183,7 +211,8 @@ condition wrote any SQL now.
 
 - `db.select`, `db.one`, `db.page`, `db.count`, `db.exists` and `db.stream` take
   it. `db.update`, `db.updateReturning`, `db.delete` and `db.deleteReturning` do
-  not.
+  not take it in their condition; the updates take it in their `.set`, on a
+  column that is not optional.
 - With [ADR 150](150-a-page-knows-what-it-left-out.md) the ordinary list
   endpoint is one typed call: an optional search, an optional `EXISTS`, a page
   and its total. The report filed the two together for that reason.
