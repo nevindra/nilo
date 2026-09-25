@@ -131,14 +131,30 @@ there.** Write a second `.exists` for the fixed one.
   two refusals that already stand between those statements and the whole table
   exist because it is reached by leaving something out; this would be a third
   way to leave it out, decided at run time.
-- **On `not_distinct_from` and on `.in`.** The first already takes an optional
-  and treats null as an ordinary value, so there is no term to drop. The second
-  takes a list, and a list that may be absent is the empty list, which `.in`
-  already reads as *no row matches*.
+- **On `not_distinct_from`.** It already takes an optional and treats null as
+  an ordinary value, so there is no term to drop.
 
 And one on the way in: `sql.given` handed something that is not an optional is
 refused, because a value that is always there is an ordinary condition and the
 guard around it would never be taken.
+
+## A list takes one too, and absent is not empty
+
+`.stage = .{ .in = sql.given(q.stages) }` is the guard around a list:
+
+```sql
+("stage" = ANY($1) OR $1 IS NULL)
+```
+
+A filter bar's multi-select asks two different questions with one field: no
+`?stage=` is *no filter*, and a list is *these stages*. Null drops the term,
+and a list that is present keeps it, **empty included**: an empty `.in` still
+means *no row matches* and an empty `.not_in` *every row*, which is what those
+two operators say everywhere else. The parameter binds as an optional array on
+Postgres, typed from `= ANY($1)` before the guard reads it, and as optional
+JSON text on SQLite, where `json_each(NULL)` is no rows beside a guard that has
+already said the term is gone. `sql/live.zig` runs both operators over integers,
+text and a `uuid` column; `db.zig` runs them on SQLite.
 
 ## A condition a request emptied is refused at run time
 
@@ -194,6 +210,19 @@ the field being absent, so the request would answer 200 and keep the old
 nickname. Telling the two apart needs a second value per field, which a
 `?T` does not carry. Until a caller needs it, the column is set with a plain
 `.nickname = value` in an update of its own.
+
+## What was rejected
+
+**Refusing `sql.given` on `.in` and `.not_in`**, the rule this ADR shipped with.
+Its reasoning was that a list that may be absent is the empty list, so there is
+no term to drop: pass an empty slice, or branch. That holds for a program with
+only one of the two meanings. A filter bar has both, and the port that filed it
+counted the cost: the `/deals` `WHERE` is twelve terms shared by the list, its
+count and seven facet statements, and two of the twelve are multi-selects, with
+a third list switched by a toggle. Branching is 2³ variants of each of nine
+statements, so all nine stayed `db.raw`, `$n::text[] IS NULL OR x = ANY($n)`
+written by hand. That is the guard this section already writes for one value,
+held back from a list by a rule about a case the caller was not asking about.
 
 ## Against ADR 017's four axes
 

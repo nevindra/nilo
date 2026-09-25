@@ -160,8 +160,13 @@ pub const Sent = struct {
     /// `db.raw` and `db.exec`.
     sql: []const u8,
     /// The name it is kept prepared under, or null for a statement that is
-    /// not kept — which is `db.raw`, `db.exec`, and every statement on a `Db`
-    /// with `prepared = false` (ADR 051).
+    /// not kept (ADR 051). A `db.raw` statement is kept and named like any
+    /// other, since its text became comptime, so the name is what a watcher
+    /// counts and groups by. Null is `db.exec`, whose text arrives at run time;
+    /// a statement whose `ORDER BY` a `sql.Ordering` chose, typed or raw,
+    /// whose text differs per request; a `Composed` statement; and every
+    /// statement on a `Db` with
+    /// `prepared = false`.
     plan: ?[]const u8,
     /// How long the database took, from the call going out to the rows being
     /// in hand. Taken from the monotonic clock, so an operator moving the
@@ -1537,6 +1542,43 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             return .{ .rows = rows, .total = total };
         }
 
+        /// `db.rawPage` with its `ORDER BY` chosen per request: the `{order}`
+        /// hole `db.rawOrdered` takes, in a statement whose list ends in
+        /// `count(*) OVER ()`
+        /// ([ADR 205](../docs/adr/205-a-raw-statement-can-carry-its-total.md)).
+        ///
+        /// ```zig
+        /// const found = try db.rawPageOrdered(Card, c,
+        ///     \SELECT c.id, c.title, count(*) OVER () FROM commitments c
+        ///     \WHERE ($1::text IS NULL OR c.state = $1) {order} LIMIT $2 OFFSET $3
+        /// , .{ state, limit, offset }, q.value.order);
+        /// ```
+        ///
+        /// **A list screen whose order is the request's is the one that most
+        /// needs its total**, and without this it was `rawOrdered` for the rows
+        /// and a second statement for the count with the `WHERE` pasted in
+        /// again: the two could disagree, which is what `rawPage` was written
+        /// to end. Both checks apply unchanged: the list is the Row's fields and
+        /// one more, and the hole is there exactly once. It runs unnamed for
+        /// the reason `rawOrdered` does.
+        pub fn rawPageOrdered(
+            self: *Self,
+            comptime Row: type,
+            c: anytype,
+            comptime sql: []const u8,
+            values: anytype,
+            order: anytype,
+        ) !Page(Row) {
+            comptime core.checkScope(@TypeOf(c), "db.rawPageOrdered");
+            comptime rawcheck.assertPaged(D, Row, sql, "db.rawPageOrdered");
+            comptime ordering.assertFor(@TypeOf(order), Row, "`db.rawPageOrdered`", false);
+            const parts = comptime ordering.split(rawText(sql, @TypeOf(values), "db.rawPageOrdered"), "`db.rawPageOrdered`");
+            const text = try spliced(parts.head, order, parts.tail, c);
+            var total: i64 = 0;
+            const rows = try filling(Row, null, self, null, c, text, null, try rawValuesOf(values, c), &total);
+            return .{ .rows = rows, .total = total };
+        }
+
         /// An empty `Composed` that spells its placeholders the way this Db's
         /// dialect does, writing into the Scope's arena
         /// ([ADR 208](../docs/adr/208-a-statement-composed-at-run-time-from-pieces-that-cannot-carry-a-string.md)).
@@ -2467,6 +2509,26 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 return .{ .rows = rows, .total = total };
             }
 
+            /// `db.rawPageOrdered` inside the transaction: the caller's paged
+            /// statement with its `ORDER BY` chosen per request (ADR 205).
+            pub fn rawPageOrdered(
+                self: *Tx,
+                comptime Row: type,
+                c: anytype,
+                comptime sql: []const u8,
+                values: anytype,
+                order: anytype,
+            ) !Page(Row) {
+                comptime core.checkScope(@TypeOf(c), "tx.rawPageOrdered");
+                comptime rawcheck.assertPaged(D, Row, sql, "tx.rawPageOrdered");
+                comptime ordering.assertFor(@TypeOf(order), Row, "`tx.rawPageOrdered`", false);
+                const parts = comptime ordering.split(rawText(sql, @TypeOf(values), "tx.rawPageOrdered"), "`tx.rawPageOrdered`");
+                const text = try spliced(parts.head, order, parts.tail, c);
+                var total: i64 = 0;
+                const rows = try filling(Row, null, self.db, &self.inner, c, text, null, try rawValuesOf(values, c), &total);
+                return .{ .rows = rows, .total = total };
+            }
+
             /// `db.exec` inside the transaction: a statement that answers with
             /// nothing, and the rows it changed (ADR 067).
             pub fn exec(self: *Tx, c: anytype, sql: []const u8, values: anytype) !usize {
@@ -3318,9 +3380,20 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             var out: Values(D, Row, @TypeOf(options), stmt) = undefined;
             inline for (stmt.paths, 0..) |path, i| {
                 const param = comptime stmt.params[i];
-                // The one parameter that is not one value: a list the Dialect
-                // wants as JSON text rather than as an array (ADR 067).
-                if (comptime param.list and D.list_form == .json_each) {
+                // A list under a `sql.given`: null is the term dropping and
+                // binds as null, and a list present, empty or not, is the
+                // list (ADR 149).
+                if (comptime param.list and param.nullable) {
+                    const held = where_mod.valueAt(options, path);
+                    const List = comptime @typeInfo(@TypeOf(out[i])).optional.child;
+                    out[i] = if (held) |list| (if (comptime D.list_form == .json_each)
+                        try jsonList(comptime WireWrite(D, where_mod.ParamType(Row, param)), list, c)
+                    else
+                        try forWire(List, list, c)) else null;
+                } else if (comptime param.list and D.list_form == .json_each) {
+                    // The one parameter that is not one value: a list the
+                    // Dialect wants as JSON text rather than as an array
+                    // (ADR 067).
                     const Item = comptime WireWrite(D, where_mod.ParamType(Row, param));
                     const value = where_mod.valueAt(options, path);
                     out[i] = try jsonList(Item, value, c);
@@ -3592,11 +3665,14 @@ fn Values(
             // SQLite does: `json_each(?1)` takes one text parameter holding
             // the whole array, so the parameter is bytes rather than a list
             // (ADR 067). `jsonList` is what fills it.
+            const List = if (D.list_form == .json_each)
+                []const u8
+            else
+                []const ArrayElement(D, where_mod.ParamType(Row, param));
+            // A list under a `sql.given` may be null, which is the term
+            // dropping (ADR 149).
             fields[i] = if (param.list)
-                (if (D.list_form == .json_each)
-                    []const u8
-                else
-                    []const ArrayElement(D, where_mod.ParamType(Row, param)))
+                (if (param.nullable) ?List else List)
             else if (param.nullable) Maybe(F) else F;
         }
         const frozen = fields;
@@ -6976,6 +7052,127 @@ test "rawPage reads the total off the window the caller put on the end" {
     try testing.expectEqual(@as(usize, 2), in_tx.rows.len);
     try testing.expectEqual(@as(i64, 7), in_tx.total);
     try tx.commit();
+}
+
+test "rawPageOrdered takes the request's order through its hole and still reads the total" {
+    // The three flagship lists of the port that asked for it were
+    // `rawOrdered` for the rows and a second statement for the count, the
+    // `WHERE` pasted into both (ADR 205).
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    var db: SqliteDb = .init(
+        testing.allocator,
+        "file:raw-page-ordered?mode=memory&cache=shared",
+        .{ .size = 2, .unchecked = true },
+    );
+    defer db.deinit();
+    try db.nilo_start(threaded.io(), .none);
+
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    _ = try db.exec(&run, accounts_ddl, .{});
+    for (0..7) |i| {
+        var mail: [16]u8 = undefined;
+        _ = try db.insert(SqliteAccount, &run, .{
+            .public = types.Uuid.nil,
+            .email = try std.fmt.bufPrint(&mail, "n{d}@example.dev", .{i}),
+        });
+    }
+
+    const PageLine = struct {
+        pub const nilo_table = .projection;
+        id: i64,
+        email: nilo.Str,
+    };
+    const Sort = ordering.Ordering(PageLine, .{ .id = .id, .mail = "email" });
+    const statement_text =
+        "SELECT id, email, count(*) OVER () FROM accounts WHERE id > $1 {order} LIMIT $2 OFFSET $3";
+
+    const newest = try db.rawPageOrdered(PageLine, &run, statement_text, .{ @as(i64, 1), @as(i64, 3), @as(i64, 0) }, Sort.by(&.{.{ .key = .id, .direction = .desc }}));
+    try testing.expectEqual(@as(usize, 3), newest.rows.len);
+    try testing.expectEqual(@as(i64, 6), newest.total);
+    try testing.expectEqualStrings("n6@example.dev", newest.rows[0].email.view());
+
+    // The other way round is the same total, because the order moved and
+    // the `WHERE` did not.
+    const oldest = try db.rawPageOrdered(PageLine, &run, statement_text, .{ @as(i64, 1), @as(i64, 3), @as(i64, 0) }, Sort.by(&.{.{ .key = .mail }}));
+    try testing.expectEqual(@as(i64, 6), oldest.total);
+    try testing.expectEqualStrings("n1@example.dev", oldest.rows[0].email.view());
+
+    var tx = try db.begin(&run, .{});
+    errdefer tx.rollback();
+    const in_tx = try tx.rawPageOrdered(PageLine, &run, statement_text, .{ @as(i64, 0), @as(i64, 2), @as(i64, 0) }, Sort.by(&.{.{ .key = .id, .direction = .desc }}));
+    try testing.expectEqual(@as(usize, 2), in_tx.rows.len);
+    try testing.expectEqual(@as(i64, 7), in_tx.total);
+    try testing.expectEqualStrings("n6@example.dev", in_tx.rows[0].email.view());
+    try tx.commit();
+}
+
+test "on SQLite, a list that may be absent drops its term, and today is the database's date" {
+    // Items 81 and 91 on the second database: the list is one JSON text
+    // parameter, and `json_each(NULL)` is no rows beside a guard that says the
+    // term is not there; `CURRENT_DATE` is the ten characters a `Date` is.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    var db: SqliteDb = .init(
+        testing.allocator,
+        "file:given-list-today?mode=memory&cache=shared",
+        .{ .size = 2, .unchecked = true },
+    );
+    defer db.deinit();
+    try db.nilo_start(threaded.io(), .none);
+
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    _ = try db.exec(&run, accounts_ddl, .{});
+    for (0..4) |i| {
+        var mail: [16]u8 = undefined;
+        _ = try db.insert(SqliteAccount, &run, .{
+            .public = types.Uuid.nil,
+            .email = try std.fmt.bufPrint(&mail, "n{d}@example.dev", .{i}),
+        });
+    }
+
+    const given = where_mod.given;
+    const some = [_]i64{ 1, 3 };
+    try testing.expectEqual(@as(usize, 4), try db.count(SqliteAccount, &run, .{
+        .where = .{ .id = .{ .in = given(@as(?[]const i64, null)) } },
+    }));
+    try testing.expectEqual(@as(usize, 2), try db.count(SqliteAccount, &run, .{
+        .where = .{ .id = .{ .in = given(@as(?[]const i64, &some)) } },
+    }));
+    try testing.expectEqual(@as(usize, 0), try db.count(SqliteAccount, &run, .{
+        .where = .{ .id = .{ .in = given(@as(?[]const i64, &.{})) } },
+    }));
+    try testing.expectEqual(@as(usize, 2), try db.count(SqliteAccount, &run, .{
+        .where = .{ .id = .{ .not_in = given(@as(?[]const i64, &some)) } },
+    }));
+
+    // `.ieq` is `COLLATE NOCASE` on both sides here.
+    try testing.expectEqual(@as(usize, 1), try db.count(SqliteAccount, &run, .{
+        .where = .{ .email = .{ .ieq = @as([]const u8, "N2@EXAMPLE.dev") } },
+    }));
+
+    _ = try db.exec(&run, "CREATE TABLE days (id INTEGER PRIMARY KEY NOT NULL, day TEXT)", .{});
+    const Day = struct {
+        pub const nilo_table = .{ .name = "days", .key = .id };
+        id: i64,
+        day: ?types.Date,
+    };
+    _ = try db.insert(Day, &run, .{ .id = @as(i64, 1), .day = @as(?types.Date, null) });
+    _ = try db.insert(Day, &run, .{ .id = @as(i64, 2), .day = @as(?types.Date, types.Date.nilo_parse("2015-03-01").?) });
+    try testing.expectEqual(@as(usize, 1), try db.update(Day, &run, .{
+        .set = .{ .day = .today },
+        .where = .{ .day = null },
+    }));
+    try testing.expectEqual(@as(usize, 1), try db.count(Day, &run, .{ .where = .{ .day = .today } }));
+    try testing.expectEqual(@as(usize, 1), try db.count(Day, &run, .{ .where = .{ .day = .{ .lt = .today } } }));
+    // Read back as a day, which is what says `CURRENT_DATE` wrote the ten
+    // characters `Date` parses rather than something else.
+    const stamped = (try db.find(Day, &run, @as(i64, 1))).?;
+    try testing.expect(stamped.day.?.days > 20_000);
 }
 
 test "rawExactlyOne answers the row an aggregate always has, and refuses a statement with none" {

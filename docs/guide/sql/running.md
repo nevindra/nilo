@@ -161,7 +161,10 @@ fn slowOnes(sent: sql.Sent) void {
 
 `db.watching(slowOnes)`, and nothing else changes. A `sql.Sent` carries the
 statement, the name it is kept prepared under, how long the database took, how
-many rows moved, and whether it failed. **Not the
+many rows moved, and whether it failed. A `db.raw` statement has a name too,
+so a watcher can count the heavy raw reads by name rather than by text; the
+ones with none are `db.exec`, a statement whose `ORDER BY` the request chose,
+and anything on a `Db` with `prepared = false`. **Not the
 values it bound** — those are the interesting half and they are also somebody's
 password, so putting them in a log is a decision rather than a default
 ([ADR 108](../../adr/108-a-statement-can-be-watched.md)).

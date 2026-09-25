@@ -640,6 +640,31 @@ test "the case-folding unique is the one that stops two addresses differing only
         .nickname = null,
         .created_at = types.Timestamp.now(),
     }));
+
+    // And `.ieq` is the lookup that unique is an index for (item 84): the
+    // row, whatever case it is asked for in, found through the index rather
+    // than by reading the table.
+    const found = (try fx.db.one(User, &fx.run, .{
+        .where = .{ .email = .{ .ieq = @as([]const u8, "WATI@example.DEV") } },
+    })).?;
+    try testing.expectEqualStrings("Wati@Example.dev", found.email);
+
+    const Step = struct {
+        pub const nilo_table = .projection;
+        id: i64,
+        parent: i64,
+        notused: i64,
+        detail: []const u8,
+    };
+    const where_ieq = comptime sql.on(Db.Dialect).selectFor(User, @TypeOf(.{
+        .where = .{ .email = .{ .ieq = @as([]const u8, "") } },
+    })).sql;
+    try testing.expect(std.mem.endsWith(u8, where_ieq, "WHERE \"email\" COLLATE NOCASE = ?1 COLLATE NOCASE"));
+    const plan = try fx.db.raw(Step, &fx.run,
+        "EXPLAIN QUERY PLAN SELECT * FROM \"users\" WHERE \"email\" COLLATE NOCASE = $1 COLLATE NOCASE",
+        .{@as([]const u8, "wati@example.dev")});
+    try testing.expect(plan.len > 0);
+    try testing.expect(std.mem.indexOf(u8, plan[0].detail, "USING INDEX") != null);
 }
 
 test "a version applies once, records itself, and answers false the second time" {

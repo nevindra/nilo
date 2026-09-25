@@ -340,10 +340,6 @@ const sql_refusals = [_]Refusal{
         .says = "the condition on a delete on given_on_a_delete.Partner holds a `sql.given`.",
     },
     .{
-        .name = "given_on_a_list",
-        .says = "the condition on `id` (as `in`) was given a `sql.given`.",
-    },
-    .{
         .name = "given_on_a_value_that_is_always_there",
         .says = "`sql.given` was handed a []const u8, which is not an optional.",
     },
@@ -555,6 +551,10 @@ const sql_refusals = [_]Refusal{
         .name = "order_on_unknown_column",
         .says = "order_on_unknown_column.User has no column `creted_at`, asked for in `.order`.",
     },
+    .{
+        .name = "order_on_a_grouped_row_by_a_column_it_does_not_carry",
+        .says = "`.order` on order_on_a_grouped_row_by_a_column_it_does_not_carry.ByCustomer names `year`, a column of its table that the Row does not carry, and the Row is grouped.",
+    },
     // An `ORDER BY` chosen per request from a closed set (ADR 165). The
     // keys are checked where they are declared, and an ordering carries the
     // Row it was checked against.
@@ -569,6 +569,10 @@ const sql_refusals = [_]Refusal{
     .{
         .name = "ordering_expression_on_a_typed_select",
         .says = "`db.select` on ordering_expression_on_a_typed_select.Ticket was given an ordering whose key `title` is an expression, and a statement nilo writes orders by columns.",
+    },
+    .{
+        .name = "raw_page_ordered_without_a_total",
+        .says = "the statement handed to `db.rawPageOrdered` selects 2 columns, and raw_page_ordered_without_a_total.Card has 2 fields and wants one more.",
     },
     .{
         .name = "raw_ordered_without_a_hole",
@@ -925,6 +929,17 @@ const sql_refusals = [_]Refusal{
     .{
         .name = "pattern_on_a_number_column",
         .says = "`.age = .{ .contains = … }` on pattern_on_a_number_column.User," ++
+            " whose `age` is i32.",
+    },
+    // The database's clock as a word: each goes in the column type it is a
+    // value of (ADR 181).
+    .{
+        .name = "today_on_a_timestamp",
+        .says = "`.set = .{ .seen_at = .today }` on today_on_a_timestamp.Card, whose `seen_at` is types.Timestamp.",
+    },
+    .{
+        .name = "ieq_on_a_number_column",
+        .says = "`.age = .{ .ieq = … }` on ieq_on_a_number_column.User," ++
             " whose `age` is i32.",
     },
     .{

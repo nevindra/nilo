@@ -124,7 +124,9 @@ links the migration module into every program with a `Db`, measured at
 17,296 bytes; a program that never calls this links none of it.
 
 `db.watching(f)` calls `f` with a `sql.Sent` after every statement — the text,
-the plan name it is kept under, how long the database took, how many rows moved
+the plan name it is kept under (a `db.raw` statement's included; null for
+`db.exec`, a request-chosen `ORDER BY`, a `Composed` and a `Db` with
+`prepared = false`), how long the database took, how many rows moved
 and whether it failed. **Not the values it bound**, which are somebody's
 password as often as they are an id
 ([ADR 108](../adr/108-a-statement-can-be-watched.md)). `sql.logging` is a
@@ -396,6 +398,7 @@ request ([ADR 038](../adr/038-a-module-sits-where-the-loop-puts-it.md)).
 | `db.raw([]const u8, c, sql, .{ … })` | `![][]const u8` — column one of every row, with no Row and no marker. `i64`, `?bool`, a `Str`: any one thing a column can be read as. `rawOne` the same, unwrapped. A list of two columns into a scalar is a Refusal ([ADR 125](../adr/125-a-row-that-owns-no-table.md)) |
 | `db.liveColumns(c, schema, table)` | `![]const sql.Column` — what the database says the table has, `name`, `udt`, `nullable`. Empty for a table that is not there. What `checkSchema` and `migrate.addMissingColumns` read |
 | `db.rawOrdered(User, c, sql, .{ … }, order)` | `![]User` — a raw statement with `{order}` in it, where the whole `ORDER BY` an `sql.Ordering` chose at run time is written. See *An order chosen at run time* below |
+| `db.rawPageOrdered(Line, c, sql, .{ … }, order)` | `!Page(Line)` — `rawPage` and `rawOrdered` at once: the list ends in `count(*) OVER ()` and the statement holds `{order}`, so a list sorted from its headings reads its rows and its total in one statement rather than two with the `WHERE` pasted into both ([ADR 205](../adr/205-a-raw-statement-can-carry-its-total.md)) |
 | `db.compose(c)` | `sql.Composed` — an empty composed statement in the Scope's arena, spelling its placeholders the way this Db's dialect does (`$n`, or `?n` on SQLite). `sql.Composed.init(arena, sql.Spelling.of(Dialect))` builds one where no Db is in scope ([ADR 208](../adr/208-a-statement-composed-at-run-time-from-pieces-that-cannot-carry-a-string.md)) |
 | `db.composed(User, c, stmt, .{ … })` | `![]User` — a statement composed at run time from pieces that cannot carry a string: `sql.Composed` is literals (`text`, comptime), checked identifiers (`ident`, `qualified`) and parameters (`param`, `number`), and nothing else. Filled by position, width-checked at run time, its tuple counted against its placeholders (`error.ParamCountMismatch`) and its spelling against the Db (`error.WrongDialect`), unnamed. For a query engine that turns a model into SQL; `raw` for everything that can be written while compiling ([ADR 208](../adr/208-a-statement-composed-at-run-time-from-pieces-that-cannot-carry-a-string.md)) |
 | `db.composedOne(User, c, stmt, .{ … })` | `!?User` — the same, unwrapped |
@@ -562,9 +565,9 @@ pointing at `insertOrIgnore`.
 | | |
 |---|---|
 | `.where` | a condition; see below |
-| `.order` | `.{ .created_at = .desc }`, one column per field. `.asc_nulls_last` and its three siblings say where NULLs go, which the two databases otherwise disagree about. Or a value of an `sql.Ordering` for an order the request chose; see below |
+| `.order` | `.{ .created_at = .desc }`, one column per field. `.asc_nulls_last` and its three siblings say where NULLs go, which the two databases otherwise disagree about. A narrower Row that is not grouped may name any column of its table, carried or not, so a tiebreak need not go on the wire; a grouped one is a Refusal there, since the column has no single value per group. Or a value of an `sql.Ordering` for an order the request chose; see below |
 | `.limit` / `.offset` | a literal is baked into the SQL; a variable becomes a parameter. A literal limit is also the row ceiling, so the result list is allocated once |
-| `.set` | update only: columns to new values, or `.{ .views = .{ .plus = 1 } }` for arithmetic on the column's own value. A bare `null` on a nullable column is `= NULL` — no `@as(?T, null)` needed — where in `.where` the same null is `IS NULL`. `.title = sql.given(maybe)` is `COALESCE($1, "title")`, the column kept when the value is null, refused on an optional column. `.updated_at = .now` is the database's clock on a `sql.Timestamp`, nothing bound |
+| `.set` | update only: columns to new values, or `.{ .views = .{ .plus = 1 } }` for arithmetic on the column's own value. A bare `null` on a nullable column is `= NULL` — no `@as(?T, null)` needed — where in `.where` the same null is `IS NULL`. `.title = sql.given(maybe)` is `COALESCE($1, "title")`, the column kept when the value is null, refused on an optional column. `.updated_at = .now` is the database's clock on a `sql.Timestamp`, and `.start_date = .today` its date (`CURRENT_DATE`) on a `sql.Date`, nothing bound for either. Each on the other's column type is a Refusal |
 
 ### Conditions
 
@@ -574,17 +577,19 @@ Different fields are ANDed. Several operators on one field are ANDed too.
 |---|---|
 | `.id = 7` | `"id" = $1` |
 | `.age = .{ .gt = 18, .lt = 65 }` | `"age" > $1 AND "age" < $2` |
-| `.eq` `.ne` `.gt` `.gte` `.lt` `.lte` | |
+| `.eq` `.ne` `.gt` `.gte` `.lt` `.lte` | each also takes `.now` on a `sql.Timestamp` column and `.today` on a `sql.Date` one, the database's clock with nothing bound: `.due_date = .{ .lt = .today }`, and `.due_date = .today` for `=` |
+| `.ieq` / `.not_ieq` | equality that ignores case: `lower("email") = lower($1)` on Postgres and `"email" COLLATE NOCASE = ?1 COLLATE NOCASE` on SQLite, the expression a `.unique` with `.ignoring_case` indexes, so the lookup uses it. An `_` is a character here, where `.ilike` would read it as a wildcard. Text only |
 | `.like` / `.ilike` | and `.not_like` / `.not_ilike`. **These do not escape the text you give them**; the row below is the one to reach for. On SQLite `.ilike` is spelled `LIKE`, because that database's `LIKE` already folds ASCII case — and `.like` is a Refusal there naming `.ilike`, for the reason `.contains` is ([ADR 055](../adr/055-the-second-dialect-is-the-test-of-the-seam.md)) |
 | `.contains` `.starts_with` `.ends_with` | the pattern is built *and* escaped by the statement, so `%` and `_` in a search term match themselves. `i` in front folds case (`.icontains`), `not_` in front negates — twelve in all. On SQLite the case-sensitive half is a Refusal: its `LIKE` folds ASCII case and cannot be told not to |
 | `.in = &.{ 1, 2, 3 }` | `= ANY($1)` — one parameter, so the statement stays a constant |
 | `.not_in = &.{ 1, 2, 3 }` | `<> ALL($1)` — one parameter likewise |
+| `.stage = .{ .in = sql.given(stages) }` | `("stage" = ANY($1) OR $1 IS NULL)` — a multi-select that may be absent: null drops the term, and a list, empty or not, is the list. See below |
 | `.deleted_at = null` | `IS NULL` |
 | `.deleted_at = .{ .ne = null }` | `IS NOT NULL` |
 | `.handle = .{ .not_distinct_from = maybe }` | `IS NOT DISTINCT FROM $1` — `=` with null treated as a value. **The one operator an optional may reach**; `.distinct_from` is its negation |
 | `.status = sql.given(maybe)` | `("status" = $1 OR $1 IS NULL)` — the term is in the statement when the filter carried a value and out of it when it did not. See below |
 | `.any = .{ .{ … }, .{ … } }` | OR, bracketed. Not `.or`, which is a keyword — so `any` is a reserved column name |
-| `.exists = .{ .{ .in = Other, .where = .{ … } } }` | `EXISTS (SELECT 1 FROM …)`, joined on the `.references` either Row declares — `Other`'s pointing at this table, or this Row's pointing at `Other`'s. `.on = .<column of Other>` or `.via = .<column of this Row>` says which when the schema says it twice. `.not_exists` negates; both are reserved column names, and both nest inside `.any` |
+| `.exists = .{ .{ .in = Other, .where = .{ … } } }` | `EXISTS (SELECT 1 FROM …)`, joined on the `.references` either Row declares — `Other`'s pointing at this table, or this Row's pointing at `Other`'s. `.on = .<column of Other>` or `.via = .<column of this Row>` says which when the schema says it twice. Either one also names a join no `.references` covers at all, and then the column named is joined to the other side's key: `.via = .deal_id` is `deals.id = <this table>.deal_id` with nothing declared on either Row, which is the way through a table another part of the program owns. `.not_exists` negates; both are reserved column names, and both nest inside `.any` |
 | `.across = .{ .columns = .{ .code, .name }, .icontains = q }` | `("code" ILIKE … $1 … OR "name" ILIKE … $1 …)` — one condition, whichever of the columns meets it, and **one parameter** named on each. A tuple of entries is several, ANDed; `across` is a reserved column name too |
 
 A column that does not exist is a compile error naming the near miss.
@@ -637,9 +642,16 @@ term dropped the subquery would ask whether *any* joined row exists, which
 excludes every row that has none. For the same reason it cannot sit beside a
 condition that is always there in one `.exists` — write a second entry.
 
-Six things are Refusals, each with its own sentence: a `sql.given` inside
-`.any` (OR reverses what dropping means), on `.in` (a list that may be absent is
-the empty list, which `.in` already reads), on `not_distinct_from` (which takes
+**A list takes one too**, and absent and empty stay two answers. A filter bar's
+multi-select sends no `?stage=` for *no filter* and a list for *these stages*,
+so `.stage = .{ .in = sql.given(q.stages) }` drops the term when `q.stages` is
+null and keeps it when it is a list; an empty list is still `.in`'s *no row
+matches*, and `.not_in`'s *every row*. On SQLite the list is one JSON
+parameter, and `json_each(NULL)` is no rows beside a guard that already said
+the term is not there.
+
+Five things are Refusals, each with its own sentence: a `sql.given` inside
+`.any` (OR reverses what dropping means), on `not_distinct_from` (which takes
 an optional already), on a value that is not optional, beside a fixed condition
 in one `.exists`, and in the condition of an `UPDATE` or a `DELETE` — where a
 term that may not be there is the whole table.
@@ -724,7 +736,9 @@ The hole is yours, for the reason `rawOne` adds no `LIMIT 1`: appending to
 somebody else's SQL is what `db.raw` exists not to do. It goes anywhere an
 `ORDER BY` clause is legal — inside an `OVER (PARTITION BY … {order})` as
 well as at the end, which is how a grouped and capped list ranks by the order
-the request chose with the one hole. Both exist on a `Tx`.
+the request chose with the one hole. `db.rawPageOrdered` is the same call for
+a statement whose list ends in `count(*) OVER ()`, read as a `Page` the way
+`rawPage` reads one. All three exist on a `Tx`.
 
 **What it costs.** The text is assembled per request, so an ordered statement
 runs **unnamed** — Parse, Bind and Execute on every call, the ~12 µs a prepared
@@ -1181,7 +1195,7 @@ const User = struct {
 | `.default = .{ .created_at = .now }` | what the database writes when an insert leaves the column out. `.now` is the one word, and only on a `sql.Timestamp`; everything else is a literal of the column's own Zig type, which has to coerce or it does not compile. A column with words of its own takes one of them the way a column is written: `.draft`, not `"draft"`. A default the database has to work out — `DEFAULT (lower(x))` — is still a step, and one on a generated key is a Refusal |
 | `.filled = .{ .number, .created_at }` | columns the database fills by means the marker cannot say: a `DEFAULT` written in a step, `gen_random_uuid()`, a trigger. Renders no DDL; it lets an insert leave them out. `.filled = .created_at` for one. A column also in `.default`, the integer key a sequence fills, and a name that is not a column are each a Refusal ([ADR 181](../adr/181-the-marker-has-two-kinds-of-word.md)) |
 | `.unique = .{ .email }` | one column. `.{ .{ .tenant_id, .name } }` is one constraint over two |
-| `.{ .columns = .{.email}, .ignoring_case = true }` | the named form. `.ignoring_case` is `lower(...)` on Postgres and `COLLATE NOCASE` on SQLite, and it is a Refusal on a column that is not text |
+| `.{ .columns = .{.email}, .ignoring_case = true }` | the named form. `.ignoring_case` is `lower(...)` on Postgres and `COLLATE NOCASE` on SQLite, and it is a Refusal on a column that is not text. The lookup it serves is `.email = .{ .ieq = address }`, which folds both sides the same way |
 | `.name = "users_one_account_per_address"` | what the constraint is called, on a `.unique`, an `.index` or a `.references`. **The name is the error message**: Postgres reports a violation by constraint name and nothing else, so this is the difference between a sentence and a column list. Text rather than `.a_word`, because that is what the database prints |
 | `.index = .{ .created_at }` | the same three shapes, without the uniqueness |
 | `.{ .created_at = .desc }` | one column of an index read downwards. `.asc` is the default and needs no saying; a direction on a `.unique` is a Refusal, since a unique index is not read in order |

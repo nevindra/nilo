@@ -1451,9 +1451,10 @@ fn setOperator(
     }
 }
 
-/// Whether a `.set` field is `.now`: the column takes the moment the
-/// statement runs, written by the database as `D.now_default`, the same
-/// expression `.default = .{ .x = .now }` puts in the schema.
+/// The expression a `.set` field of `.now` or `.today` writes: the moment the
+/// statement runs, or the day, written by the database (`where.clockWord`).
+/// `.now` is `D.now_default`, the same expression `.default = .{ .x = .now }`
+/// puts in the schema, and `.today` is `CURRENT_DATE`.
 ///
 /// **The database's clock rather than the server's**, because a row stamped
 /// by two servers whose clocks disagree sorts in an order neither wrote. On
@@ -1463,24 +1464,12 @@ fn setOperator(
 ///
 /// A column whose own type is an enum with a `now` in it is that enum's
 /// value, which is what `.now` meant there before this word existed.
-fn setsNow(comptime Row: type, comptime f: std.builtin.Type.StructField) bool {
+fn setsClock(comptime D: type, comptime Row: type, comptime f: std.builtin.Type.StructField) ?[]const u8 {
     comptime {
-        if (f.type != @TypeOf(.enum_literal)) return false;
-        const ptr = f.default_value_ptr orelse return false;
+        if (f.type != @TypeOf(.enum_literal)) return null;
+        const ptr = f.default_value_ptr orelse return null;
         const word = @as(*const f.type, @ptrCast(@alignCast(ptr))).*;
-        if (!std.mem.eql(u8, @tagName(word), "now")) return false;
-        const F = row_mod.ColumnType(Row, f.name);
-        const C = switch (@typeInfo(F)) {
-            .optional => |o| o.child,
-            else => F,
-        };
-        if (C == types_mod.Timestamp) return true;
-        if (@typeInfo(C) == .@"enum") return false;
-        @compileError(
-            "nilo: `.set = .{ ." ++ f.name ++ " = .now }` on " ++ @typeName(Row) ++
-                ", whose `" ++ f.name ++ "` is " ++ @typeName(F) ++ ".\n" ++
-                "  `.now` is the moment the statement runs, so it goes in a `sql.Timestamp`.",
-        );
+        return where_mod.clockWord(D, Row, f.name, word, "`.set = .{ ." ++ f.name ++ " = ." ++ @tagName(word) ++ " }`");
     }
 }
 
@@ -1693,8 +1682,8 @@ fn updating(
             );
             // The moment the statement runs, written by the database: no
             // parameter, so nothing to bind and no clock read on this side.
-            if (setsNow(Row, f)) {
-                sql = sql ++ quoted ++ " = " ++ D.now_default;
+            if (setsClock(D, Row, f)) |clock| {
+                sql = sql ++ quoted ++ " = " ++ clock;
                 continue;
             }
             // Arithmetic on the column's own value, or a new value for it.
@@ -1810,7 +1799,9 @@ fn orderBy(comptime D: type, comptime Row: type, comptime T: type) []const u8 {
 
         var out: []const u8 = " ORDER BY ";
         for (info.fields, 0..) |f, i| {
-            if (!row_mod.hasColumn(Row, f.name)) {
+            // A narrower Row may order by a column of its table it does not
+            // carry: a tiebreak the response has no reason to show.
+            if (!row_mod.hasColumn(Row, f.name) and !row_mod.tableHasColumn(Row, f.name)) {
                 row_mod.noSuchColumn(Row, f.name, "`.order`");
             }
             if (f.type != Direction and f.type != @TypeOf(.enum_literal)) @compileError(
@@ -2067,6 +2058,16 @@ test "several order terms keep the order they were written in" {
         sqlOf(.{ .order = .{ .created_at = .desc, .id = .asc } }),
         "ORDER BY \"created_at\" DESC, \"id\" ASC",
     ));
+}
+
+test "a narrower Row orders by a column of its table it does not carry" {
+    // Item 86: a checklist ordered by `position` with `created_at` as the
+    // tiebreak, where the response carries neither the timestamp nor any
+    // reason to.
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"email\" FROM \"users\" ORDER BY \"age\" ASC, \"created_at\" ASC",
+        comptime select(Pg, UserCard, @TypeOf(.{ .order = .{ .age = .asc, .created_at = .asc } })).sql,
+    );
 }
 
 test "an order term can say where NULLs go, which is the half neither database agrees on" {
@@ -2738,6 +2739,44 @@ test "a set of .now is the database's clock, and binds nothing" {
             " WHERE \"id\" = ?2",
         comptime update(Lite, RabLine, @TypeOf(o)).sql,
     );
+}
+
+test "a set of .today is the database's date, and a condition may compare with it" {
+    // Item 91: a card moved to *in progress* gets today as its start date,
+    // unless one on or before today is already there — one statement, and
+    // nothing bound for either clock.
+    const Card = struct {
+        pub const nilo_table = .{ .name = "work_items", .key = .id };
+        id: i64,
+        start_date: ?types_mod.Date,
+        seen_at: types_mod.Timestamp,
+    };
+    const o = .{
+        .set = .{ .start_date = .today },
+        .where = .{
+            .id = @as(i64, 7),
+            .any = .{ .{ .start_date = null }, .{ .start_date = .{ .gt = .today } } },
+        },
+    };
+    const pg = comptime update(Pg, Card, @TypeOf(o));
+    try testing.expectEqualStrings(
+        "UPDATE \"work_items\" SET \"start_date\" = CURRENT_DATE WHERE \"id\" = $1 AND " ++
+            "(\"start_date\" IS NULL OR \"start_date\" > CURRENT_DATE)",
+        pg.sql,
+    );
+    try testing.expectEqual(@as(usize, 1), pg.paramCount());
+
+    // `.now` compares the same way, as the expression `.set` writes.
+    const stale = comptime update(Lite, Card, @TypeOf(.{
+        .set = .{ .seen_at = .now },
+        .where = .{ .seen_at = .{ .lt = .now }, .start_date = .today },
+    }));
+    try testing.expectEqualStrings(
+        "UPDATE \"work_items\" SET \"seen_at\" = " ++ Lite.now_default ++ " WHERE \"seen_at\" < " ++
+            Lite.now_default ++ " AND \"start_date\" = CURRENT_DATE",
+        stale.sql,
+    );
+    try testing.expectEqual(@as(usize, 0), stale.paramCount());
 }
 
 test "a given in a set keeps the column when the value is null, which is a patch" {

@@ -4114,6 +4114,145 @@ test "a search over several columns is one statement on Postgres, with the box e
     try testing.expectEqualStrings("ada@example.dev", found.rows[0].email);
 }
 
+test "ieq finds an address whatever its case, and reads an underscore as itself" {
+    // Item 84: `lower("email") = lower($1)` is the lookup a unique that
+    // ignores case is an index for; `.ilike` would have read the `_` in an
+    // address as any one character.
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const found = (try stack.db.one(Person, &run, .{
+        .where = .{ .email = .{ .ieq = @as([]const u8, "ADA@Example.DEV") } },
+    })).?;
+    try testing.expectEqual(@as(i64, 1), found.id);
+    try testing.expectEqual(@as(usize, 0), try stack.db.count(Person, &run, .{
+        .where = .{ .email = .{ .ieq = @as([]const u8, "ad_@example.dev") } },
+    }));
+    try testing.expectEqual(@as(usize, 2), try stack.db.count(Person, &run, .{
+        .where = .{ .email = .{ .not_ieq = @as([]const u8, "Ada@Example.Dev") } },
+    }));
+}
+
+test "a list that may be absent drops its term on Postgres, and an empty one does not" {
+    // Item 81: the multi-select on a filter bar. Postgres types `$1` from
+    // `= ANY($1)` before the guard reads it, which is the order ADR 149
+    // settled for one value, and the same has to hold for an array.
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const given = where_mod.given;
+    const Ids = struct {
+        fn count(db: *db_mod.Db, scope: *nilo.Run, in: ?[]const i64, not_in: ?[]const i64) !usize {
+            return db.count(Person, scope, .{ .where = .{
+                .id = .{ .in = given(in), .not_in = given(not_in) },
+            } });
+        }
+    };
+    const one_three = [_]i64{ 1, 3 };
+    const one = [_]i64{1};
+    try testing.expectEqual(@as(usize, 3), try Ids.count(&stack.db, &run, null, null));
+    try testing.expectEqual(@as(usize, 2), try Ids.count(&stack.db, &run, &one_three, null));
+    try testing.expectEqual(@as(usize, 0), try Ids.count(&stack.db, &run, &.{}, null));
+    try testing.expectEqual(@as(usize, 2), try Ids.count(&stack.db, &run, null, &one));
+    try testing.expectEqual(@as(usize, 3), try Ids.count(&stack.db, &run, null, &.{}));
+    try testing.expectEqual(@as(usize, 1), try Ids.count(&stack.db, &run, &one_three, &one));
+
+    // Text and a uuid, the two element types that bind as something other
+    // than themselves.
+    const emails = [_][]const u8{ "ada@example.dev", "grace@example.dev" };
+    try testing.expectEqual(@as(usize, 2), try stack.db.count(Filtered, &run, .{
+        .where = .{ .email = .{ .in = given(@as(?[]const []const u8, &emails)) } },
+    }));
+    const tokens = [_]types.Uuid{try types.Uuid.parse("550e8400-e29b-41d4-a716-446655440001")};
+    try testing.expectEqual(@as(usize, 1), try stack.db.count(Filtered, &run, .{
+        .where = .{ .token = .{ .in = given(@as(?[]const types.Uuid, &tokens)) } },
+    }));
+    try testing.expectEqual(@as(usize, 3), try stack.db.count(Filtered, &run, .{
+        .where = .{ .token = .{ .in = given(@as(?[]const types.Uuid, null)) } },
+    }));
+}
+
+test "today is the database's date, written and compared without a parameter" {
+    // Item 91: the start-date stamp, whose `WHERE` compares the column to
+    // the same day the `SET` writes.
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    // Grace's is NULL and Kid's is in 2015, so only Grace is stamped.
+    const stamped = try stack.db.update(Birthday, &run, .{
+        .set = .{ .born = .today },
+        .where = .{
+            .id = .{ .in = @as([]const i64, &.{ 2, 3 }) },
+            .any = .{ .{ .born = null }, .{ .born = .{ .gt = .today } } },
+        },
+    });
+    try testing.expectEqual(@as(usize, 1), stamped);
+    try testing.expectEqual(@as(usize, 1), try stack.db.count(Birthday, &run, .{ .where = .{ .born = .today } }));
+    try testing.expectEqual(@as(usize, 2), try stack.db.count(Birthday, &run, .{ .where = .{ .born = .{ .lt = .today } } }));
+
+    // And `.now` compares the way it is written.
+    try testing.expectEqual(@as(usize, 3), try stack.db.count(Profile, &run, .{ .where = .{ .seen_at = .{ .lt = .now } } }));
+}
+
+test "a paged raw statement takes the request's order and still carries its total" {
+    // Item 82: `/work`, `/commitments` and `/deals` were `rawOrdered` and a
+    // second statement for the count with the `WHERE` pasted in again.
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const Paged = struct {
+        pub const nilo_table = .projection;
+        id: i64,
+        email: []const u8,
+    };
+    const Sort = @import("ordering.zig").Ordering(Paged, .{ .id = .id, .age = "p.age" });
+    const text = "SELECT p.id, p.email, count(*) OVER () FROM " ++ table ++
+        " p WHERE p.age > $1 {order} LIMIT $2";
+
+    const oldest = try stack.db.rawPageOrdered(Paged, &run, text, .{ @as(i32, 10), @as(i64, 2) }, Sort.by(&.{.{ .key = .age, .direction = .desc }}));
+    try testing.expectEqual(@as(i64, 3), oldest.total);
+    try testing.expectEqual(@as(usize, 2), oldest.rows.len);
+    try testing.expectEqualStrings("grace@example.dev", oldest.rows[0].email);
+    try testing.expectEqualStrings("ada@example.dev", oldest.rows[1].email);
+}
+
+test "a narrower Row sorts by a column of its table it does not carry" {
+    // Item 86: the tiebreak the response has no reason to show.
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    const Email = struct {
+        pub const nilo_table = Person;
+        id: i64,
+        email: []const u8,
+    };
+    const by_age = try stack.db.select(Email, &run, .{ .order = .{ .age = .desc } });
+    try testing.expectEqual(@as(usize, 3), by_age.len);
+    try testing.expectEqual(@as(i64, 2), by_age[0].id);
+    try testing.expectEqual(@as(i64, 1), by_age[1].id);
+    try testing.expectEqual(@as(i64, 3), by_age[2].id);
+}
+
 test "an exists from the child's side reads the parent's key off the child's own reference" {
     // Item 75: `staff WHERE EXISTS (departments WHERE …)`, where the key is on
     // the outer Row. Here the session points at the person, and the query is

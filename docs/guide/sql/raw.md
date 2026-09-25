@@ -207,6 +207,12 @@ returns the `Page(Line)` is described the same way in the document. A
 `SELECT` list exactly the Row's width, with no window on the end, is a
 Refusal that says what to add.
 
+A list sorted from its headings is `db.rawPageOrdered`: the same statement
+with `{order}` where the `ORDER BY` goes, and the `sql.Ordering` value the
+request chose as the last argument, the way [`rawOrdered`](./reading.md)
+takes it. The rows and the total still come from one statement, so the count
+cannot disagree with the page it is printed under.
+
 **Dates in a `GROUP BY` are where the two databases part.** A
 `sql.Timestamp` is microseconds since the epoch. Postgres stores it as
 `timestamptz` and `date_trunc('month', issued_at)` reads it. SQLite stores
@@ -298,7 +304,7 @@ Four things to know when the file is SQLite:
   first appearance, so `$2` written before `$1` used to bind the first value.
   nilo respells `$n` as `?n` while compiling for every call that takes
   comptime text, which is `raw`, `rawOne`, `rawExactlyOne`, `rawPage`,
-  `rawOrdered` and the `Tx` versions
+  `rawOrdered`, `rawPageOrdered` and the `Tx` versions
   ([ADR 204](../../adr/204-a-raw-placeholder-is-spelled-for-the-dialect.md)).
   `exec` takes its text at run time and sends it as written: write `?1`
   there, or a bare `?`, or a statement with no parameters, which is what

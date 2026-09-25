@@ -562,7 +562,7 @@ pub const Postgres = struct {
     /// does without an extension, so this is a functional index on `lower(…)`.
     /// **That has a consequence worth knowing before it surprises somebody**: a
     /// plain `WHERE "email" = $1` will not use this index. A lookup that wants
-    /// it writes `lower("email") = lower($1)`, which today is `db.raw`. The
+    /// it writes `lower("email") = lower($1)`, which is `.ieq`. The
     /// alternative is the `citext` extension, which is a `CREATE EXTENSION` this
     /// module has no word for and would not run on a managed database that has
     /// not allowed it.

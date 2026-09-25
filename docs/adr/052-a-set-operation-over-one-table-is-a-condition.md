@@ -29,7 +29,8 @@ The first two are obvious. The third is the one worth writing down, because
 "there is no `NOT`" is the objection and it is wrong:
 
 - **Every leaf has a negation.** `.ne` and `.distinct_from` against `=`,
-  `.not_in`, `.not_like`, `.not_ilike`, and the comparisons negate each other.
+  `.not_in`, `.not_like`, `.not_ilike`, `.not_ieq`, `not_` in front of each
+  pattern, and the comparisons negate each other.
 - **De Morgan holds in SQL's three-valued logic.** `NOT (a OR b)` and
   `NOT a AND NOT b` agree on `NULL` as well as on `TRUE` and `FALSE`, so the
   rewrite is not an approximation.

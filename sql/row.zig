@@ -824,6 +824,18 @@ pub fn hasColumn(comptime Row: type, comptime column: []const u8) bool {
     };
 }
 
+/// Whether the table `Row` reads has a column by that name, whether or not
+/// `Row` carries it: the owner's columns, for a narrower Row. What `.order`
+/// asks, because a tiebreak the response does not show is still a column the
+/// statement can sort by. A projection owns no table and answers only for
+/// itself.
+pub fn tableHasColumn(comptime Row: type, comptime column: []const u8) bool {
+    return comptime blk: {
+        const Owner = ownerOf(Row);
+        break :blk hasColumn(Owner, column);
+    };
+}
+
 /// The type `Row` reads a column into.
 pub fn ColumnType(comptime Row: type, comptime column: []const u8) type {
     comptime {

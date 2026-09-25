@@ -962,12 +962,16 @@ fn assertNoLock(comptime Row: type, comptime O: type, comptime call: []const u8)
 /// `.order = .{ .customer = .{ .name = .asc } }`.
 fn orderBy(comptime D: type, comptime Row: type, comptime T: type) []const u8 {
     comptime {
-        const terms = orderTerms(D, Row, T, &.{});
+        const terms = orderTerms(D, Row, T, &.{}, statement.relation(D, Row));
         return if (terms.len == 0) "" else " ORDER BY " ++ terms;
     }
 }
 
-fn orderTerms(comptime D: type, comptime Level: type, comptime T: type, comptime path: []const []const u8) []const u8 {
+/// `relation` is the Row's own table as the statement names it, for a column
+/// of that table the Row does not carry (`tableHasColumn`): written through
+/// the table rather than through the answer, so it is only for a Row that is
+/// not grouped, where every row of the table is still a row of the answer.
+fn orderTerms(comptime D: type, comptime Level: type, comptime T: type, comptime path: []const []const u8, comptime relation: []const u8) []const u8 {
     comptime {
         const info = switch (@typeInfo(T)) {
             .@"struct" => |s| s,
@@ -979,10 +983,23 @@ fn orderTerms(comptime D: type, comptime Level: type, comptime T: type, comptime
         var out: []const u8 = "";
         for (info.fields) |f| {
             const at = path ++ &[_][]const u8{f.name};
-            const term = switch (if (row_mod.fieldTypeOf(Level, f.name) == null) .column else row_mod.kindOf(Level, f.name)) {
-                .parent => orderTerms(D, row_mod.parentRowOf(row_mod.fieldTypeOf(Level, f.name).?).?, f.type, at),
+            const kind: row_mod.Kind = if (row_mod.fieldTypeOf(Level, f.name) == null) .column else row_mod.kindOf(Level, f.name);
+            const term = switch (kind) {
+                .parent => orderTerms(D, row_mod.parentRowOf(row_mod.fieldTypeOf(Level, f.name).?).?, f.type, at, ""),
                 .column, .aggregate => term: {
-                    if (row_mod.fieldTypeOf(Level, f.name) == null) row_mod.noSuchColumn(Level, f.name, "`.order`");
+                    const carried = row_mod.fieldTypeOf(Level, f.name) != null;
+                    const through_table = !carried and path.len == 0 and
+                        !@hasDecl(Level, row_mod.aggregate_marker) and
+                        row_mod.tableHasColumn(Level, f.name);
+                    if (!carried and path.len == 0 and @hasDecl(Level, row_mod.aggregate_marker) and
+                        row_mod.tableHasColumn(Level, f.name)) @compileError(
+                        "nilo: `.order` on " ++ @typeName(Level) ++ " names `" ++ f.name ++
+                            "`, a column of its table that the Row does not carry, and the Row is grouped.\n" ++
+                            "  A grouped Row is one row per group, and a column of the table has one value " ++
+                            "per row of the table rather than per group. Order by a field the Row groups by, " ++
+                            "or by one of its aggregates.",
+                    );
+                    if (!carried and !through_table) row_mod.noSuchColumn(Level, f.name, "`.order`");
                     if (f.type != Direction and f.type != @TypeOf(.enum_literal)) @compileError(
                         "nilo: `.order` on `" ++ row_mod.pathName(at) ++ "` was given a " ++ @typeName(f.type) ++
                             ".\n  A direction is `.asc` or `.desc`, or one of the four that also say " ++
@@ -990,7 +1007,8 @@ fn orderTerms(comptime D: type, comptime Level: type, comptime T: type, comptime
                             " = .{ .<column> = .asc }`.",
                     );
                     const direction: Direction = statement.writtenValue(T, f.name, Direction);
-                    var one = D.quote(row_mod.pathName(at)) ++ (if (direction.descending()) " DESC" else " ASC");
+                    const named = if (through_table) relation ++ "." ++ D.quote(f.name) else D.quote(row_mod.pathName(at));
+                    var one = named ++ (if (direction.descending()) " DESC" else " ASC");
                     if (direction.placement()) |where_nulls| {
                         one = one ++ (D.nulls(where_nulls) orelse
                             dialect_mod.noNullsOrder(D, Level, f.name));
@@ -1138,6 +1156,19 @@ test "an order names the answer's columns, a parent's through its field" {
     }), .many);
     try testing.expect(std.mem.endsWith(u8, found.sql, " ORDER BY \"customer.name\" ASC, \"id\" DESC LIMIT 20"));
     try testing.expectEqual(@as(?usize, 20), found.reserve);
+}
+
+test "an order may name a column of the table the Row does not carry, through the table" {
+    // Item 86: a tiebreak is a column of the table and not of the answer, so
+    // it is written as the table's rather than under an answer's name.
+    const found = comptime rows(Pg, OrderCard, @TypeOf(.{
+        .order = .{ .customer = .{ .name = .asc }, .year = .desc, .id = .asc },
+    }), .many);
+    try testing.expect(std.mem.endsWith(
+        u8,
+        found.sql,
+        " ORDER BY \"customer.name\" ASC, \"orders\".\"year\" DESC, \"id\" ASC",
+    ));
 }
 
 test "a page carries its total under a name no field can have" {

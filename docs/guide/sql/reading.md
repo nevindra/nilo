@@ -71,7 +71,11 @@ misread.
 `.in` takes a list and compiles to `= ANY($1)` — **one** parameter, so the
 statement stays a constant no matter how long the list is. Its negation is
 `.not_in`, which is `<> ALL($1)` and costs the same one parameter;
-`.not_like` and `.not_ilike` are the other two. `.distinct_from` and
+`.not_like` and `.not_ilike` are the other two. `.ieq` is `=` that ignores
+case, `lower("email") = lower($1)`, which is the lookup a `.unique` with
+`.ignoring_case` is an index for; `.not_ieq` negates it. A column of type
+`sql.Date` compares with `.today` and a `sql.Timestamp` with `.now`, the
+database's clock with nothing bound: `.due_date = .{ .lt = .today }`. `.distinct_from` and
 `.not_distinct_from` are the null-safe pair — see below. On SQLite, `.like`
 and `.not_like` are Refusals naming `.ilike` and `.not_ilike`: that
 database's `LIKE` folds ASCII case and cannot be told not to by a
@@ -177,6 +181,11 @@ With the term dropped instead, the subquery would ask whether the partner has
 *any* capability row — which quietly excludes every partner that has none. For
 the same reason a `sql.given` cannot sit beside a condition that is always there
 in one `.exists`; write a second entry.
+
+A multi-select takes one too. `.stage = .{ .in = sql.given(q.stages) }` is no
+condition when `?stage=` was not sent and the listed stages when it was; an
+empty list is still an empty `.in`, which matches nothing, because a filter bar
+that sends an empty list is asking something else.
 
 The join came out of `PartnerCapability`'s `.references`. It is read off
 either Row, so the same question from the other side — the capability rows
@@ -350,8 +359,12 @@ is the prepared name: a statement whose order is chosen per request runs
 unnamed, about 12 µs a call, and one arena allocation for its text.
 
 A key that is a string — `.value = "value_currency, value_minor"` — is SQL of
-your own, and only `db.rawOrdered` takes it, with `{order}` in your statement
-where the whole clause goes ([Raw SQL](./raw.md)).
+your own, and only `db.rawOrdered` and `db.rawPageOrdered` take it, with
+`{order}` in your statement where the whole clause goes ([Raw SQL](./raw.md)).
+
+A literal `.order` on a narrower Row may name any column of its table, not
+only the ones the Row carries, so a tiebreak such as `created_at` does not
+have to go on the wire: `.order = .{ .position = .asc, .created_at = .asc }`.
 
 ## The keyset form of a deep page
 

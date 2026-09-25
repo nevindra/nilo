@@ -59,6 +59,7 @@ const core = @import("nilo_core");
 const row_mod = @import("row.zig");
 const table_mod = @import("table.zig");
 const dialect_mod = @import("dialect.zig");
+const types = @import("types.zig");
 
 /// The field name that means OR. A Row with a column of this name is refused,
 /// because one word cannot mean both.
@@ -498,6 +499,9 @@ fn entryFiltersNothing(ops: anytype) bool {
 }
 
 fn opFiltersNothing(comptime name: []const u8, value: anytype) bool {
+    // A term that may drop never reaches an `UPDATE` or a `DELETE`: the
+    // statement refuses it while compiling (`assertNothingDroppable`).
+    if (comptime givenValue(@TypeOf(value)) != null) return false;
     if (comptime listSpelling(name)) |op| {
         // An empty `in` matches no row, which narrows as far as it goes.
         if (op == .in) return false;
@@ -696,6 +700,16 @@ fn walk(
                 if (std.mem.eql(u8, f.name, across_field)) break :term acrossOf(D, Row, f.type, path, state);
                 if (!row_mod.hasColumn(Row, f.name)) {
                     row_mod.noSuchColumn(Row, f.name, "a condition");
+                }
+                // `.due_date = .today`: the database's clock, compared with
+                // `=`, and nothing bound. Read here rather than in `condition`,
+                // which is handed the type and not the struct the word sits in.
+                if (f.type == @TypeOf(.enum_literal)) {
+                    if (clockWord(D, Row, f.name, fieldValue(W, f.name), "`." ++ f.name ++ " = ." ++
+                        @tagName(fieldValue(W, f.name)) ++ "`")) |clock|
+                    {
+                        break :term state.qualifier ++ D.quote(f.name) ++ " = " ++ clock;
+                    }
                 }
                 break :term condition(D, Row, f.name, f.type, path, state);
             };
@@ -1175,7 +1189,8 @@ fn oneAcross(
         for (info.fields) |f| {
             if (std.mem.eql(u8, f.name, across_columns)) continue;
             if (spelling(f.name) == null and patternSpelling(f.name) == null and
-                listSpelling(f.name) == null and nullSafeSpelling(f.name) == null)
+                listSpelling(f.name) == null and nullSafeSpelling(f.name) == null and
+                foldedSpelling(f.name) == null)
             {
                 @compileError(
                     "nilo: an entry of `.across` sets `." ++ f.name ++ "`, which is not an operator.\n" ++
@@ -1479,6 +1494,54 @@ fn fieldValue(comptime T: type, comptime field: []const u8) blk: {
     }
 }
 
+/// **The database's clock, as a word**: `.now` on a `sql.Timestamp` column and
+/// `.today` on a `sql.Date` one, the expression the database evaluates in
+/// place of a value. Null when the word is neither, and on a column whose type
+/// is an enum, where `.now` is that enum's value as it always was.
+///
+/// Read by a `.set` (`statement.zig`) and by a condition, so the start-date
+/// stamp is one statement: `.set = .{ .start_date = .today }` where
+/// `.start_date = .{ .gt = .today }`. `.now` is `D.now_default`, the
+/// expression a `.default` of `.now` puts in the schema. `.today` is
+/// `CURRENT_DATE`, which both databases spell the same: a `date` on Postgres,
+/// in the session's time zone, and the ten characters a `Date` is stored as on
+/// SQLite, in UTC.
+///
+/// `said` is how the caller wrote it, for the message that refuses the word on
+/// a column it does not fit.
+pub fn clockWord(
+    comptime D: type,
+    comptime Row: type,
+    comptime column: []const u8,
+    comptime word: @TypeOf(.enum_literal),
+    comptime said: []const u8,
+) ?[]const u8 {
+    comptime {
+        const name = @tagName(word);
+        const now = std.mem.eql(u8, name, "now");
+        const today = std.mem.eql(u8, name, "today");
+        if (!now and !today) return null;
+        const F = row_mod.ColumnType(Row, column);
+        const C = switch (@typeInfo(F)) {
+            .optional => |o| o.child,
+            else => F,
+        };
+        if (@typeInfo(C) == .@"enum") return null;
+        if (now and C == types.Timestamp) return D.now_default;
+        if (today and C == types.Date) return "CURRENT_DATE";
+        @compileError(
+            "nilo: " ++ said ++ " on " ++ @typeName(Row) ++ ", whose `" ++ column ++ "` is " ++
+                @typeName(F) ++ ".\n" ++
+                (if (now)
+                    "  `.now` is the moment the statement runs, so it goes in a `sql.Timestamp`." ++
+                        (if (C == types.Date) " A `sql.Date` takes `.today`." else "")
+                else
+                    "  `.today` is the day the statement runs, so it goes in a `sql.Date`." ++
+                        (if (C == types.Timestamp) " A `sql.Timestamp` takes `.now`." else "")),
+        );
+    }
+}
+
 fn condition(
     comptime D: type,
     comptime Row: type,
@@ -1521,7 +1584,8 @@ fn condition(
             var out: []const u8 = "";
             for (ops, 0..) |op, i| {
                 if (i > 0) out = out ++ " AND ";
-                out = out ++ operator(D, Row, column, quoted, op, path, state);
+                out = out ++ (clockTerm(D, Row, column, quoted, T, op) orelse
+                    operator(D, Row, column, quoted, op, path, state));
             }
             return out;
         }
@@ -1531,6 +1595,29 @@ fn condition(
             row_mod.ColumnType(Row, column),
             false,
         );
+    }
+}
+
+/// `.{ .gt = .today }`: a comparison against the database's clock
+/// (`clockWord`), or null for every operator and value that is not one. Only
+/// the six comparisons take it; a list, a pattern and a null-safe comparison
+/// have no clock to be compared with.
+fn clockTerm(
+    comptime D: type,
+    comptime Row: type,
+    comptime column: []const u8,
+    comptime quoted: []const u8,
+    comptime T: type,
+    comptime op: Operator,
+) ?[]const u8 {
+    comptime {
+        if (op.T != @TypeOf(.enum_literal)) return null;
+        const spelled = spelling(op.name) orelse return null;
+        if (std.mem.indexOf(u8, spelled, "LIKE") != null) return null;
+        const word = fieldValue(T, op.name);
+        const clock = clockWord(D, Row, column, word, "`." ++ column ++ " = .{ ." ++ op.name ++
+            " = ." ++ @tagName(word) ++ " }`") orelse return null;
+        return quoted ++ " " ++ spelled ++ " " ++ clock;
     }
 }
 
@@ -1577,6 +1664,7 @@ fn operatorsOf(comptime T: type) ?[]const Operator {
             if (listSpelling(f.name) != null) continue;
             if (nullSafeSpelling(f.name) != null) continue;
             if (patternSpelling(f.name) != null) continue;
+            if (foldedSpelling(f.name) != null) continue;
             return null;
         }
         var out: [info.fields.len]Operator = undefined;
@@ -1703,6 +1791,27 @@ fn patternSpelling(comptime name: []const u8) ?PatternOp {
     }
 }
 
+/// **Equality that ignores case**: `.ieq`, and `.not_ieq` so the leaf keeps
+/// its negation ([ADR 052](../docs/adr/052-a-set-operation-over-one-table-is-a-condition.md)).
+/// The answer is whether the operator negates.
+///
+/// **It is written as the lookup a `.unique` that ignores case serves**, which
+/// is the reason it exists rather than `.ilike`: that unique is an index on
+/// `lower(…)` on Postgres and a `COLLATE NOCASE` one on SQLite
+/// (`dialect.foldedColumn`), and a plain `=` uses neither. So both sides go
+/// through the same `foldedColumn` the index was built with, and the planner
+/// sees the expression it indexed. `.ilike` would fold case too and read an
+/// `_` in an email address as a wildcard; `.icontains` escapes it and matches
+/// a substring. The upsert Refusal on a folded unique sends people here
+/// ([ADR 151](../docs/adr/151-a-key-is-named-once.md)).
+fn foldedSpelling(comptime name: []const u8) ?bool {
+    comptime {
+        if (std.mem.eql(u8, name, "ieq")) return false;
+        if (std.mem.eql(u8, name, "not_ieq")) return true;
+        return null;
+    }
+}
+
 /// A pattern operator compares text against text, and both halves are checked.
 ///
 /// The column, because `"age" LIKE …` is a comparison Postgres will make by
@@ -1720,15 +1829,15 @@ fn assertTextPattern(
         if (!isText(F)) @compileError(
             "nilo: `." ++ column ++ " = .{ ." ++ op ++ " = … }` on " ++ @typeName(Row) ++
                 ", whose `" ++ column ++ "` is " ++ @typeName(F) ++ ".\n" ++
-                "  A pattern matches text. On a column holding something else the " ++
+                "  `." ++ op ++ "` compares text. On a column holding something else the " ++
                 "database casts it to text first, which compares the digits it happens " ++
                 "to print rather than the value.",
         );
         if (!isText(Value) and Value != @TypeOf(.enum_literal)) @compileError(
             "nilo: `." ++ column ++ " = .{ ." ++ op ++ " = … }` was given a " ++
                 @typeName(Value) ++ ".\n" ++
-                "  The pattern is built out of the text handed in, so what goes here is " ++
-                "text — a `Str` from the request, or a `[]const u8`.",
+                "  It is compared as text, so what goes here is text — a `Str` from the " ++
+                "request, or a `[]const u8`.",
         );
     }
 }
@@ -1792,15 +1901,10 @@ fn operator(
                     "for `sql.given` to drop.\n" ++
                     "  Write `." ++ column ++ " = .{ ." ++ op.name ++ " = maybe }`.",
             );
-            if (listSpelling(op.name)) |list_op| @compileError(
-                "nilo: the condition on `" ++ column ++ "` (as `" ++ op.name ++
-                    "`) was given a `sql.given`.\n" ++
-                    "  `" ++ op.name ++ "` takes a list, and a list that may be absent is " ++
-                    "the empty list — which `" ++ op.name ++ "` already reads as " ++
-                    (if (list_op == .in) "*no row matches*" else "*every row matches*") ++
-                    ".\n" ++
-                    "  Pass an empty slice, or branch.",
-            );
+            // A list is no exception (ADR 149). A filter bar's multi-select
+            // asks two questions: absent is *no filter*, and a list is *these*.
+            // An empty list keeps meaning what `.in` says it means, and null
+            // drops the term the way it does for one value.
             const n = state.next;
             const was = state.dropping;
             state.dropping = true;
@@ -1830,6 +1934,18 @@ fn operator(
             );
             return D.pattern(quoted, bound, pat.shape, pat.fold, pat.negate) orelse
                 dialect_mod.noPatternForm(D, column, op.name, pat.folding);
+        }
+
+        // Both sides folded the way the index over the column was, so the
+        // lookup a `.unique` that ignores case exists for can use it.
+        if (foldedSpelling(op.name)) |negate| {
+            assertTextPattern(Row, column, op.name, op.T);
+            const bound = D.bindAs(
+                D.placeholder(state.take(path, .{ .column = column })),
+                row_mod.ColumnType(Row, column),
+                false,
+            );
+            return D.foldedColumn(quoted) ++ (if (negate) " <> " else " = ") ++ D.foldedColumn(bound);
         }
 
         if (listSpelling(op.name)) |list_op| {
@@ -2118,6 +2234,32 @@ test "ilike on sqlite is spelled LIKE, and not_ilike NOT LIKE, for the same reas
     );
     // And Postgres keeps its own word.
     try testing.expectEqualStrings("\"email\" ILIKE $1", sqlOf(.{ .email = .{ .ilike = "%@B.com" } }));
+}
+
+test "ieq folds both sides the way a unique that ignores case was built, on both databases" {
+    // `lower(…)` is the expression the Postgres index is over, so a lookup
+    // written this way is one the index serves; `= $1` would not be.
+    try testing.expectEqualStrings(
+        "lower(\"email\") = lower($1)",
+        sqlOf(.{ .email = .{ .ieq = @as([]const u8, "Ana@Example.com") } }),
+    );
+    try testing.expectEqualStrings(
+        "lower(\"email\") <> lower($1)",
+        sqlOf(.{ .email = .{ .not_ieq = @as([]const u8, "Ana@Example.com") } }),
+    );
+    const Lite = dialect_mod.SQLite;
+    try testing.expectEqualStrings(
+        "\"email\" COLLATE NOCASE = ?1 COLLATE NOCASE",
+        comptime plan(Lite, User, @TypeOf(.{ .email = .{ .ieq = @as([]const u8, "a") } }), 1).sql,
+    );
+    // It takes a `sql.given` the way a pattern does: the lookup box that may
+    // be empty.
+    try testing.expectEqualStrings(
+        "(lower(\"email\") = lower($1) OR $1 IS NULL)",
+        sqlOf(.{ .email = .{ .ieq = given(@as(?[]const u8, null)) } }),
+    );
+    // An underscore is a character here, not the wildcard `.ilike` would read.
+    try testing.expect(!filtersNothing(.{ .email = .{ .ieq = @as([]const u8, "") } }));
 }
 
 // -- a row over there ----------------------------------------------------
@@ -2629,6 +2771,31 @@ test "an operator takes one too, and the fixed terms beside it are untouched" {
     try testing.expect(p.params[0].droppable);
     try testing.expect(!p.params[1].droppable);
     try testing.expectEqualStrings("value", p.paths[0][p.paths[0].len - 1]);
+}
+
+test "a list that may be absent drops its term, and an empty one still means what in means" {
+    // Item 81: a multi-select on a filter bar is absent (*no filter*) or a
+    // list (*these*), and the refusal that stood here read the first as the
+    // empty list, which `.in` answers with no rows (ADR 149).
+    const p = comptime plan(Pg, User, @TypeOf(.{
+        .id = .{ .in = given(@as(?[]const i64, null)) },
+        .age = .{ .not_in = given(@as(?[]const i32, null)) },
+    }), 1);
+    try testing.expectEqualStrings(
+        "(\"id\" = ANY($1) OR $1 IS NULL) AND (\"age\" <> ALL($2) OR $2 IS NULL)",
+        p.sql,
+    );
+    try testing.expect(p.params[0].list and p.params[0].droppable and p.params[0].nullable);
+    try testing.expectEqualStrings("value", p.paths[0][p.paths[0].len - 1]);
+
+    // SQLite reads the list out of one JSON parameter, and `json_each(NULL)`
+    // is no rows, which the guard beside it never has to ask about.
+    try testing.expectEqualStrings(
+        "(\"id\" IN (SELECT value FROM json_each(?1)) OR ?1 IS NULL)",
+        comptime plan(dialect_mod.SQLite, User, @TypeOf(.{
+            .id = .{ .in = given(@as(?[]const i64, null)) },
+        }), 1).sql,
+    );
 }
 
 test "one condition over several columns is one parameter, and the guard goes around the bracket" {

@@ -38,6 +38,18 @@ transaction.
 The `ORDER BY` and the `LIMIT` are the caller's to write, for the reason
 `db.page` requires both.
 
+**`db.rawPageOrdered(Row, c, sql, values, order)` is the same page with the
+request's order.** It takes the `{order}` hole and the `sql.Ordering` value
+`db.rawOrdered` takes
+([ADR 165](./165-an-order-chosen-at-run-time-from-a-closed-set.md)), and holds
+the statement to both checks: the list is the Row's fields and one more, and
+the hole is there exactly once. The flagship list of a product is the one whose
+order is chosen from its headings, and without this it was `rawOrdered` for the
+rows and a second statement for the total with the `WHERE` pasted in again,
+which is the disagreement this ADR closed, reopened by the order. It runs
+unnamed, for the reason `rawOrdered` does: its text differs per request.
+`tx.rawPageOrdered` is the same inside a transaction.
+
 ## What was rejected
 
 **Appending the window to the caller's text.** Adding text to a statement
@@ -49,6 +61,12 @@ this module did not write is the thing `raw` exists not to do: after a
 a row, it is a fact about the statement, and every row would carry a copy of
 it. `Page(Row)` already has the right shape.
 
+**`rawPage` taking the `{order}` hole itself, with the ordering optional.**
+One call for two shapes would decide at compile time whether to look for the
+hole by whether an argument was passed, and `rawPage` over a statement with no
+hole would then have two meanings. `rawOrdered` already set the pattern of a
+second name, and the reader of a call site sees which one it is.
+
 **Reading the total from a column named `total`.** A name is a convention,
 and the module counts columns by position everywhere else. The position
 after the last field is the one place the total can be with no name.
@@ -56,11 +74,13 @@ after the last field is the one place the total can be with no name.
 ## What it costs
 
 One `i64` read per statement, not per row, which is what `db.page` pays.
-One refusal.
+Two refusals. `rawPageOrdered` adds the per-request text `rawOrdered`
+already pays, one arena allocation sized while compiling, and no plan name.
 
 ## Consequences
 
-- `sql/db.zig`: `rawPage` on `Db` and `Tx`.
+- `sql/db.zig`: `rawPage` and `rawPageOrdered` on `Db` and `Tx`.
 - `sql/rawcheck.zig`: `assertPaged`.
-- `sql/refusals/raw_page_without_a_total.zig`.
+- `sql/refusals/raw_page_without_a_total.zig` and
+  `raw_page_ordered_without_a_total.zig`.
 - `examples/sqlite/` lists invoices with it.
