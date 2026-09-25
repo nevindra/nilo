@@ -12,8 +12,8 @@ what a Row can declare, the answer is `raw`:
 <!-- compiles: body -->
 ```zig
 const Tally = struct {
-    // A view. `raw` never reads the name, but a Row names a relation.
-    pub const nilo_table = .{ .name = "country_tally" };
+    // A shape no table has: `raw` fills it, and nothing builds or checks it.
+    pub const nilo_table = .projection;
 
     country: nilo.Str,
     n: i64,
@@ -32,10 +32,12 @@ compiling, and a column that plainly has a name is held against the field in
 its position ([ADR 051](../../adr/051-a-statement-that-is-a-constant-can-be-prepared-once.md));
 what it gives up is nilo writing the text, and nothing else.
 
-It is still a **Row**, so it still carries a `nilo_table` — `raw` never reads
-the name, because it did not write the statement, but the type is the same one
-every other call takes and there is no second kind of struct to learn. A join
-that answers with a shape no table has is what a view is for.
+It is still a **Row**, so it still carries a `nilo_table`, and
+`.projection` is the one that says it owns no table. Naming a table it does
+not have would put it in front of the schema check and the migrator, which
+would look for `country_tally` and find nothing. A Row that *is* a table's
+columns, or a view's, names it as usual, and `raw` fills that one the same
+way.
 
 **And the Row can carry what the program adds to it.** A line on a page
 sometimes holds a field no column has — a comment and its files, read in a
@@ -359,7 +361,7 @@ in one round trip and `db.raw` reaches it:
 <!-- compiles: body -->
 ```zig
 const Revoked = struct {
-    pub const nilo_table = .{ .name = "audit", .key = .id };
+    pub const nilo_table = .projection;
 
     id: i64,
 };

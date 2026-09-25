@@ -7,20 +7,36 @@ needs, so a test hands it those things and calls it. No server, no socket, no
 fake HTTP request.
 
 ```zig
-fn getUser(db: *Db, id: u32) !User {
-    return db.find(id) orelse nilo.fail.notFound("no user {d}", .{id});
+/// The service the handler asks for. In the program it reads a table; in a
+/// test it is whatever the test builds.
+const Users = struct {
+    rows: []const User,
+
+    pub fn find(self: *Users, id: u32) ?User {
+        for (self.rows) |u| if (u.id == id) return u;
+        return null;
+    }
+};
+
+fn getUser(users: *Users, id: u32) !User {
+    return users.find(id) orelse nilo.fail.notFound("no user {d}", .{id});
 }
 
 test "getUser" {
-    var fake = Db.fake(.{ .id = 7 });
-    try expectEqual(7, (try getUser(&fake, 7)).id);
-    try expectError(error.Failed, getUser(&fake, 99));
+    var users: Users = .{ .rows = &.{.{ .id = 7, .name = .static("wati") }} };
+    try expectEqual(7, (try getUser(&users, 7)).id);
+    try expectError(error.Failed, getUser(&users, 99));
 }
 ```
 
+nilo ships no fake database. A pointer argument is a service, and a service
+is a type you wrote, so a test builds one. When the handler takes the real
+`*sql.Db`, the test gets a real database; see
+[A handler with a table behind it](#a-handler-with-a-table-behind-it).
+
 Every fail function returns `error.Failed`, so that is what a refusal asserts on.
 A handler returning `?T` says the same thing by answering null, so there the
-assertion is `try expect(try getUser(&fake, 99) == null)` and no error is
+assertion is `try expect(try getUser(&users, 99) == null)` and no error is
 involved at all.
 To check *which* refusal, look at the message the failure box holds — or drive the
 request through the test client below, where the status is on the answer.
@@ -226,6 +242,61 @@ It is for a program that never listens, which a test is. In a program that
 does, the same work goes in `app.before` and `listen()` runs it on its own
 loop; `app.start` followed by `listen()` is refused
 ([ADR 180](../adr/180-work-that-needs-the-services-runs-on-their-loop.md)).
+
+## A handler with a table behind it
+
+A handler that takes `db: *Db` is tested against a database, because what it
+would be tested for, the statement, is the part a fake leaves out. On SQLite
+that costs nothing to set up: the database lives in memory, one per test, and
+the App boots it the way `listen()` would. This is the shape
+[`examples/sqlite/`](../../examples/sqlite/main.zig) tests itself with:
+
+```zig
+const Stack = struct {
+    threaded: std.Io.Threaded,
+    db: Db,
+    app: nilo.App,
+    client: nilo.testing.Client,
+
+    fn open(gpa: std.mem.Allocator, comptime name: []const u8) !*Stack {
+        const self = try gpa.create(Stack);
+        self.* = .{
+            .threaded = .init(gpa, .{}),
+            // One database the whole pool shares, gone when the last
+            // connection closes. A name per test keeps tests apart.
+            .db = Db.init(gpa, "file:test-" ++ name ++ "?mode=memory&cache=shared", .{ .size = 2 }),
+            .app = nilo.App.init(gpa),
+            .client = try nilo.testing.Client.init(gpa, .{}),
+        };
+        self.db.checking(schema);
+        try self.app.provide(&self.db);
+        try self.app.before(makeTables, .{&self.db});
+        try routes(&self.app);
+        try self.app.start(self.threaded.io()); // pool, tables, schema check
+        return self;
+    }
+
+    fn close(self: *Stack, gpa: std.mem.Allocator) void {
+        self.client.deinit();
+        self.app.deinit();
+        self.db.nilo_stop();
+        self.db.deinit();
+        self.threaded.deinit();
+        gpa.destroy(self);
+    }
+};
+```
+
+Heap-allocated because the App holds a pointer to the Db and the client hands
+out a `Ctx` pointing at the App, so none of the three may move. A bare
+`:memory:` is refused when the pool opens it: a pool of them is several empty
+databases, with writes going to one and reads finding nothing
+([SQLite](./sql/sqlite.md#two-things-about-the-filename)).
+
+A program on Postgres tests against Postgres. `sql/live.zig` is the pattern
+this repository uses: the URL comes from `DATABASE_URL` through `build.zig`,
+every test skips when there is none, so the loop never needs a server up, and
+CI sets it so the coverage is not optional there.
 
 ## Running the suite
 

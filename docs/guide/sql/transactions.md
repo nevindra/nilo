@@ -173,6 +173,37 @@ The row is checked and changed in one statement, so two requests cannot both
 take the last one. The lock is for the case where the decision needs more than
 a condition can say.
 
+**A form somebody holds open for ten minutes cannot hold a lock that long.**
+The edit screen read the row, the user typed, and meanwhile somebody else
+saved. Holding the row for those ten minutes would keep a connection and
+block every other writer. The row carries a number instead, and the save
+names the one it read:
+
+<!-- compiles -->
+```zig
+const Page = struct {
+    pub const nilo_table = .{ .name = "pages", .key = .id };
+
+    id: i64,
+    body: nilo.Str,
+    version: i32,
+};
+
+fn savePage(db: *sql.Db, c: *nilo.Ctx, page_id: i64, read_version: i32, body: nilo.Str) !Page {
+    return try db.updateReturningOne(Page, c, .{
+        .set = .{ .body = body, .version = .{ .plus = 1 } },
+        .where = .{ .id = page_id, .version = read_version },
+    }) orelse return nilo.fail.conflict("somebody saved this page after you opened it", .{});
+}
+```
+
+The check and the write are one statement, so two saves of the same version
+cannot both land: the second finds `version` already moved and changes
+nothing, and the handler answers 409 instead of writing over the first.
+The id is in the condition beside the version, so `updateReturningOne`
+still pins one row. A page that was deleted meanwhile also answers 409 here;
+tell the two apart with a `db.find` after the miss if the screen needs to.
+
 Four locks, and they are four jobs:
 
 | | |
