@@ -391,6 +391,77 @@ test "on Postgres the claim takes the most urgent due row, not the oldest" {
     try testing.expect((try table.claim(&p.run, live_kinds, 100, 1_000)) == null);
 }
 
+/// A run that waits in the database for as long as the test lets it: what a
+/// refresh or a backfill looks like to the worker when the server is told to
+/// stop.
+const SleepInDb = struct {
+    pub const nilo_job = "sleep-in-db";
+    pub const retry: job.Retry = .{ .times = 3, .backoff = .{ .fixed_ms = 60_000 } };
+
+    pub fn run(_: SleepInDb, scope: *core.Run, db: *sql.Db) !void {
+        const Slept = struct {
+            pub const nilo_table = .projection;
+            slept: bool,
+        };
+        // Marked, so the test waits for this statement and not a sleep
+        // another test left running on the same server.
+        _ = try db.raw(Slept, scope, "SELECT pg_sleep(10) IS NULL AS slept WHERE 'nilo_job cut-off' IS NOT NULL", .{});
+    }
+};
+
+const PgSleepJobs = job.Jobs(.{
+    .kinds = .{SleepInDb},
+    .store = PgTable,
+    .deps = struct { db: *sql.Db },
+});
+
+test "on Postgres a run cut off by a shutdown in the middle of a statement goes back to the queue" {
+    // The shutdown cancels the worker while its run is waiting on a
+    // statement. nilo_sql reports that as `QueryFailed` and leaves the
+    // cancellation pending (ADR 223), so the run's error is not
+    // `error.Canceled` — and the row still has to go back untouched, not be
+    // written off as a failed attempt by a store call the same cancellation
+    // stops, which leaves it `running` until its lease is over.
+    const p = (try Pg.open()) orelse return error.SkipZigTest;
+    defer p.close();
+    var table = PgTable.open(&p.db);
+    _ = try p.db.exec(&p.run, "DELETE FROM \"nilo_jobs\"", .{});
+
+    var jobs: PgSleepJobs = .open(testing.allocator, &table, .{ .db = &p.db }, .{ .workers = 1, .poll_ms = 50 });
+    const io = p.threaded.io();
+    try jobs.nilo_start(io, .off);
+    const id = try jobs.push(&p.run, SleepInDb{}, .{});
+    const pushed = (try p.db.rawOne(i64, &p.run, "SELECT (extract(epoch FROM clock_timestamp()) * 1e6)::bigint", .{})).?;
+
+    var serving = try io.concurrent(PgSleepJobs.serveOn, .{ &jobs, io });
+    // Until the row is claimed and its run's statement is on the wire, then
+    // the shutdown. A statement that started before the push is a sleep an
+    // earlier run of this test left behind, not this one.
+    var waiting = false;
+    for (0..100) |_| {
+        const n = try p.db.rawOne(i64, &p.run,
+            \\SELECT count(*) FROM pg_stat_activity a, "nilo_jobs" j
+            \\WHERE a.query LIKE '%nilo_job cut-off%' AND a.state = 'active' AND a.pid <> pg_backend_pid()
+            \\  AND (extract(epoch FROM a.query_start) * 1e6)::bigint >= $1
+            \\  AND j."id" = $2 AND j."state" = 'running'
+        , .{ pushed, @as(i64, @intCast(id)) });
+        if ((n orelse 0) > 0) {
+            waiting = true;
+            break;
+        }
+        try std.Io.sleep(io, .fromMilliseconds(50), .awake);
+    }
+    try testing.expect(waiting);
+    serving.cancel(io) catch {};
+
+    const Row = PgTable.Row;
+    const row = (try p.db.rawOne(Row, &p.run, "SELECT * FROM \"nilo_jobs\" WHERE \"id\" = $1", .{@as(i64, @intCast(id))})).?;
+    try testing.expectEqual(job.State.queued, row.state);
+    // The attempt the shutdown cut off is not counted against the row.
+    try testing.expectEqual(@as(i32, 0), row.attempts);
+    try testing.expectEqual(@as(?[]const u8, null), row.last_error);
+}
+
 /// The kinds these tests push. A worker passes its own `kind_names`; the
 /// claim is narrowed to them, so a row of any other kind is left alone.
 const live_kinds: []const []const u8 = &.{ "write-note", "backfill", "revalidate-a", "revalidate-b", "sweep" };

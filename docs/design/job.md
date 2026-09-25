@@ -37,6 +37,7 @@ A push wakes the one worker waiting on a futex counter; `poll_ms` only matters f
 10. **`job.cron(...)` is parsed while compiling, and only in UTC.** A field out of range, or a schedule with no `overlap`/`missed`, is a Refusal naming the gap rather than a default nobody read. [ADR 161](../adr/161-a-schedule-is-a-type-that-makes-the-caller-choose.md)
 11. **`priority` is a fact about the kind, not the call site**: three levels (`high` is 0, `normal` is the default), and a claim orders `priority` then `run_at` ascending, both on the same `(state, run_at)` index rather than a wider one that would make `run_at` stop being a range bound. [ADR 214](../adr/214-a-job-says-how-urgent-it-is.md)
 12. **A worker's claim asks only for the kinds it knows** (`kind = ANY($3)`, bound, on Postgres; a run of placeholders on SQLite), so a row of a kind this binary does not run stays `queued` for the binary that does, rather than being released and re-claimed into a retry spiral. [ADR 215](../adr/215-a-worker-claims-only-what-it-can-run.md)
+13. **A run the shutdown cut off goes back to the queue, whatever the statement said.** The worker asks the fiber, not the error: a failure with a cancellation pending (nilo_sql answers a cut-off statement `QueryFailed`, ADR 223) releases the row with its attempt given back, and every store write after a run (`done`, `retry`, `dead`, `release`) runs with cancellation held off, as cleanup. [ADR 232](../adr/232-a-run-cut-off-by-a-shutdown-goes-back-whatever-the-statement-said.md)
 
 ## Decisions
 
@@ -47,6 +48,7 @@ A push wakes the one worker waiting on a futex counter; `poll_ms` only matters f
 | [179](../adr/179-a-run-can-say-its-failure-is-final.md) | `final`, an error set naming the failures no retry can fix |
 | [214](../adr/214-a-job-says-how-urgent-it-is.md) | `priority`, three levels on the kind, and why the claim's index is not widened to hold it |
 | [215](../adr/215-a-worker-claims-only-what-it-can-run.md) | A claim is bound to the kinds this program declared, so a foreign row is left alone rather than churned |
+| [232](../adr/232-a-run-cut-off-by-a-shutdown-goes-back-whatever-the-statement-said.md) | A run a shutdown cut off goes back to the queue whatever its statement answered; what the worker writes about a row after a run cannot be interrupted |
 
 Beside this topic: why `app.spawn`/`nilo.sleep` alone were refused for recurring work is [ADR 028](../adr/028-a-spawned-fiber-belongs-to-the-server.md) (engine); why the store is the caller's own database rather than a Redis client is [ADR 110](../adr/110-an-in-process-cache-and-a-redis-client-are-two-modules.md) (cache); the same at-least-once position held on the inbound side of a request is [ADR 155](../adr/155-a-request-answered-once-is-answered-the-same-way-again.md) (idempotency); why SQLite's claim needs no `SKIP LOCKED` is [ADR 065](../adr/065-one-writer-is-not-a-setting-it-is-the-database.md) (sql-runtime).
 

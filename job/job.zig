@@ -748,6 +748,10 @@ pub fn Jobs(comptime options: anytype) type {
                 const now = core.nowMicros();
                 const claimed = self.store.claim(&run, &kind_names, now, now + self.leaseMicros()) catch |err| {
                     if (err == error.Canceled) return error.Canceled;
+                    // A claim the shutdown cut off answers `QueryFailed` with
+                    // the cancellation left pending (ADR 223): leave on it,
+                    // rather than log a failure and sleep into it.
+                    try io.checkCancel();
                     std.log.scoped(.nilo_job).err("claim: {t}", .{err});
                     try io.sleep(poll.duration.raw, .awake);
                     continue;
@@ -831,6 +835,25 @@ pub fn Jobs(comptime options: anytype) type {
                 .last = claimed.attempts > retry.times,
             };
             const outcome = self.call(K, value, scope, tick);
+            // Asked once: the answer is consumed, and asking is what spends
+            // the deadline's own cancellation (`Bound.fired`).
+            const timed_out = bound.fired();
+            // The server is going when the run says so, or when it says
+            // something else about a statement a cancellation cut off:
+            // nilo_sql answers that `QueryFailed` and leaves the cancellation
+            // pending, so the fiber is what to ask — before the protection
+            // below, under which it would answer that nothing is pending.
+            const going = if (outcome) |_| false else |err| !timed_out and (err == error.Canceled or self.cancelPending());
+            // What the row is told from here on is cleanup, and a shutdown
+            // must not stop it: a cancellation a statement handed back
+            // pending (ADR 223) would fail the `done`, the `retry` or the
+            // `release` below and leave the row `running` until its lease
+            // is over. Held off the way nilo_sql holds off a `ROLLBACK`; the
+            // cancellation stays pending for the loop, which leaves on it.
+            const protected = if (self.io) |io| io.swapCancelProtection(.blocked) else null;
+            defer if (self.io) |io| {
+                _ = io.swapCancelProtection(protected.?);
+            };
             if (outcome) |_| {
                 self.store.done(scope, claimed.id) catch |err| log.err("row {d}: {t}", .{ claimed.id, err });
                 self.note(claimed.id, .done, claimed.attempts);
@@ -840,20 +863,20 @@ pub fn Jobs(comptime options: anytype) type {
                 if (comptime scheduled(K)) self.pushNext(K, scope, clock.now());
                 return;
             } else |err| {
-                if (err == error.Canceled and !bound.fired()) {
-                    // The server is going. The row never ran to the end, so
-                    // it goes back untouched; whoever starts next takes it.
+                if (going) {
+                    // The row never ran to the end, so it goes back
+                    // untouched; whoever starts next takes it.
                     self.stopping.store(true, .release);
                     self.store.release(scope, claimed.id) catch |e| log.err("row {d}: {t}", .{ claimed.id, e });
                     self.note(claimed.id, .queued, claimed.attempts -| 1);
                     return;
                 }
-                const name = if (bound.fired()) "TimedOut" else @errorName(err);
+                const name = if (timed_out) "TimedOut" else @errorName(err);
                 // A failure the kind said is final is dead on this attempt,
                 // whatever the count says; a timeout never is, because the
                 // next attempt may finish
                 // ([ADR 179](../docs/adr/179-a-run-can-say-its-failure-is-final.md)).
-                if (claimed.attempts > retry.times or (!bound.fired() and isFinal(K, err))) {
+                if (claimed.attempts > retry.times or (!timed_out and isFinal(K, err))) {
                     self.finishDead(scope, claimed.id, K, name, claimed.attempts, clock);
                     return;
                 }
@@ -864,6 +887,17 @@ pub fn Jobs(comptime options: anytype) type {
                 self.store.retry(scope, claimed.id, again, name) catch |e| log.err("row {d}: {t}", .{ claimed.id, e });
                 self.note(claimed.id, .queued, claimed.attempts);
             }
+        }
+
+        /// Whether this fiber has a cancellation pending, put back for the
+        /// worker loop to leave on: `checkCancel` spends it to answer.
+        fn cancelPending(self: *Self) bool {
+            const io = self.io orelse return false;
+            std.Io.checkCancel(io) catch {
+                io.recancel();
+                return true;
+            };
+            return false;
         }
 
         /// Whether `err` is one the kind declared final. An `inline for` over
