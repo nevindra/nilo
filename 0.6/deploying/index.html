@@ -1,0 +1,2988 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A toolkit for Zig 0.16, and an HTTP server">
+      
+      
+      
+        <link rel="canonical" href="https://nevindra.github.io/nilo/0.6/deploying/">
+      
+      
+        <link rel="prev" href="../metrics/">
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Deploying - nilo</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#deploying" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="nilo" class="md-header__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            nilo
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Deploying
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="nilo" class="md-nav__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    nilo
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../handlers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handlers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handling a request
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Handling a request
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../requests/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requests
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../forms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Forms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../responses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Responses
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cookies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cookies
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sessions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Streaming
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../websocket/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WebSocket
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grpc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    gRPC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building an application
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Building an application
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../middleware/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Middleware and resolved values
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../static-files/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Static files
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../errors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../background/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that is not a request
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Answering once
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The other modules
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    The other modules
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../sql/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Talking to a database
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Talking to a database
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A table is a struct
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/reading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A Row with more in it
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/writing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Writing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/transactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/raw/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Past one table
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/sqlite/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQLite
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/migrations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Making the tables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/running/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running it
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fetch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Calling somebody else's API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../s3/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Object storage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jobs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that runs later, again, or on a schedule
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cache/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A cache in this process
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jwt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Checking somebody else's token
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../id/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Identifiers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Shipping it
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Shipping it
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../openapi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenAPI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deploying
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deploying
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#when-it-wont-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When it won't start
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tuning" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tuning
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#when-a-bound-is-hit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When a bound is hit
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#deadlines" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deadlines
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-many-connections-at-once" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How many connections at once
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-many-requests-at-once" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How many requests at once
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-big-a-body-may-be" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How big a body may be
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#who-the-client-is" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Who the client is
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#which-build-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Which build mode
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#debug-info-and-what-a-build-costs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Debug info, and what a build costs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#panics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Panics
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#stopping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Stopping
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tls-and-the-proxy-in-front" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        TLS, and the proxy in front
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="TLS, and the proxy in front">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#tls-without-a-proxy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        TLS without a proxy
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#more-than-one-address" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        More than one address
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#knowing-whether-it-is-ready" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Knowing whether it is ready
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#knowing-whether-it-is-working" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Knowing whether it is working
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-isnt-here-yet" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What isn't here yet
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#when-it-wont-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When it won't start
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tuning" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tuning
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#when-a-bound-is-hit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When a bound is hit
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#deadlines" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deadlines
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-many-connections-at-once" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How many connections at once
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-many-requests-at-once" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How many requests at once
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-big-a-body-may-be" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How big a body may be
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#who-the-client-is" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Who the client is
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#which-build-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Which build mode
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#debug-info-and-what-a-build-costs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Debug info, and what a build costs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#panics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Panics
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#stopping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Stopping
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tls-and-the-proxy-in-front" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        TLS, and the proxy in front
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="TLS, and the proxy in front">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#tls-without-a-proxy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        TLS without a proxy
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#more-than-one-address" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        More than one address
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#knowing-whether-it-is-ready" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Knowing whether it is ready
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#knowing-whether-it-is-working" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Knowing whether it is working
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-isnt-here-yet" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What isn't here yet
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/nevindra/nilo/edit/main/docs/guide/deploying.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="deploying">Deploying<a class="headerlink" href="#deploying" title="Permanent link">&para;</a></h1>
+<h2 id="when-it-wont-start">When it won't start<a class="headerlink" href="#when-it-wont-start" title="Permanent link">&para;</a></h2>
+<p>Everything that can stop a server before the socket opens says so in one line, in
+words, with the fix in it:</p>
+<div class="highlight"><pre><span></span><code>error: port 8787 is already in use — something else is listening on 127.0.0.1:8787.
+Stop it, or pass `.port = …` to listen() with a free one.
+
+error: service *main.Db was never registered, but 4 routes need it
+("/users", "/users/:id", "/admin/stats", …) — call app.provide() before app.listen()
+
+error: nilo: static directory "public" could not be opened (FileNotFound) —
+the path is relative to the working directory the server runs in
+
+warning: std.log will block the event loop. Add to your root source file:
+pub const std_options_debug_io = nilo.debug_io;
+
+warning: nilo was built in Debug and this program in ReleaseSafe, which is legal
+and slow. Pass the mode through: b.dependency("nilo", .{ .target = target,
+.optimize = optimize }) — in the test step too, which is the one that usually
+gets missed.
+</code></pre></div>
+<p>That line is the whole answer, so it is also the last thing on the screen:
+<code>listen()</code> stops the process there rather than returning an error, which would
+print a stack trace through nilo's own files on top of it. Which file inside the
+engine noticed the port was taken is not your problem.</p>
+<p>If you would rather handle it — a test, or a program that falls back to another
+port — <code>tryListen()</code>, <code>tryRoute()</code> and <code>tryStatic()</code> are the same calls with the
+error coming back as a value.</p>
+<h2 id="tuning">Tuning<a class="headerlink" href="#tuning" title="Permanent link">&para;</a></h2>
+<p><code>listen()</code> takes the knobs that change how the server uses the machine:</p>
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">listen</span><span class="p">(.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">address</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"0.0.0.0"</span><span class="p">,</span><span class="w">     </span><span class="c1">// IPv4 or IPv6 — "::" for every interface</span>
+<span class="w">    </span><span class="p">.</span><span class="n">port</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8080</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">threads</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w">             </span><span class="c1">// 0 = one per core</span>
+<span class="w">    </span><span class="p">.</span><span class="n">read_buffer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">16</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="p">,</span><span class="w"> </span><span class="c1">// also the ceiling on a request head (431 past it)</span>
+<span class="w">    </span><span class="p">.</span><span class="n">write_buffer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">reuse_address</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">backlog</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4096</span><span class="p">,</span><span class="w">          </span><span class="c1">// handshakes the kernel queues for accept; past it a SYN waits a second</span>
+<span class="w">    </span><span class="p">.</span><span class="n">shutdown_grace_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span><span class="n">_000</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">stop_on_signal</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w">   </span><span class="c1">// off if your program handles signals itself</span>
+
+<span class="w">    </span><span class="p">.</span><span class="n">header_timeout_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span><span class="n">_000</span><span class="p">,</span><span class="w">  </span><span class="c1">// first byte of a head to the blank line</span>
+<span class="w">    </span><span class="p">.</span><span class="n">idle_timeout_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">75</span><span class="n">_000</span><span class="p">,</span><span class="w">    </span><span class="c1">// a connection between requests</span>
+<span class="w">    </span><span class="p">.</span><span class="n">body_timeout_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">30</span><span class="n">_000</span><span class="p">,</span><span class="w">    </span><span class="c1">// any one read of a body</span>
+<span class="w">    </span><span class="p">.</span><span class="n">body_min_rate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="p">,</span><span class="w">    </span><span class="c1">// bytes a second a body has to keep up</span>
+<span class="w">    </span><span class="p">.</span><span class="n">body_grace_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span><span class="n">_000</span><span class="p">,</span><span class="w">      </span><span class="c1">// before that rate is asked for</span>
+<span class="w">    </span><span class="p">.</span><span class="n">write_timeout_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">30</span><span class="n">_000</span><span class="p">,</span><span class="w">   </span><span class="c1">// any one write to the client</span>
+<span class="w">    </span><span class="p">.</span><span class="n">request_deadline_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w">     </span><span class="c1">// a deadline every request starts with; 0 = none</span>
+
+<span class="w">    </span><span class="p">.</span><span class="n">max_connections</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span><span class="n">_000</span><span class="p">,</span><span class="w">    </span><span class="c1">// held at once; 0 = no limit</span>
+
+<span class="w">    </span><span class="p">.</span><span class="n">max_body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1024</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="p">,</span><span class="w">      </span><span class="c1">// the most `c.body()` reads into the arena</span>
+<span class="w">    </span><span class="p">.</span><span class="n">trusted_proxies</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{},</span><span class="w">      </span><span class="c1">// which machines may say who they forward for</span>
+<span class="w">    </span><span class="p">.</span><span class="n">trusted_hops</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w">            </span><span class="c1">// or, older: how many stand in front</span>
+<span class="p">});</span>
+</code></pre></div>
+<p><code>address</code> is an address to bind to, not a host name — nothing is resolved, so
+which interface you land on is never a lookup's decision.</p>
+<p>The two buffers are what a connection costs <strong>while it is being served</strong>, not
+while it waits: a connection that has gone quiet gives both of them back, along
+with its stack pages, and waits at the shallowest frame it ever has
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/062-where-a-connection-waits-is-what-it-costs.md">ADR 062</a>). So size
+them for the responses you send rather than for the connections you hold —
+<strong>an idle connection is 4,669 bytes whatever these two say.</strong></p>
+<p><code>threads = 1</code> makes handlers stop running at the same time, which removes the
+reason for <code>nilo.Mutex</code> — and also removes the reason to have a machine with
+more than one core. See <a href="../services/">Services</a>. Whatever the count, a
+connection is served by the thread it was dealt to, and a handler runs on
+that one OS thread from its first line to its last, across every wait in
+it — no work stealing between threads, because what stealing cost was a
+second wakeup on every request of a server that is not busy
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/199-a-connection-is-served-by-the-thread-it-was-dealt-to.md">ADR 199</a>).
+Every thread also accepts: one fiber per thread sits in <code>accept</code> on the
+listening socket, so how fast the server takes new connections grows with
+<code>threads</code> rather than being what one fiber can do — about 43,000 a second,
+which is where a server that closes connections after a few requests used
+to stop (<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/200-every-executor-accepts.md">ADR 200</a>).</p>
+<p>On the request path, a routed GET returning JSON with CORS installed makes
+<strong>one allocation</strong> — the JSON body, and nothing else. A test holds it there.</p>
+<h2 id="when-a-bound-is-hit">When a bound is hit<a class="headerlink" href="#when-a-bound-is-hit" title="Permanent link">&para;</a></h2>
+<p>Every limit above is a number with a behaviour behind it, and during an
+incident the behaviour is the half that matters: what the client saw, what the
+log said, and what has to happen before the server takes that work again. One
+row per bound, so the answer is a lookup rather than a read. The sections that
+follow say why each one is shaped the way it is.</p>
+<table>
+<thead>
+<tr>
+<th>Bound</th>
+<th>Default</th>
+<th>Past it</th>
+<th>What lets it go again</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>max_connections</code></td>
+<td>10,000</td>
+<td>The connection is accepted and closed at once — nothing read, no status written, so the client usually sees a reset. The log says so once a minute with a running count</td>
+<td>A held connection ends: a keep-alive one idles out, a WebSocket tab closes, a stream finishes</td>
+</tr>
+<tr>
+<td>the process's descriptor limit (<code>ulimit -n</code>)</td>
+<td>usually 1,024</td>
+<td><code>accept</code> fails with <code>ProcessFdQuotaExceeded</code>; the loop waits — 5 ms, doubling to a second — and tries again, and the log says so once per shortage. Connections meanwhile wait in the kernel's backlog. <code>listen()</code> warned at startup if this was below <code>max_connections</code> (<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/194-an-accept-loop-that-is-out-of-descriptors-waits.md">ADR 194</a>)</td>
+<td>A held connection ends</td>
+</tr>
+<tr>
+<td><code>backlog</code></td>
+<td>4,096</td>
+<td>The kernel drops the SYN — no reset, no log line here — and the client's TCP retries it one second later, so the connection succeeds late. <code>ListenOverflows</code> in <code>/proc/net/netstat</code> is the only trace; <code>bench/burst.py</code> reads it (<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/198-a-backlog-is-sized-for-the-burst-not-the-load.md">ADR 198</a>)</td>
+<td>An acceptor takes the next handshake; there is one per thread, so the queue drains at the rate all of them accept (<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/200-every-executor-accepts.md">ADR 200</a>)</td>
+</tr>
+<tr>
+<td><code>max_in_flight</code></td>
+<td>off</td>
+<td>The head is read, then <code>503</code> with <code>Retry-After: 1</code> and <code>Connection: close</code> — one write of a constant, no queue. Counted under <code>&lt;shed&gt;</code> on the metrics page</td>
+<td>A request inside its handler finishes</td>
+</tr>
+<tr>
+<td><code>header_timeout_ms</code></td>
+<td>10,000</td>
+<td>A client partway through a head gets a <code>408</code> and the connection is closed. One that sent nothing is closed without a status — there is nothing to answer</td>
+<td>Nothing to release: the connection is gone</td>
+</tr>
+<tr>
+<td><code>read_buffer</code></td>
+<td>16 KiB</td>
+<td>A head that does not fit is a <code>431</code>, and the connection is closed — send side first, so the <code>431</code> reaches a client that would otherwise see a reset (<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/195-a-refused-request-is-hung-up-on-with-a-fin.md">ADR 195</a>)</td>
+<td>Nothing to release</td>
+</tr>
+<tr>
+<td><code>idle_timeout_ms</code></td>
+<td>75,000</td>
+<td>A keep-alive connection that has asked for nothing is closed, no status</td>
+<td>Nothing to release</td>
+</tr>
+<tr>
+<td><code>body_timeout_ms</code></td>
+<td>30,000</td>
+<td>A read of the body that outlasts it fails the handler's <code>c.body()</code> with a <code>408</code>, and the connection is closed. <code>c.bodyStream()</code> sees the same read fail</td>
+<td>Nothing to release</td>
+</tr>
+<tr>
+<td><code>body_min_rate</code> after <code>body_grace_ms</code></td>
+<td>8 KiB/s after 10,000</td>
+<td>A body <code>c.body()</code> is assembling gets a deadline worked out from its announced length; too slow is a <code>408</code> however steady the bytes were. <code>c.bodyStream()</code> is not under it</td>
+<td>Nothing to release</td>
+</tr>
+<tr>
+<td><code>max_body</code>, or <code>nilo.maxBody</code> on the route</td>
+<td>1 MiB</td>
+<td><code>c.body()</code> refuses with a <code>413</code> before reading past it. A body nobody read that is over it is not drained after the answer: the response goes out and the connection is closed rather than read to the end — send side first, so the <code>413</code> arrives (<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/195-a-refused-request-is-hung-up-on-with-a-fin.md">ADR 195</a>)</td>
+<td>Nothing to release — the next request needs a new connection</td>
+</tr>
+<tr>
+<td><code>request_deadline_ms</code></td>
+<td>off</td>
+<td>Every wait of the request — body reads, the write — is cut to it, and <code>c.overdue()</code> says so to a handler doing its own work; the failure is the wait's own (<code>408</code>, or the write given up), the same as <code>nilo.deadline(ms)</code> on one route. A stream, a WebSocket or a <code>bodyStream()</code> lets go of it (<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/105-a-route-can-say-how-long-it-has.md">ADR 105</a>)</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>write_timeout_ms</code></td>
+<td>30,000</td>
+<td>One write to the client that outlasts it gives the response up: no status can be sent by then, the connection is closed, and the log says <code>gave up writing after 30000ms — the client stopped reading</code> rather than blaming the handler</td>
+<td>Nothing to release</td>
+</tr>
+<tr>
+<td><code>shutdown_grace_ms</code></td>
+<td>10,000</td>
+<td>A stop waits this long for requests inside their handlers. Idle connections are closed at once, not waited for. Past it the rest are cut off and the log says how many</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>arena_keep</code></td>
+<td>16 KiB</td>
+<td>Not a refusal: a response assembled in <code>c.arena()</code> that is larger than this is built in memory the arena gives back after the request, so the next one faults it in a page at a time (<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/075-a-response-larger-than-the-arena-keep-is-a-page-fault-per-page.md">ADR 075</a>)</td>
+<td>Raise it just past the largest response, and no further — it is held per connection</td>
+</tr>
+</tbody>
+</table>
+<p>Two things are true of every row. <strong>A status goes out only when nothing has
+been written yet</strong>: a <code>408</code> or <code>413</code> reached mid-response cannot take back the
+half that is already on the wire, so the connection is closed instead. And
+<strong>none of the deadlines bounds a request</strong> — an hour-long stream, a WebSocket, a 4 GB upload through
+<code>c.bodyStream()</code> are all fine — because each bounds one wait for the network
+and nothing else, which is the next section.</p>
+<h2 id="deadlines">Deadlines<a class="headerlink" href="#deadlines" title="Permanent link">&para;</a></h2>
+<p>The four <code>_timeout_ms</code> knobs above bound how long the server waits on a client,
+and they are on by default. Zero turns one off.</p>
+<p>They are limits on one wait for the network, not on a request
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/022-a-deadline-belongs-to-an-operation-not-to-a-request.md">ADR 022</a>),
+which is what makes them safe to leave on: a stream that runs for an hour, a
+WebSocket, and a 4 GB upload are all requests, and none of them is hurried by
+any of this. What gets cut off is a client that has stopped talking.</p>
+<p><code>header_timeout_ms</code> is the one that matters most, and it is the one that is not
+per read: the whole head has that long from its first byte, so a client sending
+one byte a second is caught rather than granted an extension every time. It ends
+in a 408. An idle keep-alive connection that has asked for nothing is closed
+without a status — there is nothing to answer.</p>
+<p><code>body_min_rate</code> is the same idea for a body, and it is the one to read twice
+because <strong>it is an admission policy rather than a safety net</strong>. A per-read limit
+cannot catch a client sending one byte every twenty-nine seconds — every byte
+arrives on time — so a body nilo is assembling in the arena gets a deadline
+worked out from the length the client announced: <code>body_grace_ms</code> plus what those
+bytes need at <code>body_min_rate</code>. A megabyte has 138 seconds at the defaults, and a
+client slower than 8 KiB/s is a 408 however honest it is
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/022-a-deadline-belongs-to-an-operation-not-to-a-request.md">ADR 022</a>).</p>
+<p>If your clients upload from places where that is not generous, lower the rate
+rather than raising the timeout — <code>body_min_rate = 0</code> turns it off entirely and
+leaves the per-read limit on its own. A chunked body announces no length, so it
+is sized from <code>max_body</code>: the same worst case as a body that announced the
+largest it may be. <strong><code>c.bodyStream()</code> is not touched by any of this</strong> — nothing
+is being held on the client's behalf there, and a long upload through it is a
+request that lasts rather than a request that stalls.</p>
+<p><code>idle_timeout_ms</code> is the knob whose real units are memory: an idle connection
+costs 4,669 bytes, so a server with many visitors and few of them active wants
+this lower than the default.</p>
+<p>A WebSocket has no read limit once the handshake is done — a chat tab with
+nobody typing is working correctly. Its writes keep theirs, which is how the
+server finds out the client is gone.</p>
+<h2 id="how-many-connections-at-once">How many connections at once<a class="headerlink" href="#how-many-connections-at-once" title="Permanent link">&para;</a></h2>
+<p><code>max_connections</code> is the most this process holds at one time. Ten thousand by
+default, and the arithmetic behind that number is the one measurement this
+project keeps repeating: <strong>an idle connection costs 4,669 bytes before it has
+asked for anything</strong>, so the default is around 45 MB of connections and no more.</p>
+<p>That figure is a <strong>floor, not a total</strong>. A suspended fiber holds its stack at
+its high-water mark, so a handler adds every byte of stack it ever touched, for
+the life of the connection — an ordinary database route measures 17,022
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/062-where-a-connection-waits-is-what-it-costs.md">ADR 062</a>). Budget from
+4,669 only for connections that are idle between requests; budget from what
+your own handlers measure for the ones in flight.</p>
+<p>That is the whole reason it exists. A server with no cap does not fail at a
+number somebody chose — it keeps accepting until the machine runs out, and what
+notices is the OOM killer, which takes the process down along with every request
+that was being answered correctly. A cap turns "we ran out of memory" into "we
+ran out of connections", which is a thing you can read in a log and set a number
+for.</p>
+<p>Past the limit, a connection is accepted and closed at once. No request is read
+and no status is sent, so a client sees the connection go immediately — often as
+a reset, since the request it sent was never read. That is on purpose:</p>
+<ul>
+<li><strong>Not "stop accepting".</strong> Connections left in the kernel's backlog hang until
+  something times out, and the load balancer in front cannot try another
+  instance until it does. Closing tells it now.</li>
+<li><strong>Not a 503.</strong> Writing to a client the server has just decided it cannot
+  afford to serve is work an attacker gets to choose, and it would put a write —
+  with a deadline on it — inside the accept loop, which is the one loop that must
+  not stall.</li>
+</ul>
+<p>The log says so once a minute for as long as it lasts, with a running total:</p>
+<div class="highlight"><pre><span></span><code>warning: nilo is holding its limit of 10000 connections, so new ones are being
+closed unanswered (417 so far). Raise `.max_connections` in listen() if the
+machine has the memory — an idle connection costs 4,669 bytes, plus whatever
+stack the handler touches — or put fewer of them on this process.
+</code></pre></div>
+<p>It counts connections, not requests. One connection makes many requests in a
+row, and a WebSocket is one connection for as long as the tab is open — a chat
+server holding open tabs wants this raised, and multiplied by 5,183 first, which
+is what an idle WebSocket costs.
+<code>.max_connections = 0</code> turns it off, which is what nilo did before this
+existed.</p>
+<p>It is also what bounds file descriptors. A response that sends a file — a static
+file over <code>max_file_bytes</code>, or a handler returning a <code>FileBody</code> — holds one open
+for as long as the send takes, and there is one of those per request in flight
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/009-static-files-are-held-in-memory-or-opened.md">ADR 009</a>). So it is
+a number that was already being multiplied rather than a second one to budget
+for.</p>
+<h2 id="how-many-requests-at-once">How many requests at once<a class="headerlink" href="#how-many-requests-at-once" title="Permanent link">&para;</a></h2>
+<p><code>max_in_flight</code> is the other unit: not sockets held but requests being
+answered. It is off by default. Set it, and a request whose head arrives while
+that many are already inside their handlers is answered <code>503</code> with
+<code>Retry-After: 1</code> at once and the connection closed — no queue, no wait, one
+write of a constant — so a balancer in front sends the retry to a replica with
+room and the requests already running finish on time
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/159-a-server-past-its-limit-says-so-at-once.md">ADR 159</a>).</p>
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">listen</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">max_in_flight</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">256</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<p>Pick the number from <code>nilo_requests_in_flight</code> on the metrics page under real
+load, not from a guess: 256 is right for a 40 ms handler and wrong for a 4 s
+one, which is why there is no default. Shed requests are counted under
+<code>&lt;shed&gt;</code> on the same page, apart from the routes they never reached.</p>
+<p>This is different from <code>max_connections</code> on purpose. Over the connection limit
+nothing is read and nothing is written, because the accept loop must not
+stall; over the request limit the head is already read on a connection fiber,
+and a 503 is something a balancer can act on where a reset is not.</p>
+<h2 id="how-big-a-body-may-be">How big a body may be<a class="headerlink" href="#how-big-a-body-may-be" title="Permanent link">&para;</a></h2>
+<p><code>max_body</code> is the most <code>c.body()</code> will read into the request arena. Past it, a
+413. A megabyte, the default, is a JSON body's worth on purpose: this body is
+held whole, in memory, per request, so raising it raises what a handful of
+concurrent clients can make the server hold.</p>
+<p><code>c.bodyStream()</code> has no such ceiling, because it holds nothing at all — it is
+bounded by the buffer the handler passes in (<a href="../requests/">Requests</a>). An
+endpoint taking files wants that one, not a bigger <code>max_body</code>.</p>
+<p>This is the knob a reverse proxy in front cannot stand in for. A proxy can bring
+the limit <strong>down</strong> — most already do — but nothing in front of nilo can raise a
+limit inside it. An app taking uploads has to say so here.</p>
+<p><strong>One route can have its own number.</strong> <code>listen()</code>'s is the server's, and an
+import that takes fifty megabytes should not make the sign-in beside it take
+fifty megabytes too:</p>
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">with</span><span class="p">(</span><span class="n">nilo</span><span class="p">.</span><span class="n">maxBody</span><span class="p">(</span><span class="mi">50</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">20</span><span class="p">)).</span><span class="n">post</span><span class="p">(</span><span class="s">"/import"</span><span class="p">,</span><span class="w"> </span><span class="n">importCsv</span><span class="p">);</span>
+</code></pre></div>
+<p>It goes both ways — a route can say it takes <em>less</em> than <code>listen()</code> allows
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/156-a-route-can-say-how-much-body-it-takes.md">ADR 156</a>).</p>
+<h2 id="who-the-client-is">Who the client is<a class="headerlink" href="#who-the-client-is" title="Permanent link">&para;</a></h2>
+<p><code>c.peer()</code> is the address the connection came from. It is what the kernel says,
+so it cannot be forged — and behind a proxy it is the proxy's address, which is
+the same for every client.</p>
+<p><code>c.clientIp()</code> is the one to reach for, and by default it answers exactly what
+<code>peer()</code> does. <code>X-Forwarded-For</code> is a header like any other: anyone can send one,
+so a server that believed it without being told to would let every client claim
+any address it liked. The things that read a client address — rate limits, audit
+logs, blocklists — are precisely the things worth lying to.</p>
+<p><strong><code>trusted_proxies</code> is the one to use</strong>: name the networks your proxies are on
+and the count stops mattering.</p>
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">listen</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">trusted_proxies</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="s">"private"</span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<p>Each entry is a CIDR (<code>10.0.0.0/8</code>, <code>fd00::/8</code>), a bare address meaning that
+host alone, or one of two names — <code>"private"</code> for the RFC 1918 ranges plus
+carrier-grade NAT, link-local, unique-local v6 and the loopback, and
+<code>"loopback"</code> for the loopback alone. The header is not read at all unless the
+connection came from one of them; entries written by one of them are skipped
+from the right; the first one left is the client. A rule that is not an address
+stops the server at <code>listen()</code> with a sentence naming it
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/102-a-proxy-is-trusted-by-which-one-it-is.md">ADR 102</a>).</p>
+<p>The reason to prefer it over a count is that <strong>a wrong count says nothing</strong>.
+Add a CDN in front of the load balancer and the number is one short from that
+afternoon on — and the server goes on answering, with the load balancer's
+address, or with whatever the client wrote in the header. Nothing logs and no
+test turns red.</p>
+<p><code>trusted_hops</code> is the older shape and still works. It is how many proxies you
+actually run:</p>
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">listen</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">trusted_hops</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">});</span><span class="w">   </span><span class="c1">// one Caddy, nginx or ALB in front</span>
+</code></pre></div>
+<p>When both are set, the description wins.</p>
+<p>Set it to the number of proxies, <strong>not</strong> to the number of entries you have seen
+in a header. Each proxy appends the address it heard from, so the entries are
+counted from the right — the rightmost was written by the proxy nearest this
+server, and the leftmost is whatever the original client claimed.</p>
+<p>That direction is the whole safety property. With one proxy in front, a client
+sending <code>X-Forwarded-For: 1.2.3.4</code> arrives as <code>1.2.3.4, 203.0.113.9</code>. Counting
+one from the right reads <code>203.0.113.9</code> — the address the proxy actually saw —
+while the forgery sits to the left and is never looked at.</p>
+<p>A header with fewer entries than there are hops means the chain is not the one
+configured, so <code>clientIp()</code> falls back to <code>peer()</code> rather than reading the
+closest thing to hand, which would be the forgery.</p>
+<p><strong><code>allowance.with</code> is the first thing in nilo that acts on this</strong>, so getting
+this wrong stops being an inconvenience and becomes an outage: leave
+it at zero behind a proxy and every request looks like it came from the proxy,
+one address spends the whole allowance, and everybody else gets a 429. nilo says
+so in the log the first time it refuses a request that carried an
+<code>X-Forwarded-For</code> and was counted against the connection's own address — see
+<a href="../middleware/#when-one-client-asks-too-often">Middleware</a>.</p>
+<p>Requests-per-second figures now exist, on one quiet box:
+<a href="https://github.com/nevindra/nilo/blob/v0.6.0/bench/result/http.md"><code>bench/result/http.md</code></a> for nilo alone and
+<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/comparison.md"><code>../comparison.md</code></a> against eight other servers. Read the
+caveats in both — loopback, no TLS, no database, and a handler that touches
+Postgres makes every row in them the same.</p>
+<h2 id="which-build-mode">Which build mode<a class="headerlink" href="#which-build-mode" title="Permanent link">&para;</a></h2>
+<p><strong><code>ReleaseSafe</code>.</strong> In <code>ReleaseFast</code> an integer overflow is undefined behaviour
+instead of a loud crash, and a web server takes input from strangers — that is
+exactly the code where the check earns its keep. <code>Debug</code> is for development;
+nilo's own <code>Str</code> staleness trap only exists there.</p>
+<h2 id="debug-info-and-what-a-build-costs">Debug info, and what a build costs<a class="headerlink" href="#debug-info-and-what-a-build-costs" title="Permanent link">&para;</a></h2>
+<p>Half of a Zig release build is debug info. Measured on this repo, warm: 14.7s
+with it and 7.4s without, and the binary goes from 6.0 MB to 0.8 MB. At runtime
+it costs nothing measurable. What it costs is the file and the line on every
+frame of a panic — so <strong>keep it for anything you deploy</strong>, which is also why the
+mode recommended above is not the one where nilo turns it off. The full
+decomposition is in <a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/comparison.md"><code>../comparison.md</code></a>.</p>
+<p><code>zig build -Doptimize=ReleaseFast</code> in this repo builds the benchmark binary,
+whose only job is to be measured, and leaves debug info out of it. Nothing else
+here does, and <code>-Dstrip=false</code> turns even that off. Your own <code>build.zig</code> decides
+for your own binaries: pass <code>.strip = true</code> to the module if you want the
+smaller, faster-to-build one and can give up the line numbers.</p>
+<h2 id="panics">Panics<a class="headerlink" href="#panics" title="Permanent link">&para;</a></h2>
+<p>Zig cannot recover from a panic: an integer overflow or an out-of-bounds index
+takes the whole process down, every in-flight connection with it. There is no
+<code>recover</code> middleware because there cannot be one — see
+<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/007-no-recover-middleware.md">ADR 007</a>.</p>
+<p>Handler <em>errors</em> are a different thing and are already handled — see
+<a href="../errors/">Errors</a>. For the rest: run behind a supervisor that restarts, and
+add</p>
+<div class="highlight"><pre><span></span><code><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">panic</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">panic</span><span class="p">;</span>
+</code></pre></div>
+<p>to your root file so the crash says which request caused it:</p>
+<div class="highlight"><pre><span></span><code>thread 589880 panic: integer overflow (while handling GET /boom/50)
+</code></pre></div>
+<p>That is the difference between a stack trace and a reproduction.</p>
+<h2 id="stopping">Stopping<a class="headerlink" href="#stopping" title="Permanent link">&para;</a></h2>
+<p><code>listen()</code> returns when the server is stopped — Ctrl-C, a <code>SIGTERM</code> from whatever
+is supervising the process, or <code>app.shutdown()</code> from anywhere:</p>
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">listen</span><span class="p">(.{});</span><span class="w">      </span><span class="c1">// returns on Ctrl-C or SIGTERM</span>
+<span class="n">std</span><span class="p">.</span><span class="n">log</span><span class="p">.</span><span class="n">info</span><span class="p">(</span><span class="s">"bye"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span><span class="w"> </span><span class="c1">// and this runs</span>
+</code></pre></div>
+<p>What happens in between is the part that matters for a deploy. The server stops
+accepting; requests already being answered are finished, and their responses go
+out saying <code>Connection: close</code> so the client opens a fresh connection to whatever
+replaced this process. Connections merely sitting idle between keep-alive
+requests are closed at once — they are holding no work, and waiting on them would
+put the whole grace period behind every open browser tab.</p>
+<p>A handler that runs past <code>.shutdown_grace_ms</code> (10 seconds by default) is cut off,
+with a line in the log saying how many were. Pressing Ctrl-C a second time skips
+the waiting entirely.</p>
+<p>A stream or a WebSocket is the case that needs your cooperation: <code>live()</code> goes
+false when the stop begins, and a loop that checks it lets the deploy finish
+instead of sitting out the whole grace period. See
+<a href="../streaming/#ending-on-purpose-and-otherwise">Streaming</a>.</p>
+<p>Work that is not a request cooperates through the same grace period, and finds
+out a different way: <code>nilo.sleep</code> fails with <code>error.Canceled</code> when it ends, and
+<code>catch return</code> is the whole of what a ticker owes the deploy. See
+<a href="../background/">Work that is not a request</a>.</p>
+<p><code>app.shutdown()</code> is safe from any thread and from inside a handler, so an admin
+endpoint that stops the server is an ordinary handler. The App is a service like
+any other, so hand it to itself first:</p>
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">quit</span><span class="p">(</span><span class="n">app</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">App</span><span class="p">)</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">app</span><span class="p">.</span><span class="n">shutdown</span><span class="p">();</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="s">"going down</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">provide</span><span class="p">(</span><span class="o">&amp;</span><span class="n">app</span><span class="p">);</span><span class="w">          </span><span class="c1">// …or `*nilo.App was never registered` at startup</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">post</span><span class="p">(</span><span class="s">"/admin/quit"</span><span class="p">,</span><span class="w"> </span><span class="n">quit</span><span class="p">);</span>
+</code></pre></div>
+<h2 id="tls-and-the-proxy-in-front">TLS, and the proxy in front<a class="headerlink" href="#tls-and-the-proxy-in-front" title="Permanent link">&para;</a></h2>
+<p><strong>nilo does not speak TLS unless the build asks for it, and a proxy in front
+is still the recommendation</strong> (<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/027-tls-is-terminated-in-front.md">ADR 027</a>).
+Zig's standard library can be a TLS client and not a TLS server; the
+alternatives were a one-person crypto dependency or a C toolchain in the
+install story. The first of those is now an option, below, for the server
+that has nothing in front of it. Everything else on this page is about the
+server that does, which is most of them.</p>
+<p>On Fly.io, Railway, Render, Cloud Run, a Kubernetes ingress, an ALB or
+Cloudflare this changes nothing — every one of them terminates TLS before the
+request arrives. Set <code>.trusted_proxies = &amp;.{"private"}</code> and carry on.</p>
+<p>On a bare VPS, the whole of it is a Caddyfile:</p>
+<div class="highlight"><pre><span></span><code>example.com {
+    reverse_proxy 127.0.0.1:8787
+}
+</code></pre></div>
+<p>Caddy gets the certificate, renews it, redirects <code>:80</code>, and sends
+<code>X-Forwarded-For</code>. The nginx equivalent needs the header said out loud:</p>
+<div class="highlight"><pre><span></span><code><span class="k">server</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kn">listen</span><span class="w"> </span><span class="mi">443</span><span class="w"> </span><span class="s">ssl</span><span class="p">;</span>
+<span class="w">    </span><span class="kn">server_name</span><span class="w"> </span><span class="s">example.com</span><span class="p">;</span>
+<span class="w">    </span><span class="kn">ssl_certificate</span><span class="w">     </span><span class="s">/etc/letsencrypt/live/example.com/fullchain.pem</span><span class="p">;</span>
+<span class="w">    </span><span class="kn">ssl_certificate_key</span><span class="w"> </span><span class="s">/etc/letsencrypt/live/example.com/privkey.pem</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kn">location</span><span class="w"> </span><span class="s">/</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kn">proxy_pass</span><span class="w"> </span><span class="s">http://127.0.0.1:8787</span><span class="p">;</span>
+<span class="w">        </span><span class="kn">proxy_set_header</span><span class="w"> </span><span class="s">X-Forwarded-For</span><span class="w"> </span><span class="nv">$proxy_add_x_forwarded_for</span><span class="p">;</span>
+<span class="w">        </span><span class="kn">proxy_set_header</span><span class="w"> </span><span class="s">Host</span><span class="w"> </span><span class="nv">$host</span><span class="p">;</span>
+<span class="w">        </span><span class="c1"># A stream, a WebSocket and SSE all need this pair.</span>
+<span class="w">        </span><span class="kn">proxy_http_version</span><span class="w"> </span><span class="mi">1</span><span class="s">.1</span><span class="p">;</span>
+<span class="w">        </span><span class="kn">proxy_set_header</span><span class="w"> </span><span class="s">Upgrade</span><span class="w"> </span><span class="nv">$http_upgrade</span><span class="p">;</span>
+<span class="w">        </span><span class="kn">proxy_set_header</span><span class="w"> </span><span class="s">Connection</span><span class="w"> </span><span class="nv">$connection_upgrade</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Either way, bind nilo to <code>127.0.0.1</code> so nothing reaches it except through the
+proxy, and say <code>.trusted_proxies = &amp;.{"loopback"}</code> so <code>clientIp()</code> reads the
+address the proxy saw.</p>
+<p><strong>Or take the port away entirely.</strong> <code>.address = "unix:/run/nilo.sock"</code> listens
+on a path instead, and then the answer to "who may connect" is the answer to
+"who may write to that directory" — <code>proxy_pass http://unix:/run/nilo.sock;</code> in
+nginx, <code>reverse_proxy unix//run/nilo.sock</code> in Caddy. <code>port</code> is not read. A
+request that arrives that way has no client address of its own, so
+<code>.trusted_proxies</code> is what <code>clientIp()</code> reads, and it is allowed to because
+nothing remote can open a unix socket
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/103-a-path-is-an-address-to-listen-on.md">ADR 103</a>).</p>
+<p>One thing goes with this decision and is worth knowing before you need it: <strong>HTTP/2 is not available for your routes.</strong> Browsers only speak it over TLS, negotiated during the handshake, and the listener below offers only <code>http/1.1</code>. <strong>gRPC is the exception</strong>, because it runs over HTTP/2 without TLS: a build that asks for it serves unary calls on a listener of its own (<a href="../grpc/">gRPC</a>).</p>
+<h3 id="tls-without-a-proxy">TLS without a proxy<a class="headerlink" href="#tls-without-a-proxy" title="Permanent link">&para;</a></h3>
+<p>For the server with nothing in front of it: an internal tool on a VM, a
+service on a private network whose policy says encrypted, a machine with one
+port and a certificate and nobody who wants to run a second process. It is
+TLS 1.3, on <a href="https://github.com/ianic/tls.zig">ianic/tls.zig</a>, and it has to
+be built in (<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/212-tls-is-an-option-a-build-asks-for.md">ADR 212</a>):</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// build.zig</span>
+<span class="kr">const</span><span class="w"> </span><span class="n">nilo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">b</span><span class="p">.</span><span class="n">dependency</span><span class="p">(</span><span class="s">"nilo"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">target</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">target</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">optimize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">optimize</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">tls</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<p>The library is fetched and linked only behind that flag, so a build without it
+is the build this page has described all along. With it, the listener takes
+two PEM files:</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">listen</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">tls</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">cert</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"/etc/nilo/fullchain.pem"</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"/etc/nilo/privkey.pem"</span><span class="p">,</span>
+<span class="p">}</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<p>The certificate chain leaf first, the way every issuer hands it out, and the
+key unencrypted; <code>certbot</code> and <code>step</code> both write exactly that. Paths are
+relative to the directory the server is started in unless absolute. A
+certificate that cannot be read stops the server before it takes the port,
+in one line saying which file; a <code>.tls</code> on a build without the flag is
+refused the same way rather than served as plain HTTP. So is a key that is
+not the certificate's, which is the mistake the two files being in
+different <code>letsencrypt/live/</code> directories makes: both files parse, so
+without that check the server came up and failed every handshake with the
+reason visible only to the client
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/212-tls-is-an-option-a-build-asks-for.md">ADR 212</a>).
+Rotation is a restart, which is the deployment this server already has.</p>
+<p>What it costs, so that the choice is a choice (<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/212-tls-is-an-option-a-build-asks-for.md">ADR 212</a>
+has the tables):</p>
+<ul>
+<li><strong>560 KB of binary</strong>, before a certificate is loaded, in every build that
+  passes the flag. The build that does not pays 2,760 bytes.</li>
+<li><strong>One page per idle connection</strong>, on every listener of that build, TLS or
+  not: 9,293 bytes against 5,191. A TLS connection's 33 KB of record buffers
+  are not in that figure, because they go back to the kernel at idle the way
+  the rest do.</li>
+<li><strong>About 300 µs of CPU per new connection with an ECDSA certificate, and 2.6 ms with an RSA-2048 one</strong>, for the handshake: twenty times a plain accept for the first, and nine times that for the second, so an ECDSA P-256 certificate is the cheap choice where you pick the key. Half a microsecond per request either way on a connection kept alive. A service whose clients hold a connection does not notice; one whose clients connect per request pays the handshake per request, and that is the deployment a proxy with session resumption is for, because this listener has none. Build for the CPU you run on: without AES instructions in the target (<code>-Dcpu</code>), a request costs six times as much.</li>
+<li><strong>One certificate per listener</strong>, no client certificates, and no reload
+  without a restart. TLS 1.3 only, which every browser and client library of
+  the last six years speaks.</li>
+<li><strong>The library has no audit.</strong> ADR 027's trust argument is unchanged, and a
+  deployment choosing this is choosing an unaudited TLS stack over an audited
+  one, on purpose, for a server that would otherwise have none. On the
+  internet, put Caddy in front and leave this off.</li>
+</ul>
+<p><code>.tls</code> and a unix socket together are refused: the socket file's permissions
+are already the access control, and there is nobody on the path to encrypt
+against. The handshake is bounded by <code>header_timeout_ms</code>, because until it is
+done a connection is a client that has not yet sent a request; a scanner that
+connects and goes quiet, or speaks plain HTTP to the port, is dropped when
+that runs out. <code>clientIp()</code> on this listener is the real address, since no
+proxy is in the way.</p>
+<h3 id="more-than-one-address">More than one address<a class="headerlink" href="#more-than-one-address" title="Permanent link">&para;</a></h3>
+<p>A server answers on one address by default and on as many as you list
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/213-a-server-answers-on-more-than-one-address.md">ADR 213</a>). The
+case this exists for is the other half of the section above: HTTPS for the
+people outside and cleartext for whatever is already inside.</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">listen</span><span class="p">(.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">port</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8080</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">also</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">port</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8081</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">tls</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">cert</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"cert.pem"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"key.pem"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="p">});</span>
+</code></pre></div>
+<p>An entry carries an address, a port and a certificate, and nothing else.
+Everything else on <code>listen()</code> belongs to the server rather than to one of
+its addresses: the buffers, the deadlines, the thread count, and
+<code>max_connections</code>, which counts the sockets this process holds rather than
+the sockets a port holds.</p>
+<p><strong>A handler is not told which listener a request came in on</strong>, and there is
+no way to ask. A listener decides how the bytes are carried and nothing
+above it does, so a route is a route on every address. A program that wants
+two different surfaces gives them two route prefixes, which it could always
+do.</p>
+<p>Three things worth knowing before you reach for it:</p>
+<ul>
+<li><code>boundPort()</code> answers for <code>port</code>, the first listener. An extra listener
+  may ask for port 0 and the kernel will give it one, but nothing reports
+  which.</li>
+<li>Two entries naming the same address are refused at <code>listen()</code>, naming
+  both, rather than arriving as the kernel's <code>AddressInUse</code> — which reads
+  as another process holding the port and sends you hunting for one.</li>
+<li>Each extra listener costs about <strong>82 KB</strong> of resident memory on a
+  sixteen-thread server: one socket, and one acceptor fiber per thread
+  parked in <code>accept</code> for the life of the server. Nothing per connection and
+  nothing per request; an idle connection is exactly what it was.</li>
+</ul>
+<h2 id="knowing-whether-it-is-ready">Knowing whether it is ready<a class="headerlink" href="#knowing-whether-it-is-ready" title="Permanent link">&para;</a></h2>
+<p>A load balancer, Kubernetes, or the script that restarts the process all ask
+the same question every second or so: <em>can this instance take traffic?</em>
+<code>app.health</code> answers it:</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">health</span><span class="p">(</span><span class="s">"/healthz"</span><span class="p">);</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>GET /healthz
+200 {"status":"ok"}
+503 {"status":"unavailable","waiting":[{"service":"sql.Db","why":"the database is not answering"}]}
+503 {"status":"stopping"}
+</code></pre></div>
+<p><strong>Alive is not ready, and this route answers the second.</strong> A route that says
+<code>ok</code> because the process is up sends traffic to a server whose database is
+down, and the application cannot write the honest version by hand because it
+does not know what the pool knows. So the page asks each service that
+declared <code>nilo_ready</code>, and the three modules that hold something answer:
+<code>sql.Db</code> sends <code>SELECT 1</code> down the pool and says what came back, an <code>s3</code>
+Store says whether it started, and a service with no hook — a config struct,
+a cache — is assumed ready. A service of your own joins in with one function
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/154-a-health-route-asks-the-services.md">ADR 154</a>):</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Mailer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">connected</span><span class="o">:</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">nilo_ready</span><span class="p">(</span><span class="n">self</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Mailer</span><span class="p">,</span><span class="w"> </span><span class="n">scope</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">AnyScope</span><span class="p">)</span><span class="w"> </span><span class="o">?</span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">scope</span><span class="p">;</span><span class="w">                       </span><span class="c1">// an arena, for a reason with a number in it</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">self</span><span class="p">.</span><span class="n">connected</span><span class="p">)</span><span class="w"> </span><span class="kc">null</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="s">"the mail relay has not accepted a connection yet"</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>Null is ready; a sentence is why not, and it goes on the page beside the
+service's name. <strong>The moment the server is told to stop, the page says
+<code>stopping</code></strong>, which is how a balancer learns to drain this instance before its
+listener closes rather than after — the other half of <a href="#stopping">Stopping</a>.
+Every answer carries <code>Cache-Control: no-store</code>.</p>
+<p>It is an ordinary route, like the metrics page: mount it where the balancer
+can reach it and nothing else needs to, and keep it out of the
+<a href="../middleware/">logger</a> if a line a second is noise. Nothing about it
+touches a request that is not the probe.</p>
+<h2 id="knowing-whether-it-is-working">Knowing whether it is working<a class="headerlink" href="#knowing-whether-it-is-working" title="Permanent link">&para;</a></h2>
+<p><code>app.metrics(.{})</code> puts a Prometheus page on <code>/metrics</code>: requests per route,
+status classes, a latency histogram, exact status codes for the process, and
+requests in flight. It is an ordinary route, so where you mount it and what you
+<code>use</code> in front of it is what protects it — nilo puts no authentication on it.
+See <a href="../metrics/">Metrics</a>.</p>
+<p>That is the <em>service</em> half. The <em>request</em> half — a request id you can tie a log
+line to — is in <a href="../errors/">Errors</a>, and the two answer different questions:
+metrics tell you something is wrong, a request id tells you which request.</p>
+<h2 id="what-isnt-here-yet">What isn't here yet<a class="headerlink" href="#what-isnt-here-yet" title="Permanent link">&para;</a></h2>
+<p><code>permessage-deflate</code>, and compression of a stream or an event stream. A
+whole answer is compressed, per request (<a href="../responses/#compression">Responses</a>),
+and a file is, once, at load (<a href="../static-files/#compression">Static files</a>).</p>
+<p>Templates are a refusal rather than a backlog item: nilo is for building APIs
+and services, and rendering pages is not what it is for. The reasoning is in
+<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/decided.md#not-coming"><code>decided.md</code></a>.</p>
+<p>What is outstanding is listed with what it is waiting for in
+<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/roadmap.md"><code>../roadmap.md</code></a>; what has been refused, with the reason, is in
+<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/decided.md"><code>../decided.md</code></a> and the ADR each entry names.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../metrics/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Metrics">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Metrics
+              </div>
+            </div>
+          </a>
+        
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.sections", "navigation.top", "navigation.footer", "navigation.indexes", "search.highlight", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

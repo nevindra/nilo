@@ -1,0 +1,2725 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A toolkit for Zig 0.16, and an HTTP server">
+      
+      
+      
+        <link rel="canonical" href="https://nevindra.github.io/nilo/0.6/forms/">
+      
+      
+        <link rel="prev" href="../requests/">
+      
+      
+        <link rel="next" href="../responses/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Forms - nilo</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#forms" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="nilo" class="md-header__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            nilo
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Forms
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="nilo" class="md-nav__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    nilo
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../handlers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handlers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handling a request
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Handling a request
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../requests/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requests
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Forms
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Forms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#a-checkbox-is-a-bool" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A checkbox is a bool
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-checkbox-group-is-a-list" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A checkbox group is a list
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#which-encoding-arrived-is-not-your-problem" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Which encoding arrived is not your problem
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#files" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Files
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Files">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-filename-is-not-a-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The filename is not a path
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#writing-it-to-disk" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Writing it to disk
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#how-big-a-form-can-be" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How big a form can be
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#when-one-field-is-wrong-and-the-rest-are-fine" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When one field is wrong and the rest are fine
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="When one field is wrong and the rest are fine">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#showing-the-form-again" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Showing the form again
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#text-with-a-shape" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Text with a shape
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#your-own-rules-in-the-same-answer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Your own rules, in the same answer
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-form-is-the-body" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A form is the body
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#from-a-ctx" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From a Ctx
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#testing-one" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testing one
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#in-the-document" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        In the document
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../responses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Responses
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cookies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cookies
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sessions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Streaming
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../websocket/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WebSocket
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grpc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    gRPC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building an application
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Building an application
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../middleware/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Middleware and resolved values
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../static-files/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Static files
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../errors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../background/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that is not a request
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Answering once
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The other modules
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    The other modules
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../sql/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Talking to a database
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Talking to a database
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A table is a struct
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/reading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A Row with more in it
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/writing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Writing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/transactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/raw/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Past one table
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/sqlite/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQLite
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/migrations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Making the tables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/running/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running it
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fetch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Calling somebody else's API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../s3/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Object storage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jobs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that runs later, again, or on a schedule
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cache/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A cache in this process
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jwt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Checking somebody else's token
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../id/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Identifiers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Shipping it
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Shipping it
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../openapi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenAPI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../deploying/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deploying
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#a-checkbox-is-a-bool" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A checkbox is a bool
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-checkbox-group-is-a-list" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A checkbox group is a list
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#which-encoding-arrived-is-not-your-problem" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Which encoding arrived is not your problem
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#files" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Files
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Files">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-filename-is-not-a-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The filename is not a path
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#writing-it-to-disk" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Writing it to disk
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#how-big-a-form-can-be" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How big a form can be
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#when-one-field-is-wrong-and-the-rest-are-fine" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When one field is wrong and the rest are fine
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="When one field is wrong and the rest are fine">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#showing-the-form-again" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Showing the form again
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#text-with-a-shape" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Text with a shape
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#your-own-rules-in-the-same-answer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Your own rules, in the same answer
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-form-is-the-body" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A form is the body
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#from-a-ctx" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From a Ctx
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#testing-one" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testing one
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#in-the-document" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        In the document
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/nevindra/nilo/edit/main/docs/guide/forms.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="forms">Forms<a class="headerlink" href="#forms" title="Permanent link">&para;</a></h1>
+<p>An HTML form is not JSON. A browser posts
+<code>application/x-www-form-urlencoded</code>, and the moment the form has a file in it,
+<code>multipart/form-data</code>. <code>Form(T)</code> reads both.</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">SignIn</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">email</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Str</span><span class="p">,</span>
+<span class="w">    </span><span class="n">password</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Str</span><span class="p">,</span>
+<span class="w">    </span><span class="n">remember</span><span class="o">:</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w">   </span><span class="c1">// an unticked checkbox is not sent at all</span>
+<span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">signIn</span><span class="p">(</span><span class="n">incoming</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Form</span><span class="p">(</span><span class="n">SignIn</span><span class="p">))</span><span class="w"> </span><span class="o">!</span><span class="n">nilo</span><span class="p">.</span><span class="n">Redirect</span><span class="p">(</span><span class="mi">303</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">...</span><span class="w"> </span><span class="n">incoming</span><span class="p">.</span><span class="n">value</span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="p">...</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">.</span><span class="n">to</span><span class="p">(</span><span class="s">"/welcome"</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>It is the same idea as <a href="../requests/#query-params"><code>Query(T)</code></a>,
+moved from the query string to the body: one field per form field, a field's
+type says what its text has to become, and a default is what "not sent" means.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Means</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>email: Str</code></td>
+<td>required — absent is a 400 saying which</td>
+</tr>
+<tr>
+<td><code>page: u32</code></td>
+<td>converted, and <code>page=soon</code> is a 400 saying so</td>
+</tr>
+<tr>
+<td><code>sort: enum { newest, oldest }</code></td>
+<td>one of those words, or a 400 listing them</td>
+</tr>
+<tr>
+<td><code>nickname: ?Str = null</code></td>
+<td>optional: absent is null</td>
+</tr>
+<tr>
+<td><code>limit: u32 = 20</code></td>
+<td>absent means the default</td>
+</tr>
+<tr>
+<td><code>remember: bool = false</code></td>
+<td>a checkbox — see below</td>
+</tr>
+<tr>
+<td><code>tags: []const Str = &amp;.{}</code></td>
+<td>a checkbox group or a <code>&lt;select multiple&gt;</code> — see below</td>
+</tr>
+<tr>
+<td><code>avatar: Upload</code></td>
+<td>a file — see below</td>
+</tr>
+</tbody>
+</table>
+<p>The messages are the ones a query param gets, because it is the same code:
+<code>"age" has to be a whole number, not "soon"</code>.</p>
+<h2 id="a-checkbox-is-a-bool">A checkbox is a <code>bool</code><a class="headerlink" href="#a-checkbox-is-a-bool" title="Permanent link">&para;</a></h2>
+<p>A ticked checkbox posts <code>on</code>. An unticked one posts <strong>nothing at all</strong> — the
+name does not appear in the body — so both halves need the default:</p>
+<div class="highlight"><pre><span></span><code><span class="n">newsletter</span><span class="o">:</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+</code></pre></div>
+<p>Ticked gives <code>true</code>, unticked leaves the default, and that is the whole of it.
+<code>true</code> and <code>false</code> are taken as well, for a client that is not a browser.</p>
+<p><strong>Only a form reads <code>on</code> this way.</strong> The same field in a <code>Query(T)</code> or a JSON
+body is <code>true</code> or <code>false</code> and nothing else, because <code>on</code> is a fact about HTML
+rather than about booleans — a JSON client sending <code>"on"</code> has a bug, and hearing
+about it is more use than having it guessed at. <code>off</code> is not accepted anywhere:
+no browser sends it, and an unticked box is an absent field rather than a
+present false one.</p>
+<h2 id="a-checkbox-group-is-a-list">A checkbox group is a list<a class="headerlink" href="#a-checkbox-group-is-a-list" title="Permanent link">&para;</a></h2>
+<p>Three boxes named <code>tags</code> post <code>tags=zig&amp;tags=http</code> when two are ticked, and a
+<code>&lt;select multiple&gt;</code> posts the same shape. A field that is a slice takes
+every value sent under its name, in the order the browser put them, and
+each one is converted the way a single field would be
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/132-a-query-parameter-or-a-form-field-that-is-a-list.md">ADR 132</a>):</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">NewPost</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">title</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Str</span><span class="p">,</span>
+<span class="w">    </span><span class="n">tags</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Str</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{},</span>
+<span class="w">    </span><span class="n">notify</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">comment</span><span class="p">,</span><span class="w"> </span><span class="n">mention</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{},</span>
+<span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">create</span><span class="p">(</span><span class="n">incoming</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Form</span><span class="p">(</span><span class="n">NewPost</span><span class="p">))</span><span class="w"> </span><span class="o">!</span><span class="n">nilo</span><span class="p">.</span><span class="n">Redirect</span><span class="p">(</span><span class="mi">303</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">incoming</span><span class="p">.</span><span class="n">value</span><span class="p">.</span><span class="n">tags</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="n">tag</span><span class="o">|</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tag</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">.</span><span class="n">to</span><span class="p">(</span><span class="s">"/posts"</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong>Nothing ticked is the empty list</strong>, never a 400: a group with no box
+ticked sends no name at all, and that is what every filter and every
+opt-in already means by not being sent. Give the field <code>= &amp;.{}</code> and the
+document says it is optional. <strong>An empty value contributes nothing</strong>, so a
+row of text boxes named <code>alias</code> with two left blank is a list of the ones
+filled in. <strong>A value with a comma in it is a value with a comma in it</strong>: a
+browser never joins a group with commas, so unlike a
+<a href="../requests/#query-params">query list</a> there is no second spelling to
+read, and <code>tags=a%2Cb</code> is one tag. A list of <code>Upload</code> is refused while
+compiling — a file is a part, not a value, and a field takes one.</p>
+<p>A value that will not convert — <code>notify=nonsense</code> — is the 400 the single
+field would have got, naming the field. Behind a
+<a href="#when-one-field-is-wrong-and-the-rest-are-fine"><code>Bound(Form(T))</code></a> the first
+bad value is the one recorded and the rest of the list is still read, so a
+group with one bad box is a group rather than a form with nothing in it.</p>
+<h2 id="which-encoding-arrived-is-not-your-problem">Which encoding arrived is not your problem<a class="headerlink" href="#which-encoding-arrived-is-not-your-problem" title="Permanent link">&para;</a></h2>
+<p>A browser picks urlencoded or multipart depending on whether the form has a
+file in it. That is a fact about the browser, so <code>Form(T)</code> reads either and the
+handler never asks — the same way <code>c.body()</code> reads a chunked body and a
+<code>Content-Length</code> one without saying which turned up.</p>
+<p>A body that is neither gets a 400 naming what was sent:</p>
+<div class="highlight"><pre><span></span><code>this endpoint takes a form, so the body has to be sent as
+application/x-www-form-urlencoded or multipart/form-data — this one arrived
+as "application/json"
+</code></pre></div>
+<h2 id="files">Files<a class="headerlink" href="#files" title="Permanent link">&para;</a></h2>
+<p>A field typed <code>nilo.Upload</code> is a file. Three pieces, all <code>Str</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">NewAvatar</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">caption</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Str</span><span class="p">,</span>
+<span class="w">    </span><span class="n">image</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Upload</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">upload</span><span class="p">(</span><span class="n">incoming</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Form</span><span class="p">(</span><span class="n">NewAvatar</span><span class="p">))</span><span class="w"> </span><span class="o">!</span><span class="n">nilo</span><span class="p">.</span><span class="n">Status</span><span class="p">(</span><span class="mi">201</span><span class="p">,</span><span class="w"> </span><span class="n">Avatar</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">image</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">incoming</span><span class="p">.</span><span class="n">value</span><span class="p">.</span><span class="n">image</span><span class="p">;</span>
+<span class="w">    </span><span class="n">image</span><span class="p">.</span><span class="n">filename</span><span class="p">.</span><span class="n">view</span><span class="p">()</span><span class="w">      </span><span class="c1">// "me.png"</span>
+<span class="w">    </span><span class="n">image</span><span class="p">.</span><span class="n">content_type</span><span class="p">.</span><span class="n">view</span><span class="p">()</span><span class="w">  </span><span class="c1">// "image/png"</span>
+<span class="w">    </span><span class="n">image</span><span class="p">.</span><span class="n">bytes</span><span class="p">.</span><span class="n">view</span><span class="p">()</span><span class="w">         </span><span class="c1">// the file</span>
+<span class="w">    </span><span class="n">image</span><span class="p">.</span><span class="n">len</span><span class="p">()</span><span class="w">                </span><span class="c1">// how big it is</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>?Upload = null</code> is a file that may not have been chosen.</p>
+<p>A form with an <code>Upload</code> in it can only arrive as multipart, so one that does
+not gets told which to send rather than being reported as a missing field:</p>
+<div class="highlight"><pre><span></span><code>this endpoint takes a file, so the form has to be sent as
+multipart/form-data — this one arrived as application/x-www-form-urlencoded.
+In HTML that is &lt;form enctype="multipart/form-data"&gt;.
+</code></pre></div>
+<h3 id="the-filename-is-not-a-path">The filename is not a path<a class="headerlink" href="#the-filename-is-not-a-path" title="Permanent link">&para;</a></h3>
+<p><strong><code>filename</code> is whatever the client sent.</strong> <code>../../etc/passwd</code> is a filename a
+browser will happily send if asked to. Store the bytes under a name of your
+own; treat this one as a label to show somebody. <code>content_type</code> is likewise the
+client's claim, not a fact — sniff the bytes if it matters.</p>
+<p>nilo reads the plain <code>filename</code> and not RFC 6266's <code>filename*=UTF-8''…</code>, which
+is the encoded form a browser sends <em>alongside</em> it for a name that is not
+Latin-1. A part carrying <strong>only</strong> the encoded one is a 400 naming the part
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/073-a-header-is-answered-as-asked-or-refused.md">ADR 073</a>) — refused
+rather than read as a text field full of upload bytes, which is what it used to
+become. No browser sends that shape; a hand-rolled HTTP client can.</p>
+<h3 id="writing-it-to-disk">Writing it to disk<a class="headerlink" href="#writing-it-to-disk" title="Permanent link">&para;</a></h3>
+<p><code>saveTo</code> puts the bytes in a directory, under a name you choose:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Uploads</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">dir</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Dir</span><span class="w"> </span><span class="p">};</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">Avatar</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">caption</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Str</span><span class="p">,</span>
+<span class="w">    </span><span class="n">image</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Upload</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">setAvatar</span><span class="p">(</span><span class="n">uploads</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Uploads</span><span class="p">,</span><span class="w"> </span><span class="n">account</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="n">incoming</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Form</span><span class="p">(</span><span class="n">Avatar</span><span class="p">))</span><span class="w"> </span><span class="o">!</span><span class="n">nilo</span><span class="p">.</span><span class="n">Status</span><span class="p">(</span><span class="mi">201</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">buf</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="mi">32</span><span class="p">]</span><span class="kt">u8</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">undefined</span><span class="p">;</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">fmt</span><span class="p">.</span><span class="n">bufPrint</span><span class="p">(</span><span class="o">&amp;</span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="s">"{d}.png"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="n">account</span><span class="p">});</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">incoming</span><span class="p">.</span><span class="n">value</span><span class="p">.</span><span class="n">image</span><span class="p">.</span><span class="n">saveTo</span><span class="p">(</span><span class="n">uploads</span><span class="p">.</span><span class="n">dir</span><span class="p">,</span><span class="w"> </span><span class="n">name</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">.{};</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The <code>Dir</code> is opened once at startup and held as a service, exactly as
+<a href="../responses/#files"><code>FileBody</code></a> takes one — and it can be the same
+one, which is the case <code>saveTo</code> is careful about. <strong>The file is replaced or it
+is not touched</strong>: the bytes go to a temporary name beside it and one rename
+puts them in place, so a request serving that name while this one writes reads
+the old file rather than a truncated one
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/097-a-file-is-written-by-the-engine.md">ADR 097</a>).</p>
+<p>Passing <code>image.filename</code> in as the name is <code>error.NameNotAllowed</code> rather than a
+path resolved against the directory — the same check <code>sendFile</code> makes on the way
+out, for the same reason.</p>
+<p>The fiber parks for the write and the thread carries on serving every other
+connection it holds, so there is nothing to hand to <code>nilo.blocking</code>.</p>
+<h3 id="how-big-a-form-can-be">How big a form can be<a class="headerlink" href="#how-big-a-form-can-be" title="Permanent link">&para;</a></h3>
+<p>The whole body is read into the request arena, bounded by <code>listen()</code>'s
+<code>max_body</code> — <strong>1 MB by default</strong>. A form is read into a struct, and a struct is
+not something you can have half of.</p>
+<p>For an upload bigger than that, turn <code>max_body</code> up — for the one route, with
+<code>app.with(nilo.maxBody(50 &lt;&lt; 20))</code>, rather than for the whole server — or take
+the body in pieces
+yourself with <a href="../requests/#bodies-too-big-to-hold"><code>c.bodyStream()</code></a>, where
+nothing is held in memory at all. <code>Form(T)</code> is the convenient one; the stream
+is the one with no ceiling.</p>
+<p>Inside the ceiling nothing is copied: a file's bytes are a slice of the body
+that was already read, not a second copy of it.</p>
+<h2 id="when-one-field-is-wrong-and-the-rest-are-fine">When one field is wrong and the rest are fine<a class="headerlink" href="#when-one-field-is-wrong-and-the-rest-are-fine" title="Permanent link">&para;</a></h2>
+<p><code>Form(T)</code> is all-or-nothing: the first field that will not convert is a 400 and
+the request is over. For an API that is usually what you want. For a page, it
+is not — somebody mistypes their age and loses everything else they typed.</p>
+<p><code>Bound(Form(T))</code> hands the failures to the handler instead:</p>
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">signUp</span><span class="p">(</span><span class="n">b</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Bound</span><span class="p">(</span><span class="n">nilo</span><span class="p">.</span><span class="n">Form</span><span class="p">(</span><span class="n">SignUp</span><span class="p">)))</span><span class="w"> </span><span class="o">!</span><span class="n">nilo</span><span class="p">.</span><span class="n">Redirect</span><span class="p">(</span><span class="mi">303</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">form</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">b</span><span class="p">.</span><span class="n">value</span><span class="p">()</span><span class="w"> </span><span class="k">orelse</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">b</span><span class="p">.</span><span class="n">fail</span><span class="p">();</span>
+<span class="w">    </span><span class="p">...</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>b.fail()</code> is a <strong>422</strong> naming every field that did not bind:</p>
+<div class="highlight"><pre><span></span><code>2 fields did not fit: the form is missing "email" (text);
+"age" has to be a whole number, not "soon"
+</code></pre></div>
+<p><code>value()</code> is an optional and there is no way past it. A field that did not bind
+holds nothing worth reading, so the binding withholds the whole struct rather
+than letting you read a zero nobody sent.</p>
+<h3 id="showing-the-form-again">Showing the form again<a class="headerlink" href="#showing-the-form-again" title="Permanent link">&para;</a></h3>
+<p>What a page needs is not the converted values — it is <strong>what the person
+typed</strong>. You put <code>soon</code> back in the age box, not <code>0</code>. That is <code>given</code>, and it
+works for every field whether or not it bound:</p>
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">signUp</span><span class="p">(</span><span class="n">arena</span><span class="o">:</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">mem</span><span class="p">.</span><span class="n">Allocator</span><span class="p">,</span><span class="w"> </span><span class="n">b</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Bound</span><span class="p">(</span><span class="n">nilo</span><span class="p">.</span><span class="n">Form</span><span class="p">(</span><span class="n">SignUp</span><span class="p">)))</span><span class="w"> </span><span class="o">!</span><span class="n">Page</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">b</span><span class="p">.</span><span class="n">value</span><span class="p">())</span><span class="w"> </span><span class="o">|</span><span class="n">form</span><span class="o">|</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">welcome</span><span class="p">(</span><span class="n">form</span><span class="p">);</span>
+
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">wrong</span><span class="o">:</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">ArrayList</span><span class="p">(</span><span class="n">Problem</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">empty</span><span class="p">;</span>
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">it</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">b</span><span class="p">.</span><span class="n">failures</span><span class="p">();</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">it</span><span class="p">.</span><span class="n">next</span><span class="p">())</span><span class="w"> </span><span class="o">|</span><span class="n">f</span><span class="o">|</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">f</span><span class="p">.</span><span class="n">field</span><span class="w">      </span><span class="c1">// "age"</span>
+<span class="w">        </span><span class="n">f</span><span class="p">.</span><span class="n">reason</span><span class="w">     </span><span class="c1">// .not_a_number — null when it is a rule of yours</span>
+<span class="w">        </span><span class="n">f</span><span class="p">.</span><span class="n">given</span><span class="w">      </span><span class="c1">// Str "soon" — what arrived</span>
+<span class="w">        </span><span class="n">f</span><span class="p">.</span><span class="n">expected</span><span class="w">   </span><span class="c1">// "a whole number"</span>
+<span class="w">        </span><span class="k">try</span><span class="w"> </span><span class="n">f</span><span class="p">.</span><span class="n">say</span><span class="p">(</span><span class="n">w</span><span class="p">)</span><span class="w"> </span><span class="c1">// nilo's own sentence, so yours cannot drift from it</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">signUpPage</span><span class="p">(.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">b</span><span class="p">.</span><span class="n">given</span><span class="p">(</span><span class="s">"email"</span><span class="p">).</span><span class="n">view</span><span class="p">(),</span><span class="w">   </span><span class="c1">// still in the box</span>
+<span class="w">        </span><span class="p">.</span><span class="n">age</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">b</span><span class="p">.</span><span class="n">given</span><span class="p">(</span><span class="s">"age"</span><span class="p">).</span><span class="n">view</span><span class="p">(),</span><span class="w">       </span><span class="c1">// "soon", so they can see it</span>
+<span class="w">        </span><span class="p">.</span><span class="n">problems</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">wrong</span><span class="p">.</span><span class="n">items</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The field name in <code>given("…")</code> is checked while compiling — a typo there would
+otherwise be an empty box nobody notices.</p>
+<h3 id="text-with-a-shape">Text with a shape<a class="headerlink" href="#text-with-a-shape" title="Permanent link">&para;</a></h3>
+<p>The reasons above are exactly the conversions nilo performs: <code>.missing</code>,
+<code>.not_a_number</code>, <code>.not_true_or_false</code>, <code>.not_a_choice</code>, <code>.wrong_kind</code>. <strong>This
+is not a validator.</strong> But a <code>u8</code> refuses 300 and nobody calls that one, and
+text can have a shape the same way a number has a range
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/193-text-with-a-shape-is-a-type-and-a-rule-about-the-struct-is-a-function-on-it.md">ADR 193</a>):</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">startsWithSku</span><span class="p">(</span><span class="n">text</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">)</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">mem</span><span class="p">.</span><span class="n">startsWith</span><span class="p">(</span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="n">text</span><span class="p">,</span><span class="w"> </span><span class="s">"SKU-"</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">SignUp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">email</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Email</span><span class="p">,</span>
+<span class="w">    </span><span class="n">password</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Text</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">min</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">max</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">72</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">    </span><span class="n">nickname</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Text</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">max</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">30</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">of</span><span class="p">(</span><span class="s">""</span><span class="p">),</span>
+<span class="w">    </span><span class="n">sku</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Text</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">check</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">startsWithSku</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">said</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"has to be a SKU code"</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">    </span><span class="n">confirm</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="p">,</span>
+
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">nilo_check</span><span class="p">(</span><span class="n">self</span><span class="o">:</span><span class="w"> </span><span class="n">SignUp</span><span class="p">,</span><span class="w"> </span><span class="n">r</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Rules</span><span class="p">(</span><span class="n">SignUp</span><span class="p">))</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">r</span><span class="p">.</span><span class="n">must</span><span class="p">(</span><span class="s">"confirm"</span><span class="p">,</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">password</span><span class="p">.</span><span class="n">eql</span><span class="p">(</span><span class="n">self</span><span class="p">.</span><span class="n">confirm</span><span class="p">.</span><span class="n">view</span><span class="p">()),</span><span class="w"> </span><span class="s">"has to match the password"</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>A <code>nilo.Text</code> is a <code>Str</code> that parses itself, so it is read wherever a <code>Str</code> is
+— a form field, a query value, a JSON body, a path param — and refused with
+one sentence in all four. <code>min</code> and <code>max</code> count characters (code points, the
+same thing JSON Schema's <code>minLength</code> counts). <code>check</code> is any <code>fn ([]const u8)
+bool</code> of your own, with <code>said</code> as its sentence in <code>must</code>'s shape. <code>Email</code> and
+<code>Url</code> are presets. The <code>Str</code> is <code>.value</code>, and <code>view</code>, <code>len</code>, <code>eql</code> and <code>blank</code>
+are on the <code>Text</code> itself; <code>.of("…")</code> is the default, checked against the shape
+while compiling.</p>
+<p><strong>A <code>Text</code> never quotes the text back.</strong> A password in a 422 body is a leak,
+so the sentence says the count: <code>"password" has to be text of 10 to 72
+characters, not 7</code>. <code>Email</code> does quote, because seeing the address is how the
+typo is found: <code>"email" has to look like an address, not "wati"</code>.</p>
+<p><strong>A rule about the struct goes on the struct.</strong> <code>nilo_check</code> runs once every
+field has bound, in whichever slot the struct arrived through, and what it
+says with <code>must</code> comes out in the same 422 as everything else — so the second
+handler binding <code>SignUp</code> cannot forget the rule. It takes the value and
+nothing else: a rule that needs the request stays below.</p>
+<p>On a plain <code>Form(SignUp)</code> a field outside its shape is the 400 a bad number
+gets, and a <code>nilo_check</code> that does not hold is a 422 naming every rule that
+did not. Under <code>Bound</code> all of it is collected:</p>
+<div class="highlight"><pre><span></span><code>3 fields did not fit: "email" has to look like an address, not "wati";
+"password" has to be text of 10 to 72 characters, not 7;
+"confirm" has to match the password
+</code></pre></div>
+<p>The document says the shape — <code>minLength</code>, <code>maxLength</code>, <code>format: email</code> —
+read off the type, so a generated client refuses the same text before
+sending it. A <code>check</code> and a <code>nilo_check</code> have no JSON Schema and are not
+claimed.</p>
+<h3 id="your-own-rules-in-the-same-answer">Your own rules, in the same answer<a class="headerlink" href="#your-own-rules-in-the-same-answer" title="Permanent link">&para;</a></h3>
+<p>What is left for the handler is the rule that needs the request — "that
+address is already registered" wants a database. Write it, hand over the
+sentence, and it comes out beside nilo's own in one 422 rather than as a
+second shape a client has to handle:</p>
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">signUp</span><span class="p">(</span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">b</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Bound</span><span class="p">(</span><span class="n">nilo</span><span class="p">.</span><span class="n">Form</span><span class="p">(</span><span class="n">SignUp</span><span class="p">)))</span><span class="w"> </span><span class="o">!</span><span class="n">nilo</span><span class="p">.</span><span class="n">Status</span><span class="p">(</span><span class="mi">201</span><span class="p">,</span><span class="w"> </span><span class="n">User</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">in</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">b</span><span class="p">.</span><span class="n">value</span><span class="p">()</span><span class="w"> </span><span class="k">orelse</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">b</span><span class="p">.</span><span class="n">fail</span><span class="p">();</span>
+
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">checked</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">b</span><span class="p">.</span><span class="n">must</span><span class="p">(</span><span class="s">"email"</span><span class="p">,</span><span class="w"> </span><span class="o">!</span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">exists</span><span class="p">(</span><span class="n">in</span><span class="p">.</span><span class="n">email</span><span class="p">.</span><span class="n">view</span><span class="p">()),</span><span class="w"> </span><span class="s">"is already registered"</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">checked</span><span class="p">.</span><span class="n">failed</span><span class="p">())</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">checked</span><span class="p">.</span><span class="n">fail</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">create</span><span class="p">(</span><span class="n">in</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>"email" is already registered
+</code></pre></div>
+<p>The bool is the rule <strong>holding</strong>, not failing — read the call as the sentence it
+makes: password must be at least 10 characters. The label is nilo's, so a rule
+in a query string says <code>?page stops at 100</code> without you knowing that slot spells
+things differently.</p>
+<p><code>must</code> returns a <code>Checked</code>, which has <code>value</code>, <code>failed</code>, <code>failedCount</code>,
+<code>given</code>, <code>failures</code> and <code>fail</code> — the same names, so nothing above has to be
+rewritten to use it. A <code>Failure</code> from a rule has <code>reason == null</code> and its own
+words in <code>said</code>; conversion failures still come first, because a rule checked
+against a field that never bound was checked against nothing.</p>
+<p>A handler that checks no rules never builds a <code>Checked</code> and pays nothing for
+this (<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/034-a-binding-hands-its-failures-to-the-handler.md">ADR 034</a>).</p>
+<p>And three things stay a plain 400, because none of them leaves a binding to
+hand back: a body that is not a form at all, text that is not JSON, and a field
+the endpoint has never heard of.</p>
+<p>The same wrapper works on the other two slots: <code>Bound(T)</code> for a JSON body and
+<code>Bound(Query(T))</code> for the query string — and a <code>nilo.Text</code> or a <code>nilo_check</code>
+on the struct works in all three the same way, with or without the wrapper.</p>
+<h2 id="a-form-is-the-body">A form is the body<a class="headerlink" href="#a-form-is-the-body" title="Permanent link">&para;</a></h2>
+<p><code>Form(T)</code> sits exactly where a plain struct argument would have read JSON.
+They are the same bytes read two ways, so asking for both stops compilation:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// nilo: the handler for route "/sign-up" asks for both a request body</span>
+<span class="c1">// (argument 1, a main.Profile) and a form (argument 2) — and a request only</span>
+<span class="c1">// has one body.</span>
+<span class="k">fn</span><span class="w"> </span><span class="n">signUp</span><span class="p">(</span><span class="n">profile</span><span class="o">:</span><span class="w"> </span><span class="n">Profile</span><span class="p">,</span><span class="w"> </span><span class="n">incoming</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Form</span><span class="p">(</span><span class="n">SignIn</span><span class="p">))</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<h2 id="from-a-ctx">From a <code>Ctx</code><a class="headerlink" href="#from-a-ctx" title="Permanent link">&para;</a></h2>
+<p><code>c.form(T)</code> is the same thing for a handler holding a <code>*Ctx</code>, the way
+<code>c.json(T)</code> is for a JSON body:</p>
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">signIn</span><span class="p">(</span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">incoming</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">form</span><span class="p">(</span><span class="n">SignIn</span><span class="p">);</span>
+<span class="w">    </span><span class="p">...</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>c.formCollecting(T, &amp;outcomes)</code> and <code>c.jsonCollecting(T, &amp;outcomes)</code> are what
+<code>Bound(…)</code> is built on, for a <code>*Ctx</code> handler that wants the failures.</p>
+<h2 id="testing-one">Testing one<a class="headerlink" href="#testing-one" title="Permanent link">&para;</a></h2>
+<p>A <code>Form(T)</code> is an ordinary struct, so a test builds one and never writes a
+request body:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">answer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">signIn</span><span class="p">(</span><span class="o">&amp;</span><span class="n">sessions</span><span class="p">,</span><span class="w"> </span><span class="n">arena</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">static</span><span class="p">(</span><span class="s">"wati@example.dev"</span><span class="p">),</span>
+<span class="w">    </span><span class="p">.</span><span class="n">password</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">static</span><span class="p">(</span><span class="s">"hunter2"</span><span class="p">),</span>
+<span class="p">}</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<p>For the multipart case — where the framing is the thing being tested — the
+<a href="../testing/">test client</a> posts a real body:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">answer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">client</span><span class="p">.</span><span class="n">postWith</span><span class="p">(</span>
+<span class="w">    </span><span class="o">&amp;</span><span class="n">app</span><span class="p">,</span>
+<span class="w">    </span><span class="s">"/sign-in"</span><span class="p">,</span>
+<span class="w">    </span><span class="s">"application/x-www-form-urlencoded"</span><span class="p">,</span>
+<span class="w">    </span><span class="s">"email=wati%40example.dev&amp;password=hunter2"</span><span class="p">,</span>
+<span class="p">);</span>
+</code></pre></div>
+<h2 id="in-the-document">In the document<a class="headerlink" href="#in-the-document" title="Permanent link">&para;</a></h2>
+<p>The generated API description says which encoding the endpoint takes —
+<code>application/x-www-form-urlencoded</code>, or <code>multipart/form-data</code> once there is a
+file — and describes the file as bytes rather than as the struct carrying it.
+See <a href="../openapi/">OpenAPI</a>.</p>
+<h2 id="see-also">See also<a class="headerlink" href="#see-also" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="https://github.com/nevindra/nilo/blob/v0.6.0/examples/forms/main.zig"><code>examples/forms</code></a> — a form, a session cookie,
+  an upload and a redirect, end to end.</li>
+<li><a href="../cookies/">Cookies</a>, which is what a sign-in does next.</li>
+<li><a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/030-a-form-is-the-body-read-by-another-rule.md">ADR 030</a> — why
+  <code>Form(T)</code> is explicit rather than sniffed, and what the multipart parser is
+  careful about.</li>
+<li><a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/034-a-binding-hands-its-failures-to-the-handler.md">ADR 034</a> — why
+  <code>value()</code> is an optional, why the reason list stops where it does, and what
+  stays a plain 400.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../requests/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Requests">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Requests
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../responses/" class="md-footer__link md-footer__link--next" aria-label="Next: Responses">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Responses
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.sections", "navigation.top", "navigation.footer", "navigation.indexes", "search.highlight", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

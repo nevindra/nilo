@@ -1,0 +1,2469 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A toolkit for Zig 0.16, and an HTTP server">
+      
+      
+      
+        <link rel="canonical" href="https://nevindra.github.io/nilo/0.6/static-files/">
+      
+      
+        <link rel="prev" href="../services/">
+      
+      
+        <link rel="next" href="../errors/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Static files - nilo</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#static-files" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="nilo" class="md-header__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            nilo
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Static files
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="nilo" class="md-nav__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    nilo
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../handlers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handlers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handling a request
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Handling a request
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../requests/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requests
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../forms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Forms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../responses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Responses
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cookies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cookies
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sessions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Streaming
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../websocket/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WebSocket
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grpc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    gRPC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building an application
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Building an application
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../middleware/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Middleware and resolved values
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Static files
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Static files
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Options
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Options">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-fallback-and-what-it-is-for" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The fallback, and what it is for
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#compression" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Compression
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#range-requests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Range requests
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#files-too-big-to-hold" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Files too big to hold
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#files-the-binary-carries" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Files the binary carries
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#while-you-are-working-on-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        While you are working on it
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The limits
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../errors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../background/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that is not a request
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Answering once
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The other modules
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    The other modules
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../sql/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Talking to a database
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Talking to a database
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A table is a struct
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/reading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A Row with more in it
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/writing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Writing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/transactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/raw/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Past one table
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/sqlite/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQLite
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/migrations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Making the tables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/running/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running it
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fetch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Calling somebody else's API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../s3/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Object storage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jobs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that runs later, again, or on a schedule
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cache/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A cache in this process
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jwt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Checking somebody else's token
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../id/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Identifiers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Shipping it
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Shipping it
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../openapi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenAPI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../deploying/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deploying
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Options
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Options">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-fallback-and-what-it-is-for" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The fallback, and what it is for
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#compression" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Compression
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#range-requests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Range requests
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#files-too-big-to-hold" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Files too big to hold
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#files-the-binary-carries" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Files the binary carries
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#while-you-are-working-on-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        While you are working on it
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The limits
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/nevindra/nilo/edit/main/docs/guide/static-files.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="static-files">Static files<a class="headerlink" href="#static-files" title="Permanent link">&para;</a></h1>
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">static</span><span class="p">(</span><span class="s">"/"</span><span class="p">,</span><span class="w"> </span><span class="s">"public"</span><span class="p">);</span>
+
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">staticWith</span><span class="p">(</span><span class="s">"/assets"</span><span class="p">,</span><span class="w"> </span><span class="s">"dist"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">cache_control</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"public, max-age=31536000, immutable"</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">spa_fallback</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"index.html"</span><span class="p">,</span>
+<span class="p">});</span>
+</code></pre></div>
+<p>The directory is read into memory when the server starts, so nothing touches the
+disk while requests are being served
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/009-static-files-are-held-in-memory-or-opened.md">ADR 009</a>). Each file gets an
+ETag at load, so a repeat visit is a 304 with no body. Path traversal isn't
+possible, because there is no path to resolve — just a name looked up in a fixed
+list.</p>
+<p>A file over <code>max_file_bytes</code> is the one exception, and it is a spill rather than
+a refusal: it stays in the list with its size and the path the walk produced,
+and a request opens it and sends it from the disk
+(<a href="#files-too-big-to-hold">below</a>). Both of the properties above survive that.</p>
+<p>The path is relative to the working directory the server runs in, and a directory
+that can't be opened stops <code>listen()</code> with that sentence in the error.</p>
+<h2 id="options">Options<a class="headerlink" href="#options" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>index</code></td>
+<td>served for a path ending in <code>/</code>. Default <code>"index.html"</code>; empty turns it off</td>
+</tr>
+<tr>
+<td><code>cache_control</code></td>
+<td>sent on every file. Default <code>"public, max-age=3600"</code></td>
+</tr>
+<tr>
+<td><code>spa_fallback</code></td>
+<td>served for a path under the prefix that names no file and could be a browser opening a page. Empty (the default) turns it off</td>
+</tr>
+<tr>
+<td><code>spa_fallback_for</code></td>
+<td>which requests that covers. <code>.navigations</code> (the default) or <code>.any_path</code>, which is what shipped before 0.2.0 (<a href="#the-fallback-and-what-it-is-for">below</a>)</td>
+</tr>
+<tr>
+<td><code>max_file_bytes</code></td>
+<td>the line between a file held in memory and one opened per request. Default 8 MB</td>
+</tr>
+<tr>
+<td><code>max_total_bytes</code></td>
+<td>the ceiling on what one tree may hold in memory, gzipped copies included. Default 64 MB</td>
+</tr>
+<tr>
+<td><code>dotfiles</code></td>
+<td>whether to load names starting with <code>.</code>. Off by default</td>
+</tr>
+<tr>
+<td><code>compress</code></td>
+<td>gzip every file worth gzipping, once, at load. On by default</td>
+</tr>
+<tr>
+<td><code>compress_min_bytes</code></td>
+<td>files smaller than this are served as they are. Default 1 KB</td>
+</tr>
+</tbody>
+</table>
+<p>Dotfiles are off because a <code>.env</code> or a <code>.git</code> that found its way into the
+directory being published on the first request is a bad way to learn it was
+there.</p>
+<h3 id="the-fallback-and-what-it-is-for">The fallback, and what it is for<a class="headerlink" href="#the-fallback-and-what-it-is-for" title="Permanent link">&para;</a></h3>
+<p><code>spa_fallback</code> is what makes a browser reload on <code>/users/42</code> reach your
+client-side router instead of a 404. <strong>It answers a request that could be
+somebody opening a page, and nothing else</strong>
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/087-a-fallback-answers-a-navigation-not-a-missing-asset.md">ADR 087</a>):</p>
+<table>
+<thead>
+<tr>
+<th>The request</th>
+<th>The answer</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /users/42</code>, <code>Accept: text/html,…</code> — a reload, a deep link</td>
+<td>the page</td>
+</tr>
+<tr>
+<td><code>GET /users/42</code> with no <code>Accept</code>, or <code>*/*</code> — <code>curl</code>, a crawler</td>
+<td>the page</td>
+</tr>
+<tr>
+<td><code>GET /app.abc123.js</code>, <code>Accept: */*</code> — a <code>&lt;script src&gt;</code></td>
+<td><strong>404</strong>, naming the path</td>
+</tr>
+<tr>
+<td><code>GET /api/orders</code>, <code>Accept: application/json</code> — a <code>fetch</code></td>
+<td><strong>404</strong></td>
+</tr>
+</tbody>
+</table>
+<p>The middle row is the one that changed in 0.2.0. A build whose hash has moved
+on refers to a bundle the directory no longer holds, and answering that with
+<code>index.html</code> is a 200 the browser reports as a syntax error on line 1 of
+something that is not JavaScript — with the name of the missing file nowhere in
+it. The same shape turns a <code>fetch</code> into a JSON parse error.</p>
+<p>Two things are worth knowing about the rule. <strong>A <code>fetch()</code> that sends <code>*/*</code> to
+a path with no extension still gets the page</strong>, because at this layer it is
+indistinguishable from a deep link; sending <code>Accept: application/json</code> is what
+separates them. And a directory that really does want the old behaviour says
+so:</p>
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">staticWith</span><span class="p">(</span><span class="s">"/"</span><span class="p">,</span><span class="w"> </span><span class="s">"public"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">spa_fallback</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"index.html"</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">spa_fallback_for</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">any_path</span><span class="p">,</span><span class="w">     </span><span class="c1">// every path under the prefix, as before</span>
+<span class="p">});</span>
+</code></pre></div>
+<p><code>max_total_bytes</code> is a real ceiling — the held part of the tree is going into
+RAM — and it is better to hit it at startup than at 3am. <code>max_file_bytes</code> is not
+a ceiling but a line: a file over it is served from the disk rather than
+refused, and holds nothing to be counted against the total
+(<a href="#files-too-big-to-hold">below</a>).</p>
+<h2 id="compression">Compression<a class="headerlink" href="#compression" title="Permanent link">&para;</a></h2>
+<p>Every file worth compressing is gzipped <strong>once, while the App is being built</strong>,
+and a client that says <code>Accept-Encoding: gzip</code> gets the copy that was already
+made. Nothing is compressed per request, so serving a compressed asset costs a
+slice and a header — measured at zero allocations, held by a test.</p>
+<p>That holds with middleware in front of it, which is worth saying because it did
+not always: the chain an asset runs through is worked out at <code>listen()</code>, per
+file, the same as a route's. A logger, a CORS, or anything scoped to a prefix
+above or below the asset adds nothing to the request.</p>
+<p>That timing is the whole design, not an optimisation on top of it. A gzip
+compressor needs a 64 KB window: one per connection would take an idle
+connection from 4,669 bytes to roughly fifteen times that, and one per request would
+put an allocation on the path where the budget is one
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/017-the-trade-budget-has-four-axes.md">ADR 017</a>). A file that never
+changes escapes both, because it can be compressed before the socket is open.</p>
+<p>What it costs instead is memory that stays: the compressed copy sits beside the
+original for the life of the process, and is charged against <code>max_total_bytes</code>
+like everything else. The startup line says how much it came to:</p>
+<div class="highlight"><pre><span></span><code>nilo: loaded 34 static file(s) (2411903 bytes held, 383204 of them gzipped
+       copies) from "dist" onto "/assets"
+</code></pre></div>
+<p>A file is skipped when it is under <code>compress_min_bytes</code>, when its type is already
+compressed — a PNG, a woff2, an MP4 — when gzip did not actually make it
+smaller, or when it is over <code>max_file_bytes</code> and so was never read to be
+compressed at all. <strong>A handler's own answer is a different feature</strong>: files
+are gzipped once here, and <code>app.compress(.{})</code> gzips an endpoint's JSON per
+request on a compressor borrowed from a pool (<a href="../responses/#compression">Responses</a>).
+Off, an endpoint returning JSON goes out as it is.</p>
+<p>Three details that are easy to get wrong, and are not:</p>
+<ul>
+<li><strong><code>Vary: Accept-Encoding</code></strong> goes out whenever a file has two representations,
+  including on the response carrying the plain one. Without it a shared cache
+  stores whichever answer it saw first and hands it to everyone after.</li>
+<li><strong>The two representations have different ETags.</strong> An ETag names a
+  representation, not a file, so handing both the same one would let a cache
+  answer a client that can't read gzip with the gzipped copy — the tag matched,
+  after all.</li>
+<li><strong><code>gzip;q=0</code> means no.</strong> It contains the word <code>gzip</code> and means the opposite,
+  which is how a client that can't decompress says so.</li>
+</ul>
+<h2 id="range-requests">Range requests<a class="headerlink" href="#range-requests" title="Permanent link">&para;</a></h2>
+<p>A video being scrubbed and a download being resumed both ask for a range, and
+both get one:</p>
+<div class="highlight"><pre><span></span><code>$ curl -i -r 0-20 localhost:8787/video.mp4
+HTTP/1.1 206 Partial Content
+Content-Length: 21
+Accept-Ranges: bytes
+Content-Range: bytes 0-20/739
+</code></pre></div>
+<p><code>bytes=3-7</code>, <code>bytes=20-</code> and <code>bytes=-30</code> all work, and <code>Accept-Ranges: bytes</code>
+goes out on every file response so a client knows it may ask.</p>
+<p>The rule for everything else is that <strong>a <code>Range</code> that can't be understood is
+ignored and the whole file goes out</strong>
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/020-a-range-is-a-slice-and-two-headers.md">ADR 020</a>). That is a
+correct answer to every request, so <code>bytes=abc-def</code> or <code>bytes=99-10</code> gets a 200
+rather than an error. The one case worth refusing is a range starting past the
+end of the file: that's a client with the wrong idea about the size, and a <code>416</code>
+with <code>Content-Range: bytes */739</code> is the only way to say so.</p>
+<p><code>If-Range</code> is honoured against the ETag, which is the one that matters for
+correctness: resuming a download of a file that has since changed would staple
+two halves of two different files together, so a stale ETag gets the whole file
+instead.</p>
+<p>The comparison is <strong>strong</strong>, which is stricter than the one <code>If-None-Match</code>
+gets: a tag wrapped in <code>W/</code> and a bare <code>*</code> both get the whole file rather than a
+range. A weak validator promises the representation is equivalent, not that it is
+the same bytes, and the same bytes is exactly what a client stapling this onto a
+prefix it already holds needs
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/073-a-header-is-answered-as-asked-or-refused.md">ADR 073</a>).</p>
+<p>A request that asks for a range gets the <strong>uncompressed</strong> file, whatever it said
+about <code>Accept-Encoding</code>. A range is an offset into a representation, and the
+gzipped copy has different offsets — so answering one from the other would hand
+back the wrong bytes without saying so.</p>
+<p>A request for several ranges at once is legal and wants a <code>multipart/byteranges</code>
+body nilo doesn't assemble — so it gets the whole file too. Nothing sends them.</p>
+<h2 id="files-too-big-to-hold">Files too big to hold<a class="headerlink" href="#files-too-big-to-hold" title="Permanent link">&para;</a></h2>
+<p>A file over <code>max_file_bytes</code> is left where it is. It keeps its place in the list
+with its size, its modification time and the path the directory walk produced,
+and the request that asks for it opens the file and sends it from the disk
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/009-static-files-are-held-in-memory-or-opened.md">ADR 009</a>). A
+directory with a video in it serves rather than failing to load.</p>
+<p>Below the line nothing has changed: read at load, hashed, gzipped if it is worth
+it, answered from a slice. Three things change above it.</p>
+<ul>
+<li><strong>There is no gzipped copy, and there never will be.</strong> Compression happens
+  once, while the App is being built, and a file that is never read has no
+  "once" to be compressed in. A file that size is a video, an archive or an
+  installer, and all three are compressed already.</li>
+<li><strong>The ETag is the modification time and the size</strong>, <code>"&lt;mtime&gt;-&lt;size&gt;"</code> in hex,
+  rather than a hash of the contents. It is strong, and it is what nginx has
+  served by default for twenty years. Hashing would mean reading the whole file
+  at startup, and the weak tag that is the other alternative would make
+  <code>If-Range</code> unusable for exactly the large downloads that get resumed. Both
+  numbers come from one look at the descriptor whose bytes are about to go out,
+  so a file that changed on disk cannot be sent with a length and a tag that
+  describe different versions of it
+  (<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/098-a-file-is-described-by-the-descriptor-being-sent.md">ADR 098</a>).</li>
+<li><strong>One file descriptor is held for as long as the response takes.</strong> One per
+  request in flight, which <code>max_connections</code> already bounds — the number an
+  operator was already multiplying.</li>
+</ul>
+<p>Two things do not change, and they are the pair that holding everything in
+memory bought. Path traversal is still not possible: the name handed to the
+kernel is the one the walk wrote down before the socket opened, never one a
+request carried. And the memory is still a number — a file over the line holds
+no bytes at all, so <code>max_total_bytes</code> counts what is held and nothing else.</p>
+<p>Ranges, <code>If-Range</code>, <code>If-None-Match</code> and <code>HEAD</code> are answered exactly as they are
+for a file in memory, by the same code rather than by a second copy of it.</p>
+<p>The startup line counts the spilled files separately from the bytes, because
+they are not in that number:</p>
+<div class="highlight"><pre><span></span><code>nilo: loaded 12 static file(s) (48211 bytes held, 9022 of them gzipped copies)
+       from "public" onto "/", 2 of them over 8388608 bytes and opened per
+       request rather than held
+</code></pre></div>
+<p>A handler can answer with a file the same way — see
+<a href="../responses/#files">Responses</a>.</p>
+<h2 id="files-the-binary-carries">Files the binary carries<a class="headerlink" href="#files-the-binary-carries" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">embeddedWith</span><span class="p">(</span><span class="s">"/"</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span>
+<span class="w">    </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"index.html"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">bytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@embedFile</span><span class="p">(</span><span class="s">"dist/index.html"</span><span class="p">)</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"assets/app.js"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">bytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@embedFile</span><span class="p">(</span><span class="s">"dist/assets/app.js"</span><span class="p">)</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"assets/app.css"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">bytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@embedFile</span><span class="p">(</span><span class="s">"dist/assets/app.css"</span><span class="p">)</span><span class="w"> </span><span class="p">},</span>
+<span class="p">},</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">spa_fallback</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"index.html"</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<p>A product that is one binary has no <code>dist/</code> on the machine it runs on. <code>embedded</code>
+is <code>static</code> with the read taken out
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/009-static-files-are-held-in-memory-or-opened.md">ADR 009</a>):
+the bytes come from <code>@embedFile</code> rather than from a disk, and everything after
+that is the same code — the sorted list, an ETag per file, a gzipped copy made
+once for the files worth it, the fallback, and nothing per request. What a
+request sees is indistinguishable from a directory that was read at startup.</p>
+<p><code>@embedFile</code> is yours to write, because its path is relative to the file it is
+written in and nilo cannot name your <code>dist/</code>. The list is the whole of it; a
+build step that walks a directory into one is an ordinary <code>build.zig</code> step, and
+is yours until two projects have written the same one.</p>
+<p>The options are <code>static</code>'s less every one that is about a disk: <code>index</code>,
+<code>cache_control</code>, <code>spa_fallback</code>, <code>spa_fallback_for</code>, <code>compress</code> and
+<code>compress_min_bytes</code>, with the same defaults. There is no <code>max_file_bytes</code>,
+because nothing here can spill; no <code>max_total_bytes</code>, because the bytes are
+mapped whether or not a Set names them and counting them would be counting
+memory that is not spent twice; no <code>dotfiles</code>, because every name was written
+by you; and no <code>reload</code>, because there is no disk.</p>
+<p>Two mistakes a directory cannot make are refused at startup, in one line: a path
+listed twice — a list can do what a directory cannot, and the second entry would
+be unreachable forever — and a <code>spa_fallback</code> that names no entry. There is no
+<code>tryEmbedded</code>: the list that failed was fixed when the program was compiled, so
+there is nothing for a program to do about it at run time but stop.</p>
+<p>What it costs is what a held file costs, less the bytes: the URL, two ETags and
+the gzipped copy are allocated once at startup, and the file itself is the
+binary's. The log line says both numbers.</p>
+<h2 id="while-you-are-working-on-it">While you are working on it<a class="headerlink" href="#while-you-are-working-on-it" title="Permanent link">&para;</a></h2>
+<p><code>staticWith(.{ .reload = true })</code> holds nothing: every file is left on disk and
+opened per request, so editing one under a running server works.</p>
+<p>It is <code>max_file_bytes = 0</code> with a name — every file takes the path above, and
+there is no fiber watching anything and no swap of a set under live readers.
+What you give up is what holding buys: the in-memory copy, the gzipped one, and
+one open and one stat per request. It says so in the log once at startup, so a
+release binary that was built with it on is not silent about it.</p>
+<p><strong>A file that did not exist at startup still needs a restart.</strong> The list of
+names comes from the directory walk, and resolving a request-carried string
+into a filename is the traversal the design refuses.</p>
+<p><strong>A bundler that renames its output is the case that bites.</strong> Vite, esbuild
+and the rest write <code>app-3f9a1c.js</code> and a fresh <code>index.html</code> pointing at it on
+every build, so with <code>.reload</code> on, the edited <code>index.html</code> is served and the
+script it names is a 404, because that name was not there when the server
+started. Two ways out, and neither is a rescan on a miss, which would let a
+request-carried string decide when the disk is walked
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/decided.md#nilo_http-1">decided</a>):</p>
+<ul>
+<li><strong>While developing, serve the frontend from the bundler's own dev server</strong>
+  and proxy <code>/api</code> to nilo. Every bundler has the proxy option, hot reload
+  comes with it, and nilo never sees a hashed name until the build is real.</li>
+<li><strong>Or restart nilo yourself after each bundle.</strong> <code>zig build dev</code> will not do it: it restarts on the binary changing and watches nothing else (<a href="../getting-started/#what-a-save-has-to-touch">Getting started</a>), and a bundle landing in <code>public/</code> leaves the binary alone.</li>
+</ul>
+<p>A production build is written once and the server starts after it, so the
+names are all there and nothing above applies.</p>
+<h2 id="the-limits">The limits<a class="headerlink" href="#the-limits" title="Permanent link">&para;</a></h2>
+<p>The set of <em>names</em> is fixed at startup. Without <code>.reload</code>, so are the bytes:
+changing a file means restarting the process, which is what a deploy does
+anyway. An embedded tree is the same, one step further: changing a file means
+rebuilding the binary.</p>
+<p>Static files are not middleware: the set holds state, so it is a terminal handler
+that the middleware chain wraps like any other. Your logger sees them, and CORS
+applies to them.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../services/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Services">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Services
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../errors/" class="md-footer__link md-footer__link--next" aria-label="Next: Errors">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Errors
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.sections", "navigation.top", "navigation.footer", "navigation.indexes", "search.highlight", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

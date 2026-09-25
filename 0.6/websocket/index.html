@@ -1,0 +1,2504 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A toolkit for Zig 0.16, and an HTTP server">
+      
+      
+      
+        <link rel="canonical" href="https://nevindra.github.io/nilo/0.6/websocket/">
+      
+      
+        <link rel="prev" href="../streaming/">
+      
+      
+        <link rel="next" href="../grpc/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>WebSocket - nilo</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#websocket" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="nilo" class="md-header__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            nilo
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              WebSocket
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="nilo" class="md-nav__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    nilo
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../handlers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handlers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handling a request
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Handling a request
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../requests/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requests
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../forms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Forms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../responses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Responses
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cookies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cookies
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sessions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Streaming
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WebSocket
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WebSocket
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#why-the-loop-is-a-separate-function" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why the loop is a separate function
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#carrying-something-into-the-loop" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Carrying something into the loop
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-message-loop" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The message loop
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#saying-something-without-a-buffer-of-your-own" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Saying something without a buffer of your own
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#closing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Closing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#shared-state" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Shared state
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sending-to-a-socket-you-dont-hold" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sending to a socket you don't hold
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-connection-that-goes-quiet" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A connection that goes quiet
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#which-pages-may-open-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Which pages may open it
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#testing-one" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testing one
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-isnt-here" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What isn't here
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grpc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    gRPC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building an application
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Building an application
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../middleware/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Middleware and resolved values
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../static-files/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Static files
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../errors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../background/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that is not a request
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Answering once
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The other modules
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    The other modules
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../sql/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Talking to a database
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Talking to a database
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A table is a struct
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/reading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A Row with more in it
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/writing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Writing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/transactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/raw/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Past one table
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/sqlite/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQLite
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/migrations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Making the tables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/running/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running it
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fetch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Calling somebody else's API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../s3/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Object storage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jobs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that runs later, again, or on a schedule
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cache/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A cache in this process
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jwt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Checking somebody else's token
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../id/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Identifiers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Shipping it
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Shipping it
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../openapi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenAPI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../deploying/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deploying
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#why-the-loop-is-a-separate-function" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why the loop is a separate function
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#carrying-something-into-the-loop" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Carrying something into the loop
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-message-loop" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The message loop
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#saying-something-without-a-buffer-of-your-own" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Saying something without a buffer of your own
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#closing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Closing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#shared-state" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Shared state
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sending-to-a-socket-you-dont-hold" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sending to a socket you don't hold
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-connection-that-goes-quiet" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A connection that goes quiet
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#which-pages-may-open-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Which pages may open it
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#testing-one" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testing one
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-isnt-here" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What isn't here
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/nevindra/nilo/edit/main/docs/guide/websocket.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="websocket">WebSocket<a class="headerlink" href="#websocket" title="Permanent link">&para;</a></h1>
+<p>A WebSocket handler is a handler. It takes services by type, sits behind the same
+middleware, and is registered with <code>app.get</code> like everything else. What it does
+differently is hand the connection to a loop and return:</p>
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">echo</span><span class="p">(</span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">upgrade</span><span class="p">(</span><span class="n">echoLoop</span><span class="p">,</span><span class="w"> </span><span class="p">{});</span>
+<span class="p">}</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">echoLoop</span><span class="p">(</span><span class="n">socket</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Socket</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="k">try</span><span class="w"> </span><span class="n">socket</span><span class="p">.</span><span class="n">receive</span><span class="p">())</span><span class="w"> </span><span class="o">|</span><span class="n">message</span><span class="o">|</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">try</span><span class="w"> </span><span class="n">socket</span><span class="p">.</span><span class="n">send</span><span class="p">(</span><span class="n">message</span><span class="p">.</span><span class="n">kind</span><span class="p">,</span><span class="w"> </span><span class="n">message</span><span class="p">.</span><span class="n">data</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">get</span><span class="p">(</span><span class="s">"/ws"</span><span class="p">,</span><span class="w"> </span><span class="n">echo</span><span class="p">);</span>
+</code></pre></div>
+<p>nilo does the handshake, the frame headers, the masking, the fragment
+reassembly and the closing handshake. Ping and pong are answered inside
+<code>receive</code>, so a handler never writes those three branches.</p>
+<p><code>c.upgrade()</code> fails with a 400 if the request isn't a WebSocket handshake, so a
+browser that wandered onto the URL gets told rather than hung up on.
+<code>c.upgradeWith(loop, state, .{ .protocol = "chat.v1" })</code> names a subprotocol.</p>
+<h3 id="why-the-loop-is-a-separate-function">Why the loop is a separate function<a class="headerlink" href="#why-the-loop-is-a-separate-function" title="Permanent link">&para;</a></h3>
+<p>Because a suspended fiber holds its stack, and where a socket waits is what it
+costs while it waits. A handler that looped in place would be parked <em>inside</em>
+the request — holding the <code>Ctx</code>, the parsed head and the route match, none of
+which the loop can reach — for as long as the tab is open. Returning first lets
+all of that unwind: an idle socket costs <strong>5,183 bytes</strong> instead of 9,290
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/062-where-a-connection-waits-is-what-it-costs.md">ADR 062</a>).</p>
+<h3 id="carrying-something-into-the-loop">Carrying something into the loop<a class="headerlink" href="#carrying-something-into-the-loop" title="Permanent link">&para;</a></h3>
+<p>The second argument to <code>upgrade</code> is whatever the handler knows and the loop
+needs. Services are the common case, and they arrive the same way they arrive
+anywhere:</p>
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">chat</span><span class="p">(</span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">room</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Room</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">upgrade</span><span class="p">(</span><span class="n">chatLoop</span><span class="p">,</span><span class="w"> </span><span class="n">room</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">chatLoop</span><span class="p">(</span><span class="n">socket</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Socket</span><span class="p">,</span><span class="w"> </span><span class="n">room</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Room</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p>Anything else works the same way — a <code>Str</code> off the query, a number off the
+path. It travels in the connection's own frame, so it is <strong>128 bytes at most</strong>;
+a struct bigger than that goes in <code>c.arena()</code>, which is alive for as long as the
+loop is, with a pointer carried across. The compiler says so rather than
+truncating anything. <code>{}</code> is what you pass when there is nothing to carry.</p>
+<h2 id="the-message-loop">The message loop<a class="headerlink" href="#the-message-loop" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>socket.receive()</code></td>
+<td>the next message, or <code>null</code> when it's over</td>
+</tr>
+<tr>
+<td><code>socket.send(kind, data)</code></td>
+<td>one message, <code>.text</code> or <code>.binary</code></td>
+</tr>
+<tr>
+<td><code>socket.sendText(text)</code> / <code>sendBinary(bytes)</code></td>
+<td>the shorthands</td>
+</tr>
+<tr>
+<td><code>socket.print(fmt, args)</code></td>
+<td>one text message, formatted</td>
+</tr>
+<tr>
+<td><code>socket.json(value)</code></td>
+<td>one text message, serialised</td>
+</tr>
+<tr>
+<td><code>socket.ping(data)</code></td>
+<td>for a proxy that drops quiet connections</td>
+</tr>
+<tr>
+<td><code>socket.close(.normal, "")</code></td>
+<td>close, saying why — safe to call twice</td>
+</tr>
+<tr>
+<td><code>socket.closedCleanly()</code></td>
+<td>whether the other end said goodbye</td>
+</tr>
+<tr>
+<td><code>socket.live()</code></td>
+<td>false once the server is stopping, exactly as a stream's is</td>
+</tr>
+</tbody>
+</table>
+<p><strong><code>receive</code> takes no buffer, and that is a memory decision rather than a
+convenience.</strong> The bytes of a message live in a buffer the executor lends this
+socket while the message is arriving and takes back when the conversation goes
+quiet, so what a process holds is one buffer per message <em>in flight</em> rather
+than one per open socket. On the workload WebSockets are for — ten thousand
+chat tabs with four people typing — those are different numbers by three
+orders of magnitude.</p>
+<p>The ceiling is <code>upgradeWith(loop, state, .{ .max_message = … })</code> and defaults
+to 16 KiB. A frame announcing more than that is refused before a byte of its
+payload is read, with a <code>1009</code>. Nothing is allocated per message, and no byte
+of one is copied twice
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/046-a-message-is-copied-once-and-framed-once.md">ADR 046</a>).</p>
+<p><code>receive</code> returns <code>null</code> three ways: the client closed politely, the client
+vanished — a tab closed, a network gone — or the server is stopping, in which
+case nilo has already told the client so with a <code>1001</code>. All three end the loop
+the same way, so none of them is an error to write a branch for, and <strong>a message
+loop needs no shutdown check of its own</strong>. <code>socket.closedCleanly()</code> tells the
+first apart from the rest afterwards:</p>
+<div class="highlight"><pre><span></span><code><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="k">try</span><span class="w"> </span><span class="n">socket</span><span class="p">.</span><span class="n">receive</span><span class="p">())</span><span class="w"> </span><span class="o">|</span><span class="n">message</span><span class="o">|</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="p">}</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">socket</span><span class="p">.</span><span class="n">closedCleanly</span><span class="p">())</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">log</span><span class="p">.</span><span class="n">info</span><span class="p">(</span><span class="s">"client vanished"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+</code></pre></div>
+<p><code>live()</code> is still there for the handler doing work of its <em>own</em> between messages
+— a long computation, a timer, a queue it drains — which nilo can't see and so
+can't end on your behalf. Sending on a socket that has already closed writes
+nothing rather than failing: the other end closing between two of your sends
+isn't a bug you can prevent, so it isn't one you have to branch on.</p>
+<h2 id="saying-something-without-a-buffer-of-your-own">Saying something without a buffer of your own<a class="headerlink" href="#saying-something-without-a-buffer-of-your-own" title="Permanent link">&para;</a></h2>
+<p><code>print</code> and <code>json</code> write straight onto the wire, so a formatted message doesn't
+need a stack buffer you have to guess the size of:</p>
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">socket</span><span class="p">.</span><span class="n">print</span><span class="p">(</span><span class="s">"welcome, {d} here"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="n">room</span><span class="p">.</span><span class="n">count</span><span class="p">()});</span>
+<span class="k">try</span><span class="w"> </span><span class="n">socket</span><span class="p">.</span><span class="n">json</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">kind</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"joined"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">who</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">here</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">room</span><span class="p">.</span><span class="n">count</span><span class="p">()</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<p>Neither allocates. Both run the format twice — once to size the frame header,
+once to write the bytes — because a frame states its length before its bytes and
+there's nowhere to hold them meanwhile that isn't an allocation or a buffer you
+guessed at. Pass values rather than a window onto memory another fiber is
+writing, and the two passes agree.</p>
+<p><code>nilo.Room</code> has the same pair, and there they cost nothing extra at all: the
+message is formatted into the allocation <code>say</code> was going to make anyway.</p>
+<h2 id="closing">Closing<a class="headerlink" href="#closing" title="Permanent link">&para;</a></h2>
+<p>Everything protocol-wrong is refused with the right close code before the error
+comes back — an unmasked frame or a reserved bit is <code>1002</code>, text that isn't valid
+UTF-8 is <code>1007</code>, too big is <code>1009</code> — because a connection dropped without a close
+frame looks to the other end like a crash.</p>
+<p>That includes a goodbye that isn't one. A close frame carrying a single byte, a
+code nobody assigned, or a reason that isn't UTF-8 gets a <code>1002</code> rather than
+being echoed back — echoing it would put the same broken frame on the wire
+again. Your own reason is cut on a character boundary if it's longer than the
+123 bytes a close frame has room for, so it never goes out as half a character.</p>
+<p>Your own reasons go through <code>close</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">members</span><span class="p">.</span><span class="n">allows</span><span class="p">(</span><span class="n">user</span><span class="p">))</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">socket</span><span class="p">.</span><span class="n">close</span><span class="p">(.</span><span class="n">policy</span><span class="p">,</span><span class="w"> </span><span class="s">"not a member"</span><span class="p">);</span>
+</code></pre></div>
+<p><code>.normal</code>, <code>.going_away</code>, <code>.protocol_error</code>, <code>.unsupported</code>, <code>.invalid_payload</code>,
+<code>.policy</code>, <code>.too_big</code>, <code>.internal</code>, or a number of your own.</p>
+<h2 id="shared-state">Shared state<a class="headerlink" href="#shared-state" title="Permanent link">&para;</a></h2>
+<p>A socket handler takes services by type like any other handler, so anything the
+connections share is an ordinary service:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Transcript</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">lock</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Mutex</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">init</span><span class="p">,</span>
+<span class="w">    </span><span class="n">messages</span><span class="o">:</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">ArrayList</span><span class="p">([]</span><span class="kt">u8</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">empty</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">chat</span><span class="p">(</span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">transcript</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Transcript</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p><code>nilo.Mutex</code>, not <code>std.Thread.Mutex</code> — see <a href="../services/">Services</a>.</p>
+<p>That is for state of your own. Reaching the <em>other connections</em> is not something
+to hand-roll on top of it — see below.</p>
+<h2 id="sending-to-a-socket-you-dont-hold">Sending to a socket you don't hold<a class="headerlink" href="#sending-to-a-socket-you-dont-hold" title="Permanent link">&para;</a></h2>
+<p><code>nilo.Room</code> is a service like any other: provide one, take it by type, <code>join</code> on
+the way in and <code>defer leave</code> on the way out.</p>
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">room</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Room</span><span class="p">.</span><span class="n">init</span><span class="p">(</span><span class="n">gpa</span><span class="p">);</span>
+<span class="k">defer</span><span class="w"> </span><span class="n">room</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">provide</span><span class="p">(</span><span class="o">&amp;</span><span class="n">room</span><span class="p">);</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">chat</span><span class="p">(</span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">room</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Room</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">upgrade</span><span class="p">(</span><span class="n">chatLoop</span><span class="p">,</span><span class="w"> </span><span class="n">room</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">chatLoop</span><span class="p">(</span><span class="n">socket</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Socket</span><span class="p">,</span><span class="w"> </span><span class="n">room</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Room</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">room</span><span class="p">.</span><span class="n">join</span><span class="p">(</span><span class="n">socket</span><span class="p">);</span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="n">room</span><span class="p">.</span><span class="n">leave</span><span class="p">(</span><span class="n">socket</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="k">try</span><span class="w"> </span><span class="n">socket</span><span class="p">.</span><span class="n">receive</span><span class="p">())</span><span class="w"> </span><span class="o">|</span><span class="n">message</span><span class="o">|</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">try</span><span class="w"> </span><span class="n">room</span><span class="p">.</span><span class="n">say</span><span class="p">(</span><span class="n">message</span><span class="p">.</span><span class="n">kind</span><span class="p">,</span><span class="w"> </span><span class="n">message</span><span class="p">.</span><span class="n">data</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>That loop is the one an echo server writes. Nothing in it mentions the other
+connections and nothing handles an incoming broadcast — <code>receive</code> writes those
+out on the way past, from the fiber that owns the socket. The rest of the API is
+in <a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/reference/streaming.md#room">the reference</a>. <code>defer room.leave(socket)</code> is the part
+that isn't optional: Zig has no destructor, and a seat nobody gives up is one the
+next connection can't have.</p>
+<p><strong>Size the room for the crowd it might hold.</strong> <code>join</code> and <code>say</code> both cost what
+the room <em>holds</em> rather than what it was sized for, so an extra thousand empty
+seats is a memory decision and nothing else — and a <code>say</code> into a room with
+nobody in it doesn't even allocate
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/046-a-message-is-copied-once-and-framed-once.md">ADR 046</a>).</p>
+<p><strong>Why it isn't a lock around a loop</strong>, which is worth knowing before you write
+one in your own code. A connection's write buffer belongs to the fiber serving
+it, so two fibers writing into it interleave frames — a corrupt stream rather
+than a slow one. A lock per socket fixes that much and nothing else: the
+broadcast is then performed by the <em>speaker's</em> fiber, which walks the
+connections, reaches one whose client has stopped reading, and blocks there. It
+never gets back to reading its own socket, so everybody's messages stop because
+one client stopped. Measured, with two healthy clients wanting only to talk to
+each other and one wedged client in the same room: their messages never arrived
+at all, at either lock granularity.</p>
+<p>So <code>say</code> doesn't write. It rings a bell on each seat, and the connection's own
+fiber does the writing — which is why one client that stops reading costs that
+client and nobody else, and why a full backlog is a policy named at the room
+(<code>.drop_oldest</code> by default, or <code>.drop_newest</code>, with <code>room.missed(&amp;socket)</code> saying
+how many went) rather than a disconnect
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/035-a-broadcast-rings-a-bell-it-does-not-write.md">ADR 035</a>). It adds
+4 measured bytes per idle connection. The design that needed a second fiber per
+connection was 8,673 bytes against a per-connection budget that was 8,767 at the
+time, which is what kept this off the list for two stages
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/028-a-spawned-fiber-belongs-to-the-server.md">ADR 028</a>).</p>
+<p>What else came out of that work is <a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/reference/app.md#concurrency"><code>nilo.spawn</code></a>,
+for work that is not a request at all.</p>
+<h2 id="a-connection-that-goes-quiet">A connection that goes quiet<a class="headerlink" href="#a-connection-that-goes-quiet" title="Permanent link">&para;</a></h2>
+<p>There is no read deadline, and there shouldn't be: a socket is <em>allowed</em> to sit
+quiet — a chat tab with nobody typing is working correctly, and closing it after
+thirty seconds would be a framework breaking a working connection. What catches a
+client that vanished without a FIN is <code>.idle_ms</code>, and it's a ping rather than a
+deadline. Silence asks whether the client is still there; an answer buys another
+stretch; a client that misses the next one is closed with <code>1001</code>.</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// 30s by default, 0 waits forever</span>
+<span class="k">return</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">upgradeWith</span><span class="p">(</span><span class="n">chatLoop</span><span class="p">,</span><span class="w"> </span><span class="n">room</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">idle_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">60</span><span class="n">_000</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<p>Thirty seconds costs a dead connection about a minute to notice and a live one
+two frames a minute. Proxies that drop quiet connections usually do so at sixty
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/022-a-deadline-belongs-to-an-operation-not-to-a-request.md">ADR 022</a>).</p>
+<h2 id="which-pages-may-open-it">Which pages may open it<a class="headerlink" href="#which-pages-may-open-it" title="Permanent link">&para;</a></h2>
+<p><strong>A browser applies no CORS to a WebSocket.</strong> It sends no preflight and it
+ignores <code>Access-Control-Allow-Origin</code>, so a <code>cors.with(…)</code> in front of an
+upgrade route sets headers nobody enforces. The handshake is an ordinary GET, so
+it arrives carrying the session cookie — which means that without a check here,
+a page on any origin could open your users' sockets and read and write them for
+as long as its tab was open. There is no browser step that refuses it.</p>
+<p>So the default is your own pages: a handshake whose <code>Origin</code> does not name the
+authority its <code>Host</code> named is a 403. Nothing to write for the ordinary case,
+where the page and the socket are the same server.</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// the page is on another host to the socket</span>
+<span class="k">return</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">upgradeWith</span><span class="p">(</span><span class="n">chatLoop</span><span class="p">,</span><span class="w"> </span><span class="n">room</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">origins</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="s">"https://app.example.com"</span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="c1">// a public socket, carrying nothing worth stealing</span>
+<span class="k">return</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">upgradeWith</span><span class="p">(</span><span class="n">feedLoop</span><span class="p">,</span><span class="w"> </span><span class="p">{},</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">origins</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="s">"*"</span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<p>The scheme isn't compared — TLS is terminated in front, so nilo never learns
+which one the browser used — and a request with <strong>no</strong> <code>Origin</code> is allowed,
+because that isn't a browser and has no ambient cookie to be borrowed. <code>curl</code>,
+<code>wstest</code> and every native client send none
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/080-a-websocket-handshake-is-same-origin-unless-the-route-says-otherwise.md">ADR 080</a>).</p>
+<h2 id="testing-one">Testing one<a class="headerlink" href="#testing-one" title="Permanent link">&para;</a></h2>
+<p>A handler that upgrades never returns a value, so there's nothing for
+<code>testing.Client</code> to read. <code>testing.Conversation</code> queues the frames a client
+would send, runs the handshake and the loop, and hands back what the server said
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/091-a-websocket-route-can-be-driven-from-a-test.md">ADR 091</a>):</p>
+<div class="highlight"><pre><span></span><code><span class="k">test</span><span class="w"> </span><span class="s">"the chat echoes what it is told"</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">App</span><span class="p">.</span><span class="n">init</span><span class="p">(</span><span class="n">testing</span><span class="p">.</span><span class="n">allocator</span><span class="p">);</span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">get</span><span class="p">(</span><span class="s">"/chat"</span><span class="p">,</span><span class="w"> </span><span class="n">chat</span><span class="p">);</span>
+
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">talking</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">testing</span><span class="p">.</span><span class="n">Conversation</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="p">.</span><span class="n">init</span><span class="p">(</span><span class="n">testing</span><span class="p">.</span><span class="n">allocator</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="n">talking</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">talking</span><span class="p">.</span><span class="n">text</span><span class="p">(</span><span class="s">"hello"</span><span class="p">);</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">talking</span><span class="p">.</span><span class="n">close</span><span class="p">(</span><span class="mi">1000</span><span class="p">,</span><span class="w"> </span><span class="s">"bye"</span><span class="p">);</span>
+
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">talk</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">talking</span><span class="p">.</span><span class="n">open</span><span class="p">(</span><span class="o">&amp;</span><span class="n">app</span><span class="p">,</span><span class="w"> </span><span class="s">"/chat"</span><span class="p">);</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">testing</span><span class="p">.</span><span class="n">expect</span><span class="p">(</span><span class="n">talk</span><span class="p">.</span><span class="n">accepted</span><span class="p">());</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">testing</span><span class="p">.</span><span class="n">expectEqualStrings</span><span class="p">(</span><span class="s">"hello"</span><span class="p">,</span><span class="w"> </span><span class="n">talk</span><span class="p">.</span><span class="n">at</span><span class="p">(</span><span class="mi">0</span><span class="p">).</span><span class="o">?</span><span class="p">.</span><span class="n">bytes</span><span class="p">);</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">testing</span><span class="p">.</span><span class="n">expectEqual</span><span class="p">(</span><span class="nb">@as</span><span class="p">(</span><span class="kt">u16</span><span class="p">,</span><span class="w"> </span><span class="mi">1000</span><span class="p">),</span><span class="w"> </span><span class="n">talk</span><span class="p">.</span><span class="n">closedWith</span><span class="p">().</span><span class="o">?</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>text</code>, <code>binary</code>, <code>ping</code>, <code>pong</code>, <code>close</code>, <code>fragments</code> and <code>raw</code> are what you
+can send; <code>talk.at(n)</code>, <code>talk.first(.pong)</code> and <code>talk.closedWith()</code> are what
+came back. <code>setHeader</code> puts an <code>Origin</code> or a cookie on the handshake, which is
+how the <a href="#which-pages-may-open-it">origin check</a> gets tested.</p>
+<p><strong>The frames are queued before the server runs</strong>, so a test can't read what the
+server said and then decide what to send next — and a conversation between two
+sockets, which is what a <a href="#sending-to-a-socket-you-dont-hold">Room</a> is, needs
+two connections and can't be driven from here at all.</p>
+<h2 id="what-isnt-here">What isn't here<a class="headerlink" href="#what-isnt-here" title="Permanent link">&para;</a></h2>
+<p><code>permessage-deflate</code>. It's negotiated in the handshake, and a compressor per
+connection is a 64 KB window against a budget of 4,669 bytes — so it needs a
+design rather than a switch.</p>
+<p>One number worth knowing before a chat server meets its users: an open socket is
+an open connection, and <code>max_connections</code> bounds those at 10,000 by default. A
+tab that is connected and silent still counts. Raise it — and multiply by the
+5,183 bytes an idle WebSocket costs — before that is the limit you find out about
+(<a href="../deploying/#how-many-connections-at-once">Deploying</a>).</p>
+<p><code>zig build run-chat</code> is a working one, browser page included.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../streaming/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Streaming">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Streaming
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../grpc/" class="md-footer__link md-footer__link--next" aria-label="Next: gRPC">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                gRPC
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.sections", "navigation.top", "navigation.footer", "navigation.indexes", "search.highlight", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

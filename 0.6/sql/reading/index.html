@@ -1,0 +1,2668 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A toolkit for Zig 0.16, and an HTTP server">
+      
+      
+      
+        <link rel="canonical" href="https://nevindra.github.io/nilo/0.6/sql/reading/">
+      
+      
+        <link rel="prev" href="../tables/">
+      
+      
+        <link rel="next" href="../shapes/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Reading - nilo</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#reading" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="nilo" class="md-header__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            nilo
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Reading
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="nilo" class="md-nav__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    nilo
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../handlers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handlers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handling a request
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Handling a request
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../requests/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requests
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../forms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Forms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../responses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Responses
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../cookies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cookies
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sessions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Streaming
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../websocket/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WebSocket
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../grpc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    gRPC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building an application
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Building an application
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../middleware/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Middleware and resolved values
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../static-files/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Static files
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../errors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../background/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that is not a request
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Answering once
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The other modules
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    The other modules
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Talking to a database
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Talking to a database
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A table is a struct
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-query-is-a-constant" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The query is a constant
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#conditions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Conditions
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Conditions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#a-null-is-written-never-held" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A null is written, never held
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-filter-nobody-set" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A filter nobody set
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#all-of-them-one-of-them-or-one-by-key" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        All of them, one of them, or one by key
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#counting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Counting
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-page-and-its-total" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A page and its total
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#an-order-the-request-chose" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        An order the request chose
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-keyset-form-of-a-deep-page" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The keyset form of a deep page
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#why-writing-the-limit-out-is-worth-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why writing the limit out is worth it
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-query-with-no-server" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A query with no server
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#streaming-a-result-set-too-big-to-hold" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Streaming a result set too big to hold
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A Row with more in it
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../writing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Writing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../transactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../raw/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Past one table
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sqlite/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQLite
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../migrations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Making the tables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../running/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running it
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../fetch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Calling somebody else's API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../s3/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Object storage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../jobs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that runs later, again, or on a schedule
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../cache/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A cache in this process
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../jwt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Checking somebody else's token
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../id/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Identifiers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Shipping it
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Shipping it
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../openapi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenAPI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deploying/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deploying
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-query-is-a-constant" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The query is a constant
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#conditions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Conditions
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Conditions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#a-null-is-written-never-held" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A null is written, never held
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-filter-nobody-set" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A filter nobody set
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#all-of-them-one-of-them-or-one-by-key" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        All of them, one of them, or one by key
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#counting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Counting
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-page-and-its-total" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A page and its total
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#an-order-the-request-chose" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        An order the request chose
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-keyset-form-of-a-deep-page" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The keyset form of a deep page
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#why-writing-the-limit-out-is-worth-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why writing the limit out is worth it
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-query-with-no-server" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A query with no server
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#streaming-a-result-set-too-big-to-hold" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Streaming a result set too big to hold
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/nevindra/nilo/edit/main/docs/guide/sql/reading.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="reading">Reading<a class="headerlink" href="#reading" title="Permanent link">&para;</a></h1>
+<p>The statement is settled while compiling, the conditions are a struct, and
+what comes back is the Row the <a href="../tables/">tables page</a> declared. This page
+is every way of asking; <a href="../writing/">writing</a> and
+<a href="../transactions/">transactions</a> are the other two, and
+<a href="../raw/">past one table</a> is where the statement is yours.</p>
+<h2 id="the-query-is-a-constant">The query is a constant<a class="headerlink" href="#the-query-is-a-constant" title="Permanent link">&para;</a></h2>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">listAdults</span><span class="p">(</span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">sql</span><span class="p">.</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="p">[]</span><span class="n">User</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">select</span><span class="p">(</span><span class="n">User</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">age</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">gt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">18</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">created_at</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">desc</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">limit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>That compiles to this, before the program runs:</p>
+<div class="highlight"><pre><span></span><code><span class="k">SELECT</span><span class="w"> </span><span class="ss">"id"</span><span class="p">,</span><span class="w"> </span><span class="ss">"email"</span><span class="p">,</span><span class="w"> </span><span class="ss">"age"</span><span class="p">,</span><span class="w"> </span><span class="ss">"created_at"</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="ss">"users"</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="ss">"age"</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="err">$</span><span class="mi">1</span><span class="w"> </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="ss">"created_at"</span><span class="w"> </span><span class="k">DESC</span><span class="w"> </span><span class="k">LIMIT</span><span class="w"> </span><span class="mi">10</span>
+</code></pre></div>
+<p>Exactly one thing reaches run time and it is the <code>18</code>. Which table, which
+columns, which operators, how many parameters — all settled while compiling,
+and all a compile error when wrong. The constant is readable, too:
+<code>sql.selectFor(User, @TypeOf(options)).sql</code> is the text above, and
+<code>sql.on(sql.SQLite).selectFor(User, @TypeOf(options)).sql</code> is the same
+statement spelled with <code>?1</code> — <code>sql.on(D)</code> binds <code>selectFor</code> and the fourteen
+beside it to a Dialect of your choosing.</p>
+<div class="highlight"><pre><span></span><code>$ zig build
+error: nilo: User has no column `agee`, asked for in a condition.
+       Did you mean `age`?
+</code></pre></div>
+<p>Note the <code>limit</code>. A literal is baked into the SQL, which also gives Postgres
+a number to plan with. A limit held in a variable becomes a parameter
+instead. That is the same rule read strictly, not an inconsistency: <code>10</code>
+written in the source is shape, and shape is settled early.</p>
+<h2 id="conditions">Conditions<a class="headerlink" href="#conditions" title="Permanent link">&para;</a></h2>
+<p>Different fields are ANDed, because that is what a struct is. Several
+operators on one field are ANDed too, so a range needs no <code>between</code> and no
+second idea.</p>
+<div class="highlight"><pre><span></span><code><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">age</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">gte</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">18</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">lt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">65</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">like</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"%@example.dev"</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">.</span><span class="n">deleted_at</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w">                      </span><span class="c1">// IS NULL</span>
+<span class="w">    </span><span class="p">.</span><span class="n">any</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w">                                </span><span class="c1">// OR, bracketed</span>
+<span class="w">        </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">role</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"admin"</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">verified</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>.any</code> rather than <code>.or</code> because <code>or</code> is a Zig keyword and would have to be
+written <code>.@"or"</code>. The cost is that <code>any</code> becomes a reserved column name, and
+a Row with a column called that is refused by name rather than quietly
+misread.</p>
+<p><code>.in</code> takes a list and compiles to <code>= ANY($1)</code> — <strong>one</strong> parameter, so the
+statement stays a constant no matter how long the list is. Its negation is
+<code>.not_in</code>, which is <code>&lt;&gt; ALL($1)</code> and costs the same one parameter;
+<code>.not_like</code> and <code>.not_ilike</code> are the other two. <code>.distinct_from</code> and
+<code>.not_distinct_from</code> are the null-safe pair — see below. On SQLite, <code>.like</code>
+and <code>.not_like</code> are Refusals naming <code>.ilike</code> and <code>.not_ilike</code>: that
+database's <code>LIKE</code> folds ASCII case and cannot be told not to by a
+statement, so the case-sensitive spelling would have matched more than it
+said, on one database only — the same reason <code>.contains</code> is refused there
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/055-the-second-dialect-is-the-test-of-the-seam.md">ADR 055</a>).</p>
+<h3 id="a-null-is-written-never-held">A null is written, never held<a class="headerlink" href="#a-null-is-written-never-held" title="Permanent link">&para;</a></h3>
+<p><code>.deleted_at = null</code> above is <code>IS NULL</code> because the compiler can see the
+null. This is not:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">maybe</span><span class="o">:</span><span class="w"> </span><span class="o">?</span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">query</span><span class="p">.</span><span class="n">handle</span><span class="p">;</span><span class="w">      </span><span class="c1">// may or may not be there</span>
+<span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">handle</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">maybe</span><span class="w"> </span><span class="p">}</span><span class="w">                   </span><span class="c1">// ✗ compile error</span>
+</code></pre></div>
+<p>The two readings are two different statements — <code>"handle" = $1</code> and
+<code>"handle" IS NULL</code> — and which one is right depends on a value that arrives
+after the statement is already a constant. Sending <code>= $1</code> with NULL in it is
+legal SQL and <em>never true</em>, so the query would run, match nothing and report
+nothing at all.</p>
+<p>Usually what you meant is SQL's null-safe comparison, and that <strong>is</strong> one
+statement:</p>
+<div class="highlight"><pre><span></span><code><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">handle</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">not_distinct_from</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">maybe</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w">   </span><span class="c1">// ✓</span>
+</code></pre></div>
+<p><code>IS NOT DISTINCT FROM</code> is <code>=</code> with null treated as an ordinary value: two
+nulls match, and null against anything else does not. It takes an optional
+where nothing else does, and the reason is the same rule read the other way
+— the statement is the same six words whether the value turns out to be null
+or not, so nothing about its shape waits for run time. <code>.distinct_from</code> is
+the negation, and it finds the null rows that <code>&lt;&gt;</code> silently drops.</p>
+<p>Where the two cases really are two different queries, write the branch:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">found</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">maybe</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="n">handle</span><span class="o">|</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">select</span><span class="p">(</span><span class="n">User</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">handle</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">handle</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">})</span>
+<span class="k">else</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">select</span><span class="p">(</span><span class="n">User</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">handle</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<p>Only the value you write is judged. A <code>?[]const u8</code> column compared against a
+plain <code>[]const u8</code> is an ordinary condition, and so is every <code>.set</code> and every
+<code>insert</code> — <code>SET handle = $1</code> with NULL in it means exactly one thing
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/040-a-condition-holds-a-value-not-a-maybe.md">ADR 040</a>).</p>
+<h2 id="a-filter-nobody-set">A filter nobody set<a class="headerlink" href="#a-filter-nobody-set" title="Permanent link">&para;</a></h2>
+<p>A search box that is empty is not a search for nothing. <code>.status = null</code> asks
+for the rows whose status is null; a filter nobody set wants <strong>no condition on
+status at all</strong>, which is the opposite — one matches a handful of rows and the
+other matches every one.</p>
+<p><code>sql.given</code> is that, and it is a word rather than an optional so the two stay
+tellable apart
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/149-a-filter-that-is-absent-is-not-a-filter-that-is-null.md">ADR 149</a>):</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="c1">// search: ?[]const u8 and least_age: ?i32, straight off the query string.</span>
+<span class="kr">const</span><span class="w"> </span><span class="n">found</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">page</span><span class="p">(</span><span class="n">User</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">icontains</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">given</span><span class="p">(</span><span class="n">search</span><span class="p">)</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">age</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">gte</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">given</span><span class="p">(</span><span class="n">least_age</span><span class="p">)</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="p">.</span><span class="n">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">asc</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">.</span><span class="n">limit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">20</span><span class="p">,</span>
+<span class="p">});</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><span class="p">(</span><span class="ss">"email"</span><span class="w"> </span><span class="k">ILIKE</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="k">OR</span><span class="w"> </span><span class="err">$</span><span class="mi">1</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NULL</span><span class="p">)</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="p">(</span><span class="ss">"age"</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="err">$</span><span class="mi">2</span><span class="w"> </span><span class="k">OR</span><span class="w"> </span><span class="err">$</span><span class="mi">2</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NULL</span><span class="p">)</span>
+</code></pre></div>
+<p><strong>One statement whatever the screen is set to</strong>, so one parameter list and one
+prepared plan. The alternative — a statement per combination of filters — is
+four for two filters and sixteen for four, each with its own parameter tuple.
+Postgres folds <code>$1 IS NULL</code> away while it is planning with the actual values,
+which it does for the first five executions and for as long after that as the
+custom plan wins, so a filter that <em>is</em> set plans as if the guard were not
+written.</p>
+<p>Inside an <code>.exists</code> it drops the <strong>whole subquery</strong>, not the term:</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="c1">// capability: ?nilo.Str — the dropdown nobody has touched yet.</span>
+<span class="kr">const</span><span class="w"> </span><span class="n">partners</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">page</span><span class="p">(</span><span class="n">Partner</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">exists</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">in</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">PartnerCapability</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">capability</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">given</span><span class="p">(</span><span class="n">capability</span><span class="p">)</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">.</span><span class="n">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">asc</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">.</span><span class="n">limit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">20</span><span class="p">,</span>
+<span class="p">});</span>
+</code></pre></div>
+<p>With the term dropped instead, the subquery would ask whether the partner has
+<em>any</em> capability row — which quietly excludes every partner that has none. For
+the same reason a <code>sql.given</code> cannot sit beside a condition that is always there
+in one <code>.exists</code>; write a second entry.</p>
+<p>The join came out of <code>PartnerCapability</code>'s <code>.references</code>. It is read off
+either Row, so the same question from the other side — the capability rows
+whose partner matches, where the key is <code>partner_id</code> on the Row the statement
+is over — is the same line with the two swapped
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/175-an-exists-reads-the-reference-from-either-side.md">ADR 175</a>):</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">of_partner</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">select</span><span class="p">(</span><span class="n">PartnerCapability</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">exists</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">in</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Partner</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">icontains</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="p">});</span>
+</code></pre></div>
+<p>A Row that points at the same parent from two columns says which with
+<code>.via = .&lt;column&gt;</code> — a column of <em>this</em> Row, where <code>.on</code> is a column of the
+one inside.</p>
+<p>It is refused inside <code>.any</code> (OR reverses what dropping a term means), on <code>.in</code>
+and <code>not_distinct_from</code>, on a value that is not optional, and <strong>in the condition
+of an <code>UPDATE</code> or a <code>DELETE</code></strong> — there a term that may not be there is the whole
+table.</p>
+<p><strong>A search box over several columns is not the <code>.any</code> case.</strong> There the same
+absent value sits on every column, and the whole bracket should drop as one —
+which is <code>.across</code>, one condition tested against each column it names, with
+<strong>one parameter</strong> taken once and named on every column
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/172-one-condition-over-several-columns-is-one-parameter.md">ADR 172</a>):</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="c1">// search: ?[]const u8 — the box, over the email and the name.</span>
+<span class="kr">const</span><span class="w"> </span><span class="n">matched</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">select</span><span class="p">(</span><span class="n">User</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">age</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">gte</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">given</span><span class="p">(</span><span class="n">least_age</span><span class="p">)</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">.</span><span class="n">across</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">columns</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">email</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">.</span><span class="n">icontains</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">given</span><span class="p">(</span><span class="n">search</span><span class="p">)</span><span class="w"> </span><span class="p">},</span>
+<span class="p">}</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><span class="p">(</span><span class="ss">"age"</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="err">$</span><span class="mi">1</span><span class="w"> </span><span class="k">OR</span><span class="w"> </span><span class="err">$</span><span class="mi">1</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NULL</span><span class="p">)</span>
+<span class="k">AND</span><span class="w"> </span><span class="p">((</span><span class="ss">"email"</span><span class="w"> </span><span class="k">ILIKE</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="err">$</span><span class="mi">2</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="k">OR</span><span class="w"> </span><span class="ss">"name"</span><span class="w"> </span><span class="k">ILIKE</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="err">$</span><span class="mi">2</span><span class="w"> </span><span class="err">…</span><span class="p">)</span><span class="w"> </span><span class="k">OR</span><span class="w"> </span><span class="err">$</span><span class="mi">2</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NULL</span><span class="p">)</span>
+</code></pre></div>
+<p>The columns have to read as one Zig type — a nullable column beside one that
+is not is fine, a number beside text is two conditions in <code>.any</code> — and a
+<code>sql.given</code> beside a fixed operator in one entry is refused the way it is in
+<code>.exists</code>: write a second entry.</p>
+<h2 id="all-of-them-one-of-them-or-one-by-key">All of them, one of them, or one by key<a class="headerlink" href="#all-of-them-one-of-them-or-one-by-key" title="Permanent link">&para;</a></h2>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">all</span><span class="w">   </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">select</span><span class="p">(</span><span class="n">User</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">age</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">gt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">18</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="kr">const</span><span class="w"> </span><span class="n">maybe</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">one</span><span class="p">(</span><span class="n">User</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<p><code>one</code> returns <code>?User</code>, so a handler that returns <code>!?User</code> answers <strong>404</strong>
+when there is nothing — and the OpenAPI document says so, because the <code>?</code>
+already meant that. Two modules that never import each other, agreeing,
+because they read the same struct you wrote.</p>
+<p>It compiles its own <code>LIMIT 1</code>, so a condition on a column that is not unique
+costs one row rather than every match. Writing a <code>.limit</code> beside it is a
+compile error: the ceiling belongs to the call.</p>
+<p>A lookup by key is the same thing with the condition already filled in:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">show</span><span class="p">(</span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">sql</span><span class="p">.</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">)</span><span class="w"> </span><span class="o">!?</span><span class="n">User</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">User</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>That is a whole endpoint. The column comes from the Row's <code>.key</code>, so it is
+not written out at every call site, and <code>?User</code> is the 404. A struct where
+the key goes is a compile error pointing at <code>one</code> — <code>find</code> takes the value
+itself.</p>
+<p>Every call takes the <code>Ctx</code>. Not to read the request: for the request arena,
+which is where the rows go. They live exactly as long as the response that
+carries them, and nothing is freed by hand.</p>
+<h2 id="counting">Counting<a class="headerlink" href="#counting" title="Permanent link">&para;</a></h2>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">total</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">count</span><span class="p">(</span><span class="n">User</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">age</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">gt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">18</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="kr">const</span><span class="w"> </span><span class="n">taken</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">exists</span><span class="p">(</span><span class="n">User</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">email</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<p><code>count</code> answers a <code>usize</code> and <code>exists</code> a <code>bool</code>. Both take a condition and
+nothing else — there is nothing to sort and nothing to narrow in an answer
+one row wide, so <code>.order</code> and <code>.limit</code> are compile errors rather than clauses
+quietly dropped. A <code>count</code> with no condition counts the table.</p>
+<p><code>exists</code> is <code>SELECT EXISTS(…)</code> rather than a count compared against zero, so
+the database stops at the first matching row instead of counting every one of
+them to settle a question the first one settles.</p>
+<p>The condition goes through the same walker <code>select</code> uses, so a column
+misspelled in either is the same compile error.</p>
+<h2 id="a-page-and-its-total">A page and its total<a class="headerlink" href="#a-page-and-its-total" title="Permanent link">&para;</a></h2>
+<p>A trimmed list has to say what it trimmed. <code>db.page</code> answers both numbers out
+of one statement:</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">found</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">page</span><span class="p">(</span><span class="n">Order</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"open"</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">.</span><span class="n">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">asc</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">.</span><span class="n">limit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">20</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">offset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">40</span><span class="p">,</span>
+<span class="p">});</span>
+<span class="c1">// found.rows is []Order, found.total is every order that matched.</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><span class="k">SELECT</span><span class="w"> </span><span class="ss">"id"</span><span class="p">,</span><span class="w"> </span><span class="ss">"status"</span><span class="p">,</span><span class="w"> </span><span class="k">count</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="ss">"orders"</span>
+<span class="w">  </span><span class="k">WHERE</span><span class="w"> </span><span class="ss">"status"</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="err">$</span><span class="mi">1</span><span class="w"> </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="ss">"id"</span><span class="w"> </span><span class="k">ASC</span><span class="w"> </span><span class="k">LIMIT</span><span class="w"> </span><span class="mi">20</span><span class="w"> </span><span class="k">OFFSET</span><span class="w"> </span><span class="err">$</span><span class="mi">2</span>
+</code></pre></div>
+<p><strong>The round trip is the smaller half of why.</strong> A <code>db.count</code> beside a
+<code>db.select</code> is two statements against a table somebody else can write between,
+so the screen says <em>"20 of 47"</em> while holding 20 of 46 and nothing says so.
+<code>count(*) OVER ()</code> rides on the page and cannot come apart from it
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/150-a-page-knows-what-it-left-out.md">ADR 150</a>). It costs one integer
+read per statement rather than per row: the window function answers the same
+number on every row, so only the first is read.</p>
+<p><code>.limit</code> and <code>.order</code> are both required. With no ceiling this is the whole
+table and the total is <code>rows.len</code>; with no order, Postgres owes the <code>LIMIT</code>
+nothing, so two requests for the same page can hold one row twice and miss
+another. <code>.lock</code> is refused — <code>FOR UPDATE</code> and a window function cannot be in
+one statement. <code>tx.page</code> is the same call inside a transaction.</p>
+<p><code>db.count</code> is still the call when you want a total and no rows.</p>
+<h2 id="an-order-the-request-chose">An order the request chose<a class="headerlink" href="#an-order-the-request-chose" title="Permanent link">&para;</a></h2>
+<p><code>.order = .{ .id = .asc }</code> is settled while compiling. A list sorted from its
+column headings is not, and the way to let a request choose without letting a
+request write SQL is to declare the set it chooses from
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/165-an-order-chosen-at-run-time-from-a-closed-set.md">ADR 165</a>):</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Sort</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">Ordering</span><span class="p">(</span><span class="n">Order</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">column</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">status</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">nulls</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">last</span><span class="w"> </span><span class="p">},</span>
+<span class="p">});</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">list</span><span class="p">(</span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">sql</span><span class="p">.</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">q</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Query</span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">order</span><span class="o">:</span><span class="w"> </span><span class="n">Sort</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Sort</span><span class="p">.</span><span class="n">by</span><span class="p">(</span><span class="o">&amp;</span><span class="p">.{.{</span><span class="w"> </span><span class="p">.</span><span class="n">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="p">}}),</span>
+<span class="p">}))</span><span class="w"> </span><span class="o">!</span><span class="n">sql</span><span class="p">.</span><span class="n">Page</span><span class="p">(</span><span class="n">Order</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">page</span><span class="p">(</span><span class="n">Order</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">q</span><span class="p">.</span><span class="n">value</span><span class="p">.</span><span class="n">order</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">limit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">20</span><span class="w"> </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>?order=status:desc,id</code> reads straight into the field — <code>key[:asc|:desc]</code>,
+comma-separated — and a key that is not declared is a 400 in the type's own
+words: <em>?order has to be an ordering by id or status, each with an optional
+:asc or :desc, comma-separated, not "height"</em>. Each key is a column of the
+Row, checked while compiling, and the clause is written from fragments the
+type built then; nothing the request sent reaches the statement. What it costs
+is the prepared name: a statement whose order is chosen per request runs
+unnamed, about 12 µs a call, and one arena allocation for its text.</p>
+<p>A key that is a string — <code>.value = "value_currency, value_minor"</code> — is SQL of
+your own, and only <code>db.rawOrdered</code> takes it, with <code>{order}</code> in your statement
+where the whole clause goes (<a href="../raw/">Raw SQL</a>).</p>
+<h2 id="the-keyset-form-of-a-deep-page">The keyset form of a deep page<a class="headerlink" href="#the-keyset-form-of-a-deep-page" title="Permanent link">&para;</a></h2>
+<p><code>db.page</code> above is <code>OFFSET</code>, and <code>OFFSET</code> costs the database every row it is
+not going to answer with: page 4,000 of <code>/orders</code> scans and discards 12,000
+rows to reach the twenty this call wants, and it gets slower the deeper a
+caller goes. No index fixes that — an index tells the database <em>where</em> a row
+is, not how many came before it.</p>
+<p><strong>Keyset pagination</strong> asks a different question: not <em>the twenty after the
+twelve-thousandth</em>, but <em>the twenty after this one</em>. The caller carries the
+last row it saw instead of a page number, and the condition is the tuple
+comparison a book uses to find its place — <code>(created_at, id) &lt; (…)</code> —
+written the way this module writes every OR, as <code>.any</code>:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">olderThan</span><span class="p">(</span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">sql</span><span class="p">.</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">after</span><span class="o">:</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">Timestamp</span><span class="p">,</span><span class="w"> </span><span class="n">after_id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="p">[]</span><span class="n">User</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">select</span><span class="p">(</span><span class="n">User</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">any</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">            </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">created_at</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">lt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">after</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">            </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">created_at</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">after</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">lt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">after_id</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">created_at</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">desc_nulls_last</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">desc</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">limit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">20</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>after</code> and <code>after_id</code> are the <code>created_at</code> and <code>id</code> off the last row the
+previous call answered with — a cursor the caller carries rather than a page
+number the database counts up to. The first call has none to carry: read the
+first page with <code>.order</code> and <code>.limit</code> alone, and start carrying a cursor once
+there is a last row to take it from.</p>
+<p><code>.order</code> is doing two jobs. <code>.desc_nulls_last</code> is one of the four directions
+beside plain <code>.asc</code> and <code>.desc</code> that also say where a NULL goes, so a row
+with no <code>created_at</code> sorts to the same place on every call rather than
+wherever the database happens to put one; <code>id</code> beside it breaks a tie
+between two rows sharing one <code>created_at</code>, which is why the condition needs
+two terms and not one — drop either and two calls can disagree about where
+the boundary was, the same failure <code>.limit</code> with no <code>.order</code> already has
+against <code>OFFSET</code>.</p>
+<p><strong>The trade is the running total.</strong> <code>db.page</code>'s <code>count(*) OVER ()</code> rides on
+the page it counts; a keyset condition has nothing to ride it on, because
+there is no "page 4,000" for a count to be relative to. Ask for one row more
+than the page needs and drop it to know whether there is a next page, or keep
+<code>db.count</code> beside the call for a total that does not have to be exact this
+second.</p>
+<p><code>DISTINCT</code> is not part of this and is not coming: over one table with a key
+every row appears once anyway, which is the same argument
+<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/052-a-set-operation-over-one-table-is-a-condition.md">ADR 052</a>
+makes for <code>UNION</code>.</p>
+<h2 id="why-writing-the-limit-out-is-worth-it">Why writing the limit out is worth it<a class="headerlink" href="#why-writing-the-limit-out-is-worth-it" title="Permanent link">&para;</a></h2>
+<p>A <code>.limit</code> written as a literal is baked into the SQL, and that buys two
+things. Postgres gets a number to plan with, which <code>LIMIT $2</code> does not give
+it. And nilo knows before the first row arrives how many can possibly come,
+so the list they go into is built once at that size.</p>
+<p>Measured over a 32-byte row: <strong>one</strong> allocation with the limit written out,
+the same at ten rows and at a hundred thousand. Without it, 2, 3, 5 and 9 at
+ten, a hundred, a thousand and a hundred thousand — the list doubling its way
+there, and each doubling abandons the buffer before it, because a request
+arena has no way to take one back.</p>
+<p>The ceiling is not a promise about how many rows arrive. Asking for a
+thousand and getting three reserves room for a thousand, and the difference is
+held until the request ends. The number you wrote is believed.</p>
+<h2 id="a-query-with-no-server">A query with no server<a class="headerlink" href="#a-query-with-no-server" title="Permanent link">&para;</a></h2>
+<p>What a call actually asks the <code>Ctx</code> for is two calls — <code>arena()</code> and <code>str()</code> — so
+what it takes is a <strong>Scope</strong>, and a <code>*Ctx</code> is one
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/038-a-module-sits-where-the-loop-puts-it.md">ADR 038</a>). Where there
+is no request there is <code>nilo.Run</code>, which owns an arena and a lifetime of its
+own:</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">run</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Run</span><span class="p">.</span><span class="n">init</span><span class="p">(</span><span class="n">gpa</span><span class="p">);</span>
+<span class="k">defer</span><span class="w"> </span><span class="n">run</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">adults</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">select</span><span class="p">(</span><span class="n">User</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">run</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">age</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">gt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">18</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<p>Same query, same rows, no server in the process.</p>
+<p><strong>A <code>Run</code> is an arena and a lifetime. What it is not is a connection.</strong> The
+pool is opened by <code>nilo_start</code>, and until something calls it every query answers
+<code>error.Disconnected</code> — so a script, a migration, or a test needs one more line
+than the snippet above
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/180-work-that-needs-the-services-runs-on-their-loop.md">ADR 180</a>):</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">threaded</span><span class="o">:</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">Io</span><span class="p">.</span><span class="n">Threaded</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">init</span><span class="p">(</span><span class="n">gpa</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span><span class="w">   </span><span class="c1">// std's own, not the Engine</span>
+<span class="k">defer</span><span class="w"> </span><span class="n">threaded</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span>
+<span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">nilo_start</span><span class="p">(</span><span class="n">threaded</span><span class="p">.</span><span class="n">io</span><span class="p">(),</span><span class="w"> </span><span class="p">.</span><span class="n">none</span><span class="p">);</span><span class="w">                  </span><span class="c1">// the pool is open from here</span>
+
+<span class="kr">var</span><span class="w"> </span><span class="n">run</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Run</span><span class="p">.</span><span class="n">init</span><span class="p">(</span><span class="n">gpa</span><span class="p">);</span>
+<span class="k">defer</span><span class="w"> </span><span class="n">run</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span>
+</code></pre></div>
+<p>Inside a program that also serves, the same work goes in <code>app.before</code>, which
+<code>listen()</code> runs on the server's own loop after the pools are open and before
+the first request
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/180-work-that-needs-the-services-runs-on-their-loop.md">ADR 180</a>):</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">makeTables</span><span class="p">(</span><span class="n">run</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Run</span><span class="p">,</span><span class="w"> </span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">sql</span><span class="p">.</span><span class="n">Db</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">exec</span><span class="p">(</span><span class="n">run</span><span class="p">,</span><span class="w"> </span><span class="s">"CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="p">}</span>
+</code></pre></div>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">provide</span><span class="p">(</span><span class="o">&amp;</span><span class="n">db</span><span class="p">);</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">before</span><span class="p">(</span><span class="n">makeTables</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="o">&amp;</span><span class="n">db</span><span class="p">});</span><span class="w">  </span><span class="c1">// runs once, inside listen()</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">listen</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">port</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8080</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<p>The function takes the boot's <code>nilo.Run</code> first — made by <code>listen()</code> on the
+loop the pool was dialled through, so a key can be minted from it — and then
+whatever it was registered with. If it fails, the server does not start.</p>
+<p><strong>A SQLite application needs this and most Postgres ones do not</strong>: there is no
+server to have created the tables somewhere else, so <code>zig build run</code> on a fresh
+machine has to do it.</p>
+<p><code>app.start(io)</code> — services checked, pools open on an <code>Io</code> of yours — is for a
+program that never listens: a test through <code>testing.Client</code>, a script. Followed
+by <code>listen()</code> it is refused, because a pool dialled through one loop cannot be
+driven from another (ADR 180).</p>
+<h2 id="streaming-a-result-set-too-big-to-hold">Streaming a result set too big to hold<a class="headerlink" href="#streaming-a-result-set-too-big-to-hold" title="Permanent link">&para;</a></h2>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">exportUsers</span><span class="p">(</span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">sql</span><span class="p">.</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">s</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">stream</span><span class="p">(</span><span class="mi">200</span><span class="p">,</span><span class="w"> </span><span class="s">"text/csv"</span><span class="p">);</span>
+
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">rows</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">stream</span><span class="p">(</span><span class="n">User</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="n">rows</span><span class="p">.</span><span class="n">close</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="k">try</span><span class="w"> </span><span class="n">rows</span><span class="p">.</span><span class="n">next</span><span class="p">())</span><span class="w"> </span><span class="o">|</span><span class="n">u</span><span class="o">|</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">print</span><span class="p">(</span><span class="s">"{d},{s}</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="n">u</span><span class="p">.</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">u</span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">finish</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>A million rows runs flat. Postgres sends them all without being asked, but
+they are read off the socket as they arrive, so memory stays bounded by the
+read buffer and TCP carries the rest. No cursor needed.</p>
+<p>The rows come back as <code>sql.Borrowed(User)</code>, which is <code>User</code> with every <code>Str</code>
+replaced by <code>[]const u8</code>. That is deliberate and it is the type telling you
+the truth: the text points into the buffer the rows arrive in and is invalid
+after the next <code>next()</code>. A <code>Str</code> means <em>text that lives as long as the
+request</em>, with no asterisk, so text that does not is not called one. Copy it
+if you need to keep it.</p>
+<p><code>defer rows.close()</code> is required. A result set walked away from half-read
+costs a connection — and unlike a transaction, which is rolled back when the
+request ends, nothing else will ever close this one. Forgetting it is caught
+in Debug by the same counter that watches transactions.</p>
+<p>Two kinds of column cannot be streamed, and each is a compile error rather
+than a footnote: a <code>sql.Json(T)</code>, and an <strong>array</strong>. The rule behind both is one
+sentence — <strong>a streamed row holds only what the read buffer already holds.</strong>
+A borrowed row allocates nothing, which is what makes a million of them run
+flat; parsing a document costs one allocation per row, and so does building a
+slice out of a run of length-prefixed elements. Read either with <code>select</code>, or
+leave the column out of the Row being streamed — a Json column read as
+<code>[]const u8</code> streams as bytes you can parse where you need them.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../tables/" class="md-footer__link md-footer__link--prev" aria-label="Previous: A table is a struct">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                A table is a struct
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../shapes/" class="md-footer__link md-footer__link--next" aria-label="Next: A Row with more in it">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                A Row with more in it
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.sections", "navigation.top", "navigation.footer", "navigation.indexes", "search.highlight", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

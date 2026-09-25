@@ -1,0 +1,2996 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A toolkit for Zig 0.16, and an HTTP server">
+      
+      
+      
+        <link rel="canonical" href="https://nevindra.github.io/nilo/0.6/jobs/">
+      
+      
+        <link rel="prev" href="../s3/">
+      
+      
+        <link rel="next" href="../cache/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Work that runs later, again, or on a schedule - nilo</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#work-that-runs-later-again-or-on-a-schedule" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="nilo" class="md-header__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            nilo
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Work that runs later, again, or on a schedule
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="nilo" class="md-nav__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    nilo
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../handlers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handlers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handling a request
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Handling a request
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../requests/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requests
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../forms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Forms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../responses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Responses
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cookies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cookies
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sessions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Streaming
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../websocket/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WebSocket
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grpc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    gRPC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building an application
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Building an application
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../middleware/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Middleware and resolved values
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../static-files/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Static files
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../errors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../background/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that is not a request
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Answering once
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The other modules
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    The other modules
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../sql/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Talking to a database
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Talking to a database
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A table is a struct
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/reading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A Row with more in it
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/writing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Writing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/transactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/raw/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Past one table
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/sqlite/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQLite
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/migrations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Making the tables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/running/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running it
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fetch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Calling somebody else's API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../s3/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Object storage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that runs later, again, or on a schedule
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that runs later, again, or on a schedule
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-whole-of-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The whole of it
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-job-is-a-struct" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A job is a struct
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pushing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pushing
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Pushing">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#in-a-transaction" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        In a transaction
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#from-inside-a-job" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From inside a job
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#at-least-once" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        At least once
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-schedule" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A schedule
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-store" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The store
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#watching-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Watching it
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-worker-with-no-server-in-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A worker with no server in it
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#testing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-costs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it costs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-will-not-do" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it will not do
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cache/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A cache in this process
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jwt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Checking somebody else's token
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../id/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Identifiers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Shipping it
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Shipping it
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../openapi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenAPI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../deploying/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deploying
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-whole-of-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The whole of it
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-job-is-a-struct" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A job is a struct
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pushing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pushing
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Pushing">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#in-a-transaction" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        In a transaction
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#from-inside-a-job" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From inside a job
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#at-least-once" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        At least once
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-schedule" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A schedule
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-store" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The store
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#watching-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Watching it
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-worker-with-no-server-in-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A worker with no server in it
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#testing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-costs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it costs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-will-not-do" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it will not do
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/nevindra/nilo/edit/main/docs/guide/jobs.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="work-that-runs-later-again-or-on-a-schedule">Work that runs later, again, or on a schedule<a class="headerlink" href="#work-that-runs-later-again-or-on-a-schedule" title="Permanent link">&para;</a></h1>
+<p><code>nilo_job</code> is for the four things an ordinary API does that are not
+requests: send the welcome email after the user is created, try it again
+when the mail provider is down, send the reminder tomorrow, and run the
+report at three in the morning. A job is a struct of yours; the queue is a
+table in the database you already have; a worker is a fiber the server owns
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/160-a-queue-is-a-table-in-the-database-you-already-have.md">ADR 160</a>).</p>
+<p>It is a <strong>Fitting</strong>, like <code>nilo_fetch</code>: it borrows the event loop and owns
+no destination. The store is handed to it — a <code>job.Table</code> over your
+<code>sql.Db</code>, or <code>job.Memory</code> for a test — so the module imports <code>nilo_core</code>
+and nothing else, and a program with no queue in it links no worker loop.</p>
+<p><strong>It is at least once.</strong> A worker that dies halfway through a row leaves a
+lease that runs out, and another worker takes the row. So <code>run</code> is written
+to be safe to call twice, the way a webhook handler already is. That is the
+one sentence on this page worth reading before the rest.</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">job</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@import</span><span class="p">(</span><span class="s">"nilo_job"</span><span class="p">);</span>
+</code></pre></div>
+<p>and in <code>build.zig</code>, beside <code>nilo_http</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"nilo_job"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">module</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">module</span><span class="p">(</span><span class="s">"nilo_job"</span><span class="p">)</span><span class="w"> </span><span class="p">},</span>
+</code></pre></div>
+<h2 id="the-whole-of-it">The whole of it<a class="headerlink" href="#the-whole-of-it" title="Permanent link">&para;</a></h2>
+<p>A job is a struct. Its fields are the payload, <code>retry</code> says what a failure
+means, and <code>run</code> is the work:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">SendWelcome</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_job</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"send-welcome"</span><span class="p">;</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">retry</span><span class="o">:</span><span class="w"> </span><span class="n">job</span><span class="p">.</span><span class="n">Retry</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">times</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">backoff</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">exponential</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">from_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="n">_000</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">to_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="n">_600_000</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">};</span>
+
+<span class="w">    </span><span class="n">user_id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">email</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="p">,</span>
+
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">run</span><span class="p">(</span><span class="n">self</span><span class="o">:</span><span class="w"> </span><span class="n">SendWelcome</span><span class="p">,</span><span class="w"> </span><span class="n">scope</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Run</span><span class="p">,</span><span class="w"> </span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Db</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kr">const</span><span class="w"> </span><span class="n">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">User</span><span class="p">,</span><span class="w"> </span><span class="n">scope</span><span class="p">,</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">user_id</span><span class="p">)</span><span class="w"> </span><span class="k">orelse</span><span class="w"> </span><span class="k">return</span><span class="p">;</span>
+<span class="w">        </span><span class="k">try</span><span class="w"> </span><span class="n">sendMail</span><span class="p">(</span><span class="n">scope</span><span class="p">,</span><span class="w"> </span><span class="n">user</span><span class="p">.</span><span class="n">email</span><span class="p">,</span><span class="w"> </span><span class="s">"Welcome"</span><span class="p">);</span><span class="w">   </span><span class="c1">// yours</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>The queue is a type built from the jobs it can run, the store it runs on,
+and the services a <code>run</code> may ask for:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Jobs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">job</span><span class="p">.</span><span class="n">Jobs</span><span class="p">(.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">kinds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="n">SendWelcome</span><span class="p">,</span><span class="w"> </span><span class="n">Nightly</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">.</span><span class="n">store</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">job</span><span class="p">.</span><span class="n">Table</span><span class="p">(</span><span class="n">Db</span><span class="p">),</span>
+<span class="w">    </span><span class="p">.</span><span class="n">deps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Db</span><span class="w"> </span><span class="p">},</span>
+<span class="p">});</span>
+</code></pre></div>
+<p>In <code>main</code>, the table is migrated beside your own rows, and the queue is a
+service and a fiber:</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">migrate</span><span class="p">.</span><span class="n">createMissing</span><span class="p">(</span><span class="n">db</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">run</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">tables</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="w"> </span><span class="n">User</span><span class="p">,</span><span class="w"> </span><span class="n">Jobs</span><span class="p">.</span><span class="n">Row</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+
+<span class="n">table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">job</span><span class="p">.</span><span class="n">Table</span><span class="p">(</span><span class="n">Db</span><span class="p">).</span><span class="n">open</span><span class="p">(</span><span class="n">db</span><span class="p">);</span>
+<span class="n">jobs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">open</span><span class="p">(</span><span class="n">gpa</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">table</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">db</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">db</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">workers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="p">});</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">provide</span><span class="p">(</span><span class="o">&amp;</span><span class="n">jobs</span><span class="p">);</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">spawn</span><span class="p">(</span><span class="n">Jobs</span><span class="p">.</span><span class="n">serve</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="o">&amp;</span><span class="n">jobs</span><span class="p">});</span>
+</code></pre></div>
+<p>And in a handler, the push:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">register</span><span class="p">(</span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">jobs</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Jobs</span><span class="p">,</span><span class="w"> </span><span class="n">body</span><span class="o">:</span><span class="w"> </span><span class="n">SignIn</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">User</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">body</span><span class="p">.</span><span class="n">email</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">password</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">body</span><span class="p">.</span><span class="n">password</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">jobs</span><span class="p">.</span><span class="n">push</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="n">SendWelcome</span><span class="p">{</span><span class="w"> </span><span class="p">.</span><span class="n">user_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">user</span><span class="p">.</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">user</span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">.{});</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>push</code> writes the struct as JSON into one row and returns the row's id. A
+worker claims the row when it is due, parses the JSON back into a
+<code>SendWelcome</code>, and calls <code>run</code> with a <code>nilo.Run</code> of the tick's own and
+every pointer after it looked up in <code>deps</code> by type. <code>email</code> is a <code>Str</code>
+borrowed from the request, and that is fine: it is copied at <code>push</code>, not
+carried.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job.Jobs(.{ .kinds, .store, .deps, .status })</code></td>
+<td>the queue, as a type</td>
+</tr>
+<tr>
+<td><code>Jobs.open(gpa, &amp;store, deps, settings)</code></td>
+<td>the value a handler holds</td>
+</tr>
+<tr>
+<td><code>Jobs.openWith(gpa, &amp;store, deps, settings, space)</code></td>
+<td>the same, with the <code>.status</code> Space</td>
+</tr>
+<tr>
+<td><code>Jobs.Row</code></td>
+<td>the store's table, for <code>createMissing</code> and <code>db.checking</code></td>
+</tr>
+<tr>
+<td><code>jobs.push(c, value, .{})</code></td>
+<td><code>Id</code>, or <code>?Id</code> when <code>.unique</code> is given</td>
+</tr>
+<tr>
+<td><code>jobs.pushIn(&amp;tx, c, value, .{})</code></td>
+<td>the same, inside a transaction you hold</td>
+</tr>
+<tr>
+<td><code>jobs.cancel(c, id)</code></td>
+<td><code>bool</code> — a <code>queued</code> row taken out before it runs; false once a worker holds it</td>
+</tr>
+<tr>
+<td><code>jobs.stats(c)</code></td>
+<td>how many are <code>queued</code>, <code>running</code> and <code>dead</code></td>
+</tr>
+<tr>
+<td><code>jobs.status(id)</code></td>
+<td><code>?job.Status</code> from the <code>.status</code> Space, when there is one</td>
+</tr>
+<tr>
+<td><code>jobs.progress(id, n)</code></td>
+<td>how far a run has got, into the same Space</td>
+</tr>
+<tr>
+<td><code>jobs.deadOnes(c)</code></td>
+<td>the rows that failed for the last time, newest first</td>
+</tr>
+<tr>
+<td><code>jobs.retryDead(c, id)</code></td>
+<td>queue one of them again from its first attempt</td>
+</tr>
+<tr>
+<td><code>Jobs.serve</code></td>
+<td>the worker loop, for <code>app.spawn</code></td>
+</tr>
+<tr>
+<td><code>jobs.serveOn(io)</code></td>
+<td>the same loop on an <code>Io</code> of yours, for a worker process</td>
+</tr>
+<tr>
+<td><code>jobs.drain(&amp;run)</code></td>
+<td>run everything due, here, now — for a test</td>
+</tr>
+<tr>
+<td><code>jobs.drainAt(&amp;run, now)</code></td>
+<td>the same as if it were <code>now</code> — how a test moves the clock</td>
+</tr>
+<tr>
+<td><code>jobs.runOne(&amp;run)</code> / <code>runOneAt(&amp;run, now)</code></td>
+<td>one row, or <code>false</code></td>
+</tr>
+<tr>
+<td><code>jobs.seed(&amp;run)</code> / <code>seedAt(&amp;run, now)</code></td>
+<td>queue every schedule's next tick, for a test that drains</td>
+</tr>
+</tbody>
+</table>
+<h2 id="a-job-is-a-struct">A job is a struct<a class="headerlink" href="#a-job-is-a-struct" title="Permanent link">&para;</a></h2>
+<p>Three things on it are read while compiling, and each one missing is a
+Refusal that says what to write.</p>
+<p><strong><code>nilo_job</code> is the name the row carries.</strong> Sixty-four bytes at most, unique
+across the <code>kinds</code> — two jobs with one name is a compile error naming both
+types — and it is what lets a binary that knows the kind claim a row a
+different binary pushed. A row whose kind this program has no job for is
+put back untouched, with a warning, for the program that does.</p>
+<p><strong><code>retry</code> has no default.</strong> How many times an email is tried is a promise
+about that email, and a default nobody read is not one
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/161-a-schedule-is-a-type-that-makes-the-caller-choose.md">ADR 161</a>).</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>.none</code></td>
+<td>one attempt, and a failure is final</td>
+</tr>
+<tr>
+<td><code>.{ .times = 3 }</code></td>
+<td>four attempts in all, back to back</td>
+</tr>
+<tr>
+<td><code>.{ .times = 3, .backoff = .{ .fixed_ms = 30_000 } }</code></td>
+<td>thirty seconds between each</td>
+</tr>
+<tr>
+<td><code>.{ .times = 5, .backoff = .{ .exponential = .{ .from_ms = 1_000, .to_ms = 3_600_000 } } }</code></td>
+<td>1s, 2s, 4s, … and never past an hour</td>
+</tr>
+</tbody>
+</table>
+<p>A row past its last retry is <strong>dead</strong>: it stays in the table with the name of
+the error that killed it, <code>stats</code> counts it, <code>deadOnes</code> lists it, and
+<code>retryDead</code> is the one way it runs again. Nothing is deleted for you.</p>
+<p><strong>Some failures are final on the first attempt.</strong> A reset socket or a 429
+is different in ten seconds; a 4xx saying <em>invalid from address</em> is the same
+4xx in an hour, and both come back through the same error set. <code>final</code> is
+the error set a <code>run</code> can fail with and be dead at once, whatever <code>retry</code>
+says
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/179-a-run-can-say-its-failure-is-final.md">ADR 179</a>):</p>
+<div class="highlight"><pre><span></span><code><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">retry</span><span class="o">:</span><span class="w"> </span><span class="n">job</span><span class="p">.</span><span class="n">Retry</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">times</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">backoff</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">exponential</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">from_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span><span class="n">_000</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">to_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="n">_600_000</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">};</span>
+<span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">final</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">error</span><span class="p">{</span><span class="w"> </span><span class="n">Rejected</span><span class="p">,</span><span class="w"> </span><span class="n">NoSuchAddress</span><span class="w"> </span><span class="p">};</span>
+</code></pre></div>
+<p>The row keeps the error's own name, so <code>deadOnes</code> says <code>Rejected</code> rather
+than a queue word. A timeout is never final, because the next attempt may
+finish. On a kind whose <code>retry</code> is <code>.none</code> the set would decide nothing, and
+it is refused.</p>
+<p><strong><code>run</code> takes the value, a <code>*nilo.Run</code>, and pointers.</strong> The value is the
+struct as it was pushed. The Run is the tick's Scope — an arena reset when
+the tick ends, and the thing you hand to <code>db</code> and <code>fetch</code>. Every parameter
+after those two is a pointer, found in <code>deps</code> by its type: <code>db: *Db</code> is
+answered by the <code>db</code> field, and a pointer type nobody put in <code>deps</code> is a
+compile error naming the job and the field to add. A <code>run</code> that asks for a
+<code>*nilo.Ctx</code> is refused the same way, because a job runs outside any request
+and a fail function would have nobody to fail to.</p>
+<p><strong>And a <code>job.Tick</code>, by value, if it wants to know which tick it is.</strong> The
+rule is the one a handler's argument list follows: a pointer is a service,
+a value is the tick. It carries the row's <code>id</code>, the attempt this is
+(<code>attempts</code>, <code>1</code> the first time), when the row was due (<code>run_at</code>), and
+whether this is the last attempt <code>retry</code> allows (<code>last</code>) — all of it in
+the worker's hand from the claim, so asking costs nothing
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/160-a-queue-is-a-table-in-the-database-you-already-have.md">ADR 160</a>):</p>
+<div class="highlight"><pre><span></span><code><span class="kr">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">run</span><span class="p">(</span><span class="n">self</span><span class="o">:</span><span class="w"> </span><span class="n">SendWelcome</span><span class="p">,</span><span class="w"> </span><span class="n">scope</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Run</span><span class="p">,</span><span class="w"> </span><span class="n">tick</span><span class="o">:</span><span class="w"> </span><span class="n">job</span><span class="p">.</span><span class="n">Tick</span><span class="p">,</span><span class="w"> </span><span class="n">mail</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Mailer</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">via</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">tick</span><span class="p">.</span><span class="n">last</span><span class="p">)</span><span class="w"> </span><span class="n">mail</span><span class="p">.</span><span class="n">fallback</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="n">mail</span><span class="p">.</span><span class="n">primary</span><span class="p">;</span>
+<span class="w">    </span><span class="n">std</span><span class="p">.</span><span class="n">log</span><span class="p">.</span><span class="n">info</span><span class="p">(</span><span class="s">"welcome row {d}, attempt {d}"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="n">tick</span><span class="p">.</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">tick</span><span class="p">.</span><span class="n">attempts</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">via</span><span class="p">.</span><span class="n">send</span><span class="p">(</span><span class="n">scope</span><span class="p">,</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">email</span><span class="p">,</span><span class="w"> </span><span class="s">"Welcome"</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>last</code> is about the count: a failure the kind lists in <code>final</code> is dead on
+whichever attempt it happens, and the tick cannot know which error is
+coming. A <code>*job.Tick</code> is refused naming the rule.</p>
+<p><strong>A payload holds no pointer.</strong> A <code>*T</code> field is a compile error naming
+the field: the row is JSON read back on a worker, possibly in another
+process, and an address means nothing there — carry the id and look it up
+in <code>run</code>. Text is fine, as a <code>Str</code> or a <code>[]const u8</code>, and so are numbers,
+enums, optionals, arrays, slices and structs of those; what comes back is
+in the tick's arena. Every field of a <em>scheduled</em> job has a default,
+because nobody pushes a scheduled job and so nobody fills one in.</p>
+<p><strong><code>timeout_ms</code> is optional</strong>, per kind, and overrides the queue's:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">timeout_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">300</span><span class="n">_000</span><span class="p">;</span><span class="w">   </span><span class="c1">// this report takes a while</span>
+</code></pre></div>
+<p>Past it the run is cancelled, counted as a failed attempt named <code>TimedOut</code>,
+and retried or dead by the job's <code>retry</code>. The longest <code>timeout_ms</code> across
+the kinds is also the lease: a worker that dies holding a row gives it up
+after that long, plus a second.</p>
+<h2 id="pushing">Pushing<a class="headerlink" href="#pushing" title="Permanent link">&para;</a></h2>
+<p>The last argument to <code>push</code> is the options, and <code>.{}</code> is the ordinary call:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>after_ms</code></td>
+<td>run no sooner than this many milliseconds from now</td>
+</tr>
+<tr>
+<td><code>at</code></td>
+<td>run no sooner than this moment, in microseconds since the epoch. One of the two, not both</td>
+</tr>
+<tr>
+<td><code>unique</code></td>
+<td>a key of up to 64 bytes that at most one queued-or-running row of this kind may carry. The answer becomes <code>?Id</code>, null when a row already carries it</td>
+</tr>
+<tr>
+<td><code>within</code></td>
+<td>a <code>cache.Space</code> of <code>job.Mark</code> put in front of <code>unique</code>, for "at most one of these every thirty seconds"</td>
+</tr>
+</tbody>
+</table>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">remind</span><span class="p">(</span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">jobs</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Jobs</span><span class="p">,</span><span class="w"> </span><span class="n">user</span><span class="o">:</span><span class="w"> </span><span class="n">User</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">key</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="mi">32</span><span class="p">]</span><span class="kt">u8</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">undefined</span><span class="p">;</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">fmt</span><span class="p">.</span><span class="n">bufPrint</span><span class="p">(</span><span class="o">&amp;</span><span class="n">key</span><span class="p">,</span><span class="w"> </span><span class="s">"remind:{d}"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="n">user</span><span class="p">.</span><span class="n">id</span><span class="p">});</span>
+
+<span class="w">    </span><span class="c1">// Tomorrow, and only once however many times this route is hit today.</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">try</span><span class="w"> </span><span class="n">jobs</span><span class="p">.</span><span class="n">push</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="n">SendWelcome</span><span class="p">{</span><span class="w"> </span><span class="p">.</span><span class="n">user_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">user</span><span class="p">.</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">user</span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">after_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">24</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1</span><span class="n">_000</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">unique</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">name</span><span class="p">,</span>
+<span class="w">    </span><span class="p">}))</span><span class="w"> </span><span class="o">|</span><span class="n">_</span><span class="o">|</span><span class="w"> </span><span class="p">{}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// already queued — nothing to do</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong><code>unique</code> is a unique index, not a check.</strong> The table has a unique index
+over <code>(kind, unique_key)</code>, and a row that finishes has its key set to NULL,
+so "at most one queued or running" is the database's promise rather than a
+read followed by a write. Ten servers pushing the same key at once get one
+row between them.</p>
+<p><strong>A queued row can be taken back.</strong> The user closed the export dialog, or
+unsubscribed before the nudge went out: <code>jobs.cancel(c, id)</code> deletes the
+row while it is still <code>queued</code> and answers <code>true</code>; once a worker has
+claimed it the answer is <code>false</code> and the run finishes, because nothing
+interrupts a <code>run</code> and a half-cancelled row would be the worse outcome. One
+statement, so a worker claiming in the same instant either got it or did
+not. The <code>unique</code> key goes with the row, which is how "move it to tomorrow"
+is written — a cancel and a push
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/160-a-queue-is-a-table-in-the-database-you-already-have.md">ADR 160</a>):</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">postpone</span><span class="p">(</span><span class="n">jobs</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Jobs</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">row</span><span class="o">:</span><span class="w"> </span><span class="n">job</span><span class="p">.</span><span class="n">Id</span><span class="p">,</span><span class="w"> </span><span class="n">user_id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="n">email</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Str</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="k">try</span><span class="w"> </span><span class="n">jobs</span><span class="p">.</span><span class="k">cancel</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="n">row</span><span class="p">))</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">conflict</span><span class="p">(</span><span class="s">"that reminder is already going out"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">jobs</span><span class="p">.</span><span class="n">push</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="n">SendWelcome</span><span class="p">{</span><span class="w"> </span><span class="p">.</span><span class="n">user_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">user_id</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">email</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">after_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">24</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1</span><span class="n">_000</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong><code>.within</code> is the cheaper version of the same promise</strong>, for when a miss
+costs a second run and not a wrong one: the Space remembers the key for its
+TTL, a second push inside the window is answered by the cache and never
+reaches the table, and a restart forgets. A <code>.within</code> without a <code>.unique</code>
+is a compile error, because the window has to remember something.</p>
+<h3 id="in-a-transaction">In a transaction<a class="headerlink" href="#in-a-transaction" title="Permanent link">&para;</a></h3>
+<p>The row is a row, so it can commit with yours:</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">tx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">begin</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="k">defer</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">User</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">form</span><span class="p">.</span><span class="n">email</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">password</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">form</span><span class="p">.</span><span class="n">password</span><span class="w"> </span><span class="p">});</span>
+<span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">jobs</span><span class="p">.</span><span class="n">pushIn</span><span class="p">(</span><span class="o">&amp;</span><span class="n">tx</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="n">SendWelcome</span><span class="p">{</span><span class="w"> </span><span class="p">.</span><span class="n">user_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">user</span><span class="p">.</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">user</span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">.{});</span>
+
+<span class="k">try</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">commit</span><span class="p">();</span>
+</code></pre></div>
+<p>If the commit fails, there is no job; if the job is pushed, the user exists.
+That is the outbox pattern with no outbox, and it is the reason the queue is
+a table rather than a Redis
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/160-a-queue-is-a-table-in-the-database-you-already-have.md">ADR 160</a>).
+<code>pushIn</code> on a <code>job.Memory</code> is a compile error — a row in memory has nothing
+to commit with — and so is <code>pushIn</code> with <code>.within</code>, because a cache cannot
+roll back.</p>
+<p><strong>A <code>push</code> wakes a worker; a <code>pushIn</code> cannot.</strong> The row is not there until
+the commit, so a worker woken at the <code>pushIn</code> would claim nothing and go
+back to sleep. Call <code>jobs.wake()</code> after <code>tx.commit()</code> and the row starts at
+once; leave it and the next poll finds it, a second later at the default
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/160-a-queue-is-a-table-in-the-database-you-already-have.md">ADR 160</a>).</p>
+<h3 id="from-inside-a-job">From inside a job<a class="headerlink" href="#from-inside-a-job" title="Permanent link">&para;</a></h3>
+<p>A pipeline — download, then process, then notify; a welcome now and a
+nudge three days later — is a <code>run</code> that pushes the next kind, and for
+that it asks for the queue itself: <code>jobs: *Jobs</code>. The queue is a dep like
+any other, with one wrinkle. <code>Jobs</code> does not exist while its own <code>.deps</code>
+is being read, so a struct naming <code>*Jobs</code> in a field is a <code>dependency
+loop</code> in the compiler's words. Write <code>.deps</code> as a function of the queue
+type instead, and nilo hands it the finished type
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/160-a-queue-is-a-table-in-the-database-you-already-have.md">ADR 160</a>):</p>
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">deps</span><span class="p">(</span><span class="kr">comptime</span><span class="w"> </span><span class="n">Queue</span><span class="o">:</span><span class="w"> </span><span class="kt">type</span><span class="p">)</span><span class="w"> </span><span class="kt">type</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">jobs</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Queue</span><span class="w"> </span><span class="p">};</span>
+<span class="p">}</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">Jobs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">job</span><span class="p">.</span><span class="n">Jobs</span><span class="p">(.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">kinds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="n">Download</span><span class="p">,</span><span class="w"> </span><span class="n">Process</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">.</span><span class="n">store</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">job</span><span class="p">.</span><span class="n">Table</span><span class="p">(</span><span class="n">Db</span><span class="p">),</span>
+<span class="w">    </span><span class="p">.</span><span class="n">deps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">deps</span><span class="p">,</span>
+<span class="p">});</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">Download</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_job</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"download"</span><span class="p">;</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">retry</span><span class="o">:</span><span class="w"> </span><span class="n">job</span><span class="p">.</span><span class="n">Retry</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">times</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">backoff</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">fixed_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">30</span><span class="n">_000</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">};</span>
+
+<span class="w">    </span><span class="n">file</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">run</span><span class="p">(</span><span class="n">self</span><span class="o">:</span><span class="w"> </span><span class="n">Download</span><span class="p">,</span><span class="w"> </span><span class="n">scope</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Run</span><span class="p">,</span><span class="w"> </span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">jobs</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Jobs</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">try</span><span class="w"> </span><span class="n">fetchInto</span><span class="p">(</span><span class="n">scope</span><span class="p">,</span><span class="w"> </span><span class="n">db</span><span class="p">,</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">file</span><span class="p">);</span>
+<span class="w">        </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">jobs</span><span class="p">.</span><span class="n">push</span><span class="p">(</span><span class="n">scope</span><span class="p">,</span><span class="w"> </span><span class="n">Process</span><span class="p">{</span><span class="w"> </span><span class="p">.</span><span class="n">file</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">file</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">.{});</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>The queue is a dep of its own kinds, so it is opened once it has an
+address to give:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">jobs</span><span class="o">:</span><span class="w"> </span><span class="n">Jobs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">undefined</span><span class="p">;</span>
+<span class="n">jobs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">open</span><span class="p">(</span><span class="n">gpa</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">table</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">db</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">db</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">jobs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">jobs</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">workers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<p>Everything else is as before: <code>Jobs.Deps</code> is the struct the function
+answered, a pushed kind still has to be in <code>.kinds</code>, and a <code>run</code> asking
+for a service the struct has not got is the same compile error naming the
+job. What moves is <em>where</em> that error arrives for a queue whose <code>.deps</code>
+is a function — at the first <code>open</code> rather than at the <code>job.Jobs(…)</code>
+line, because that is when the queue type exists to check a <code>run</code>
+against; the compiler's trace points back. The nudge three days later is
+the same call with <code>.after_ms</code>.</p>
+<h2 id="at-least-once">At least once<a class="headerlink" href="#at-least-once" title="Permanent link">&para;</a></h2>
+<p>The claim is one statement, and the second half of its <code>WHERE</code> is the lease:</p>
+<div class="highlight"><pre><span></span><code><span class="k">UPDATE</span><span class="w"> </span><span class="n">nilo_jobs</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="k">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">'running'</span><span class="p">,</span><span class="w"> </span><span class="n">lease_until</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="err">$</span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="n">attempts</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">attempts</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">nilo_jobs</span>
+<span class="w">            </span><span class="k">WHERE</span><span class="w"> </span><span class="n">kind</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">ANY</span><span class="p">(</span><span class="err">$</span><span class="mi">3</span><span class="p">)</span>
+<span class="w">              </span><span class="k">AND</span><span class="w"> </span><span class="p">((</span><span class="k">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">'queued'</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">run_at</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="err">$</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="k">OR</span><span class="w"> </span><span class="p">(</span><span class="k">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">'running'</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">lease_until</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="err">$</span><span class="mi">1</span><span class="p">))</span>
+<span class="w">            </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">priority</span><span class="p">,</span><span class="w"> </span><span class="n">run_at</span><span class="w"> </span><span class="k">LIMIT</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="k">FOR</span><span class="w"> </span><span class="k">UPDATE</span><span class="w"> </span><span class="n">SKIP</span><span class="w"> </span><span class="n">LOCKED</span><span class="p">)</span>
+<span class="n">RETURNING</span><span class="w"> </span><span class="err">…</span>
+</code></pre></div>
+<p>A <code>running</code> row whose lease has passed is a row whose worker died — the
+process was killed, the machine went — and it is taken again by whoever
+asks next. <code>run</code> is therefore called <em>at least</em> once, and a <code>run</code> that has
+already done its work the second time round is the design rather than a
+bug to work around: an email keyed by <code>user_id</code> that the provider
+deduplicates, an <code>insertOrIgnore</code> rather than an <code>insert</code>, an <code>UPDATE …
+WHERE state = 'pending'</code>. <code>nilo.Idempotent</code> is the same position on the
+inbound side (<a href="../idempotency/">Answering once</a>).</p>
+<p>The queue never promises exactly once because it cannot: that would be a
+claim about your mail provider.</p>
+<h2 id="a-schedule">A schedule<a class="headerlink" href="#a-schedule" title="Permanent link">&para;</a></h2>
+<p>A job with a <code>schedule</code> runs on the clock and nobody pushes it. It also has
+to say two more things, and neither has a default
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/161-a-schedule-is-a-type-that-makes-the-caller-choose.md">ADR 161</a>):</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Nightly</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_job</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"nightly-report"</span><span class="p">;</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">retry</span><span class="o">:</span><span class="w"> </span><span class="n">job</span><span class="p">.</span><span class="n">Retry</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">none</span><span class="p">;</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">schedule</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">job</span><span class="p">.</span><span class="n">cron</span><span class="p">(</span><span class="s">"0 3 * * *"</span><span class="p">);</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">overlap</span><span class="o">:</span><span class="w"> </span><span class="n">job</span><span class="p">.</span><span class="n">Overlap</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">skip</span><span class="p">;</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">missed</span><span class="o">:</span><span class="w"> </span><span class="n">job</span><span class="p">.</span><span class="n">Missed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">drop</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">run</span><span class="p">(</span><span class="n">self</span><span class="o">:</span><span class="w"> </span><span class="n">Nightly</span><span class="p">,</span><span class="w"> </span><span class="n">scope</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Run</span><span class="p">,</span><span class="w"> </span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Db</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="p">}</span>
+<span class="p">};</span>
+</code></pre></div>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job.cron("0 3 * * *")</code></td>
+<td><code>minute hour day month weekday</code>, UTC, parsed while compiling. <code>*</code>, lists, ranges and <code>*/n</code></td>
+</tr>
+<tr>
+<td><code>job.every(600_000)</code></td>
+<td>every ten minutes from whenever the worker started, for when it does not matter which ten</td>
+</tr>
+</tbody>
+</table>
+<p>A field out of range, a sixth field or a backwards range is a compile error
+naming the field. <strong>UTC only</strong>: a program in Jakarta writes <code>0 20 * * *</code>
+with a comment, and <code>docs/roadmap.md</code> carries the gap.</p>
+<p><strong><code>overlap</code></strong> is what happens when the previous run is still running when
+the next tick is due:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>.skip</code></td>
+<td>do not start another. The tick that falls inside a run does not happen, and the next is computed from the clock when the run ends</td>
+</tr>
+<tr>
+<td><code>.queue</code></td>
+<td>start it anyway, on another worker</td>
+</tr>
+</tbody>
+</table>
+<p><strong><code>missed</code></strong> is what happens to a tick whose time has passed — the process
+was down, or every worker was busy:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>.drop</code></td>
+<td>forget it. A tick that is later than its own successor is not run; one that is merely late is</td>
+</tr>
+<tr>
+<td><code>.catch_up</code></td>
+<td>run it once, then continue from the clock</td>
+</tr>
+</tbody>
+</table>
+<p>A schedule is a row: the next tick is pushed with the unique key
+<code>"schedule"</code>, so ten instances seeding the same schedule at start-up produce
+one row, and whichever worker claims it runs it. There is no leader, a
+restart loses no tick, and <strong>the first tick is the next one the clock
+says</strong> — <code>every(600_000)</code> first fires ten minutes after the worker started.
+A program that wants a run at start-up pushes one.</p>
+<p>A tick that fails is retried by the job's <code>retry</code> like any other row, and
+the schedule's next tick is pushed regardless. A tick that dies is dead
+like any other row.</p>
+<h2 id="the-store">The store<a class="headerlink" href="#the-store" title="Permanent link">&para;</a></h2>
+<p><strong><code>job.Table(Db)</code></strong> is the queue in your database. <code>Db</code> is your <code>sql.Db</code>
+or <code>sql.Sqlite(…)</code> type; the Row it carries is a <code>nilo_table</code> like yours,
+named <code>nilo_jobs</code>, migrated beside your own with <code>createMissing</code> or the
+<code>db</code> command, and checked by <code>db.checking(.{ .tables = &amp;.{ …, Jobs.Row } })</code> at startup.
+Both databases are production stores here. What differs on SQLite is that
+every claim is a write, so <code>workers</code> is the number of claims in flight as
+well as the number of jobs — four is right, forty is a queue for the
+writer.</p>
+<p><strong><code>job.Memory</code></strong> is the same contract in this process, for a test or for a
+program that can lose its queue at a restart and says so:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">store</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">job</span><span class="p">.</span><span class="n">Memory</span><span class="p">.</span><span class="n">open</span><span class="p">(</span><span class="n">gpa</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">bytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">20</span><span class="w"> </span><span class="p">});</span>
+<span class="k">defer</span><span class="w"> </span><span class="n">store</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span>
+</code></pre></div>
+<p>It is a queue and not a cache: a full <code>Memory</code> answers <code>error.QueueFull</code>
+rather than writing over the oldest row, which is why the module does not
+sit on <code>nilo_cache</code>. <code>.max_payload</code> (4 KiB) is the largest row it holds.</p>
+<p><strong><code>Settings</code></strong>, given to <code>open</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Default</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>workers</code></td>
+<td>4</td>
+<td>rows running at once in this process. Each is a fiber, and a fiber holds its stack at its high-water mark for the life of it (<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/062-where-a-connection-waits-is-what-it-costs.md">ADR 062</a>), so this is paid per worker rather than per row</td>
+</tr>
+<tr>
+<td><code>poll_ms</code></td>
+<td>1,000</td>
+<td>how long a worker with nothing to do waits before asking again, <strong>when nothing wakes it first</strong>. A <code>push</code> from this process wakes a worker itself, so this is the latency only of a row <em>another</em> process pushed — and the cost of an idle queue, one claim per worker per interval (<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/160-a-queue-is-a-table-in-the-database-you-already-have.md">ADR 160</a>)</td>
+</tr>
+<tr>
+<td><code>timeout_ms</code></td>
+<td>60,000</td>
+<td>how long one run may take, for a kind that names no <code>timeout_ms</code> of its own. Also the lease</td>
+</tr>
+</tbody>
+</table>
+<p>A third store is nine methods, listed in <code>job/contract.zig</code> for whoever
+brings the deployment.</p>
+<h2 id="watching-it">Watching it<a class="headerlink" href="#watching-it" title="Permanent link">&para;</a></h2>
+<p><strong><code>stats</code></strong> is the three counts, and a health page that wants to know the
+queue is not backing up reads <code>queued</code> there. <strong><code>nilo_ready</code></strong> is what
+<a href="../deploying/#knowing-whether-it-is-ready"><code>app.health</code></a> asks:
+not ready before <code>listen()</code>, not ready when the store says so, and not
+ready when <code>serve</code> has been started and no worker is alive.</p>
+<p><strong>A status a route can poll</strong> is a <code>cache.Space</code> of <code>job.Status</code> named on
+the type and handed in at <code>openWith</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Statuses</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cache</span><span class="p">.</span><span class="n">Space</span><span class="p">(</span><span class="s">"job-status"</span><span class="p">,</span><span class="w"> </span><span class="n">job</span><span class="p">.</span><span class="n">Status</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">ttl_s</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">600</span><span class="w"> </span><span class="p">});</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">Jobs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">job</span><span class="p">.</span><span class="n">Jobs</span><span class="p">(.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">kinds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="n">SendWelcome</span><span class="p">},</span>
+<span class="w">    </span><span class="p">.</span><span class="n">store</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">job</span><span class="p">.</span><span class="n">Table</span><span class="p">(</span><span class="n">Db</span><span class="p">),</span>
+<span class="w">    </span><span class="p">.</span><span class="n">deps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Db</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">.</span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Statuses</span><span class="p">,</span>
+<span class="p">});</span>
+
+<span class="n">jobs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">openWith</span><span class="p">(</span><span class="n">gpa</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">table</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">db</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">db</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">.{},</span><span class="w"> </span><span class="n">Statuses</span><span class="p">.</span><span class="n">open</span><span class="p">(</span><span class="o">&amp;</span><span class="n">store</span><span class="p">));</span>
+</code></pre></div>
+<p><code>jobs.status(id)</code> then answers <code>.{ .state, .attempts, .progress }</code> for as
+long as the Space remembers the row — <code>queued</code>, <code>running</code>, <code>done</code> or
+<code>dead</code> — and null once it has forgotten, which for a route answering "is
+my export ready?" is the right shape. It is a cache and not the table on
+purpose: a status is the one thing here that may be forgotten, and a poll
+every second should not be a query every second.</p>
+<p><strong><code>progress</code> is the run's own figure in the same Space.</strong> A <code>run</code> that
+asks for its <code>job.Tick</code> and for <code>*Jobs</code> writes <code>jobs.progress(tick.id, n)</code>
+as it goes — rows imported, a percentage, a step; the kind decides what
+the number means — and the route polling <code>status(id)</code> reads it beside the
+state (<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/160-a-queue-is-a-table-in-the-database-you-already-have.md">ADR 160</a>):</p>
+<div class="highlight"><pre><span></span><code><span class="kr">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">run</span><span class="p">(</span><span class="n">self</span><span class="o">:</span><span class="w"> </span><span class="n">Import</span><span class="p">,</span><span class="w"> </span><span class="n">scope</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Run</span><span class="p">,</span><span class="w"> </span><span class="n">tick</span><span class="o">:</span><span class="w"> </span><span class="n">job</span><span class="p">.</span><span class="n">Tick</span><span class="p">,</span><span class="w"> </span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">jobs</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Jobs</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">done</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="k">try</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">nextBatch</span><span class="p">(</span><span class="n">scope</span><span class="p">))</span><span class="w"> </span><span class="o">|</span><span class="n">batch</span><span class="o">|</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">insertMany</span><span class="p">(</span><span class="n">Row</span><span class="p">,</span><span class="w"> </span><span class="n">scope</span><span class="p">,</span><span class="w"> </span><span class="n">batch</span><span class="p">);</span>
+<span class="w">        </span><span class="n">done</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="nb">@intCast</span><span class="p">(</span><span class="n">batch</span><span class="p">.</span><span class="n">len</span><span class="p">);</span>
+<span class="w">        </span><span class="n">jobs</span><span class="p">.</span><span class="n">progress</span><span class="p">(</span><span class="n">tick</span><span class="p">.</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">done</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The figure starts over with every attempt and is kept on <code>done</code>, so "done,
+4,000 rows" is what the last poll reads. It is a <code>get</code> and a <code>put</code> on the
+Space per call and touches the table not at all, which is why a run may
+report every batch rather than every thousand.</p>
+<p><strong>The dead ones</strong> are listed newest first with the error's name, and
+<code>retryDead</code> puts one back at attempt one. An operator's route:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">dead</span><span class="p">(</span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">jobs</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Jobs</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="p">[]</span><span class="n">job</span><span class="p">.</span><span class="n">Dead</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">jobs</span><span class="p">.</span><span class="n">deadOnes</span><span class="p">(</span><span class="n">c</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">retry</span><span class="p">(</span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">jobs</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Jobs</span><span class="p">,</span><span class="w"> </span><span class="n">row</span><span class="o">:</span><span class="w"> </span><span class="kt">u64</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="k">try</span><span class="w"> </span><span class="n">jobs</span><span class="p">.</span><span class="n">retryDead</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="n">row</span><span class="p">))</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">notFound</span><span class="p">(</span><span class="s">"no dead job {d}"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="n">row</span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong>The log</strong> carries every failure as a <code>warn</code> with the kind, the row, the
+error's name, the attempt and the wait before the next; a row that dies
+says so with its attempt count; a claim that cannot reach the store is an
+<code>err</code>, and the worker sleeps <code>poll_ms</code> and asks again.</p>
+<h2 id="a-worker-with-no-server-in-it">A worker with no server in it<a class="headerlink" href="#a-worker-with-no-server-in-it" title="Permanent link">&para;</a></h2>
+<p><code>serve</code> runs the workers on the <code>Io</code> the server handed over in
+<code>nilo_start</code>, and stops when the server does — <code>error.Canceled</code> is the
+shutdown, as it is for every fiber
+(<a href="../background/">Work that is not a request</a>). A worker process that
+serves no HTTP calls <code>serveOn</code> with an <code>Io</code> of its own instead:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">threaded</span><span class="o">:</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">Io</span><span class="p">.</span><span class="n">Threaded</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">init</span><span class="p">(</span><span class="n">gpa</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="k">defer</span><span class="w"> </span><span class="n">threaded</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span>
+
+<span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">nilo_start</span><span class="p">(</span><span class="n">threaded</span><span class="p">.</span><span class="n">io</span><span class="p">(),</span><span class="w"> </span><span class="p">.</span><span class="n">none</span><span class="p">);</span>
+<span class="k">try</span><span class="w"> </span><span class="n">jobs</span><span class="p">.</span><span class="n">nilo_start</span><span class="p">(</span><span class="n">threaded</span><span class="p">.</span><span class="n">io</span><span class="p">(),</span><span class="w"> </span><span class="p">.</span><span class="n">none</span><span class="p">);</span>
+<span class="k">try</span><span class="w"> </span><span class="n">jobs</span><span class="p">.</span><span class="n">serveOn</span><span class="p">(</span><span class="n">threaded</span><span class="p">.</span><span class="n">io</span><span class="p">());</span><span class="w">   </span><span class="c1">// returns when cancelled</span>
+</code></pre></div>
+<p>Cancelling it is yours: there is no signal handler here, because the one in
+<code>nilo_http</code> belongs to the server.</p>
+<p><strong>This is also the shape a CLI has</strong> — a <code>Db</code>, a <code>Jobs</code>, maybe a
+<code>fetch.Client</code>, on one <code>Io.Threaded</code> and no <code>App</code> anywhere — and a push from
+it wakes its own workers the way a server's does. What it does not get is
+a row pushed by a <em>second</em> process on the same table: that one is found by
+the poll, or by a <code>jobs.wake()</code> the second process cannot make. Two
+processes on one queue is what <code>poll_ms</code> is for.</p>
+<h2 id="testing">Testing<a class="headerlink" href="#testing" title="Permanent link">&para;</a></h2>
+<p>A queue over <code>job.Memory</code> needs no database, no server and no <code>Io</code>, and
+<code>drain</code> runs everything due on the thread it is called from. A job that
+takes a <code>*Db</code> still needs one, and a SQLite file in memory is the one
+<code>nilo_sql</code>'s own tests use:</p>
+<div class="highlight"><pre><span></span><code><span class="k">test</span><span class="w"> </span><span class="s">"signing up queues a welcome, and the welcome finds the user"</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">store</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">job</span><span class="p">.</span><span class="n">Memory</span><span class="p">.</span><span class="n">open</span><span class="p">(</span><span class="n">testing</span><span class="p">.</span><span class="n">allocator</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">bytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">20</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="n">store</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span>
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">jobs</span><span class="o">:</span><span class="w"> </span><span class="n">Jobs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">open</span><span class="p">(</span><span class="n">testing</span><span class="p">.</span><span class="n">allocator</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">store</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">db</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">db</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">.{});</span>
+
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">run</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Run</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">init</span><span class="p">(</span><span class="n">testing</span><span class="p">.</span><span class="n">allocator</span><span class="p">);</span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="n">run</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span>
+
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">jobs</span><span class="p">.</span><span class="n">push</span><span class="p">(</span><span class="o">&amp;</span><span class="n">run</span><span class="p">,</span><span class="w"> </span><span class="n">SendWelcome</span><span class="p">{</span><span class="w"> </span><span class="p">.</span><span class="n">user_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">7</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">static</span><span class="p">(</span><span class="s">"a@b.c"</span><span class="p">)</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">.{});</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">testing</span><span class="p">.</span><span class="n">expectEqual</span><span class="p">(</span><span class="nb">@as</span><span class="p">(</span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">),</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">jobs</span><span class="p">.</span><span class="n">drain</span><span class="p">(</span><span class="o">&amp;</span><span class="n">run</span><span class="p">));</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">testing</span><span class="p">.</span><span class="n">expectEqual</span><span class="p">(</span><span class="nb">@as</span><span class="p">(</span><span class="kt">u64</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">),</span><span class="w"> </span><span class="p">(</span><span class="k">try</span><span class="w"> </span><span class="n">jobs</span><span class="p">.</span><span class="n">stats</span><span class="p">(</span><span class="o">&amp;</span><span class="n">run</span><span class="p">)).</span><span class="n">queued</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>drain</code> and <code>runOne</code> take a <code>*nilo.Run</code> and refuse a <code>*Ctx</code> while
+compiling: a job that ran under a request would be a job that could call a
+fail function.</p>
+<p><strong>A test moves the clock with <code>drainAt</code>.</strong> <code>drain</code> runs what is due now;
+<code>drainAt(&amp;run, now)</code> runs what would be due if it were <code>now</code>, in
+microseconds since the epoch, and every read of the clock inside a tick —
+whether a row is due, when a failed run is tried again, when a schedule's
+next tick is — reads that number. So the reminder for tomorrow, the third
+attempt of a backoff, and the report at three in the morning are each a
+call rather than a sleep
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/160-a-queue-is-a-table-in-the-database-you-already-have.md">ADR 160</a>):</p>
+<div class="highlight"><pre><span></span><code><span class="k">test</span><span class="w"> </span><span class="s">"the nudge goes out three days later and not before"</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">nowMicros</span><span class="p">();</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">jobs</span><span class="p">.</span><span class="n">push</span><span class="p">(</span><span class="o">&amp;</span><span class="n">run</span><span class="p">,</span><span class="w"> </span><span class="n">Nudge</span><span class="p">{</span><span class="w"> </span><span class="p">.</span><span class="n">user_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">7</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">after_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">24</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1</span><span class="n">_000</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">testing</span><span class="p">.</span><span class="n">expectEqual</span><span class="p">(</span><span class="nb">@as</span><span class="p">(</span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">),</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">jobs</span><span class="p">.</span><span class="n">drainAt</span><span class="p">(</span><span class="o">&amp;</span><span class="n">run</span><span class="p">,</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">day</span><span class="p">));</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">testing</span><span class="p">.</span><span class="n">expectEqual</span><span class="p">(</span><span class="nb">@as</span><span class="p">(</span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">),</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">jobs</span><span class="p">.</span><span class="n">drainAt</span><span class="p">(</span><span class="o">&amp;</span><span class="n">run</span><span class="p">,</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">day</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">time</span><span class="p">.</span><span class="n">us_per_s</span><span class="p">));</span>
+<span class="p">}</span>
+
+<span class="k">test</span><span class="w"> </span><span class="s">"the report runs at three, and again the next day"</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">jobs</span><span class="p">.</span><span class="n">seedAt</span><span class="p">(</span><span class="o">&amp;</span><span class="n">run</span><span class="p">,</span><span class="w"> </span><span class="n">ten_in_the_morning</span><span class="p">);</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">three</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Nightly</span><span class="p">.</span><span class="n">schedule</span><span class="p">.</span><span class="n">next</span><span class="p">(</span><span class="n">ten_in_the_morning</span><span class="p">);</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">testing</span><span class="p">.</span><span class="n">expectEqual</span><span class="p">(</span><span class="nb">@as</span><span class="p">(</span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">),</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">jobs</span><span class="p">.</span><span class="n">drainAt</span><span class="p">(</span><span class="o">&amp;</span><span class="n">run</span><span class="p">,</span><span class="w"> </span><span class="n">three</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">));</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">testing</span><span class="p">.</span><span class="n">expectEqual</span><span class="p">(</span><span class="nb">@as</span><span class="p">(</span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">),</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">jobs</span><span class="p">.</span><span class="n">drainAt</span><span class="p">(</span><span class="o">&amp;</span><span class="n">run</span><span class="p">,</span><span class="w"> </span><span class="n">three</span><span class="p">));</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">testing</span><span class="p">.</span><span class="n">expectEqual</span><span class="p">(</span><span class="nb">@as</span><span class="p">(</span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">),</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">jobs</span><span class="p">.</span><span class="n">drainAt</span><span class="p">(</span><span class="o">&amp;</span><span class="n">run</span><span class="p">,</span><span class="w"> </span><span class="n">three</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">day</span><span class="p">));</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>seedAt</code> is what <code>serve</code> does at start — queue every schedule's next tick
+— for a test that drains rather than serves. A retry's wait is walked the
+same way: a kind with <code>.exponential = .{ .from_ms = 100, … }</code> that fails
+at <code>t</code> runs again at <code>drainAt(&amp;run, t + 100 * ms)</code>, not at <code>t + 99 * ms</code>,
+and the third attempt at <code>t + 300 * ms</code>. <code>push</code> takes <code>.at</code> for the row
+side of the same arithmetic.</p>
+<p><code>drain</code> itself is <code>drainAt</code> at the moment it was called, and reads the
+clock once: what is due is due against that one reading, so a schedule of
+<code>every(1)</code> under a slow tick cannot keep a drain going for as long as the
+ticks take.</p>
+<h2 id="what-it-costs">What it costs<a class="headerlink" href="#what-it-costs" title="Permanent link">&para;</a></h2>
+<p>Against <a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/017-the-trade-budget-has-four-axes.md">ADR 017</a>'s axes,
+with the numbers in <a href="https://github.com/nevindra/nilo/blob/v0.6.0/bench/result/job.md"><code>bench/result/job.md</code></a>:</p>
+<p><strong>Per request, nothing on a route that does not push.</strong> A route that does
+pays the JSON of the payload out of the request arena — the one allocation
+it already has — and one <code>INSERT</code>: 10 µs on SQLite, 0.9 ms on Postgres
+across a Docker port.</p>
+<p><strong>Per idle worker, one claim per <code>poll_ms</code></strong>: 55 µs of SQLite or 354 µs of
+Postgres a second, which is 0.035% of one connection and where the default
+comes from. A claim that takes a row is 140 µs and 1.2 ms. <strong>Per push, one
+atomic and one futex wake</strong>, which is what takes the whole of <code>poll_ms</code> off
+the latency of a row this process pushed
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/160-a-queue-is-a-table-in-the-database-you-already-have.md">ADR 160</a>).</p>
+<p><strong>Per connection, nothing.</strong> A worker is a fiber per process, and its stack
+is paid once and held at the high-water mark of whatever <code>run</code> touches.</p>
+<p><strong>Per row, a <code>job.Tick</code> built whether or not the <code>run</code> asks for it</strong> —
+three words and a bool on the worker's stack — and a tag test on the
+clock for each of the three or four times a tick reads it, which is what
+lets <code>drainAt</code> hand a test's number to every one of them
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/160-a-queue-is-a-table-in-the-database-you-already-have.md">ADR 160</a>).</p>
+<h2 id="what-it-will-not-do">What it will not do<a class="headerlink" href="#what-it-will-not-do" title="Permanent link">&para;</a></h2>
+<p>Not a priority queue: rows come out in <code>run_at</code> order and nothing else. Not
+a workflow engine, not a rate limiter for a kind — <code>nilo.Gate</code> inside <code>run</code>
+is that — and not exactly once. Not a time zone. Each of those is in
+<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/roadmap.md"><code>docs/roadmap.md</code></a> under <code>nilo_job</code>, with what it is waiting
+for.</p>
+<h2 id="see-also">See also<a class="headerlink" href="#see-also" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/reference/job.md#nilo_job">The reference</a> — the surface as a list.</li>
+<li><a href="../background/">Work that is not a request</a> — the fiber underneath,
+  for work that is a loop rather than a row.</li>
+<li><a href="../sql/transactions/">Transactions</a> — what <code>pushIn</code> joins.</li>
+<li><a href="../cache/">A cache in this process</a> — the Space a status lives in.</li>
+<li><a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/160-a-queue-is-a-table-in-the-database-you-already-have.md">ADR 160</a>
+  — why a table and not a Redis; <a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/161-a-schedule-is-a-type-that-makes-the-caller-choose.md">ADR 161</a>
+  — why <code>overlap</code> and <code>missed</code> have no default.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../s3/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Object storage">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Object storage
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../cache/" class="md-footer__link md-footer__link--next" aria-label="Next: A cache in this process">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                A cache in this process
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.sections", "navigation.top", "navigation.footer", "navigation.indexes", "search.highlight", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

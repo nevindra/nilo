@@ -1,0 +1,2850 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A toolkit for Zig 0.16, and an HTTP server">
+      
+      
+      
+        <link rel="canonical" href="https://nevindra.github.io/nilo/0.6/sql/migrations/">
+      
+      
+        <link rel="prev" href="../sqlite/">
+      
+      
+        <link rel="next" href="../running/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Making the tables - nilo</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#making-the-tables" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="nilo" class="md-header__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            nilo
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Making the tables
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="nilo" class="md-nav__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    nilo
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../handlers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handlers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handling a request
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Handling a request
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../requests/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requests
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../forms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Forms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../responses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Responses
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../cookies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cookies
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sessions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Streaming
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../websocket/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WebSocket
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../grpc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    gRPC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building an application
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Building an application
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../middleware/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Middleware and resolved values
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../static-files/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Static files
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../errors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../background/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that is not a request
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Answering once
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The other modules
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    The other modules
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Talking to a database
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Talking to a database
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A table is a struct
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A Row with more in it
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../writing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Writing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../transactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../raw/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Past one table
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sqlite/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQLite
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Making the tables
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Making the tables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-two-words-nilo-does-not-read" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The two words nilo does not read
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-schema-is-one-value" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The schema is one value
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#creating-them" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Creating them
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Creating them">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#a-column-the-shipped-file-has-not-got" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A column the shipped file has not got
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#changing-them" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changing them
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#applying-them" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Applying them
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#refusing-to-serve-a-database-that-is-behind" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Refusing to serve a database that is behind
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#your-own-db-command" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Your own db command
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Your own db command">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-a-version-file-looks-like-and-where-your-own-steps-go" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What a version file looks like, and where your own steps go
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-sql-beside-it-for-a-database-no-zig-can-reach" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The .sql beside it, for a database no Zig can reach
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porting-an-existing-schema" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Porting an existing schema
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../running/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running it
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../fetch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Calling somebody else's API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../s3/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Object storage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../jobs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that runs later, again, or on a schedule
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../cache/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A cache in this process
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../jwt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Checking somebody else's token
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../id/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Identifiers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Shipping it
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Shipping it
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../openapi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenAPI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deploying/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deploying
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-two-words-nilo-does-not-read" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The two words nilo does not read
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-schema-is-one-value" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The schema is one value
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#creating-them" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Creating them
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Creating them">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#a-column-the-shipped-file-has-not-got" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A column the shipped file has not got
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#changing-them" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changing them
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#applying-them" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Applying them
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#refusing-to-serve-a-database-that-is-behind" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Refusing to serve a database that is behind
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#your-own-db-command" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Your own db command
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Your own db command">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-a-version-file-looks-like-and-where-your-own-steps-go" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What a version file looks like, and where your own steps go
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-sql-beside-it-for-a-database-no-zig-can-reach" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The .sql beside it, for a database no Zig can reach
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porting-an-existing-schema" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Porting an existing schema
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/nevindra/nilo/edit/main/docs/guide/sql/migrations.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="making-the-tables">Making the tables<a class="headerlink" href="#making-the-tables" title="Permanent link">&para;</a></h1>
+<p>The same Row that reads a table can create it, change it, and say whether
+the database it is about to serve is behind. Migrations are the one thing in
+<a href="../">Talking to a database</a> that is not a query.</p>
+<p>Everything the marker says, it says in one place, and every word of it is
+checked while you compile:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Org</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"orgs"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="p">};</span>
+
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">name</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Str</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">Plan</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">free</span><span class="p">,</span><span class="w"> </span><span class="n">team</span><span class="p">,</span><span class="w"> </span><span class="n">enterprise</span><span class="w"> </span><span class="p">};</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">Member</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"members"</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">default</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">created_at</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">now</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">plan</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">free</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">seats</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">unique</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">            </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">columns</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{.</span><span class="n">email</span><span class="p">},</span><span class="w"> </span><span class="p">.</span><span class="n">ignoring_case</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">               </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"members_one_account_per_address"</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">            </span><span class="p">.</span><span class="n">created_at</span><span class="p">,</span>
+<span class="w">            </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">columns</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">org_id</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">created_at</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">desc</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">               </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">left_on</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">references</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">org_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="n">Org</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">cascade</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">};</span>
+
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">org_id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">email</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Str</span><span class="p">,</span>
+<span class="w">    </span><span class="n">plan</span><span class="o">:</span><span class="w"> </span><span class="n">Plan</span><span class="p">,</span>
+<span class="w">    </span><span class="n">seats</span><span class="o">:</span><span class="w"> </span><span class="kt">i32</span><span class="p">,</span>
+<span class="w">    </span><span class="n">created_at</span><span class="o">:</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">Timestamp</span><span class="p">,</span>
+<span class="w">    </span><span class="n">left_on</span><span class="o">:</span><span class="w"> </span><span class="o">?</span><span class="n">sql</span><span class="p">.</span><span class="n">Date</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kr">comptime</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">migrate</span><span class="p">.</span><span class="n">desiredOf</span><span class="p">(</span><span class="n">sql</span><span class="p">.</span><span class="n">Postgres</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">tables</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="w"> </span><span class="n">Org</span><span class="p">,</span><span class="w"> </span><span class="n">Member</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>.default</code> is what the database writes when your insert leaves the column out.
+<code>.now</code> is the one word it has and it only goes on a <code>sql.Timestamp</code>; everything
+else is a literal your column's own Zig type can hold. A column that holds one
+of an enum's words takes one of them written the way a column is — <code>.free</code>, not
+<code>"free"</code>. A default the database has to work out, <code>DEFAULT (lower(x))</code>, is SQL
+you write in a step.</p>
+<p>A column whose default is written in a step, or filled by a trigger, goes in <code>.filled = .{ … }</code> as well, so an insert may leave it out: nilo refuses an insert that leaves out a column nothing fills (<a href="../writing/">writing rows</a>). <code>.filled</code> renders nothing into the table.</p>
+<p><code>plan: Plan</code> needs nothing said about it: it is a <code>text</code> column with
+<code>CHECK ("plan" IN ('free', 'team', 'enterprise'))</code> beside it, and the words are
+in the snapshot — so adding a word to the enum is a migration, rather than an
+insert your database refuses. (An enum that names its own database type with
+<code>pub const nilo_column = "user_role"</code> is the database's, and nilo leaves its
+words alone.)</p>
+<p><code>.unique</code> and <code>.index</code> take one column (<code>.email</code>), several as one constraint
+(<code>.{ .org_id, .created_at }</code>), or the named form when there is something to say
+about it. <code>.ignoring_case</code> is <code>lower("email")</code> on Postgres and <code>COLLATE NOCASE</code>
+on SQLite — the case where two people sign up as <code>Wati@</code> and <code>wati@</code> and the
+plain unique takes both.</p>
+<p><strong>Give a constraint a <code>.name</code> when the violation is a sentence somebody has to
+read.</strong> Postgres reports one by name and nothing else, so
+<code>members_one_account_per_address</code> is something your support engineer can act on
+where <code>members_email_key</code> is a column list they have to go and look up. Any
+name over 63 bytes is a compile error on both databases, because Postgres cuts
+a longer one down in a <code>NOTICE</code> nobody reads.</p>
+<p>An index can read a column downwards (<code>.{ .created_at = .desc }</code>) and can cover
+part of the table (<code>.where</code>). The predicate is the same grammar a <code>db.select</code>
+condition uses, not a string: <code>null</code> is <code>IS NULL</code>, <code>.{ .ne = null }</code> is
+<code>IS NOT NULL</code>, a literal is <code>=</code> and <code>.{ .ne = lit }</code> is <code>&lt;&gt;</code>. An index over an
+expression — <code>lower(btrim(site))</code> — is SQL you write in a step.</p>
+<p><code>.references</code> is keyed by the column doing the pointing and it names the <strong>Row</strong>
+rather than a table, so renaming the table moves the key with it. A third entry
+says what happens on delete: <code>.cascade</code>, <code>.restrict</code> or <code>.set_null</code>. The two
+sides have to hold the same type, and a <code>.set_null</code> on a column the Row cannot
+hold a null in is a compile error — both are things the database would find at
+the first insert, in a message about a cast.</p>
+<p><strong>Name the table as text when you cannot import its Row.</strong> Some programs are
+laid out so that one file may not <code>@import</code> another — a context per directory,
+where contexts never import each other — and <code>.{ Org, .id }</code> needs the type in
+scope. <code>.{ "orgs", .id, .cascade }</code> says the same key without it:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Comment</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"comments"</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">references</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">author_staff_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="s">"staff"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">};</span>
+
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">author_staff_id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">body</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">Staff</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"staff"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">managed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="p">};</span>
+
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">email</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="c1">// The schema `sql.cli.Tool` and `db.checking` are given, and the one place every</span>
+<span class="c1">// Row is together — so it is where `"staff"` is resolved and where the two</span>
+<span class="c1">// columns' types are compared. Written `comptime` here because that is what</span>
+<span class="c1">// makes this page's own check run; in a program it is `Tool(Db, schema)`.</span>
+<span class="kr">comptime</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">migrate</span><span class="p">.</span><span class="n">desiredOf</span><span class="p">(</span><span class="n">sql</span><span class="p">.</span><span class="n">Postgres</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">tables</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="w"> </span><span class="n">Comment</span><span class="p">,</span><span class="w"> </span><span class="n">Staff</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>You do not lose the type check by naming the table; it moves. A table no Row in
+that list claims is a compile error naming both spellings
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/181-the-marker-has-two-kinds-of-word.md">ADR 181</a>), and
+<code>.managed = false</code> is how a table this program only reads gets into the list
+without the tool offering to create it.</p>
+<p><strong>A key can span two columns</strong>, which is how a rule like "the Epic has to be on
+the same board" gets said in the schema instead of in a comment:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Epic</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"epics"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">board_id</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">};</span>
+
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">board_id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">title</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">Task</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"tasks"</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">references</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">            </span><span class="p">.</span><span class="n">epic</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">                </span><span class="p">.</span><span class="n">columns</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">epic_id</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">board_id</span><span class="w"> </span><span class="p">},</span>
+<span class="w">                </span><span class="p">.</span><span class="n">to</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="n">Epic</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">board_id</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">                </span><span class="p">.</span><span class="n">on_delete</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">cascade</span><span class="p">,</span>
+<span class="w">            </span><span class="p">},</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">    </span><span class="p">};</span>
+
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">epic_id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">board_id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">title</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kr">comptime</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">migrate</span><span class="p">.</span><span class="n">desiredOf</span><span class="p">(</span><span class="n">sql</span><span class="p">.</span><span class="n">Postgres</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">tables</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="w"> </span><span class="n">Task</span><span class="p">,</span><span class="w"> </span><span class="n">Epic</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The entry is keyed by a label (<code>.epic</code>) rather than by a column, because a Zig
+field name cannot be a tuple. <code>.to</code> takes a Row or a name, the columns line up
+by position, and a mismatched count is a compile error. <code>.exists</code> joins on every
+column of it, not just the first.</p>
+<p>You do not say whether the key is generated. An integer key is
+<code>GENERATED BY DEFAULT AS IDENTITY</code> on Postgres and
+<code>INTEGER PRIMARY KEY AUTOINCREMENT</code> on SQLite; anything else — a <code>sql.Uuid</code>, a
+slug — is a key your insert fills. That is a rule rather than a word, because
+there is no case where you want the other one.</p>
+<p><strong>An array column takes a default like any other</strong>, and <code>&amp;.{}</code> is the one every
+<code>NOT NULL</code> array column in a hand-written schema has:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Agent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"agents"</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">default</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">read_tags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{},</span><span class="w"> </span><span class="p">.</span><span class="n">write_capabilities</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="w"> </span><span class="s">"deals"</span><span class="p">,</span><span class="w"> </span><span class="s">"work"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">};</span>
+
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">read_tags</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="n">Str</span><span class="p">,</span>
+<span class="w">    </span><span class="n">write_capabilities</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="n">Str</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kr">comptime</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">migrate</span><span class="p">.</span><span class="n">desiredOf</span><span class="p">(</span><span class="n">sql</span><span class="p">.</span><span class="n">Postgres</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">tables</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="n">Agent</span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Each element goes through the column's own element type, so a number where a
+word goes does not compile. A comma, a brace, a quote, a backslash or an
+apostrophe inside an element is escaped, so the array Postgres stores has as
+many elements as you wrote
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/181-the-marker-has-two-kinds-of-word.md">ADR 181</a>).</p>
+<h2 id="the-two-words-nilo-does-not-read">The two words nilo does not read<a class="headerlink" href="#the-two-words-nilo-does-not-read" title="Permanent link">&para;</a></h2>
+<p>Everything above is checked by the compiler. Two words are not, on purpose: a
+<code>CHECK</code> body and a trigger are SQL, and reading them means shipping a SQL
+parser. What nilo does instead is <strong>own the name and hash the body</strong>
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/181-the-marker-has-two-kinds-of-word.md">ADR 181</a>):</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Invoice</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"invoices"</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">check</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">            </span><span class="p">.</span><span class="n">invoices_amount_is_positive</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"amount &gt; 0"</span><span class="p">,</span>
+<span class="w">            </span><span class="p">.</span><span class="n">invoices_dates_run_forwards</span><span class="w"> </span><span class="o">=</span>
+<span class="w">                </span><span class="s">"sent_on IS NULL OR paid_on IS NULL OR sent_on &lt;= paid_on"</span><span class="p">,</span>
+<span class="w">            </span><span class="p">.</span><span class="n">invoices_kind_is_known</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">words_of</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">kind</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">trigger</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">            </span><span class="p">.</span><span class="n">invoices_touch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">                </span><span class="p">.</span><span class="n">when</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"BEFORE UPDATE"</span><span class="p">,</span>
+<span class="w">                </span><span class="p">.</span><span class="n">run</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"FOR EACH ROW EXECUTE FUNCTION set_updated_at()"</span><span class="p">,</span>
+<span class="w">            </span><span class="p">},</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">    </span><span class="p">};</span>
+
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">amount</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">kind</span><span class="o">:</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">sale</span><span class="p">,</span><span class="w"> </span><span class="n">refund</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="n">sent_on</span><span class="o">:</span><span class="w"> </span><span class="o">?</span><span class="n">sql</span><span class="p">.</span><span class="n">Date</span><span class="p">,</span>
+<span class="w">    </span><span class="n">paid_on</span><span class="o">:</span><span class="w"> </span><span class="o">?</span><span class="n">sql</span><span class="p">.</span><span class="n">Date</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kr">comptime</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">migrate</span><span class="p">.</span><span class="n">desiredOf</span><span class="p">(</span><span class="n">sql</span><span class="p">.</span><span class="n">Postgres</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">tables</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="n">Invoice</span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong>The key is the name the object goes into the database under.</strong> A <code>.unique</code> can
+derive one from its columns; a check has no columns, and a constraint nobody
+named is reported by Postgres under a name it made up. It is also the whole of
+what Postgres says when a row breaks it, so it is worth writing.</p>
+<p>The diff has three cases and no fourth: same name and same hash, nothing to do;
+same name and a different hash, drop and create; a name your Rows no longer
+have, drop. The snapshot records the name and sixteen hex characters, not the
+body — a view is sixty lines, and a <code>.zon</code> file carrying them stops being
+readable.</p>
+<p><strong>A trigger is two halves because nilo writes <code>ON "invoices"</code> between them.</strong>
+The table is the one thing the marker already knows, and a second copy of it
+stops matching the day you rename the table — a trigger left on the old table is
+a trigger that quietly stops running. <code>.when</code> is what goes before, <code>.run</code> is
+what goes after.</p>
+<p><code>.{ .words_of = .kind }</code> is the same <code>.check</code> word doing a different job: it
+names the <code>CHECK</code> an enum column already generates, instead of letting it be
+<code>invoices_kind_check</code>. Moving that name is a migration, because the constraint
+in your database still has the old one.</p>
+<p>What this does not do is check your SQL. The database does, inside the version's
+transaction, which is the same moment a <code>.data</code> step is checked. A <code>CHECK</code> rides
+inside the <code>CREATE TABLE</code>, so SQLite takes it too; <em>changing</em> one there is the
+four-statement rebuild every other table constraint needs, and the diff spells
+it out. A trigger is a statement of its own and both databases do all three
+cases.</p>
+<h2 id="the-schema-is-one-value">The schema is one value<a class="headerlink" href="#the-schema-is-one-value" title="Permanent link">&para;</a></h2>
+<p>Every call on this page is given the same thing: a <code>sql.Schema</code>, which is
+every Row and the three kinds of object that hang off the schema rather than
+off a table
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/181-the-marker-has-two-kinds-of-word.md">ADR 181</a>).</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">schema</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">Schema</span><span class="p">{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">extensions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="s">"pgcrypto"</span><span class="p">},</span>
+<span class="w">    </span><span class="p">.</span><span class="n">functions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"set_updated_at"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span>
+<span class="w">            </span><span class="sh">\\CREATE OR REPLACE FUNCTION set_updated_at() RETURNS trigger AS $$</span>
+<span class="w">            </span><span class="sh">\\BEGIN NEW.updated_at = now(); RETURN NEW; END</span>
+<span class="w">            </span><span class="sh">\\$$ LANGUAGE plpgsql</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="p">.</span><span class="n">tables</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="w"> </span><span class="n">User</span><span class="p">,</span><span class="w"> </span><span class="n">Order</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">.</span><span class="n">views</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"open_orders"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"SELECT id, user_id, total FROM orders WHERE status = 'open'"</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>Write it once and hand it to <code>db.checking(schema)</code>, <code>sql.cli.Tool(Db, schema)</code>
+and <code>createMissing(&amp;db, &amp;run, schema)</code>. That is the whole reason it is a value
+rather than three lists: the tool, the startup check and the boot cannot
+disagree about what the database is. A program with tables and nothing else
+writes <code>.{ .tables = &amp;.{ User, Order } }</code> and is done.</p>
+<p><code>@embedFile</code> is the point of the two named lists. A sixty-line view belongs in
+<code>sql/open_orders.sql</code> with highlighting, not in sixty <code>\\</code> lines, and
+<code>.body = @embedFile("sql/open_orders.sql")</code> puts it there. The snapshot
+records a function or a view as its name and a hash, the way it records a
+check, so the file stays readable however long the SQL is.</p>
+<p>Two of the three have a shape nilo holds you to, and both are compile errors
+rather than a failed apply:</p>
+<ul>
+<li>A <strong>function</strong> is the whole <code>CREATE OR REPLACE FUNCTION &lt;name&gt; …</code>
+  statement, and it has to open with those words and that name. That is what
+  makes applying it twice applying it once, and what lets a changed body be
+  one step in the diff rather than a drop and a create.</li>
+<li>A <strong>view</strong> is the <code>SELECT</code>. nilo writes <code>CREATE VIEW "name" AS</code> in front of
+  it, for the reason a trigger is two words: the name is the thing the schema
+  already knows, and a second copy of it stops matching the day it is renamed.
+  A view whose text moved is dropped before any table moves and remade after
+  every table has, so a view reading a column about to go is never in the way.</li>
+</ul>
+<p>An extension is a name. <code>CREATE EXTENSION IF NOT EXISTS</code> when it arrives, and
+<code>DROP EXTENSION</code> when it leaves the list — marked destructive, because dropping
+one drops every object it made. SQLite has neither extensions nor
+<code>CREATE FUNCTION</code> as statements, so both lists are refused there; views it has.</p>
+<p><strong>The tool owns the order</strong>: extensions, functions, tables by reference, each
+table's indexes and triggers, then views. What is none of these — a backfill,
+a seed row, a <code>create_hypertable</code> — is what a version file's <code>before</code> and
+<code>after</code> slots are for.</p>
+<h2 id="creating-them">Creating them<a class="headerlink" href="#creating-them" title="Permanent link">&para;</a></h2>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">migrate</span><span class="p">.</span><span class="n">createMissing</span><span class="p">(</span><span class="o">&amp;</span><span class="n">db</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">run</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">tables</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="n">User</span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<p>One <code>CREATE TABLE IF NOT EXISTS</code> per Row plus its indexes, all in one
+transaction. <strong>The order comes from the references, not from your list</strong>:
+foreign keys are written inline, which is the only shape SQLite has, so <code>orgs</code>
+is created before <code>members</code> whichever way round you wrote them. Two tables
+pointing at each other is a compile error naming both, with the way out in it.</p>
+<p>Run it again and nothing happens, which is what a boot needs. This is for a
+test, a fixture, or a single-file SQLite application — it creates what is
+missing and never alters what is there.</p>
+<p>In a program that serves, the boot is where it goes, and the boot is inside
+<code>listen()</code>: register it with <code>app.before</code> and it runs once the pool is open,
+on the server's own loop, before the first request
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/180-work-that-needs-the-services-runs-on-their-loop.md">ADR 180</a>).</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">makeTables</span><span class="p">(</span><span class="n">run</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Run</span><span class="p">,</span><span class="w"> </span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">sql</span><span class="p">.</span><span class="n">Db</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">migrate</span><span class="p">.</span><span class="n">createMissing</span><span class="p">(</span><span class="n">db</span><span class="p">,</span><span class="w"> </span><span class="n">run</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">tables</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="n">User</span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="n">db</span><span class="p">.</span><span class="n">checking</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">tables</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="n">User</span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">provide</span><span class="p">(</span><span class="o">&amp;</span><span class="n">db</span><span class="p">);</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">before</span><span class="p">(</span><span class="n">makeTables</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="o">&amp;</span><span class="n">db</span><span class="p">});</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">listen</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">port</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8080</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<p><strong><code>db.checking</code> and <code>createMissing</code> go together</strong>, and in that order of
+events: the pool opens, <code>before</code> makes the tables, and then the schema check
+runs and reads what it made. A first boot on an empty file is clean, and a
+Row that has drifted from a table <code>createMissing</code> will not alter is still
+refused at boot. The check is a <code>nilo_check</code>, which the App runs after the
+work <code>before</code> registered, and <code>app.start(io)</code> runs the same three steps for
+a test (<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/180-work-that-needs-the-services-runs-on-their-loop.md">ADR 180</a>).
+<a href="https://github.com/nevindra/nilo/blob/v0.6.0/examples/sqlite/main.zig"><code>examples/sqlite/</code></a> is this program.</p>
+<h3 id="a-column-the-shipped-file-has-not-got">A column the shipped file has not got<a class="headerlink" href="#a-column-the-shipped-file-has-not-got" title="Permanent link">&para;</a></h3>
+<p>A single-file program that shipped <code>downloads</code> with five columns and now has
+a Row with eight does not want a ledger and version files for three <code>ADD
+COLUMN</code>s, and writing the three by hand copies a type mapping that drifts
+the next time nilo's moves. <code>addMissingColumns</code> is the step after
+<code>createMissing</code> for exactly that program
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/123-a-migration-is-a-diff-against-a-snapshot.md">ADR 123</a>):</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">migrate</span><span class="p">.</span><span class="n">createMissing</span><span class="p">(</span><span class="o">&amp;</span><span class="n">db</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">run</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">tables</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="n">User</span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">migrate</span><span class="p">.</span><span class="n">addMissingColumns</span><span class="p">(</span><span class="o">&amp;</span><span class="n">db</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">run</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">tables</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="n">User</span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<p>One <code>ALTER TABLE … ADD COLUMN</code> per field the table lacks, typed from the same
+<code>Desc</code> the create reads — <code>pragma_table_info</code> on SQLite, <code>pg_catalog</code> on
+Postgres — in one transaction, and the answer is how many were added: three
+the first time, zero at every boot after.</p>
+<p><strong>A required column with no default is refused</strong>, <code>error.NeedsBackfill</code>, with
+the statement it would have sent in the log, and nothing is sent. SQLite
+refuses that <code>ALTER</code> outright and Postgres refuses it on a table with rows,
+so it is not a statement nilo can send and mean. Give the field a <code>.default</code>
+in the marker — the rows already there get it and there is nothing to
+backfill — or make it optional, or write the version. A table that is not
+there is skipped, because it is <code>createMissing</code>'s. Nothing else moves: a
+column the table has and the Row does not is left, a type that changed is
+left, and <code>db.checking</code> is what says so.</p>
+<h2 id="changing-them">Changing them<a class="headerlink" href="#changing-them" title="Permanent link">&para;</a></h2>
+<p>The other half is a diff, and <strong>it needs no database on either side</strong>:</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">before</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">snapshot</span><span class="p">.</span><span class="n">empty</span><span class="p">(</span><span class="n">sql</span><span class="p">.</span><span class="n">Db</span><span class="p">.</span><span class="n">Dialect</span><span class="p">);</span><span class="w">   </span><span class="c1">// or snapshot.zon, read back</span>
+<span class="kr">const</span><span class="w"> </span><span class="n">desired</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kr">comptime</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">migrate</span><span class="p">.</span><span class="n">desiredOf</span><span class="p">(</span><span class="n">sql</span><span class="p">.</span><span class="n">Db</span><span class="p">.</span><span class="n">Dialect</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">tables</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="n">User</span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">change</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">migrate</span><span class="p">.</span><span class="n">plan</span><span class="p">(</span><span class="n">gpa</span><span class="p">,</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">Db</span><span class="p">.</span><span class="n">Dialect</span><span class="p">,</span><span class="w"> </span><span class="n">desired</span><span class="p">,</span><span class="w"> </span><span class="n">before</span><span class="p">);</span>
+</code></pre></div>
+<p><code>desired</code> is your types. <code>before</code> is <code>migrations/snapshot.zon</code>, a file you
+commit, which is what the last diff believed the schema was. Two files, so this
+runs on a plane — and two branches that both generate conflict in <strong>git</strong>,
+which is a conflict worth having, rather than at deploy.</p>
+<p><code>change.steps</code> is what to run, each with its <code>sql</code> and a line of <code>why</code>.
+<code>change.problems</code> is what the diff will not write, and <strong>all of them come back
+rather than the first</strong>: a column that moved in a way SQLite cannot follow — its
+type, its nullability, its default or an enum's words, since SQLite has neither
+<code>ALTER COLUMN</code> nor a way to replace a constraint — and any foreign-key change on
+a table that already exists, because the one-statement form takes an
+<code>ACCESS EXCLUSIVE</code> lock and scans the table. The problem spells out the
+<code>ADD CONSTRAINT … NOT VALID</code> then <code>VALIDATE CONSTRAINT</code> pair to write instead. A
+column that moved three ways gets one problem naming all three, because what it
+needs is one rewrite.</p>
+<p>A renamed column is written in the type, not asked at a prompt:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Renamed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"members"</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">was</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"handle"</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">};</span>
+
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">email</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Str</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kr">comptime</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">migrate</span><span class="p">.</span><span class="n">desiredOf</span><span class="p">(</span><span class="n">sql</span><span class="p">.</span><span class="n">Postgres</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">tables</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="n">Renamed</span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Every other tool guesses that a dropped <code>handle</code> and a new <code>email</code> are the same
+column, then asks you at a prompt. The answer is in your head; putting it in the
+type means the same code produces the same migration for you, for CI and for the
+next person.</p>
+<h2 id="applying-them">Applying them<a class="headerlink" href="#applying-them" title="Permanent link">&para;</a></h2>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">chain</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">migrate</span><span class="p">.</span><span class="n">chainOf</span><span class="p">(</span><span class="n">run</span><span class="p">.</span><span class="n">arena</span><span class="p">(),</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{});</span>
+
+<span class="k">try</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">migrate</span><span class="p">.</span><span class="n">ensureLedger</span><span class="p">(</span><span class="o">&amp;</span><span class="n">db</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">run</span><span class="p">);</span>
+<span class="kr">const</span><span class="w"> </span><span class="n">ran</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">migrate</span><span class="p">.</span><span class="n">applyPending</span><span class="p">(</span><span class="o">&amp;</span><span class="n">db</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">run</span><span class="p">,</span><span class="w"> </span><span class="n">chain</span><span class="p">);</span>
+</code></pre></div>
+<p><code>nilo_migrations</code> is an ordinary Row. One version is one transaction: take the
+advisory lock, check whether this version is already there, run every step,
+write the row, commit. It is skipped when it was already applied, which is what
+nine of ten replicas booting together get — <strong>the lock is not decoration</strong>, and
+it is the part a hand-written runner usually leaves out.</p>
+<p>Each version's hash is taken over its own steps chained onto the one before it,
+so editing a migration that has already run moves that version and every version
+after it. <code>sql.migrate.drift</code> is what asks the database whether anybody has.</p>
+<p>The hash is not a field on the version. <code>chainOf</code> works the whole list out in
+one pass, because a hash somebody can type in is a hash somebody can type in
+wrong, and a wrong one makes the drift check look like it is working.</p>
+<p>A version is a <em>list</em> of steps, and one of them can be SQL you wrote. That is
+the shape expand and contract needs: add the column, backfill it, tighten it to
+<code>NOT NULL</code>, all in one version and one transaction. An <code>up</code>/<code>down</code> pair has
+nowhere to put the middle one.</p>
+<p>There is no <code>down</code>. A migration that has run against production data cannot be
+undone by a statement written before anybody knew what the data was: dropping
+the column you just added does not bring back what was in it. Forward-only. On a
+laptop, the way back is to drop the database and migrate again, and while you
+are still on version 1, <code>db generate --baseline</code> re-derives it in place.</p>
+<p>A program that applies its own migrations at boot puts the three lines above
+in a function and hands it to <code>app.before</code>, the way <code>makeTables</code> is above. If
+it fails, the server does not start: a migration that could not run is a
+database this binary must not serve. Do not open the pool yourself with
+<code>app.start(io)</code> and then call <code>listen()</code> — that hands the pool one loop and
+the requests another, and it is refused
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/180-work-that-needs-the-services-runs-on-their-loop.md">ADR 180</a>).</p>
+<h2 id="refusing-to-serve-a-database-that-is-behind">Refusing to serve a database that is behind<a class="headerlink" href="#refusing-to-serve-a-database-that-is-behind" title="Permanent link">&para;</a></h2>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="n">db</span><span class="p">.</span><span class="n">expecting</span><span class="p">(</span><span class="mi">7</span><span class="p">);</span>
+</code></pre></div>
+<p>One query, run by <code>listen()</code> on the pool it just opened. This catches one
+incident shape and it is a common one: the code went out before the migration
+did, and every request touching the new column answers 500 until somebody
+notices. The number is the generated manifest's head — <code>manifest.head</code> — so
+the guard moves with the migrations and nobody types it.</p>
+<p>A database <em>ahead</em> of the binary is allowed and only logged — that is the
+ordinary middle of a two-stage deploy. A database that cannot be asked starts
+with a warning, the way <code>db.checking</code> does. <code>sql.migrate.expect(&amp;db, &amp;run, 7)</code>
+is the same check as a call, for a script that has a <code>Run</code> in hand, and
+<code>sql.migrate.standing</code> is the same question as a value if you would rather
+decide yourself.</p>
+<h2 id="your-own-db-command">Your own <code>db</code> command<a class="headerlink" href="#your-own-db-command" title="Permanent link">&para;</a></h2>
+<p>Everything above is callable, but nobody wants to call it. <code>sql.cli</code> is the
+commands, so your project's migration tool is one small file:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">std</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@import</span><span class="p">(</span><span class="s">"std"</span><span class="p">);</span>
+<span class="kr">const</span><span class="w"> </span><span class="n">sql</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@import</span><span class="p">(</span><span class="s">"nilo_sql"</span><span class="p">);</span>
+<span class="kr">const</span><span class="w"> </span><span class="n">manifest</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@import</span><span class="p">(</span><span class="s">"migrations/manifest.zig"</span><span class="p">);</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">Db</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">Sqlite</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">threading</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">in_fiber</span><span class="w"> </span><span class="p">});</span>
+<span class="kr">const</span><span class="w"> </span><span class="n">Tool</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">cli</span><span class="p">.</span><span class="n">Tool</span><span class="p">(</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">tables</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="w"> </span><span class="n">User</span><span class="p">,</span><span class="w"> </span><span class="n">Org</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+
+<span class="kr">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">main</span><span class="p">(</span><span class="n">init</span><span class="o">:</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">process</span><span class="p">.</span><span class="n">Init</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">u8</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">buf</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="mi">8192</span><span class="p">]</span><span class="kt">u8</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">undefined</span><span class="p">;</span>
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">fw</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">Io</span><span class="p">.</span><span class="n">File</span><span class="p">.</span><span class="n">stdout</span><span class="p">().</span><span class="n">writer</span><span class="p">(</span><span class="n">init</span><span class="p">.</span><span class="n">io</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">buf</span><span class="p">);</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">out</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">fw</span><span class="p">.</span><span class="n">interface</span><span class="p">;</span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="n">out</span><span class="p">.</span><span class="n">flush</span><span class="p">()</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">{};</span>
+
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">argv</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">init</span><span class="p">.</span><span class="n">minimal</span><span class="p">.</span><span class="n">args</span><span class="p">.</span><span class="n">toSlice</span><span class="p">(</span><span class="n">init</span><span class="p">.</span><span class="n">arena</span><span class="p">.</span><span class="n">allocator</span><span class="p">());</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">req</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">cli</span><span class="p">.</span><span class="n">parse</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">..])</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="o">|</span><span class="n">err</span><span class="o">|</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">cli</span><span class="p">.</span><span class="n">explain</span><span class="p">(</span><span class="n">out</span><span class="p">,</span><span class="w"> </span><span class="n">err</span><span class="p">);</span>
+
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">db</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Db</span><span class="p">.</span><span class="n">init</span><span class="p">(</span><span class="n">init</span><span class="p">.</span><span class="n">gpa</span><span class="p">,</span><span class="w"> </span><span class="s">"app.db"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">nilo_start</span><span class="p">(</span><span class="n">init</span><span class="p">.</span><span class="n">io</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">none</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">Tool</span><span class="p">.</span><span class="n">run</span><span class="p">(</span><span class="n">init</span><span class="p">.</span><span class="n">gpa</span><span class="p">,</span><span class="w"> </span><span class="n">init</span><span class="p">.</span><span class="n">io</span><span class="p">,</span><span class="w"> </span><span class="n">out</span><span class="p">,</span><span class="w"> </span><span class="n">req</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">db</span><span class="p">,</span><span class="w"> </span><span class="n">manifest</span><span class="p">.</span><span class="n">versions</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>nilo owns the parsing, the dispatch and every sentence that comes back. You own
+the allocator, the connection string and the <code>Db</code> type, because those are the
+three things nilo cannot guess.</p>
+<p>Add it to your <code>build.zig</code> as an executable and you have five commands:</p>
+<div class="highlight"><pre><span></span><code><span class="gp">$ </span>db<span class="w"> </span>check<span class="w">                       </span><span class="c1"># do the Rows, the migrations and the .sql twins agree?</span>
+<span class="gp">$ </span>db<span class="w"> </span>generate<span class="w"> </span>--name<span class="w"> </span>add_nickname
+<span class="gp">$ </span>db<span class="w"> </span>generate<span class="w"> </span>--name<span class="w"> </span>schema<span class="w"> </span>--baseline<span class="w">   </span><span class="c1"># re-derive version 1, keeping your own steps</span>
+<span class="gp">$ </span>db<span class="w"> </span>status<span class="w">                      </span><span class="c1"># what this database has, and what is waiting</span>
+<span class="gp">$ </span>db<span class="w"> </span>migrate<span class="w">                     </span><span class="c1"># apply it</span>
+<span class="gp">$ </span>db<span class="w"> </span>verify<span class="w">                      </span><span class="c1"># has an applied version been edited since?</span>
+</code></pre></div>
+<p><code>generate</code> and <code>check</code> never open the database. They diff your Rows against
+<code>migrations/snapshot.zon</code>, which is why they run on a laptop with nothing
+installed and in CI with no service container.</p>
+<p><strong>The exit code is the whole API for CI.</strong> <code>0</code> did what was asked. <code>1</code> you have
+something to do. <code>2</code> the command line was wrong. <code>db check</code> in a pipeline needs
+no output parsing at all.</p>
+<p>Removing a field is the one thing <code>generate</code> will not do quietly:</p>
+<div class="highlight"><pre><span></span><code><span class="gp">$ </span>db<span class="w"> </span>generate<span class="w"> </span>--name<span class="w"> </span>drop_nickname
+<span class="go">Nothing written. Some of this loses data that nothing brings back:</span>
+
+<span class="go">  drop users.nickname, which no field reads</span>
+<span class="go">    ALTER TABLE "users" DROP COLUMN "nickname"</span>
+
+<span class="go">The rest of the version is fine. Run it again with `--drop` when you have read</span>
+<span class="go">the above, and the generated file in migrations/ will say that you did.</span>
+</code></pre></div>
+<p>The generated file is Zig you can read, and it is exactly what runs: those
+steps, in that order, in one transaction.</p>
+<h3 id="what-a-version-file-looks-like-and-where-your-own-steps-go">What a version file looks like, and where your own steps go<a class="headerlink" href="#what-a-version-file-looks-like-and-where-your-own-steps-go" title="Permanent link">&para;</a></h3>
+<p>Only one declaration in it is generated. The other three are yours:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">migrate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@import</span><span class="p">(</span><span class="s">"nilo_sql"</span><span class="p">).</span><span class="n">migrate</span><span class="p">;</span>
+
+<span class="c1">/// Steps of your own that have to run *before* the generated ones — what is</span>
+<span class="c1">/// not an extension, a function, a table or a view, since those four the</span>
+<span class="c1">/// schema already orders.</span>
+<span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">before</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="n">migrate</span><span class="p">.</span><span class="n">Step</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{};</span>
+
+<span class="c1">/// And the ones that run after: a backfill, a seed row, a `create_hypertable`.</span>
+<span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">after</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="n">migrate</span><span class="p">.</span><span class="n">Step</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{};</span>
+
+<span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">version</span><span class="o">:</span><span class="w"> </span><span class="n">migrate</span><span class="p">.</span><span class="n">Version</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">number</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"schema"</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">steps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">before</span><span class="w"> </span><span class="o">++</span><span class="w"> </span><span class="n">generated</span><span class="w"> </span><span class="o">++</span><span class="w"> </span><span class="n">after</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="c1">// nilo:generated begin</span>
+<span class="kr">const</span><span class="w"> </span><span class="n">generated</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="n">migrate</span><span class="p">.</span><span class="n">Step</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="p">};</span>
+<span class="c1">// nilo:generated end</span>
+</code></pre></div>
+<p>The generated block is at the bottom because on a ported schema it is four
+thousand lines, and a <code>version</code> under that is a <code>version</code> nobody ever reads.
+Put your own <code>.kind = .data</code> steps in <code>before</code> or <code>after</code> — or change the
+concatenation to pull them from another file, which is what a program that keeps
+its steps beside its Rows will want:</p>
+<div class="highlight"><pre><span></span><code><span class="p">.</span><span class="n">steps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">before</span><span class="w"> </span><span class="o">++</span><span class="w"> </span><span class="n">generated</span><span class="w"> </span><span class="o">++</span><span class="w"> </span><span class="n">billing</span><span class="p">.</span><span class="n">steps</span><span class="w"> </span><span class="o">++</span><span class="w"> </span><span class="n">work</span><span class="p">.</span><span class="n">steps</span><span class="p">,</span>
+</code></pre></div>
+<p>Everything outside the two <code>// nilo:generated</code> lines is kept when the file is
+written again. Do not move or edit either line: a version file that has lost one
+is refused rather than rewritten, because the only other reading is that all of
+it is generated.</p>
+<h3 id="the-sql-beside-it-for-a-database-no-zig-can-reach">The <code>.sql</code> beside it, for a database no Zig can reach<a class="headerlink" href="#the-sql-beside-it-for-a-database-no-zig-can-reach" title="Permanent link">&para;</a></h3>
+<p>Every version file has a twin, written by the same <code>generate</code> and committed
+beside it:</p>
+<div class="highlight"><pre><span></span><code>migrations/0007_work_items_get_a_priority.zig
+migrations/0007_work_items_get_a_priority.sql
+</code></pre></div>
+<p>It is the same steps in the same order, each with its <code>why</code> above it as a
+comment, wrapped in <code>BEGIN</code>/<code>COMMIT</code>, with the ledger table created if it is not
+there and the ledger row on the end:</p>
+<div class="highlight"><pre><span></span><code><span class="k">BEGIN</span><span class="p">;</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="ss">"nilo_migrations"</span><span class="w"> </span><span class="p">(</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="p">);</span>
+
+<span class="c1">-- add work_items.priority</span>
+<span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="ss">"work_items"</span><span class="w"> </span><span class="k">ADD</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="ss">"priority"</span><span class="w"> </span><span class="nb">text</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">'normal'</span><span class="p">;</span>
+
+<span class="k">INSERT</span><span class="w"> </span><span class="k">INTO</span><span class="w"> </span><span class="ss">"nilo_migrations"</span><span class="w"> </span><span class="p">(</span><span class="ss">"version"</span><span class="p">,</span><span class="w"> </span><span class="ss">"name"</span><span class="p">,</span><span class="w"> </span><span class="ss">"hash"</span><span class="p">,</span><span class="w"> </span><span class="ss">"applied_at"</span><span class="p">,</span><span class="w"> </span><span class="ss">"ms"</span><span class="p">)</span>
+<span class="k">VALUES</span><span class="w"> </span><span class="p">(</span><span class="mi">7</span><span class="p">,</span><span class="w"> </span><span class="s1">'work_items_get_a_priority'</span><span class="p">,</span><span class="w"> </span><span class="s1">'9f3c…'</span><span class="p">,</span><span class="w"> </span><span class="n">now</span><span class="p">(),</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+
+<span class="k">COMMIT</span><span class="p">;</span>
+</code></pre></div>
+<p>That last row is what makes it worth having. <code>psql -f</code>, a CI job with no
+toolchain, dbmate, or somebody on a jump host can bring a database to head, and
+<code>db.expecting(manifest.head)</code> still serves it and <code>db verify</code> still holds it to
+the hash. Without the row the database is at 7 and the ledger says 6, and the
+next boot refuses to serve.</p>
+<p><strong>It is an output.</strong> nilo reads the <code>.zig</code> and never this, and a version written
+in SQL by somebody else is not picked up — authoring stays Zig, for the reasons
+<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/123-a-migration-is-a-diff-against-a-snapshot.md">ADR 123</a> gives.
+<code>db check</code> fails when a twin no longer matches the version beside it, so it
+cannot go stale in a branch nobody rebuilt, and any <code>db generate</code> writes it
+again (<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/123-a-migration-is-a-diff-against-a-snapshot.md">ADR 123</a>).</p>
+<p>One case writes nothing and says so: <code>--baseline</code> rewriting a version 1 whose
+<code>before</code> or <code>after</code> hold steps of your own. Those are Zig nothing has compiled
+yet, so the twin's hash cannot be worked out. Build, then run <code>db check</code>, which
+names the file, and any <code>db generate</code> writes it.</p>
+<h3 id="porting-an-existing-schema">Porting an existing schema<a class="headerlink" href="#porting-an-existing-schema" title="Permanent link">&para;</a></h3>
+<p>Porting is not "add a column". It is one version written over and over until it
+matches the reference, and <code>--baseline</code> is what makes that a loop rather than a
+shell script:</p>
+<div class="highlight"><pre><span></span><code><span class="gp">$ </span>db<span class="w"> </span>generate<span class="w"> </span>--name<span class="w"> </span>schema<span class="w"> </span>--baseline
+<span class="go">Rewrote migrations/0001_schema.zig, 59 step(s):</span>
+<span class="go">  …</span>
+<span class="go">The generated block is new; everything else in the file is as you left it.</span>
+</code></pre></div>
+<p>It ignores <code>snapshot.zon</code> entirely, diffs your Rows against nothing, and
+rewrites version 1 where it stands, along with the manifest and the snapshot —
+so <code>db check</code> straight afterwards is green, once the <code>.sql</code> twin has caught up.
+Run it as many times as the port takes.</p>
+<p><strong>A snapshot an older nilo wrote is read, not refused.</strong> If you upgrade nilo and
+the file is in a shape this version no longer writes, <code>generate</code> says one line
+about it, diffs against it anyway and writes the current shape out. You do not
+have to delete anything, which matters because deleting the snapshot at version
+7 makes the next <code>generate</code> write a version 8 that creates every table you
+already have
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/181-the-marker-has-two-kinds-of-word.md">ADR 181</a>).</p>
+<p>It refuses in three places rather than doing something you cannot undo: when the
+directory holds a version it is not re-deriving (version 2 is a diff against
+what version 1 left behind), when <code>--name</code> disagrees with the version 1 already
+there, and when the file it would rewrite has no generated block. Each message
+names the files.</p>
+<p><a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/123-a-migration-is-a-diff-against-a-snapshot.md">ADR 123</a>
+is why the file is shaped that way.</p>
+<p><strong>One file to write before the first run.</strong> The tool imports
+<code>migrations/manifest.zig</code> and <code>generate</code> is what writes it, so it needs to exist
+before the first build. Create it with <code>head</code> at 0 and an empty list — the
+reference has the seven lines — and from then on the tool owns it.</p>
+<p><a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/123-a-migration-is-a-diff-against-a-snapshot.md">ADR 123</a> is the
+design, including why a version is one <code>.zig</code> file and not a <code>.sql</code> one.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../sqlite/" class="md-footer__link md-footer__link--prev" aria-label="Previous: SQLite">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                SQLite
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../running/" class="md-footer__link md-footer__link--next" aria-label="Next: Running it">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Running it
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.sections", "navigation.top", "navigation.footer", "navigation.indexes", "search.highlight", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

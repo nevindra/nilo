@@ -1,0 +1,3016 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A toolkit for Zig 0.16, and an HTTP server">
+      
+      
+      
+        <link rel="canonical" href="https://nevindra.github.io/nilo/0.6/fetch/">
+      
+      
+        <link rel="prev" href="../sql/running/">
+      
+      
+        <link rel="next" href="../s3/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Calling somebody else's API - nilo</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#calling-somebody-elses-api" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="nilo" class="md-header__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            nilo
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Calling somebody else's API
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="nilo" class="md-nav__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    nilo
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../handlers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handlers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handling a request
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Handling a request
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../requests/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requests
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../forms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Forms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../responses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Responses
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cookies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cookies
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sessions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Streaming
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../websocket/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WebSocket
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grpc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    gRPC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building an application
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Building an application
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../middleware/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Middleware and resolved values
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../static-files/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Static files
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../errors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../background/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that is not a request
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Answering once
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The other modules
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    The other modules
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../sql/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Talking to a database
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Talking to a database
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A table is a struct
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/reading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A Row with more in it
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/writing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Writing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/transactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/raw/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Past one table
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/sqlite/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQLite
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/migrations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Making the tables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/running/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running it
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Calling somebody else's API
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Calling somebody else's API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#one-call" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        One call
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reading-the-answer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reading the answer
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-service-as-a-type" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A service as a type
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-clients-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The client's settings
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="The client&#39;s settings">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#a-bound-on-silence-not-on-the-call" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A bound on silence, not on the call
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-answers-instead" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it answers instead
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-body-is-asked-for-uncompressed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The body is asked for uncompressed
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-body-too-big-to-hold" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A body too big to hold
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-costs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it costs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-is-not" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it is not
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#testing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../s3/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Object storage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jobs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that runs later, again, or on a schedule
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cache/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A cache in this process
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jwt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Checking somebody else's token
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../id/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Identifiers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Shipping it
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Shipping it
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../openapi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenAPI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../deploying/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deploying
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#one-call" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        One call
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reading-the-answer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reading the answer
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-service-as-a-type" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A service as a type
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-clients-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The client's settings
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="The client&#39;s settings">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#a-bound-on-silence-not-on-the-call" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A bound on silence, not on the call
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-answers-instead" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it answers instead
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-body-is-asked-for-uncompressed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The body is asked for uncompressed
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-body-too-big-to-hold" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A body too big to hold
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-costs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it costs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-is-not" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it is not
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#testing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/nevindra/nilo/edit/main/docs/guide/fetch.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="calling-somebody-elses-api">Calling somebody else's API<a class="headerlink" href="#calling-somebody-elses-api" title="Permanent link">&para;</a></h1>
+<p><code>nilo_fetch</code> is an HTTP client for the inside of a handler: a payment
+provider, a geocoder, a webhook, somebody's JSON API. It is
+<code>std.http.Client</code> — the pool, HTTP/1.1, TLS — with the policy a server needs
+and a script does not put in front of it, in about sixty lines
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/061-a-fitting-borrows-the-loop.md">ADR 061</a>).</p>
+<p>It is a <strong>Fitting</strong>: it borrows the event loop and owns no destination. A
+<code>sql.Db</code> holds a pool to one database named in its URL; a <code>fetch.Client</code> is
+handed an address on every call and holds no connection to any named system,
+which is what lets one client serve every API a program talks to.</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">fetch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@import</span><span class="p">(</span><span class="s">"nilo_fetch"</span><span class="p">);</span>
+</code></pre></div>
+<p>and in <code>build.zig</code>, beside <code>nilo_http</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"nilo_fetch"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">module</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">module</span><span class="p">(</span><span class="s">"nilo_fetch"</span><span class="p">)</span><span class="w"> </span><span class="p">},</span>
+</code></pre></div>
+<h2 id="one-call">One call<a class="headerlink" href="#one-call" title="Permanent link">&para;</a></h2>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">fetch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@import</span><span class="p">(</span><span class="s">"nilo_fetch"</span><span class="p">);</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">Receipt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="n">amount</span><span class="o">:</span><span class="w"> </span><span class="kt">u64</span><span class="w"> </span><span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">charge</span><span class="p">(</span><span class="n">api</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">fetch</span><span class="p">.</span><span class="n">Client</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">Receipt</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">api</span><span class="p">.</span><span class="n">post</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="s">"https://api.example.com/v1/charges"</span><span class="p">,</span><span class="w"> </span><span class="s">"amount=500"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">res</span><span class="p">.</span><span class="n">ok</span><span class="p">())</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">status</span><span class="p">(</span><span class="mi">502</span><span class="p">,</span><span class="w"> </span><span class="s">"the payment service said no"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">res</span><span class="p">.</span><span class="n">json</span><span class="p">(</span><span class="n">Receipt</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>and in <code>main</code>, once:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">api</span><span class="o">:</span><span class="w"> </span><span class="n">fetch</span><span class="p">.</span><span class="n">Client</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">init</span><span class="p">(</span><span class="n">gpa</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="k">defer</span><span class="w"> </span><span class="n">api</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">provide</span><span class="p">(</span><span class="o">&amp;</span><span class="n">api</span><span class="p">);</span>
+</code></pre></div>
+<p>The client is a <a href="../services/">service</a>: registered once, asked for by type.
+<strong>One is enough for the whole program</strong> — the pool inside it is keyed by
+host, so calls to three different APIs share it without knowing about each
+other, and a second client would load the certificate bundle a second time.</p>
+<p><code>c</code> is a Scope: the <code>*Ctx</code> a handler holds, or a <a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/reference/core.md#run"><code>nilo.Run</code></a>
+where there is no request — a startup path, a ticker, a test. The body comes
+back as a <code>Str</code> in that Scope's arena, so it lives exactly as long as the
+request does and nothing is freed by hand.</p>
+<table>
+<thead>
+<tr>
+<th>Call</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>api.get(c, url, .{})</code></td>
+<td><code>Response</code></td>
+</tr>
+<tr>
+<td><code>api.post(c, url, body, .{})</code></td>
+<td><code>Response</code></td>
+</tr>
+<tr>
+<td><code>api.put(c, url, body, .{})</code></td>
+<td><code>Response</code></td>
+</tr>
+<tr>
+<td><code>api.delete(c, url, .{})</code></td>
+<td><code>Response</code></td>
+</tr>
+<tr>
+<td><code>api.patch(c, url, body_or_null, .{})</code></td>
+<td><code>Response</code></td>
+</tr>
+<tr>
+<td><code>api.send(c, method, url, body_or_null, .{})</code></td>
+<td>for a method the five above do not name</td>
+</tr>
+<tr>
+<td><code>api.postJson(c, url, value, .{})</code></td>
+<td><code>Response</code> — <code>value</code> written out as JSON, <code>content-type</code> said for you. <code>putJson</code>, <code>patchJson</code>, <code>sendJson</code> beside it</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Most APIs take JSON, so the value goes as itself.</strong> <code>postJson</code> writes it
+out with <code>std.json</code> into the Scope's arena — the one allocation every caller
+was already paying to <code>std.json.Stringify.valueAlloc</code> by hand — and says
+<code>content-type: application/json</code>, unless your <code>headers</code> name one, which then
+goes instead. What <code>res.json(T, c)</code> is for the way in, this is for the way
+out (<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/061-a-fitting-borrows-the-loop.md">ADR 061</a>).</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">fetch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@import</span><span class="p">(</span><span class="s">"nilo_fetch"</span><span class="p">);</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">chargeJson</span><span class="p">(</span><span class="n">api</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">fetch</span><span class="p">.</span><span class="n">Client</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">Receipt</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">api</span><span class="p">.</span><span class="n">postJson</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="s">"https://api.example.com/v1/charges"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">amount</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">500</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">currency</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"idr"</span><span class="p">,</span>
+<span class="w">    </span><span class="p">},</span><span class="w"> </span><span class="p">.{});</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">res</span><span class="p">.</span><span class="n">ok</span><span class="p">())</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">status</span><span class="p">(</span><span class="mi">502</span><span class="p">,</span><span class="w"> </span><span class="s">"the payment service said no"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">res</span><span class="p">.</span><span class="n">json</span><span class="p">(</span><span class="n">Receipt</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>A body you already have as text is refused here while compiling — <code>std.json</code>
+would write it out as <em>one JSON string</em>, quotes and escapes and all, and the
+far end would answer 400 to a body that looked right in your editor. That one
+goes through <code>post</code>.</p>
+<p><strong>A query string is a struct, and the encoding is done for you.</strong>
+<code>fetch.withQuery(c, base, params)</code> answers the URL with the params on the
+end of it, percent-encoded, in the Scope's memory — one allocation, sized
+exactly. A field is an int, a bool, text (a <code>[]const u8</code>, a string literal,
+a <code>Str</code>) or an optional of one, where null is the param left out; anything
+else is a Refusal naming the field. A base that already has a <code>?</code> gets <code>&amp;</code>.</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">fetch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@import</span><span class="p">(</span><span class="s">"nilo_fetch"</span><span class="p">);</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">search</span><span class="p">(</span><span class="n">api</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">fetch</span><span class="p">.</span><span class="n">Client</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">q</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Str</span><span class="p">,</span><span class="w"> </span><span class="n">page</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">fetch</span><span class="p">.</span><span class="n">Response</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">fetch</span><span class="p">.</span><span class="n">withQuery</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="s">"https://api.example.com/search"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">q</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">q</span><span class="p">,</span><span class="w"> </span><span class="c1">// "a b" goes as a%20b, "a/b" as a%2Fb</span>
+<span class="w">        </span><span class="p">.</span><span class="n">page</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">page</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">cursor</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@as</span><span class="p">(</span><span class="o">?</span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="kc">null</span><span class="p">),</span><span class="w"> </span><span class="c1">// left out</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">api</span><span class="p">.</span><span class="n">get</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="n">url</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The URL is what every call takes, <code>Exchange.begin</code> included, which is why
+this is a function and not a field on the call. A path segment —
+<code>/v1/charges/{id}</code> with the id encoded on the way in — needs a base for the
+path to hang off, and that is a <a href="#a-service-as-a-type">target</a>: the same
+struct is then the query, and the segments come out of it by name.</p>
+<p>The last argument is a <code>Call</code> — per-call overrides, every field null, so
+<code>.{}</code> is the ordinary case:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>headers</code></td>
+<td><code>[]const std.http.Header</code>, written to the wire in this order. One that std has a slot for — <code>host</code>, <code>authorization</code>, <code>user-agent</code>, <code>content-type</code>, <code>connection</code>, <code>accept-encoding</code> — is sent once, this copy, rather than beside std's own (<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/182-a-header-std-owns-goes-out-once.md">ADR 182</a>)</td>
+</tr>
+<tr>
+<td><code>timeout_ms</code></td>
+<td>this call's own deadline, over the client's</td>
+</tr>
+<tr>
+<td><code>stall_ms</code></td>
+<td>this call's own ceiling on silence, over the client's</td>
+</tr>
+<tr>
+<td><code>max_body</code></td>
+<td>this call's own body ceiling, over the client's</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Headers you did not choose.</strong> A <code>headers</code> taken off a pasted <code>curl</code> line
+carries <code>user-agent</code>, <code>host</code> and <code>authorization</code> as strings, and std writes
+each of those for itself. Hand them over as they are: nilo tells std to leave
+its own copy out, and the list of what std owns is nilo's to know rather
+than yours. The one to know about is <code>accept-encoding</code> — the line goes as
+written, but the client still decodes nothing, so a server that obliges a
+<code>gzip</code> gets <code>error.HttpContentEncodingUnsupported</code> rather than handing you
+a <code>Str</code> full of gzip. Leave it out and the client asks for identity itself.</p>
+<h2 id="reading-the-answer">Reading the answer<a class="headerlink" href="#reading-the-answer" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>res.status</code></td>
+<td><code>std.http.Status</code></td>
+</tr>
+<tr>
+<td><code>res.ok()</code></td>
+<td><code>bool</code> — 2xx</td>
+</tr>
+<tr>
+<td><code>res.body</code></td>
+<td><code>Str</code>, in the Scope's arena. Goes when the request does</td>
+</tr>
+<tr>
+<td><code>res.header(name)</code></td>
+<td><code>?[]const u8</code>, case-insensitively; null when the answer did not carry it</td>
+</tr>
+<tr>
+<td><code>res.headers</code></td>
+<td>the whole header block, kept into the Scope beside the body</td>
+</tr>
+<tr>
+<td><code>res.json(T, c)</code></td>
+<td><code>T</code>, parsed into the same Scope. Unknown fields are ignored</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The answer's headers came back with it.</strong> <code>Retry-After</code> on a 429, <code>ETag</code>
+for the next conditional GET, <code>Location</code> on a 201, <code>Link</code> on an API that
+pages by header, <code>X-RateLimit-Remaining</code> before deciding whether to make the
+next call: <code>res.header("retry-after")</code> reads any of them after the call,
+because the block was kept into the Scope before the body read over it. It
+is the same copy <code>head.keep(c)</code> makes on an <code>Exchange</code>, made for you here
+because a whole-body call has no other moment to make it — one arena
+allocation the size of the block, beside the body's own
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/187-a-head-that-outlives-its-body.md">ADR 187</a>).</p>
+<p><strong>A 4xx or a 5xx is a <code>Response</code>, not an error.</strong> The call worked and the
+service said no; only the caller knows which of those matters and what to
+say about it. The distinction is worth a <code>switch</code>, because the far end's
+status is not yours to forward:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">fetch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@import</span><span class="p">(</span><span class="s">"nilo_fetch"</span><span class="p">);</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">Repo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">full_name</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span>
+<span class="w">    </span><span class="n">stargazers_count</span><span class="o">:</span><span class="w"> </span><span class="kt">u64</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">GitHub</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fetch</span><span class="p">.</span><span class="n">Target</span><span class="p">(</span><span class="s">"github"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">timeout_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="n">_000</span><span class="w"> </span><span class="p">});</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">stars</span><span class="p">(</span><span class="n">github</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">GitHub</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">owner</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Str</span><span class="p">,</span><span class="w"> </span><span class="n">name</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Str</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">u64</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">github</span><span class="p">.</span><span class="n">get</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="s">"/repos/{}/{}"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="n">owner</span><span class="p">,</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">.{})</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="o">|</span><span class="n">err</span><span class="o">|</span><span class="w"> </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">error</span><span class="p">.</span><span class="n">TimedOut</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">status</span><span class="p">(</span><span class="mi">504</span><span class="p">,</span><span class="w"> </span><span class="s">"github took longer than 2s"</span><span class="p">,</span><span class="w"> </span><span class="p">.{}),</span>
+<span class="w">        </span><span class="k">else</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">,</span>
+<span class="w">    </span><span class="p">};</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">res</span><span class="p">.</span><span class="n">ok</span><span class="p">())</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="nb">@intFromEnum</span><span class="p">(</span><span class="n">res</span><span class="p">.</span><span class="n">status</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="mi">404</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">notFound</span><span class="p">(</span><span class="s">"no repository {s}/{s}"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="n">owner</span><span class="p">.</span><span class="n">view</span><span class="p">(),</span><span class="w"> </span><span class="n">name</span><span class="p">.</span><span class="n">view</span><span class="p">()</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">        </span><span class="mi">403</span><span class="p">,</span><span class="w"> </span><span class="mi">429</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">status</span><span class="p">(</span><span class="mi">502</span><span class="p">,</span><span class="w"> </span><span class="s">"github is rate-limiting this address; retry after {s}"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">            </span><span class="n">res</span><span class="p">.</span><span class="n">header</span><span class="p">(</span><span class="s">"retry-after"</span><span class="p">)</span><span class="w"> </span><span class="k">orelse</span><span class="w"> </span><span class="n">res</span><span class="p">.</span><span class="n">header</span><span class="p">(</span><span class="s">"x-ratelimit-reset"</span><span class="p">)</span><span class="w"> </span><span class="k">orelse</span><span class="w"> </span><span class="s">"a while"</span><span class="p">,</span>
+<span class="w">        </span><span class="p">}),</span>
+<span class="w">        </span><span class="k">else</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">status</span><span class="p">(</span><span class="mi">502</span><span class="p">,</span><span class="w"> </span><span class="s">"github answered {d}"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="nb">@intFromEnum</span><span class="p">(</span><span class="n">res</span><span class="p">.</span><span class="n">status</span><span class="p">)}),</span>
+<span class="w">    </span><span class="p">};</span>
+
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">repo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">res</span><span class="p">.</span><span class="n">json</span><span class="p">(</span><span class="n">Repo</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">)</span><span class="w"> </span><span class="k">catch</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">status</span><span class="p">(</span><span class="mi">502</span><span class="p">,</span><span class="w"> </span><span class="s">"github sent something this program cannot read"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">repo</span><span class="p">.</span><span class="n">stargazers_count</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Four things in there are the habits worth keeping. <strong>Text from a request
+going into a URL is percent-encoded</strong>, never pasted — <code>%2e%2e%2f</code> in a path
+param is how a caller reaches an endpoint you never meant to offer, and each
+<code>{}</code> in a target's path is encoded on the way in with <code>/</code> as data, by the
+same <code>nilo.percent</code> a query goes through
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/057-percent-is-needed-by-two-layers.md">ADR 057</a>). <strong><code>error.TimedOut</code>
+gets its own arm</strong>, because it is the one failure every caller of anything
+has to have an answer for, and 504 says <em>the thing I asked is slow</em> where 500
+would say <em>I am broken</em>. <strong>A refusal says when to come back</strong>, because the
+header that carries that is on the answer and one call away. And <strong>the
+struct you parse into is what your program depends on</strong>, not a
+transcription of the far end's schema: <code>Repo</code> names two of GitHub's hundred
+fields, and the parse ignores the rest.</p>
+<p><a href="https://github.com/nevindra/nilo/blob/v0.6.0/examples/outbound/main.zig"><code>examples/outbound</code></a> is that handler with
+a <code>main</code> around it, against GitHub's public API.</p>
+<h2 id="a-service-as-a-type">A service as a type<a class="headerlink" href="#a-service-as-a-type" title="Permanent link">&para;</a></h2>
+<p>A program that calls Stripe from six handlers writes Stripe's host, its
+<code>authorization</code> and the seconds it gets six times, and there is nowhere on
+the client to write them once — the client is one for the whole program,
+because the pool is in it. <strong>A target is that sentence as a type</strong>: two
+services are two types, opened once on the client, and a handler asks for
+the one it wants the way it asks for a database
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/061-a-fitting-borrows-the-loop.md">ADR 061</a>).</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">fetch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@import</span><span class="p">(</span><span class="s">"nilo_fetch"</span><span class="p">);</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">Stripe</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fetch</span><span class="p">.</span><span class="n">Target</span><span class="p">(</span><span class="s">"stripe"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">timeout_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span><span class="n">_000</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">max_in_flight</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="p">});</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">Refund</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="n">amount</span><span class="o">:</span><span class="w"> </span><span class="kt">u64</span><span class="w"> </span><span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">refund</span><span class="p">(</span><span class="n">stripe</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Stripe</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">charge_id</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Str</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">Refund</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">stripe</span><span class="p">.</span><span class="n">postJson</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="s">"/v1/charges/{}/refunds"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="n">charge_id</span><span class="p">},</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">amount</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">500</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">.{});</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">res</span><span class="p">.</span><span class="n">ok</span><span class="p">())</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">status</span><span class="p">(</span><span class="mi">502</span><span class="p">,</span><span class="w"> </span><span class="s">"stripe said no"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">res</span><span class="p">.</span><span class="n">json</span><span class="p">(</span><span class="n">Refund</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>and in <code>main</code>, once, beside the client:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">stripe</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">Stripe</span><span class="p">.</span><span class="n">open</span><span class="p">(</span><span class="o">&amp;</span><span class="n">api</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">base</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cfg</span><span class="p">.</span><span class="n">stripe_base</span><span class="p">,</span><span class="w"> </span><span class="c1">// https://api.stripe.com</span>
+<span class="w">    </span><span class="p">.</span><span class="n">authorization</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cfg</span><span class="p">.</span><span class="n">stripe_key</span><span class="p">,</span>
+<span class="p">});</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">provide</span><span class="p">(</span><span class="o">&amp;</span><span class="n">stripe</span><span class="p">);</span>
+</code></pre></div>
+<p><strong>What is on the type is what is true of the service wherever the program
+runs</strong>; what is given to <code>open</code> is the deployment's. The split is
+<a href="../s3/">the one a bucket makes</a>: the name, the clocks and the ceilings are
+Stripe's, and the base URL and the key come from a <code>Config</code>, because a
+sandbox host with a test key in development and the real pair in production
+is one binary rather than two.</p>
+<table>
+<thead>
+<tr>
+<th>On the type</th>
+<th>Default</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>max_in_flight</code></td>
+<td>0</td>
+<td>calls to this service at once, under the client's own ceiling. <code>0</code> is no gate of its own. Set it for the slow third party, so its calls queue at its own gate rather than holding the permits every other service shares</td>
+</tr>
+<tr>
+<td><code>timeout_ms</code></td>
+<td>the client's</td>
+<td>this service's own deadline; a <code>Call</code> still overrides it for one call</td>
+</tr>
+<tr>
+<td><code>stall_ms</code></td>
+<td>the client's</td>
+<td>likewise, for silence</td>
+</tr>
+<tr>
+<td><code>max_body</code></td>
+<td>the client's</td>
+<td>likewise, for the body</td>
+</tr>
+<tr>
+<td><code>ready</code></td>
+<td>null</td>
+<td>a path the <a href="../deploying/#knowing-whether-it-is-ready">health route</a> GETs on every probe, with a 2xx as ready. Null is started-is-ready, because a balancer asks every second and a call to somebody else's API at that rate is a bill and a rate limit rather than a check</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Given to <code>open</code></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>base</code></td>
+<td><code>https://api.stripe.com</code>, or <code>https://api.sandbox.example.com/v2</code> — scheme, host, and a path prefix if there is one. No query, no fragment; a trailing <code>/</code> is dropped. <code>error.BaseNotAbsolute</code> and <code>error.BaseHasQuery</code> otherwise</td>
+</tr>
+<tr>
+<td><code>authorization</code></td>
+<td>sent on every call, unless the call's own <code>headers</code> name one</td>
+</tr>
+<tr>
+<td><code>user_agent</code></td>
+<td>likewise</td>
+</tr>
+<tr>
+<td><code>headers</code></td>
+<td>anything else the service always wants — <code>accept</code>, an API version, a tenant. A call's own line of the same name goes instead of it</td>
+</tr>
+</tbody>
+</table>
+<p>Every call the client has, the target has with a <strong>path</strong> in place of the
+URL: <code>get</code>, <code>post</code>, <code>put</code>, <code>delete</code>, <code>patch</code>, <code>send</code>, <code>postJson</code>,
+<code>putJson</code>, <code>patchJson</code>, <code>sendJson</code>, and <code>url(c, path, args)</code> for the URL
+alone — an <code>Exchange</code> begun on the client, a link written into a response.</p>
+<p><strong>The path is a template, read while compiling.</strong> <code>{}</code> is a segment filled
+by position from a tuple, and the count is checked: two <code>{}</code> and one
+argument is a compile error rather than a 404 from the far end. A segment is
+an int, a bool or text, and text is percent-encoded with <code>/</code> as data, so an
+id off a request that says <code>../admin</code> is one segment rather than a walk.</p>
+<p><strong>Name the segments and the same struct is the query.</strong> <code>{id}</code> is filled
+from the field <code>id</code>, and every field the template does not name goes on the
+end as a query param under <code>withQuery</code>'s rules — an optional that is null is
+left out:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">refunds</span><span class="p">(</span><span class="n">stripe</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Stripe</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">charge_id</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Str</span><span class="p">,</span><span class="w"> </span><span class="n">cursor</span><span class="o">:</span><span class="w"> </span><span class="o">?</span><span class="n">nilo</span><span class="p">.</span><span class="n">Str</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">fetch</span><span class="p">.</span><span class="n">Response</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// GET /v1/charges/&lt;charge_id&gt;/refunds?limit=20, and &amp;starting_after=… when there is one</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">stripe</span><span class="p">.</span><span class="n">get</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="s">"/v1/charges/{id}/refunds"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">charge_id</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">limit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">20</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">starting_after</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cursor</span><span class="p">,</span>
+<span class="w">    </span><span class="p">},</span><span class="w"> </span><span class="p">.{});</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>A name with no field, a tuple for a named segment, a struct for a
+positional one, and a template that mixes the two are each refused while
+compiling, in a sentence that says what to write instead.</p>
+<p><strong>The call's own headers win.</strong> A <code>Call</code> on a target is the same <code>Call</code>,
+and a line in its <code>headers</code> naming <code>authorization</code> or <code>user-agent</code> goes
+instead of the standing value — one line on the wire, yours, the rule
+<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/182-a-header-std-owns-goes-out-once.md">ADR 182</a> already sets for
+std's own slot. A line naming any other standing header shadows it, so a
+target that says <code>accept: application/json</code> can be asked for <code>text/csv</code> on
+one call. The ordinary call has no standing headers and costs nothing here;
+a call that passes headers of its own under a target that has some spends
+one arena allocation on the merge.</p>
+<p><strong>One target's gate is taken before the client's.</strong> With <code>max_in_flight</code> on
+the type, a call to a slow service waits at that service's own gate holding
+no permit the others share; the client's ceiling on live connections still
+holds over all of them. The target starts the client under it, so a program
+that provides three targets and never the client is fine, and one that
+provides all four starts the client four times, which sets the same <code>Io</code>
+four times.</p>
+<h2 id="the-clients-settings">The client's settings<a class="headerlink" href="#the-clients-settings" title="Permanent link">&para;</a></h2>
+<p>Given to <code>init</code>, once:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Default</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>max_in_flight</code></td>
+<td>32</td>
+<td>calls at once, across every host. Past it a caller waits for a permit rather than opening another connection</td>
+</tr>
+<tr>
+<td><code>timeout_ms</code></td>
+<td>30,000</td>
+<td>how long one whole call may take — connect, send, head and body. <code>0</code> is no limit</td>
+</tr>
+<tr>
+<td><code>stall_ms</code></td>
+<td>0</td>
+<td>how long the far end may say <strong>nothing</strong>: time since the last byte, not since the call began. <code>0</code> is no such bound. The other shape of clock, for the call whose whole point is the transfer (<a href="#a-bound-on-silence-not-on-the-call">below</a>)</td>
+</tr>
+<tr>
+<td><code>max_body</code></td>
+<td>8 MiB</td>
+<td>a longer body is <code>error.BodyTooLarge</code>, enforced while reading, so a <code>content-length</code> that lies cannot get past it</td>
+</tr>
+<tr>
+<td><code>max_drain</code></td>
+<td>64 KiB</td>
+<td>how much of an unread body is worth reading to keep a pooled connection. Past it the connection is dropped instead</td>
+</tr>
+<tr>
+<td><code>read_buffer_size</code></td>
+<td>8 KiB</td>
+<td>the buffer each connection reads the socket through, and so how much one read brings in. std's own default, passed through; per connection, on the heap beside it</td>
+</tr>
+<tr>
+<td><code>forward_request_id</code></td>
+<td>true</td>
+<td>a call made under a <code>*Ctx</code> carries the request's id as <code>X-Request-Id</code>, so the service you called can log the same id you did. Under a <code>nilo.Run</code> there is no request and nothing is sent; a call that names its own <code>X-Request-Id</code> keeps it (<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/158-a-request-id-goes-out-with-the-call.md">ADR 158</a>)</td>
+</tr>
+</tbody>
+</table>
+<p><strong><code>max_in_flight</code> is the one that is not a nicety.</strong> <code>std.http.Client</code>'s pool
+bounds <em>idle</em> connections and does not bound in-use ones at all, so without
+it the ceiling on live connections is however many handlers happen to be
+running — and an HTTPS connection holds 59,151 bytes of TLS and socket
+buffers. Five hundred concurrent handlers would be 29.6 MB nobody asked for
+and five hundred handshakes. Thirty-two times that is the most the client
+will ever hold.</p>
+<p><strong><code>timeout_ms</code> bounds the whole call rather than each read</strong>, because a
+server sending one byte a second satisfies any per-read limit you care to
+name and never finishes. It is the same reasoning the server's own
+<a href="../deploying/#deadlines">deadlines</a> follow from the other side.</p>
+<p><strong>And it fires with or without an Engine.</strong> Under a server the deadline is
+armed on the fiber
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/056-the-way-out-was-open-the-clock-was-not.md">ADR 056</a>), and
+<code>app.provide</code> is what hands the client the Engine's <code>Limits</code>. A client
+started with <code>nilo_start(io, .none)</code> — a test, a CLI, a worker with no server
+around it — has no fiber to arm, so each step of the call runs as a task of
+that <code>Io</code> and the task is what gets cancelled when the clock runs out
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/056-the-way-out-was-open-the-clock-was-not.md">ADR 056</a>). The
+cost is one thread hop per step, paid only there. Until 0.5 that client had
+<code>timeout_ms</code> written down and nothing to fire it, and the first CLI on nilo
+wrote its own watchdog to cover for it; <code>.off</code>, the older name for <code>.none</code>,
+is kept so that program still compiles.</p>
+<h3 id="a-bound-on-silence-not-on-the-call">A bound on silence, not on the call<a class="headerlink" href="#a-bound-on-silence-not-on-the-call" title="Permanent link">&para;</a></h3>
+<p>A download may honestly take an hour, so the only honest <code>timeout_ms</code> for a
+call whose whole point is the transfer is <code>0</code>, and that leaves a peer that
+went quiet with the socket open (a CDN edge that lost its origin, a NAT that
+dropped the mapping, a Wi-Fi handover) with nothing to end it. <strong><code>stall_ms</code>
+is the ceiling on silence inside a call</strong>: nothing arriving for that long is
+<code>error.Stalled</code>, counted from the last byte that reached you rather than
+from the start. The two compose (<code>timeout_ms</code> on the whole, <code>stall_ms</code> on
+the gaps) and a caller sets either or both
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/056-the-way-out-was-open-the-clock-was-not.md">ADR 056</a>).</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">fetch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@import</span><span class="p">(</span><span class="s">"nilo_fetch"</span><span class="p">);</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">pull</span><span class="p">(</span><span class="n">api</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">fetch</span><span class="p">.</span><span class="n">Client</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">out</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">stream</span><span class="p">(</span><span class="mi">200</span><span class="p">,</span><span class="w"> </span><span class="s">"application/octet-stream"</span><span class="p">);</span>
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">ex</span><span class="o">:</span><span class="w"> </span><span class="n">fetch</span><span class="p">.</span><span class="n">Exchange</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">idle</span><span class="p">;</span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="n">ex</span><span class="p">.</span><span class="n">end</span><span class="p">();</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">ex</span><span class="p">.</span><span class="n">begin</span><span class="p">(</span><span class="n">api</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">method</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">GET</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"https://mirror.example.com/large.iso"</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">timeout_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="c1">// however long it takes</span>
+<span class="w">        </span><span class="p">.</span><span class="n">stall_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span><span class="n">_000</span><span class="p">,</span><span class="w"> </span><span class="c1">// but never ten seconds of nothing</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ex</span><span class="p">.</span><span class="n">pipe</span><span class="p">(</span><span class="o">&amp;</span><span class="n">out</span><span class="p">.</span><span class="n">writer</span><span class="p">)</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="o">|</span><span class="n">err</span><span class="o">|</span><span class="w"> </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">error</span><span class="p">.</span><span class="n">Stalled</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">status</span><span class="p">(</span><span class="mi">504</span><span class="p">,</span><span class="w"> </span><span class="s">"the mirror went quiet"</span><span class="p">,</span><span class="w"> </span><span class="p">.{}),</span>
+<span class="w">        </span><span class="k">else</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">,</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">out</span><span class="p">.</span><span class="n">finish</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>It is not a per-read timeout, which ADR 056 refused and still refuses: a
+server sending one byte a second is <em>slow</em>, satisfies this bound, and
+whether slow is acceptable is yours to judge against your other connections.
+What this catches is a server sending nothing. <code>Stalled</code> is told apart from
+<code>TimedOut</code> because a caller does different things with them: a stalled
+transfer is restarted on a fresh connection, a call that blew its whole
+budget is given up on.</p>
+<p>Under a server it is the Engine's timer, re-armed on every chunk; on a
+client with no Engine it is the same task-and-cancel ADR 056 built, with
+the wait re-read from the last byte. Either way a transfer that keeps moving
+never fires it.</p>
+<h2 id="what-it-answers-instead">What it answers instead<a class="headerlink" href="#what-it-answers-instead" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Error</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>error.TimedOut</code></td>
+<td>this call's own deadline ran out</td>
+</tr>
+<tr>
+<td><code>error.Stalled</code></td>
+<td>nothing arrived for <code>stall_ms</code>; the peer still holds the socket</td>
+</tr>
+<tr>
+<td><code>error.Canceled</code></td>
+<td>the server is shutting down underneath the call. Told apart from <code>TimedOut</code> rather than guessed at</td>
+</tr>
+<tr>
+<td><code>error.RedirectRefused</code></td>
+<td>the answer was a 3xx with a <code>Location</code>, and the call made no decision about redirects. <code>Client.get</code> and its siblings follow; an <code>Exchange</code> says <code>.redirects = .follow</code> or <code>.expose</code> (<a href="#a-body-too-big-to-hold">below</a>)</td>
+</tr>
+<tr>
+<td><code>error.BodyTooLarge</code></td>
+<td>the body passed <code>max_body</code>, and reading stopped there</td>
+</tr>
+<tr>
+<td><code>error.BodyTooShort</code></td>
+<td>the body ended before the length its own head announced</td>
+</tr>
+<tr>
+<td><code>error.NotStarted</code></td>
+<td>a call made before <code>listen()</code> — the client is finished at startup like any other service</td>
+</tr>
+<tr>
+<td>the rest</td>
+<td><code>std.Uri.ParseError</code>, <code>std.http.Client</code>'s connect and receive errors, and the reader and writer errors, unchanged</td>
+</tr>
+</tbody>
+</table>
+<p><code>NotStarted</code> is the one a unit test meets: a handler called directly, with no
+App around it, has a client nobody started. The fix is the same one the
+<a href="../testing/#two-things-listen-does-that-the-client-does-not">testing page</a>
+gives for a database — <code>app.start(io)</code>, in a test that never listens — or a
+fake in the handler's argument list, which is what the signature rules are for.</p>
+<h2 id="the-body-is-asked-for-uncompressed">The body is asked for uncompressed<a class="headerlink" href="#the-body-is-asked-for-uncompressed" title="Permanent link">&para;</a></h2>
+<p><code>send</code> puts <code>Accept-Encoding: identity</code> on every call, so <code>res.body</code> is the
+body rather than a gzip stream. <code>std.http.Client</code> on its own advertises gzip
+and then hands back the compressed bytes — decompressing is a separate call
+there, and a caller who does not make it gets unreadable bytes and no error.
+Decompressing here would cost a 32 KiB flate window on the handler's stack,
+which is held per <em>connection</em>
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/062-where-a-connection-waits-is-what-it-costs.md">ADR 062</a>), so identity
+is the trade taken. A server that ignores the header and gzips anyway is an
+error rather than a <code>Str</code> full of noise.</p>
+<h2 id="a-body-too-big-to-hold">A body too big to hold<a class="headerlink" href="#a-body-too-big-to-hold" title="Permanent link">&para;</a></h2>
+<p>The four calls above take the whole body into the Scope, which is right for
+an API answering JSON and wrong for anything measured in megabytes. An
+<code>Exchange</code> is the same policy with the body left on the socket: <strong>read the
+response head, decide, then move the bytes somewhere that is not memory.</strong>
+What a <a href="../requests/#bodies-too-big-to-hold">body reader</a> is for a request
+coming in, this is for an answer going the other way.</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">fetch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@import</span><span class="p">(</span><span class="s">"nilo_fetch"</span><span class="p">);</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">mirror</span><span class="p">(</span><span class="n">api</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">fetch</span><span class="p">.</span><span class="n">Client</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">ex</span><span class="o">:</span><span class="w"> </span><span class="n">fetch</span><span class="p">.</span><span class="n">Exchange</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">idle</span><span class="p">;</span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="n">ex</span><span class="p">.</span><span class="n">end</span><span class="p">();</span>
+
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">head</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">ex</span><span class="p">.</span><span class="n">begin</span><span class="p">(</span><span class="n">api</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">method</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">GET</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"https://example.com/report.csv"</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">head</span><span class="p">.</span><span class="n">ok</span><span class="p">())</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">status</span><span class="p">(</span><span class="mi">502</span><span class="p">,</span><span class="w"> </span><span class="s">"upstream answered {d}"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="nb">@intFromEnum</span><span class="p">(</span><span class="n">head</span><span class="p">.</span><span class="n">status</span><span class="p">)});</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">head</span><span class="p">.</span><span class="n">content_length</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="n">n</span><span class="o">|</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">n</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">64</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">status</span><span class="p">(</span><span class="mi">502</span><span class="p">,</span><span class="w"> </span><span class="s">"report too large"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">streamWith</span><span class="p">(</span><span class="mi">200</span><span class="p">,</span><span class="w"> </span><span class="n">head</span><span class="p">.</span><span class="n">content_type</span><span class="w"> </span><span class="k">orelse</span><span class="w"> </span><span class="s">"text/csv"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">length</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">head</span><span class="p">.</span><span class="n">content_length</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">ex</span><span class="p">.</span><span class="n">pipe</span><span class="p">(</span><span class="o">&amp;</span><span class="n">body</span><span class="p">.</span><span class="n">writer</span><span class="p">);</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">body</span><span class="p">.</span><span class="n">finish</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ex.begin(api, .{…})</code></td>
+<td><code>Head</code> — <code>status</code>, <code>content_length</code>, <code>content_type</code>, <code>header(name)</code> case-insensitively, <code>ok()</code>; and <code>redirected</code>, the <code>std.Uri</code> a followed redirect ended at or null, with <code>location(&amp;buf)</code> to write it out as one string</td>
+</tr>
+<tr>
+<td><code>head.keep(c)</code></td>
+<td>the same head copied into the Scope, so it reads the same after the body has been through</td>
+</tr>
+<tr>
+<td><code>ex.take(c, max)</code></td>
+<td>the rest of the body as a <code>Str</code> in the Scope, refusing over <code>max</code></td>
+</tr>
+<tr>
+<td><code>ex.readInto(buf)</code></td>
+<td>exactly <code>buf.len</code> bytes, or <code>error.BodyTooShort</code></td>
+</tr>
+<tr>
+<td><code>ex.pipe(w)</code></td>
+<td>the rest into a <code>*std.Io.Writer</code>, and how many bytes</td>
+</tr>
+<tr>
+<td><code>ex.stream(w, limit)</code></td>
+<td>one chunk into <code>w</code>, at most <code>limit</code>, and how many bytes; <code>0</code> is the end. For a body moved in pieces of your own choosing</td>
+</tr>
+<tr>
+<td><code>ex.discard()</code></td>
+<td>"I will not read this body; close the connection." For the probe that asked for one byte and got the file</td>
+</tr>
+<tr>
+<td><code>ex.end()</code></td>
+<td>required, and safe twice</td>
+</tr>
+</tbody>
+</table>
+<p><code>Begin</code> takes what a <code>Call</code> does and more: <code>headers</code>, <code>host</code>, <code>authorization</code>,
+<code>content_type</code> and <code>user_agent</code> — four headers std would otherwise write for
+itself, which a signed request has to control; <code>timeout_ms</code>, <code>stall_ms</code>, a
+<code>body</code> of <code>.none</code>, <code>.slice</code> or <code>.stream</code> with a length, and <code>redirects</code>. The
+explicit fields are for a caller who has the value; the same name in
+<code>headers</code> is the other way to say it, and both at once is two lines on the
+wire.</p>
+<p><strong>A redirect is a decision, and the call says which.</strong> <code>redirects</code> is
+<code>.refuse</code> by default, and under it a 3xx with a <code>Location</code> is
+<code>error.RedirectRefused</code>: a caller who never thought about redirects finds
+out from the error rather than from a status 301 read as a broken server.
+<code>.follow = &amp;buf</code> walks the chain, three deep at most, and the answer comes
+back with <code>head.redirected</code> set to the URL it actually came from, so the
+connections after a probe can go straight there rather than walking the
+chain again; the text lives in your buffer, which is why
+<code>head.location(&amp;buf)</code> takes one to write into rather than handing back a
+slice (<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/183-a-redirect-is-a-decision-with-a-name.md">ADR 183</a>).
+<code>.expose</code> is handed the 3xx as itself, which is what a signed request wants
+(a signature is computed over one host and one path, and following would
+send the <code>authorization</code> header somewhere it was never meant to go) and
+what a client that reads the body of a 301 wants, which is where S3 puts
+its reason (<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/183-a-redirect-is-a-decision-with-a-name.md">ADR 183</a>).</p>
+<p><strong>Everything in <code>Head</code> points into the connection's read buffer, and the
+first byte of body read overwrites it.</strong> Read what you need before <code>take</code> or
+<code>pipe</code>, or <code>head.keep(c)</code> for a copy in the Scope that reads the same
+afterwards: the <code>etag</code> the next run compares against, taken before the body
+and needed after it
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/187-a-head-that-outlives-its-body.md">ADR 187</a>). That is the
+bargain a <a href="../sql/raw/">borrowed row</a> makes, for the same reason: the
+alternative is an allocation per call for text most callers glance at once,
+so the borrowed head is the default and the copy is one line where it is
+wanted.</p>
+<p><strong>There is no buffer to declare.</strong> <code>take</code>, <code>readInto</code>, <code>pipe</code> and <code>stream</code>
+go from the connection's own read buffer straight to the destination, on
+every framing; the <code>transfer_buffer</code> field is for a caller who reads
+<em>buffered</em> off <code>ex.reader</code> (<code>take</code>, <code>peek</code>, a delimiter) and for nothing
+else. It does not change how much one socket read brings in, which is
+<code>read_buffer_size</code> on the client. Until 0.5 the guide said bigger was fewer
+trips, a download manager gave sixteen segments 64 KiB each on the strength
+of it, and the syscall count did not move
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/186-the-transfer-buffer-serves-nothing-here.md">ADR 186</a>).</p>
+<p><strong>An <code>Exchange</code> must not be copied once begun</strong> — it holds a live
+<code>std.http.Client.Request</code>. Declare it, fill it where it stands, leave it
+there. <code>defer ex.end()</code> is the line that is not optional: it gives the permit
+back and returns the connection to the pool, or drops it if what was left
+unread is past <code>max_drain</code>. When you already know the body is not wanted —
+a <code>Range</code> probe that was answered with the whole object — <code>ex.discard()</code>
+before the <code>end</code> says so, and the connection goes with the body whatever
+<code>max_drain</code> would have decided. That keeps <code>max_drain</code> a policy for every
+call rather than a lever pulled for one
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/184-a-caller-that-knows-says-discard.md">ADR 184</a>).</p>
+<p><strong>A body with no length cannot be sent streamed.</strong> <code>.stream</code> takes the
+length because HTTP can frame an unknown length only as chunked, and the
+services this exists for — S3 among them — answer <code>411</code> to that. Not knowing
+the length is therefore a compile error here rather than somebody else's
+status code.</p>
+<h2 id="what-it-costs">What it costs<a class="headerlink" href="#what-it-costs" title="Permanent link">&para;</a></h2>
+<p>On the request path, nothing that was not already there: one call is one
+permit, two arena allocations — the header block, then the body
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/187-a-head-that-outlives-its-body.md">ADR 187</a>) — the JSON
+written out or the URL assembled if you asked for either, and the parse if
+you asked for that. <strong>What it costs is per idle connection</strong>, and it is stack: a handler
+that has made one call holds 4,139 bytes more than one that has not, for the
+life of the connection, at the depth <code>std.http.Client</code> drives the fiber to
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/062-where-a-connection-waits-is-what-it-costs.md">ADR 062</a>). That is
+still the largest per-connection figure in the toolkit, and the levers left
+are small: taking the 4 KiB transfer buffer out of <code>send</code> moved it by 14
+bytes, because a buffer no byte ever touched was never a resident page.</p>
+<p>Everything measured is <code>http://</code>;
+<a href="https://github.com/nevindra/nilo/blob/v0.6.0/bench/result/fetch.md"><code>bench/result/fetch.md</code></a> has the numbers on all
+four of <a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/017-the-trade-budget-has-four-axes.md">ADR 017</a>'s axes and
+says plainly that nothing has been put on a scale through TLS yet.</p>
+<h2 id="what-it-is-not">What it is not<a class="headerlink" href="#what-it-is-not" title="Permanent link">&para;</a></h2>
+<p>A retry policy, a circuit breaker or a rate limiter. How many times, how long
+between, and what counts as failure are facts about somebody else's service,
+and a default that guessed them would turn one outage into a thundering herd.
+A caller who knows them writes three lines — a loop, a
+<a href="../services/#what-needs-wrapping"><code>nilo.sleep</code></a> between attempts, and a
+<code>switch</code> on which errors are worth another go. What is here is the part that
+is the same for everybody: do not hold a connection forever, do not hold more
+than you meant to, and do not read more than you asked for.</p>
+<h2 id="testing">Testing<a class="headerlink" href="#testing" title="Permanent link">&para;</a></h2>
+<p>A handler that takes a <code>*fetch.Client</code> is an ordinary function, and the
+usual answer is not to give it one: shape the far end's response into a
+struct, and test the function that turns that struct into yours, which is
+what <code>examples/outbound</code> does with its <code>card</code>. For the call itself, the
+module's own tests stand a real socket up on <code>std.Io.Threaded</code> with no
+Engine anywhere — which is the entry condition for its layer — and the
+server they drive is yours to use.</p>
+<p><strong><code>fetch.testing.Canned</code> is one real exchange, for a suite of your own.</strong>
+Open it, say what it answers, start it with <code>io.concurrent</code> beside the
+call, and finish the client with <code>nilo_start(io, .none)</code> as <code>listen()</code> would
+have done. It binds port 0 and reads the kernel's answer back, so there is
+no port range to keep apart from anybody's; <code>serveOne</code> reads the request
+whole and <code>request()</code> and <code>requestBody()</code> show what reached it, which is
+what a test about a POST wants
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/061-a-fitting-borrows-the-loop.md">ADR 061</a>).</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">fetch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@import</span><span class="p">(</span><span class="s">"nilo_fetch"</span><span class="p">);</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">retryAfterIsRead</span><span class="p">(</span><span class="n">io</span><span class="o">:</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">Io</span><span class="p">,</span><span class="w"> </span><span class="n">gpa</span><span class="o">:</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">mem</span><span class="p">.</span><span class="n">Allocator</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">canned</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">fetch</span><span class="p">.</span><span class="n">testing</span><span class="p">.</span><span class="n">Canned</span><span class="p">.</span><span class="n">open</span><span class="p">(</span><span class="n">io</span><span class="p">);</span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="n">canned</span><span class="p">.</span><span class="n">close</span><span class="p">();</span>
+<span class="w">    </span><span class="n">canned</span><span class="p">.</span><span class="n">reply</span><span class="p">(</span><span class="s">"429 Too Many Requests"</span><span class="p">,</span><span class="w"> </span><span class="s">"Retry-After: 30</span><span class="se">\r\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="s">"slow down"</span><span class="p">);</span>
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">served</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">io</span><span class="p">.</span><span class="n">concurrent</span><span class="p">(</span><span class="n">fetch</span><span class="p">.</span><span class="n">testing</span><span class="p">.</span><span class="n">Canned</span><span class="p">.</span><span class="n">serveOne</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="o">&amp;</span><span class="n">canned</span><span class="p">});</span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="n">served</span><span class="p">.</span><span class="k">cancel</span><span class="p">(</span><span class="n">io</span><span class="p">)</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">{};</span>
+
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">api</span><span class="o">:</span><span class="w"> </span><span class="n">fetch</span><span class="p">.</span><span class="n">Client</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">init</span><span class="p">(</span><span class="n">gpa</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="n">api</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">api</span><span class="p">.</span><span class="n">nilo_start</span><span class="p">(</span><span class="n">io</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">none</span><span class="p">);</span>
+
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">run</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Run</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">init</span><span class="p">(</span><span class="n">gpa</span><span class="p">);</span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="n">run</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span>
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">buf</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="mi">64</span><span class="p">]</span><span class="kt">u8</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">undefined</span><span class="p">;</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">api</span><span class="p">.</span><span class="n">get</span><span class="p">(</span><span class="o">&amp;</span><span class="n">run</span><span class="p">,</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">canned</span><span class="p">.</span><span class="n">url</span><span class="p">(</span><span class="o">&amp;</span><span class="n">buf</span><span class="p">),</span><span class="w"> </span><span class="p">.{});</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">testing</span><span class="p">.</span><span class="n">expectEqualStrings</span><span class="p">(</span><span class="s">"30"</span><span class="p">,</span><span class="w"> </span><span class="n">res</span><span class="p">.</span><span class="n">header</span><span class="p">(</span><span class="s">"retry-after"</span><span class="p">).</span><span class="o">?</span><span class="p">);</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">testing</span><span class="p">.</span><span class="n">expect</span><span class="p">(</span><span class="n">std</span><span class="p">.</span><span class="n">mem</span><span class="p">.</span><span class="n">startsWith</span><span class="p">(</span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="n">canned</span><span class="p">.</span><span class="n">request</span><span class="p">(),</span><span class="w"> </span><span class="s">"GET / "</span><span class="p">));</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>io</code> is a <code>std.Io.Threaded</code> the test owns — <code>var threaded: std.Io.Threaded =
+.init(std.testing.allocator, .{}); defer threaded.deinit();</code> and
+<code>threaded.io()</code>. <code>concurrent</code> rather than <code>async</code>, because <code>async</code> may run
+the server on your own thread and sit in <code>accept</code> waiting for the connection
+that thread was about to make; the module's tests found that at zero CPU
+(<a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/056-the-way-out-was-open-the-clock-was-not.md">ADR 056</a>).</p>
+<h2 id="see-also">See also<a class="headerlink" href="#see-also" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/reference/fetch.md#nilo_fetch">The reference</a> — the surface as a list.</li>
+<li><a href="../s3/">Object storage</a> — <code>nilo_s3</code> is this module with SigV4 in front of
+  it, and the only module that imports a Fitting.</li>
+<li><a href="../jwt/">Checking somebody else's token</a> — the fetch that gets a JWKS
+  document.</li>
+<li><a href="https://github.com/nevindra/nilo/blob/v0.6.0/docs/adr/056-the-way-out-was-open-the-clock-was-not.md">ADR 056</a> — why the
+  deadline is on the fiber rather than in std.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../sql/running/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Running it">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Running it
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../s3/" class="md-footer__link md-footer__link--next" aria-label="Next: Object storage">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Object storage
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.sections", "navigation.top", "navigation.footer", "navigation.indexes", "search.highlight", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
