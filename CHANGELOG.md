@@ -12,6 +12,7 @@ in [`docs/history.md`](./docs/history.md); what is coming is in
 
 ### Breaking
 
+- **An upsert's conflict target has to be the key or a declared `.unique`** on a table this program builds, and a unique that ignores case does not count. Both databases refused the others when the statement ran; now they do not compile. Declare the unique in the marker, or `.managed = false` for a table something else builds (ADR 151).
 - **`updateReturningOne` refuses a `.where` that could match more than one row.** It has to hold the key, or every column of a `.unique`, with `=`; other terms beside them are fine. It used to update every matching row and hand back the first. `updateReturning` is the call for a condition that means several (ADR 146).
 - **`generate --drop` names what it drops**: `--drop users.nickname,notes,extension:pgcrypto`. A bare `--drop` names nothing and writes nothing, and the refusal prints the command with the names filled in. `migrations.Options.allow_destructive` is gone, replaced by `.drop`, a list of the same names; `sql.cli.Request.allow_destructive` is `.drop` and `.drop_bare`. A field renamed without `.was` used to be dropped by the same flag as the column somebody meant to drop (ADR 123).
 - **A column type that does not widen is destructive, and has to be named with `--drop table.column`.** `int8` to `int4`, `float8` to `float4`, `numeric(10,2)` to `numeric(10,1)` and `timestamptz` to `timestamp` can refuse, round or reinterpret the rows already there; they were written like any other step. Widenings go through as before (ADR 123).

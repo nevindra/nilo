@@ -1190,6 +1190,84 @@ fn conflictColumns(comptime Row: type, comptime on: anytype) []const []const u8 
     }
 }
 
+/// **A conflict target has to be a constraint the database has**, or the
+/// statement is refused when it runs: Postgres says "there is no unique or
+/// exclusion constraint matching the ON CONFLICT specification", SQLite
+/// "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint".
+/// That is the first time the upsert runs, which is the first request in
+/// production down a path no test took.
+///
+/// A table this program builds declares every unique in its marker, so the
+/// target is held to the key or one of them, as a set. **A case-folding
+/// unique does not count**: it is an index on `lower(…)` on Postgres and a
+/// `COLLATE NOCASE` one on SQLite, and neither database matches a plain
+/// column list against it. A table `.managed = false` declares nothing here
+/// and passes.
+fn assertConflictTarget(comptime D: type, comptime Row: type, comptime targets: []const []const u8) void {
+    comptime {
+        const owner = row_mod.ownerOf(Row);
+        if (!row_mod.managedOf(owner)) return;
+        const keys = row_mod.keysIfAnyOf(owner);
+        // A Row with no key is not one `createMissing` can build, so its
+        // marker is not the whole account of its table either.
+        if (keys.len == 0) return;
+        if (sameSet(targets, keys)) return;
+
+        var folded: ?[]const u8 = null;
+        var declared: []const u8 = "";
+        for (table_mod.descOf(D, owner).uniques) |u| {
+            if (sameSet(targets, u.columns)) {
+                if (!u.ignoring_case) return;
+                folded = u.name;
+            }
+            declared = declared ++ "\n    ." ++ columnTuple(u.columns) ++
+                (if (u.ignoring_case) ", which ignores case" else "");
+        }
+
+        const head = "nilo: an upsert on " ++ @typeName(Row) ++ " conflicts on ." ++ columnTuple(targets);
+        if (folded) |name| @compileError(
+            head ++ ", and the unique over it, `" ++ name ++ "`, ignores case.\n" ++
+                "  That unique is an index on lower(…) on Postgres and a COLLATE NOCASE one on " ++
+                "SQLite, and neither database matches `ON CONFLICT` naming the plain column " ++
+                "against it: the statement is refused when it runs.\n" ++
+                "  Look the row up first with `.ieq`, or declare a unique that does not fold " ++
+                "case beside it and conflict on that.",
+        );
+        @compileError(
+            head ++ ", and neither its key nor any `.unique` in its marker is over those columns.\n" ++
+                "  The database refuses an `ON CONFLICT` with no constraint behind it, the first " ++
+                "time the statement runs.\n" ++
+                "  The key is ." ++ columnTuple(keys) ++
+                (if (declared.len > 0) ", and the uniques are:" ++ declared else ", and there is no `.unique`.") ++
+                "\n  Declare `.unique = .{ ." ++ columnTuple(targets) ++ " }` if the table has one, or " ++
+                "`.managed = false` if this program does not build the table.",
+        );
+    }
+}
+
+/// Two column lists naming the same columns, in any order. An `ON CONFLICT`
+/// list and a unique index match as sets.
+fn sameSet(comptime a: []const []const u8, comptime b: []const []const u8) bool {
+    comptime {
+        if (a.len != b.len) return false;
+        for (a) |x| {
+            for (b) |y| {
+                if (std.mem.eql(u8, x, y)) break;
+            } else return false;
+        }
+        return true;
+    }
+}
+
+/// `{ .a, .b }` for a message.
+fn columnTuple(comptime columns: []const []const u8) []const u8 {
+    comptime {
+        var out: []const u8 = "{ ";
+        for (columns, 0..) |c, i| out = out ++ (if (i > 0) ", " else "") ++ "." ++ c;
+        return out ++ " }";
+    }
+}
+
 fn notAConflictTarget(comptime Row: type, comptime On: type) noreturn {
     @compileError(
         "nilo: an upsert on " ++ @typeName(Row) ++ " was given a " ++ @typeName(On) ++
@@ -1273,6 +1351,10 @@ fn upserting(
                 "identifies the row that is already there.\n" ++
                 "  `db.insertOrIgnore` is the statement with nothing to set, and says so.",
         );
+
+        // After the refusals about what the statement writes, which are
+        // about the call; this one is about the table.
+        assertConflictTarget(D, Row, targets);
 
         const clause = switch (action) {
             .nothing => " ON CONFLICT (" ++ conflict ++ ") DO NOTHING",
@@ -1791,6 +1873,9 @@ const User = struct {
     pub const nilo_table = .{
         .name = "users",
         .key = .id,
+        // What the upserts below conflict on, which a table this program
+        // builds has to declare.
+        .unique = .{ .email, .{ .id, .email } },
         .default = .{ .age = 0 },
         .filled = .created_at,
     };

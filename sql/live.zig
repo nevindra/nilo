@@ -260,7 +260,9 @@ const setup =
     ");";
 
 const Person = struct {
-    pub const nilo_table = .{ .name = table, .key = .id };
+    // The `UNIQUE` the fixture's DDL puts on `email`, declared so the upserts
+    // below may conflict on it.
+    pub const nilo_table = .{ .name = table, .key = .id, .unique = .{.email} };
 
     id: i64,
     email: []const u8,

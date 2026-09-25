@@ -542,8 +542,10 @@ either matters.
 
 The last argument is the conflict target — the column the database has a
 unique constraint on, written the way a key is. `.{ .tenant_id, .email }` for
-one spanning two columns. Postgres refuses the statement if no such constraint
-exists; a Row cannot name one, so nothing on this side can check it.
+one spanning two columns. **On a table this program builds it has to be the key
+or a `.unique` in the marker**, as a set, and one that ignores case does not
+count; anything else does not compile, where the database would refuse it at
+run time (ADR 151). A table `.managed = false` is not checked.
 
 Two calls rather than one option, because the answers differ:
 `DO NOTHING` stores no row and `RETURNING` then yields none, so ignoring

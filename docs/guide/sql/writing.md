@@ -222,10 +222,15 @@ const user = try db.insertOrUpdate(User, c, .{
 The last argument is the **conflict target**: the column the database has a
 unique constraint or index on, written the way a key is. For a constraint
 spanning two columns it is a tuple, `.{ .tenant_id, .email }`. It is not
-required to be the Row's key — an email is the ordinary case and is usually
-not — and nothing on this side can check that a constraint exists, because a
-constraint is not a column and a Row cannot name one. Postgres refuses the
-statement if there is none.
+required to be the Row's key. An email is the ordinary case, and it is the
+`.unique = .{.email}` the [tables page](./tables.md) declared.
+
+**The target has to be the key or a `.unique` the marker declares**, or the
+upsert does not compile. The database would refuse it anyway, but only when the
+statement runs, which is the first request down that path in production. A
+unique that ignores case does not count either: both databases build it on the
+folded value, and `ON CONFLICT ("email")` does not match it. A table
+`.managed = false` is somebody else's to declare and is not checked.
 
 **When it *is* the key, write `.key`**
 ([ADR 151](../../adr/151-a-key-is-named-once.md)):

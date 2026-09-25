@@ -254,6 +254,14 @@ const sql_refusals = [_]Refusal{
         .says = "`updateReturningOne` on returning_one_on_a_column_not_unique.User has a condition that can match more than one row.",
     },
     .{
+        .name = "upsert_on_a_column_no_unique_covers",
+        .says = "an upsert on upsert_on_a_column_no_unique_covers.User conflicts on .{ .email }, and neither its key nor any `.unique` in its marker is over those columns.",
+    },
+    .{
+        .name = "upsert_on_a_unique_that_folds_case",
+        .says = "an upsert on upsert_on_a_unique_that_folds_case.User conflicts on .{ .email }, and the unique over it, `users_email_key`, ignores case.",
+    },
+    .{
         .name = "violated_not_a_unique",
         .says = "`sql.violated` asks about violated_not_a_unique.User's .{ .handle }, and neither its key nor any `.unique` is over those columns.",
     },

@@ -56,6 +56,27 @@ condition and in a `.set` — unlike `any`, `exists` and `not_exists`, which
 `where.zig` reserves across the whole Row because a condition could carry either
 meaning anywhere.
 
+## A conflict target has a constraint behind it, or it does not compile
+
+**On a table this program builds, the target has to be the key or one of the
+marker's `.unique` entries, as a set.** The database refuses an `ON CONFLICT`
+with no constraint behind it, and it refuses it when the statement runs: the
+first request down that path in production, on a path no test may have taken.
+A managed table's marker is the whole account of its uniques, because
+`createMissing` and `generate` build nothing else, so the check has something
+to check against. `.managed = false` and a Row with no key pass, because their
+marker is not that account.
+
+**A unique that ignores case does not count.** It is an index on `lower(…)` on
+Postgres and a `COLLATE NOCASE` index on SQLite, and neither database matches an
+`ON CONFLICT` naming the plain column against it. The refusal names the index and
+says to look the row up with `.ieq`, or to declare a plain unique beside it.
+
+This used to be said the other way round: "a constraint is not a column and a
+Row cannot name one, so nothing on this side can check it". A Row can name one,
+since `.unique` arrived in the marker ([ADR 181](181-the-marker-has-two-kinds-of-word.md)),
+and the sentence stayed after it stopped being true.
+
 ## Against ADR 017's four axes
 
 - **Allocations per request: zero.** The conflict target is a comptime list of
