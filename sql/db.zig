@@ -91,6 +91,7 @@ const composed_mod = @import("composed.zig");
 const row_mod = @import("row.zig");
 const schema = @import("schema.zig");
 const statement = @import("statement.zig");
+const table_mod = @import("table.zig");
 const types = @import("types.zig");
 const where_mod = @import("where.zig");
 const wire_mod = @import("wire.zig");
@@ -275,6 +276,120 @@ pub fn lastProblem(c: anytype) ?wire_mod.Problem {
     // than a plausible sentence about the wrong row.
     if (mine.ptr != asked.ptr or mine.vtable != asked.vtable) return null;
     return held;
+}
+
+/// Whether the last statement this fiber ran broke `Row`'s key or the
+/// `.unique` over `columns` (ADR 117). Exported as `sql.violated`.
+///
+/// ```zig
+/// _ = db.insert(User, c, .{ .email = form.email, .handle = form.handle }) catch |err| switch (err) {
+///     error.AlreadyExists => if (sql.violated(c, User, .{.email}))
+///         return fail.conflict("that address already has an account", .{})
+///     else if (sql.violated(c, User, .{.handle}))
+///         return fail.conflict("that handle is taken", .{})
+///     else
+///         return err,
+///     else => return err,
+/// };
+/// ```
+///
+/// **The columns are checked while compiling**, against the key and the
+/// uniques the marker declares, so a unique that is renamed or dropped is a
+/// build error at every place that branches on it. The alternative is
+/// comparing `sql.problem(c).?.constraint` with `"users_email_key"`, a string
+/// nothing checks and one the two databases do not even agree on: Postgres
+/// names the constraint, SQLite names the columns (`users.email`). This
+/// accepts either spelling, so a handler tested on one answers the same on
+/// the other.
+///
+/// False when the last statement worked, broke something else, or ran on
+/// another request. A foreign key is not accepted here: SQLite does not say
+/// which one failed.
+pub fn violated(c: anytype, comptime Row: type, comptime columns: anytype) bool {
+    comptime core.checkScope(@TypeOf(c), "sql.violated");
+    const spellings = comptime constraintSpellings(Row, columns);
+    const said = lastProblem(c) orelse return false;
+    if (said.constraint.len == 0) return false;
+    for (spellings) |name| {
+        if (std.mem.eql(u8, said.constraint, name)) return true;
+    }
+    return false;
+}
+
+/// The two ways a database names the key or unique over `columns`: the
+/// constraint's name, as Postgres reports it, and `table.a, table.b`, as
+/// SQLite does.
+fn constraintSpellings(comptime Row: type, comptime columns: anytype) []const []const u8 {
+    comptime {
+        const owner = row_mod.ownerOf(Row);
+        const desc = table_mod.descOf(dialect.Postgres, owner);
+        const wanted = columnsNamed(Row, columns);
+
+        const keys = row_mod.keysIfAnyOf(owner);
+        if (keys.len > 0 and sameSet(wanted, keys)) {
+            const out = [_][]const u8{ desc.table ++ "_pkey", sqliteSpelling(desc.table, keys) };
+            return &out;
+        }
+        var declared: []const u8 = "";
+        for (desc.uniques) |u| {
+            if (sameSet(wanted, u.columns)) {
+                const out = [_][]const u8{ u.name, sqliteSpelling(desc.table, u.columns) };
+                return &out;
+            }
+            declared = declared ++ "\n    ." ++ tupleOf(u.columns);
+        }
+        @compileError(
+            "nilo: `sql.violated` asks about " ++ @typeName(Row) ++ "'s ." ++ tupleOf(wanted) ++
+                ", and neither its key nor any `.unique` is over those columns.\n" ++
+                "  The key is ." ++ tupleOf(keys) ++
+                (if (declared.len > 0) ", and the uniques are:" ++ declared else ", and it declares no `.unique`.") ++
+                "\n  A constraint the marker does not declare is one this cannot name for you.",
+        );
+    }
+}
+
+fn columnsNamed(comptime Row: type, comptime columns: anytype) []const []const u8 {
+    comptime {
+        const C = @TypeOf(columns);
+        if (C == @TypeOf(.enum_literal)) return columnsNamed(Row, .{columns});
+        const fields = @typeInfo(C).@"struct".fields;
+        var out: [fields.len][]const u8 = undefined;
+        for (fields, 0..) |f, i| {
+            const name = @tagName(@field(columns, f.name));
+            if (!row_mod.hasColumn(Row, name)) row_mod.noSuchColumn(Row, name, "`sql.violated`");
+            out[i] = name;
+        }
+        const frozen = out;
+        return &frozen;
+    }
+}
+
+fn sameSet(comptime a: []const []const u8, comptime b: []const []const u8) bool {
+    comptime {
+        if (a.len != b.len) return false;
+        for (a) |x| {
+            for (b) |y| {
+                if (std.mem.eql(u8, x, y)) break;
+            } else return false;
+        }
+        return true;
+    }
+}
+
+fn sqliteSpelling(comptime table: []const u8, comptime columns: []const []const u8) []const u8 {
+    comptime {
+        var out: []const u8 = "";
+        for (columns, 0..) |c, i| out = out ++ (if (i > 0) ", " else "") ++ table ++ "." ++ c;
+        return out;
+    }
+}
+
+fn tupleOf(comptime columns: []const []const u8) []const u8 {
+    comptime {
+        var out: []const u8 = "{ ";
+        for (columns, 0..) |c, i| out = out ++ (if (i > 0) ", " else "") ++ "." ++ c;
+        return out ++ " }";
+    }
 }
 
 /// A ready-made watcher: one `std.log.debug` line per statement, in the
@@ -1760,14 +1875,15 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// matched*, which in a PATCH endpoint is the 404 the typed layer
         /// already writes for it (ADR 023).
         ///
-        /// A `.where` that matches several rows updates all of them and this
-        /// hands back the first, exactly as `db.one` does for a condition on a
-        /// column that is not unique. It is the shape of the call site rather
-        /// than a promise about the statement.
+        /// **The `.where` has to hold the key, or a unique, with `=`**, or
+        /// this does not compile. An `UPDATE` matching several rows changes
+        /// all of them, and handing back the first would report one change
+        /// where there were many. `updateReturning` is the call for a
+        /// condition that means several.
         pub fn updateReturningOne(self: *Self, comptime Row: type, c: anytype, options: anytype) !?Row {
             comptime core.checkScope(@TypeOf(c), "db.updateReturningOne");
             try narrowing(Row, "db.updateReturningOne", options);
-            const stmt = comptime statement.updateReturning(D, Row, @TypeOf(options));
+            const stmt = comptime statement.updateReturningOne(D, Row, @TypeOf(options));
             const changed = try fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
             return if (changed.len == 0) null else changed[0];
         }
@@ -1791,6 +1907,25 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             try narrowing(Row, "db.deleteReturning", options);
             const stmt = comptime statement.deleteReturning(D, Row, @TypeOf(options));
             return fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
+        }
+
+        /// Delete the one row the `.where` pins and give it back, or null
+        /// when there was none. The same rule as `updateReturningOne`: the
+        /// key or a unique, held with `=`.
+        ///
+        /// ```zig
+        /// const reset = try db.deleteReturningOne(Reset, c, .{ .where = .{ .token = token } })
+        ///     orelse return nilo.fail.notFound("that link has been used", .{});
+        /// ```
+        ///
+        /// What taking a one-time token is: the check and the removal are one
+        /// statement, so two requests with the same token cannot both get it.
+        pub fn deleteReturningOne(self: *Self, comptime Row: type, c: anytype, options: anytype) !?Row {
+            comptime core.checkScope(@TypeOf(c), "db.deleteReturningOne");
+            try narrowing(Row, "db.deleteReturningOne", options);
+            const stmt = comptime statement.deleteReturningOne(D, Row, @TypeOf(options));
+            const gone = try fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
+            return if (gone.len == 0) null else gone[0];
         }
 
         // -- transactions ----------------------------------------------------
@@ -2169,7 +2304,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             pub fn updateReturningOne(self: *Tx, comptime Row: type, c: anytype, options: anytype) !?Row {
                 comptime core.checkScope(@TypeOf(c), "tx.updateReturningOne");
                 try narrowing(Row, "tx.updateReturningOne", options);
-                const stmt = comptime statement.updateReturning(D, Row, @TypeOf(options));
+                const stmt = comptime statement.updateReturningOne(D, Row, @TypeOf(options));
                 const changed = try fill(Row, stmt.reserve, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
                 return if (changed.len == 0) null else changed[0];
             }
@@ -2186,6 +2321,14 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 try narrowing(Row, "tx.deleteReturning", options);
                 const stmt = comptime statement.deleteReturning(D, Row, @TypeOf(options));
                 return fill(Row, stmt.reserve, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
+            }
+
+            pub fn deleteReturningOne(self: *Tx, comptime Row: type, c: anytype, options: anytype) !?Row {
+                comptime core.checkScope(@TypeOf(c), "tx.deleteReturningOne");
+                try narrowing(Row, "tx.deleteReturningOne", options);
+                const stmt = comptime statement.deleteReturningOne(D, Row, @TypeOf(options));
+                const gone = try fill(Row, stmt.reserve, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
+                return if (gone.len == 0) null else gone[0];
             }
 
             /// `db.raw` inside the transaction, and the same call in every
@@ -2608,7 +2751,11 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             // The first row is pulled out of the loop so the width is asked
             // **once per statement** rather than once per row, and asked at
             // the first moment both drivers can answer it (ADR 106).
-            if (try w.next(&rows)) {
+            const any = w.next(&rows) catch |err| {
+                db.told(arena, started, sql, plan, null, true, stepProblem(w, &rows, err, arena));
+                return err;
+            };
+            if (any) {
                 wideEnough(Row, if (total == null) 0 else 1, w, &rows) catch |err| {
                     db.told(arena, started, sql, plan, null, true, null);
                     return err;
@@ -2633,11 +2780,28 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                         return err;
                     };
                     try out.append(arena, filled);
-                    if (!try w.next(&rows)) break;
+                    const more = w.next(&rows) catch |err| {
+                        db.told(arena, started, sql, plan, null, true, stepProblem(w, &rows, err, arena));
+                        return err;
+                    };
+                    if (!more) break;
                 }
             }
             db.told(arena, started, sql, plan, out.items.len, false, null);
             return out.toOwnedSlice(arena);
+        }
+
+        /// What the database said about a row it refused to step to.
+        ///
+        /// **SQLite reports an `INSERT … RETURNING`'s constraint here**, at
+        /// the first step rather than when the statement is prepared, so a
+        /// read that only asked the Wire at `run` told the watcher nothing
+        /// and left `sql.problem` null for exactly the duplicate a signup
+        /// form branches on. A Wire whose failures all arrive at `run` has
+        /// no `stepProblem`, and the answer is null.
+        fn stepProblem(w: *W, rows: *const W.Rows, err: anytype, arena: std.mem.Allocator) ?wire_mod.Problem {
+            if (comptime !@hasDecl(W, "stepProblem")) return null;
+            return w.stepProblem(rows, err, arena);
         }
 
         /// Refuse a result set that has fewer columns than the Row reads by
@@ -7670,7 +7834,7 @@ test "an update or a delete whose condition the request emptied is refused befor
         .set = .{ .email = "all@example.dev" },
         .where = .{ .any = .{ .{ .id = @as(i64, 1) }, .{ .email = .{ .iends_with = blank } } } },
     }));
-    try testing.expectError(error.QueryFailed, db.updateReturningOne(SqliteAccount, &run, .{
+    try testing.expectError(error.QueryFailed, db.updateReturning(SqliteAccount, &run, .{
         .set = .{ .email = "all@example.dev" },
         .where = .{ .email = .{ .icontains = blank } },
     }));
@@ -7693,4 +7857,82 @@ test "an update or a delete whose condition the request emptied is refused befor
     // refused as if the `.where` were empty, because it takes no parameter.
     try testing.expectEqual(@as(usize, 0), try db.delete(SqliteAccount, &run, .{ .where = .{ .email = null } }));
     try testing.expectEqual(@as(usize, 1), try db.count(SqliteAccount, &run, .{}));
+}
+
+test "deleteReturningOne takes the row the key pins, once, and answers null the second time" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    var db = try abortedDb(&threaded, "delete-returning-one", &run);
+    defer db.deinit();
+    _ = try db.insert(SqliteAccount, &run, .{ .id = @as(i64, 2), .public = types.Uuid.nil, .email = "two@example.dev" });
+
+    // A one-time token is this shape: the check and the removal are one
+    // statement, so the second request with the same token finds nothing.
+    const taken = (try db.deleteReturningOne(SqliteAccount, &run, .{ .where = .{ .id = @as(i64, 1) } })).?;
+    try testing.expectEqualStrings("one@example.dev", taken.email.view());
+    try testing.expect(try db.deleteReturningOne(SqliteAccount, &run, .{ .where = .{ .id = @as(i64, 1) } }) == null);
+    try testing.expectEqual(@as(usize, 1), try db.count(SqliteAccount, &run, .{}));
+
+    // The same inside a transaction, and `.eq` is `=` too.
+    var tx = try db.begin(&run, .{});
+    defer tx.deinit();
+    const also = (try tx.deleteReturningOne(SqliteAccount, &run, .{ .where = .{ .id = .{ .eq = @as(i64, 2) } } })).?;
+    try testing.expectEqual(@as(i64, 2), also.id);
+    try tx.commit();
+    try testing.expectEqual(@as(usize, 0), try db.count(SqliteAccount, &run, .{}));
+}
+
+/// Two uniques and a key, for `sql.violated`: which of the three a duplicate
+/// broke is the question a signup form has to answer.
+const Member = struct {
+    pub const nilo_table = .{
+        .name = "members",
+        .key = .id,
+        .unique = .{ .{ .columns = .{.email} }, .{ .columns = .{ .org, .handle } } },
+    };
+
+    id: i64,
+    org: i64,
+    email: []const u8,
+    handle: []const u8,
+};
+
+test "sql.violated says which unique a duplicate broke, in SQLite's spelling of it" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    var db: SqliteDb = .init(testing.allocator, "file:violated?mode=memory&cache=shared", .{ .size = 2, .unchecked = true });
+    defer db.deinit();
+    try db.nilo_start(threaded.io(), .none);
+    try migrate.createMissing(&db, &run, .{ .tables = &.{Member} });
+
+    _ = try db.insert(Member, &run, .{ .id = @as(i64, 1), .org = @as(i64, 1), .email = "ada@example.dev", .handle = "ada" });
+
+    try testing.expectError(error.AlreadyExists, db.insert(Member, &run, .{ .id = @as(i64, 2), .org = @as(i64, 1), .email = "ada@example.dev", .handle = "bob" }));
+    try testing.expect(violated(&run, Member, .{.email}));
+    try testing.expect(violated(&run, Member, .email));
+    try testing.expect(!violated(&run, Member, .{ .org, .handle }));
+
+    // Two columns, named in either order: it is the set that is the unique.
+    try testing.expectError(error.AlreadyExists, db.insert(Member, &run, .{ .id = @as(i64, 3), .org = @as(i64, 1), .email = "cy@example.dev", .handle = "ada" }));
+    try testing.expect(violated(&run, Member, .{ .handle, .org }));
+    try testing.expect(!violated(&run, Member, .{.email}));
+
+    try testing.expectError(error.AlreadyExists, db.insert(Member, &run, .{ .id = @as(i64, 1), .org = @as(i64, 2), .email = "di@example.dev", .handle = "di" }));
+    try testing.expect(violated(&run, Member, .id));
+
+    // A statement that worked leaves nothing to have been violated.
+    _ = try db.insert(Member, &run, .{ .id = @as(i64, 4), .org = @as(i64, 2), .email = "ed@example.dev", .handle = "ed" });
+    try testing.expect(!violated(&run, Member, .{.email}));
+}
+
+test "a constraint's spellings are the Postgres name and SQLite's column list" {
+    const both = comptime constraintSpellings(Member, .{ .handle, .org });
+    try testing.expectEqualStrings("members_org_handle_key", both[0]);
+    try testing.expectEqualStrings("members.org, members.handle", both[1]);
+    const key = comptime constraintSpellings(Member, .id);
+    try testing.expectEqualStrings("members_pkey", key[0]);
 }

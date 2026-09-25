@@ -1534,6 +1534,28 @@ fn condition(
     }
 }
 
+/// Whether a term of type `T` compares its column with `=` to one value that
+/// is always there: a plain value, or `.{ .eq = value }`. Not `null`, which
+/// is `IS NULL`; not an optional, which may be; not a `sql.given`, which may
+/// drop out; not any other operator, which can match a range.
+///
+/// What `updateReturningOne` and `deleteReturningOne` ask of every column of
+/// a key or a unique before they promise one row
+/// ([ADR 146](../docs/adr/146-a-statement-with-a-key-in-it-has-a-single-row-answer.md)).
+pub fn pinsEquality(comptime T: type) bool {
+    comptime {
+        switch (@typeInfo(T)) {
+            .null, .optional => return false,
+            else => {},
+        }
+        if (givenValue(T) != null) return false;
+        if (operatorsOf(T)) |ops| {
+            return ops.len == 1 and std.mem.eql(u8, ops[0].name, "eq") and pinsEquality(ops[0].T);
+        }
+        return true;
+    }
+}
+
 const Operator = struct {
     name: []const u8,
     T: type,
@@ -2716,4 +2738,17 @@ test "a condition narrows nothing only when every term it ANDs narrows nothing" 
 
     // An `.exists` is judged to narrow, which is the direction to be wrong in.
     try testing.expect(!filtersNothing(.{ .exists = .{ .on = .owner, .where = .{ .id = .{ .not_in = none } } } }));
+}
+
+test "a term pins its column only when it is `=` to a value that is always there" {
+    try testing.expect(comptime pinsEquality(i64));
+    try testing.expect(comptime pinsEquality([]const u8));
+    try testing.expect(comptime pinsEquality(struct { eq: i64 }));
+
+    try testing.expect(comptime !pinsEquality(@TypeOf(null)));
+    try testing.expect(comptime !pinsEquality(?i64));
+    try testing.expect(comptime !pinsEquality(struct { gt: i64 }));
+    try testing.expect(comptime !pinsEquality(struct { eq: ?i64 }));
+    try testing.expect(comptime !pinsEquality(struct { in: []const i64 }));
+    try testing.expect(comptime !pinsEquality(Given(i64)));
 }

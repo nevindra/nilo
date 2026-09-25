@@ -158,16 +158,35 @@ fn rename(db: *sql.Db, c: *nilo.Ctx, id: i64, body: Rename) !?User {
 
 `updateReturning` is the same statement answering with the slice, for a `.where`
 that means to match many rows. `deleteReturning` is the other half, for a delete
-that has to report or log what it took. The clause they add is the `SELECT` list
-this module already writes, so none of them costs a statement the compiler did
-not settle.
+that has to report or log what it took, and `deleteReturningOne` is its
+one-row form. The clause they add is the `SELECT` list this module already
+writes, so none of them costs a statement the compiler did not settle.
 
-**`updateReturningOne` is the unwrap, not a narrower statement**
+**The `…One` calls change one row, or they do not compile**
 ([ADR 146](../../adr/146-a-statement-with-a-key-in-it-has-a-single-row-answer.md)).
-The `.where` is yours: an `UPDATE` matching several rows updates all of them, and
-this hands back the first. What it saves is `if (changed.len == 0) null else
-changed[0]` at every call site — and `!?User` is already a 404 in the typed
-layer, so the handler above is the whole endpoint.
+The `.where` has to hold the key, or every column of a `.unique`, with `=`. An
+`UPDATE` matching several rows changes all of them, so an answer of one row
+would hide the rest:
+
+```
+error: nilo: `updateReturningOne` on User has a condition that can match more than one row.
+       It answers with one row, and the statement changes every row the condition matches.
+       Hold the key with `=`: .{ .id = … }
+       Or call `updateReturning`, which answers with every row it changed.
+```
+
+Terms beside the key only narrow, so `.{ .id = id, .owner_id = me }` is fine,
+and it is how a handler says "this row, if it is mine". `!?User` is already a
+404 in the typed layer, so the handler above is the whole endpoint.
+
+A one-time token is `deleteReturningOne`. The row is found and removed by one
+statement, so a link clicked twice at once works once:
+
+<!-- compiles: body -->
+```zig
+const reset = try db.deleteReturningOne(Reset, c, .{ .where = .{ .digest = sql.Bytes.of(&digest) } }) orelse
+    return nilo.fail.unauthorized("that link is not one", .{});
+```
 
 `db.rawOne` is the same shape for a statement you wrote yourself. **It adds no
 `LIMIT 1`**, unlike `db.one`: this module did not write the statement and has

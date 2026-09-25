@@ -297,6 +297,9 @@ pub const Problem = wire.Problem;
 /// an error name cannot carry. Read it in the `catch`: it lives as long as
 /// the request does, and the next statement on this fiber replaces it.
 pub const problem = db.lastProblem;
+/// Whether the last statement broke the key or the `.unique` over these
+/// columns, checked against the marker while compiling (ADR 117).
+pub const violated = db.violated;
 
 /// What a transaction is begun with, and what a read holds on to. Both are
 /// written as literals at the call — `db.begin(c, .{ .isolation = .serializable })`,
@@ -389,6 +392,18 @@ pub fn oneFor(comptime Row: type, comptime Options: type) statement.Statement {
 /// both required and `.lock` is refused.
 pub fn pageFor(comptime Row: type, comptime Options: type) statement.Statement {
     return comptime statement.page(Postgres, Row, Options);
+}
+
+/// The `UPDATE … RETURNING` and `DELETE … RETURNING` behind the two calls
+/// that answer with one row. The same statements as the plural calls; what
+/// these add is the Refusal of a `.where` that could match more than one row
+/// (ADR 146).
+pub fn updateReturningOneFor(comptime Row: type, comptime Options: type) statement.Statement {
+    return comptime statement.updateReturningOne(Postgres, Row, Options);
+}
+
+pub fn deleteReturningOneFor(comptime Row: type, comptime Options: type) statement.Statement {
+    return comptime statement.deleteReturningOne(Postgres, Row, Options);
 }
 
 /// `SELECT count(*)`, and `SELECT EXISTS(…)`. Both take a condition and

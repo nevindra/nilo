@@ -384,9 +384,10 @@ request ([ADR 038](../adr/038-a-module-sits-where-the-loop-puts-it.md)).
 | `db.update(User, c, .{ .set = …, .where = … })` | `!usize` — rows changed. Both halves required |
 | `db.updateMany(User, c, rows)` | `![]User` — a whole batch in one statement, found by the Row's key. No `.where`: the join is the condition; see below |
 | `db.updateReturning(User, c, .{ .set = …, .where = … })` | `![]User` — the rows as they now are. One statement where an update and a select are two and a race |
-| `db.updateReturningOne(User, c, .{ .set = …, .where = … })` | `!?User` — the same for a `.where` holding a key, so a PATCH endpoint is one call and null is its 404 |
+| `db.updateReturningOne(User, c, .{ .set = …, .where = … })` | `!?User` — the same for a `.where` holding the key or a unique with `=`, so a PATCH endpoint is one call and null is its 404. Any other `.where` does not compile |
 | `db.delete(User, c, .{ .where = … })` | `!usize` — rows deleted. `.where` required |
 | `db.deleteReturning(User, c, .{ .where = … })` | `![]User` — the rows that were removed |
+| `db.deleteReturningOne(User, c, .{ .where = … })` | `!?User` — the one row the key or a unique pins, removed; what a one-time token is |
 | `db.stream(User, c, .{ … })` | rows one at a time; see below |
 | `db.raw(User, c, sql, .{ … })` | `![]User` — a statement this module will not write. `sql` is **comptime**: the `SELECT` list is counted against the Row's fields and each column that plainly has a name is checked against the field in its position, and the statement is kept prepared like every other ([ADR 051](../adr/051-a-statement-that-is-a-constant-can-be-prepared-once.md)) |
 | `db.rawOne(User, c, sql, .{ … })` | `!?User` — the same, for a statement whose `WHERE` holds a key. **No `LIMIT 1` is added**; see below |
@@ -456,11 +457,15 @@ becomes `return db.rawOne(Card, c, card_sql, .{id});`.
 **Unlike `db.one`, no `LIMIT 1` is added.** This module did not write the
 statement and has nowhere honest to put one — a `LIMIT` after a `UNION ALL` or
 inside a CTE means something else. A statement that matches many rows still
-costs every one of them and this hands back the first. The same reading applies
-to `updateReturningOne`: the `.where` is yours, an `UPDATE` matching several rows
-updates all of them, and what changes is the shape of the answer.
+costs every one of them and this hands back the first.
 
-Both exist on a `Tx` too.
+`updateReturningOne` and `deleteReturningOne` go further, because the builder
+wrote their `WHERE` and can read it: **a `.where` that could match more than
+one row does not compile.** It has to hold every column of the key, or of one
+`.unique`, with `=` to a value that is always there. A write of every matching
+row answered with the first would hide the others.
+
+All three exist on a `Tx` too.
 
 **`db.page` is a `select` carrying the count the condition matched before the
 `.limit` cut it** ([ADR 150](../adr/150-a-page-knows-what-it-left-out.md)):
@@ -876,7 +881,7 @@ try tx.commit();
 
 `tx` carries every read and write call above — `select`, `one`, `find`,
 `count`, `exists`, `insert`, `insertMany`, `update`, `updateMany`,
-`updateReturning`, `delete`, `deleteReturning` and `raw` — all down the one
+`updateReturning`, `delete`, `deleteReturning`, `deleteReturningOne` and `raw` — all down the one
 connection it holds. Forgetting the `defer` is caught in Debug by a counter
 asserted at `db.deinit()`.
 
@@ -1089,6 +1094,24 @@ does, and the next statement replaces it.
 
 `db.watching` is unchanged and is still the way to see *every* statement. The two
 answer different questions.
+
+**`sql.violated(c, Row, .{ .email })` is the same question with the constraint
+named by its columns**, which is the form to branch on:
+
+```zig
+error.AlreadyExists => if (sql.violated(c, Staff, .{.email}))
+    return nilo.fail.conflict("that address is already on the staff", .{})
+else
+    return err,
+```
+
+The columns are checked while compiling against the key and every `.unique`
+the marker declares, in any order, so a unique that is renamed or dropped is a
+build error wherever a handler branches on it. It accepts both databases'
+spellings: Postgres reports the constraint's name, `staff_email_key`, and
+SQLite the columns, `staff.email`. `Problem.constraint` on SQLite is the text
+after `constraint failed:` for the same reason. A foreign key is not accepted,
+because SQLite does not say which one failed.
 
 ### Migrations
 

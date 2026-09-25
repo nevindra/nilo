@@ -357,22 +357,26 @@ fn forgot(c: *nilo.Ctx, db: *sql.Db, form: nilo.Form(Forgot)) !nilo.Redirect(303
 
 const NewPassword = struct { password: Str };
 
-// `POST /reset/:user/:token`
+// `POST /reset/:token`
 fn reset(
     c: *nilo.Ctx,
     db: *sql.Db,
-    user_id: i64,
     token: Str,
     form: nilo.Form(NewPassword),
 ) !nilo.Redirect(303) {
-    const row = try db.one(Reset, c, .{ .where = .{ .user_id = user_id } }) orelse
+    const presented = pw.Token.parse(token.view()) orelse
         return nilo.fail.unauthorized("that link is not one", .{});
-    if (row.expires_at.micros < nilo.nowMicros() or !pw.Token.matches(row.digest.bytes, token.view()))
+    const digest = presented.digest();
+
+    // Found and taken in one statement: two requests with the same link
+    // cannot both get past this line.
+    const row = try db.deleteReturningOne(Reset, c, .{ .where = .{ .digest = sql.Bytes.of(&digest) } }) orelse
+        return nilo.fail.unauthorized("that link is not one", .{});
+    if (row.expires_at.micros < nilo.nowMicros())
         return nilo.fail.unauthorized("that link is not one", .{});
 
     const fresh = try c.hashPassword(pw.huge_pages, form.value.password.view());
-    _ = try db.update(Account, c, .{ .set = .{ .password = fresh.text() }, .where = .{ .id = user_id } });
-    _ = try db.delete(Reset, c, .{ .where = .{ .id = row.id } });
+    _ = try db.update(Account, c, .{ .set = .{ .password = fresh.text() }, .where = .{ .id = row.user_id } });
     return .to("/sign-in");
 }
 
@@ -389,19 +393,28 @@ Four things about it:
   43 characters of base64url — safe in a URL, a header and a mail — and
   `token.digest()` is SHA-256 over the bytes. A row holding the digest is
   useless to whoever reads the table, which is the point of it.
-- **`matches` is the whole check, and every wrong answer is `false`.** The
-  wrong length, a character outside base64url, a padded spelling: one
-  answer, because which way a token was wrong is not something to tell
-  whoever presented it. A stored value that is not 32 bytes is `false` too,
-  so a table that kept the text by mistake signs nobody in rather than
-  everybody.
+- **Every wrong token gets one answer.** `parse` gives null for the wrong
+  length, a character outside base64url or a padded spelling, and the lookup
+  gives null for a token nobody issued. Both end in the same 401, because
+  which way a token was wrong is not something to tell whoever presented it.
+  Finding the row by its digest leaks no timing worth having: whoever sends a
+  token cannot choose the bytes of its SHA-256. Where the row is found some
+  other way, `pw.Token.matches(stored, presented)` is the constant-time
+  compare, and a stored value that is not 32 bytes is `false`, so a table
+  that kept the text by mistake signs nobody in rather than everybody.
 - **No argon2.** A token has 256 bits of entropy and needs no stretching;
   a reset endpoint that took 13 ms to say no would be one that can be
   walked. This is why it is `pw.Token` and not a Cost.
-- **Expiry and single use are yours.** `expires_at` and the `delete` above
-  are columns and a statement in your table, the way the password hash's row
-  is. An API key is the same three calls with no expiry and the digest as
-  the key: `pw.Token.parse(header).?.digest()` is what to look the row up by.
+- **Expiry and single use are yours.** `expires_at` is a column in your
+  table, and single use is `deleteReturningOne`: the row is found by its
+  digest and removed by the same statement, so a link clicked twice at once
+  works once. Reading it with `db.one` and deleting it after leaves a gap
+  where both requests read it. The digest needs `.unique` in the marker,
+  which is what lets `deleteReturningOne` promise one row. A failure after
+  the delete, such as the password update, spends the link, and the user asks
+  for another. That is the safe way round. An API key is the same calls with
+  no expiry and no delete: `pw.Token.parse(header).?.digest()` is what to
+  look the row up by.
 
 ## Testing
 

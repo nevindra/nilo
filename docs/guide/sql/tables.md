@@ -10,6 +10,7 @@ const User = struct {
     pub const nilo_table = .{
         .name = "users",
         .key = .id,
+        .unique = .{.email},
         .default = .{ .age = 0, .orders = 0, .created_at = .now },
     };
 
@@ -25,6 +26,10 @@ comptime {
     _ = User;
 }
 ```
+
+`.unique = .{.email}` is the constraint the writing page's upserts conflict on
+and the one `sql.violated(c, User, .{.email})` names when a signup collides.
+[Making the tables](./migrations.md) has the rest of what the marker can say.
 
 The table name is written out, never guessed. `User` → `users` looks clever
 until `Category`, and every framework that guesses ends up shipping a list of

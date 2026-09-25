@@ -40,6 +40,8 @@ pub var email: []const u8 = undefined;
 pub var name: []const u8 = undefined;
 pub var month: i32 = undefined;
 pub var tags: []const []const u8 = undefined;
+// A token's SHA-256, for the one-time-token block.
+pub var digest: [32]u8 = undefined;
 pub var schema_sql: []const u8 = undefined;
 pub var url: []const u8 = undefined;
 

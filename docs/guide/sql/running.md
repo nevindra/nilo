@@ -301,6 +301,24 @@ if (std.mem.eql(u8, said.constraint, "users_email_key")) {
 }
 ```
 
+For a unique the marker declares, `sql.violated` asks the same thing by the
+columns and checks them while compiling:
+
+<!-- compiles: body -->
+```zig
+_ = db.insert(User, c, .{ .email = email, .name = name, .age = 30 }) catch |err| switch (err) {
+    error.AlreadyExists => if (sql.violated(c, User, .{.email}))
+        return nilo.fail.conflict("that email is already listed", .{})
+    else
+        return err,
+    else => return err,
+};
+```
+
+`users_email_key` in a string is a name nothing checks, and SQLite does not
+use it: it reports `users.email`. `sql.violated` accepts either, and a column
+list that is neither the key nor a `.unique` does not compile.
+
 It answers for the last statement **this fiber** ran, and null when it worked.
 Read it in the `catch`: it lives as long as the request does, and the next
 statement replaces it. `db.watching` is the other end of the same information

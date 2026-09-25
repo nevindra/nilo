@@ -4300,6 +4300,52 @@ test "a plan a migration changed the answer of is prepared again, and inside a t
     }
 }
 
+/// A table with a unique of its own, for `sql.violated` against Postgres's
+/// spelling: the constraint's name.
+const members_table = "nilo_live_members_" ++ mode_suffix;
+
+const LiveMember = struct {
+    pub const nilo_table = .{
+        .name = members_table,
+        .key = .id,
+        .unique = .{ .{ .columns = .{.email} }, .{ .columns = .{ .org, .handle } } },
+    };
+
+    id: i64,
+    org: i64,
+    email: []const u8,
+    handle: []const u8,
+};
+
+test "sql.violated says which unique a duplicate broke, by the name Postgres gives it" {
+    const gpa = testing.allocator;
+    const url = live_config.database_url orelse return error.SkipZigTest;
+
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    var db = db_mod.Db.init(gpa, url, .{ .size = 1, .connect_on_init = 1, .unchecked = true });
+    defer db.deinit();
+    try db.nilo_start(threaded.io(), .off);
+    defer db.nilo_stop();
+    var run: core.Run = .init(gpa);
+    defer run.deinit();
+
+    _ = try db.exec(&run, "DROP TABLE IF EXISTS \"" ++ members_table ++ "\"", .{});
+    defer _ = db.exec(&run, "DROP TABLE IF EXISTS \"" ++ members_table ++ "\"", .{}) catch {};
+    try migrate.createMissing(&db, &run, .{ .tables = &.{LiveMember} });
+
+    _ = try db.insert(LiveMember, &run, .{ .id = @as(i64, 1), .org = @as(i64, 1), .email = "ada@example.dev", .handle = "ada" });
+    try testing.expectError(error.AlreadyExists, db.insert(LiveMember, &run, .{ .id = @as(i64, 2), .org = @as(i64, 1), .email = "ada@example.dev", .handle = "bob" }));
+    try testing.expect(db_mod.violated(&run, LiveMember, .{.email}));
+    try testing.expect(!db_mod.violated(&run, LiveMember, .{ .org, .handle }));
+
+    try testing.expectError(error.AlreadyExists, db.insert(LiveMember, &run, .{ .id = @as(i64, 3), .org = @as(i64, 1), .email = "cy@example.dev", .handle = "ada" }));
+    try testing.expect(db_mod.violated(&run, LiveMember, .{ .org, .handle }));
+
+    try testing.expectError(error.AlreadyExists, db.insert(LiveMember, &run, .{ .id = @as(i64, 1), .org = @as(i64, 2), .email = "di@example.dev", .handle = "di" }));
+    try testing.expect(db_mod.violated(&run, LiveMember, .id));
+}
+
 /// A table whose columns a generated plan drops, indexes and all.
 const tidy_table = "nilo_live_tidy_" ++ mode_suffix;
 

@@ -250,6 +250,18 @@ const sql_refusals = [_]Refusal{
         .says = "`db.one` on one_with_limit.User was given a `.limit`.",
     },
     .{
+        .name = "returning_one_on_a_column_not_unique",
+        .says = "`updateReturningOne` on returning_one_on_a_column_not_unique.User has a condition that can match more than one row.",
+    },
+    .{
+        .name = "violated_not_a_unique",
+        .says = "`sql.violated` asks about violated_not_a_unique.User's .{ .handle }, and neither its key nor any `.unique` is over those columns.",
+    },
+    .{
+        .name = "returning_one_with_a_range_on_the_key",
+        .says = "`deleteReturningOne` on returning_one_with_a_range_on_the_key.Session has a condition that can match more than one row.",
+    },
+    .{
         .name = "find_with_a_condition",
         .says = "`db.find` on find_with_a_condition.User was given a struct where its key goes.",
     },

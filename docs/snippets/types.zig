@@ -56,7 +56,7 @@ pub const Signed = struct { user: u32, admin: bool = false };
 /// the sessions guide: whose it is, the digest and never the text, and when
 /// it stops working (ADR 044).
 pub const Reset = struct {
-    pub const nilo_table = .{ .name = "password_resets", .key = .id };
+    pub const nilo_table = .{ .name = "password_resets", .key = .id, .unique = .{.digest} };
 
     id: i64,
     user_id: i64,

@@ -1429,6 +1429,84 @@ pub fn updateReturning(comptime D: type, comptime Row: type, comptime O: type) S
     return comptime updating(D, Row, O, true);
 }
 
+/// `updateReturning` for a `.where` that can match one row at most: the
+/// statement is the same one, and this refuses the condition that could
+/// match more ([ADR 146](../docs/adr/146-a-statement-with-a-key-in-it-has-a-single-row-answer.md)).
+pub fn updateReturningOne(comptime D: type, comptime Row: type, comptime O: type) Statement {
+    return comptime blk: {
+        assertPinsOneRow(D, Row, O, "updateReturningOne", "updateReturning");
+        break :blk updating(D, Row, O, true);
+    };
+}
+
+/// `deleteReturning` for a `.where` that can match one row at most.
+pub fn deleteReturningOne(comptime D: type, comptime Row: type, comptime O: type) Statement {
+    return comptime blk: {
+        assertPinsOneRow(D, Row, O, "deleteReturningOne", "deleteReturning");
+        break :blk deleting(D, Row, O, true);
+    };
+}
+
+/// **A call that answers with one row changes one row**, or it does not
+/// compile. The `.where` has to hold every column of the key, or every column
+/// of one `.unique`, each compared with `=` to a value that is always there.
+/// Other terms beside them only narrow further.
+///
+/// An `UPDATE` or a `DELETE` matching several rows changes all of them, and
+/// the call used to hand back the first: a `PATCH` written against a column
+/// that is not unique rewrote every row sharing its value and reported one.
+/// A caller who means several rows has `updateReturning` and
+/// `deleteReturning`, which say so in their answer.
+fn assertPinsOneRow(
+    comptime D: type,
+    comptime Row: type,
+    comptime O: type,
+    comptime call: []const u8,
+    comptime plural: []const u8,
+) void {
+    comptime {
+        if (!@hasField(O, "where")) return; // the statement refuses it, in its own words
+        const W = @FieldType(O, "where");
+        if (@typeInfo(W) != .@"struct") return;
+        const owner = row_mod.ownerOf(Row);
+
+        const keys = row_mod.keysIfAnyOf(owner);
+        if (keys.len > 0 and pinsAll(W, keys)) return;
+        var uniques: []const u8 = "";
+        for (table_mod.descOf(D, owner).uniques) |u| {
+            if (pinsAll(W, u.columns)) return;
+            uniques = uniques ++ "\n    ." ++ spelledColumns(u.columns);
+        }
+
+        @compileError(
+            "nilo: `" ++ call ++ "` on " ++ @typeName(Row) ++ " has a condition that can match more than one row.\n" ++
+                "  It answers with one row, and the statement changes every row the condition matches.\n" ++
+                "  Hold the key with `=`: ." ++ spelledColumns(keys) ++
+                (if (uniques.len > 0) ", or a unique:" ++ uniques else "") ++ "\n" ++
+                "  Or call `" ++ plural ++ "`, which answers with every row it changed.",
+        );
+    }
+}
+
+fn pinsAll(comptime W: type, comptime columns: []const []const u8) bool {
+    comptime {
+        for (columns) |c| {
+            if (!@hasField(W, c)) return false;
+            if (!where_mod.pinsEquality(@FieldType(W, c))) return false;
+        }
+        return true;
+    }
+}
+
+/// `{ .a = …, .b = … }` for a message.
+fn spelledColumns(comptime columns: []const []const u8) []const u8 {
+    comptime {
+        var out: []const u8 = "{ ";
+        for (columns, 0..) |c, i| out = out ++ (if (i > 0) ", " else "") ++ "." ++ c ++ " = …";
+        return out ++ " }";
+    }
+}
+
 fn updating(
     comptime D: type,
     comptime Row: type,

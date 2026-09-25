@@ -910,7 +910,27 @@ pub fn Wire(comptime opts_in: Options) type {
                 slot.* = .{ .message = @errorName(err) };
                 return;
             }
-            slot.* = .{ .message = arena.dupe(u8, text) catch @errorName(err) };
+            const message = arena.dupe(u8, text) catch @errorName(err);
+            slot.* = .{ .message = message, .constraint = constraintOf(message) };
+        }
+
+        /// What SQLite's message names after `constraint failed: `. The
+        /// columns for a key or a unique, `users.email`, since SQLite does
+        /// not report an index's name; the name for a named check. Empty for
+        /// a foreign key, which SQLite reports without saying which one.
+        fn constraintOf(message: []const u8) []const u8 {
+            const marker = "constraint failed: ";
+            const at = std.mem.indexOf(u8, message, marker) orelse return "";
+            return message[at + marker.len ..];
+        }
+
+        /// What SQLite said about the step `next` just failed, for the
+        /// `Db` to hand the watcher and `sql.problem` (ADR 117). A step is
+        /// where an `INSERT … RETURNING` meets its constraint.
+        pub fn stepProblem(self: *Self, rows: *const Rows, err: wire.Error, arena: std.mem.Allocator) ?wire.Problem {
+            var slot: ?wire.Problem = null;
+            self.said(rows.at, err, arena, &slot);
+            return slot;
         }
 
         pub fn next(self: *Self, rows: *Rows) wire.Error!bool {

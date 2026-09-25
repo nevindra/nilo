@@ -317,11 +317,11 @@ fn report(db: *Db, c: *nilo.Ctx) !Report {
 /// requests paying one invoice at once must not both succeed. A `Tx` holds
 /// one connection until it ends, and on SQLite that is the writer, so the
 /// second request's `find` waits its turn and sees `paid`. It ends however
-/// the handler leaves: the `errdefer` is the rollback for every early
-/// return below, and a `fail.*` is an early return.
+/// the handler leaves: `deinit` rolls back unless the commit ran, on every
+/// early return below, and a `fail.*` is an early return.
 fn payInvoice(db: *Db, c: *nilo.Ctx, id: i64) !Invoice {
     var tx = try db.begin(c, .{});
-    errdefer tx.rollback();
+    defer tx.deinit();
 
     const invoice = try tx.find(Invoice, c, id) orelse return fail.notFound("there is no invoice {d}", .{id});
     if (invoice.status == .paid) return fail.conflict("invoice {d} was already paid", .{id});

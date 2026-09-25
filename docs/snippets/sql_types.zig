@@ -28,6 +28,18 @@ pub const sql = @import("nilo_sql");
 
 pub const Str = nilo.Str;
 
+/// A password-reset row, for the one-time token on the writing page: found
+/// and removed by its digest, which `.unique` makes one row at most, the
+/// promise `deleteReturningOne` asks for (ADR 146).
+pub const Reset = struct {
+    pub const nilo_table = .{ .name = "password_resets", .key = .id, .unique = .{.digest} };
+
+    id: i64,
+    user_id: i64,
+    digest: sql.Bytes,
+    expires_at: sql.Timestamp,
+};
+
 /// What a user buys, and the other side of every transaction example.
 pub const Order = struct {
     pub const nilo_table = .{ .name = "orders", .key = .id };
