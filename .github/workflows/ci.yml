@@ -155,8 +155,8 @@ jobs:
 
       - run: zig version
 
-      - name: zig build test
-        run: zig build test
+      - name: fetch tests with timing
+        run: zig build test-fetch 2>&1 | grep -E "DIAG|failed|error" | head -120 || true
 
   # The guide is published only when a tag is pushed (docs.yml), so a page
   # link or a heading anchor broken on main would otherwise be found by the

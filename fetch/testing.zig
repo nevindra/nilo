@@ -555,10 +555,12 @@ pub const Canned = struct {
         const w = &writer.interface;
         try w.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n", .{self.body_len});
         try w.flush();
-        for (0..self.body_len) |_| {
+        const t0 = @import("nilo_core").monotonicMicros();
+        for (0..self.body_len) |i| {
             try std.Io.sleep(self.io, .fromMilliseconds(trickle_ms), .awake);
             try w.writeByte('x');
             try w.flush();
+            std.debug.print("DIAG server sent byte {d} at {d}us\n", .{ i, @import("nilo_core").monotonicMicros() - t0 });
         }
     }
 

@@ -999,7 +999,12 @@ pub const Exchange = struct {
 
     fn tapStream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
         const self: *Exchange = @alignCast(@fieldParentPtr("tap", r));
-        const n = try self.inner.stream(w, limit);
+        const t0 = core.monotonicMicros();
+        const n = self.inner.stream(w, limit) catch |err| {
+            std.debug.print("DIAG tapStream err={s} after {d}us limit={any}\n", .{ @errorName(err), core.monotonicMicros() - t0, limit });
+            return err;
+        };
+        std.debug.print("DIAG tapStream n={d} took {d}us since_last_mark={d}us limit={any}\n", .{ n, core.monotonicMicros() - t0, core.monotonicMicros() - self.last_byte.load(.acquire), limit });
         self.mark();
         return n;
     }
@@ -1380,6 +1385,7 @@ pub const Exchange = struct {
             if (self.stall_ms != 0) {
                 const left = self.last_byte.load(.acquire) + @as(i64, self.stall_ms) * std.time.us_per_ms - now;
                 if (left <= 0) {
+                    std.debug.print("DIAG watcher: stalled, last_byte age {d}us\n", .{now - self.last_byte.load(.acquire)});
                     self.stalled = true;
                     return future.cancel(io);
                 }
