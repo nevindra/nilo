@@ -4851,6 +4851,33 @@ const ShapeByCustomer = struct {
     weighed: f64,
 };
 
+const ShapeCounted = struct {
+    pub const nilo_table = ShapeOrder;
+    pub const nilo_via = .{ .customer = .customer_id };
+    pub const nilo_children = .{
+        .line_count = .{ .count = ShapeLine },
+        .lines = .{ .order = .{ .sku = .desc }, .where = .{ .sku = .{ .in = .{ "a", "b" } } } },
+    };
+    id: types.Uuid,
+    customer: ShapeCustomerName,
+    line_count: i64,
+    lines: []const ShapeSku,
+};
+
+const ShapeFiltered = struct {
+    pub const nilo_table = ShapeOrder;
+    pub const nilo_via = .{ .customer = .customer_id };
+    pub const nilo_aggregate = .{
+        .large = .{ .sum = .total, .where = .{ .total = .{ .gte = 100 } } },
+        .referred = .{ .count = .id, .where = .{ .referrer_id = .{ .ne = null } } },
+        .light = .{ .max = .weight, .where = .{ .weight = .{ .lt = 2.0 } } },
+    };
+    customer: ShapeCustomerName,
+    large: ?i64,
+    referred: i64,
+    light: ?f32,
+};
+
 const shape_setup = [_][]const u8{
     "DROP TABLE IF EXISTS nilo_shape_lines",
     "DROP TABLE IF EXISTS nilo_shape_orders",
@@ -4917,6 +4944,43 @@ test "a parent, its children and a sum come back from a real Postgres" {
     try testing.expectEqual(@as(f32, 2.5), groups.rows[0].heaviest);
     try testing.expectEqual(@as(f64, 4), groups.rows[0].weighed);
     try testing.expectEqual(@as(i64, 40), groups.rows[1].revenue);
+
+    // An aggregate's `.where`: the cast applies to the filtered call, and a
+    // group none of whose rows matches is null rather than missing.
+    const filtered = try stack.db.select(ShapeFiltered, &run, .{ .order = .{ .customer = .{ .name = .asc } } });
+    try testing.expectEqual(@as(usize, 2), filtered.len);
+    try testing.expectEqual(@as(?i64, 350), filtered[0].large);
+    try testing.expectEqual(@as(i64, 1), filtered[0].referred);
+    try testing.expectEqual(@as(?f32, 1.5), filtered[0].light);
+    try testing.expect(filtered[1].large == null);
+    try testing.expectEqual(@as(i64, 1), filtered[1].referred);
+    try testing.expectEqual(@as(?f32, 0.5), filtered[1].light);
+    const having = try stack.db.select(ShapeFiltered, &run, .{ .where = .{ .large = .{ .gt = @as(i64, 0) } } });
+    try testing.expectEqual(@as(usize, 1), having.len);
+
+    // Children in an order of their own and narrowed, and a count of them
+    // read in the same statement as the rows it belongs to.
+    const counted = try stack.db.select(ShapeCounted, &run, .{
+        .where = .{ .line_count = .{ .gt = @as(i64, 0) } },
+        .order = .{ .line_count = .desc },
+    });
+    try testing.expectEqual(@as(usize, 2), counted.len);
+    try testing.expectEqual(@as(i64, 2), counted[0].line_count);
+    try testing.expectEqual(@as(usize, 2), counted[0].lines.len);
+    try testing.expectEqualStrings("b", counted[0].lines[0].sku);
+    try testing.expectEqualStrings("a", counted[0].lines[1].sku);
+    try testing.expectEqual(@as(i64, 1), counted[1].line_count);
+    try testing.expectEqual(@as(usize, 0), counted[1].lines.len);
+
+    // The plan of a shaped read, run with its values bound: what a slow page
+    // is asked first.
+    const plan = try stack.db.explain(ShapeOrderCard, &run, .{
+        .where = .{ .total = .{ .gt = @as(i64, 50) } },
+        .order = .{ .total = .desc },
+    });
+    try testing.expect(std.mem.indexOf(u8, plan, "nilo_shape_orders") != null);
+    try testing.expect(std.mem.indexOf(u8, plan, "Execution Time:") != null);
+    try testing.expect(std.mem.indexOf(u8, plan, "\n") != null);
 
     for (shape_setup[0..3]) |text| _ = try stack.db.exec(&run, text, .{});
 }

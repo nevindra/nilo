@@ -139,10 +139,13 @@ statement is still counted.
 
 Aggregates are most of what a dashboard reads. A count, a sum, a min, a
 max or an average over a column, grouped by columns and parents, is a
-[grouped Row](./shapes.md#a-group), and a total over everything is
-`db.exactlyOne`. What is left for `raw` is a report those cannot say: a
-`FILTER`, a `coalesce`, an expression inside the aggregate, a join no
-reference names. Three shapes come up, and each has a call:
+[grouped Row](./shapes.md#a-group), a `FILTER` on one of them is its
+entry's [`.where`](./shapes.md#an-aggregate-over-some-of-the-rows), a count
+of the rows pointing back is a [count field](./shapes.md#an-order-a-condition-and-a-count),
+and a total over everything is `db.exactlyOne`. What is left for `raw` is a
+report those cannot say: a `coalesce`, an expression inside the aggregate, a
+filter naming a parent's column, a join no reference names. Three shapes
+come up, and each has a call:
 
 **A statement that always has one row.** `SELECT count(*), sum(total) FROM
 invoices` answers one row whatever is in the table, and so does `RETURNING`

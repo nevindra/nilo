@@ -397,7 +397,10 @@ fn columnOf(comptime Row: type, comptime name: []const u8, comptime said: anytyp
         if (@TypeOf(said) == @TypeOf(.enum_literal)) {
             const column = @tagName(said);
             if (row_mod.hasColumn(Row, column)) return column;
-            if (row_mod.fieldTypeOf(Row, column) != null and row_mod.kindOf(Row, column) == .aggregate) return column;
+            if (row_mod.fieldTypeOf(Row, column) != null) switch (row_mod.kindOf(Row, column)) {
+                .aggregate, .count => return column,
+                else => {},
+            };
             row_mod.noSuchColumn(Row, column, what);
         }
         if (!isPath(@TypeOf(said))) @compileError(

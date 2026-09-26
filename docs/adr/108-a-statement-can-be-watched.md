@@ -34,6 +34,8 @@ pub const Sent = struct {
     micros: u64,
     rows: ?usize,
     failed: bool,
+    problem: ?wire.Problem = null,   // ADR 117
+    route: ?[]const u8 = null,
 };
 ```
 
@@ -53,6 +55,18 @@ does; it cannot be taken back out of a log.
 `db.stream`, whose rows are pulled by the handler long after this call returned.
 For a stream, `micros` is how long the statement took to **open**, which is the
 half that is worth reporting and the half that can be reported truthfully.
+
+**`route` is the `operationId` of the route whose request sent the
+statement**, what `c.routeName()` answers
+([ADR 162](162-a-middleware-can-learn-which-route-it-is-in-front-of.md)), and
+null under a `Run` or for a request nothing matched. It is what joins a slow
+`SELECT` to the page that paid for it: one list, its count and seven facets
+are often the same text, and the text alone cannot say which request each
+came from. It is read off the Scope every statement is already handed, by
+`core.routeNameOf`, which asks for a declaration rather than naming `Ctx`:
+`nilo_sql` may not import the HTTP layer, and a Scope without a `routeName`
+answers null. A pointer the App already holds, so nothing is allocated, and a
+watcher may keep it past the request.
 
 ## On the `Db` rather than on the Wire
 
@@ -105,15 +119,24 @@ writes `if (sent.micros < …) return;` — which is the second example above.
 is the obvious next thing to want. It also makes the signature generic over the
 Scope, which means the watcher becomes a comptime shape rather than a function
 pointer, and every program that stores one has to name a type it did not write.
+The route is read off the Scope before the call instead, into the `Sent`.
+
+**The request id on the `Sent` beside the route.** `Ctx.requestId` mints one
+when the request carried none, which is an allocation on a path that did not
+ask for it, once per statement ([ADR 017](017-the-trade-budget-has-four-axes.md)).
+The route answers *which page*; *which request* is the log line the request
+writes, and a watcher that needs both joins them there.
+
+**The fiber's threadlocal**, where `fail`'s message box lives
+([ADR 006](006-failure-box-bound-to-the-fiber.md)): the other way the route
+could have reached a Service. It is the arrangement the standing risk about
+`bulkhead.slot()` is about, and the Scope was already in the call.
 
 **Printing from inside this module.** `std.log` with no way to turn it off is
 what "not in Debug, not behind an option" was already too much of.
 
 ## What is still open
 
-**A statement cannot say which request it came from.** The `Sent` has no
-request id and no route, so a watcher can say *this statement ran for 4ms* and
-not *for which page*. `fail`'s message box is bound to the fiber
-([ADR 006](006-failure-box-bound-to-the-fiber.md)) and reaching the same
-threadlocal from a Service is the trick `bulkhead.slot()` warns about in the
-standing risks. Worth having; worth having on purpose.
+**An `AnyScope` carries no route.** Its table has five calls and `routeName`
+is not one, so a statement sent from the far side of a function pointer is
+reported with none. The sixth call is a line when somebody meets it.

@@ -301,6 +301,14 @@ pub const Postgres = struct {
     /// What the first key's number is. `WITH ORDINALITY` counts from one.
     pub const ordinal_base = 1;
 
+    /// What `db.explain` writes in front of a read, and how many columns a
+    /// line of the answer has, the plan's own text last. `ANALYZE` runs the
+    /// statement and reports what it did rather than what the planner
+    /// guessed, which is the question a slow page asks; `BUFFERS` says how
+    /// much of it came off the disk.
+    pub const explain = "EXPLAIN (ANALYZE, BUFFERS) ";
+    pub const explain_width = 1;
+
     /// Where NULLs sit in an ordered result, or `null` for a database that
     /// cannot be told. Written the same way `lock` is, and for the same
     /// reason: a Dialect that has no spelling for this refuses rather than
@@ -946,6 +954,12 @@ pub const SQLite = struct {
     /// `json_each` counts from zero.
     pub const ordinal_base = 0;
 
+    /// `EXPLAIN QUERY PLAN`, which plans and does not run: SQLite has no
+    /// `ANALYZE` form that reports timings. Four columns a line, the step's
+    /// text last.
+    pub const explain = "EXPLAIN QUERY PLAN ";
+    pub const explain_width = 4;
+
     /// The same two words, and **that is the finding rather than the
     /// coincidence.** SQLite has taken `NULLS FIRST`/`NULLS LAST` since 3.30
     /// (2019), so the clause the two databases disagree about by *default* is
@@ -1345,6 +1359,8 @@ pub fn assertDialect(comptime D: type) void {
             "readAggregate",
             "ordinalList",
             "ordinal_base",
+            "explain",
+            "explain_width",
         };
         for (owed) |decl| {
             if (!@hasDecl(D, decl)) @compileError(

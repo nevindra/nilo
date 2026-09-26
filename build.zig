@@ -551,6 +551,30 @@ const sql_refusals = [_]Refusal{
         .name = "order_on_unknown_column",
         .says = "order_on_unknown_column.User has no column `creted_at`, asked for in `.order`.",
     },
+    // `nilo_children`: a count is an i64, and an entry takes what one
+    // statement for every parent can honour (ADR 218).
+    .{
+        .name = "children_count_read_as_a_usize",
+        .says = "children_count_read_as_a_usize.RabCard reads `.line_count`, a count, as usize.",
+    },
+    .{
+        .name = "children_entry_with_a_limit",
+        .says = "children_entry_with_a_limit.RabCard's nilo_children gives `.lines` a `.limit`, which it does not take.",
+    },
+    // An aggregate's `.where`: it narrows a computation, it makes the answer
+    // nullable, and it takes only what a literal can say (ADR 218).
+    .{
+        .name = "aggregate_filter_with_nothing_to_compute",
+        .says = "aggregate_filter_with_nothing_to_compute.ByCustomer's nilo_aggregate gives `.foreign` a `.where` and nothing to compute.",
+    },
+    .{
+        .name = "aggregate_filter_read_as_never_null",
+        .says = "aggregate_filter_read_as_never_null.ByCustomer reads `.idr` as i64, and it reads only the rows its `.where` matches, and sum over a group where none does is null.",
+    },
+    .{
+        .name = "aggregate_filter_with_a_pattern",
+        .says = "aggregate_filter_with_a_pattern.ByCustomer's `.rupiah` `.where` tests `currency` with `.starts_with`, which is not one it writes.",
+    },
     .{
         .name = "order_on_a_grouped_row_by_a_column_it_does_not_carry",
         .says = "`.order` on order_on_a_grouped_row_by_a_column_it_does_not_carry.ByCustomer names `year`, a column of its table that the Row does not carry, and the Row is grouped.",

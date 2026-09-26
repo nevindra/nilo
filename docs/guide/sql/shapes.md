@@ -158,6 +158,46 @@ The Row has to read `id`, the column the lines point at, because that is how eac
 
 Children go one level deep. A child can have parents, which are joined into the second statement, but it cannot have children of its own. `db.stream` refuses a Row with children, because a stream never holds the rows the children would be handed to.
 
+### An order, a condition, and a count
+
+`pub const nilo_children` says the rest, keyed by the field:
+
+<!-- compiles -->
+```zig
+const InvoiceSummary = struct {
+    pub const nilo_table = Invoice;
+    pub const nilo_children = .{
+        .lines = .{ .order = .{ .qty = .desc }, .where = .{ .qty = .{ .gt = 0 } } },
+        .line_count = .{ .count = InvoiceLine },
+        .bulk_lines = .{ .count = InvoiceLine, .where = .{ .qty = .{ .gte = 100 } } },
+    };
+    id: i64,
+    lines: []const LineBrief,
+    line_count: i64,
+    bulk_lines: i64,
+};
+
+fn busiest(db: *sql.Db, c: *nilo.Ctx) ![]InvoiceSummary {
+    return db.select(InvoiceSummary, c, .{
+        .where = .{ .line_count = .{ .gt = 0 } },
+        .order = .{ .line_count = .desc },
+        .limit = 20,
+    });
+}
+```
+
+**A list takes `.order` and `.where`.** The order is columns of the child's table, and the child's key still comes last, so two lines with the same `qty` come back the same way every time. A key minted as a v7 id matches the order rows were made in, which is the order a user dragging lines around has just changed, so a list with a `position` column wants `.order = .{ .position = .asc }`.
+
+**A count is an `i64` field that reads no child.** It is a subquery on each row, in the same statement:
+
+```sql
+(SELECT count(*) FROM "invoice_lines" AS "#c" WHERE "#c"."invoice_id" = "invoices"."id") AS "line_count"
+```
+
+So a badge that says *12 lines* costs one index lookup per invoice on the page, not every line read into memory to take `.len`. Put an index on the column that points back: Postgres does not make one for a foreign key. A count can be ordered by and named in `.where` like a column, and it can sit on a parent's Row too.
+
+Both `.where`s here are written with their values in them, because they are part of the Row rather than of a request: a value, `null`, `.eq`, `.ne`, `.gt`, `.gte`, `.lt`, `.lte`, `.in` and `.not_in`. A filter that comes from the request goes in the read's own `.where`. A `.limit` on a list is refused, because one statement reads the children of every row and a limit there would cut across rows.
+
 ## A group
 
 `nilo_aggregate` names the fields that are computed. Every other field is a key of the group:
@@ -212,6 +252,31 @@ The words are `.count`, `.{ .count = .col }`, `.{ .count_distinct = .col }`, `.{
 
 A field is `?` exactly when the answer can be null: over a nullable column, where a group of nulls sums to null. `db.page` of a grouped Row counts groups, and so does `db.count`.
 
+### An aggregate over some of the rows
+
+An entry can carry a `.where`, which narrows only the rows that one aggregate reads. It is `FILTER (WHERE …)`, on both databases:
+
+<!-- compiles -->
+```zig
+const RevenueByCustomer = struct {
+    pub const nilo_table = Invoice;
+    pub const nilo_aggregate = .{
+        .this_year = .{ .sum = .total, .where = .{ .year = 2026 } },
+        .large = .{ .count = .id, .where = .{ .total = .{ .gte = 1_000_000 } } },
+    };
+    customer: CustomerName,
+    this_year: ?i64,
+    large: i64,
+};
+```
+
+```sql
+sum("invoices"."total") FILTER (WHERE "invoices"."year" = 2026)::int8 AS "this_year",
+count("invoices"."id") FILTER (WHERE "invoices"."total" >= 1000000) AS "large"
+```
+
+The values go into the statement as written, with the same words a children entry's `.where` takes, over the table's columns. **A filtered `sum`, `min`, `max` or `avg` is `?` whatever its column**, because a customer with no invoice this year has nothing to sum. A filtered count is zero there. To count the rows that match, name a column that is never null, the key usually: `.{ .count = .id, .where = … }`.
+
 ## A total
 
 A grouped Row with no keys at all is one row over everything the condition matched. It is read with `db.exactlyOne`, which answers the Row itself rather than a list or a `?`:
@@ -234,4 +299,4 @@ fn totals(db: *sql.Db, c: *nilo.Ctx, year: i32) !Totals {
 
 ## What is still `raw`
 
-A shaped Row is an answer, so it is read and never written: an insert, an update or a `.lock` through one is refused, and so is `db.raw` into one. `DISTINCT`, window functions, CTEs, a join through a condition rather than a reference, and an aggregate over an expression are still [past one table](./raw.md).
+A shaped Row is an answer, so it is read and never written: an insert, an update or a `.lock` through one is refused, and so is `db.raw` into one. `DISTINCT`, window functions, CTEs, a join through a condition rather than a reference, an aggregate over an expression, and a filter on an aggregate that names a parent's column are still [past one table](./raw.md).

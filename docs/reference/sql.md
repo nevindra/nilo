@@ -38,7 +38,8 @@ const User = struct {
 | `pub const nilo_table = .projection` | a Row that owns no table at all — the shape `db.raw` fills. See below |
 | `pub const nilo_beside = .{ .attachments }` | the fields **beside** the columns: on the Row, in its JSON and its document, and in no statement. See below |
 | `pub const nilo_via = .{ .approver = .approver_id }` | on a narrower Row: which column a parent or a list of children follows, when the schema has several or none. See [A parent, children, a group](#a-parent-children-a-group) |
-| `pub const nilo_aggregate = .{ .n = .count, .owed = .{ .sum = .amount } }` | on a narrower Row: the fields that are computed, which makes the Row one row per group. See [A parent, children, a group](#a-parent-children-a-group) |
+| `pub const nilo_aggregate = .{ .n = .count, .owed = .{ .sum = .amount } }` | on a narrower Row: the fields that are computed, which makes the Row one row per group. An entry may carry a `.where`. See [A parent, children, a group](#a-parent-children-a-group) |
+| `pub const nilo_children = .{ .lines = .{ .order = .{ .position = .asc } }, .n = .{ .count = Line } }` | on a narrower Row: a children field's `.order` and `.where`, and a count of the rows pointing back. See [A parent, children, a group](#a-parent-children-a-group) |
 
 #### A Row that owns no table
 
@@ -126,8 +127,9 @@ links the migration module into every program with a `Db`, measured at
 `db.watching(f)` calls `f` with a `sql.Sent` after every statement — the text,
 the plan name it is kept under (a `db.raw` statement's included; null for
 `db.exec`, a request-chosen `ORDER BY`, a `Composed` and a `Db` with
-`prepared = false`), how long the database took, how many rows moved
-and whether it failed. **Not the values it bound**, which are somebody's
+`prepared = false`), how long the database took, how many rows moved,
+whether it failed, and `route`, the `operationId` of the route whose request
+sent it (null under a `Run`). **Not the values it bound**, which are somebody's
 password as often as they are an id
 ([ADR 108](../adr/108-a-statement-can-be-watched.md)). `sql.logging` is a
 ready-made one that writes a debug line. A `Db` nobody watches pays one null
@@ -144,6 +146,12 @@ this exists for: `error.QueryFailed` used to be the whole of what a program
 could see. It lives in the request's arena, so a watcher keeping one past the
 request copies it, and it still never reaches the client
 ([ADR 024](../adr/024-every-failure-answers-as-json.md)).
+
+`db.explain(Row, c, options)` takes what `db.select` takes and answers the plan
+of that statement with its values bound, one line of the plan per line of text:
+`EXPLAIN (ANALYZE, BUFFERS)` on Postgres, which runs the read, and
+`EXPLAIN QUERY PLAN` on SQLite. For a test and a developer; a children
+statement is not in it ([ADR 232](../adr/232-a-read-can-show-its-plan.md)).
 
 **`sql.problem(c)` is the same struct asked for from the other end** — by the
 call that failed rather than by an observer of every call. See
@@ -841,7 +849,8 @@ const ByCustomer = struct {
 | A field | is | read by |
 |---|---|---|
 | `p: P` or `p: ?P`, `P` a Row of another table | **a parent**: the row a reference of this table points at | a `JOIN` (`LEFT JOIN` for `?P`) in the same statement, aliased by the field's name |
-| `cs: []const C`, `C` a Row of a table pointing here | **children**: every row pointing at this one, in `C`'s key order | a second statement, `unnest(…) WITH ORDINALITY` on Postgres and `json_each(…)` on SQLite, for all the rows at once |
+| `cs: []const C`, `C` a Row of a table pointing here | **children**: every row pointing at this one, in `C`'s key order unless `nilo_children` gives an `.order` | a second statement, `unnest(…) WITH ORDINALITY` on Postgres and `json_each(…)` on SQLite, for all the rows at once |
+| `n: i64`, named in `nilo_children` with `.{ .count = C }` | **a count** of the rows of `C`'s table pointing at this one | a correlated `(SELECT count(*) …)` in the same statement, one per row answered |
 | a field named in `nilo_aggregate` | **an aggregate** of the rows in its group | `count`, `sum`, `min`, `max`, `avg` in the same statement; every other field is a `GROUP BY` key |
 
 **The link is the schema's.** One `.references` between the two tables is the join; none, or several, is a compile error until `nilo_via` names the column. `nilo_via` may name a column no reference covers, and then it joins the other table's key. A parent is `?P` exactly when its column may be null; the other way round is refused as well.
@@ -857,22 +866,36 @@ const ByCustomer = struct {
 | `.{ .min = .col }`, `.{ .max = .col }` | the column's type |
 | `.{ .avg = .col }` | `f64` |
 
-Optional exactly when the answer can be null: a nullable column, or `sum`, `min`, `max` and `avg` on a Row with no keys.
+Optional exactly when the answer can be null: a nullable column, `sum`, `min`, `max` and `avg` with a `.where`, or `sum`, `min`, `max` and `avg` on a Row with no keys.
 
-| Call | a parent | children | a group | no keys |
-|---|---|---|---|---|
-| `select`, `one`, `page` | ✓ | ✓ | ✓ (a page counts groups) | refused |
-| `find` | ✓ | ✓ | refused | refused |
-| `count`, `exists` | ✓ | ✓ | ✓ (counts groups) | refused |
-| `stream` | ✓ | refused | ✓ | refused |
-| `exactlyOne` | | | | ✓ |
+**An entry's `.where` narrows only what that aggregate reads**, as `FILTER (WHERE …)` on both databases: `.idr = .{ .sum = .amount, .where = .{ .currency = "IDR" } }`. Rows that match are counted through a column that is never null, `.{ .count = .id, .where = … }`.
+
+**`nilo_children`**, keyed by field:
+
+| entry | on a field | writes |
+|---|---|---|
+| `.{ .order = .{ .position = .asc } }` | `[]const C` | `ORDER BY "#k"."key", <the terms>, <C's key>` in the children's statement; columns of `C`'s table |
+| `.{ .where = .{ … } }` | `[]const C` | a `WHERE` on the children's statement |
+| `.{ .count = C }`, `.{ .count = C, .where = .{ … } }` | `i64` | `(SELECT count(*) FROM <C's table> AS "#c" WHERE "#c".<reference> = <this row's key> [AND …])` |
+
+A count may be ordered by and named in `.where` like a column, sits on a parent's Row too, and follows `nilo_via` keyed by its own field. A grouped Row refuses one.
+
+**The `.where` of an aggregate or of a `nilo_children` entry is written with its values in it**, because it is part of the Row rather than of a request: a value is `=`, `null` is `IS NULL`, and an operator struct takes `.eq`, `.ne`, `.gt`, `.gte`, `.lt`, `.lte`, `.in` and `.not_in`, over columns of the table the entry reads. Anything else is refused and names the words.
+
+| Call | a parent | children | a count of children | a group | no keys |
+|---|---|---|---|---|---|
+| `select`, `one`, `page` | ✓ | ✓ | ✓ | ✓ (a page counts groups) | refused |
+| `find` | ✓ | ✓ | ✓ | refused | refused |
+| `count`, `exists` | ✓ | ✓ | ✓ | ✓ (counts groups) | refused |
+| `stream` | ✓ | refused | ✓ | ✓ | refused |
+| `exactlyOne` | | | | | ✓ |
 
 | Call | Returns |
 |---|---|
 | `db.exactlyOne(Totals, c, .{ .where = … })` | `!Totals`: a Row whose every field is an aggregate, over the rows matched. Exactly one row, whatever matched; a `sum` over none is null |
 | `sql.exactlyOneFor(Row, Options)`, `sql.childrenFor(Row, "field")` | the statements behind `exactlyOne` and a children field, while compiling |
 
-Refused: a parent or children on the Row that describes the table, children of children, children through a reference of several columns, a `.lock`, a write, and `db.raw` into a shaped Row. Children are two statements, one snapshot only inside a `Tx`.
+Refused: a parent or children on the Row that describes the table, children of children, children through a reference of several columns, a `.limit` on children, a count on a grouped Row, a `.lock`, a write, and `db.raw` into a shaped Row. Children are two statements, one snapshot only inside a `Tx`.
 
 ### Streaming
 

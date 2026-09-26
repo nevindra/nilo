@@ -199,6 +199,14 @@ pub const Sent = struct {
     /// the request has to copy it — the same rule a `Str` follows. And it
     /// still never reaches the client (ADR 024).
     problem: ?wire_mod.Problem = null,
+    /// The `operationId` of the route whose request sent it, the name
+    /// `c.routeName()` answers, or null for a statement sent under a `Run`
+    /// and for a request no route matched. What joins a slow statement to
+    /// the screen that paid for it: one list, its count and seven facets are
+    /// often the same text, and this says which request each came from. A
+    /// comptime literal or a name the App owns for its life, so a watcher
+    /// may keep it.
+    route: ?[]const u8 = null,
 };
 
 /// What `db.watching` takes. A plain function pointer rather than an
@@ -786,7 +794,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// nobody could get a word out of (ADR 117).
         fn told(
             self: *const Self,
-            arena: std.mem.Allocator,
+            c: anytype,
             started: ?i64,
             sql: []const u8,
             plan: ?[]const u8,
@@ -798,11 +806,12 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             // watcher's half: a `Db` with no watcher and a `Db` with timing off
             // both still owe the caller an answer about the statement it just
             // ran (ADR 117).
-            remember(arena, problem);
+            remember(c.arena(), problem);
             const f = self.watch orelse return;
             const at = started orelse return;
             const took = core.monotonicMicros() - at;
             f(.{
+                .route = core.routeNameOf(c),
                 .sql = sql,
                 .plan = plan,
                 // A monotonic clock does not go backwards, so this cannot be
@@ -832,15 +841,15 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             var problem: ?wire_mod.Problem = null;
             const changed = if (tx) |t|
                 t.exec(arena, sql, values, plan, &problem) catch |err| {
-                    self.told(arena, started, sql, plan, null, true, problem);
+                    self.told(c, started, sql, plan, null, true, problem);
                     return err;
                 }
             else
                 w.exec(arena, sql, values, plan, &problem) catch |err| {
-                    self.told(arena, started, sql, plan, null, true, problem);
+                    self.told(c, started, sql, plan, null, true, problem);
                     return err;
                 };
-            self.told(arena, started, sql, plan, changed, false, null);
+            self.told(c, started, sql, plan, changed, false, null);
             return changed;
         }
 
@@ -1119,6 +1128,46 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             return fill(Row, stmt.reserve, self, null, c, try textOf(stmt, options, c), self.planOf(stmt), try valuesOf(stmt, Row, options, c));
         }
 
+        /// The plan of the statement `db.select(Row, c, options)` sends, with
+        /// the same values bound, one line of it per line of text.
+        ///
+        /// ```zig
+        /// const plan = try db.explain(DealCard, c, .{ .where = .{ .stage = .won }, .order = .{ .id = .desc }, .limit = 20 });
+        /// try testing.expect(std.mem.indexOf(u8, plan, "Seq Scan on deals") == null);
+        /// ```
+        ///
+        /// **For a test and for a developer, and it says so by what it does.**
+        /// On Postgres it is `EXPLAIN (ANALYZE, BUFFERS)`, which runs the read
+        /// and reports what it did; on SQLite `EXPLAIN QUERY PLAN`, which plans
+        /// it. The point is the statement nilo wrote: a shaped or typed read's
+        /// text exists only while it runs and its values are kept from the
+        /// watcher on purpose, so without this the plan of a slow `db.page`
+        /// meant rebuilding the text and guessing the values. A Row's children
+        /// are a second statement and are not in it. Sent unprepared, and
+        /// told to the watcher like any other statement.
+        pub fn explain(self: *Self, comptime Row: type, c: anytype, options: anytype) ![]const u8 {
+            comptime core.checkScope(@TypeOf(c), "db.explain");
+            comptime assertUnlocked(Row, @TypeOf(options), "db.explain", "The plan of a locking read is the plan " ++
+                "of the same read without the lock: take `.lock` out.");
+            const stmt = comptime statement.select(D, Row, @TypeOf(options));
+            const arena = c.arena();
+            const text = try std.mem.concat(arena, u8, &.{ D.explain, try textOf(stmt, options, c) });
+            const lines = try filling(PlanLine(D.explain_width), null, self, null, c, text, null, try valuesOf(stmt, Row, options, c), null);
+            var size: usize = 0;
+            for (lines) |line| size += line.text.len + 1;
+            const out = try arena.alloc(u8, size -| 1);
+            var at: usize = 0;
+            for (lines, 0..) |line, i| {
+                if (i > 0) {
+                    out[at] = '\n';
+                    at += 1;
+                }
+                @memcpy(out[at..][0..line.text.len], line.text);
+                at += line.text.len;
+            }
+            return out;
+        }
+
         /// The first row matching `options`, or null.
         ///
         /// `?Row` is already a 404 in the typed layer (ADR 023), so a
@@ -1308,7 +1357,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 self.planOf(stmt),
                 &problem,
             ) catch |err| {
-                self.told(arena, started, text, self.planOf(stmt), null, true, problem);
+                self.told(c, started, text, self.planOf(stmt), null, true, problem);
                 return err;
             };
             // **What a watcher is told here is the statement opening**, with
@@ -1316,7 +1365,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             // nothing in this call sees the last one. A stream that is slow to
             // *open* is the half worth reporting, and it is the half this can
             // report honestly (ADR 108).
-            self.told(arena, started, text, self.planOf(stmt), null, false, null);
+            self.told(c, started, text, self.planOf(stmt), null, false, null);
             // Counted only once the statement is away, so a `stream` that
             // never opened is not a `stream` that was never closed.
             if (traps_enabled) self.hold(&self.open_streams, .Add);
@@ -2625,7 +2674,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             inline for (@typeInfo(Row).@"struct".fields) |f| {
                 const F = @FieldType(B, f.name);
                 switch (comptime row_mod.kindWith(Row, f.name, f.type)) {
-                    .column, .aggregate => {
+                    .column, .aggregate, .count => {
                         @field(out, f.name) = try borrowColumn(w, rows, F, col);
                         col += 1;
                     },
@@ -2808,12 +2857,12 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
 
             var rows = if (tx) |t|
                 t.run(arena, sql, values, plan, &problem) catch |err| {
-                    db.told(arena, started, sql, plan, null, true, problem);
+                    db.told(c, started, sql, plan, null, true, problem);
                     return err;
                 }
             else
                 w.run(arena, sql, values, plan, &problem) catch |err| {
-                    db.told(arena, started, sql, plan, null, true, problem);
+                    db.told(c, started, sql, plan, null, true, problem);
                     return err;
                 };
             // Whatever happens below, the connection goes back usable —
@@ -2827,12 +2876,12 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             // **once per statement** rather than once per row, and asked at
             // the first moment both drivers can answer it (ADR 106).
             const any = w.next(&rows) catch |err| {
-                db.told(arena, started, sql, plan, null, true, stepProblem(w, &rows, err, arena));
+                db.told(c, started, sql, plan, null, true, stepProblem(w, &rows, err, arena));
                 return err;
             };
             if (any) {
                 wideEnough(Row, if (total == null) 0 else 1, w, &rows) catch |err| {
-                    db.told(arena, started, sql, plan, null, true, null);
+                    db.told(c, started, sql, plan, null, true, null);
                     return err;
                 };
                 // Read once rather than per row: `count(*) OVER ()` is the
@@ -2845,24 +2894,24 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                         comptime shape.width(Row),
                         c,
                     ) catch |err| {
-                        db.told(arena, started, sql, plan, null, true, null);
+                        db.told(c, started, sql, plan, null, true, null);
                         return err;
                     };
                 }
                 while (true) {
                     const filled = readRow(Row, 0, w, &rows, c) catch |err| {
-                        db.told(arena, started, sql, plan, null, true, null);
+                        db.told(c, started, sql, plan, null, true, null);
                         return err;
                     };
                     try out.append(arena, filled);
                     const more = w.next(&rows) catch |err| {
-                        db.told(arena, started, sql, plan, null, true, stepProblem(w, &rows, err, arena));
+                        db.told(c, started, sql, plan, null, true, stepProblem(w, &rows, err, arena));
                         return err;
                     };
                     if (!more) break;
                 }
             }
-            db.told(arena, started, sql, plan, out.items.len, false, null);
+            db.told(c, started, sql, plan, out.items.len, false, null);
             return out.toOwnedSlice(arena);
         }
 
@@ -2934,12 +2983,12 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
 
             var rows = if (tx) |t|
                 t.run(arena, sql, values, plan, &problem) catch |err| {
-                    db.told(arena, started, sql, plan, null, true, problem);
+                    db.told(c, started, sql, plan, null, true, problem);
                     return err;
                 }
             else
                 w.run(arena, sql, values, plan, &problem) catch |err| {
-                    db.told(arena, started, sql, plan, null, true, problem);
+                    db.told(c, started, sql, plan, null, true, problem);
                     return err;
                 };
             defer w.drain(&rows);
@@ -2950,19 +2999,19 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 // answered rows, so this is the one width a scalar can be
                 // short of, and it is checked for the reason `wideEnough` is.
                 if (w.width(&rows) < 1) {
-                    db.told(arena, started, sql, plan, null, true, null);
+                    db.told(c, started, sql, plan, null, true, null);
                     return error.QueryFailed;
                 }
                 while (true) {
                     const value = readColumn(w, &rows, T, 0, c) catch |err| {
-                        db.told(arena, started, sql, plan, null, true, null);
+                        db.told(c, started, sql, plan, null, true, null);
                         return err;
                     };
                     try out.append(arena, value);
                     if (!try w.next(&rows)) break;
                 }
             }
-            db.told(arena, started, sql, plan, out.items.len, false, null);
+            db.told(c, started, sql, plan, out.items.len, false, null);
             return out.toOwnedSlice(arena);
         }
 
@@ -2988,12 +3037,12 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
 
             var rows = if (tx) |t|
                 t.run(arena, sql, values, plan, &problem) catch |err| {
-                    db.told(arena, started, sql, plan, null, true, problem);
+                    db.told(c, started, sql, plan, null, true, problem);
                     return err;
                 }
             else
                 w.run(arena, sql, values, plan, &problem) catch |err| {
-                    db.told(arena, started, sql, plan, null, true, problem);
+                    db.told(c, started, sql, plan, null, true, problem);
                     return err;
                 };
             defer w.drain(&rows);
@@ -3002,17 +3051,17 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             // driver and Postgres disagree about what was sent, which is not
             // something to paper over with a zero.
             if (!try w.next(&rows)) {
-                db.told(arena, started, sql, plan, null, true, null);
+                db.told(c, started, sql, plan, null, true, null);
                 return error.QueryFailed;
             }
             const answer = w.read(&rows, T, 0) catch |err| {
-                db.told(arena, started, sql, plan, null, true, null);
+                db.told(c, started, sql, plan, null, true, null);
                 return err;
             };
             // One row, which is what an aggregate is — the count in it is the
             // answer rather than the number of rows, and a watcher reading
             // `rows` gets what a `SELECT` would have given it.
-            db.told(arena, started, sql, plan, 1, false, null);
+            db.told(c, started, sql, plan, 1, false, null);
             return answer;
         }
 
@@ -3029,7 +3078,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             comptime var col = at;
             inline for (@typeInfo(Row).@"struct".fields) |f| {
                 switch (comptime row_mod.kindWith(Row, f.name, f.type)) {
-                    .column, .aggregate => {
+                    .column, .aggregate, .count => {
                         @field(filled, f.name) = try readColumn(w, rows, f.type, col, c);
                         col += 1;
                     },
@@ -3101,12 +3150,12 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             var problem: ?wire_mod.Problem = null;
             var rows = if (tx) |t|
                 t.run(arena, stmt.sql, values, plan, &problem) catch |err| {
-                    db.told(arena, started, stmt.sql, plan, null, true, problem);
+                    db.told(c, started, stmt.sql, plan, null, true, problem);
                     return err;
                 }
             else
                 w.run(arena, stmt.sql, values, plan, &problem) catch |err| {
-                    db.told(arena, started, stmt.sql, plan, null, true, problem);
+                    db.told(c, started, stmt.sql, plan, null, true, problem);
                     return err;
                 };
             defer w.drain(&rows);
@@ -3115,7 +3164,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             var last: usize = 0;
             while (try w.next(&rows)) {
                 const read = readChild(Child, numbered, w, &rows, c) catch |err| {
-                    db.told(arena, started, stmt.sql, plan, null, true, null);
+                    db.told(c, started, stmt.sql, plan, null, true, null);
                     return err;
                 };
                 // The number is the parent's position, counted from where the
@@ -3123,14 +3172,14 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 // statement is not the one this was written against.
                 const at = read.number - D.ordinal_base;
                 if (at < last or at >= parents.len) {
-                    db.told(arena, started, stmt.sql, plan, null, true, null);
+                    db.told(c, started, stmt.sql, plan, null, true, null);
                     return error.QueryFailed;
                 }
                 last = @intCast(at);
                 try found.append(arena, read.child);
                 ends[last] = found.items.len;
             }
-            db.told(arena, started, stmt.sql, plan, found.items.len, false, null);
+            db.told(c, started, stmt.sql, plan, found.items.len, false, null);
 
             var from: usize = 0;
             for (parents, ends) |*parent, end| {
@@ -3977,7 +4026,7 @@ fn assertReadable(comptime Row: type) void {
                     assertReadable(row_mod.childRowOf(f.type).?);
                     continue;
                 },
-                .column, .aggregate => {},
+                .column, .aggregate, .count => {},
             }
             const Column = switch (@typeInfo(f.type)) {
                 .optional => |o| o.child,
@@ -4070,7 +4119,7 @@ fn assertStreamable(comptime Row: type) void {
                         "and a stream never has them in hand. Stream a Row without the list, " ++
                         "or read a page of them with `db.select`.",
                 ),
-                .column, .aggregate => {},
+                .column, .aggregate, .count => {},
             }
             const Inner = switch (@typeInfo(f.type)) {
                 .optional => |o| o.child,
@@ -4109,6 +4158,25 @@ fn assertStreamable(comptime Row: type) void {
 /// exactly the kind of mistake a compiler can hold.
 ///
 /// The same call inside a `Tx` is the intended one, and the message says so.
+/// One line of what `db.explain` reads back: the plan's text, after
+/// whatever the Dialect answers in front of it (`explain_width`).
+fn PlanLine(comptime width: usize) type {
+    return switch (width) {
+        1 => struct {
+            pub const nilo_table = .projection;
+            text: []const u8,
+        },
+        4 => struct {
+            pub const nilo_table = .projection;
+            id: i64,
+            parent: i64,
+            notused: i64,
+            text: []const u8,
+        },
+        else => @compileError("nilo: a Dialect's `explain_width` is 1 or 4."),
+    };
+}
+
 fn assertUnlocked(
     comptime Row: type,
     comptime O: type,
@@ -5824,6 +5892,7 @@ var watched: struct {
     failed: bool = false,
     micros: u64 = 0,
     problem: ?wire_mod.Problem = null,
+    route: ?[]const u8 = null,
 } = .{};
 
 fn recordSent(sent: Sent) void {
@@ -5834,6 +5903,7 @@ fn recordSent(sent: Sent) void {
     watched.failed = sent.failed;
     watched.micros = sent.micros;
     watched.problem = sent.problem;
+    watched.route = sent.route;
 }
 
 test "a watcher is told the statement, the plan and how many rows it moved" {
@@ -5859,6 +5929,41 @@ test "a watcher is told the statement, the plan and how many rows it moved" {
     try testing.expect(watched.plan != null);
     try testing.expectEqual(@as(?usize, 2), watched.rows);
     try testing.expect(!watched.failed);
+}
+
+test "a watcher is told which route's request sent the statement, and a Run sends none" {
+    // Item 93: the metrics page knows `/api/deals` and the watcher knows a
+    // `SELECT`; the route's name on the statement is what joins the two.
+    watched = .{};
+
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    db.wire = .{ .answers = 1 };
+    db.watching(recordSent);
+
+    var run = nilo.Run.init(testing.allocator);
+    defer run.deinit();
+    _ = try db.select(Person, &run, .{});
+    try testing.expect(watched.route == null);
+
+    // The shape `Ctx` has: a Scope with a `routeName`.
+    const Routed = struct {
+        run: *nilo.Run,
+        pub fn arena(self: *@This()) std.mem.Allocator {
+            return self.run.arena();
+        }
+        pub fn str(self: *@This(), bytes: []const u8) core.Str {
+            return self.run.str(bytes);
+        }
+        pub fn routeName(self: *const @This()) ?[]const u8 {
+            _ = self;
+            return "listPeople";
+        }
+    };
+    var routed: Routed = .{ .run = &run };
+    _ = try db.select(Person, &routed, .{});
+    try testing.expectEqual(@as(usize, 2), watched.count);
+    try testing.expectEqualStrings("listPeople", watched.route.?);
 }
 
 test "a statement that failed is reported as failed, with no row count to give" {
@@ -7864,6 +7969,115 @@ test "a grouped Row is one row per group, narrowed before and after the grouping
     try testing.expectEqualStrings("Cobalt", by_name[0].customer.name);
     const by_revenue = try db.select(ShopByCustomer, &run, .{ .order = Sort.by(&.{.{ .key = .revenue }}) });
     try testing.expectEqualStrings("Borealis", by_revenue[0].customer.name);
+}
+
+const ShopOrderCounted = struct {
+    pub const nilo_table = ShopOrder;
+    pub const nilo_children = .{
+        .line_count = .{ .count = ShopLine },
+        .big = .{ .count = ShopLine, .where = .{ .qty = .{ .gte = 2 } } },
+        .lines = .{ .order = .{ .qty = .asc }, .where = .{ .sku = .{ .ne = "b" } } },
+    };
+    id: i64,
+    line_count: i64,
+    big: i64,
+    lines: []const ShopLineBrief,
+};
+
+test "on SQLite, children come back in the order asked, narrowed, and counted without being read" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    var db = try shopDb(&threaded, "shape-counted", &run);
+    defer db.deinit();
+
+    const orders = try db.select(ShopOrderCounted, &run, .{
+        .where = .{ .line_count = .{ .gt = @as(i64, 0) } },
+        .order = .{ .line_count = .desc, .id = .asc },
+    });
+    try testing.expectEqual(@as(usize, 3), orders.len);
+    try testing.expectEqual(@as(i64, 10), orders[0].id);
+    try testing.expectEqual(@as(i64, 2), orders[0].line_count);
+    try testing.expectEqual(@as(i64, 1), orders[0].big);
+    // By quantity rather than by key: c (1) before a (2).
+    try testing.expectEqual(@as(usize, 2), orders[0].lines.len);
+    try testing.expectEqualStrings("c", orders[0].lines[0].sku);
+    try testing.expectEqualStrings("a", orders[0].lines[1].sku);
+    // Order 11's one line is b, which the entry's `.where` leaves out; the
+    // count has no `.where` and still sees it.
+    try testing.expectEqual(@as(i64, 11), orders[1].id);
+    try testing.expectEqual(@as(i64, 1), orders[1].line_count);
+    try testing.expectEqual(@as(usize, 0), orders[1].lines.len);
+    try testing.expectEqual(@as(i64, 0), orders[2].big);
+
+    // A count on a page: the rows the page shows, and the total of all.
+    const page = try db.page(ShopOrderCounted, &run, .{ .order = .{ .id = .desc }, .limit = 2 });
+    try testing.expectEqual(@as(i64, 5), page.total);
+    try testing.expectEqual(@as(i64, 0), page.rows[0].line_count);
+}
+
+const ShopFiltered = struct {
+    pub const nilo_table = ShopOrder;
+    pub const nilo_aggregate = .{
+        .this_year = .{ .sum = .total, .where = .{ .year = 2026 } },
+        .discounted = .{ .count = .id, .where = .{ .discount = .{ .ne = null } } },
+        .big = .{ .count = .id, .where = .{ .total = .{ .gte = 100 }, .owner_id = .{ .in = .{1} } } },
+    };
+    customer: ShopCustomerName,
+    this_year: ?i64,
+    discounted: i64,
+    big: i64,
+};
+
+test "on SQLite, an aggregate's .where narrows the rows it reads and not the group" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    var db = try shopDb(&threaded, "shape-filter", &run);
+    defer db.deinit();
+
+    const groups = try db.select(ShopFiltered, &run, .{ .order = .{ .customer = .{ .name = .asc } } });
+    try testing.expectEqual(@as(usize, 3), groups.len);
+    try testing.expectEqualStrings("Acme", groups[0].customer.name);
+    try testing.expectEqual(@as(?i64, 350), groups[0].this_year);
+    try testing.expectEqual(@as(i64, 1), groups[0].discounted);
+    try testing.expectEqual(@as(i64, 1), groups[0].big);
+    try testing.expectEqual(@as(?i64, 100), groups[1].this_year);
+    try testing.expectEqual(@as(i64, 0), groups[1].big);
+    // Cobalt's one order is from 2025: the group is there, its filtered sum
+    // is null and its filtered count is zero.
+    try testing.expectEqualStrings("Cobalt", groups[2].customer.name);
+    try testing.expect(groups[2].this_year == null);
+    try testing.expectEqual(@as(i64, 0), groups[2].discounted);
+    try testing.expectEqual(@as(i64, 1), groups[2].big);
+
+    // A condition on the field is on the filtered number.
+    const current = try db.select(ShopFiltered, &run, .{
+        .where = .{ .this_year = .{ .gt = @as(i64, 0) } },
+        .order = .{ .this_year = .desc },
+    });
+    try testing.expectEqual(@as(usize, 2), current.len);
+    try testing.expectEqualStrings("Acme", current[0].customer.name);
+}
+
+test "on SQLite, explain answers the plan of the read a select would send" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    var db = try shopDb(&threaded, "shape-explain", &run);
+    defer db.deinit();
+
+    // By key: a search, not a scan.
+    const by_key = try db.explain(ShopOrderCard, &run, .{ .where = .{ .id = @as(i64, 11) } });
+    try testing.expect(std.mem.indexOf(u8, by_key, "SEARCH") != null);
+    try testing.expect(std.mem.indexOf(u8, by_key, "SCAN shop_orders") == null);
+    // By a column nothing indexes: the whole table, which is what a test
+    // asserting on this is there to notice.
+    const by_total = try db.explain(ShopOrderCard, &run, .{ .where = .{ .total = @as(i64, 100) } });
+    try testing.expect(std.mem.indexOf(u8, by_total, "SCAN shop_orders") != null);
 }
 
 test "a Row grouped by nothing is exactly one row, with a null sum over no rows" {

@@ -149,10 +149,6 @@ Behaviour that is wrong today. Each entry was found by reading a design page aga
 
 **Needs:** a shape that does not become a second metrics registry. `app.metrics` is the shape and a `Db` is a Service, which knows nothing about an App — so where the numbers meet is the question, not how to count them.
 
-**A watched statement cannot say which request it came from.** `db.watching` shows the text, the plan, the duration and the rows ([ADR 108](./adr/108-a-statement-can-be-watched.md)), so *which statement is slow* is answerable. *Slow on which page* is not: a `Sent` carries no request id and no route, and the one thing that knows both is the fiber the statement is running on.
-
-**Needs:** a decision between two shapes. `fail`'s message box is bound to the fiber ([ADR 006](./adr/006-failure-box-bound-to-the-fiber.md)) and reaching the same threadlocal from a Service is the arrangement [the open risk about `bulkhead.slot()`](./risks.md#open) is already about; handing the watcher the Scope is the other answer and costs the plain function pointer.
-
 **A Row over an attached SQLite database has nowhere to `ATTACH` it.** A schema in `nilo_table` means an attached database there ([ADR 055](./adr/055-the-second-dialect-is-the-test-of-the-seam.md)), and `ATTACH` is per connection — but the Wire holds a writer and a pool of readers, opens them itself, and `db.exec("ATTACH …")` reaches the writer alone. The introspection then asks a reader that has never heard the name, which is how the test for the schema-qualified `sqlite_master` found this: it attaches on every `conns[i].handle` by hand, and a program cannot.
 
 **Needs:** a statement list run on every connection at open — which is also where a `PRAGMA` of the caller's own would go.

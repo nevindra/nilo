@@ -472,6 +472,23 @@ pub fn requestIdOf(comptime S: type, scope: *S) ?Str {
     return scope.requestId();
 }
 
+/// The `operationId` of the route a Scope's request matched, or null: for a
+/// Scope with no `routeName` (a `Run`, an `AnyScope`), and for a request
+/// nothing matched. What `nilo_sql` puts on the statement it reports, so a
+/// slow `SELECT` names the screen that paid for it
+/// ([ADR 108](../docs/adr/108-a-statement-can-be-watched.md)).
+///
+/// A read of a pointer the App already holds: no allocation, and nothing
+/// the Scope has to work out.
+pub fn routeNameOf(scope: anytype) ?[]const u8 {
+    const S = switch (@typeInfo(@TypeOf(scope))) {
+        .pointer => |p| p.child,
+        else => @TypeOf(scope),
+    };
+    if (comptime !@hasDecl(S, "routeName")) return null;
+    return scope.routeName();
+}
+
 /// Two `@typeName` results naming the same type.
 ///
 /// The pointer comparison is the one that fires: `@typeName` of one type is
@@ -740,6 +757,23 @@ test "an erased Scope carries the request id of the Scope it was made from, and 
     var erased = AnyScope.of(&named);
     try testing.expectEqualStrings("req-7f3a", erased.requestId().?.view());
     try testing.expectEqualStrings("req-7f3a", requestIdOf(Named, &named).?.view());
+}
+
+test "a Scope names the route its request matched, and a Run names none" {
+    var run = Run.init(testing.allocator);
+    defer run.deinit();
+    try testing.expect(routeNameOf(&run) == null);
+
+    const Routed = struct {
+        name: ?[]const u8,
+        pub fn routeName(self: *const @This()) ?[]const u8 {
+            return self.name;
+        }
+    };
+    var routed: Routed = .{ .name = "listDeals" };
+    try testing.expectEqualStrings("listDeals", routeNameOf(&routed).?);
+    routed.name = null;
+    try testing.expect(routeNameOf(&routed) == null);
 }
 
 test "an erased Scope answers what the Run behind it was given, and NotGiven for the rest" {

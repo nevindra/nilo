@@ -248,6 +248,9 @@ pub const Kind = enum {
     /// Named in `nilo_aggregate`: a count, a sum, a minimum over the rows of
     /// the group.
     aggregate,
+    /// Named in `nilo_children` with a `.count`: how many rows of another
+    /// table point at this one, read in the same statement.
+    count,
 };
 
 /// The declaration that makes a Row grouped
@@ -257,6 +260,19 @@ pub const Kind = enum {
 /// pub const nilo_aggregate = .{ .objects = .count, .owed = .{ .sum = .principal } };
 /// ```
 pub const aggregate_marker = "nilo_aggregate";
+
+/// The declaration that says what a Row reads of the rows pointing back at
+/// it, past the list itself: an order and a condition for a children field,
+/// or a count in place of one
+/// ([ADR 218](../docs/adr/218-a-row-may-carry-its-parent-its-children-or-a-sum.md)).
+///
+/// ```zig
+/// pub const nilo_children = .{
+///     .lines = .{ .order = .{ .position = .asc }, .where = .{ .state = .{ .ne = .void } } },
+///     .line_count = .{ .count = Line },
+/// };
+/// ```
+pub const children_marker = "nilo_children";
 
 /// The declaration that says which reference a parent or children field
 /// follows, when the schema declares more than one between the two tables.
@@ -275,6 +291,11 @@ pub const Aggregate = struct {
     field: []const u8,
     kind: dialect_mod.Aggregate,
     column: ?[]const u8,
+    /// Whether the entry carries a `.where`, which only narrows the rows this
+    /// one aggregate reads: `sum(…) FILTER (WHERE …)`. The condition itself
+    /// is read off the declaration by `where.aggregateCall`, which has the
+    /// table to check it against and this file does not.
+    filtered: bool = false,
 };
 
 /// What `name` is on `Row`. A name that is not a field answers `.column`, so
@@ -294,6 +315,7 @@ pub fn kindWith(comptime Row: type, comptime name: []const u8, comptime T: type)
         // Row written before ADR 218, answers from the type alone.
         if (@hasDecl(Row, beside_marker) and isBeside(Row, name)) break :blk .beside;
         if (@hasDecl(Row, aggregate_marker) and aggregateNamed(Row, name)) break :blk .aggregate;
+        if (@hasDecl(Row, children_marker) and countNamed(Row, name)) break :blk .count;
         if (parentRowOf(T) != null) break :blk .parent;
         if (childRowOf(T) != null) break :blk .children;
         break :blk .column;
@@ -309,6 +331,34 @@ fn aggregateNamed(comptime Row: type, comptime name: []const u8) bool {
         .@"struct" => |s| !s.is_tuple and @hasField(D, name),
         else => false,
     };
+}
+
+/// Whether `nilo_children` has an entry for `name` that is a count: a struct
+/// with a `.count` in it. Asked of the types alone, the way `aggregateNamed`
+/// is; `shape.zig` says what is wrong with an entry of any other shape.
+fn countNamed(comptime Row: type, comptime name: []const u8) bool {
+    const D = @TypeOf(@field(Row, children_marker));
+    switch (@typeInfo(D)) {
+        .@"struct" => |s| if (s.is_tuple or !@hasField(D, name)) return false,
+        else => return false,
+    }
+    const E = @FieldType(D, name);
+    return switch (@typeInfo(E)) {
+        .@"struct" => |s| !s.is_tuple and @hasField(E, "count"),
+        else => false,
+    };
+}
+
+/// The Row a count field counts: the `.count` of its `nilo_children` entry.
+pub fn countedRowOf(comptime Row: type, comptime name: []const u8) type {
+    const counted = @field(@field(Row, children_marker), name).count;
+    if (@TypeOf(counted) != type or !isRow(counted)) @compileError(
+        "nilo: " ++ @typeName(Row) ++ "'s " ++ children_marker ++ " counts `." ++ name ++
+            "` over a " ++ @typeName(@TypeOf(counted)) ++ ".\n" ++
+            "  A count names the Row whose table points back at this one: `." ++ name ++
+            " = .{ .count = Line }`.",
+    );
+    return counted;
 }
 
 /// Whether `name` is one of the Row's columns rather than anything else a
@@ -377,7 +427,7 @@ pub fn isShaped(comptime Row: type) bool {
         if (@hasDecl(Row, aggregate_marker)) break :blk true;
         for (@typeInfo(Row).@"struct".fields) |f| {
             switch (kindWith(Row, f.name, f.type)) {
-                .parent, .children => break :blk true,
+                .parent, .children, .count => break :blk true,
                 else => {},
             }
         }
@@ -462,7 +512,8 @@ fn aggregateSpec(comptime Row: type, comptime field: []const u8, comptime said: 
         const S = @TypeOf(said);
         const words = "`.count`, `.{ .count = .<column> }`, `.{ .count_distinct = .<column> }`, " ++
             "`.{ .sum = .<column> }`, `.{ .min = .<column> }`, `.{ .max = .<column> }` or " ++
-            "`.{ .avg = .<column> }`";
+            "`.{ .avg = .<column> }`, each but the first with a `.where` beside it if it " ++
+            "reads only some of the rows";
         if (S == @TypeOf(.enum_literal)) {
             if (said == .count) return .{ .field = field, .kind = .count, .column = null };
             @compileError(
@@ -479,11 +530,21 @@ fn aggregateSpec(comptime Row: type, comptime field: []const u8, comptime said: 
                     "` a " ++ @typeName(S) ++ ".\n  It is " ++ words ++ ".",
             ),
         };
-        if (info.is_tuple or info.fields.len != 1) @compileError(
+        // A `.where` beside the computation narrows what it reads, and is the
+        // one other name an entry may carry.
+        const filtered = !info.is_tuple and @hasField(S, "where");
+        if (filtered and info.fields.len == 1) @compileError(
+            "nilo: " ++ @typeName(Row) ++ "'s " ++ aggregate_marker ++ " gives `." ++ field ++
+                "` a `.where` and nothing to compute.\n" ++
+                "  The condition narrows a computation: `.{ .sum = .principal, .where = .{ .currency = \"IDR\" } }`. " ++
+                "Rows that match are counted by naming a column that is never null: " ++
+                "`.{ .count = .id, .where = … }`.",
+        );
+        if (info.is_tuple or info.fields.len != @as(usize, if (filtered) 2 else 1)) @compileError(
             "nilo: " ++ @typeName(Row) ++ "'s " ++ aggregate_marker ++ " gives `." ++ field ++
                 "` more than one computation.\n  One field holds one answer: " ++ words ++ ".",
         );
-        const word = info.fields[0].name;
+        const word = if (std.mem.eql(u8, info.fields[0].name, "where")) info.fields[1].name else info.fields[0].name;
         const kind = std.meta.stringToEnum(dialect_mod.Aggregate, word) orelse @compileError(
             "nilo: " ++ @typeName(Row) ++ "'s " ++ aggregate_marker ++ " asks `." ++ field ++
                 "` for `." ++ word ++ "`, which is not one it computes.\n  It is " ++ words ++
@@ -495,7 +556,7 @@ fn aggregateSpec(comptime Row: type, comptime field: []const u8, comptime said: 
                 "`'s `." ++ word ++ "` a " ++ @typeName(@TypeOf(column)) ++ ".\n" ++
                 "  It names a column of the table, written as one: `.{ ." ++ word ++ " = .principal }`.",
         );
-        return .{ .field = field, .kind = kind, .column = @tagName(column) };
+        return .{ .field = field, .kind = kind, .column = @tagName(column), .filtered = filtered };
     }
 }
 
@@ -787,7 +848,7 @@ pub fn Borrowed(comptime Row: type) type {
                 // before this type is ever built. Kept so the refusal is the
                 // one the caller meets rather than one about this struct.
                 .children => f.type,
-                .column, .aggregate => borrowedType(f.type),
+                .column, .aggregate, .count => borrowedType(f.type),
             };
         }
         const frozen_names = names;
@@ -904,6 +965,12 @@ pub fn noSuchColumn(
                     what ++ ".\n" ++
                     "  It is computed over each group, so it can be sorted by and filtered on from " ++
                     "`.order` and `.where`, and from nowhere that reads one row at a time.",
+            ),
+            .count => @compileError(
+                "nilo: `" ++ wrong ++ "` on " ++ @typeName(Row) ++ " is a count of the rows pointing " ++
+                    "back, asked for in " ++ what ++ ".\n" ++
+                    "  It is computed by a subquery, so it can be sorted by and filtered on from " ++
+                    "`.order` and `.where` of a read, and from nowhere else.",
             ),
             .column, .beside => {},
         };
@@ -1140,7 +1207,7 @@ fn assertDescribesItsTable(comptime Row: type) void {
                     what ++ ".\n" ++ narrower,
             );
         }
-        for ([_][]const u8{ aggregate_marker, via_marker }) |decl| {
+        for ([_][]const u8{ aggregate_marker, via_marker, children_marker }) |decl| {
             if (@hasDecl(Row, decl)) @compileError(
                 "nilo: " ++ @typeName(Row) ++ " names its table and says `" ++ decl ++ "`.\n" ++ narrower,
             );

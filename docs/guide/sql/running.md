@@ -161,7 +161,10 @@ fn slowOnes(sent: sql.Sent) void {
 
 `db.watching(slowOnes)`, and nothing else changes. A `sql.Sent` carries the
 statement, the name it is kept prepared under, how long the database took, how
-many rows moved, and whether it failed. A `db.raw` statement has a name too,
+many rows moved, whether it failed, and `route`: the name of the route whose
+request sent it, the `operationId` `c.routeName()` answers, or null for a
+statement sent under a `Run`. That is what says a slow `SELECT` belongs to
+`listDeals` rather than to the facet count beside it that sends the same text. A `db.raw` statement has a name too,
 so a watcher can count the heavy raw reads by name rather than by text; the
 ones with none are `db.exec`, a statement whose `ORDER BY` the request chose,
 and anything on a `Db` with `prepared = false`. **Not the
@@ -196,6 +199,33 @@ before you log it. None of it ever reaches the client.
 
 A `Db` nobody is watching pays one null test per statement, and a watched one
 pays two clock reads at 15ns each.
+
+### Why one is slow
+
+`db.explain` takes what `db.select` takes and answers the plan of the
+statement that read would send, with the same values bound
+([ADR 232](../../adr/232-a-read-can-show-its-plan.md)):
+
+<!-- compiles -->
+```zig
+fn planOfTheList(db: *sql.Db, c: *nilo.Ctx) ![]const u8 {
+    return db.explain(User, c, .{ .where = .{ .age = .{ .gt = 18 } }, .limit = 20 });
+}
+```
+
+On Postgres it is `EXPLAIN (ANALYZE, BUFFERS)`, which **runs the read** and
+says what it did; on SQLite it is `EXPLAIN QUERY PLAN`, which plans it. Use it
+from a test or a development endpoint. Against seeded data, a test can hold a
+plan to what it should be, so an index that goes missing fails the suite
+rather than a page:
+
+```zig
+const plan = try db.explain(DealCard, &run, .{ .where = .{ .stage = .won }, .order = .{ .id = .desc }, .limit = 20 });
+try std.testing.expect(std.mem.indexOf(u8, plan, "Seq Scan on deals") == null);
+```
+
+The plan is of the statement that reads the rows. A Row's children are a
+second statement, and are not in it.
 
 ## Views, and the one thing a check cannot know
 

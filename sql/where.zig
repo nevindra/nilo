@@ -358,12 +358,25 @@ pub fn planScoped(
 /// column qualified by the relation the statement reads. The same text in
 /// the `SELECT` list and the `HAVING`, which is what lets a condition on
 /// `.owed` mean the number the row reports.
+///
+/// An entry with a `.where` takes it as `FILTER (WHERE …)`, with the values
+/// written in (`table.literalCondition`): the condition is part of `Shape`'s
+/// declaration, so it is the same for every statement and there is nothing
+/// to bind. Both databases take the clause, SQLite since 3.30.
 pub fn aggregateCall(
     comptime D: type,
+    comptime Shape: type,
     comptime relation: []const u8,
     comptime aggregate: row_mod.Aggregate,
 ) []const u8 {
-    return comptime aggregate.kind.call(if (aggregate.column) |c| relation ++ "." ++ D.quote(c) else null);
+    return comptime blk: {
+        const call = aggregate.kind.call(if (aggregate.column) |c| relation ++ "." ++ D.quote(c) else null);
+        if (!aggregate.filtered) break :blk call;
+        const where = @field(@field(Shape, row_mod.aggregate_marker), aggregate.field).where;
+        const what = @typeName(Shape) ++ "'s `." ++ aggregate.field ++ "` `.where`";
+        break :blk call ++ " FILTER (WHERE " ++
+            table_mod.literalCondition(D, row_mod.ownerOf(Shape), relation ++ ".", what, where) ++ ")";
+    };
 }
 
 /// How many parameters the fragment carries. The same number as
@@ -690,6 +703,10 @@ fn walk(
                         if (state.phase == .groups) continue;
                         break :term parentTerm(D, Shape, f.name, f.type, path, state);
                     },
+                    .count => {
+                        if (state.phase == .groups) continue;
+                        break :term countTerm(D, Shape, f.name, f.type, path, state);
+                    },
                     .children => row_mod.noSuchColumn(Shape, f.name, "a condition"),
                     .column, .beside => {},
                 };
@@ -862,7 +879,31 @@ fn groupTerm(
         const was_inner = state.inner;
         // The qualifier here is the grouped relation's, because a term on the
         // groups is only ever written at the top of the walk.
-        state.spelled = aggregateCall(D, state.outer, aggregate);
+        state.spelled = aggregateCall(D, Shape, state.outer, aggregate);
+        state.inner = Shape;
+        const term = condition(D, Shape, name, T, path, state);
+        state.spelled = was_spelled;
+        state.inner = was_inner;
+        return term;
+    }
+}
+
+/// `.line_count = .{ .gt = 0 }` on a Row that counts its children: the
+/// count's subquery in place of the column (ADR 218), the way `groupTerm`
+/// puts an aggregate's call there. Correlated with `state.outer`, which is
+/// the relation at the top of the walk and a parent's alias inside one.
+fn countTerm(
+    comptime D: type,
+    comptime Shape: type,
+    comptime name: []const u8,
+    comptime T: type,
+    comptime path: Path,
+    comptime state: *State,
+) []const u8 {
+    comptime {
+        const was_spelled = state.spelled;
+        const was_inner = state.inner;
+        state.spelled = @import("shape.zig").countCall(D, Shape, name, state.outer);
         state.inner = Shape;
         const term = condition(D, Shape, name, T, path, state);
         state.spelled = was_spelled;

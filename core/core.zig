@@ -41,6 +41,10 @@ pub const checkScope = scope_mod.check;
 /// and null for one that declares none (ADR 158).
 pub const requestIdOf = scope_mod.requestIdOf;
 
+/// The route a Scope's request matched, or null for a Scope that is not a
+/// request or a request nothing matched (ADR 108).
+pub const routeNameOf = scope_mod.routeNameOf;
+
 /// A Scope with its type erased, for the one place a shape checked while
 /// compiling cannot reach: the other side of a function pointer
 /// ([ADR 144](../docs/adr/144-a-scope-that-crosses-a-function-pointer.md)).

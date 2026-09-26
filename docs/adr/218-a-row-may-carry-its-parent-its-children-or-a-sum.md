@@ -101,7 +101,29 @@ ORDER BY "#k"."key", "lines"."id"
 
 SQLite spells the list `json_each(?1) AS "#k"`, which answers the same two columns. **The parents' keys go in as one list and come back as their positions**, sorted by position, so the reader walks the parents and the children in step and hands each parent a contiguous run of one list. No key is ever compared, hashed or collated on the way, which matters for a text key and for a `Uuid` whose two Dialects store it differently.
 
-`.limit` has counted the parents by the time this runs, so a page is twenty orders whatever they hold, the second property kept by construction rather than by care. Within one parent the children are in their table's key order. The Row has to read the column the children point at, since that is what they are handed out by, and forgetting it is a Refusal that names the field to add.
+`.limit` has counted the parents by the time this runs, so a page is twenty orders whatever they hold, the second property kept by construction rather than by care. Within one parent the children are in their table's key order unless the Row says otherwise. The Row has to read the column the children point at, since that is what they are handed out by, and forgetting it is a Refusal that names the field to add.
+
+**`pub const nilo_children` says what else a Row reads of the rows pointing back**, keyed by the field it describes:
+
+```zig
+const RabCard = struct {
+    pub const nilo_table = Rab;
+    pub const nilo_children = .{
+        .lines = .{ .order = .{ .position = .asc }, .where = .{ .state = .{ .ne = .void } } },
+        .line_count = .{ .count = Line },
+        .open_work = .{ .count = WorkItem, .where = .{ .category = .{ .not_in = .{ .done, .cancelled } } } },
+    };
+    id: i64,
+    lines: []const LineBrief,
+    line_count: i64,
+    open_work: i64,
+};
+```
+
+- **A list takes `.order` and `.where`.** The order is columns of the child's table, carried by the child Row or not, after the parent's position and before the child's key, so two children the order ties still come back the same way every time: `ORDER BY "#k"."key", "lines"."position" ASC, "lines"."id"`. The condition is a `WHERE` on the children's statement. A key order is a v7 mint order and matches a `position` only until somebody reorders, which is why every child list in nodeflux-os needed one.
+- **A count is a field of its own, `i64`, and reads no child.** `.{ .count = Line }` names the Row whose table points back, with the reference found the way a children field finds it and `nilo_via` keyed by the count's field when there are two. It is a subquery correlated with the row it sits on, in the same statement: `(SELECT count(*) FROM "lines" AS "#c" WHERE "#c"."rab_id" = "rabs"."id")`. The counted table is always read under `"#c"`, so a table that points at itself (a work item's sub-items) is two names. A count may be ordered by and named in a condition like a column, the subquery written in its place, and it may sit on a parent's Row, where it correlates with the parent's alias. A grouped Row refuses one, because a group is many rows.
+
+Both `.where`s are the literal condition an aggregate's `.where` takes, below: the entry is part of the Row's declaration, so its values are the compiler's and there is nothing to bind. `.limit` on a list is refused, because the children of every parent are one statement, and a limit there would cut across parents rather than within one.
 
 **It is one level, and only through a reference of one column.** A child may have parents of its own, joined into the children's statement, but not children of its own: a second level would be a third statement per level with nowhere principled to stop. `db.stream` refuses children, because a stream never holds the rows the children would be handed to.
 
@@ -124,6 +146,17 @@ SQLite spells the list `json_each(?1) AS "#k"`, which answers the same two colum
 
 **The type is a rule rather than a guess, and it is checked.** Both databases answer `sum` over an `integer` column as something wider, and Postgres answers it as `numeric`, which is why the Postgres Dialect writes `sum(x)::int8` and `avg(x)::float8`. A field is optional exactly when the computation can be null: over a nullable column, and for `sum`, `min`, `max` and `avg` on a Row with no keys at all, which answers even when nothing matched. `count` is never null. Each direction is a Refusal with the type to write.
 
+**An entry may carry a `.where`, which narrows only the rows that one aggregate reads**: `sum(…) FILTER (WHERE …)`, which both databases take (SQLite since 3.30). It is what "amounts are never summed across currencies" looks like, one number in rupiah beside a count of what it left out:
+
+```zig
+pub const nilo_aggregate = .{
+    .idr = .{ .sum = .value_amount_minor, .where = .{ .value_currency = "IDR" } },
+    .foreign = .{ .count = .id, .where = .{ .value_currency = .{ .ne = "IDR" } } },
+};
+```
+
+The condition is the where walker's words narrowed to what a literal can say: a value is `=`, `null` is `IS NULL`, and an operator struct takes `.eq`, `.ne`, `.gt`, `.gte`, `.lt`, `.lte`, `.in` and `.not_in`, ANDed across fields and within one, over columns of the table the Row groups. **The values are written into the statement**, checked against their column the way a column's `.default` is and quoted by the same function, because the entry is part of the Row's declaration and is the same for every statement: there is nothing to bind, the statement text stays one constant with one plan name, and the planner sees the value it is filtering on. A filtered `sum`, `min`, `max` or `avg` is optional whatever its column, because a group none of whose rows matches computes over nothing; a filtered count is `0` there and stays `i64`. Rows that match are counted by naming a column that is never null, `.{ .count = .id, .where = … }`, rather than by a second spelling of `.count`. The same call, filter included, is what a condition on the field compares in the `HAVING`.
+
 **A condition goes where it belongs by what it names.** A term on a column of the table or of a parent is a `WHERE`, applied before grouping; a term on an aggregate field is a `HAVING`, applied after. One `.where` carries both, and nothing at the call site says which is which, because the Row already does. An aggregate inside `.any` is refused: an alternative cannot be half `WHERE` and half `HAVING`.
 
 **A Row with no keys is exactly one row.** `db.select` of it would always hold one, and `db.one` would never say null, so it is read with a new call, `db.exactlyOne(Row, c, .{ .where = … })`, which answers the Row itself. A condition on its aggregates is refused, because it would turn "exactly one" into "maybe none".
@@ -134,15 +167,15 @@ A shaped statement names every column it answers: `"id"`, `"customer.name"`, `"a
 
 ### Where each call stands
 
-| | parent | children | grouped | no keys |
-|---|---|---|---|---|
-| `select`, `one`, `page` | yes | yes | yes | refused, `exactlyOne` |
-| `find` | yes | yes | refused: a group has no key | refused |
-| `count`, `exists` | yes, joining only the parents the condition names | yes | yes, counting groups | refused |
-| `stream` | yes | refused | yes | refused |
-| `exactlyOne` | | | | yes |
-| `.lock` | refused | refused | refused | refused |
-| writes, `raw`, `composed` | refused | refused | refused | refused |
+| | parent | children | a count of children | grouped | no keys |
+|---|---|---|---|---|---|
+| `select`, `one`, `page` | yes | yes | yes | yes | refused, `exactlyOne` |
+| `find` | yes | yes | yes | refused: a group has no key | refused |
+| `count`, `exists` | yes, joining only the parents the condition names | yes | yes | yes, counting groups | refused |
+| `stream` | yes | refused | yes | yes | refused |
+| `exactlyOne` | | | | | yes |
+| `.lock` | refused | refused | refused | refused | refused |
+| writes, `raw`, `composed` | refused | refused | refused | refused | refused |
 
 Every call has its `tx.*` twin. A grouped `db.count` counts groups, by wrapping the grouped statement: `SELECT count(*) FROM (…) AS "#groups"`. A `.lock` is refused because it would lock a row of every table joined, which is not what anyone holding one order meant. A write through a shaped Row is refused because an answer is not written back. `exists` and `not_exists` join `any` as reserved column names, so a Row with a column carrying one of those names is refused by name, the same trade `any` made.
 
@@ -164,9 +197,15 @@ Every call has its `tx.*` twin. A grouped `db.count` counts groups, by wrapping 
 
 **An `.exists` with an empty `.where`.** It would ask only whether any row over there is joined to this one, which the join column already answers without a subquery.
 
+**Children in their table's key order and nothing else**, the position this ADR first took. Every child list the port reads is ordered by a `position`, and a v7 key matches it only until somebody drags a line up; the workaround was a raw statement batched by hand with `= ANY($1)`, which is the N+1 fix done again per screen. `nilo_children` took its place.
+
+**A count of children as the length of the list.** It reads every child to print one number: a SKU Product's whole catalogue for a badge. **A count as a `LEFT JOIN` onto a grouped subquery** answers the same number in one statement and counts every parent's children, those on the page and those not, before `.limit` has a say; the correlated subquery asks one index lookup per row the page shows. **A count as a word in `nilo_aggregate`** would have made the Row grouped, which it is not: each row is one row of its table.
+
+**An aggregate's or a child list's `.where` bound as parameters, in the walker's full grammar.** The values are in a declaration, so they are the compiler's; binding them would thread a second set of paths through every shaped statement, number the `SELECT` list's placeholders ahead of the caller's, and buy patterns and `.any` that no filter in the port uses. A literal takes the thirty-three `FILTER`s the port wrote, and a filter needing more is the statement's own `.where` or `db.raw`.
+
 ## What is still refused
 
-A join to a table that no reference or `nilo_via` connects; a join with a condition in its `ON`; a self-join through the same field twice (two fields do it, under two names); children of children; children through a reference of several columns; `DISTINCT`; window functions other than the page total; CTEs, unions and set operations; an aggregate over an expression rather than a column. Each is `db.raw`, which is unchanged, and each is written down so the next person to want one starts from which property it would have to keep.
+A join to a table that no reference or `nilo_via` connects; a join with a condition in its `ON`; a self-join through the same field twice (two fields do it, under two names); children of children; children through a reference of several columns; a limit on children per parent; `DISTINCT`; window functions other than the page total; CTEs, unions and set operations; an aggregate over an expression rather than a column; an aggregate's `.where` on a parent's column, or with a pattern, `.any` or `.exists` in it; a sum or any aggregate but a count over children. Each is `db.raw`, which is unchanged, and each is written down so the next person to want one starts from which property it would have to keep.
 
 ## What it costs
 
@@ -174,9 +213,9 @@ Put against the four axes ([ADR 017](./017-the-trade-budget-has-four-axes.md)).
 
 | Axis | Cost |
 |---|---|
-| Allocations per request | none added to a path that did not ask. `.exists` is comptime string concatenation, its values out of the same parameter tuple. A flat Row is read by the same code it was, `readRow`'s loop generalised by kind, and `db.zig`'s allocation tests pass unchanged. A parent adds nothing, its columns read into the Row that was going to be allocated anyway. **Children cost, per statement, one array of keys and one array of run ends, each one word per parent, plus the list the children are read into**, which doubles as it grows because how many will arrive is not known; on SQLite the key list is one JSON text, one allocation. A grouped Row allocates what a flat Row of the same width does. |
+| Allocations per request | none added to a path that did not ask. `.exists` is comptime string concatenation, its values out of the same parameter tuple. A flat Row is read by the same code it was, `readRow`'s loop generalised by kind, and `db.zig`'s allocation tests pass unchanged. A parent adds nothing, its columns read into the Row that was going to be allocated anyway. **Children cost, per statement, one array of keys and one array of run ends, each one word per parent, plus the list the children are read into**, which doubles as it grows because how many will arrive is not known; on SQLite the key list is one JSON text, one allocation. A grouped Row allocates what a flat Row of the same width does. An aggregate's `.where`, a child list's `.order` and `.where`, and a count of children are comptime text with no value to bind, and a count is read into the Row like any column. |
 | Memory per idle connection | zero. Nothing here lives on a connection. |
-| Throughput and p99 | one round trip for `.exists`, a parent or a group, the same as the `db.raw` each replaces; two for children, against N+1 for the loop it replaces. What the database does with the join or the subquery is the caller's own plan, exactly as when the caller wrote it by hand. Unmeasured on the database's own side: what an `.exists` costs there against the `db.raw` it replaces is the same SQL, so nothing is benchmarked here; if the two ever diverge, [`bench/result/sql.md`](../../bench/result/sql.md) is where the number goes. |
+| Throughput and p99 | one round trip for `.exists`, a parent, a group or a count of children, the same as the `db.raw` each replaces; two for children, against N+1 for the loop it replaces. A count of children is one lookup of the counted table's reference column per row answered, which is what the hand-written correlated `count(*)` it replaces costs, and wants the same index: Postgres does not index a foreign key by itself. What the database does with the join or the subquery is the caller's own plan, exactly as when the caller wrote it by hand. Unmeasured on the database's own side: what an `.exists` costs there against the `db.raw` it replaces is the same SQL, so nothing is benchmarked here; if the two ever diverge, [`bench/result/sql.md`](../../bench/result/sql.md) is where the number goes. |
 | Binary size | zero for a program with no shaped Row and no `.exists`; all of it is comptime. `zig build size-sql`, stripped `ReleaseFast`: +80 bytes on the Postgres program and −352 on the SQLite one, and −160 on `bench-sql-server`, against a build from before this change. Layout rather than code; the statements are comptime and the flat reader it generalised does the same work ([`sql.md` §14](../../bench/result/sql.md#14-a-row-with-a-parent-children-or-a-sum-costs-a-program-without-one-nothing)). |
 
-Twenty-five Refusals cover the rules above, in `sql/refusals/shape_*.zig`, one per rule. `.exists`'s own correlation carries its own set beside them, for a reference declared twice, none at all, `.on` given beside `.via`, and either naming a column the Row lacks, the last of them added when the correlation gained the outer Row's own side ([ADR 175](./175-an-exists-reads-the-reference-from-either-side.md)).
+Twenty-five Refusals cover the rules above, in `sql/refusals/shape_*.zig`, one per rule, and five more the words added after them: `aggregate_filter_*` for an aggregate's `.where` with nothing to compute, read as never null, or with a pattern, and `children_*` for a count read as anything but `i64` and a list given a `.limit`. `.exists`'s own correlation carries its own set beside them, for a reference declared twice, none at all, `.on` given beside `.via`, and either naming a column the Row lacks, the last of them added when the correlation gained the outer Row's own side ([ADR 175](./175-an-exists-reads-the-reference-from-either-side.md)).

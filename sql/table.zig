@@ -768,11 +768,12 @@ fn defaultOf(
 
 /// One value of the caller's, as SQL text the database reads straight.
 ///
-/// **The two places in this module where a value becomes SQL rather than a
-/// parameter**, and both are parts of the schema rather than of a statement: a
-/// column's `DEFAULT` and a partial index's `WHERE`. There is nothing to bind
-/// against in either, which is also why the value has to be one the compiler
-/// can see.
+/// **The three places in this module where a value becomes SQL rather than a
+/// parameter**: a column's `DEFAULT`, a partial index's `WHERE`, and an
+/// aggregate's `FILTER`. The first two are parts of the schema and the third
+/// is part of a Row's declaration, so there is nothing to bind against in
+/// any of them, which is also why the value has to be one the compiler can
+/// see.
 fn literalText(
     comptime Row: type,
     comptime what: []const u8,
@@ -838,7 +839,7 @@ fn literalText(
         @compileError(
             "nilo: " ++ what ++ " gives " ++ mine ++ " a value, and the column is " ++
                 @typeName(T) ++ ".\n" ++
-                "  What nilo writes into a schema is text, a whole number, a fraction, a " ++
+                "  What nilo writes into the SQL is text, a whole number, a fraction, a " ++
                 "bool, one of a Zig enum's words, or a list of those. Anything else the " ++
                 "database has to work out, so it is a step.",
         );
@@ -983,8 +984,8 @@ fn wrongLiteral(
     @compileError(
         "nilo: " ++ what ++ " gives " ++ mine ++ " a " ++ @typeName(W) ++ ", and the " ++
             "column is " ++ @typeName(T) ++ ".\n" ++
-            "  A value written into the schema is of the column's own type, because " ++
-            "nothing converts it on the way: the database reads the text as it stands.",
+            "  A value written into the SQL rather than bound is of the column's own type, " ++
+            "because nothing converts it on the way: the database reads the text as it stands.",
     );
 }
 
@@ -1485,6 +1486,128 @@ fn whereTerm(
         }
         return quoted ++ " = " ++ literalText(Row, "`.index`'s `.where`", column, written);
     }
+}
+
+/// A condition over one table's columns written as SQL with its values in
+/// it, for the one place a statement has a condition and nowhere to bind it:
+/// an aggregate's `.where`, which lives in a Row's declaration and becomes
+/// `FILTER (WHERE …)` ([ADR 218](../docs/adr/218-a-row-may-carry-its-parent-its-children-or-a-sum.md)).
+///
+/// **The where walker's words, narrowed to what a literal can say.** A value
+/// is `=`, `null` is `IS NULL`, and an operator struct takes `.eq`, `.ne`,
+/// `.gt`, `.gte`, `.lt`, `.lte`, `.in` and `.not_in`, ANDed across fields and
+/// within one. No `.any`, no pattern and no `.exists`: a filter that needs
+/// one is the statement's own `.where`, or `db.raw`. The values are the
+/// compiler's, so `literalText` checks each against its column the way it
+/// checks a default, and a quote in one is doubled rather than trusted.
+///
+/// `qualifier` goes in front of every column, so the filter reads the same
+/// relation its aggregate does.
+pub fn literalCondition(
+    comptime D: type,
+    comptime Row: type,
+    comptime qualifier: []const u8,
+    comptime what: []const u8,
+    comptime where: anytype,
+) []const u8 {
+    comptime {
+        const W = @TypeOf(where);
+        if (!isNamedForm(W)) @compileError(
+            "nilo: " ++ what ++ " is a " ++ @typeName(W) ++ ".\n" ++
+                "  It is keyed by the column it tests, the way a condition is: " ++
+                "`.where = .{ .currency = \"IDR\" }`.",
+        );
+        const fields = @typeInfo(W).@"struct".fields;
+        if (fields.len == 0) @compileError(
+            "nilo: " ++ what ++ " is empty.\n" ++
+                "  An aggregate over every row of the group is the ordinary kind: leave `.where` out.",
+        );
+        var out: []const u8 = "";
+        for (fields, 0..) |f, i| {
+            if (!row_mod.hasColumn(Row, f.name)) row_mod.noSuchColumn(Row, f.name, what);
+            const term = literalTerm(D, Row, qualifier, what, f.name, @field(where, f.name));
+            out = out ++ (if (i == 0) "" else " AND ") ++ term;
+        }
+        return out;
+    }
+}
+
+fn literalTerm(
+    comptime D: type,
+    comptime Row: type,
+    comptime qualifier: []const u8,
+    comptime what: []const u8,
+    comptime column: []const u8,
+    comptime written: anytype,
+) []const u8 {
+    comptime {
+        const quoted = qualifier ++ D.quote(column);
+        const W = @TypeOf(written);
+        if (W == @TypeOf(null)) return quoted ++ " IS NULL";
+        if (!isNamedForm(W)) return quoted ++ " = " ++ literalText(Row, what, column, written);
+
+        const words = "`.eq`, `.ne`, `.gt`, `.gte`, `.lt`, `.lte`, `.in` and `.not_in`";
+        const fields = @typeInfo(W).@"struct".fields;
+        if (fields.len == 0) @compileError(
+            "nilo: " ++ what ++ " tests `" ++ column ++ "` with no operator.\n  They are " ++ words ++ ".",
+        );
+        var out: []const u8 = "";
+        for (fields, 0..) |f, i| {
+            const value = @field(written, f.name);
+            const term = if (listWord(f.name)) |negate| blk: {
+                if (!isListLiteral(@TypeOf(value))) @compileError(
+                    "nilo: " ++ what ++ " gives `" ++ column ++ "`'s `." ++ f.name ++ "` a " ++
+                        @typeName(@TypeOf(value)) ++ ".\n" ++
+                        "  It takes a list written out: `.{ ." ++ f.name ++ " = &.{ .done, .cancelled } }`.",
+                );
+                var list: []const u8 = "";
+                for (value, 0..) |element, n| {
+                    list = list ++ (if (n == 0) "" else ", ") ++ literalText(Row, what, column, element);
+                }
+                if (list.len == 0) @compileError(
+                    "nilo: " ++ what ++ " gives `" ++ column ++ "`'s `." ++ f.name ++ "` an empty list.\n" ++
+                        "  `IN ()` is not SQL, and a condition nothing can meet is one to take out.",
+                );
+                break :blk quoted ++ (if (negate) " NOT IN (" else " IN (") ++ list ++ ")";
+            } else if (comparisonWord(f.name)) |op| blk: {
+                if (@TypeOf(value) == @TypeOf(null)) {
+                    if (std.mem.eql(u8, op, "=")) break :blk quoted ++ " IS NULL";
+                    if (std.mem.eql(u8, op, "<>")) break :blk quoted ++ " IS NOT NULL";
+                    @compileError(
+                        "nilo: " ++ what ++ " asks whether `" ++ column ++ "` is `." ++ f.name ++
+                            "` null.\n  Nothing is greater or less than null: `null` is IS NULL " ++
+                            "and `.{ .ne = null }` is IS NOT NULL.",
+                    );
+                }
+                break :blk quoted ++ " " ++ op ++ " " ++ literalText(Row, what, column, value);
+            } else @compileError(
+                "nilo: " ++ what ++ " tests `" ++ column ++ "` with `." ++ f.name ++
+                    "`, which is not one it writes.\n  They are " ++ words ++
+                    ". A pattern, an `.any` or an `.exists` belongs in the statement's own " ++
+                    "`.where`, or in `db.raw`.",
+            );
+            out = out ++ (if (i == 0) "" else " AND ") ++ term;
+        }
+        return out;
+    }
+}
+
+/// `.in` and `.not_in`, and whether the one found negates.
+fn listWord(comptime name: []const u8) ?bool {
+    if (std.mem.eql(u8, name, "in")) return false;
+    if (std.mem.eql(u8, name, "not_in")) return true;
+    return null;
+}
+
+fn comparisonWord(comptime name: []const u8) ?[]const u8 {
+    const table = .{
+        .{ "eq", "=" }, .{ "ne", "<>" }, .{ "gt", ">" },
+        .{ "gte", ">=" }, .{ "lt", "<" }, .{ "lte", "<=" },
+    };
+    inline for (table) |pair| {
+        if (std.mem.eql(u8, name, pair[0])) return pair[1];
+    }
+    return null;
 }
 
 /// What an entry of `.references` may say beside its columns.
