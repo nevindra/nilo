@@ -2070,6 +2070,27 @@ test "a narrower Row orders by a column of its table it does not carry" {
     );
 }
 
+test "a narrower Row is narrowed by a column of its table it does not carry" {
+    // Item 96, the other half of item 86: staff creation finds a person by
+    // email through a Row that has no reason to carry it. The value binds as
+    // the table's column, since the Row has no field to take a type from.
+    const stmt = comptime select(Pg, UserCard, @TypeOf(.{
+        .where = .{ .age = .{ .gte = @as(i32, 18) }, .any = .{ .{ .created_at = @as(i64, 0) }, .{ .id = @as(i64, 7) } } },
+    }));
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"email\" FROM \"users\" WHERE \"age\" >= $1 AND (\"created_at\" = $2 OR \"id\" = $3)",
+        stmt.sql,
+    );
+    try testing.expect(stmt.params[0].of.? == User);
+    try testing.expect(stmt.params[1].of.? == User);
+    try testing.expectEqual(@as(?type, null), stmt.params[2].of);
+    // The same for the statements that only take a condition.
+    try testing.expectEqualStrings(
+        "SELECT count(*) FROM \"users\" WHERE \"age\" = $1",
+        (comptime count(Pg, UserCard, @TypeOf(.{ .where = .{ .age = @as(i32, 30) } }))).sql,
+    );
+}
+
 test "an order term can say where NULLs go, which is the half neither database agrees on" {
     try testing.expect(std.mem.endsWith(
         u8,
@@ -2777,6 +2798,33 @@ test "a set of .today is the database's date, and a condition may compare with i
         stale.sql,
     );
     try testing.expectEqual(@as(usize, 0), stale.paramCount());
+}
+
+test "a column read as text takes the clock its column type names" {
+    // Item 99: dates that cross an API as `yyyy-MM-dd` are
+    // `sql.AsText("date")`, and the database writes the value either way.
+    const Card = struct {
+        pub const nilo_table = .{ .name = "work_items", .key = .id };
+        id: i64,
+        start_date: ?types_mod.AsText("date"),
+        seen_at: types_mod.AsText("timestamptz"),
+    };
+    const o = .{
+        .set = .{ .start_date = .today, .seen_at = .now },
+        .where = .{ .id = @as(i64, 7), .start_date = .{ .lt = .today }, .seen_at = .{ .lte = .now } },
+    };
+    try testing.expectEqualStrings(
+        "UPDATE \"work_items\" SET \"start_date\" = CURRENT_DATE, \"seen_at\" = now() WHERE \"id\" = $1 AND " ++
+            "\"start_date\" < CURRENT_DATE AND \"seen_at\" <= now()",
+        (comptime update(Pg, Card, @TypeOf(o))).sql,
+    );
+    // On SQLite `.now` in a text column is text, not the microseconds a
+    // `Timestamp` column holds.
+    try testing.expectEqualStrings(
+        "UPDATE \"work_items\" SET \"start_date\" = CURRENT_DATE, \"seen_at\" = " ++ Lite.now_text ++
+            " WHERE \"id\" = ?1 AND \"start_date\" < CURRENT_DATE AND \"seen_at\" <= " ++ Lite.now_text,
+        (comptime update(Lite, Card, @TypeOf(o))).sql,
+    );
 }
 
 test "a given in a set keeps the column when the value is null, which is a patch" {

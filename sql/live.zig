@@ -4204,6 +4204,22 @@ test "today is the database's date, written and compared without a parameter" {
 
     // And `.now` compares the way it is written.
     try testing.expectEqual(@as(usize, 3), try stack.db.count(Profile, &run, .{ .where = .{ .seen_at = .{ .lt = .now } } }));
+
+    // Item 99: the same two words on columns read as text, which is how a
+    // date crosses an API as `yyyy-MM-dd`. The database writes the value
+    // either way.
+    const Stamped = struct {
+        pub const nilo_table = .{ .name = table, .key = .id };
+        id: i64,
+        born: ?types.AsText("date"),
+        seen_at: types.AsText("timestamptz"),
+    };
+    try testing.expectEqual(@as(usize, 1), try stack.db.count(Stamped, &run, .{ .where = .{ .born = .today } }));
+    try testing.expectEqual(@as(usize, 1), try stack.db.update(Stamped, &run, .{
+        .set = .{ .born = .today, .seen_at = .now },
+        .where = .{ .id = @as(i64, 1), .born = .{ .lt = .today } },
+    }));
+    try testing.expectEqual(@as(usize, 2), try stack.db.count(Stamped, &run, .{ .where = .{ .born = .today, .seen_at = .{ .lte = .now } } }));
 }
 
 test "a paged raw statement takes the request's order and still carries its total" {
@@ -4230,6 +4246,29 @@ test "a paged raw statement takes the request's order and still carries its tota
     try testing.expectEqual(@as(usize, 2), oldest.rows.len);
     try testing.expectEqualStrings("grace@example.dev", oldest.rows[0].email);
     try testing.expectEqualStrings("ada@example.dev", oldest.rows[1].email);
+
+    // Item 97: past the last row the window has no row to ride on, and the
+    // same statement asked again from row one says the total. The port's
+    // shape, a cast on each bound.
+    const skipping = "SELECT p.id, p.email, count(*) OVER () FROM " ++ table ++
+        " p WHERE p.age > $1 {order} LIMIT $2::int OFFSET $3::int";
+    const past = try stack.db.rawPageOrdered(Paged, &run, skipping, .{ @as(i32, 10), @as(i32, 2), @as(i32, 200) }, Sort.by(&.{.{ .key = .id }}));
+    try testing.expectEqual(@as(usize, 0), past.rows.len);
+    try testing.expectEqual(@as(i64, 3), past.total);
+    const typed_past = try stack.db.page(Person, &run, .{ .order = .{ .id = .asc }, .limit = 2, .offset = @as(i64, 200) });
+    try testing.expectEqual(@as(usize, 0), typed_past.rows.len);
+    try testing.expectEqual(@as(i64, 3), typed_past.total);
+
+    // Item 98: the plan of the same statement, sorted as a request sorted it.
+    const plan = try stack.db.rawExplainOrdered(&run, skipping, .{ @as(i32, 10), @as(i32, 2), @as(i32, 0) }, Sort.by(&.{.{ .key = .age }}));
+    try testing.expect(std.mem.indexOf(u8, plan, "WindowAgg") != null);
+    try testing.expect(std.mem.indexOf(u8, plan, "Execution Time:") != null);
+
+    // A write's plan is asked inside a transaction that is rolled back, so
+    // `ANALYZE` running it keeps nothing.
+    const write_plan = try stack.db.rawExplain(&run, "UPDATE " ++ table ++ " SET age = age + $1", .{@as(i32, 100)});
+    try testing.expect(std.mem.indexOf(u8, write_plan, "Update on") != null);
+    try testing.expectEqual(@as(usize, 0), try stack.db.count(Person, &run, .{ .where = .{ .age = .{ .gt = @as(i32, 100) } } }));
 }
 
 test "a narrower Row sorts by a column of its table it does not carry" {
@@ -4251,6 +4290,13 @@ test "a narrower Row sorts by a column of its table it does not carry" {
     try testing.expectEqual(@as(i64, 2), by_age[0].id);
     try testing.expectEqual(@as(i64, 1), by_age[1].id);
     try testing.expectEqual(@as(i64, 3), by_age[2].id);
+
+    // Item 96: and narrowed by one, bound as the table's `int4`.
+    const grown = try stack.db.select(Email, &run, .{ .where = .{ .age = .{ .gte = @as(i32, 18) } }, .order = .{ .id = .asc } });
+    try testing.expectEqual(@as(usize, 2), grown.len);
+    try testing.expectEqualStrings("grace@example.dev", grown[1].email);
+    const found = (try stack.db.one(Email, &run, .{ .where = .{ .handle = "kid" } })).?;
+    try testing.expectEqual(@as(i64, 3), found.id);
 }
 
 test "an exists from the child's side reads the parent's key off the child's own reference" {
@@ -4967,6 +5013,11 @@ test "a parent, its children and a sum come back from a real Postgres" {
     try testing.expectEqual(@as(?f32, 0.5), filtered[1].light);
     const having = try stack.db.select(ShapeFiltered, &run, .{ .where = .{ .large = .{ .gt = @as(i64, 0) } } });
     try testing.expectEqual(@as(usize, 1), having.len);
+    // A filtered sum is optional, and on Postgres `.desc` puts its nulls
+    // first: a leaderboard ranks with `NULLS LAST`.
+    const ranked = try stack.db.select(ShapeFiltered, &run, .{ .order = .{ .large = .desc_nulls_last } });
+    try testing.expectEqual(@as(?i64, 350), ranked[0].large);
+    try testing.expect(ranked[1].large == null);
 
     // Children in an order of their own and narrowed, and a count of them
     // read in the same statement as the rows it belongs to.

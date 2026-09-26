@@ -94,6 +94,18 @@ branch `sql-improvements`.
 | 93 | A slow query, from the route down to the plan | Done: `sql.Sent.route` ([ADR 108](./adr/108-a-statement-can-be-watched.md)) and `db.explain` ([ADR 232](./adr/232-a-read-can-show-its-plan.md)); a raw statement already had a plan name, and only the doc said otherwise. Open: a stable name for a statement whose `ORDER BY` a `sql.Ordering` chose, and counts per statement on the metrics page. |
 | 94 | Where the bugs are now: the statements nilo tells us to write raw | **Open.** A question rather than an ask; not taken up. |
 
+## The second round, items 95–99
+
+Filed after the port built against the branch above.
+
+| # | Finding | Status |
+|---|---|---|
+| 95 | A `*_nulls_*` order through a narrower Row did not compile | Fixed: an order term through a parent, on an aggregate, or on a children field says where the nulls go. |
+| 96 | `.order` may name a column a narrower Row does not carry, and `.where` may not | Done, [ADR 218](./adr/218-a-row-may-carry-its-parent-its-children-or-a-sum.md): a condition names one too, bound as the table's column type. |
+| 97 | A page past the last row says the total is zero | Fixed, [ADR 150](./adr/150-a-page-knows-what-it-left-out.md) and [ADR 205](./adr/205-a-raw-statement-can-carry-its-total.md). A typed page sends one `db.count`; a raw page asks the same statement again from row one, which needs its `OFFSET` to be one placeholder. |
+| 98 | `db.explain` covers typed reads only | Done, [ADR 232](./adr/232-a-read-can-show-its-plan.md): `db.rawExplain` and `db.rawExplainOrdered`, rolled back. The ADR says only structural assertions survive a tiny database. |
+| 99 | `.today` needs `sql.Date`, and every date here is `sql.AsText("date")` | Done, [ADR 181](./adr/181-the-marker-has-two-kinds-of-word.md): `.today` on `AsText("date")`, `.now` on `AsText("timestamptz")`. |
+
 ---
 
 ## The port on `636d7b6`

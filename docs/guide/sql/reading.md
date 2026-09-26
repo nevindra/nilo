@@ -75,7 +75,9 @@ statement stays a constant no matter how long the list is. Its negation is
 case, `lower("email") = lower($1)`, which is the lookup a `.unique` with
 `.ignoring_case` is an index for; `.not_ieq` negates it. A column of type
 `sql.Date` compares with `.today` and a `sql.Timestamp` with `.now`, the
-database's clock with nothing bound: `.due_date = .{ .lt = .today }`. `.distinct_from` and
+database's clock with nothing bound: `.due_date = .{ .lt = .today }`. A column
+read as text takes the word its column type names, `.today` on
+`sql.AsText("date")` and `.now` on `sql.AsText("timestamptz")`. `.distinct_from` and
 `.not_distinct_from` are the null-safe pair — see below. On SQLite, `.like`
 and `.not_like` are Refusals naming `.ilike` and `.not_ilike`: that
 database's `LIKE` folds ASCII case and cannot be told not to by a
@@ -365,6 +367,9 @@ your own, and only `db.rawOrdered` and `db.rawPageOrdered` take it, with
 A literal `.order` on a narrower Row may name any column of its table, not
 only the ones the Row carries, so a tiebreak such as `created_at` does not
 have to go on the wire: `.order = .{ .position = .asc, .created_at = .asc }`.
+A `.where` may name one too, so a lookup by email need not carry `email` on a
+Row that only answers `id` and `name`: `.where = .{ .email = e }`. The value
+binds as the table's column, since the Row has no field to say its type.
 
 ## The keyset form of a deep page
 

@@ -363,6 +363,179 @@ pub fn assertPaged(
     }
 }
 
+/// Which values a paged statement's own `LIMIT` and `OFFSET` are, by
+/// position in the tuple: what `db.rawPage` needs to ask the same statement
+/// again from its first row when the page came back empty
+/// ([ADR 205](../docs/adr/205-a-raw-statement-can-carry-its-total.md)).
+pub const Paging = struct {
+    /// The tuple index `OFFSET $n` binds, or null when the statement skips
+    /// nothing: no `OFFSET`, or `OFFSET 0`.
+    offset: ?usize,
+    /// The tuple index `LIMIT $n` binds, when that placeholder is used
+    /// nowhere else. Null when the limit is written out, absent, or shared,
+    /// which only means the second ask reads the rows it reads.
+    limit: ?usize,
+
+    /// Whether an empty page can have rows behind it at all. A statement
+    /// with neither bound as a value skips nothing and asks for rows, so
+    /// empty is nothing matched, and the second ask is not compiled.
+    pub fn asksAgain(self: Paging) bool {
+        return self.offset != null or self.limit != null;
+    }
+};
+
+/// Read a paged statement's `LIMIT` and `OFFSET`, and refuse one whose
+/// offset nilo could not set back to zero.
+///
+/// **Why a page cares.** `count(*) OVER ()` rides on the rows, so a page
+/// past the last row has no row to carry the total and answered zero: a list
+/// of 150 asked for rows 200 onward read as "nothing matches". nilo cannot
+/// write a count of a statement it did not write, but it can send the same
+/// statement again with `OFFSET 0` and `LIMIT 1`, and the window on that one
+/// row is the total. That takes knowing which value is the offset, so the
+/// offset has to be a placeholder of its own: `OFFSET $3`, a cast (`$3::int`)
+/// and `ROWS` allowed.
+///
+/// The clauses read are the statement's own, at the top level: a
+/// subquery's or a CTE's is inside brackets and is not the page's.
+pub fn paging(comptime sql: []const u8, comptime V: type, comptime call: []const u8) Paging {
+    return comptime blk: {
+        @setEvalBranchQuota(400 * sql.len + 10_000);
+        var depth: usize = 0;
+        var i: usize = 0;
+        var limit_at: ?usize = null;
+        var offset_at: ?usize = null;
+        while (i < sql.len) {
+            const skipped = skipPast(sql, i);
+            if (skipped != i) {
+                i = skipped;
+                continue;
+            }
+            const ch = sql[i];
+            if (ch == '(' or ch == '[') {
+                depth += 1;
+            } else if (ch == ')' or ch == ']') {
+                if (depth > 0) depth -= 1;
+            } else if (depth == 0) {
+                if (wordAt(sql, i, "LIMIT")) limit_at = i + "LIMIT".len;
+                if (wordAt(sql, i, "OFFSET")) offset_at = i + "OFFSET".len;
+            }
+            i += 1;
+        }
+
+        const tuple = @typeInfo(V) == .@"struct" and @typeInfo(V).@"struct".is_tuple;
+        var out: Paging = .{ .offset = null, .limit = null };
+
+        if (limit_at) |at| {
+            const bound = boundAt(sql, at);
+            // SQLite's `LIMIT <offset>, <count>` puts the offset first, where
+            // nothing here would look for it.
+            if (bound.comma) @compileError(std.fmt.comptimePrint(
+                "nilo: the statement handed to `{s}` writes `LIMIT a, b`.\n" ++
+                    "  A page answers its total even past the last row by asking the same statement " ++
+                    "again from row one, which needs to find the offset. Write it the way both " ++
+                    "databases read: `LIMIT $2 OFFSET $3`.",
+                .{call},
+            ));
+            if (bound.param) |n| {
+                if (tuple and uses(sql, n) == 1) out.limit = n - 1;
+            }
+        }
+
+        if (offset_at) |at| {
+            const bound = boundAt(sql, at);
+            if (bound.written) |value| {
+                if (value != 0) @compileError(std.fmt.comptimePrint(
+                    "nilo: the statement handed to `{s}` writes `OFFSET {d}`.\n" ++
+                        "  A page past its last row has no row to carry `count(*) OVER ()`, so nilo " ++
+                        "asks the same statement again with the offset at 0 — and an offset written " ++
+                        "into the text cannot be. Pass it as a value: `OFFSET $n`.",
+                    .{ call, value },
+                ));
+            } else if (bound.param) |n| {
+                if (!tuple) @compileError(
+                    "nilo: `" ++ call ++ "` was given its values in a struct with named fields.\n" ++
+                        "  A page past its last row is asked again with its `OFFSET` at 0, and the " ++
+                        "offset is found by position. Pass the values as a tuple: `.{ a, limit, offset }`.",
+                );
+                if (uses(sql, n) != 1) @compileError(std.fmt.comptimePrint(
+                    "nilo: the statement handed to `{s}` uses its offset, ${d}, somewhere besides " ++
+                        "`OFFSET`.\n" ++
+                        "  A page past its last row is asked again with the offset at 0, which would " ++
+                        "change the other use too. Give the offset a placeholder of its own.",
+                    .{ call, n },
+                ));
+                out.offset = n - 1;
+            } else @compileError(
+                "nilo: the statement handed to `" ++ call ++ "` has an `OFFSET` that is not one " ++
+                    "placeholder.\n" ++
+                    "  A page past its last row has no row to carry `count(*) OVER ()`, so nilo asks " ++
+                    "the same statement again with the offset at 0, and that means finding the " ++
+                    "offset among the values. Work the number out in Zig and write `OFFSET $n`; a " ++
+                    "cast, `$n::int`, is fine.",
+            );
+        }
+        break :blk out;
+    };
+}
+
+/// What stands after a `LIMIT` or `OFFSET` starting at `at`: one
+/// placeholder, one number, or something else, and whether a comma follows.
+fn boundAt(comptime sql: []const u8, comptime at: usize) struct { param: ?usize = null, written: ?u64 = null, comma: bool = false } {
+    comptime {
+        var j = at;
+        while (j < sql.len and std.ascii.isWhitespace(sql[j])) j += 1;
+        if (j >= sql.len) return .{};
+        var param: ?usize = null;
+        var written: ?u64 = null;
+        if (paramAt(sql, j)) |found| {
+            param = found.n;
+            j = found.end;
+        } else if (std.ascii.isDigit(sql[j])) {
+            const from = j;
+            while (j < sql.len and std.ascii.isDigit(sql[j])) j += 1;
+            if (j < sql.len and isWordByte(sql[j])) return .{};
+            written = std.fmt.parseInt(u64, sql[from..j], 10) catch return .{};
+        } else return .{};
+        while (j < sql.len and std.ascii.isWhitespace(sql[j])) j += 1;
+        // A cast on the placeholder is the value's type, not arithmetic on it.
+        if (j + 1 < sql.len and sql[j] == ':' and sql[j + 1] == ':') {
+            j += 2;
+            while (j < sql.len and std.ascii.isWhitespace(sql[j])) j += 1;
+            while (j < sql.len and isWordByte(sql[j])) j += 1;
+            while (j < sql.len and std.ascii.isWhitespace(sql[j])) j += 1;
+        }
+        if (j < sql.len and sql[j] == ',') return .{ .param = param, .written = written, .comma = true };
+        // What may follow is the end, a `;`, or the next clause's keyword
+        // (`OFFSET`, `ROWS`, `FOR`). An operator means the bound is an
+        // expression, and nothing here can set an expression to zero.
+        if (j < sql.len and sql[j] != ';' and !std.ascii.isAlphabetic(sql[j])) return .{};
+        return .{ .param = param, .written = written };
+    }
+}
+
+/// How many times `$n` appears in a statement, quotes and comments skipped.
+fn uses(comptime sql: []const u8, comptime n: usize) usize {
+    comptime {
+        var count: usize = 0;
+        var i: usize = 0;
+        while (i < sql.len) {
+            const skipped = skipPast(sql, i);
+            if (skipped != i) {
+                i = skipped;
+                continue;
+            }
+            if (paramAt(sql, i)) |found| {
+                if (found.n == n) count += 1;
+                i = found.end;
+                continue;
+            }
+            i += 1;
+        }
+        return count;
+    }
+}
+
 /// `s` where a count is not one. Written out because a message that reads
 /// "selects 1 columns" is a message somebody stops trusting.
 fn plural(comptime n: usize) []const u8 {
@@ -961,4 +1134,38 @@ test "a paged statement is the Row's columns and one more" {
     // And a list this file cannot count is left to the run-time width check,
     // the way `assertList` leaves it.
     comptime assertPaged(Dollar, Line, "SELECT * FROM objects", "db.rawPage");
+}
+
+test "a page's own offset and limit are found by position, past a cast and a subquery's" {
+    const T3 = struct { i64, i64, i64 };
+    const T4 = struct { i64, i64, i64, i64 };
+    const plain = comptime paging("SELECT id, count(*) OVER () FROM t WHERE a > $1 ORDER BY id LIMIT $2 OFFSET $3", T3, "db.rawPage");
+    try testing.expectEqual(@as(?usize, 2), plain.offset);
+    try testing.expectEqual(@as(?usize, 1), plain.limit);
+
+    // The port's shape: a cast on each, and `ROWS` after the offset.
+    const cast = comptime paging("SELECT id, count(*) OVER () FROM t ORDER BY id LIMIT $13::int OFFSET $14 :: int ROWS", struct { i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 }, "db.rawPage");
+    try testing.expectEqual(@as(?usize, 13), cast.offset);
+    try testing.expectEqual(@as(?usize, 12), cast.limit);
+
+    // A subquery's clauses are its own; the page's are the outer ones.
+    const inner = comptime paging(
+        "SELECT id, count(*) OVER () FROM (SELECT id FROM t LIMIT $1 OFFSET $2) s ORDER BY id LIMIT $3 OFFSET $4",
+        T4,
+        "db.rawPage",
+    );
+    try testing.expectEqual(@as(?usize, 3), inner.offset);
+    try testing.expectEqual(@as(?usize, 2), inner.limit);
+
+    // Nothing skipped: no offset at all, or a written zero.
+    const first = comptime paging("SELECT id, count(*) OVER () FROM t ORDER BY id LIMIT 20", struct {}, "db.rawPage");
+    try testing.expectEqual(@as(?usize, null), first.offset);
+    try testing.expectEqual(@as(?usize, null), first.limit);
+    try testing.expectEqual(@as(?usize, null), (comptime paging("SELECT 1, 2 FROM t LIMIT 5 OFFSET 0", struct {}, "db.rawPage")).offset);
+
+    // A limit whose placeholder is also a condition cannot be set to one on
+    // the second ask, so it is left as it is.
+    const shared = comptime paging("SELECT id, count(*) OVER () FROM t WHERE rn <= $1 ORDER BY id LIMIT $1 OFFSET $2", struct { i64, i64 }, "db.rawPage");
+    try testing.expectEqual(@as(?usize, null), shared.limit);
+    try testing.expectEqual(@as(?usize, 1), shared.offset);
 }

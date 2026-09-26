@@ -557,6 +557,11 @@ pub const Postgres = struct {
     /// What a `.default` of `.now` writes.
     pub const now_default = "now()";
 
+    /// What `.now` writes into a column read as text, `sql.AsText("timestamptz")`
+    /// (ADR 181). The column is still a `timestamptz` here, so it is the same
+    /// clock.
+    pub const now_text = "now()";
+
     /// Whether this database can drop a table constraint and add another in
     /// its place. Postgres can, in one `ALTER TABLE`, which is what makes a
     /// changed word on an enum column a diff rather than a rebuild.
@@ -1144,6 +1149,12 @@ pub const SQLite = struct {
     pub const now_default =
         "(CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER) * 1000)";
 
+    /// What `.now` writes into a column read as text, `sql.AsText("timestamptz")`
+    /// (ADR 181). `now_default` is a number of microseconds, which a text
+    /// column would hand back as digits; this is RFC 3339 in UTC to the
+    /// millisecond, which two of sort as text in the order they happened.
+    pub const now_text = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
+
     /// **The clause that is a different shape rather than a different word.**
     ///
     /// `INTEGER PRIMARY KEY` is an alias for the rowid here, so the type and
@@ -1352,6 +1363,7 @@ pub fn assertDialect(comptime D: type) void {
             "like_folds",
             "enum_values",
             "now_default",
+            "now_text",
             "can_alter_constraint",
             "text_accepts",
             "trigger_drop_names_table",

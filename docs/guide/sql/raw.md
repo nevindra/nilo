@@ -210,6 +210,15 @@ returns the `Page(Line)` is described the same way in the document. A
 `SELECT` list exactly the Row's width, with no window on the end, is a
 Refusal that says what to add.
 
+**A page past the last row still says how many there are.** The window rides
+on the rows, so a request for rows 200 onward of a list of 150 has no row to
+carry it. nilo sends the same statement again with the offset at 0 (and the
+limit at 1, when it is a placeholder of its own), and reads the total off that
+one row. For that it has to find the offset, so write it as one placeholder
+used nowhere else, `OFFSET $2` or `OFFSET $2::int`, and work the number out
+in Zig. An `OFFSET` written as a number, or as arithmetic like
+`($3 - 1) * 20`, is a Refusal that says so.
+
 A list sorted from its headings is `db.rawPageOrdered`: the same statement
 with `{order}` where the `ORDER BY` goes, and the `sql.Ordering` value the
 request chose as the last argument, the way [`rawOrdered`](./reading.md)

@@ -441,6 +441,32 @@ const sql_refusals = [_]Refusal{
         .name = "raw_page_without_a_total",
         .says = "the statement handed to `db.rawPage` selects 2 columns, and raw_page_without_a_total.Line has 2 fields and wants one more.",
     },
+    // A page past its last row is asked again with its offset at 0, so the
+    // offset has to be a value of its own (ADR 205).
+    .{
+        .name = "raw_page_offset_not_a_placeholder",
+        .says = "the statement handed to `db.rawPage` has an `OFFSET` that is not one placeholder.",
+    },
+    .{
+        .name = "raw_page_offset_written_out",
+        .says = "the statement handed to `db.rawPage` writes `OFFSET 40`.",
+    },
+    .{
+        .name = "raw_page_offset_shared",
+        .says = "the statement handed to `db.rawPage` uses its offset, $1, somewhere besides `OFFSET`.",
+    },
+    .{
+        .name = "raw_page_limit_with_a_comma",
+        .says = "the statement handed to `db.rawPage` writes `LIMIT a, b`.",
+    },
+    .{
+        .name = "raw_page_values_named",
+        .says = "`db.rawPage` was given its values in a struct with named fields.",
+    },
+    .{
+        .name = "raw_page_offset_not_a_number",
+        .says = "a page's `LIMIT` or `OFFSET` was given a []const u8.",
+    },
     // The two shapes a `::text` cannot be hiding in, and the only two this
     // refuses (ADR 138). Both name the *column* type rather than the Zig one:
     // `@typeName` of an `AsText` is `types.AsText("numeric"[0..7])`, and a
@@ -964,6 +990,10 @@ const sql_refusals = [_]Refusal{
     .{
         .name = "today_on_a_timestamp",
         .says = "`.set = .{ .seen_at = .today }` on today_on_a_timestamp.Card, whose `seen_at` is types.Timestamp.",
+    },
+    .{
+        .name = "today_on_a_timestamp_read_as_text",
+        .says = "`.set = .{ .seen_at = .today }` on today_on_a_timestamp_read_as_text.Card, whose `seen_at` is a `timestamptz` column read as text.",
     },
     .{
         .name = "ieq_on_a_number_column",

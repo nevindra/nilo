@@ -152,6 +152,11 @@ of that statement with its values bound, one line of the plan per line of text:
 `EXPLAIN (ANALYZE, BUFFERS)` on Postgres, which runs the read, and
 `EXPLAIN QUERY PLAN` on SQLite. For a test and a developer; a children
 statement is not in it ([ADR 232](../adr/232-a-read-can-show-its-plan.md)).
+`db.rawExplain(c, sql, values)` is the same for a raw statement, and
+`db.rawExplainOrdered(c, sql, values, order)` for one with the `{order}` hole.
+Both run inside a transaction that is rolled back, so the plan of an `UPDATE`
+keeps no row it changed. On a test database of a few rows, assert on the plan's
+structure (a `SubPlan`, no `Join`) rather than on which index it chose.
 
 **`sql.problem(c)` is the same struct asked for from the other end** — by the
 call that failed rather than by an observer of every call. See
@@ -402,7 +407,7 @@ request ([ADR 038](../adr/038-a-module-sits-where-the-loop-puts-it.md)).
 | `db.raw(User, c, sql, .{ … })` | `![]User` — a statement this module will not write. `sql` is **comptime**: the `SELECT` list is counted against the Row's fields and each column that plainly has a name is checked against the field in its position, and the statement is kept prepared like every other ([ADR 051](../adr/051-a-statement-that-is-a-constant-can-be-prepared-once.md)) |
 | `db.rawOne(User, c, sql, .{ … })` | `!?User` — the same, for a statement whose `WHERE` holds a key. **No `LIMIT 1` is added**; see below |
 | `db.rawExactlyOne(Totals, c, sql, .{ … })` | `!Totals`: `rawOne` for a statement that has one row by construction: an aggregate with no `GROUP BY`, a `RETURNING` on a keyed write. No row is `error.QueryFailed`, not a zero-filled Row ([ADR 206](../adr/206-a-statement-that-always-answers-answers-a-row.md)) |
-| `db.rawPage(Line, c, sql, .{ … })` | `!Page(Line)`: a raw statement read as a page: the Row's columns, then `count(*) OVER ()` as one more column on the end of the `SELECT` list, which becomes `.total`. The `ORDER BY` and `LIMIT` are yours to write. A list exactly the Row's width is a Refusal ([ADR 205](../adr/205-a-raw-statement-can-carry-its-total.md)) |
+| `db.rawPage(Line, c, sql, .{ … })` | `!Page(Line)`: a raw statement read as a page: the Row's columns, then `count(*) OVER ()` as one more column on the end of the `SELECT` list, which becomes `.total`. The `ORDER BY` and `LIMIT` are yours to write. A list exactly the Row's width is a Refusal. An empty page past the last row is asked again from row one for its total, so the statement's own `OFFSET` is one placeholder, `OFFSET $3` or `$3::int`, used nowhere else ([ADR 205](../adr/205-a-raw-statement-can-carry-its-total.md)) |
 | `db.raw([]const u8, c, sql, .{ … })` | `![][]const u8` — column one of every row, with no Row and no marker. `i64`, `?bool`, a `Str`: any one thing a column can be read as. `rawOne` the same, unwrapped. A list of two columns into a scalar is a Refusal ([ADR 125](../adr/125-a-row-that-owns-no-table.md)) |
 | `db.liveColumns(c, schema, table)` | `![]const sql.Column` — what the database says the table has, `name`, `udt`, `nullable`. Empty for a table that is not there. What `checkSchema` and `migrate.addMissingColumns` read |
 | `db.rawOrdered(User, c, sql, .{ … }, order)` | `![]User` — a raw statement with `{order}` in it, where the whole `ORDER BY` an `sql.Ordering` chose at run time is written. See *An order chosen at run time* below |
@@ -500,7 +505,9 @@ SELECT "id", "status", count(*) OVER () FROM "orders"
 else can write between**, so the total and the rows can disagree with nothing
 saying so. A window function rides on the page and cannot. It costs one integer
 read per statement rather than per row, and a condition matching nothing answers
-with no rows and a total of zero.
+with no rows and a total of zero. **A page past the last row still has its
+total**: the window has no row to ride on there, so an empty page that skipped
+rows sends one `db.count` with the same `.where`, and no other page does.
 
 `.limit` and `.order` are both required, and `.lock` is refused. With no ceiling
 this is the whole table and the total is `rows.len`; with no order Postgres owes
@@ -572,10 +579,10 @@ pointing at `insertOrIgnore`.
 
 | | |
 |---|---|
-| `.where` | a condition; see below |
+| `.where` | a condition; see below. On a narrower Row it may name a column of the table the Row does not carry, bound as the table's column type ([ADR 218](../adr/218-a-row-may-carry-its-parent-its-children-or-a-sum.md)) |
 | `.order` | `.{ .created_at = .desc }`, one column per field. `.asc_nulls_last` and its three siblings say where NULLs go, which the two databases otherwise disagree about. A narrower Row that is not grouped may name any column of its table, carried or not, so a tiebreak need not go on the wire; a grouped one is a Refusal there, since the column has no single value per group. Or a value of an `sql.Ordering` for an order the request chose; see below |
 | `.limit` / `.offset` | a literal is baked into the SQL; a variable becomes a parameter. A literal limit is also the row ceiling, so the result list is allocated once |
-| `.set` | update only: columns to new values, or `.{ .views = .{ .plus = 1 } }` for arithmetic on the column's own value. A bare `null` on a nullable column is `= NULL` — no `@as(?T, null)` needed — where in `.where` the same null is `IS NULL`. `.title = sql.given(maybe)` is `COALESCE($1, "title")`, the column kept when the value is null, refused on an optional column. `.updated_at = .now` is the database's clock on a `sql.Timestamp`, and `.start_date = .today` its date (`CURRENT_DATE`) on a `sql.Date`, nothing bound for either. Each on the other's column type is a Refusal |
+| `.set` | update only: columns to new values, or `.{ .views = .{ .plus = 1 } }` for arithmetic on the column's own value. A bare `null` on a nullable column is `= NULL` — no `@as(?T, null)` needed — where in `.where` the same null is `IS NULL`. `.title = sql.given(maybe)` is `COALESCE($1, "title")`, the column kept when the value is null, refused on an optional column. `.updated_at = .now` is the database's clock on a `sql.Timestamp`, and `.start_date = .today` its date (`CURRENT_DATE`) on a `sql.Date`, nothing bound for either. A column read as text takes the word its column type names: `.today` on `sql.AsText("date")`, `.now` on `sql.AsText("timestamptz")`. Each on the other's column type is a Refusal |
 
 ### Conditions
 
@@ -585,7 +592,7 @@ Different fields are ANDed. Several operators on one field are ANDed too.
 |---|---|
 | `.id = 7` | `"id" = $1` |
 | `.age = .{ .gt = 18, .lt = 65 }` | `"age" > $1 AND "age" < $2` |
-| `.eq` `.ne` `.gt` `.gte` `.lt` `.lte` | each also takes `.now` on a `sql.Timestamp` column and `.today` on a `sql.Date` one, the database's clock with nothing bound: `.due_date = .{ .lt = .today }`, and `.due_date = .today` for `=` |
+| `.eq` `.ne` `.gt` `.gte` `.lt` `.lte` | each also takes `.now` on a `sql.Timestamp` or `sql.AsText("timestamptz")` column and `.today` on a `sql.Date` or `sql.AsText("date")` one, the database's clock with nothing bound: `.due_date = .{ .lt = .today }`, and `.due_date = .today` for `=` |
 | `.ieq` / `.not_ieq` | equality that ignores case: `lower("email") = lower($1)` on Postgres and `"email" COLLATE NOCASE = ?1 COLLATE NOCASE` on SQLite, the expression a `.unique` with `.ignoring_case` indexes, so the lookup uses it. An `_` is a character here, where `.ilike` would read it as a wildcard. Text only |
 | `.like` / `.ilike` | and `.not_like` / `.not_ilike`. **These do not escape the text you give them**; the row below is the one to reach for. On SQLite `.ilike` is spelled `LIKE`, because that database's `LIKE` already folds ASCII case — and `.like` is a Refusal there naming `.ilike`, for the reason `.contains` is ([ADR 055](../adr/055-the-second-dialect-is-the-test-of-the-seam.md)) |
 | `.contains` `.starts_with` `.ends_with` | the pattern is built *and* escaped by the statement, so `%` and `_` in a search term match themselves. `i` in front folds case (`.icontains`), `not_` in front negates — twelve in all. On SQLite the case-sensitive half is a Refusal: its `LIKE` folds ASCII case and cannot be told not to |

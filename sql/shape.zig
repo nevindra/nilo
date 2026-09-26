@@ -1024,7 +1024,9 @@ fn childOrder(comptime D: type, comptime Table: type, comptime relation: []const
                     ".\n  A direction is `.asc` or `.desc`, or one of the four that also say where NULLs go.",
             );
             const direction: Direction = statement.writtenValue(T, f.name, Direction);
-            var one = relation ++ "." ++ D.quote(f.name) ++ (if (direction.descending()) " DESC" else " ASC");
+            // A slice rather than the array `++` would infer, or a `NULLS`
+            // clause appended below is a different length and does not fit.
+            var one: []const u8 = relation ++ "." ++ D.quote(f.name) ++ (if (direction.descending()) " DESC" else " ASC");
             if (direction.placement()) |where_nulls| {
                 one = one ++ (D.nulls(where_nulls) orelse dialect_mod.noNullsOrder(D, Table, f.name));
             }
@@ -1204,7 +1206,8 @@ fn orderTerms(comptime D: type, comptime Level: type, comptime T: type, comptime
                     );
                     const direction: Direction = statement.writtenValue(T, f.name, Direction);
                     const named = if (through_table) relation ++ "." ++ D.quote(f.name) else D.quote(row_mod.pathName(at));
-                    var one = named ++ (if (direction.descending()) " DESC" else " ASC");
+                    // A slice, for the reason `childOrder` gives.
+                    var one: []const u8 = named ++ (if (direction.descending()) " DESC" else " ASC");
                     if (direction.placement()) |where_nulls| {
                         one = one ++ (D.nulls(where_nulls) orelse
                             dialect_mod.noNullsOrder(D, Level, f.name));
@@ -1365,6 +1368,19 @@ test "an order may name a column of the table the Row does not carry, through th
         found.sql,
         " ORDER BY \"customer.name\" ASC, \"orders\".\"year\" DESC, \"id\" ASC",
     ));
+}
+
+test "a condition may name a column of the table the Row does not carry, through the table" {
+    // Item 96: as an order may (item 86), and qualified the same way.
+    const found = comptime rows(Pg, OrderCard, @TypeOf(.{
+        .where = .{ .status = "open", .customer = .{ .name = "Acme" } },
+    }), .many);
+    try testing.expect(std.mem.endsWith(
+        u8,
+        found.sql,
+        " WHERE \"orders\".\"status\" = $1 AND \"customer\".\"name\" = $2",
+    ));
+    try testing.expect(found.params[0].of.? == Order);
 }
 
 test "a page carries its total under a name no field can have" {
@@ -1555,6 +1571,40 @@ const OrderWithOrderedLines = struct {
     id: i64,
     lines: []const LineBrief,
 };
+
+test "an order on a shaped Row says where the nulls go, through a parent and on a filtered sum" {
+    // A filtered sum is always optional, and `.desc` alone puts the groups
+    // with none first on Postgres: a leaderboard needs `NULLS LAST`.
+    const grouped = comptime rows(Pg, ByCustomerOpen, @TypeOf(.{
+        .order = .{ .paid = .desc_nulls_last, .customer = .{ .name = .asc_nulls_first } },
+    }), .many);
+    try testing.expect(std.mem.endsWith(
+        u8,
+        grouped.sql,
+        " ORDER BY \"paid\" DESC NULLS LAST, \"customer.name\" ASC NULLS FIRST",
+    ));
+    const lite = comptime rows(Lite, ByCustomerOpen, @TypeOf(.{ .order = .{ .paid = .desc_nulls_last } }), .many);
+    try testing.expect(std.mem.endsWith(u8, lite.sql, " ORDER BY \"paid\" DESC NULLS LAST"));
+    // Through the table, on a Row that is not grouped.
+    const flat = comptime rows(Pg, OrderCard, @TypeOf(.{ .order = .{ .year = .desc_nulls_first } }), .many);
+    try testing.expect(std.mem.endsWith(u8, flat.sql, " ORDER BY \"orders\".\"year\" DESC NULLS FIRST"));
+}
+
+const OrderWithLinesNullsLast = struct {
+    pub const nilo_table = Order;
+    pub const nilo_children = .{ .lines = .{ .order = .{ .qty = .desc_nulls_last } } };
+    id: i64,
+    lines: []const LineBrief,
+};
+
+test "a children field's order says where the nulls go" {
+    const pg = comptime children(Pg, OrderWithLinesNullsLast, "lines");
+    try testing.expect(std.mem.endsWith(
+        u8,
+        pg.sql,
+        "ORDER BY \"#k\".\"key\", \"lines\".\"qty\" DESC NULLS LAST, \"lines\".\"id\"",
+    ));
+}
 
 test "a children field takes an order and a condition, and the key still breaks a tie" {
     const pg = comptime children(Pg, OrderWithOrderedLines, "lines");

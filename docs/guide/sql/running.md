@@ -227,6 +227,29 @@ try std.testing.expect(std.mem.indexOf(u8, plan, "Seq Scan on deals") == null);
 The plan is of the statement that reads the rows. A Row's children are a
 second statement, and are not in it.
 
+A statement you wrote is `db.rawExplain`, with the text and values `db.raw`
+would take, and `db.rawExplainOrdered` for one with the `{order}` hole:
+
+<!-- compiles -->
+```zig
+fn planOfTheInvoices(db: *sql.Db, c: *nilo.Ctx) ![]const u8 {
+    return db.rawExplain(c,
+        "SELECT i.id, u.name FROM invoices i JOIN users u ON u.id = i.user_id WHERE i.total > $1",
+        .{@as(i64, 100)});
+}
+```
+
+It runs inside a transaction that is rolled back, because `ANALYZE` executes
+what it plans: the plan of an `UPDATE` keeps no row the `UPDATE` changed.
+
+**On a test database of a few rows, assert on the plan's structure.** The
+planner prices a plan by the rows it expects, and over ten rows a sequential
+scan and a nested loop are cheapest whatever the indexes. "No `Seq Scan`"
+then fails on a correct schema. What holds at any size is what the statement's
+shape decides: a `SubPlan` is there, a `Join` is not. An assertion about an
+index wants enough seeded rows for the index to win, and `ANALYZE` on the
+table after seeding.
+
 ## Views, and the one thing a check cannot know
 
 A Row can name a **view** or a **materialized view** instead of a table, and

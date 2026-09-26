@@ -746,20 +746,35 @@ fn walk(
                 if (std.mem.eql(u8, f.name, exists_field)) break :term existsOf(D, Row, f.type, path, state, false);
                 if (std.mem.eql(u8, f.name, not_exists_field)) break :term existsOf(D, Row, f.type, path, state, true);
                 if (std.mem.eql(u8, f.name, across_field)) break :term acrossOf(D, Row, f.type, path, state);
-                if (!row_mod.hasColumn(Row, f.name)) {
+                // A narrower Row may be narrowed by a column of its table it
+                // does not carry, as it may be ordered by one: the statement
+                // reads the table, and the condition is about the table's
+                // rows. The column's name and type are the owner's, and so is
+                // the type its value is bound as. A field the Row carries
+                // beside its columns keeps its own refusal: the name means
+                // that field to whoever reads the Row.
+                const Column = if (row_mod.hasColumn(Row, f.name))
+                    Row
+                else if (row_mod.fieldTypeOf(Row, f.name) == null and row_mod.tableHasColumn(Row, f.name))
+                    row_mod.ownerOf(Row)
+                else
                     row_mod.noSuchColumn(Row, f.name, "a condition");
-                }
                 // `.due_date = .today`: the database's clock, compared with
                 // `=`, and nothing bound. Read here rather than in `condition`,
                 // which is handed the type and not the struct the word sits in.
                 if (f.type == @TypeOf(.enum_literal)) {
-                    if (clockWord(D, Row, f.name, fieldValue(W, f.name), "`." ++ f.name ++ " = ." ++
+                    if (clockWord(D, Column, f.name, fieldValue(W, f.name), "`." ++ f.name ++ " = ." ++
                         @tagName(fieldValue(W, f.name)) ++ "`")) |clock|
                     {
                         break :term state.qualifier ++ D.quote(f.name) ++ " = " ++ clock;
                     }
                 }
-                break :term condition(D, Row, f.name, f.type, path, state);
+                if (Column == Row) break :term condition(D, Row, f.name, f.type, path, state);
+                const held = state.inner;
+                state.inner = Column;
+                const widened = condition(D, Column, f.name, f.type, path, state);
+                state.inner = held;
+                break :term widened;
             };
             if (term.len == 0) continue;
             out = out ++ (if (out.len == 0) "" else " AND ") ++ term;
@@ -1571,6 +1586,12 @@ fn fieldValue(comptime T: type, comptime field: []const u8) blk: {
 /// place of a value. Null when the word is neither, and on a column whose type
 /// is an enum, where `.now` is that enum's value as it always was.
 ///
+/// **A column read as text takes the word its column type does**:
+/// `sql.AsText("date")` takes `.today` and `sql.AsText("timestamptz")` takes
+/// `.now`, because the database writes the value either way and the Zig type
+/// only decides how it comes back. On SQLite, where `.now` is otherwise a
+/// number of microseconds, a text column gets `D.now_text`.
+///
 /// Read by a `.set` (`statement.zig`) and by a condition, so the start-date
 /// stamp is one statement: `.set = .{ .start_date = .today }` where
 /// `.start_date = .{ .gt = .today }`. `.now` is `D.now_default`, the
@@ -1601,16 +1622,34 @@ pub fn clockWord(
         if (@typeInfo(C) == .@"enum") return null;
         if (now and C == types.Timestamp) return D.now_default;
         if (today and C == types.Date) return "CURRENT_DATE";
+        const text = if (C != types.Timestamp and C != types.Date) types.asText(C) else null;
+        const moment = if (text) |t| isMomentColumn(t) else false;
+        const day = if (text) |t| std.ascii.eqlIgnoreCase(t, "date") else false;
+        if (now and moment) return D.now_text;
+        if (today and day) return "CURRENT_DATE";
         @compileError(
             "nilo: " ++ said ++ " on " ++ @typeName(Row) ++ ", whose `" ++ column ++ "` is " ++
-                @typeName(F) ++ ".\n" ++
+                (if (text) |t| "a `" ++ t ++ "` column read as text" else @typeName(F)) ++ ".\n" ++
                 (if (now)
-                    "  `.now` is the moment the statement runs, so it goes in a `sql.Timestamp`." ++
-                        (if (C == types.Date) " A `sql.Date` takes `.today`." else "")
+                    "  `.now` is the moment the statement runs, so it goes in a `sql.Timestamp` " ++
+                        "or a `sql.AsText(\"timestamptz\")`." ++
+                        (if (C == types.Date or day) " A date takes `.today`." else "")
                 else
-                    "  `.today` is the day the statement runs, so it goes in a `sql.Date`." ++
-                        (if (C == types.Timestamp) " A `sql.Timestamp` takes `.now`." else "")),
+                    "  `.today` is the day the statement runs, so it goes in a `sql.Date` " ++
+                        "or a `sql.AsText(\"date\")`." ++
+                        (if (C == types.Timestamp or moment) " A timestamp takes `.now`." else "")),
         );
+    }
+}
+
+/// Whether a column type named in text is a moment: `.now` is one whatever the
+/// spelling Postgres accepts for it.
+fn isMomentColumn(comptime t: []const u8) bool {
+    comptime {
+        for ([_][]const u8{ "timestamptz", "timestamp", "timestamp with time zone", "timestamp without time zone" }) |name| {
+            if (std.ascii.eqlIgnoreCase(t, name)) return true;
+        }
+        return false;
     }
 }
 

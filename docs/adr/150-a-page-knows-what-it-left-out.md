@@ -49,6 +49,22 @@ answers the same number on every row of the result, so only the first is read; a
 condition matching nothing answers with no rows and a total of zero, which is
 the same branch the empty result already takes.
 
+## A page past the last row
+
+The window rides on the rows, so a page with none has no total. An empty
+answer is two different facts: nothing matched, or the page asked for rows past
+the last one, `.offset = 200` on a list that shrank to 150. The first is a total
+of zero. The second used to read as zero too, and a screen said "nothing
+matches" about a list of 150.
+
+**So an empty page that skipped rows, or asked for none, sends `db.count` with
+its own `.where`**, and that is the total. An empty page with no offset matched
+nothing and sends nothing more. The count is a second statement, which is what
+this ADR exists to avoid, and here it cannot do the harm that was avoided:
+there are no rows on the page for the number to disagree with. A count is
+cheaper than asking the page again from its first row: no sort and no columns.
+A grouped Row counts groups, as `db.count` does over one.
+
 The same text in both Dialects. Window functions are SQL:2003 and SQLite has had
 them since 3.25, so this is not a Postgres-only call and `dialect.zig` gains
 nothing.
@@ -80,9 +96,25 @@ thing whose second page has to line up with its first.
   trip rather than two and one prepared statement rather than two. Against
   `db.select` alone it is one `readColumn` per statement and the window
   function's own cost, which Postgres computes during the same scan.
+  A page that comes back empty after skipping rows sends one `db.count` more,
+  and no other page does.
 - **Binary size: one more call**, generic over the Row like every other. `fill`
   is unchanged and `filling` is what it always was with one parameter added, so
   no call site is duplicated.
+
+## What was rejected
+
+**Saying zero past the last row and writing it down.** It is what
+`count(*) OVER ()` answers on its own, and nodeflux-os filed it as item 97: the
+two-statement shape this replaced answered the real number, and the server the
+port mirrors does too. A total that is right on every page but the empty one
+is a total a caller has to second-guess on every page.
+
+**One statement that always carries a row**, the page `LEFT JOIN`ed to a
+`count(*)` of the same condition. It answers past the end in one round trip,
+and every other page pays for it: the condition is evaluated twice and the
+plan is a different shape from the one `db.select` gets, to cover a request
+the frontend rarely sends.
 
 ## Consequences
 
