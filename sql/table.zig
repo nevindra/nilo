@@ -1489,9 +1489,10 @@ fn whereTerm(
 }
 
 /// A condition over one table's columns written as SQL with its values in
-/// it, for the one place a statement has a condition and nowhere to bind it:
-/// an aggregate's `.where`, which lives in a Row's declaration and becomes
-/// `FILTER (WHERE …)` ([ADR 218](../docs/adr/218-a-row-may-carry-its-parent-its-children-or-a-sum.md)).
+/// it, for the places a statement has a condition and nowhere to bind it: an
+/// aggregate's `.where`, which becomes `FILTER (WHERE …)`, and a
+/// `nilo_children` entry's
+/// ([ADR 218](../docs/adr/218-a-row-may-carry-its-parent-its-children-or-a-sum.md)).
 ///
 /// **The where walker's words, narrowed to what a literal can say.** A value
 /// is `=`, `null` is `IS NULL`, and an operator struct takes `.eq`, `.ne`,
@@ -1502,13 +1503,83 @@ fn whereTerm(
 /// checks a default, and a quote in one is doubled rather than trusted.
 ///
 /// `qualifier` goes in front of every column, so the filter reads the same
-/// relation its aggregate does.
+/// relation its entry does. A column that points somewhere is refused as a
+/// way in here; `literalReaching` is the one that follows it.
 pub fn literalCondition(
     comptime D: type,
     comptime Row: type,
     comptime qualifier: []const u8,
     comptime what: []const u8,
     comptime where: anytype,
+) []const u8 {
+    comptime {
+        var hops: []const Hop = &.{};
+        return literalWalk(D, Row, qualifier, what, where, null, &hops);
+    }
+}
+
+/// One table a literal condition reached through a reference, joined into
+/// the statement under `alias`: `text` is the whole ` JOIN … ON …`.
+pub const Hop = struct {
+    alias: []const u8,
+    text: []const u8,
+};
+
+/// What `literalReaching` answers: the condition, and the joins it needs.
+pub const Reached = struct {
+    sql: []const u8,
+    hops: []const Hop,
+};
+
+/// The alias every table an aggregate's `.where` reaches is joined under
+/// starts with this, followed by the path of reference columns:
+/// `"#f.org_unit_id.customer_id"`. `#` begins no field name, so no parent's
+/// alias can meet one.
+pub const reach_prefix = "#f";
+
+/// `literalCondition`, where a column with a `.references` may also be a way
+/// into the row it points at: `.state_id = .{ .category = .{ .not_in = … } }`
+/// ([ADR 218](../docs/adr/218-a-row-may-carry-its-parent-its-children-or-a-sum.md)).
+///
+/// **The table reached is joined, once, under an alias its path names**, and
+/// the condition reads its columns there. A reference points at one row or
+/// none, so the join changes neither how many rows there are nor what any
+/// other aggregate reads: that is ADR 218's argument for a parent, and it
+/// holds here for the same reason. A `JOIN` when the reference cannot be
+/// null and a `LEFT JOIN` when it can, or when anything above it is, the way
+/// a parent's join is chosen. A join and not an `EXISTS`, because the
+/// statements this replaces read a whole table into a dashboard's totals,
+/// and one join is one pass where a subquery in a `FILTER` is a lookup per
+/// row per aggregate. `relation` is the statement's own relation, quoted.
+pub fn literalReaching(
+    comptime D: type,
+    comptime Row: type,
+    comptime relation: []const u8,
+    comptime what: []const u8,
+    comptime where: anytype,
+) Reached {
+    comptime {
+        var hops: []const Hop = &.{};
+        const sql = literalWalk(D, Row, relation ++ ".", what, where, .{ .path = reach_prefix, .left = false }, &hops);
+        return .{ .sql = sql, .hops = hops };
+    }
+}
+
+/// Where a literal walk may go through a reference: the alias path so far,
+/// and whether a join above this one was already outer.
+const Reach = struct {
+    path: []const u8,
+    left: bool,
+};
+
+fn literalWalk(
+    comptime D: type,
+    comptime Row: type,
+    comptime qualifier: []const u8,
+    comptime what: []const u8,
+    comptime where: anytype,
+    comptime reach: ?Reach,
+    comptime hops: *[]const Hop,
 ) []const u8 {
     comptime {
         const W = @TypeOf(where);
@@ -1525,7 +1596,7 @@ pub fn literalCondition(
         var out: []const u8 = "";
         for (fields, 0..) |f, i| {
             if (!row_mod.hasColumn(Row, f.name)) row_mod.noSuchColumn(Row, f.name, what);
-            const term = literalTerm(D, Row, qualifier, what, f.name, @field(where, f.name));
+            const term = literalTerm(D, Row, qualifier, what, f.name, @field(where, f.name), reach, hops);
             out = out ++ (if (i == 0) "" else " AND ") ++ term;
         }
         return out;
@@ -1539,6 +1610,8 @@ fn literalTerm(
     comptime what: []const u8,
     comptime column: []const u8,
     comptime written: anytype,
+    comptime reach: ?Reach,
+    comptime hops: *[]const Hop,
 ) []const u8 {
     comptime {
         const quoted = qualifier ++ D.quote(column);
@@ -1551,6 +1624,41 @@ fn literalTerm(
         if (fields.len == 0) @compileError(
             "nilo: " ++ what ++ " tests `" ++ column ++ "` with no operator.\n  They are " ++ words ++ ".",
         );
+
+        // A struct of columns rather than of operators: a way through the
+        // reference this column is, into the row it points at.
+        var operators: usize = 0;
+        for (fields) |f| {
+            if (listWord(f.name) != null or comparisonWord(f.name) != null) operators += 1;
+        }
+        if (operators == 0) {
+            if (pointedFrom(Row, column)) |pointed| {
+                const at = reach orelse @compileError(
+                    "nilo: " ++ what ++ " reaches through `" ++ column ++ "` into " ++
+                        @typeName(pointed.row) ++ ".\n" ++
+                        "  Only an aggregate's `.where` follows a reference. Here the condition " ++
+                        "is on the columns of the table itself.",
+                );
+                const path = at.path ++ "." ++ column;
+                const alias = D.quote(path);
+                const left = at.left or @typeInfo(row_mod.ColumnType(Row, column)) == .optional;
+                var seen = false;
+                for (hops.*) |h| {
+                    if (std.mem.eql(u8, h.alias, path)) seen = true;
+                }
+                if (!seen) {
+                    const q = row_mod.qualifiedOf(pointed.row);
+                    hops.* = hops.* ++ &[_]Hop{.{
+                        .alias = path,
+                        .text = (if (left) " LEFT JOIN " else " JOIN ") ++ D.qualify(q.schema, q.table) ++
+                            " AS " ++ alias ++ " ON " ++ alias ++ "." ++ D.quote(pointed.target) ++
+                            " = " ++ quoted,
+                    }};
+                }
+                return literalWalk(D, pointed.row, alias ++ ".", what, written, .{ .path = path, .left = left }, hops);
+            }
+        }
+
         var out: []const u8 = "";
         for (fields, 0..) |f, i| {
             const value = @field(written, f.name);
@@ -1583,12 +1691,38 @@ fn literalTerm(
             } else @compileError(
                 "nilo: " ++ what ++ " tests `" ++ column ++ "` with `." ++ f.name ++
                     "`, which is not one it writes.\n  They are " ++ words ++
+                    (if (reach != null and operators == 0)
+                        ". A column with a `.references` of one column is also a way into the " ++
+                            "row it points at: `." ++ column ++ " = .{ .<its column> = … }`"
+                    else
+                        "") ++
                     ". A pattern, an `.any` or an `.exists` belongs in the statement's own " ++
                     "`.where`, or in `db.raw`.",
             );
             out = out ++ (if (i == 0) "" else " AND ") ++ term;
         }
         return out;
+    }
+}
+
+/// The Row a column of `Row`'s table points at through a `.references` of
+/// that one column, and the column it points at there. Null for a column
+/// that points nowhere, for one inside a key of several columns, and for a
+/// reference that named its table as text: there is no Row there to check a
+/// column against.
+fn pointedFrom(comptime Row: type, comptime column: []const u8) ?struct { row: type, target: []const u8 } {
+    comptime {
+        const owner = row_mod.ownerOf(Row);
+        const decl = @field(owner, row_mod.marker);
+        if (!isNamedForm(@TypeOf(decl)) or !@hasField(@TypeOf(decl), "references")) return null;
+        const refs = decl.references;
+        if (!@hasField(@TypeOf(refs), column)) return null;
+        const entry = @field(refs, column);
+        if (isNamedForm(@TypeOf(entry))) return null;
+        const target = targetOf(owner, column, entry[0], entry[1]);
+        const Pointed = target.row orelse return null;
+        if (target.columns.len != 1) return null;
+        return .{ .row = Pointed, .target = target.columns[0] };
     }
 }
 

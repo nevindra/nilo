@@ -558,6 +558,10 @@ const sql_refusals = [_]Refusal{
         .says = "children_count_read_as_a_usize.RabCard reads `.line_count`, a count, as usize.",
     },
     .{
+        .name = "children_where_through_a_reference",
+        .says = "children_where_through_a_reference.EpicCard's `.items` `.where` reaches through `state_id` into children_where_through_a_reference.State.",
+    },
+    .{
         .name = "children_entry_with_a_limit",
         .says = "children_entry_with_a_limit.RabCard's nilo_children gives `.lines` a `.limit`, which it does not take.",
     },

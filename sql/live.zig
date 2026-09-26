@@ -4851,6 +4851,16 @@ const ShapeByCustomer = struct {
     weighed: f64,
 };
 
+const ShapeLineTally = struct {
+    pub const nilo_table = ShapeLine;
+    pub const nilo_aggregate = .{
+        .acme = .{ .count = .id, .where = .{ .order_id = .{ .customer_id = .{ .name = "Acme" } } } },
+        .referred = .{ .count = .id, .where = .{ .order_id = .{ .referrer_id = .{ .name = "Borealis" } } } },
+    };
+    acme: i64,
+    referred: i64,
+};
+
 const ShapeCounted = struct {
     pub const nilo_table = ShapeOrder;
     pub const nilo_via = .{ .customer = .customer_id };
@@ -4971,6 +4981,12 @@ test "a parent, its children and a sum come back from a real Postgres" {
     try testing.expectEqualStrings("a", counted[0].lines[1].sku);
     try testing.expectEqual(@as(i64, 1), counted[1].line_count);
     try testing.expectEqual(@as(usize, 0), counted[1].lines.len);
+
+    // An aggregate's `.where` through two references, one of them nullable.
+    const tally = try stack.db.exactlyOne(ShapeLineTally, &run, .{});
+    // Order 1 is Acme's and holds two lines; order 2, Acme's too, holds none.
+    try testing.expectEqual(@as(i64, 2), tally.acme);
+    try testing.expectEqual(@as(i64, 2), tally.referred);
 
     // The plan of a shaped read, run with its values bound: what a slow page
     // is asked first.

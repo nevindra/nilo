@@ -372,10 +372,41 @@ pub fn aggregateCall(
     return comptime blk: {
         const call = aggregate.kind.call(if (aggregate.column) |c| relation ++ "." ++ D.quote(c) else null);
         if (!aggregate.filtered) break :blk call;
+        break :blk call ++ " FILTER (WHERE " ++ aggregateFilter(D, Shape, relation, aggregate).sql ++ ")";
+    };
+}
+
+/// An aggregate's `.where`, and the tables it reaches through a reference
+/// (`table.literalReaching`), which the statement joins once each.
+fn aggregateFilter(
+    comptime D: type,
+    comptime Shape: type,
+    comptime relation: []const u8,
+    comptime aggregate: row_mod.Aggregate,
+) table_mod.Reached {
+    return comptime blk: {
         const where = @field(@field(Shape, row_mod.aggregate_marker), aggregate.field).where;
         const what = @typeName(Shape) ++ "'s `." ++ aggregate.field ++ "` `.where`";
-        break :blk call ++ " FILTER (WHERE " ++
-            table_mod.literalCondition(D, row_mod.ownerOf(Shape), relation ++ ".", what, where) ++ ")";
+        break :blk table_mod.literalReaching(D, row_mod.ownerOf(Shape), relation, what, where);
+    };
+}
+
+/// Every table the aggregates' `.where`s reach, once each and in the order
+/// they were first reached: the joins a grouped statement adds so the
+/// `FILTER`s can read them (ADR 218).
+pub fn aggregateHops(comptime D: type, comptime Shape: type, comptime relation: []const u8) []const table_mod.Hop {
+    return comptime blk: {
+        var out: []const table_mod.Hop = &.{};
+        for (row_mod.aggregatesOf(Shape)) |aggregate| {
+            if (!aggregate.filtered) continue;
+            for (aggregateFilter(D, Shape, relation, aggregate).hops) |hop| {
+                const seen = for (out) |h| {
+                    if (std.mem.eql(u8, h.alias, hop.alias)) break true;
+                } else false;
+                if (!seen) out = out ++ &[_]table_mod.Hop{hop};
+            }
+        }
+        break :blk out;
     };
 }
 

@@ -129,6 +129,14 @@ fn layoutOf(comptime D: type, comptime Row: type) Layout {
         var joins: []const Join = &.{};
         var outputs: []const Output = &.{};
         visit(D, Row, Row, relation, &.{}, relation, false, &joins, &outputs);
+        // The tables an aggregate's `.where` reaches through a reference,
+        // after the parents: a hop's `ON` names the relation or another
+        // hop, never a parent's alias.
+        if (row_mod.isGrouped(Row)) {
+            for (where_mod.aggregateHops(D, Row, relation)) |hop| {
+                joins = joins ++ &[_]Join{.{ .alias = hop.alias, .text = hop.text }};
+            }
+        }
         return .{ .relation = relation, .joins = joins, .outputs = outputs };
     }
 }
@@ -1423,6 +1431,35 @@ test "an aggregate with a .where reads only the rows it matches, the values writ
         lite.sql,
         "sum(\"orders\".\"total\") FILTER (WHERE \"orders\".\"status\" = 'paid' AND \"orders\".\"discount\" IS NULL) AS \"paid\"",
     ) != null);
+}
+
+const LineTally = struct {
+    pub const nilo_table = Line;
+    pub const nilo_aggregate = .{
+        .west = .{ .sum = .qty, .where = .{ .order_id = .{ .customer_id = .{ .region = "west" } } } },
+        .approved = .{ .count = .id, .where = .{ .order_id = .{ .approver_id = .{ .ne = null }, .status = "paid" } } },
+        .unapproved = .{ .count = .id, .where = .{ .order_id = .{ .approver_id = .{ .full_name = "Budi" } } } },
+    };
+    west: ?i64,
+    approved: i64,
+    unapproved: i64,
+};
+
+test "an aggregate's .where reaches through a reference, and the table is joined once" {
+    // The port's case: a count by the category of a work item's state, which
+    // no field of the Row holds.
+    const found = comptime exactlyOne(Pg, LineTally, @TypeOf(.{}));
+    try testing.expectEqualStrings(
+        "SELECT sum(\"lines\".\"qty\") FILTER (WHERE \"#f.order_id.customer_id\".\"region\" = 'west')::int8 AS \"west\", " ++
+            "count(\"lines\".\"id\") FILTER (WHERE \"#f.order_id\".\"approver_id\" IS NOT NULL AND \"#f.order_id\".\"status\" = 'paid') AS \"approved\", " ++
+            "count(\"lines\".\"id\") FILTER (WHERE \"#f.order_id.approver_id\".\"full_name\" = 'Budi') AS \"unapproved\" " ++
+            "FROM \"lines\" JOIN \"orders\" AS \"#f.order_id\" ON \"#f.order_id\".\"id\" = \"lines\".\"order_id\" " ++
+            "JOIN \"customers\" AS \"#f.order_id.customer_id\" ON \"#f.order_id.customer_id\".\"id\" = \"#f.order_id\".\"customer_id\" " ++
+            // `approver_id` may be null, so its table is an outer join and
+            // an order with no approver still counts for the other two.
+            "LEFT JOIN \"staff\" AS \"#f.order_id.approver_id\" ON \"#f.order_id.approver_id\".\"id\" = \"#f.order_id\".\"approver_id\"",
+        found.sql,
+    );
 }
 
 test "SQLite reads the same aggregate with no cast, because it answers in the field's type" {

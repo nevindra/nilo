@@ -184,6 +184,10 @@ fn busiest(db: *sql.Db, c: *nilo.Ctx) ![]InvoiceSummary {
         .limit = 20,
     });
 }
+
+comptime {
+    _ = sql.childrenFor(InvoiceSummary, "lines");
+}
 ```
 
 **A list takes `.order` and `.where`.** The order is columns of the child's table, and the child's key still comes last, so two lines with the same `qty` come back the same way every time. A key minted as a v7 id matches the order rows were made in, which is the order a user dragging lines around has just changed, so a list with a `position` column wants `.order = .{ .position = .asc }`.
@@ -268,6 +272,10 @@ const RevenueByCustomer = struct {
     this_year: ?i64,
     large: i64,
 };
+
+comptime {
+    _ = sql.selectFor(RevenueByCustomer, @TypeOf(.{}));
+}
 ```
 
 ```sql
@@ -275,7 +283,32 @@ sum("invoices"."total") FILTER (WHERE "invoices"."year" = 2026)::int8 AS "this_y
 count("invoices"."id") FILTER (WHERE "invoices"."total" >= 1000000) AS "large"
 ```
 
-The values go into the statement as written, with the same words a children entry's `.where` takes, over the table's columns. **A filtered `sum`, `min`, `max` or `avg` is `?` whatever its column**, because a customer with no invoice this year has nothing to sum. A filtered count is zero there. To count the rows that match, name a column that is never null, the key usually: `.{ .count = .id, .where = … }`.
+The values go into the statement as written, with the same words a children entry's `.where` takes, over the table's columns. **A column with a `.references` is also a way into the row it points at**, which is how a count by a state's category reads when the state is another table:
+
+<!-- compiles -->
+```zig
+const RevenueByRegion = struct {
+    pub const nilo_table = Invoice;
+    pub const nilo_aggregate = .{
+        .west = .{ .sum = .total, .where = .{ .customer_id = .{ .region = "west" } } },
+        .unapproved = .{ .count = .id, .where = .{ .approver_id = null } },
+    };
+    year: i32,
+    west: ?i64,
+    unapproved: i64,
+};
+
+comptime {
+    _ = sql.selectFor(RevenueByRegion, @TypeOf(.{}));
+}
+```
+
+```sql
+sum("invoices"."total") FILTER (WHERE "#f.customer_id"."region" = 'west')::int8 AS "west"
+… JOIN "customers" AS "#f.customer_id" ON "#f.customer_id"."id" = "invoices"."customer_id"
+```
+
+The table reached is joined once, however many aggregates read it, and a reference that may be null is a `LEFT JOIN`, so a row with none still counts for the rest. References chain: `.org_unit_id = .{ .customer_id = .{ .kind = .government } }` is two joins. **A filtered `sum`, `min`, `max` or `avg` is `?` whatever its column**, because a customer with no invoice this year has nothing to sum. A filtered count is zero there. To count the rows that match, name a column that is never null, the key usually: `.{ .count = .id, .where = … }`.
 
 ## A total
 
@@ -299,4 +332,4 @@ fn totals(db: *sql.Db, c: *nilo.Ctx, year: i32) !Totals {
 
 ## What is still `raw`
 
-A shaped Row is an answer, so it is read and never written: an insert, an update or a `.lock` through one is refused, and so is `db.raw` into one. `DISTINCT`, window functions, CTEs, a join through a condition rather than a reference, an aggregate over an expression, and a filter on an aggregate that names a parent's column are still [past one table](./raw.md).
+A shaped Row is an answer, so it is read and never written: an insert, an update or a `.lock` through one is refused, and so is `db.raw` into one. `DISTINCT`, window functions, CTEs, a join through a condition rather than a reference, and an aggregate over an expression are still [past one table](./raw.md).

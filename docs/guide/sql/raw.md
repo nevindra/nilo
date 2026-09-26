@@ -144,7 +144,7 @@ entry's [`.where`](./shapes.md#an-aggregate-over-some-of-the-rows), a count
 of the rows pointing back is a [count field](./shapes.md#an-order-a-condition-and-a-count),
 and a total over everything is `db.exactlyOne`. What is left for `raw` is a
 report those cannot say: a `coalesce`, an expression inside the aggregate, a
-filter naming a parent's column, a join no reference names. Three shapes
+join no reference names. Three shapes
 come up, and each has a call:
 
 **A statement that always has one row.** `SELECT count(*), sum(total) FROM

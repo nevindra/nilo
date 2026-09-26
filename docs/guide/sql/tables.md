@@ -192,6 +192,59 @@ The column is checked against the table at startup like any other, and the
 type works everywhere a column type works: conditions, `.set`, `insert`, a
 batch.
 
+### A `numeric` that is not money
+
+A quantity, a weight, a percentage: a `numeric(14,3)` column whose value is
+multiplied by a price rather than added to a ledger. `sql.Decimal` holds its
+digits and does no arithmetic, and a plain `f64` field on a `numeric`
+column is refused by the schema check at startup, because an `f64` reads a
+`float8` and the column type was chosen so that nothing rounds.
+**The way to say "round it, I know" is a column type that does**, written once
+and named for what it holds:
+
+<!-- compiles -->
+```zig
+/// A quantity: a `numeric(14,3)` read as the `f64` the arithmetic wants. Past
+/// fifteen significant digits an `f64` rounds, which a quantity never reaches
+/// and a total of money does.
+const Quantity = struct {
+    value: f64,
+
+    pub const nilo_column = "numeric(14,3)";
+    pub const nilo_openapi = .{ .type = "number" };
+
+    pub fn nilo_read(text: []const u8, arena: std.mem.Allocator) !Quantity {
+        _ = arena;
+        return .{ .value = try std.fmt.parseFloat(f64, text) };
+    }
+
+    pub fn nilo_write(self: Quantity, arena: std.mem.Allocator) ![]const u8 {
+        return std.fmt.allocPrint(arena, "{d}", .{self.value});
+    }
+
+    pub fn jsonStringify(self: Quantity, jw: anytype) !void {
+        try jw.write(self.value);
+    }
+};
+
+const RabLine = struct {
+    pub const nilo_table = .{ .name = "rab_lines", .key = .id };
+
+    id: i64,
+    quantity: Quantity,        // numeric(14,3)
+    unit_amount_minor: i64,
+};
+
+comptime {
+    _ = sql.selectFor(RabLine, @TypeOf(.{}));
+}
+```
+
+The rounding is then a decision the type's name carries, in one file, rather
+than a field type somebody changes from `sql.Decimal` to `f64` on one Row
+and not the next. It goes out in JSON as a number, `"quantity": 1.5`, because
+that is what `jsonStringify` writes and what `nilo_openapi` says.
+
 Two mistakes stop at compile time — one of `nilo_read`/`nilo_write` without
 the other, and both without a `nilo_column`. One thing is still closed: an
 **array** of one is not read, the same boundary `[]const sql.Decimal` has

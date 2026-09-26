@@ -11,9 +11,11 @@ one view, one hypertable and 113 rows of reference data. A Zig port
 (`backend-zig/`) has been serving the same API on nilo for some time, with every
 context Row declared `.managed = false` (ADR 130) and checked at boot.
 
-Two rounds so far. The first, against **v0.4.0** at `eb545fa`, filed ten
+Three rounds so far. The first, against **v0.4.0** at `eb545fa`, filed ten
 findings; nilo answered nine of them in ADRs 180, 181 and 123. The second re-did
-the whole port on `636d7b6` and found three more. This file is what is still
+the whole port on `636d7b6` and found three more. The third read every raw
+statement of the port against the query surface of v0.6.0 at `de37265` and
+filed items 81–94, which have [a section of their own](#the-query-surface-items-8194). This file is what is still
 open, with the settled items kept to a paragraph each at the end so a number
 cited from an ADR or a commit still resolves. The files are under
 `nodeflux-os/backend-zig/src/schema/` and `nodeflux-os/backend-zig/migrations/`,
@@ -65,6 +67,32 @@ same reason — nilo has to write something in the middle:
   hash is chained onto the one before it. One case writes nothing and says so:
   `--baseline` rewriting a version 1 whose `before` or `after` hold hand-written
   steps, since those are Zig nothing has compiled yet.
+
+---
+
+## The query surface, items 81–94
+
+Filed in `nodeflux-os/docs/nilo-feedback.md` from reading all 171 raw call
+sites of the port against ADR 218, `rawPage` and `rawExactlyOne`. The numbers
+are that file's, so an item cited from either side resolves. Answered on the
+branch `sql-improvements`.
+
+| # | Finding | Status |
+|---|---|---|
+| 81 | `sql.given` on `.in`: an absent list filter is not an empty one | Done, [ADR 149](./adr/149-a-filter-that-is-absent-is-not-a-filter-that-is-null.md). Null drops the term, a present empty list is still the list. |
+| 82 | `rawPage` takes no `{order}` hole | Done, [ADR 205](./adr/205-a-raw-statement-can-carry-its-total.md), as `db.rawPageOrdered`. |
+| 83 | A parent cannot be spelled flat on the wire | **Open.** Not taken up; it moves the JSON shape, not the query. |
+| 84 | `.ieq` is named in a refusal and is not an operator | Done, [ADR 181](./adr/181-the-marker-has-two-kinds-of-word.md) and [ADR 052](./adr/052-a-set-operation-over-one-table-is-a-condition.md): `.ieq` and `.not_ieq`, the expression an `.ignoring_case` unique indexes. |
+| 85 | An aggregate cannot carry a filter | Done, [ADR 218](./adr/218-a-row-may-carry-its-parent-its-children-or-a-sum.md): a `.where` on the entry is `FILTER (WHERE …)`, and follows a `.references` into the row it points at, joined once. |
+| 86 | A narrower Row cannot be ordered by a column it does not carry | Done, [ADR 218](./adr/218-a-row-may-carry-its-parent-its-children-or-a-sum.md). Refused on a grouped Row, by name. |
+| 87 | Children: an order, a condition, and a count | Done, [ADR 218](./adr/218-a-row-may-carry-its-parent-its-children-or-a-sum.md), as `nilo_children`: `.order` and `.where` on a list, and `.{ .count = C }` read by a correlated subquery. |
+| 88 | A `numeric` that is not money, read as `f64` | Answered in the documentation, the answer the item said was enough: a `Quantity` column type in [the tables guide](./guide/sql/tables.md#a-numeric-that-is-not-money), and a line in [decided](./decided.md). |
+| 89 | An aggregate over a product of two columns | Not an ask. Stays `db.raw`, written down in ADR 218's *What is still refused*. |
+| 90 | No `INNER JOIN` over a nullable reference | Not an ask. `?P` with `.{ .ne = null }` in the condition stands. |
+| 91 | The date, not only the instant, and a column on the right of a condition | `.today` done, [ADR 181](./adr/181-the-marker-has-two-kinds-of-word.md), in `.set` and in a condition. A column on the right, the larger ask, is not taken up. |
+| 92 | Docs: `.exists` through a column no reference covers | Done: the reference and the guide say `.via` names such a column. |
+| 93 | A slow query, from the route down to the plan | Done: `sql.Sent.route` ([ADR 108](./adr/108-a-statement-can-be-watched.md)) and `db.explain` ([ADR 232](./adr/232-a-read-can-show-its-plan.md)); a raw statement already had a plan name, and only the doc said otherwise. Open: a stable name for a statement whose `ORDER BY` a `sql.Ordering` chose, and counts per statement on the metrics page. |
+| 94 | Where the bugs are now: the statements nilo tells us to write raw | **Open.** A question rather than an ask; not taken up. |
 
 ---
 

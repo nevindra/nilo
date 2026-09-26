@@ -7984,6 +7984,40 @@ const ShopOrderCounted = struct {
     lines: []const ShopLineBrief,
 };
 
+const ShopLineTally = struct {
+    pub const nilo_table = ShopLine;
+    pub const nilo_aggregate = .{
+        .west_qty = .{ .sum = .qty, .where = .{ .order_id = .{ .customer_id = .{ .region = "west" } } } },
+        .unapproved = .{ .count = .id, .where = .{ .order_id = .{ .approver_id = null } } },
+        .by_budi = .{ .count = .id, .where = .{ .order_id = .{ .approver_id = .{ .full_name = "Budi" } } } },
+    };
+    west_qty: ?i64,
+    unapproved: i64,
+    by_budi: i64,
+};
+
+test "on SQLite, an aggregate's .where reaches through two references and one that may be null" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    var db = try shopDb(&threaded, "shape-reach", &run);
+    defer db.deinit();
+
+    const all = try db.exactlyOne(ShopLineTally, &run, .{});
+    // Acme is west, and orders 10 and 11 are Acme's: lines of 1, 2 and 5.
+    try testing.expectEqual(@as(?i64, 8), all.west_qty);
+    // Order 12 has no approver: its one line.
+    try testing.expectEqual(@as(i64, 1), all.unapproved);
+    // Budi approved orders 10 and 13, and only 10 has lines: two.
+    try testing.expectEqual(@as(i64, 2), all.by_budi);
+
+    // The statement's own condition still narrows the rows every aggregate reads.
+    const some = try db.exactlyOne(ShopLineTally, &run, .{ .where = .{ .sku = "b" } });
+    try testing.expectEqual(@as(?i64, 5), some.west_qty);
+    try testing.expectEqual(@as(i64, 0), some.by_budi);
+}
+
 test "on SQLite, children come back in the order asked, narrowed, and counted without being read" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();

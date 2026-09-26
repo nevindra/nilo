@@ -868,7 +868,7 @@ const ByCustomer = struct {
 
 Optional exactly when the answer can be null: a nullable column, `sum`, `min`, `max` and `avg` with a `.where`, or `sum`, `min`, `max` and `avg` on a Row with no keys.
 
-**An entry's `.where` narrows only what that aggregate reads**, as `FILTER (WHERE …)` on both databases: `.idr = .{ .sum = .amount, .where = .{ .currency = "IDR" } }`. Rows that match are counted through a column that is never null, `.{ .count = .id, .where = … }`.
+**An entry's `.where` narrows only what that aggregate reads**, as `FILTER (WHERE …)` on both databases: `.idr = .{ .sum = .amount, .where = .{ .currency = "IDR" } }`. Rows that match are counted through a column that is never null, `.{ .count = .id, .where = … }`. A column with a one-column `.references` is also a way into the row it points at, `.where = .{ .state_id = .{ .category = .done } }`, and that table is joined once under `"#f.state_id"` (`LEFT JOIN` when the reference may be null).
 
 **`nilo_children`**, keyed by field:
 
@@ -880,7 +880,7 @@ Optional exactly when the answer can be null: a nullable column, `sum`, `min`, `
 
 A count may be ordered by and named in `.where` like a column, sits on a parent's Row too, and follows `nilo_via` keyed by its own field. A grouped Row refuses one.
 
-**The `.where` of an aggregate or of a `nilo_children` entry is written with its values in it**, because it is part of the Row rather than of a request: a value is `=`, `null` is `IS NULL`, and an operator struct takes `.eq`, `.ne`, `.gt`, `.gte`, `.lt`, `.lte`, `.in` and `.not_in`, over columns of the table the entry reads. Anything else is refused and names the words.
+**The `.where` of an aggregate or of a `nilo_children` entry is written with its values in it**, because it is part of the Row rather than of a request: a value is `=`, `null` is `IS NULL`, and an operator struct takes `.eq`, `.ne`, `.gt`, `.gte`, `.lt`, `.lte`, `.in` and `.not_in`, over columns of the table the entry reads, and for an aggregate through a reference as above. Anything else is refused and names the words.
 
 | Call | a parent | children | a count of children | a group | no keys |
 |---|---|---|---|---|---|
