@@ -46,18 +46,22 @@
 //! | `live.zig` | the half that needs a real one |
 //!
 //! | `listing.zig` | the query a `list` sends and the five names it reads back |
+//! | `multipart.zig` | the queries, the UploadId and the completion document of `putMultipart` |
 //!
 //! ## What it will not do
 //!
-//! `COPY` and multipart upload, for one reason rather than two: **they are
-//! where S3 stops being bytes at a key and starts being a document format.**
-//! `LIST` was the third of these for a cycle, and what let it in is the
+//! `COPY`, because **it is where S3 stops being bytes at a key and starts
+//! being a document format**, and it carries a trap of its own: a copy can
+//! answer 200 with an error in the body. `LIST` and multipart upload were
+//! refused on the same ground for a cycle each, and what let each in is the
 //! observation `code.zig` had already made about error bodies: a fixed, flat
-//! document with five interesting names in it is a scan rather than a parser
-//! (ADR 058). It is bounded — one page, a cursor handed back, and no helper
-//! that follows it — because the call with unbounded output is the one that
-//! invites reading a bucket as a database. The other two are on the roadmap
-//! with the reason attached.
+//! document with a handful of interesting names in it is a scan rather than
+//! a parser (ADR 058). `list` is bounded — one page, a cursor handed back,
+//! and no helper that follows it — because the call with unbounded output is
+//! the one that invites reading a bucket as a database. `putMultipart` owns
+//! the whole protocol in one call, reads the completion's body because a 200
+//! there is the same trap `COPY` carries, and aborts on the way out of a
+//! failure. `COPY` stays on the roadmap with the reason attached.
 //!
 //! Arbitrary `x-amz-meta-*` is refused too, on a performance argument that can
 //! therefore be revisited with a measurement: the header set being fixed is
@@ -125,6 +129,7 @@ test {
     _ = store;
     _ = bucket;
     _ = @import("listing.zig");
+    _ = @import("multipart.zig");
     // A fake S3 on a loopback socket, which needs no container and runs in
     // `zig build test-s3` every time.
     _ = @import("canned.zig");

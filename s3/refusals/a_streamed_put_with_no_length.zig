@@ -1,7 +1,7 @@
 //! S3 answers 411 to a body whose length it was not told, and a reader has no
 //! length to ask for. Saying so here makes *I do not know the size* a compile
-//! error rather than a production surprise; upload of unknown size needs
-//! multipart, which is on the roadmap with its reason attached.
+//! error rather than a production surprise; an upload whose size is unknown
+//! is `putMultipart`'s.
 
 const std = @import("std");
 const s3 = @import("nilo_s3");

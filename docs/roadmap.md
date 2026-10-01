@@ -369,10 +369,6 @@ The design is known and priced; what is missing is somebody who needs it. Bring 
 
 **Needs:** a caller who wants it enough to hold the XML.
 
-**Multipart upload, and therefore upload of unknown size.** `putStream` frames by length because S3 does not accept chunked, so a body whose length is not known before it starts has no way in. Multipart is a protocol rather than a call: initiate, N parts each with its own ETag, then a completion document listing them. XML again.
-
-**Needs:** a caller.
-
 ### `nilo_http`
 
 **A TLS listener that reloads its certificate without a restart.** `listen(.{ .tls = … })` reads the two files once ([ADR 212](./adr/212-tls-is-an-option-a-build-asks-for.md)), and a certificate that renews every sixty days is a restart every sixty days. The shape that costs nothing per connection is a second `CertKeyPair` swapped in under the acceptors on a signal or a file's mtime, with the old one freed once the last handshake that took it is over, which is a count the Engine does not keep yet.

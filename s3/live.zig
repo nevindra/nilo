@@ -32,6 +32,7 @@ const core = @import("nilo_core");
 const s3_config = @import("s3_config");
 
 const bucket_mod = @import("bucket.zig");
+const multipart_mod = @import("multipart.zig");
 const store_mod = @import("store.zig");
 
 const Store = store_mod.Store;
@@ -448,6 +449,85 @@ test "a bucket that is not there is a NotFound rather than a crash" {
             defer scope.deinit();
 
             try testing.expectError(error.NotFound, missing.get(&scope, "anything"));
+        }
+    }.run);
+}
+
+/// The multipart tests' own type: reading a two-part object back whole needs
+/// a ceiling above `Live`'s 4 MiB, which is itself under test above.
+const LiveBig = bucket_mod.Bucket(s3_config.bucket, .{ .style = .path, .max_bytes = 16 << 20 });
+
+test "a multipart put of two parts is one object, byte for byte" {
+    try withStore(struct {
+        fn run(store: *Store) !void {
+            var live = try LiveBig.open(store);
+            defer live.deinit();
+
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            // One full part and a tail: the smallest honest multipart, and
+            // the pattern makes a part served out of order readable in a diff.
+            const len = multipart_mod.part_min + 123_457;
+            const body = try testing.allocator.alloc(u8, len);
+            defer testing.allocator.free(body);
+            for (body, 0..) |*b, i| b.* = @truncate(i *% 31 +% (i >> 8));
+
+            var reader = std.Io.Reader.fixed(body);
+            const key = home ++ "multipart.bin";
+            try live.putMultipart(&scope, key, .{
+                .reader = &reader,
+                .content_type = "application/octet-stream",
+                .part_bytes = multipart_mod.part_min,
+            });
+            defer live.delete(&scope, key) catch {};
+
+            const got = try live.get(&scope, key);
+            try testing.expectEqual(@as(u64, len), got.len);
+            try testing.expect(std.mem.eql(u8, body, got.bytes.view()));
+        }
+    }.run);
+}
+
+test "a multipart put smaller than one part is one part, and still one object" {
+    try withStore(struct {
+        fn run(store: *Store) !void {
+            var live = try LiveBig.open(store);
+            defer live.deinit();
+
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            const body = "small enough for a single final part";
+            var reader = std.Io.Reader.fixed(body);
+            const key = home ++ "multipart-small.bin";
+            try live.putMultipart(&scope, key, .{
+                .reader = &reader,
+                .content_type = "application/octet-stream",
+            });
+            defer live.delete(&scope, key) catch {};
+
+            const got = try live.get(&scope, key);
+            try testing.expectEqualStrings(body, got.bytes.view());
+        }
+    }.run);
+}
+
+test "a part size under S3's floor is refused before any byte moves" {
+    try withStore(struct {
+        fn run(store: *Store) !void {
+            var live = try LiveBig.open(store);
+            defer live.deinit();
+
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            var reader = std.Io.Reader.fixed("whatever");
+            try testing.expectError(error.Rejected, live.putMultipart(&scope, home ++ "never.bin", .{
+                .reader = &reader,
+                .content_type = "application/octet-stream",
+                .part_bytes = 1024,
+            }));
         }
     }.run);
 }
