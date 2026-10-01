@@ -424,7 +424,24 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
         pub fn put(self: *Self, c: anytype, key: []const u8, value: anytype) Error!void {
             comptime core.checkScope(@TypeOf(c), "bucket.put");
             comptime checkPayload(@TypeOf(value), "bucket.put");
+            // Null means the Store's own deadline, today's behaviour: a put
+            // is a short call unless `putMultipart`'s small-source branch
+            // says otherwise.
+            return self.putBounded(c, key, value, null, null);
+        }
 
+        /// `put`'s body, with the deadline the caller's to choose: the
+        /// small-source branch of `putMultipart` sends up to a whole part
+        /// this way, which is a transfer rather than a short call, so it
+        /// passes the source's terms where `put` passes the Store's.
+        fn putBounded(
+            self: *Self,
+            c: anytype,
+            key: []const u8,
+            value: anytype,
+            timeout_ms: ?u32,
+            stall_ms: ?u32,
+        ) Error!void {
             const bytes = viewOf(value.bytes);
 
             var url_buf: [url_max]u8 = undefined;
@@ -456,6 +473,8 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
                 .headers = headers.slice(),
                 .body = .{ .slice = bytes },
                 .redirects = .expose,
+                .timeout_ms = timeout_ms,
+                .stall_ms = stall_ms,
             }) catch |err| return blame(err);
 
             if (!got.ok()) return self.failure(c, &ex, got);
@@ -572,21 +591,24 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
             const buffer = try c.arena().alloc(u8, part_bytes);
             var n = source.reader.readSliceShort(buffer) catch
                 return readerFailed();
+            const timeout_ms = optionalMs(source, "timeout_ms") orelse 0;
+
+            // The stream share bounds long uploads exactly as it bounds
+            // `putStream`, taken once for the whole protocol — the
+            // small-source PUT included, because up to a whole part on a
+            // slow link is the long-transfer shape `max_streams` exists to
+            // bound, and the caller chose the transfer call (ADR 060).
+            try self.store.takeStream();
+            defer self.store.giveStream();
+
             if (n < buffer.len) {
-                return self.put(c, key, .{
+                return self.putBounded(c, key, .{
                     .bytes = buffer[0..n],
                     .content_type = source.content_type,
                     .cache_control = optional(source, "cache_control"),
                     .content_disposition = optional(source, "content_disposition"),
-                });
+                }, timeout_ms, self.store.options.stall_ms);
             }
-
-            const timeout_ms = optionalMs(source, "timeout_ms") orelse 0;
-
-            // The stream share bounds long uploads exactly as it bounds
-            // `putStream`, taken once for the whole protocol (ADR 060).
-            try self.store.takeStream();
-            defer self.store.giveStream();
 
             const upload_id = try self.initiateMultipart(
                 c,

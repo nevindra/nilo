@@ -179,6 +179,9 @@ const Canned = struct {
     /// again, so a closed connection moves to the next accept rather than
     /// ending the script.
     fn serveScript(self: *Canned, answers: []const Answer) !void {
+        // Refused with a name, not an index panic at `played`, for the
+        // first script longer than the log.
+        if (answers.len > self.played.len) return error.ScriptLongerThanPlayedLog;
         var i: usize = 0;
         while (i < answers.len) {
             var stream = try self.server.accept(self.io);
