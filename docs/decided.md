@@ -8,6 +8,12 @@ An entry leaves this file only by being reopened, and every entry says what woul
 
 A gap that is the rule. Each was looked at, priced, and kept as it is, and the entry says what it would take to look again.
 
+### `nilo_s3`
+
+**`putMultipart` has no `bench/release/` program.** CLAUDE.md puts a module's new everyday operation there, and multipart is not one: it is minutes of network bounded by the uplink, so instructions and allocations per operation — what `bench/release.py` counts — measure the part loop's bookkeeping against a cost five orders of magnitude larger. The per-call allocations are stated in ADR 058 instead, where they are a claim about the arena rather than a number about speed.
+
+**Reopened by:** a caller whose parts are small and local enough that the bookkeeping shows up, or `bench/release.py` growing a way to measure per-byte overhead rather than per-operation cost.
+
 ### `nilo_core`
 
 **The layering step cannot tell a test import from a real one.** `zig build layering` refuses an import that is not in that module's row of the `layers` table, and `sql/db.zig` legitimately names `nilo_http` from a `test` block. Telling the two apart needs a parser rather than a scan, so the table has an `in_tests` list the step allows and does not verify. A rule with a listed exception still beats a rule in a document. This is the part of it that is weaker than the rest.

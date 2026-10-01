@@ -25,10 +25,12 @@ pub const parts_max: usize = 10_000;
 /// which carries objects to 80 GB before `parts_max` is near.
 pub const default_part_bytes: usize = 8 << 20;
 
-/// The longest `UploadId` accepted. AWS and the S3 implementations this
-/// module is tested against hand out far less; one larger cannot fit the
-/// URL buffer the part calls are sized by, so it is refused with its length
-/// named, the same way `list` refuses an oversized cursor.
+/// The longest `UploadId` the part calls can carry. AWS and the S3
+/// implementations this module is tested against hand out far less; one
+/// larger cannot fit the URL buffer the part calls are sized by, so the
+/// bucket refuses it with its length named — after aborting the upload the
+/// initiate already opened, which is why `uploadIdOf` hands an oversized id
+/// back rather than swallowing it.
 pub const upload_id_max: usize = 1024;
 
 /// The longest canonical query a part or completion call can write: the two
@@ -59,15 +61,16 @@ pub fn finishQuery(out: []u8, upload_id: []const u8) []const u8 {
 }
 
 /// The `<UploadId>` out of an `InitiateMultipartUploadResult`, as a slice
-/// into the body. Null when the tag is missing, empty, or past
-/// `upload_id_max` — an id that cannot be used is an answer that cannot be
-/// taken, and the caller fails the call rather than carrying it around.
+/// into the body. Null when the tag is missing or empty. **Length is the
+/// caller's check**: an id past `upload_id_max` cannot be used, but the
+/// initiate it came from has already succeeded, so the bucket needs the id
+/// in hand to abort that upload before refusing it.
 pub fn uploadIdOf(xml: []const u8) ?[]const u8 {
     const open = "<UploadId>";
     const start = (std.mem.indexOf(u8, xml, open) orelse return null) + open.len;
     const end = std.mem.indexOfPos(u8, xml, start, "</UploadId>") orelse return null;
     const id = xml[start..end];
-    if (id.len == 0 or id.len > upload_id_max) return null;
+    if (id.len == 0) return null;
     return id;
 }
 
@@ -116,7 +119,7 @@ test "the part query is canonical and the id is encoded" {
     try testing.expectEqualStrings("uploadId=plain", finishQuery(&buf, "plain"));
 }
 
-test "the upload id is read out of the initiate answer, bounded" {
+test "the upload id is read out of the initiate answer" {
     const body =
         "<?xml version=\"1.0\"?><InitiateMultipartUploadResult>" ++
         "<Bucket>b</Bucket><Key>k</Key><UploadId>2~XyZ</UploadId>" ++
@@ -124,9 +127,11 @@ test "the upload id is read out of the initiate answer, bounded" {
     try testing.expectEqualStrings("2~XyZ", uploadIdOf(body).?);
     try testing.expect(uploadIdOf("<UploadId></UploadId>") == null);
     try testing.expect(uploadIdOf("<NoSuchTag/>") == null);
-    try testing.expect(uploadIdOf(
+    // Oversized comes back as it is: the bucket aborts the upload it names
+    // before refusing it, which it cannot do without the id.
+    try testing.expectEqual(upload_id_max + 1, uploadIdOf(
         "<UploadId>" ++ ("x" ** (upload_id_max + 1)) ++ "</UploadId>",
-    ) == null);
+    ).?.len);
 }
 
 test "the completion document carries every part in order, sized exactly" {

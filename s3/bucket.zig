@@ -522,13 +522,27 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
         /// `source` is anything with `.reader` and `.content_type` — no
         /// `.len`, which is what this call is for. The reader is read to its
         /// end in parts of `.part_bytes` (8 MiB unless the source says
-        /// otherwise; S3 refuses less than 5 MiB for any part but the last),
-        /// each part goes up as its own PUT, and a completion document seals
-        /// them into one object. **A 200 on the completion is not believed on
-        /// its own**: S3 can answer it with an error in the body, so the body
-        /// is read and has to say so too. Any failure after the initiate
-        /// aborts the upload on the way out, so a lost connection does not
-        /// leave paid-for parts parked in the bucket.
+        /// otherwise; under S3's 5 MiB part floor is refused before any byte
+        /// moves), each part goes up as its own PUT, and a completion
+        /// document seals them into one object. **A source that ends inside
+        /// the first part becomes a plain `put`**: one round trip instead of
+        /// three, and the ETag stays the content's own MD5 rather than a
+        /// multipart digest, which matters to a caller comparing by hash.
+        /// **A 200 on the completion is not believed on its own**: S3 can
+        /// answer it with an error in the body, so the body is read and has
+        /// to say so too. Any failure after the initiate aborts the upload
+        /// on the way out, so a lost connection does not leave paid-for
+        /// parts parked in the bucket. One bound only a server can hold: the
+        /// 10,000-part ceiling is S3's own, and for a reader of unknown
+        /// length it can only be met on the way, after those parts went up.
+        ///
+        /// Each part and the completion run under the source's optional
+        /// `.timeout_ms` (none unless it says one) and the Store's
+        /// `stall_ms` bound on silence, the same terms `putStream` gives its
+        /// one body — the Store's `timeout_ms` is for the short calls, and a
+        /// part is not one (ADR 060). `.cache_control` and
+        /// `.content_disposition` are read off the source if it has them,
+        /// as `put` reads them off its value.
         ///
         /// What it costs in the Scope: one buffer of `part_bytes`, one copy
         /// of each part's ETag, and the completion document. Parts go up one
@@ -552,22 +566,39 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
                 return error.Rejected;
             }
 
+            // The first part is read before anything is sent, because a
+            // source that ends inside it has a known length after all and
+            // deserves the plain PUT: one round trip, the content's own MD5.
+            const buffer = try c.arena().alloc(u8, part_bytes);
+            var n = source.reader.readSliceShort(buffer) catch
+                return readerFailed();
+            if (n < buffer.len) {
+                return self.put(c, key, .{
+                    .bytes = buffer[0..n],
+                    .content_type = source.content_type,
+                    .cache_control = optional(source, "cache_control"),
+                    .content_disposition = optional(source, "content_disposition"),
+                });
+            }
+
+            const timeout_ms = optionalMs(source, "timeout_ms") orelse 0;
+
             // The stream share bounds long uploads exactly as it bounds
             // `putStream`, taken once for the whole protocol (ADR 060).
             try self.store.takeStream();
             defer self.store.giveStream();
 
-            const upload_id = try self.initiateMultipart(c, key, contentTypeOf(source.content_type));
+            const upload_id = try self.initiateMultipart(
+                c,
+                key,
+                contentTypeOf(source.content_type),
+                optional(source, "cache_control"),
+                optional(source, "content_disposition"),
+            );
             errdefer self.abortMultipart(c, key, upload_id);
 
-            const buffer = try c.arena().alloc(u8, part_bytes);
             var etags: std.ArrayList([]const u8) = .empty;
             while (true) {
-                const n = source.reader.readSliceShort(buffer) catch {
-                    std.log.warn("nilo_s3: `{s}`.putMultipart: the source reader failed", .{name});
-                    return error.Failed;
-                };
-                if (n == 0 and etags.items.len > 0) break;
                 if (etags.items.len == multipart_mod.parts_max) {
                     std.log.warn(
                         "nilo_s3: `{s}`.putMultipart reached S3's {d}-part ceiling; raise `.part_bytes`",
@@ -575,29 +606,51 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
                     );
                     return error.Rejected;
                 }
-                const etag = try self.putPart(c, key, upload_id, etags.items.len + 1, buffer[0..n]);
+                const etag = try self.putPart(c, key, upload_id, etags.items.len + 1, buffer[0..n], timeout_ms);
                 etags.append(c.arena(), etag) catch return error.OutOfMemory;
                 if (n < buffer.len) break;
+                n = source.reader.readSliceShort(buffer) catch
+                    return readerFailed();
+                if (n == 0) break;
             }
 
-            try self.completeMultipart(c, key, upload_id, etags.items);
+            try self.completeMultipart(c, key, upload_id, etags.items, timeout_ms);
+        }
+
+        fn readerFailed() Error {
+            std.log.warn("nilo_s3: `{s}`.putMultipart: the source reader failed", .{name});
+            return error.Failed;
         }
 
         /// The initiate POST. Hands back the `UploadId`, a slice into the
-        /// answer's body in the Scope.
-        fn initiateMultipart(self: *Self, c: anytype, key: []const u8, content_type: ?[]const u8) Error![]const u8 {
+        /// answer's body in the Scope. An id too long for the part calls'
+        /// URL buffer is refused — after aborting the upload the initiate
+        /// just opened, because by then the id is the one thing in hand.
+        fn initiateMultipart(
+            self: *Self,
+            c: anytype,
+            key: []const u8,
+            content_type: ?[]const u8,
+            cache_control: ?[]const u8,
+            content_disposition: ?[]const u8,
+        ) Error![]const u8 {
             var url_buf: [part_url_max]u8 = undefined;
             var token_buf: [settings.session_token_max]u8 = undefined;
             var sig: sign.Signature = .none;
             var headers: Headers = .{};
 
-            const target = try self.urlForQuery(&url_buf, key, multipart_mod.initiate_query);
+            const at = try self.urlToQuery(&url_buf, key);
+            const query = multipart_mod.initiate_query;
+            @memcpy(url_buf[at..][0..query.len], query);
+            const target = url_buf[0 .. at + query.len];
             try self.prepare(&sig, &headers, .{
                 .method = "POST",
                 .key = key,
-                .query = multipart_mod.initiate_query,
+                .query = query,
                 .payload = self.store.payloadNoBody(),
                 .content_type = content_type,
+                .cache_control = cache_control,
+                .content_disposition = content_disposition,
                 .token_buf = &token_buf,
             });
 
@@ -617,14 +670,26 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
             if (!got.ok()) return self.failure(c, &ex, got);
 
             const body = ex.take(c, 8 << 10) catch |err| return blame(err);
-            return multipart_mod.uploadIdOf(body.view()) orelse {
+            const upload_id = multipart_mod.uploadIdOf(body.view()) orelse {
                 std.log.warn("nilo_s3: `{s}` answered the initiate with no usable UploadId", .{name});
                 return error.Failed;
             };
+            if (upload_id.len > multipart_mod.upload_id_max) {
+                self.abortMultipart(c, key, upload_id);
+                std.log.warn(
+                    "nilo_s3: `{s}` handed out an UploadId of {d} bytes, over the {d} a part call can carry; the upload was aborted",
+                    .{ name, upload_id.len, multipart_mod.upload_id_max },
+                );
+                return error.Failed;
+            }
+            return upload_id;
         }
 
         /// One part up, its ETag back, copied into the Scope: the head's
-        /// bytes are read over by the next call.
+        /// bytes are read over by the next call. The query is written into
+        /// the URL buffer once and sliced back out for `prepare`, so the
+        /// bytes signed are the bytes sent by construction, the shape
+        /// `urlForList` uses.
         fn putPart(
             self: *Self,
             c: anytype,
@@ -632,16 +697,17 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
             upload_id: []const u8,
             part_number: usize,
             bytes: []const u8,
+            timeout_ms: u32,
         ) Error![]const u8 {
             var url_buf: [part_url_max]u8 = undefined;
-            var query_buf: [multipart_mod.query_max]u8 = undefined;
             var token_buf: [settings.session_token_max]u8 = undefined;
             var hash_buf: [64]u8 = undefined;
             var sig: sign.Signature = .none;
             var headers: Headers = .{};
 
-            const query = multipart_mod.partQuery(&query_buf, part_number, upload_id);
-            const target = try self.urlForQuery(&url_buf, key, query);
+            const at = try self.urlToQuery(&url_buf, key);
+            const query = multipart_mod.partQuery(url_buf[at..], part_number, upload_id);
+            const target = url_buf[0 .. at + query.len];
             try self.prepare(&sig, &headers, .{
                 .method = "PUT",
                 .key = key,
@@ -661,10 +727,22 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
                 .headers = headers.slice(),
                 .body = .{ .slice = bytes },
                 .redirects = .expose,
+                // A part is minutes on a slow uplink, not a short call: no
+                // whole-call limit unless the source named one, and the
+                // stall bound on silence, the terms `putStream` set (ADR 060).
+                .timeout_ms = timeout_ms,
+                .stall_ms = self.store.options.stall_ms,
             }) catch |err| return blame(err);
 
             if (!got.ok()) return self.failure(c, &ex, got);
-            return keepIn(c, got.header("etag") orelse "");
+            const etag = got.header("etag") orelse "";
+            if (etag.len == 0) {
+                // Sent on anyway, the completion would be refused later with
+                // `InvalidPart`, an error about the wrong call.
+                std.log.warn("nilo_s3: `{s}` answered part {d} without an ETag", .{ name, part_number });
+                return error.Failed;
+            }
+            return keepIn(c, etag);
         }
 
         /// The completion POST, and the one place a 200 is not an answer:
@@ -675,6 +753,7 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
             key: []const u8,
             upload_id: []const u8,
             etags: []const []const u8,
+            timeout_ms: u32,
         ) Error!void {
             const completion = try c.arena().alloc(u8, multipart_mod.completionLen(etags));
             var doc = std.Io.Writer.fixed(completion);
@@ -682,14 +761,14 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
             const body_bytes = doc.buffered();
 
             var url_buf: [part_url_max]u8 = undefined;
-            var query_buf: [multipart_mod.query_max]u8 = undefined;
             var token_buf: [settings.session_token_max]u8 = undefined;
             var hash_buf: [64]u8 = undefined;
             var sig: sign.Signature = .none;
             var headers: Headers = .{};
 
-            const query = multipart_mod.finishQuery(&query_buf, upload_id);
-            const target = try self.urlForQuery(&url_buf, key, query);
+            const at = try self.urlToQuery(&url_buf, key);
+            const query = multipart_mod.finishQuery(url_buf[at..], upload_id);
+            const target = url_buf[0 .. at + query.len];
             try self.prepare(&sig, &headers, .{
                 .method = "POST",
                 .key = key,
@@ -709,6 +788,10 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
                 .headers = headers.slice(),
                 .body = .{ .slice = body_bytes },
                 .redirects = .expose,
+                // On AWS a large completion is assembled while this waits,
+                // which can take minutes: the same terms as a part.
+                .timeout_ms = timeout_ms,
+                .stall_ms = self.store.options.stall_ms,
             }) catch |err| return blame(err);
 
             if (!got.ok()) return self.failure(c, &ex, got);
@@ -726,16 +809,28 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
         /// Best effort, on the way out of a failed upload: parked parts are
         /// paid-for bytes, and a bucket with no lifecycle rule keeps them
         /// forever. A failed abort is logged and the original error stands.
+        ///
+        /// The URL is built in the Scope rather than on the stack: an abort
+        /// only runs on a failure path, where an allocation is cheap, and it
+        /// must carry even an `UploadId` the part calls refused as too long,
+        /// which no stack buffer here is sized for.
         fn abortMultipart(self: *Self, c: anytype, key: []const u8, upload_id: []const u8) void {
-            _ = c;
-            var url_buf: [part_url_max]u8 = undefined;
-            var query_buf: [multipart_mod.query_max]u8 = undefined;
             var token_buf: [settings.session_token_max]u8 = undefined;
             var sig: sign.Signature = .none;
             var headers: Headers = .{};
 
-            const query = multipart_mod.finishQuery(&query_buf, upload_id);
-            const target = self.urlForQuery(&url_buf, key, query) catch return;
+            const room = self.base.len + self.prefix.len + 1 + key.len * 3 +
+                "?uploadId=".len + upload_id.len * 3;
+            const url_buf = c.arena().alloc(u8, room) catch return;
+            var w = std.Io.Writer.fixed(url_buf);
+            w.writeAll(self.base) catch return;
+            w.writeAll(self.prefix) catch return;
+            w.writeByte('/') catch return;
+            core.percent.encodeWrite(&w, key, .path) catch return;
+            w.writeByte('?') catch return;
+            const at = w.buffered().len;
+            const query = multipart_mod.finishQuery(url_buf[at..], upload_id);
+            const target = url_buf[0 .. at + query.len];
             self.prepare(&sig, &headers, .{
                 .method = "DELETE",
                 .key = key,
@@ -1434,19 +1529,19 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
             return w.buffered();
         }
 
-        /// `https://files.s3.amazonaws.com/big.mp4?partNumber=3&uploadId=…`:
-        /// a key *and* a query, for the multipart calls. The query arrives
-        /// canonical from `multipart.zig`, so the bytes signed are the bytes
-        /// sent here too.
-        fn urlForQuery(self: *Self, buf: *[part_url_max]u8, key: []const u8, query: []const u8) Error![]const u8 {
+        /// `https://files.s3.amazonaws.com/big.mp4?` and where the query
+        /// goes: the multipart calls write their canonical query into the
+        /// same buffer after this, once, and slice it back out for
+        /// `prepare` — signed bytes and sent bytes are one spelling by
+        /// construction, the same one-buffer shape `urlForList` uses.
+        fn urlToQuery(self: *Self, buf: *[part_url_max]u8, key: []const u8) Error!usize {
             var w = std.Io.Writer.fixed(buf);
             w.writeAll(self.base) catch return error.Rejected;
             w.writeAll(self.prefix) catch return error.Rejected;
             w.writeByte('/') catch return error.Rejected;
             core.percent.encodeWrite(&w, key, .path) catch return error.Rejected;
             w.writeByte('?') catch return error.Rejected;
-            w.writeAll(query) catch return error.Rejected;
-            return w.buffered();
+            return w.buffered().len;
         }
 
         /// `https://s3.amazonaws.com/files/?encoding-type=url&list-type=2…`:

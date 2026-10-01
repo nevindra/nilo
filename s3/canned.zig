@@ -23,6 +23,7 @@ const core = @import("nilo_core");
 const fetch = @import("nilo_fetch");
 
 const bucket_mod = @import("bucket.zig");
+const multipart_mod = @import("multipart.zig");
 const sign = @import("sign.zig");
 const store_mod = @import("store.zig");
 
@@ -45,6 +46,10 @@ const Seen = struct {
     count: usize = 0,
     body: [8192]u8 = undefined,
     body_len: usize = 0,
+    /// The Content-Length as sent, which `body` may not have room for: a
+    /// multipart part is megabytes, and what a test asserts on is that the
+    /// right number arrived, with the first `body.len` bytes to look at.
+    declared_len: u64 = 0,
 
     fn methodText(self: *const Seen) []const u8 {
         return self.method[0..self.method_len];
@@ -116,6 +121,9 @@ const Canned = struct {
     /// What the server computed, for a failure message worth reading.
     expected: [64]u8 = undefined,
     got: [64]u8 = undefined,
+    /// Filled by `serveScript`: each request of a protocol, in order.
+    played: [8]Played = undefined,
+    played_count: usize = 0,
 
     /// Port 0, and the kernel's answer read back — the account of why this
     /// was a walk of a thousand ports for a cycle, and of the premise that
@@ -139,6 +147,69 @@ const Canned = struct {
 
     fn serveOne(self: *Canned) !void {
         return self.serveMany(1);
+    }
+
+    /// What `serveScript` keeps of each request, after `seen` is reused for
+    /// the next: enough for a test to assert the protocol's shape.
+    const Played = struct {
+        method: [16]u8 = undefined,
+        method_len: usize = 0,
+        target: [1024]u8 = undefined,
+        target_len: usize = 0,
+        body_prefix: [512]u8 = undefined,
+        body_prefix_len: usize = 0,
+        declared_len: u64 = 0,
+        verified: bool = false,
+
+        fn methodText(self: *const Played) []const u8 {
+            return self.method[0..self.method_len];
+        }
+
+        fn targetText(self: *const Played) []const u8 {
+            return self.target[0..self.target_len];
+        }
+
+        fn bodyPrefix(self: *const Played) []const u8 {
+            return self.body_prefix[0..self.body_prefix_len];
+        }
+    };
+
+    /// One answer per request, in order — a protocol rather than a call.
+    /// A client may put the sequence on one pooled connection or dial
+    /// again, so a closed connection moves to the next accept rather than
+    /// ending the script.
+    fn serveScript(self: *Canned, answers: []const Answer) !void {
+        var i: usize = 0;
+        while (i < answers.len) {
+            var stream = try self.server.accept(self.io);
+            defer stream.close(self.io);
+
+            var in_buf: [16 << 10]u8 = undefined;
+            var out_buf: [64 << 10]u8 = undefined;
+            var reader = stream.reader(self.io, &in_buf);
+            var writer = stream.writer(self.io, &out_buf);
+
+            while (i < answers.len) {
+                self.seen = .{};
+                self.answer = answers[i];
+                self.answerOne(&reader.interface, &writer.interface) catch |err| switch (err) {
+                    error.EndOfStream => break,
+                    else => return err,
+                };
+                var kept: Played = .{ .verified = self.verified, .declared_len = self.seen.declared_len };
+                @memcpy(kept.method[0..self.seen.method_len], self.seen.methodText());
+                kept.method_len = self.seen.method_len;
+                const target_len = @min(self.seen.target_len, kept.target.len);
+                @memcpy(kept.target[0..target_len], self.seen.targetText()[0..target_len]);
+                kept.target_len = target_len;
+                const body_len = @min(self.seen.body_len, kept.body_prefix.len);
+                @memcpy(kept.body_prefix[0..body_len], self.seen.bodyText()[0..body_len]);
+                kept.body_prefix_len = body_len;
+                self.played[self.played_count] = kept;
+                self.played_count += 1;
+                i += 1;
+            }
+        }
     }
 
     /// `n` requests **on one connection**, which is what a pooling client
@@ -242,8 +313,13 @@ const Canned = struct {
             }
         }
 
+        self.seen.declared_len = content_length;
         self.seen.body_len = @min(content_length, self.seen.body.len);
         if (self.seen.body_len != 0) try r.readSliceAll(self.seen.body[0..self.seen.body_len]);
+        // The rest of a body bigger than the capture, off the socket so the
+        // next request on this connection starts at a request line.
+        if (content_length > self.seen.body_len)
+            try r.discardAll64(content_length - self.seen.body_len);
     }
 
     /// Rebuild the canonical request from what arrived, and see whether the
@@ -2177,6 +2253,235 @@ test "a presign with the largest token a bucket may declare fits its buffer" {
 
             const link = try temp.presign(&scope, "one.txt", 60);
             try testing.expect(std.mem.indexOf(u8, link.url.view(), "X-Amz-Security-Token=%2B%2B") != null);
+        }
+    }.run);
+}
+
+// ---- multipart: the protocol against a server that checks every signature --
+
+const initiate_answer_body =
+    "<InitiateMultipartUploadResult><Bucket>files</Bucket><Key>big.bin</Key>" ++
+    "<UploadId>canned-upload</UploadId></InitiateMultipartUploadResult>";
+const completed_answer_body =
+    "<CompleteMultipartUploadResult><ETag>\"whole\"</ETag></CompleteMultipartUploadResult>";
+const error_answer_body =
+    "<Error><Code>InternalError</Code><Message>we dropped it</Message></Error>";
+
+/// A source big enough to be a real multipart: one full part and `tail`
+/// more. Freed by the caller.
+fn multipartBody(tail: usize) ![]u8 {
+    const body = try testing.allocator.alloc(u8, multipart_mod.part_min + tail);
+    for (body, 0..) |*b, i| b.* = @truncate(i);
+    return body;
+}
+
+test "a multipart upload signs its three queries, and the completion lists every part" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var served = try io.concurrent(Canned.serveScript, .{ &canned, &[_]Answer{
+                .{ .body = initiate_answer_body, .content_type = "application/xml" },
+                .{ .etag = "\"p1\"" },
+                .{ .etag = "\"p2\"" },
+                .{ .body = completed_answer_body, .content_type = "application/xml" },
+            } });
+            defer served.cancel(io) catch {};
+
+            var buf: [64]u8 = undefined;
+            var store = try started(io, &canned, &buf);
+            defer store.deinit();
+            var files = try Files.open(&store);
+            defer files.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            const body = try multipartBody(123);
+            defer testing.allocator.free(body);
+            var reader = std.Io.Reader.fixed(body);
+            try files.putMultipart(&scope, "big.bin", .{
+                .reader = &reader,
+                .content_type = "application/octet-stream",
+                .part_bytes = multipart_mod.part_min,
+            });
+
+            served.await(io) catch {};
+            try testing.expectEqual(@as(usize, 4), canned.played_count);
+            for (canned.played[0..4]) |step| try testing.expect(step.verified);
+
+            try testing.expectEqualStrings("POST", canned.played[0].methodText());
+            try testing.expectEqualStrings("/files/big.bin?uploads=", canned.played[0].targetText());
+            try testing.expectEqualStrings("PUT", canned.played[1].methodText());
+            try testing.expectEqualStrings("/files/big.bin?partNumber=1&uploadId=canned-upload", canned.played[1].targetText());
+            try testing.expectEqual(@as(u64, multipart_mod.part_min), canned.played[1].declared_len);
+            try testing.expectEqualStrings("/files/big.bin?partNumber=2&uploadId=canned-upload", canned.played[2].targetText());
+            try testing.expectEqual(@as(u64, 123), canned.played[2].declared_len);
+            try testing.expectEqualStrings("POST", canned.played[3].methodText());
+            try testing.expectEqualStrings("/files/big.bin?uploadId=canned-upload", canned.played[3].targetText());
+            try testing.expectEqualStrings(
+                "<CompleteMultipartUpload>" ++
+                    "<Part><PartNumber>1</PartNumber><ETag>\"p1\"</ETag></Part>" ++
+                    "<Part><PartNumber>2</PartNumber><ETag>\"p2\"</ETag></Part>" ++
+                    "</CompleteMultipartUpload>",
+                canned.played[3].bodyPrefix(),
+            );
+        }
+    }.run);
+}
+
+test "a failed part aborts the upload rather than abandoning it" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var served = try io.concurrent(Canned.serveScript, .{ &canned, &[_]Answer{
+                .{ .body = initiate_answer_body, .content_type = "application/xml" },
+                .{ .status = "500 Internal Server Error", .error_body = error_answer_body },
+                .{ .status = "204 No Content" },
+            } });
+            defer served.cancel(io) catch {};
+
+            var buf: [64]u8 = undefined;
+            var store = try started(io, &canned, &buf);
+            defer store.deinit();
+            var files = try Files.open(&store);
+            defer files.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            const body = try multipartBody(0);
+            defer testing.allocator.free(body);
+            var reader = std.Io.Reader.fixed(body);
+            try testing.expectError(error.Unavailable, files.putMultipart(&scope, "big.bin", .{
+                .reader = &reader,
+                .content_type = "application/octet-stream",
+                .part_bytes = multipart_mod.part_min,
+            }));
+
+            served.await(io) catch {};
+            try testing.expectEqual(@as(usize, 3), canned.played_count);
+            try testing.expectEqualStrings("DELETE", canned.played[2].methodText());
+            try testing.expectEqualStrings("/files/big.bin?uploadId=canned-upload", canned.played[2].targetText());
+            try testing.expect(canned.played[2].verified);
+        }
+    }.run);
+}
+
+test "a completion answered 200 with an error in the body is a failure, and aborts" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var served = try io.concurrent(Canned.serveScript, .{
+                &canned,
+                &[_]Answer{
+                    .{ .body = initiate_answer_body, .content_type = "application/xml" },
+                    .{ .etag = "\"p1\"" },
+                    // The trap itself: a 200 whose body says no.
+                    .{ .body = error_answer_body, .content_type = "application/xml" },
+                    .{ .status = "204 No Content" },
+                },
+            });
+            defer served.cancel(io) catch {};
+
+            var buf: [64]u8 = undefined;
+            var store = try started(io, &canned, &buf);
+            defer store.deinit();
+            var files = try Files.open(&store);
+            defer files.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            const body = try multipartBody(0);
+            defer testing.allocator.free(body);
+            var reader = std.Io.Reader.fixed(body);
+            try testing.expectError(error.Failed, files.putMultipart(&scope, "big.bin", .{
+                .reader = &reader,
+                .content_type = "application/octet-stream",
+                .part_bytes = multipart_mod.part_min,
+            }));
+
+            served.await(io) catch {};
+            try testing.expectEqual(@as(usize, 4), canned.played_count);
+            try testing.expectEqualStrings("DELETE", canned.played[3].methodText());
+            try testing.expectEqualStrings("/files/big.bin?uploadId=canned-upload", canned.played[3].targetText());
+        }
+    }.run);
+}
+
+test "a part answered without an ETag fails there, not at the completion" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var served = try io.concurrent(Canned.serveScript, .{ &canned, &[_]Answer{
+                .{ .body = initiate_answer_body, .content_type = "application/xml" },
+                .{ .etag = "" },
+                .{ .status = "204 No Content" },
+            } });
+            defer served.cancel(io) catch {};
+
+            var buf: [64]u8 = undefined;
+            var store = try started(io, &canned, &buf);
+            defer store.deinit();
+            var files = try Files.open(&store);
+            defer files.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            const body = try multipartBody(0);
+            defer testing.allocator.free(body);
+            var reader = std.Io.Reader.fixed(body);
+            try testing.expectError(error.Failed, files.putMultipart(&scope, "big.bin", .{
+                .reader = &reader,
+                .content_type = "application/octet-stream",
+                .part_bytes = multipart_mod.part_min,
+            }));
+
+            served.await(io) catch {};
+            try testing.expectEqual(@as(usize, 3), canned.played_count);
+            try testing.expectEqualStrings("DELETE", canned.played[2].methodText());
+        }
+    }.run);
+}
+
+test "a source smaller than one part is a plain PUT, one round trip" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var served = try io.concurrent(Canned.serveScript, .{ &canned, &[_]Answer{
+                .{},
+            } });
+            defer served.cancel(io) catch {};
+
+            var buf: [64]u8 = undefined;
+            var store = try started(io, &canned, &buf);
+            defer store.deinit();
+            var files = try Files.open(&store);
+            defer files.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            var reader = std.Io.Reader.fixed("three dozen bytes, give or take");
+            try files.putMultipart(&scope, "small.bin", .{
+                .reader = &reader,
+                .content_type = "text/plain",
+                .cache_control = "max-age=60",
+            });
+
+            served.await(io) catch {};
+            try testing.expectEqual(@as(usize, 1), canned.played_count);
+            try testing.expectEqualStrings("PUT", canned.played[0].methodText());
+            // No query: the protocol never started.
+            try testing.expectEqualStrings("/files/small.bin", canned.played[0].targetText());
+            try testing.expect(canned.played[0].verified);
+            try testing.expectEqualStrings("three dozen bytes, give or take", canned.played[0].bodyPrefix());
         }
     }.run);
 }
