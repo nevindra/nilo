@@ -875,7 +875,7 @@ arena is cheaper than the stack, on this path as on the others.
 
 ### What the logger costs a held stream: nothing, and the fix was already free
 
-`roadmap.md` carried **"the logger puts a kilobyte on a frame that is live while
+`todo.md` carried **"the logger puts a kilobyte on a frame that is live while
 the handler waits"**, waiting on a number. `logger.with`'s inner `log` declares
 `var buf: [1024]u8` and was a plain `fn`, so it was a candidate for inlining
 into `run`, whose frame is live across `next.run(c)` — which is exactly the
@@ -939,7 +939,7 @@ Asked when `nilo.Rooms` began lending Rooms to keys ([ADR 228](../../docs/adr/22
 
 ## The WebSocket against Autobahn
 
-`roadmap.md` carried **"nothing runs the Autobahn suite against the
+`todo.md` carried **"nothing runs the Autobahn suite against the
 WebSocket"**, and by
 [ADR 032](../../docs/adr/032-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md)'s
 reading that made every close-code and UTF-8 rule in
@@ -3182,7 +3182,7 @@ On 1 MB, `std.flate` 6 is 106,428 bytes in 21.8 ms, libdeflate 6 is 80,635 in 10
 - **22% of `std.flate`'s time on an arena body is a memset nobody needs**: `toks.* = .empty` in `writeBlock` (`Compress.zig` lines 987 and 1055) rebuilds the 96 KB token buffer from its constant after every block. A scratch copy assigning the fields one by one gave byte-identical output 18% to 44% faster, about 50 µs a body here. That is a one-line change to the standard library, not to nilo.
 - Two lines above were wrong and are corrected: the reset clears the hash table's 64 KB `head` (32,768 two-byte entries), not 128 KB.
 
-**The decision it moved.** Nothing shipped. brotli and zstd are refused on these numbers ([`docs/decided.md`](../../docs/decided.md)). libdeflate behind a build flag, the way `-Dtls` brings tls.zig (ADR 212), is the candidate, and its open questions are on [`docs/roadmap.md`](../../docs/roadmap.md). Under HttpArena's score, `rps × (min_bytes / my_bytes)²`, with compression about 0.78 of a `json-comp` request's CPU (230 µs a request on the board against 49 µs for `json-tls`), libdeflate 6 scores about 1.95 times today's entry and brotli 5 about 1.10. That model has not been checked against the board.
+**The decision it moved.** Nothing shipped. brotli and zstd are refused on these numbers ([`docs/decided.md`](../../docs/decided.md)). libdeflate behind a build flag, the way `-Dtls` brings tls.zig (ADR 212), is the candidate, and its open questions are on [`docs/todo.md`](../../docs/todo.md). Under HttpArena's score, `rps × (min_bytes / my_bytes)²`, with compression about 0.78 of a `json-comp` request's CPU (230 µs a request on the board against 49 µs for `json-tls`), libdeflate 6 scores about 1.95 times today's entry and brotli 5 about 1.10. That model has not been checked against the board.
 
 **Can it be pushed further.** Yes, three ways. Run it again on a quiet machine and on a Zen 5, since the ratios have been measured only on this one. Measure the RSS libdeflate actually touches on a small body, which is bounded by the 668 KB above and not yet known. And the memset fix goes upstream to Zig, which every nilo build would get for nothing.
 
@@ -3435,3 +3435,50 @@ Asked by the photon port, whose WAL writer's `pwritev` and `fdatasync` (2 ms of 
 **The stall is the rule, not chance.** The short call waits exactly as long as the long one runs, every time, and starts at once with the threshold at 0. **A burst is unchanged**: 512 callers fill the pool to its ceiling either way, because the default rule also starts workers once the queue is twice what runs. **Steady concurrent calls are where it costs**: as many workers as callers instead of seven, 6% more CPU and 2.2 MB more RSS, for a wall time 38% shorter. Every one of those workers exits after zio's idle timeout of 60 s, as before.
 
 The decision: `serve` runs the pool at `scale_threshold = 0` ([ADR 013](../../docs/adr/013-handlers-must-not-block-the-thread.md#how-the-pool-grows)). **Can it be pushed further?** Not by this knob: the ceiling is what bounds the threads now, and a caller that must never queue even at the ceiling is what `blockingReserved` is for.
+
+## An answer handed to the framing
+
+Taken for [ADR 253](../../docs/adr/253-an-answer-is-handed-to-the-framing-that-carried-its-request.md), the go or no-go on putting every write `Ctx` makes behind `Framing`, a tagged union whose HTTP/2 arm exists only under `-Dgrpc`. **The rule it was held to: the HTTP/1.1 path unchanged on the two hard axes, and inside the spread on the other two.**
+
+**Machine and builds.** AMD Ryzen 7 9700X (8 cores, 16 threads), Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`. Before is `6a914dd` exported with `git archive HEAD` into a scratch tree; after is the same commit with the seam. Both sides built the same afternoon, `ReleaseFast`, in the default build and with `-Dgrpc`, so the four binaries are one-arm before, one-arm after (the tag is known while compiling), and the same pair with the HTTP/2 arm present.
+
+**Allocations per request: unchanged.** The four budget tests in `http/behaviour.zig` (the routed GET with CORS at exactly one allocation and no resize, traced, with metrics, with an allowance) pass unchanged, and so does every test that reads raw HTTP/1.1 back: 2,604 passed, 30 skipped, in Debug.
+
+**Memory per idle connection: unchanged to the byte.** `bench/mem.py --path /health --steps 1000,5000,10000`, two rounds each, interleaved:
+
+| build | 1,000 | 5,000 | 10,000 |
+|---|---|---|---|
+| default, before and after | 5,247 B | 5,197 B | 5,190 B |
+| `-Dgrpc`, before and after | 5,313 B | 5,210 B | 5,197 B |
+
+The marginal figure is the same on both sides of each pair in both rounds, as expected: `serveRequest` is `noinline`, so the `Ctx` that grew is unwound before the connection parks (ADR 062).
+
+**Binary size: under a kilobyte either way.** `nilo-hello` (the benchmark server) stripped `ReleaseFast`: 1,017,512 to 1,017,112 bytes in the default build (400 smaller, the duplicate of `Ctx.send` in `serve.zig` gone), 1,140,296 to 1,141,128 with `-Dgrpc` (832 larger, the collecting arm).
+
+**Throughput and p99, end to end: inside the spread.** A keep-alive load generator written for this (64 connections, one request in flight on each, 2 s warm-up and 8 s counted, plain Go over raw sockets because the machine has no wrk or oha), `GET /users/42` against `nilo-hello` over loopback, server on cores 0 to 3 and client on 4 to 7 and 12 to 15 so no physical core is shared. Five rounds, the four builds interleaved in each:
+
+| build | requests a second, five rounds | median | p99 |
+|---|---|---|---|
+| default, before | 1.49, 1.46, 1.38, 1.62, 1.62 M | 1.49 M | 60 to 69 µs |
+| default, after | 1.48, 1.45, 1.49, 1.45, 1.61 M | 1.48 M | 61 to 70 µs |
+| `-Dgrpc`, before | 1.49, 1.32, 1.49, 1.49, 1.60 M | 1.49 M | 62 to 71 µs |
+| `-Dgrpc`, after | 1.47, 1.33, 1.53, 1.48, 1.61 M | 1.48 M | 61 to 69 µs |
+
+A margin of 0.6% against a spread of 17% is "unchanged".
+
+**In process: the one number that moved, and why it is not the seam.** `zig build profile` (which had stopped compiling, see below), each binary pinned to core 6, eight interleaved rounds:
+
+| build | the routed GET, end to end | a unary gRPC call |
+|---|---|---|
+| default, before | 394 to 406 ns | 1,099 to 1,114 ns |
+| default, after | 418 to 426 ns | 1,111 to 1,140 ns |
+| `-Dgrpc`, before | 397 to 433 ns | 1,101 to 1,153 ns |
+| `-Dgrpc`, after | 400 to 423 ns | 1,131 to 1,143 ns |
+
+The default build is about 20 ns slower in process, outside its spread, and the build with the second arm, the one that pays a compare, is not. The per-piece rows say where it went: "serialise the body", which is `json.zig` writing into a buffer and touches nothing the seam changed, went from 85 to 94 ns in the default build and to 91 in the other. A row the change cannot reach moving by half the difference is code placement, not the dispatch. End to end it is inside the spread above, about 0.7% of the 2.7 µs of CPU a request costs on four cores at 1.49 M a second. The gRPC call is about 2% slower in both builds, the same order, and it is not explained here: the call still goes through the HTTP/1.1 arm of the translation, so it pays what a routed GET pays and no more, and stage 2 of [the framing page](../../docs/design/framing.md#how-the-direction-is-built) removes that path along with the HTTP/1.1 text it parses back.
+
+**Found on the way.** `zig build profile` did not compile at `6a914dd`: its module was never given `nilo_build`, which `compress.zig` has asked for since ADR 248, and nothing builds the profile on `zig build test`. It is now wired like every other instance of the App's files and compiled, not run, on every `test`.
+
+**The decision it moved:** go. Every answer `Ctx` makes leaves through `Framing`, and stage 2 can build on it.
+
+**Can it be pushed further:** (1) the 20 ns of placement in the default build, by finding which function's alignment moved (`perf` is not on this machine); it is not on any path the end-to-end run can see. (2) The gRPC call's text round trip, which stage 2 and 3 remove outright.

@@ -413,7 +413,7 @@ pub noinline fn serveRequest(
         ._arena = arena,
         ._lifetime = lifetime,
         ._in = in,
-        ._out = out,
+        ._framing = .{ .http1 = .{ .in = in, .out = out, .minor_version = r.minor_version } },
         ._request = &r,
         ._path = path,
         ._query = raw_query,
@@ -1139,8 +1139,7 @@ noinline fn endAbandonedStream(c: *Ctx) bool {
             "call stream.finish() — anything still buffered was lost",
         .{ @tagName(c.method), c._path },
     );
-    if (open.chunked and !open.drop) http1.writeLastChunk(c._out) catch return false;
-    c._out.flush() catch return false;
+    c._framing.end(open.chunked and !open.drop) catch return false;
 
     // A promised length that was never met cannot be tidied up the way a
     // missing zero-length chunk can: the head has gone out saying how many
@@ -1205,29 +1204,7 @@ fn sendDirect(c: *Ctx, status: u16, content_type: []const u8, body: []const u8) 
     // is nilo waiting on the client, not a handler running (ADR 013).
     const w = watchdog.waiting(c._watch);
     defer watchdog.waited(c._watch, w);
-    const connection = c.connection();
-    if (c.method == .HEAD) {
-        try http1.writeResponseHeadOnly(
-            c._out,
-            status,
-            http1.statusPhrase(status),
-            content_type,
-            body.len,
-            connection,
-            c.extraHeaders(),
-        );
-    } else {
-        try http1.writeResponse(
-            c._out,
-            status,
-            http1.statusPhrase(status),
-            content_type,
-            body,
-            connection,
-            c.extraHeaders(),
-        );
-    }
-    try http1.settle(c._out, c._in);
+    try c.writeWhole(status, content_type, body);
 }
 
 /// Turn a handler failure into a response. A fail function's message is

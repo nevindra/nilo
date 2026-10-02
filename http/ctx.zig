@@ -15,6 +15,7 @@ const compress_mod = @import("compress.zig");
 const convert = @import("convert.zig");
 const cookie_mod = @import("cookie.zig");
 const encoded = @import("encoded.zig");
+const framing_mod = @import("framing.zig");
 const http1 = @import("http1.zig");
 const json_mod = @import("json.zig");
 const jsonmark = @import("jsonmark.zig");
@@ -117,7 +118,10 @@ pub const Ctx = struct {
     _arena: std.mem.Allocator,
     _lifetime: *const str_mod.Lifetime,
     _in: *std.Io.Reader,
-    _out: *std.Io.Writer,
+    /// Where the answer goes: the bytes of HTTP/1.1, or an answer kept for
+    /// an HTTP/2 connection to frame. Nothing in `Ctx` writes a protocol's
+    /// bytes itself (ADR 253).
+    _framing: framing_mod.Framing,
     _request: *const http1.Request,
     _path: []const u8,
     /// The query string as it arrived, still encoded. `_query_params` is
@@ -1244,13 +1248,12 @@ pub const Ctx = struct {
     fn aboutToReadBody(self: *Ctx) !void {
         self.aboutToRead();
         if (!self._request.expect_continue or self._continued) return;
-        // An HTTP/1.0 client cannot be sent an interim response (RFC 9110
-        // §15.2), and one that has already been answered is past the point
-        // where a 100 would mean anything.
-        if (self._request.minor_version == 0 or self.answered() != null) return;
+        // One that has already been answered is past the point where a 100
+        // would mean anything. Which clients may be sent one at all is the
+        // framing's to know.
+        if (self.answered() != null) return;
         self._continued = true;
-        try self._out.writeAll("HTTP/1.1 100 Continue\r\n\r\n");
-        try self._out.flush();
+        try self._framing.interimContinue();
     }
 
     /// The whole request body, read once into the request arena. Chunked
@@ -1926,34 +1929,16 @@ pub const Ctx = struct {
         defer watchdog.waited(self._watch, w);
         self.armWriteLimit();
 
-        // A handler need not know this is a HEAD: it assembles a response
-        // as usual, and what must not go out is filtered here. The length
-        // is the one a GET would have carried, compressed or not.
-        if (self.method == .HEAD) {
-            try http1.writeResponseHeadOnly(
-                self._out,
-                status,
-                http1.statusPhrase(status),
-                content_type,
-                outgoing.len,
-                self.connection(),
-                self.extraHeaders(),
-            );
-        } else {
-            try http1.writeResponse(
-                self._out,
-                status,
-                http1.statusPhrase(status),
-                content_type,
-                outgoing,
-                self.connection(),
-                self.extraHeaders(),
-            );
-        }
-        // On the wire now, unless the client has pipelined the next request
-        // behind this one, in which case it goes out with that one's answer
-        // (ADR 201).
-        try http1.settle(self._out, self._in);
+        try self.writeWhole(status, content_type, outgoing);
+    }
+
+    /// A whole answer handed to the framing, with the headers middleware and
+    /// the handler set. A handler need not know this is a HEAD: it assembles
+    /// a response as usual, and what must not go out is filtered by the
+    /// framing. The length is the one a GET would have carried. `send` and
+    /// the answers App makes itself both end here, so there is one way out.
+    pub fn writeWhole(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8) !void {
+        try self._framing.whole(status, content_type, response_body, self.method == .HEAD, self.keepAlive(), self.extraHeaders());
     }
 
     /// The compressed body, when this answer is one to compress: long
@@ -2116,38 +2101,27 @@ pub const Ctx = struct {
             .{ status, status },
         );
 
-        // A length already says where the body stops, so there is nothing for
-        // chunked framing to add and a head must not carry both. Otherwise
-        // HTTP/1.1 gets chunks; HTTP/1.0 has neither, so the end of the body
-        // can only be the end of the connection — which means that connection
+        // How the body is told apart from the next answer is the framing's.
+        // One that only the connection closing can end means that connection
         // cannot carry another request whatever either side asked for.
-        const chunked = options.length == null and self._request.minor_version == 1;
-        if (!chunked and options.length == null) self._force_close = true;
+        const shape = self._framing.streamShape(options.length);
+        if (shape.ends_connection) self._force_close = true;
 
         self.markAnswered(status);
         self.tookOver();
         self._stream = .{
-            .chunked = chunked,
+            .chunked = shape.chunked,
             .drop = self.method == .HEAD,
             .promised = options.length,
         };
 
-        try http1.writeStreamHead(
-            self._out,
-            status,
-            http1.statusPhrase(status),
-            content_type,
-            chunked,
-            options.length,
-            self.connection(),
-            self.extraHeaders(),
-        );
+        try self._framing.streamHead(status, content_type, shape, options.length, self.keepAlive(), self.extraHeaders());
 
         // The one allocation a stream makes, made once. Everything written
         // afterwards goes through this buffer and allocates nothing.
         const buffer = try self._arena.alloc(u8, options.buffer);
         var out: stream_mod.Stream =
-            .initClosing(buffer, self._out, self._stopping, &self._stream, &self._force_close);
+            .initClosing(buffer, &self._framing, self._stopping, &self._stream, &self._force_close);
         out._watch = self._watch;
         return out;
     }
@@ -2229,6 +2203,13 @@ pub const Ctx = struct {
         if (self.method != .GET) {
             return fail.badRequest("a WebSocket handshake has to be a GET, not a {s}", .{@tagName(self.method)});
         }
+        // A WebSocket takes its connection for the rest of its life, and an
+        // HTTP/2 stream has none of its own to give: WebSockets over HTTP/2
+        // (RFC 8441) are not served (ADR 253).
+        const wire = self._framing.wire() orelse return fail.badRequest(
+            "a WebSocket needs an HTTP/1.1 connection of its own, and this request came over HTTP/2",
+            .{},
+        );
         if (!websocket.isUpgrade(self._head)) {
             return fail.badRequest(
                 "this endpoint is a WebSocket; the request needs Upgrade: websocket and Connection: Upgrade",
@@ -2287,7 +2268,7 @@ pub const Ctx = struct {
         self._force_close = true;
 
         const answer = websocket.accept(key.view());
-        try websocket.writeAcceptance(self._out, &answer, websocket.negotiated(self._head, options));
+        try websocket.writeAcceptance(wire.out, &answer, websocket.negotiated(self._head, options));
 
         // A WebSocket is allowed to sit quiet. A chat tab with nobody typing
         // is working correctly, and the read limit that protects the HTTP
@@ -2313,7 +2294,7 @@ pub const Ctx = struct {
 
         return .{
             ._in = self._in,
-            ._out = self._out,
+            ._out = wire.out,
             ._stopping = self._stopping,
             // How this socket can be told something by a fiber that is not
             // holding it. Nothing uses it until the handler joins a Room.
@@ -2382,17 +2363,24 @@ pub const Ctx = struct {
     pub fn eventsFrom(self: *Ctx, rooms: anytype, options: stream_mod.FromRooms) !void {
         comptime checkRooms(@TypeOf(rooms));
         if (self.answered() != null) return error.AlreadyAnswered; // one request, one response, as `send`
+        // The connection loop runs this stream once the handler has returned,
+        // which needs a connection that is this request's alone (ADR 227).
+        const wire = self._framing.wire() orelse return fail.internal(
+            "eventsFrom needs an HTTP/1.1 connection of its own, and this request came over HTTP/2",
+            .{},
+        );
+        const shape = self._framing.streamShape(null);
 
         var held: stream_mod.RoomEvents = .{
             ._in = self._in,
-            ._out = self._out,
+            ._out = wire.out,
             ._stopping = self._stopping,
             ._waker = self._waker,
             ._watch = self._watch,
             ._keepalive_ms = options.keepalive_ms,
             // HTTP/1.0 has no chunks, so the end of the stream is the end of
             // the connection, which it always is here anyway.
-            ._chunked = self._request.minor_version == 1,
+            ._chunked = shape.chunked,
         };
 
         // A HEAD is answered with the head a GET would get and nothing else,
@@ -2418,16 +2406,7 @@ pub const Ctx = struct {
         try self.setStaticHeader("X-Accel-Buffering", "no");
         self.markAnswered(200);
         self.tookOver();
-        try http1.writeStreamHead(
-            self._out,
-            200,
-            http1.statusPhrase(200),
-            stream_mod.Events.content_type,
-            held._chunked,
-            null,
-            self.connection(),
-            self.extraHeaders(),
-        );
+        try self._framing.streamHead(200, stream_mod.Events.content_type, shape, null, self.keepAlive(), self.extraHeaders());
         if (head_only) return;
 
         // The stream never ends while the connection could carry another

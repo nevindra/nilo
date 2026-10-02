@@ -360,7 +360,7 @@ pub const Options = struct {
     /// six years speaks and nothing older does. One certificate per
     /// listener: no selection by name, no client certificates, no session
     /// tickets, and no reload without a restart, each of which is a
-    /// use case waiting for a caller (`docs/roadmap.md`).
+    /// use case waiting for a caller (`docs/todo.md`).
     ///
     /// The handshake is bounded by `header_timeout_ms` and
     /// `write_timeout_ms`, because until it is done that is what a

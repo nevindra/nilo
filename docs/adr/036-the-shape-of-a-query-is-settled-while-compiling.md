@@ -9,7 +9,7 @@ This adds a second module — `sql`, alongside `nilo`, not inside it — that tu
 
 ## Why this is not the refusal templates got
 
-`docs/roadmap.md` refuses templates on two arguments, and it is worth being precise about which of them applies here, because from a distance this looks like the same request.
+`docs/todo.md` refuses templates on two arguments, and it is worth being precise about which of them applies here, because from a distance this looks like the same request.
 
 The scope argument does not apply. Templates were refused because **nilo is for building APIs and services, and rendering a page is the thing it is not for**. Querying a database is not a thing it is not for; it is the first thing every service in the audience does after routing.
 

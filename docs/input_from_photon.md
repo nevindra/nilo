@@ -10,7 +10,7 @@ Every gap below is anchored to a specific place in Photon that needs it, with th
 call count that justifies it. Nothing here is speculative "would be nice". Ordered by how much
 each one unlocks, not by how hard it is.
 
-Assessed against nilo 0.2.0 (`README.md`, `CHANGELOG.md`, `docs/roadmap.md`, `docs/reference.md`,
+Assessed against nilo 0.2.0 (`README.md`, `CHANGELOG.md`, `docs/todo.md`, `docs/reference.md`,
 `docs/guide/{sql,static-files,streaming,services}.md`) and Zig 0.16.0 stdlib source.
 
 ---
@@ -169,7 +169,7 @@ comptime file list.
 `nilo_start` covers initialization once the loop exists. There is no documented facility for
 "wake every N, do work, listen for a control signal, shut down cleanly".
 
-`docs/roadmap.md` lists **"spawned fiber lifetime safety (design needed)"** as an open risk,
+`docs/todo.md` lists **"spawned fiber lifetime safety (design needed)"** as an open risk,
 which means rolling this by hand today means entering territory nilo has not settled yet.
 
 ### Why it matters

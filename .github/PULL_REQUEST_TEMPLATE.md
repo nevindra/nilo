@@ -41,12 +41,12 @@ ADR:
 
 ## Documentation
 
-<!-- Tick what this change touched. Not what shipped in history (that is the changelog's job), and not a roadmap entry marked done (it leaves the file). -->
+<!-- Tick what this change touched. Not what shipped in history (that is the changelog's job), and not a todo entry marked done (it leaves the file). -->
 
 - [ ] `docs/adr/`: the decision, and the alternative it beat
 - [ ] `docs/history.md`: a number measured, or a premise that turned out false
 - [ ] `bench/result/`: a run that changed a decision, with machine, commit and transport
-- [ ] `docs/roadmap.md`: the entry for what is now built, removed
+- [ ] `docs/todo.md`: the entry for what is now built, removed
 - [ ] `docs/decided.md`: a question answered, or a feature refused with its reason
 - [ ] `CHANGELOG.md`: what a user has to change, under `## Unreleased`
 - [ ] `docs/reference/`: the API, and a new heading listed once on its `README.md`

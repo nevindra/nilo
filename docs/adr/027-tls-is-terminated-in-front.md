@@ -8,7 +8,7 @@ server with a proxy in front), and by [ADR 220](./220-grpc-is-served-over-h2c-be
 it never needed TLS; HTTP/2 for browsers stays refused)
 **Topic:** [tls](../design/tls.md)
 
-`docs/roadmap.md` carried TLS under "Not decided" with the note that it *may stay out on purpose*. This decides it. **The default build does not speak TLS.** It listens on plaintext HTTP and expects a proxy in front of it wherever the internet is involved, and that proxy stays the recommendation for a server on the internet. A build that asks with `-Dtls` gets a TLS 1.3 listener ([ADR 212](./212-tls-is-an-option-a-build-asks-for.md)); what this ADR first said, that nilo would never speak TLS, held until a Zig TLS server existed to plug in, and ADR 212 carries the evidence that moved it.
+`docs/todo.md` carried TLS under "Not decided" with the note that it *may stay out on purpose*. This decides it. **The default build does not speak TLS.** It listens on plaintext HTTP and expects a proxy in front of it wherever the internet is involved, and that proxy stays the recommendation for a server on the internet. A build that asks with `-Dtls` gets a TLS 1.3 listener ([ADR 212](./212-tls-is-an-option-a-build-asks-for.md)); what this ADR first said, that nilo would never speak TLS, held until a Zig TLS server existed to plug in, and ADR 212 carries the evidence that moved it.
 
 The question that settled it was not "how hard is TLS" but "what does every other server in the comparison actually do".
 

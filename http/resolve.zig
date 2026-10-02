@@ -359,7 +359,7 @@ const Standin = struct {
             ._arena = self.arena.allocator(),
             ._lifetime = &self.lifetime,
             ._in = &self.in,
-            ._out = &self.out,
+            ._framing = .{ .http1 = .{ .in = &self.in, .out = &self.out, .minor_version = 1 } },
             ._request = &self.request,
             ._path = "/me",
             ._query = "",

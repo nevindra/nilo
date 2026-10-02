@@ -61,7 +61,7 @@ Related topics: where the startup phase runs is [ADR 180](../adr/180-work-that-n
 
 ## Open questions
 
-- **`reset` and `squash`**, to pay down the debt that forward-only migrations build up; in [the roadmap](../roadmap.md).
+- **`reset` and `squash`**, to pay down the debt that forward-only migrations build up; in [the todo list](../todo.md).
 - **A `rebase`** that rewrites a conflicting version on top of the merged snapshot. Done by hand today.
 - **A step that runs Zig code**, such as re-hashing passwords with `nilo_pw`. `Step.sql` is text only.
 - **Having a build step write the manifest** instead of writing seven lines by hand.

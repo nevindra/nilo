@@ -447,4 +447,4 @@ That covers the *service*. For a single *request*, a request id you can match to
 
 Templates are refused, not planned: nilo is for building APIs and services, and rendering pages is not what it is for. The reasoning is in [`decided.md`](../decided.md#not-coming).
 
-What is still open is listed, with what it is waiting for, in [`../roadmap.md`](../roadmap.md). What has been refused, with the reason, is in [`../decided.md`](../decided.md) and the ADR each entry names.
+What is still open is listed, with what it is waiting for, in [`../todo.md`](../todo.md). What has been refused, with the reason, is in [`../decided.md`](../decided.md) and the ADR each entry names.

@@ -48,7 +48,7 @@ else in the file.
 
 ## Two places this differs from the design as written down
 
-`roadmap.md` sketched this before anybody built it, and two of its sentences did
+`todo.md` sketched this before anybody built it, and two of its sentences did
 not survive contact.
 
 **It said `eqlIgnoreCase`, and the compare is exact.** Case-insensitive matching

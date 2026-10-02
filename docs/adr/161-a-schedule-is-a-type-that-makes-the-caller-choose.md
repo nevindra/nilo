@@ -14,7 +14,7 @@ them quietly would be a schedule that surprises somebody at three in the
 morning. It ended with: *a schedule can be built on top later without taking
 the primitive back.*
 
-`docs/roadmap.md` then carried "A schedule, rather than a loop around a
+`docs/todo.md` then carried "A schedule, rather than a loop around a
 sleep" as Not decided, waiting on somebody who had written the loop twice.
 The queue of [ADR 160](./160-a-queue-is-a-table-in-the-database-you-already-have.md)
 is where it got written the second time: a schedule is a job whose next row
@@ -106,7 +106,7 @@ this a type rather than a string.
 
 **UTC, and only UTC.** A time zone is a table of rules that changes twice a
 year and a dependency to carry it. `0 20 * * *` with a comment is 03:00
-Jakarta; `docs/roadmap.md` carries the gap.
+Jakarta; `docs/todo.md` carries the gap.
 
 ## What was rejected
 

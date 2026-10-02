@@ -63,5 +63,5 @@ Related topics: the layering rule that makes a Fitting its own layer, never a si
 
 ## Open questions
 
-- **Starting an `Exchange` from a `Target`.** Wanted but not built: a streamed call through a target would need the target's standing headers and limit to reach `Exchange.begin`, which today takes a client and a URL directly. [ADR 061](../adr/061-a-fitting-borrows-the-loop.md) leaves it waiting for someone who streams from a service with standing headers, and it is listed on [the roadmap](../roadmap.md).
+- **Starting an `Exchange` from a `Target`.** Wanted but not built: a streamed call through a target would need the target's standing headers and limit to reach `Exchange.begin`, which today takes a client and a URL directly. [ADR 061](../adr/061-a-fitting-borrows-the-loop.md) leaves it waiting for someone who streams from a service with standing headers, and it is listed on [the todo list](../todo.md).
 - **Whether a larger `read_buffer_size` reduces syscalls for a caller reading many large bodies at once.** The field now exists for exactly this measurement; [ADR 186](../adr/186-the-transfer-buffer-serves-nothing-here.md) notes it could not be measured before the field existed.

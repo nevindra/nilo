@@ -6,7 +6,7 @@ it; the second cannot be held in this language and is said out loud instead,
 which is the whole of what can be done about it; the third is
 [still open](#open), with no mechanism under it yet, and an entry moves from
 that list to the first when something is built that holds it. The open ones
-are the only part of this file that is work, and [the roadmap](./roadmap.md)
+are the only part of this file that is work, and [the todo list](./todo.md)
 points here rather than repeating them.
 
 ## Held by something

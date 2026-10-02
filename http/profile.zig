@@ -21,6 +21,7 @@ const cors = @import("cors.zig");
 const websocket = @import("websocket.zig");
 const room_mod = @import("room.zig");
 const stream_mod = @import("stream.zig");
+const framing_mod = @import("framing.zig");
 const body_mod = @import("body.zig");
 const range_mod = @import("range.zig");
 const router = @import("router.zig");
@@ -629,8 +630,10 @@ fn longLived(gpa: std.mem.Allocator) !void {
     t = clock();
     for (0..piece_rounds) |_| {
         var out = std.Io.Writer.fixed(away);
+        var nothing_in = std.Io.Reader.fixed("");
+        var framing: framing_mod.Framing = .{ .http1 = .{ .in = &nothing_in, .out = &out, .minor_version = 1 } };
         var open: ?stream_mod.Open = .{ .chunked = true, .drop = false };
-        var body = stream_mod.Stream.init(&stream_buf, &out, null, &open);
+        var body = stream_mod.Stream.init(&stream_buf, &framing, null, &open);
         for (0..200) |i| try body.print("{d},wati,{d}\n", .{ i, i * 3 });
         try body.finish();
         sink += out.buffered().len;
@@ -640,8 +643,10 @@ fn longLived(gpa: std.mem.Allocator) !void {
     t = clock();
     for (0..piece_rounds) |_| {
         var out = std.Io.Writer.fixed(away);
+        var nothing_in = std.Io.Reader.fixed("");
+        var framing: framing_mod.Framing = .{ .http1 = .{ .in = &nothing_in, .out = &out, .minor_version = 1 } };
         var open: ?stream_mod.Open = .{ .chunked = true, .drop = false };
-        var events = stream_mod.Events{ .stream = .init(&stream_buf, &out, null, &open) };
+        var events = stream_mod.Events{ .stream = .init(&stream_buf, &framing, null, &open) };
         for (0..200) |i| {
             _ = i;
             try events.send(.{ .name = "token", .data = "hello" });

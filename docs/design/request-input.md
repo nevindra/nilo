@@ -73,4 +73,4 @@ Related topics: why a header's name and value are `Str` instead of `[]const u8` 
 
 ## Open questions
 
-- **Multipart is read whole, never streamed.** `Form(T)` limits an upload by `max_body`, which is right for a photo and wrong for a 2 GB video. A streaming version needs a parser that can resume across reads, and an `Upload` that is a reader instead of bytes. Tracked in [the roadmap](../roadmap.md#known-waiting-for-a-caller), linked to [ADR 030](../adr/030-a-form-is-the-body-read-by-another-rule.md).
+- **Multipart is read whole, never streamed.** `Form(T)` limits an upload by `max_body`, which is right for a photo and wrong for a 2 GB video. A streaming version needs a parser that can resume across reads, and an `Upload` that is a reader instead of bytes. Tracked in [the todo list](../todo.md#known-waiting-for-a-caller), linked to [ADR 030](../adr/030-a-form-is-the-body-read-by-another-rule.md).

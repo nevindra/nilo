@@ -58,5 +58,5 @@ Related topics: the watchdog these deadlines report to, and what counts as parke
 
 ## Open questions
 
-- **Nothing tells a handler that its client has gone.** A read-side EOF does not mean the client left (a half-closed client is still waiting for its answer), so the obvious implementation is wrong. Tracked in [the roadmap](../roadmap.md) under `nilo_http`; it needs two separate signals, not one flag.
+- **Nothing tells a handler that its client has gone.** A read-side EOF does not mean the client left (a half-closed client is still waiting for its answer), so the obvious implementation is wrong. Tracked in [the todo list](../todo.md) under `nilo_http`; it needs two separate signals, not one flag.
 - **A deadline that also covers `nilo.sleep` and `nilo.Mutex.lock`.** Both already return `error.Canceled` on shutdown, and a caller cannot yet tell that apart from a deadline by the error name alone. [ADR 105](../adr/105-a-route-can-say-how-long-it-has.md) records it as worth doing; it is not done.

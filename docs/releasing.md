@@ -7,7 +7,7 @@ What happens between `## Unreleased` and a tag. Read it when you cut one; the re
 - `.version` in `build.zig.zon`
 - the badge and the `?ref=` in `README.md`
 - the `?ref=` in `docs/guide/getting-started.md`
-- the "needs Zig" line in `docs/roadmap.md`
+- the "needs Zig" line in `docs/todo.md`
 - the comment in `stress/arsip/build.zig.zon`
 
 The version follows the size of the change: a fix or any small change is a patch, minor is for new features, major for breaks.

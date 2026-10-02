@@ -84,6 +84,6 @@ const nilo = @import("nilo_http");
 - [The reference](../reference/README.md): every public name, as a list.
 - [The design pages](../design/README.md): one page a topic, with the rules in force and the decisions behind them.
 - [`../adr/`](../adr/): why each decision went the way it did.
-- [`../roadmap.md`](../roadmap.md): what's next.
+- [`../todo.md`](../todo.md): what's next.
 - [`../decided.md`](../decided.md): what's refused, and why.
 - [`../../CONTEXT.md`](../../CONTEXT.md): the project's vocabulary.

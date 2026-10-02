@@ -1005,6 +1005,7 @@ test {
     _ = @import("resolve.zig");
     _ = @import("openapi.zig");
     _ = @import("stream.zig");
+    _ = @import("framing.zig");
     _ = @import("body.zig");
     _ = @import("range.zig");
     _ = @import("sendfile.zig");

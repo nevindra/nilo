@@ -1,6 +1,6 @@
 # Decided
 
-What nilo has decided, so it is not decided twice. Three kinds of thing are in here, and none of them is work: a gap that was looked at and **accepted** as the rule rather than as debt, a question that was **answered** in a line and kept so nobody re-derives it, and a feature that is **not coming**, with the reason. What is still open is in [`roadmap.md`](./roadmap.md); the decisions that are binding on the code are in [`adr/`](./adr/), and an entry here that grows past a screen is one of those.
+What nilo has decided, so it is not decided twice. Three kinds of thing are in here, and none of them is work: a gap that was looked at and **accepted** as the rule rather than as debt, a question that was **answered** in a line and kept so nobody re-derives it, and a feature that is **not coming**, with the reason. What is still open is in [`todo.md`](./todo.md); the decisions that are binding on the code are in [`adr/`](./adr/), and an entry here that grows past a screen is one of those.
 
 An entry leaves this file only by being reopened, and every entry says what would do that. Bring that, not the patch.
 

@@ -5,12 +5,14 @@ This file holds the release that has not been tagged yet;
 [the releases page](https://github.com/nevindra/nilo/releases) holds the ones
 that have, one page each. What was measured and what was got wrong on the way is
 in [`docs/history.md`](./docs/history.md); what is coming is in
-[`docs/roadmap.md`](./docs/roadmap.md), and what was refused or answered is in
+[`docs/todo.md`](./docs/todo.md), and what was refused or answered is in
 [`docs/decided.md`](./docs/decided.md).
 
 ## Unreleased
 
-Nothing yet. Work lands here under `### Breaking`, `### Added`, `### Changed` and `### Fixed`, newest first.
+### Breaking
+
+- **`nilo.Stream.init` and `initClosing` take the request's `Framing` where they took the connection's `*std.Io.Writer`.** Both are what `Ctx.stream` builds, and nothing in the reference shows them; a test that built a `Stream` by hand against a buffer builds a `Framing` around that buffer first (`.{ .http1 = .{ .in = &reader, .out = &writer, .minor_version = 1 } }`). Every answer now leaves through the framing that carried its request, which is the first stage of HTTP/2 for more than gRPC ([ADR 253](docs/adr/253-an-answer-is-handed-to-the-framing-that-carried-its-request.md)).
 
 ## Released
 

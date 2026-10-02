@@ -162,50 +162,18 @@ fn writeBody(c: *Ctx, contents: Contents, status: u16, from: u64, len: u64) !voi
     defer watchdog.waited(c._watch, w);
     c.armWriteLimit();
 
-    const connection = c.connection();
+    const keep = c.keepAlive();
 
     // A HEAD gets the head a GET would have got, `Content-Length` and all,
     // and none of the body. Nothing is read from the file, so a HEAD of a
     // four-gigabyte file costs an open, a stat and a close.
     if (c.method == .HEAD) {
-        try http1.writeResponseHeadOnly(
-            c._out,
-            status,
-            http1.statusPhrase(status),
-            contents.content_type,
-            len,
-            connection,
-            c.extraHeaders(),
-        );
-        return http1.settle(c._out, c._in);
+        return c._framing.head(status, contents.content_type, len, keep, c.extraHeaders());
     }
 
-    // Left in the write buffer on purpose: `sendFileAll` sends what is
-    // already buffered ahead of the file's first bytes, so the head and the
-    // start of the body leave together.
-    try http1.writeFileHead(
-        c._out,
-        status,
-        http1.statusPhrase(status),
-        contents.content_type,
-        len,
-        connection,
-        c.extraHeaders(),
-    );
-
-    // A loop rather than one call, because a `std.Io.Limit` is a `usize` and
-    // the length of a file is not: on a 32-bit build `limited64` clamps, and
-    // without this a four-gigabyte download would look like a truncated file
-    // and close the connection for it. On a 64-bit build it goes round once.
-    // `sendFileAll` is short only at the end of the file, so nothing left to
-    // send and nothing sent means there is no more file.
-    var sent: u64 = 0;
-    while (sent < len) {
-        const n = try c._out.sendFileAll(&reader, .limited64(len - sent));
-        if (n == 0) break;
-        sent += n;
-    }
-    try c._out.flush();
+    // The head and the body leave together where the framing can manage
+    // it, and zero-copy where the connection allows (ADR 009).
+    const sent = try c._framing.file(status, contents.content_type, &reader, len, keep, c.extraHeaders());
 
     // Fewer bytes than the head promised. The length came from a `stat` that
     // is now out of date — the file was truncated or replaced underneath the

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-**nilo is a toolkit for Zig 0.16: twelve modules, of which the largest is an HTTP server.** What they share is one idea: **your types are the contract, and the compiler is the check.** A plain Zig function is a route, and its argument list produces routing, typed input, a 400 for anything that does not fit, and an OpenAPI document. A plain struct is a table, and its fields produce the SQL before the program starts. Nothing is annotated.
+**nilo is an HTTP framework for Zig 0.16, and the toolkit it is built from: twelve modules, of which the largest is the framework.** The repository is the Toolkit and `nilo_http` is the Framework (`CONTEXT.md` has both words). What they share is one idea: **your types are the contract, and the compiler is the check.** A plain Zig function is a route, and its argument list produces routing, typed input, a 400 for anything that does not fit, and an OpenAPI document. A plain struct is a table, and its fields produce the SQL before the program starts. Nothing is annotated.
 
 **A module gets built because the job is common, not because it is interesting**, and it gets in only if it is expressible as a type the caller already wrote, checked while compiling, with its cost written down (ADR 017). The README's three words, helpful, quick, cheerful, are the order the trades are made in.
 
@@ -14,6 +14,16 @@ Four places carry context this one does not repeat:
 - **`docs/adr/`**: the binding decisions, each naming the alternative it rejected, and each the rule in force: a change to a decision edits its ADR in place, and a new number is for a new decision (ADR 221). Every ADR names its topic; a topic with a page in `docs/design/` is where to start reading it. Check here before proposing a design change; "why not X?" usually has an answer on file. The ADRs were renumbered once to three digits, so a four-digit number is an old one: `docs/adr/renumbered.md` translates it, and `zig build adr-check` refuses it anywhere else. **ADR 038 decides which module new work goes in and what that module may import**; read it before adding a file anywhere but `http/`, and ADR 039 and 063 before adding a module.
 - **`docs/reference/`**: the whole public API, one page a module.
 - **`docs/README.md`**: the map, one row per topic with its guide, reference and design page. Every doc page's line 3 says what it is and line 5 links its other two layers, so `head -5` over a folder is its table of contents (ADR 236).
+
+## Guiding principles
+
+These come before everything below, and a proposal that breaks one says which and why.
+
+1. **Developer experience comes first, and performance comes with it, not after it.** When the two pull apart, DX wins, within ADR 017's budget: below 10% of throughput and p99, and never a byte of the two hard axes (allocations per request, memory per idle connection). Fast and small are numbers on the record, not adjectives: a run in `bench/result/` behind each figure.
+2. **The best developer experience the language allows, and the user's code kept safe while giving it.** The type they already wrote is the API, a mistake is a compile error naming it (a refusal) before it is a runtime one, and nothing gets easier by getting less safe: a convenience that would need undefined behaviour in ReleaseFast, a panic a request can reach, or a lifetime the compiler cannot see does not ship.
+3. **Build the clean, proper and beautiful solution, not the quick one.** nilo is growing, and a bad design that gets improved instead of replaced keeps producing more of itself. The edge of a young project is that things are expected to break: a breaking change that buys the cleaner design is paid now, with a `CHANGELOG.md` entry saying what a user changes, rather than carried for ever. What this does not license is shipping in a worse shape to ship sooner; a design that cannot fit the four axes waits for one that does.
+4. **Be objective.** A claim rests on code read or a number measured, and says which. Say where a proposal is weak, the user's and your own included, recommend against it when the evidence does, and report a result that went the wrong way as plainly as one that went the right way.
+5. **A recommendation is tested before it is given, and again after.** Put it against the real cases (the clients, proxies, protocols and other frameworks that meet it), against every stage the roadmap says comes later, and against what it closes off; then give it, with what it fails at. Never "this now, that later" when the later thing is one many others depend on: that is the design deferred, not simplified. Design it whole and build it in stages.
 
 ## Who works here
 
@@ -160,14 +170,15 @@ The habits, each of which caught something here (the cases are under *Measuring*
 | how a topic's decisions fit together | its page in `docs/design/`, linked from each ADR's `**Topic:**` line |
 | a lesson: a number measured, a premise that turned out false, a design tried and lost | `docs/history.md`, as one paragraph under the theme it teaches (its header has the rules) |
 | what a user has to change | `CHANGELOG.md`, under `## Unreleased` |
-| what is still open | `docs/roadmap.md` (its own rules are under [How this file is written](docs/roadmap.md#how-this-file-is-written)) |
+| a direction the framework is heading, larger than one change | `docs/roadmap.md` (its rules are under [How this file is written](docs/roadmap.md#how-this-file-is-written)) |
+| a concrete item still open: a defect, a decision, a caller awaited, a question, a measurement, an upstream fix | `docs/todo.md` (its own rules are under [How this file is written](docs/todo.md#how-this-file-is-written)) |
 | a question answered, a gap kept as the rule, a feature refused with its reason | `docs/decided.md` |
 | a risk with no mechanism under it yet | `docs/risks.md`, under `## Open` |
 | a benchmark run | `bench/result/` |
 | a new guide page | `docs/guide/`, with the five-line head and a row in `docs/README.md` (`docs-check` refuses either missing), plus a line in `nav:` in `mkdocs.yml` or CI's `docs` job fails |
 | a new reference or design page, or a renamed heading on one | the five-line head, a link in `docs/README.md`, and `zig build docs-index` for the reference's heading list |
 
-**The roadmap holds nothing built and nothing decided.** When something ships its entry leaves entirely, no strikethrough; what was learned moves to `docs/history.md`. Every entry opens with its whole claim in bold and closes with a `Needs:` or `What would settle it:` line, which is what makes a blocker that has quietly stopped being one findable. **`docs/history.md` stays short**: a lesson, not an account of what shipped, and a lesson learned again extends its entry rather than adding one.
+**The roadmap and the todo list hold nothing built and nothing decided.** The roadmap is a few directions, each naming the todo entries it gathers; the todo list is every concrete item. When something ships its entry leaves entirely, no strikethrough; what was learned moves to `docs/history.md`. Every entry opens with its whole claim in bold and closes with a `Needs:` or `What would settle it:` line, which is what makes a blocker that has quietly stopped being one findable. **`docs/history.md` stays short**: a lesson, not an account of what shipped, and a lesson learned again extends its entry rather than adding one.
 
 Cutting a release (the version bumps, the pinned `?ref=#commit`, the release page) is [`docs/releasing.md`](docs/releasing.md).
 

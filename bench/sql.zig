@@ -1,6 +1,6 @@
 //! What a prepared statement is worth, measured before it is built.
 //!
-//! `docs/roadmap.md` carried "prepared statements" as the SQL module's Next 1
+//! `docs/todo.md` carried "prepared statements" as the SQL module's Next 1
 //! with one condition on it: **measure first.** Every statement `nilo_sql`
 //! sends is already a comptime constant, which is the property that makes a
 //! per-connection statement cache cheap here and impossible in a library that
@@ -58,7 +58,7 @@
 //! What is **not** here is `.in_fiber` against `.{ .hop = nilo }`, which is
 //! the choice ADR 064 left to the caller and the one number that would make
 //! one of them advice. That wants the Engine and a load generator — a run of
-//! `bench-sql-server` with each — and it is `docs/roadmap.md`'s Next 1 for
+//! `bench-sql-server` with each — and it is `docs/todo.md`'s Next 1 for
 //! this module rather than something this single-threaded program can answer.
 
 const std = @import("std");

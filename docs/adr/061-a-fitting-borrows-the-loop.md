@@ -95,7 +95,7 @@ The type-keyed registry resolves `*Stripe` with nothing added to it, and a targe
 
 **A path built through `withQuery` alone.** `withQuery` needs no base and a path does; a segment is not a param, since it is encoded with `/` as data and cannot be left out.
 
-**An `Exchange` begun on a target.** Wanted, and not built: `Exchange.begin` takes a client and a URL, and a target's `url(c, path, args)` is the URL, so the standing headers and the target's gate do not reach a streamed call. It waits on a caller who streams from a service that has standing headers (`docs/roadmap.md`).
+**An `Exchange` begun on a target.** Wanted, and not built: `Exchange.begin` takes a client and a URL, and a target's `url(c, path, args)` is the URL, so the standing headers and the target's gate do not reach a streamed call. It waits on a caller who streams from a service that has standing headers (`docs/todo.md`).
 
 ## What it costs
 

@@ -51,8 +51,8 @@ Related topics: why the module needs no `Io` and where it sits is [ADR 038](../a
 
 ## Open questions
 
-- **There is no `getOrPut`.** Every caller writes the miss, the compute and the put by hand, so two threads can compute the same value at the same time. The sketched fix is a claim held outside this module rather than a lock inside it, following how `nilo.Idempotent`'s `in_flight` marker does the same job for incoming requests. [The roadmap](../roadmap.md).
-- **Whether `Stats` can be turned off.** Counting a read costs 4.2% on eight threads and 7.0% on one now that reads take no lock, and no cheaper exact count has been found. A build flag is sketched, not built. [The roadmap](../roadmap.md).
-- **`[]const u8` is the only value type that is not flat.** A struct holding one is rejected by name. The fix (write the slices after the fixed part and point them back into the caller's buffer) is known but not built. [The roadmap](../roadmap.md).
-- **`nilo_redis` is not being built.** ADR 110 settles the design; what is missing is a deployment with more than one instance to build it for. [The roadmap](../roadmap.md).
-- **Where the remaining gap to quick_cache on eight threads comes from.** Each lever found so far is worth a few percent; nobody has yet run `perf` on both binaries side by side. [The roadmap](../roadmap.md).
+- **There is no `getOrPut`.** Every caller writes the miss, the compute and the put by hand, so two threads can compute the same value at the same time. The sketched fix is a claim held outside this module rather than a lock inside it, following how `nilo.Idempotent`'s `in_flight` marker does the same job for incoming requests. [The todo list](../todo.md).
+- **Whether `Stats` can be turned off.** Counting a read costs 4.2% on eight threads and 7.0% on one now that reads take no lock, and no cheaper exact count has been found. A build flag is sketched, not built. [The todo list](../todo.md).
+- **`[]const u8` is the only value type that is not flat.** A struct holding one is rejected by name. The fix (write the slices after the fixed part and point them back into the caller's buffer) is known but not built. [The todo list](../todo.md).
+- **`nilo_redis` is not being built.** ADR 110 settles the design; what is missing is a deployment with more than one instance to build it for. [The todo list](../todo.md).
+- **Where the remaining gap to quick_cache on eight threads comes from.** Each lever found so far is worth a few percent; nobody has yet run `perf` on both binaries side by side. [The todo list](../todo.md).

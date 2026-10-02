@@ -5076,6 +5076,10 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    // The App's files ask `nilo_build` which deflate to gzip with and
+    // whether gRPC is in (ADR 248, ADR 220), so the profile is wired the way
+    // every other instance of them is.
+    wireOptions(b, profile.root_module, target, .ReleaseFast, want_tls, want_grpc, false);
     const run_profile = b.addRunArtifact(profile);
     // `zig build profile -- --routes <file>` times matching on a route table
     // of the caller's, one `METHOD /pattern` a line.
@@ -5159,6 +5163,11 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the tests in Debug — the fast loop");
     const test_all_step = b.step("test-all", "Run the tests in Debug and ReleaseSafe — what CI runs");
     test_all_step.dependOn(test_step);
+
+    // The profile is compiled on every run and not run: a measuring tool
+    // nothing builds stopped compiling twice before anybody reached for it
+    // (it lost `nilo_build` with ADR 248, and `Stream.init` with ADR 253).
+    test_step.dependOn(&profile.step);
 
     // Core, on its own, in both modes (ADR 038). It hangs off `test` rather
     // than beside it because it is the fastest thing in this file — no

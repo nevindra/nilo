@@ -86,10 +86,10 @@ Related topics: every statement here being a compile-time constant, which both t
 
 ## Open questions
 
-- **Whether `.hop` or `.in_fiber` is faster for a cache-hit read has not been measured.** [ADR 064](../adr/064-a-file-has-no-socket-to-wait-on.md) recommends `.hop` for now, and the run that would settle it is in [the roadmap](../roadmap.md).
+- **Whether `.hop` or `.in_fiber` is faster for a cache-hit read has not been measured.** [ADR 064](../adr/064-a-file-has-no-socket-to-wait-on.md) recommends `.hop` for now, and the run that would settle it is in [the todo list](../todo.md).
 - **Telling a fiber waiting for the writer it already holds from one that is genuinely waiting** still needs a fiber identity that `std.Io` does not give a Service. Named as open in [ADR 107](../adr/107-a-wait-for-a-connection-has-a-bound.md) and tracked in the roadmap.
 - **An `AnyScope` has no route**, so a statement sent through a function pointer reaches the watcher with `route` null ([ADR 108](../adr/108-a-statement-can-be-watched.md)).
 - **A children statement cannot be explained**; only the statement that reads the parents can ([ADR 232](../adr/232-a-read-can-show-its-plan.md)).
-- **The SQLite pool has no live test under real contention** (two writers colliding, `busy_timeout` expiring), per [the roadmap](../roadmap.md).
-- **Nothing reports how a pool is doing**: connections in use, how long callers waited, statements run, per [the roadmap](../roadmap.md).
+- **The SQLite pool has no live test under real contention** (two writers colliding, `busy_timeout` expiring), per [the todo list](../todo.md).
+- **Nothing reports how a pool is doing**: connections in use, how long callers waited, statements run, per [the todo list](../todo.md).
 - **Whether `sql/live.zig`'s `connect_on_init = size` workaround is still needed has not been tested.** [ADR 122](../adr/122-the-panic-under-the-panic.md) says the reconnector may now park under `std.Io.Threaded` since it moved to an `Io.Group` task, and asks for a re-test before removing it.

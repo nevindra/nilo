@@ -1346,7 +1346,7 @@ Every shape that goes through a cached statement lost 2.1 to 3.1 µs, one unix-s
 
 `starts_with` and `istarts_with` were read the same way: SQLite plans `SCAN` over a table with a `NOCASE` index on the column, because the pattern is built inside the statement by `replace(…) || '%'` and SQLite's LIKE optimisation wants a constant; Postgres uses a `text_pattern_ops` index on a custom plan and scans 200,000 rows once the statement goes generic.
 
-**What it changed:** four entries under `nilo_sql` in the [roadmap](../../docs/roadmap.md). The window is read once, as ADR 150 says, but computed over every row that matches before the limit applies, so a page costs its whole match. The guide's keyset condition filters rather than seeks, and costs what the `OFFSET` it replaces does. A stream let go early reads the rest of its result off the socket while holding the connection.
+**What it changed:** four entries under `nilo_sql` in the [todo list](../../docs/todo.md). The window is read once, as ADR 150 says, but computed over every row that matches before the limit applies, so a page costs its whole match. The guide's keyset condition filters rather than seeks, and costs what the `OFFSET` it replaces does. A stream let go early reads the rest of its result off the socket while holding the connection.
 
 **Can it be pushed further:** each is a shape rather than a tuning. A page with no total, a row comparison the index can seek on, and a stream that cancels or reads in batches are the three; the pattern bound whole from Zig costs an allocation a condition, which wants its own number against ADR 017 before it is taken.
 

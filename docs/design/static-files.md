@@ -57,5 +57,5 @@ Related topics: keeping file IO out of the Bulkhead's own contract, and using `s
 
 ## Open questions
 
-- **Streams and event streams stay uncompressed, and brotli is not offered.** In [the roadmap](../roadmap.md), waiting for someone streaming something large enough for bandwidth to matter, or a reason for brotli strong enough to justify the C dependency it brings.
+- **Streams and event streams stay uncompressed, and brotli is not offered.** In [the todo list](../todo.md), waiting for someone streaming something large enough for bandwidth to matter, or a reason for brotli strong enough to justify the C dependency it brings.
 - **`.reload` does not notice a file created after the server started**, only edits to files the startup walk found. Recorded in [`docs/decided.md`](../decided.md) as a deliberate gap: rescanning on a miss would let a name in a request decide when the disk is scanned, which is exactly the kind of traversal `static` exists to prevent.

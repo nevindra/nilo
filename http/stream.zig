@@ -24,6 +24,8 @@
 const std = @import("std");
 
 const bulkhead = @import("bulkhead.zig");
+const framing_mod = @import("framing.zig");
+const Framing = framing_mod.Framing;
 const http1 = @import("http1.zig");
 const json_mod = @import("json.zig");
 const room_mod = @import("room.zig");
@@ -97,9 +99,9 @@ pub const Stream = struct {
     /// Write here. Everything that lands in this buffer leaves as one chunk.
     writer: std.Io.Writer,
 
-    /// The connection. Chunk framing is written straight to it, around
-    /// whatever the buffer above collected.
-    _out: *std.Io.Writer,
+    /// Where the pieces go. How each is framed, and how the body ends, is
+    /// the framing's (ADR 253).
+    _framing: *Framing,
     /// The server's "please stop" flag, or null when nothing can stop —
     /// App driven straight from a test.
     _stopping: ?*const std.atomic.Value(bool),
@@ -142,7 +144,7 @@ pub const Stream = struct {
     /// one after them.
     pub fn flush(self: *Stream) !void {
         try self.writer.flush();
-        try self._out.flush();
+        try self._framing.flush();
     }
 
     /// Whether it is still worth carrying on: false once the server has been
@@ -191,8 +193,7 @@ pub const Stream = struct {
             }
         }
 
-        if (open.chunked and !open.drop) try http1.writeLastChunk(self._out);
-        try self._out.flush();
+        try self._framing.end(open.chunked and !open.drop);
 
         // Take the buffer away, so that anything written from here on has
         // nowhere to sit and goes straight to `drain` — which is where the
@@ -271,11 +272,7 @@ pub const Stream = struct {
             self._open.*.?.written = open.written + total;
         }
 
-        if (open.chunked) http1.writeChunkHeader(self._out, total) catch return error.WriteFailed;
-        if (buffered.len > 0) self._out.writeAll(buffered) catch return error.WriteFailed;
-        for (data[0 .. data.len - 1]) |slice| self._out.writeAll(slice) catch return error.WriteFailed;
-        for (0..splat) |_| self._out.writeAll(pattern) catch return error.WriteFailed;
-        if (open.chunked) http1.endChunk(self._out) catch return error.WriteFailed;
+        self._framing.piece(open.chunked, buffered, data, splat) catch return error.WriteFailed;
 
         w.end = 0;
         return from_data;
@@ -284,13 +281,13 @@ pub const Stream = struct {
     /// nilo's own: `Ctx.stream` builds one of these once the head is out.
     pub fn init(
         buffer: []u8,
-        out: *std.Io.Writer,
+        framing: *Framing,
         stopping: ?*const std.atomic.Value(bool),
         open: *?Open,
     ) Stream {
         return .{
             .writer = .{ .buffer = buffer, .vtable = &.{ .drain = drain } },
-            ._out = out,
+            ._framing = framing,
             ._stopping = stopping,
             ._open = open,
         };
@@ -300,12 +297,12 @@ pub const Stream = struct {
     /// flag — which is `Ctx` and nobody else.
     pub fn initClosing(
         buffer: []u8,
-        out: *std.Io.Writer,
+        framing: *Framing,
         stopping: ?*const std.atomic.Value(bool),
         open: *?Open,
         force_close: *bool,
     ) Stream {
-        var self = init(buffer, out, stopping, open);
+        var self = init(buffer, framing, stopping, open);
         self._force_close = force_close;
         return self;
     }
@@ -452,7 +449,7 @@ pub const FromRooms = struct {
 /// ends. Either way the stream ends. It is the one place nilo learns a client
 /// left without writing to it, and the reason it can be learned here is the
 /// same reason it cannot on an ordinary request: an ordinary response ends,
-/// and a client that half-closed may be waiting for it (`docs/roadmap.md`).
+/// and a client that half-closed may be waiting for it (`docs/todo.md`).
 pub const RoomEvents = struct {
     _in: *std.Io.Reader,
     _out: *std.Io.Writer,
@@ -652,23 +649,26 @@ const testing = std.testing;
 const Wire = struct {
     buf: [4096]u8 = undefined,
     out: std.Io.Writer = undefined,
+    in: std.Io.Reader = .fixed(""),
+    framing: Framing = undefined,
     stream_buf: [64]u8 = undefined,
     open: ?Open = null,
 
     fn init(self: *Wire) void {
         self.out = .fixed(&self.buf);
+        self.framing = .{ .http1 = .{ .in = &self.in, .out = &self.out, .minor_version = 1 } };
     }
 
     fn stream(self: *Wire, chunked: bool, drop: bool) Stream {
         self.open = .{ .chunked = chunked, .drop = drop };
-        return .init(&self.stream_buf, &self.out, null, &self.open);
+        return .init(&self.stream_buf, &self.framing, null, &self.open);
     }
 
     /// A stream whose head promised `length` bytes: no chunk framing, and a
     /// close flag for the one failure that cannot be taken back.
     fn promising(self: *Wire, length: u64, closing: *bool) Stream {
         self.open = .{ .chunked = false, .drop = false, .promised = length };
-        return .initClosing(&self.stream_buf, &self.out, null, &self.open, closing);
+        return .initClosing(&self.stream_buf, &self.framing, null, &self.open, closing);
     }
 
     fn written(self: *const Wire) []const u8 {
@@ -961,7 +961,7 @@ test "a HEAD that promised a length writes nothing and closes nothing" {
     wire.init();
     var closing = false;
     wire.open = .{ .chunked = false, .drop = true, .promised = 100 };
-    var body: Stream = .initClosing(&wire.stream_buf, &wire.out, null, &wire.open, &closing);
+    var body: Stream = .initClosing(&wire.stream_buf, &wire.framing, null, &wire.open, &closing);
 
     // The head said a hundred bytes, because that is what a GET would have
     // said. Nothing follows it, and nothing about that is short.
@@ -978,7 +978,7 @@ test "live follows the server's stopping flag" {
     var stopping = std.atomic.Value(bool).init(false);
 
     wire.open = .{ .chunked = true, .drop = false };
-    var body: Stream = .init(&wire.stream_buf, &wire.out, &stopping, &wire.open);
+    var body: Stream = .init(&wire.stream_buf, &wire.framing, &stopping, &wire.open);
     try testing.expect(body.live());
     stopping.store(true, .release);
     try testing.expect(!body.live());
