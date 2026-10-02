@@ -185,7 +185,7 @@ test "every limit nilo arms is cut down to the deadline, and none is lengthened"
     var caught: bulkhead.Limit = .none;
     const Trap = struct {
         fn limit(target: ?*anyopaque, _: bulkhead.Side, l: bulkhead.Limit) void {
-            const into: *bulkhead.Limit = @alignCast(@ptrCast(target.?));
+            const into: *bulkhead.Limit = @ptrCast(@alignCast(target.?));
             into.* = l;
         }
         fn timedOut(_: ?*anyopaque) bool {
@@ -291,4 +291,3 @@ test "a request that takes the connection over lets go of the default and keeps 
     try testing.expectEqual(@as(u16, 200), (try client.get(&app, "/default")).status);
     try testing.expectEqual(@as(u16, 200), (try client.get(&app, "/own")).status);
 }
-

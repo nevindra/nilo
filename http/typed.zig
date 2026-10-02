@@ -96,6 +96,8 @@ pub fn Response(comptime T: type) type {
 
         status: u16 = 200,
         headers: Headers = .{},
+        /// Sent after the body, the way `Ctx.setTrailer` sends them (ADR 254).
+        trailers: Headers = .{},
         value: void = {},
     };
     return struct {
@@ -106,6 +108,8 @@ pub fn Response(comptime T: type) type {
 
         status: u16 = 200,
         headers: Headers = .{},
+        /// Sent after the body, the way `Ctx.setTrailer` sends them (ADR 254).
+        trailers: Headers = .{},
         value: T,
     };
 }
@@ -142,6 +146,8 @@ pub fn Status(comptime code: u16, comptime T: type) type {
         pub const nilo_type_name = std.fmt.comptimePrint("nilo.Status({d},void)", .{code});
 
         headers: Headers = .{},
+        /// Sent after the body, the way `Ctx.setTrailer` sends them (ADR 254).
+        trailers: Headers = .{},
         value: void = {},
     };
     return struct {
@@ -152,6 +158,8 @@ pub fn Status(comptime code: u16, comptime T: type) type {
         pub const nilo_type_name = std.fmt.comptimePrint("nilo.Status({d},{s})", .{ code, naming.of(T) });
 
         headers: Headers = .{},
+        /// Sent after the body, the way `Ctx.setTrailer` sends them (ADR 254).
+        trailers: Headers = .{},
         value: T,
     };
 }
@@ -534,6 +542,8 @@ const Begun = struct {
     /// middleware's, which set themselves again on a replay. What is set
     /// after is the handler's, through the Ctx, and is kept with the answer.
     headers_from: usize,
+    /// The same count for trailers.
+    trailers_from: usize,
 };
 
 const BeginOutcome = union(enum) { replayed, fresh: Begun };
@@ -607,6 +617,7 @@ fn idempotentBegin(comptime P: type, c: *Ctx) !BeginOutcome {
         .under = under,
         .fingerprint = fingerprint,
         .headers_from = c.extraHeaders().len,
+        .trailers_from = c.trailers().len,
     };
     if (claimed) return .{ .fresh = begun };
 
@@ -631,6 +642,8 @@ fn idempotentBegin(comptime P: type, c: *Ctx) !BeginOutcome {
 
     var it = record.eachHeader();
     while (it.next()) |h| try c.setHeader(h.name, h.value);
+    var trailing = record.eachTrailer();
+    while (trailing.next()) |t| try c.setTrailer(t.name, t.value);
     try c.setStaticHeader(idempotent_mod.replayed_name, "true");
     try c.send(record.status, record.contentType(), record.body);
     return .replayed;
@@ -657,12 +670,13 @@ fn idempotentFinish(comptime P: type, c: *Ctx, begun: Begun, result: anytype) !v
     // `sendRendered` puts them on the first response in, so a name set both
     // ways has the same winner (ADR 155).
     const kept_headers = try withCtxHeaders(c, begun.headers_from, answer.headers);
+    const kept_trailers = try joinedFrom(c, c.trailers(), begun.trailers_from, answer.trailers);
     // Before the put: a header `setHeader` refuses would be kept and then
     // replayed as the same 500 until the Space expired it, where a miss
     // runs the handler again (ADR 155).
-    try checkKept(c, kept_headers, answer);
+    try checkKept(c, kept_headers, kept_trailers, answer);
 
-    const record = idempotent_mod.encode(c._arena, answer.kind, answer.status, begun.fingerprint, kept_headers, answer.content_type, answer.body) catch |err| switch (err) {
+    const record = idempotent_mod.encode(c._arena, answer.kind, answer.status, begun.fingerprint, kept_headers, kept_trailers, answer.content_type, answer.body) catch |err| switch (err) {
         error.TooLarge => {
             _ = replays.del(begun.under);
             std.log.warn("route \"{s}\" answered with more headers than an idempotency record holds; the answer was sent and not kept", .{c._path});
@@ -697,7 +711,12 @@ fn idempotentRelease(comptime P: type, c: *Ctx, begun: Begun) void {
 /// The headers a kept answer is sent with: those set through the Ctx since
 /// `from`, then `own`. Nothing is allocated when the handler set none.
 fn withCtxHeaders(c: *Ctx, from: usize, own: []const http1.Header) ![]const http1.Header {
-    const all = c.extraHeaders();
+    return joinedFrom(c, c.extraHeaders(), from, own);
+}
+
+/// `all` from `from` on, then `own`. Nothing is allocated when nothing was
+/// set through the Ctx.
+fn joinedFrom(c: *Ctx, all: []const http1.Header, from: usize, own: []const http1.Header) ![]const http1.Header {
     if (all.len <= from) return own;
     const set = all[from..];
     const both = try c._arena.alloc(http1.Header, set.len + own.len);
@@ -708,8 +727,9 @@ fn withCtxHeaders(c: *Ctx, from: usize, own: []const http1.Header) ![]const http
 
 /// Whether every header of an answer about to be kept, and its label, would
 /// be accepted by the Ctx on the way out (ADR 155, ADR 188).
-fn checkKept(c: *Ctx, headers: []const http1.Header, answer: Rendered) !void {
+fn checkKept(c: *Ctx, headers: []const http1.Header, trailers: []const http1.Header, answer: Rendered) !void {
     for (headers) |h| try Ctx.checkHeader(h);
+    for (trailers) |t| try Ctx.checkTrailer(t);
     if (answer.kind == .own) try c.contentTypeOk(answer.content_type);
 }
 
@@ -776,6 +796,8 @@ fn cachedBegin(comptime P: type, c: *Ctx) !cached_mod.Outcome {
             if (record.kind != .in_flight) {
                 var it = record.eachHeader();
                 while (it.next()) |h| try c.setHeader(h.name, h.value);
+                var trailing = record.eachTrailer();
+                while (trailing.next()) |t| try c.setTrailer(t.name, t.value);
                 try c.setStaticHeader(cached_mod.status_name, cached_mod.hit_value);
                 try c.send(record.status, record.contentType(), record.body);
                 return .replayed;
@@ -829,7 +851,7 @@ fn cachedFinish(comptime P: type, c: *Ctx, begun: cached_mod.Begun, result: anyt
 
     // Before the put, for the reason `idempotentFinish` gives: a refused
     // header kept is a 500 replayed for the whole TTL (ADR 188).
-    try checkKept(c, answer.headers, answer);
+    try checkKept(c, answer.headers, answer.trailers, answer);
 
     const record = idempotent_mod.encode(
         c._arena,
@@ -837,6 +859,7 @@ fn cachedFinish(comptime P: type, c: *Ctx, begun: cached_mod.Begun, result: anyt
         answer.status,
         begun.fingerprint,
         answer.headers,
+        answer.trailers,
         answer.content_type,
         answer.body,
     ) catch |err| switch (err) {
@@ -907,6 +930,9 @@ pub const Rendered = struct {
     /// The handler's own — a `Response(T)`'s, a `Bytes`' — and not the
     /// ones middleware set, which set themselves again on a replay.
     headers: []const http1.Header,
+    /// The handler's own trailers, a `Response(T)`'s, kept beside its headers
+    /// and set again on a replay (ADR 254).
+    trailers: []const http1.Header = &.{},
     /// What an `.own` answer goes out as; empty for every other kind.
     content_type: []const u8,
     body: []const u8,
@@ -922,6 +948,7 @@ fn renderAnswer(c: *Ctx, result: anytype) !Rendered {
     const T = @TypeOf(value);
 
     var own_headers: []const http1.Header = &.{};
+    var own_trailers: []const http1.Header = &.{};
     var status: u16 = 200;
     const inner = if (comptime hasNamedDecl(T, "nilo_response")) blk: {
         // Into the arena, not a view: `value` is this frame's copy of the
@@ -929,6 +956,7 @@ fn renderAnswer(c: *Ctx, result: anytype) !Rendered {
         // dangling the moment this returns. `sendResult` sends before it
         // returns and can view; a rendered answer outlives the frame.
         own_headers = try keptHeaders(c._arena, value.headers.view());
+        own_trailers = try keptHeaders(c._arena, value.trailers.view());
         status = if (comptime hasNamedDecl(T, "nilo_status")) T.nilo_status else value.status;
         break :blk value.value;
     } else value;
@@ -976,6 +1004,7 @@ fn renderAnswer(c: *Ctx, result: anytype) !Rendered {
         .kind = kind,
         .status = status,
         .headers = own_headers,
+        .trailers = own_trailers,
         .content_type = content_type,
         .body = body,
     };
@@ -1003,7 +1032,9 @@ fn joinedHeaders(arena: std.mem.Allocator, a: []const http1.Header, b: []const h
 /// its kind implies or the one the type chose.
 fn sendRendered(c: *Ctx, answer: Rendered) !void {
     for (answer.headers) |h| try c.setHeader(h.name, h.value);
-    return c.send(answer.status, if (answer.kind == .own) answer.content_type else answer.kind.contentType(), answer.body);
+    for (answer.trailers) |t| try c.setTrailer(t.name, t.value);
+    // In the arena, or what the handler returned: not copied when held.
+    return c.sendKept(answer.status, if (answer.kind == .own) answer.content_type else answer.kind.contentType(), answer.body);
 }
 
 /// Which services this handler needs. Computed at compile time and used by
@@ -2250,6 +2281,7 @@ fn sendResult(c: *Ctx, result: anytype) !void {
         // handler assembling a header value has the request arena to build
         // it in, and should not have to think about which of the two it is.
         for (value.headers.view()) |h| try c.setHeader(h.name, h.value);
+        for (value.trailers.view()) |t| try c.setTrailer(t.name, t.value);
         const status = if (comptime hasNamedDecl(T, "nilo_status"))
             T.nilo_status
         else
@@ -2294,16 +2326,20 @@ fn sendValue(c: *Ctx, status: u16, value: anytype) !void {
     // `Status(201, T)` and `Response(T)` all reach it the way they reach
     // JSON. What it costs is what JSON costs: the same arena buffer, the
     // same `send`.
+    //
+    // Every body below is `sendKept`: it is in the request arena, or it is
+    // what the handler returned, which outlived the handler's frame already,
+    // so a middleware holding the answer does not copy it (ADR 008).
     if (comptime ownbody.writesItsOwnBody(T)) {
         var out: std.Io.Writer.Allocating = try .initCapacity(c._arena, ctx_mod.json_hint);
         try value.nilo_write(&out.writer);
-        return c.send(status, T.nilo_content_type, out.written());
+        return c.sendKept(status, T.nilo_content_type, out.written());
     }
-    if (T == Str) return c.sendText(status, value.view());
+    if (T == Str) return c.sendKept(status, "text/plain", value.view());
     // The same question `contentTypeFor` asks, and it has to be the same
     // answer: a body sent as JSON under a `text/plain` label, or the other way
     // round, is the response and its own description disagreeing.
-    if (comptime json_mod.isByteSlice(T)) return c.sendText(status, value);
+    if (comptime json_mod.isByteSlice(T)) return c.sendKept(status, "text/plain", value);
     return c.sendJson(status, value);
 }
 

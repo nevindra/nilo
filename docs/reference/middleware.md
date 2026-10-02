@@ -227,6 +227,31 @@ fn ingestRoutes(app: *nilo.App, max_body_bytes: usize) !void {
 
 There is no lock: the number is written before the server starts and read while it runs, and changing it while the server is running is a race with every request in flight.
 
+## Holding the answer with `next.hold`
+
+**`next.hold(c)` is `next.run(c)` with the answer kept back until the chain has unwound, and handed to the middleware to read and change** ([ADR 008](../adr/008-middleware-is-an-onion-of-ctx-functions.md), [ADR 254](../adr/254-an-answer-can-carry-trailers.md)).
+
+```zig
+const answer = try next.hold(c);
+if (answer.status() == 200) try answer.setHeader("Cache-Control", "max-age=60");
+```
+
+`hold` is `fn (Next, *Ctx) anyerror!Answer`. The held answer is written when the holding middleware returns. A middleware that never calls it is unchanged.
+
+| `nilo.Answer` | |
+|---|---|
+| `answer.status()` | `?u16`: null when nothing below answered, because App's own empty 200 or its 500 for a guard that said nothing is still to come |
+| `answer.body()` | `?[]const u8`: a whole answer's body as it was sent, before compression. Null for a stream, a file, or nothing answered |
+| `answer.setHeader(name, value)` | as `c.setHeader`. Refused on a stream, whose head has gone |
+| `answer.setTrailer(name, value)` | as `c.setTrailer`. A stream takes one too, because its end is held as well |
+| `answer.replace(status, content_type, body)` | a different whole answer in its place (a 304, a page of HTML for a browser that got JSON). Headers set so far stay, and `body` is copied. Refused once a head has gone |
+
+**What can change is what has not had to leave:** a whole answer's status, headers, body and trailers; a file's headers; a stream's trailers and its end.
+
+**A failure below `hold` propagates like `run`**, as its error. A failure after it replaces a held whole answer, where after `run` it could only close the connection.
+
+**The cost is a copy.** Under a hold, the body a handler gives `c.send` is copied into the request arena, because the handler's frame is gone by the time the chain unwinds: free under the 16 KiB the arena keeps, and 63% of throughput at 64 KiB in the run that settled it. A body from `c.sendKept`, a typed handler's return value, `c.sendJson` and static files is not copied.
+
 ## `nilo.accept`
 
 **What the request's `Accept` header says about one media type.** One call, no allocation. It is what the single-page fallback reads when a request sent no `Sec-Fetch-Mode` ([ADR 087](../adr/087-a-fallback-answers-a-navigation-not-a-missing-asset.md)).

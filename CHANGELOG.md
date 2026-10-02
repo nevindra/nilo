@@ -13,6 +13,17 @@ in [`docs/history.md`](./docs/history.md); what is coming is in
 ### Breaking
 
 - **`nilo.Stream.init` and `initClosing` take the request's `Framing` where they took the connection's `*std.Io.Writer`.** Both are what `Ctx.stream` builds, and nothing in the reference shows them; a test that built a `Stream` by hand against a buffer builds a `Framing` around that buffer first (`.{ .http1 = .{ .in = &reader, .out = &writer, .minor_version = 1 } }`). Every answer now leaves through the framing that carried its request, which is the first stage of HTTP/2 for more than gRPC ([ADR 253](docs/adr/253-an-answer-is-handed-to-the-framing-that-carried-its-request.md)).
+- **A header set after the answer's head was written is refused with an error**, where it used to be dropped without a word. A middleware that set a header after `try next.run(c)` and saw it reach the client never did; it calls `next.hold(c)` instead, or sets the header before `next`, or with `defer c.setHeader(...) catch {};` for one that must cover failures too ([ADR 008](docs/adr/008-middleware-is-an-onion-of-ctx-functions.md)).
+- **`c.setHeader("grpc-status", …)` and `c.setHeader("grpc-message", …)` are refused.** Set them with `c.setTrailer`, which works the same on HTTP/2 and HTTP/1.1 ([ADR 254](docs/adr/254-an-answer-can-carry-trailers.md)).
+- **A gRPC call that fails with `error.AlreadyExists` answers `ALREADY_EXISTS` (6), and one that fails with `error.RolledBack` answers `ABORTED` (10)**, where they answered `ABORTED` and `UNAVAILABLE` from their HTTP status. A client that retried on those codes sees the right ones now.
+- **`App.grpcHost` is a compile error in a build without `-Dgrpc`**, where it compiled and was undefined behaviour in ReleaseFast if reached.
+- **The idempotency and cache record encoders take the answer's trailers** beside its headers. A record written before reads the same.
+
+### Added
+
+- **`c.setTrailer(name, value)`**, a field sent after the body: a HEADERS frame on HTTP/2, a trailer section on a chunked HTTP/1.1 stream, and on a whole HTTP/1.1 answer when the client sent `TE: trailers`. With it `c.trailers()`, `c.clientReadsTrailers()`, `Ctx.checkTrailer`, and `.trailers` on `nilo.Response(T)` and `nilo.Status(code)`. A route that sets none pays nothing ([ADR 254](docs/adr/254-an-answer-can-carry-trailers.md)).
+- **`next.hold(c)`**, which hands a middleware the answer below it unwritten as a `nilo.Answer` (`status`, `body`, `setHeader`, `setTrailer`, `replace`), written when the chain has unwound. A body sent with `c.send` under a hold is copied into the arena, free under 16 KiB and costly above it; **`c.sendKept`** sends one that already outlives the chain without the copy ([ADR 008](docs/adr/008-middleware-is-an-onion-of-ctx-functions.md)).
+- **A unary gRPC call is 17% faster in process and a `-Dgrpc` build 47 KB smaller**: the answer is collected by the framing rather than written as HTTP/1.1 and parsed back.
 
 ## Released
 

@@ -190,7 +190,7 @@ fn placeOrder(key: nilo.Idempotent(Replays, .{ .by = account }), body: NewOrder)
 }
 ```
 
-The first request with a key runs the handler and **stores what it returned**: the status, the `Response(T)` headers, and the body. Every later request with that key gets the stored answer back, byte for byte, with `Idempotent-Replayed: true`, and the handler does not run. A failure is not stored, so a retry after a `fail.…` or an error runs the handler again.
+The first request with a key runs the handler and **stores what it returned**: the status, the `Response(T)` headers and trailers, and the body. Every later request with that key gets the stored answer back, byte for byte, with `Idempotent-Replayed: true`, and the handler does not run. A failure is not stored, so a retry after a `fail.…` or an error runs the handler again.
 
 | | |
 |---|---|
@@ -218,7 +218,7 @@ fn frontPage(page: nilo.Cached(Pages, .{ .ttl_s = 60 })) !Front {
 }
 ```
 
-The first request runs the handler and **stores what it returned** (status, the `Response(T)` headers, the body) under the path and query. Every request for the same path and query within `ttl_s` gets the stored answer back, byte for byte, with `Cache-Status: nilo; hit`, and the handler does not run; a fresh answer carries `Cache-Status: nilo; fwd=miss`. A failure is not stored, so the next request runs the handler again. **An answer that sets a cookie, or carries a header `setHeader` refuses, is sent and not kept**, with a `warn`, so the first visitor's `Set-Cookie` is never replayed to everybody ([ADR 188](../adr/188-a-route-can-say-cache-this-answer-for-a-minute.md)).
+The first request runs the handler and **stores what it returned** (status, the `Response(T)` headers and trailers, the body) under the path and query. Every request for the same path and query within `ttl_s` gets the stored answer back, byte for byte, with `Cache-Status: nilo; hit`, and the handler does not run; a fresh answer carries `Cache-Status: nilo; fwd=miss`. A failure is not stored, so the next request runs the handler again. **An answer that sets a cookie, or carries a header `setHeader` refuses, is sent and not kept**, with a `warn`, so the first visitor's `Set-Cookie` is never replayed to everybody ([ADR 188](../adr/188-a-route-can-say-cache-this-answer-for-a-minute.md)).
 
 | | |
 |---|---|
@@ -303,6 +303,8 @@ Versioned([]Order){ .version = revision, .value = orders }  // `W/"…"`; `.unch
 ```
 
 `Headers` holds up to 8 headers by value; a ninth is a compile error.
+
+**`Status(code, T)` and `Response(T)` also take `.trailers: Headers = .{}`**, sent after the body the way `c.setTrailer` sends them, under the same rules and refusals ([ADR 254](../adr/254-an-answer-can-carry-trailers.md), [Trailers](ctx.md#trailers)). Costs nothing when empty.
 
 ### A `*Ctx` handler that returns `void`
 

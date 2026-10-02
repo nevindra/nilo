@@ -179,13 +179,13 @@ test "a start past the end of the file is the one thing worth a 416" {
 test "anything that cannot be understood is ignored, and the whole file goes out" {
     const nonsense = [_][]const u8{
         "bytes=abc-def", // not numbers
-        "bytes=0x10-",   // not decimal
-        "bytes=+5-10",   // not digits
-        "bytes=99-10",   // backwards
-        "items=0-99",    // a unit nobody has
-        "bytes=",        // nothing asked for
-        "0-99",          // no unit at all
-        "bytes 0-99",    // no `=`
+        "bytes=0x10-", // not decimal
+        "bytes=+5-10", // not digits
+        "bytes=99-10", // backwards
+        "items=0-99", // a unit nobody has
+        "bytes=", // nothing asked for
+        "0-99", // no unit at all
+        "bytes 0-99", // no `=`
     };
     for (nonsense) |header| {
         try testing.expectEqual(Answer.whole, wants(header, 1000));

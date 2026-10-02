@@ -3482,3 +3482,67 @@ The default build is about 20 ns slower in process, outside its spread, and the 
 **The decision it moved:** go. Every answer `Ctx` makes leaves through `Framing`, and stage 2 can build on it.
 
 **Can it be pushed further:** (1) the 20 ns of placement in the default build, by finding which function's alignment moved (`perf` is not on this machine); it is not on any path the end-to-end run can see. (2) The gRPC call's text round trip, which stage 2 and 3 remove outright.
+
+## Holding every answer until the chain unwinds
+
+Taken for the open question on [the framing page](../../docs/design/framing.md#open-questions), whether a middleware may change an answer after `next()`. **The question: what it costs to hold every whole answer until the middleware chain has unwound, as Axum and Hono do, rather than only where a middleware asks for it.** Holding means `send` keeps the answer and the connection writes it after the chain, and a body the request does not own (anything handed to `c.send`) has to be copied into the arena first: the handler's frame is gone by then, and so is anything its `defer` released, a cache entry included.
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`. Base is `372b766` exported with `git archive`; the spike is the same tree with `Ctx.send` holding the answer, copying the body unless it came from the typed layer or `sendJson` (already in the arena), and `serveRequest` writing it after the chain. Both serve `nilo-hello` plus four routes answering `c.send(200, "application/octet-stream", blob[0..n])` from a global buffer, and an allocator under the App that counts what the arenas ask of it. Spike not kept.
+
+**Method.** The Go load generator from the section above, 64 keep-alive connections, server on cores 0 to 3 and client on 4 to 7 and 12 to 15, 1 s warm-up and 5 s counted, five rounds with the order of the two builds swapped each round. Peak memory is the server's `VmHWM` at the end of each run. Backing allocations are a separate 2 s run with no warm-up, divided by the requests in it.
+
+| route | base: req/s, p99 | spike: req/s, p99 | backing allocations a request, spike | peak RSS, base → spike |
+|---|---|---|---|---|
+| `/users/42` (typed JSON, not copied) | 1,641 k, 57.3 µs | 1,644 k, 57.5 µs | 0 | 6.9 → 6.9 MB |
+| `/b/1k` | 1,759 k, 57.5 µs | 1,758 k, 57.8 µs | 0 | 6.6 → 6.8 MB |
+| `/b/16k` | 1,029 k, 82.8 µs | 1,009 k, 85.6 µs | 0 | 6.6 → 7.9 MB |
+| `/b/64k` | 388 k, 225 µs | 143 k, 620 µs | 1.0 | 6.6 → 9.8 MB |
+| `/b/1m` | 67 k, 2.9 ms | 9 k, 8.1 ms | 1.0 | 6.6 → 56.8 MB |
+
+Medians of five rounds; the base never asked its allocator for anything after warm-up on any route. **Holding itself costs nothing measurable** (`/users/42`, where nothing is copied, is level). **The copy is free while it fits in what the arena keeps and ruinous once it does not**: at 16 KiB it is 2% of throughput and 3% of p99, at the edge of the spread, and at 64 KiB every request grows its arena past `arena_keep` and gives it back, which cost 63% of throughput and nearly tripled p99. At 1 MiB it is 87% of throughput and 8.6 times the peak memory. Why the growth costs that much was not taken apart (no `perf` on this machine); the large blocks go to the page allocator, so a map and an unmap a request across four threads is the likely reading, not a measured one.
+
+**The hypothesis it replaced was too kind.** Before the run the estimate for a 16 KiB to 1 MiB body was "a few microseconds" a request; it was 400 µs of p99 at 64 KiB. ADR 017 calls allocations a hard axis because one is "fine a million times and then it is a `mmap`"; here it is the `mmap` every time.
+
+**The decision it moved:** holding every answer is refused. Holding where a middleware asks for it (`next.hold`, built in the next section) stays the recommendation, and it carries the same copy: a route behind such a middleware that sends a large body through `c.send` pays these numbers, which its documentation has to say. Idle memory per connection was not measured; nothing in the spike lives past `serveRequest`.
+
+**Can it be pushed further:** the copy could be skipped for a body that provably outlives the chain, but nothing can prove that about a slice: a global, an arena and a cache entry released by the handler's `defer` look the same. Raising `arena_keep` moves the 64 KiB cost from throughput to memory a connection holds.
+
+## Trailers, a held answer, and gRPC answered from what it collected
+
+The cost of the framing's second stage ([ADR 254](../../docs/adr/254-an-answer-can-carry-trailers.md), [ADR 008](../../docs/adr/008-middleware-is-an-onion-of-ctx-functions.md), [ADR 220](../../docs/adr/220-grpc-is-served-over-h2c-behind-a-flag.md)): `c.setTrailer`, `next.hold(c)`, a header after the head refused, and a gRPC call answered from a `framing.Collected` instead of from HTTP/1.1 text it parsed back. **The question: what each axis pays, in a build with `-Dgrpc` and one without.**
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`. Before is `372b766` exported with `git archive`; after is the working tree on top of it, same afternoon, same flags, each built default and with `-Dgrpc`.
+
+**Size**, stripped `nilo-hello`:
+
+| build | before | after | |
+|---|---|---|---|
+| default | 1,017,104 | 1,020,800 | +3,696 |
+| `-Dgrpc` | 1,141,120 | 1,094,112 | −47,008 |
+
+The default build pays for the held answer, the trailer list on `Ctx` and the late-header check; the trailer writers are behind a pointer the first `setTrailer` sets (the ADR 246 move), which took 2,656 bytes out of the first cut. The `-Dgrpc` build loses the HTTP/1.1 response parser, the chunked decoder and the reframing copy that the call used to go through.
+
+**The profile** (`zig build profile`, pinned to one core, four rounds interleaved, best of five inside each): a routed GET end to end 407 to 409 ns before and 403 to 405 ns after in the default build. **The first cut of the `-Dgrpc` build was a regression and is not what ships**: the same GET went from 392 to 395 ns to 464 to 469 ns, +18%, past ADR 017's 10%. Every row the profile breaks out was level, so it was in the remainder; a build with the HTTP/2 arm forced off came back to 402 to 403 ns, and with `Collected.whole` and `Collected.head` made `noinline` the GET is 411 to 412 ns (+4%, inside the 15 ns the two builds already differed by before). No `perf` on this machine, so the reading that inlining the collecting code into `Framing.whole` is what cost it is the experiment's, not a profile's. A unary gRPC call over h2c went from 1,083 to 1,118 ns to 902 to 910 ns, −17%: the parse it no longer does.
+
+**End to end**, `/users/42` under the Go load generator, 64 keep-alive connections, server on cores 0 to 3 and client on 4 to 7 and 12 to 15, 2 s warm-up and 8 s counted, five rounds interleaved, medians:
+
+| build | before: req/s, p99 | after: req/s, p99 |
+|---|---|---|
+| default | 1,633 k, 59.5 µs | 1,611 k, 59.5 µs |
+| `-Dgrpc` | 1,610 k, 60.3 µs | 1,608 k, 60.3 µs |
+
+The default build's −1.3% is small and is in every round, not inside the spread: after was below before in all five. It is the per-answer bookkeeping a hold needs (`_head_written`, the check `setHeader` makes against it, the trailer list's emptiness), and it is inside the budget.
+
+**Idle memory** (`bench/mem.py`, 1,000, 5,000 and 10,000 idle connections, two rounds): 5,165, 5,181 and 5,182 bytes a connection before and after in the default build; 5,165, 5,181, 5,182 before and 5,161, 5,180, 5,182 after with `-Dgrpc`. Unchanged. Nothing new lives past `serveRequest`, and `endStream` stays `noinline` off the connection loop.
+
+**Allocations.** The request path's budget test (`http/behaviour.zig`) passes unchanged: a route that does not hold or set a trailer pays nothing. A gRPC call's arena, counted with `budget.Counting` in a scratch build over the suite's three services:
+
+| call | before: allocations, bytes | after: allocations, bytes |
+|---|---|---|
+| `/test.Echo/Say` | 4, 615 | 4, 495 |
+| `/test.Meta/Who` | 9, 978 | 10, 697 |
+| `/test.Orders/Get` | 8, 1,082 | 8, 824 |
+
+The first cut was one more allocation on every call (5, 11 and 9): the body and the content type were copied separately. They are now one block, with the five bytes of the gRPC prefix in front of the body so the frame is written without a second copy. `Meta/Who` keeps one more, the copy of the headers it sets, which the old path paid as part of a larger text. Heap allocations from the second call on stay zero.
+
+**The decision it moved:** the stage ships with `noinline` on the collecting methods, and the default build's 1.3% is the price of the hold. **Can it be pushed further:** the 1.3% could come back if the late-header check moved off `setHeader` into Debug only, which would turn a refusal into a silent loss in ReleaseFast; refused, for the reason ADR 008 gives.

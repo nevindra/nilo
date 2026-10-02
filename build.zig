@@ -6506,6 +6506,20 @@ pub fn build(b: *std.Build) void {
         refused.expect_errors = .{ .contains = b.fmt("error: nilo: {s}", .{refusal.says}) };
         refusals_step.dependOn(&refused.step);
     }
+    // One refusal holds only in a build without `-Dgrpc`, because with the
+    // flag the same program is correct: asking the App for gRPC where there
+    // is no framing to collect a call into (ADR 220).
+    if (!want_grpc) {
+        const module = b.createModule(.{
+            .root_source_file = b.path("refusals/grpc_without_the_build_flag.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{.{ .name = "nilo_http", .module = nilo_http }},
+        });
+        const refused = b.addObject(.{ .name = "grpc_without_the_build_flag", .root_module = module });
+        refused.expect_errors = .{ .contains = "error: nilo: the App answers gRPC only in a build with `.grpc = true` (`-Dgrpc`)." };
+        refusals_step.dependOn(&refused.step);
+    }
     test_step.dependOn(refusals_step);
 
     // And the mirror of it: the documentation's own snippets, which have to

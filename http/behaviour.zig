@@ -7073,7 +7073,7 @@ test "a failure drops the headers that described the answer it replaced, and kee
     defer h.deinit();
     try h.ready(&app);
     const result = h.send(&app, "POST /orders HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n");
-    const head = result.response[0 .. std.mem.indexOf(u8, result.response, "\r\n\r\n").?];
+    const head = result.response[0..std.mem.indexOf(u8, result.response, "\r\n\r\n").?];
     try testing.expect(std.mem.startsWith(u8, head, "HTTP/1.1 409 "));
     for ([_][]const u8{ "Content-Encoding", "Cache-Control", "Expires", "ETag", "Last-Modified", "Content-Range", "Content-Disposition", "Location" }) |gone| {
         if (std.ascii.indexOfIgnoreCase(head, gone) != null) {
@@ -11100,4 +11100,259 @@ test "a group bound twice is bound to the listeners both name" {
         const response = h.send(&app, "GET /narrow HTTP/1.1\r\nHost: t\r\n\r\n").response;
         if (l == 2) try expectOk(response) else try testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 404 "));
     }
+}
+
+// ---- holding an answer, and trailers (ADR 008, ADR 254) ----
+
+var late_header_refused = false;
+
+/// The half after `next.run` setting a header, which has nowhere to go.
+fn lateHeader(c: *Ctx, next: mw.Next) anyerror!void {
+    try next.run(c);
+    late_header_refused = false;
+    c.setHeader("X-Late", "1") catch |err| {
+        late_header_refused = err == error.Failed;
+    };
+}
+
+/// The same, holding the answer first.
+fn heldHeader(c: *Ctx, next: mw.Next) anyerror!void {
+    const answer = try next.hold(c);
+    try answer.setHeader("Server-Timing", "app;dur=1");
+}
+
+fn heldTrailer(c: *Ctx, next: mw.Next) anyerror!void {
+    const answer = try next.hold(c);
+    try answer.setTrailer("Server-Timing", "app;dur=1");
+}
+
+/// What a conditional-GET middleware does: the client has this body already.
+fn heldNotModified(c: *Ctx, next: mw.Next) anyerror!void {
+    const answer = try next.hold(c);
+    if (answer.status() == 200 and answer.body() != null) try answer.replace(304, "", "");
+}
+
+fn heldThenRefused(c: *Ctx, next: mw.Next) anyerror!void {
+    _ = try next.hold(c);
+    return fail.forbidden("decided after the handler", .{});
+}
+
+/// Sends from a buffer of its own and then reuses it, which a held answer
+/// must not see.
+fn reusesItsBuffer(c: *Ctx) anyerror!void {
+    var buf = "first".*;
+    try c.send(200, "text/plain", &buf);
+    @memset(&buf, 'x');
+}
+
+fn streamsAndFinishes(c: *Ctx) anyerror!void {
+    var body = try c.stream(200, "text/plain");
+    try body.writeAll("piece");
+    try body.finish();
+}
+
+fn sendsWithTrailer(c: *Ctx) anyerror!void {
+    try c.setTrailer("Server-Timing", "db;dur=3");
+    try c.send(200, "text/plain", "hi");
+}
+
+fn barredTrailer(c: *Ctx) anyerror!void {
+    try c.setTrailer("Content-Type", "text/html");
+    try c.send(200, "text/plain", "hi");
+}
+
+var trailer_after_end_refused = false;
+
+fn trailerAfterEnd(c: *Ctx) anyerror!void {
+    try c.send(200, "text/plain", "hi");
+    trailer_after_end_refused = false;
+    c.setTrailer("Server-Timing", "db;dur=3") catch |err| {
+        trailer_after_end_refused = err == error.Failed;
+    };
+}
+
+test "a header set after next.run is refused, where it used to be lost without a word" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(lateHeader);
+    try app.get("/x", plainOk);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 "));
+    try testing.expect(std.mem.indexOf(u8, result.response, "X-Late") == null);
+    try testing.expect(late_header_refused);
+}
+
+test "a middleware that holds the answer adds a header after the handler ran" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(heldHeader);
+    try app.get("/x", plainOk);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 "));
+    try testing.expect(std.mem.indexOf(u8, result.response, "Server-Timing: app;dur=1\r\n") != null);
+    try testing.expect(result.keep_alive);
+}
+
+/// A timing middleware that covers failures too: a failure below `hold`
+/// comes back as its error, as from `run`, and a header set on the way out
+/// goes on the failure's answer as on any other.
+fn timingEveryAnswer(c: *Ctx, next: mw.Next) anyerror!void {
+    defer c.setHeader("Server-Timing", "app;dur=1") catch {};
+    _ = try next.hold(c);
+}
+
+test "a holding middleware covers App's own 404 by setting its header on the way out" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(timingEveryAnswer);
+    try app.get("/x", plainOk);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /nowhere HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 404 "));
+    try testing.expect(std.mem.indexOf(u8, result.response, "Server-Timing: app;dur=1\r\n") != null);
+}
+
+test "a held answer can be replaced, and the replacement is what goes out" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(heldNotModified);
+    try app.get("/x", plainOk);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 304 "));
+}
+
+test "a failure after next.hold replaces the held answer and keeps the connection" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(heldThenRefused);
+    try app.get("/x", plainOk);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 403 "));
+    try testing.expect(try Harness.saysFailure(result.response, "decided after the handler"));
+    try testing.expect(result.keep_alive);
+}
+
+test "a held body is copied, so a buffer the handler reuses after send does not change it" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(heldHeader);
+    try app.get("/x", reusesItsBuffer);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, result.response, "\r\n\r\nfirst"));
+}
+
+test "a held stream takes a trailer after the handler finished it" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(heldTrailer);
+    try app.get("/x", streamsAndFinishes);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, result.response, "Transfer-Encoding: chunked\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, result.response, "5\r\npiece\r\n0\r\nServer-Timing: app;dur=1\r\n\r\n"));
+    try testing.expect(result.keep_alive);
+}
+
+test "a whole answer's trailers go out chunked to a client that reads them, and not to one that did not ask" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/x", sendsWithTrailer);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const asked = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\nTE: trailers\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, asked.response, "Transfer-Encoding: chunked\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, asked.response, "2\r\nhi\r\n0\r\nServer-Timing: db;dur=3\r\n\r\n"));
+
+    const plain = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, plain.response, "Content-Length: 2\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, plain.response, "Server-Timing") == null);
+}
+
+test "a trailer RFC 9110 keeps out of trailers is refused with a sentence" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/x", barredTrailer);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 500 "));
+    try testing.expect(try Harness.saysFailure(result.response, "cannot be a trailer"));
+}
+
+test "a trailer set after the body ended is refused" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/x", trailerAfterEnd);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    _ = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\nTE: trailers\r\n\r\n");
+    try testing.expect(trailer_after_end_refused);
+}
+
+test "a typed Response carries its trailers" {
+    const Typed = struct {
+        fn handler() typed.Response([]const u8) {
+            return .{ .value = "hi", .trailers = .of(&.{.{ .name = "Server-Timing", .value = "db;dur=4" }}) };
+        }
+    };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/x", Typed.handler);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\nTE: trailers\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, result.response, "0\r\nServer-Timing: db;dur=4\r\n\r\n"));
+}
+
+test "a held answer with nothing held is App's empty 200, with the held middleware's header" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(heldHeader);
+    try app.get("/x", answersNothing);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 "));
+    try testing.expect(std.mem.indexOf(u8, result.response, "Server-Timing: app;dur=1\r\n") != null);
+}
+
+test "a held static file goes out after the chain with the middleware's header" {
+    var files = try TmpFiles.init(testing.allocator, &.{.{ "a.txt", "alphabet" }});
+    defer files.deinit(testing.allocator);
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(heldHeader);
+    try app.static("/", files.path);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /a.txt HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 "));
+    try testing.expect(std.mem.indexOf(u8, result.response, "Server-Timing: app;dur=1\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, result.response, "\r\n\r\nalphabet"));
 }

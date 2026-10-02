@@ -112,6 +112,25 @@ The head then carries `Content-Length` and no `Transfer-Encoding`, and the piece
 
 **A stream with a length is held to it.** Writing past the stated length fails with `error.WriteFailed` before any byte of the overrun goes out, because a client reading a `Content-Length` stops there and would read everything after it as the start of the next response. Finishing short cannot be refused, since the head has already gone, so the connection closes and the log names both numbers ([ADR 101](../adr/101-a-stream-that-knows-its-length-says-so.md)).
 
+## Trailers
+
+**A stream can end with trailers**, fields that go after the last piece. Set them before `finish`, which is what sends them:
+
+```zig
+fn report(c: *nilo.Ctx, db: *Db) !void {
+    var body = try c.stream(200, "text/csv");
+    var rows: usize = 0;
+    for (db.rows()) |row| {
+        try body.print("{d},{s}\n", .{ row.id, row.name });
+        rows += 1;
+    }
+    try c.setTrailer("x-rows", try std.fmt.allocPrint(c.arena(), "{d}", .{rows}));
+    try body.finish();
+}
+```
+
+On an HTTP/1.1 stream they are the trailer section of the chunked body. A client only reads them if it said `TE: trailers`, and `c.clientReadsTrailers()` tells you; setting them when it did not is harmless, and they are left off. A stream with a known length has no chunked body to carry them. The names that may not be trailers are listed under [Trailers](./responses.md#trailers).
+
 ## When a stream ends
 
 **Check `live()` in the loop so a deploy can finish.** It goes false when the server has been asked to stop. Measured with a client mid-stream, `Ctrl-C` to process exit took **204 ms**, and the client got the closing event rather than a dropped connection. A stream that ignores it holds the shutdown open for as long as it runs, up to `shutdown_grace_ms`, after which it is cut off.

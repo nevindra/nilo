@@ -388,6 +388,58 @@ pub fn isReservedHeader(name: []const u8) bool {
         std.ascii.eqlIgnoreCase(name, "connection");
 }
 
+/// Whether a field may not travel as a trailer, because what it says has to
+/// be known before the content is (RFC 9110 §6.5.1): the framing, the route,
+/// a request modifier, authentication, a response control, the content's own
+/// format, and HTTP/2's pseudo-headers. A recipient may drop such a trailer or
+/// act on it wrongly, so `Ctx.setTrailer` refuses it where it is set.
+pub fn barredFromTrailer(name: []const u8) bool {
+    if (name.len > 0 and name[0] == ':') return true;
+    const names = [_][]const u8{
+        // framing and the connection
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "keep-alive",
+        "upgrade",
+        "trailer",
+        "te",
+        // routing and request modifiers
+        "host",
+        "cache-control",
+        "expect",
+        "max-forwards",
+        "pragma",
+        "range",
+        "if-match",
+        "if-none-match",
+        "if-modified-since",
+        "if-unmodified-since",
+        "if-range",
+        // authentication
+        "authorization",
+        "proxy-authorization",
+        "www-authenticate",
+        "proxy-authenticate",
+        "set-cookie",
+        "cookie",
+        // response controls
+        "age",
+        "date",
+        "expires",
+        "location",
+        "retry-after",
+        "vary",
+        "warning",
+        // the content's format
+        "content-type",
+        "content-encoding",
+        "content-range",
+    };
+    for (names) |n| if (std.ascii.eqlIgnoreCase(n, name)) return true;
+    return false;
+}
+
 /// Whether a response header described the answer a failure is replacing,
 /// and so must not go out on the failure (ADR 024): a JSON 409 labelled gzip,
 /// cacheable for a year, or pointing at an order that was never made.
@@ -400,10 +452,10 @@ pub fn isReservedHeader(name: []const u8) bool {
 /// is no more fit to keep, so that one stays.
 pub fn describesAnswer(name: []const u8, value: []const u8) bool {
     const names = [_][]const u8{
-        "content-encoding", "content-language", "content-location", "content-range",
-        "content-disposition", "content-digest", "repr-digest", "digest",
-        "etag", "last-modified", "accept-ranges", "expires",
-        "age", "location",
+        "content-encoding",    "content-language", "content-location", "content-range",
+        "content-disposition", "content-digest",   "repr-digest",      "digest",
+        "etag",                "last-modified",    "accept-ranges",    "expires",
+        "age",                 "location",
     };
     for (names) |n| {
         if (std.ascii.eqlIgnoreCase(name, n)) return true;
@@ -1491,6 +1543,21 @@ pub fn endChunk(out: *std.Io.Writer) !void {
 /// section after it.
 pub fn writeLastChunk(out: *std.Io.Writer) !void {
     try out.writeAll("0\r\n\r\n");
+}
+
+/// The zero-length chunk, and a trailer section holding `trailers` (RFC 9112
+/// §7.1.2). Each one was checked as a header when it was set, so it is
+/// written as it is.
+pub fn writeLastChunkWith(out: *std.Io.Writer, trailers: []const Header) !void {
+    if (trailers.len == 0) return writeLastChunk(out);
+    try out.writeAll("0\r\n");
+    for (trailers) |t| {
+        try out.writeAll(t.name);
+        try out.writeAll(": ");
+        try out.writeAll(t.value);
+        try out.writeAll("\r\n");
+    }
+    try out.writeAll("\r\n");
 }
 
 /// The response to a HEAD: the head has to be byte-for-byte what a GET

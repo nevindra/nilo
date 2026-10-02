@@ -297,9 +297,9 @@ pub fn compare(bytes: []const u8) ?Finding {
         "where the head ends"
     else if (!std.mem.eql(u8, t.method, ours.method))
         "method"
-    // An absolute-form target is split into authority and path by nilo,
-    // and handed over whole by llhttp; the path is compared, the split is
-    // `fuzz.zig`'s to check.
+        // An absolute-form target is split into authority and path by nilo,
+        // and handed over whole by llhttp; the path is compared, the split is
+        // `fuzz.zig`'s to check.
     else if (ours.authority.len == 0 and !std.mem.eql(u8, t.url, ours.target))
         "target"
     else if (t.major != 1 or t.minor != ours.minor_version)
@@ -311,8 +311,8 @@ pub fn compare(bytes: []const u8) ?Finding {
         "chunked"
     else if (t.keep_alive != ours.keep_alive)
         "keep-alive"
-    // nilo's `upgrade` is looser on purpose (http1.zig): the only wrong
-    // answer is llhttp seeing an upgrade that nilo does not.
+        // nilo's `upgrade` is looser on purpose (http1.zig): the only wrong
+        // answer is llhttp seeing an upgrade that nilo does not.
     else if (t.upgrade and !ours.upgrade)
         "upgrade"
     else

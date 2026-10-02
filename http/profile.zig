@@ -254,7 +254,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
     try routerScale(gpa);
     if (routes_file) |file| try routeTable(gpa, file, whole / rounds);
     try serviceScale(gpa);
-    try grpcCalls();
+    // A call is answered through the framing only a `-Dgrpc` build has
+    // (ADR 220), so without the flag there is no gRPC call to time.
+    if (comptime @import("nilo_build").grpc) try grpcCalls() else std.debug.print(
+        "\nA gRPC call is timed by `zig build profile -Dgrpc`.\n",
+        .{},
+    );
 
     if (sink == 0) unreachable; // keeps the work from being optimised away
 }

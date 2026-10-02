@@ -3,9 +3,9 @@
 //!
 //! ```zig
 //! fn timing(c: *Ctx, next: Next) !void {
-//!     var timer = try std.time.Timer.start();
+//!     const started = nilo.monotonicNanos();
 //!     try next.run(c);
-//!     std.log.info("{s} took {d}µs", .{ c.path().view(), timer.read() / 1000 });
+//!     std.log.info("{s} took {d}µs", .{ c.path().view(), (nilo.monotonicNanos() - started) / 1000 });
 //! }
 //!
 //! try app.use(timing);
@@ -19,6 +19,28 @@
 //! the same path a failing handler does, fail functions and mapping table
 //! included (ADR 004), so there is only ever one error path.
 //!
+//! **A middleware that changes the answer after `next` holds it**:
+//!
+//! ```zig
+//! fn timing(c: *Ctx, next: Next) !void {
+//!     const started = nilo.monotonicNanos();
+//!     const answer = try next.hold(c);
+//!     var buf: [32]u8 = undefined;
+//!     const took = (nilo.monotonicNanos() - started) / std.time.ns_per_ms;
+//!     try answer.setHeader("Server-Timing", try std.fmt.bufPrint(&buf, "app;dur={d}", .{took}));
+//! }
+//! ```
+//!
+//! A failure below `hold` comes back as its error, as from `run`, and App
+//! answers it after the chain. A header set on the way out with `defer` goes
+//! on that answer too, so one line covers both.
+//!
+//! `next.run(c)` writes the answer as soon as the handler sends it, so the
+//! half after it can read what was sent and change nothing; `next.hold(c)`
+//! keeps the answer until the chain has unwound, and what has not had to
+//! leave yet can still change (ADR 008). A header set after `run` is refused
+//! with a sentence naming `hold`, where Go and Gin drop one without a word.
+//!
 //! Middleware still produces no value for the handler, and it no longer
 //! needs to: the thing it used to be asked for — auth resolving a user — is
 //! a resolved value now (ADR 015). A middleware guards, a resolved value
@@ -27,6 +49,7 @@
 
 const std = @import("std");
 const Ctx = @import("ctx.zig").Ctx;
+const fail = @import("fail.zig");
 const http1 = @import("http1.zig");
 
 /// The innermost layer: a plain Ctx handler. This is what the typed layer
@@ -95,6 +118,89 @@ pub const Next = struct {
         c._chain_left = @intCast(@min(self.rest.len, std.math.maxInt(u8)));
         if (self.rest.len == 0) return self.handler(c);
         return self.rest[0](c, .{ .rest = self.rest[1..], .handler = self.handler });
+    }
+
+    /// `run`, with the answer held until the chain has unwound rather than
+    /// written when the handler sends it, and handed back to change (ADR 008).
+    ///
+    /// ```zig
+    /// const answer = try next.hold(c);
+    /// if (answer.status() == 200) try answer.setHeader("Cache-Control", "max-age=60");
+    /// ```
+    ///
+    /// What can change is what has not had to leave: a whole answer's status,
+    /// headers, body and trailers; a file's headers; a stream's trailers and
+    /// its end, whose head left when it opened. A failure below comes back as
+    /// its error, as from `run`, and a header set with `defer` goes on its
+    /// answer too; a failure after this replaces a held whole answer, where
+    /// after `run` it could only close the connection. The cost is a copy: a body handed to `c.send` is copied
+    /// into the request arena to outlive the handler, which is free under
+    /// 16 KiB and not above it (`Ctx.send`); one the typed layer sends from a
+    /// returned value is not copied.
+    pub fn hold(self: Next, c: *Ctx) anyerror!Answer {
+        c._hold = true;
+        try self.run(c);
+        return .{ ._c = c };
+    }
+};
+
+/// The answer a middleware is holding (`Next.hold`): written when the chain
+/// has unwound, and until then this middleware's to read and change.
+pub const Answer = struct {
+    /// What a nilo compile error calls this type, which is the name the
+    /// reader's own import line gives it (ADR 074).
+    pub const nilo_type_name = "nilo.Answer";
+
+    _c: *Ctx,
+
+    /// The status it answers with, or null when nothing below answered: App's
+    /// empty 200, or its 500 for a guard that said nothing, is still to come.
+    pub fn status(self: Answer) ?u16 {
+        return self._c.answered();
+    }
+
+    /// The body of a whole answer, as it was sent and before any compression.
+    /// Null for a stream, a file, or nothing answered.
+    pub fn body(self: Answer) ?[]const u8 {
+        const held = self._c._held orelse return null;
+        return switch (held.*) {
+            .whole => |w| w.body,
+            .file => null,
+        };
+    }
+
+    /// A header on the answer, as `Ctx.setHeader`. Refused on a stream, whose
+    /// head has gone.
+    pub fn setHeader(self: Answer, name: []const u8, value: []const u8) !void {
+        return self._c.setHeader(name, value);
+    }
+
+    /// A trailer on the answer, as `Ctx.setTrailer`. A stream takes one too,
+    /// because its end is held as well.
+    pub fn setTrailer(self: Answer, name: []const u8, value: []const u8) !void {
+        return self._c.setTrailer(name, value);
+    }
+
+    /// A different whole answer in its place: a 304 for a body whose tag the
+    /// client already has, a page of HTML for a browser that got JSON. The
+    /// headers set so far stay. `new_body` is copied. Refused once a head
+    /// has gone, a stream's or a handed-over connection's.
+    pub fn replace(self: Answer, new_status: u16, content_type: []const u8, new_body: []const u8) !void {
+        const c = self._c;
+        if (c._head_written) return fail.internal(
+            "the answer being replaced has written its head already (a stream, or a connection " ++
+                "handed over), so there is nothing left to replace it with",
+            .{},
+        );
+        try c.contentTypeOk(content_type);
+        if (c._held) |held| if (held.* == .file) held.file.contents.file.close();
+        c.markAnswered(new_status);
+        (try c.heldSlot()).* = .{ .whole = .{
+            .status = new_status,
+            .content_type = try c._arena.dupe(u8, content_type),
+            .body = try c._arena.dupe(u8, new_body),
+            .compress = true,
+        } };
     }
 };
 

@@ -112,6 +112,14 @@ _Avoid_: wildcard route, splat, glob
 A response written in pieces because its length is not known when the head goes out. Held by the handler, not returned by it. Nothing is allocated per piece, and `finish` is what says where the body ends.
 _Avoid_: chunked response, writer, body writer
 
+**Trailer**:
+A field sent after the body, for what is known only once the body is. Set with `c.setTrailer` until the body ends; HTTP/2 sends it after the body, a chunked HTTP/1.1 stream as its trailer section, and a whole HTTP/1.1 answer only when the client sent `TE: trailers`.
+_Avoid_: footer, late header, trailing header
+
+**Held answer**:
+An answer a middleware kept back with `next.hold(c)`, so it can read and change it before the chain unwinds and it is written. A body sent under a hold is copied into the request arena.
+_Avoid_: buffered response, deferred response, post-processing
+
 **Body reader**:
 A request body taken in pieces rather than held whole, for the ones too big for the request arena. Bounded by the buffer the handler passes in, and allocates nothing. A body left half-read is finished off by nilo, so the connection stays usable.
 _Avoid_: upload stream, multipart, file handle

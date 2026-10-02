@@ -44,11 +44,11 @@ A build that did not pass `.grpc = true` rejects the listener at `listen()` with
 
 **The message is a struct of yours, read and written by [`nilo_proto`](../reference/proto.md)** ([Protobuf messages](./proto.md)). `proto.decode(Request, c.arena(), body.view())` reads the call and `proto.encode(Reply, c.arena(), reply)` writes the answer, with the field numbers declared on the types and nothing generated. A type generator such as [zig-protobuf](https://github.com/Arwalk/zig-protobuf) works as well: nilo reads and writes bytes and never looks inside them.
 
-A call's metadata arrives as request headers, so `c.header("x-tenant")` reads it, and a header the route sets with `c.setHeader` goes back as metadata.
+A call's metadata arrives as request headers, so `c.header("x-tenant")` reads it, and a header the route sets with `c.setHeader` goes back as metadata. Metadata that goes after the message is a trailer, set with `c.setTrailer` ([trailers](./responses.md#trailers)).
 
 ## Errors and gRPC status codes
 
-**A route that fails the ordinary way is answered with the matching gRPC status**, and the failure's message as `grpc-message`:
+**A route that fails the ordinary way is answered with the matching gRPC status**, and the failure's message as `grpc-message`. The code comes from the error first: `error.AlreadyExists` is `ALREADY_EXISTS` (6) and `error.RolledBack` is `ABORTED` (10), whatever HTTP status the error maps to. Any other error takes the code from its HTTP status, as this table says:
 
 | the route failed with | the client sees |
 |---|---|
@@ -62,7 +62,9 @@ A call's metadata arrives as request headers, so `c.header("x-tenant")` reads it
 | 503 | `UNAVAILABLE` (14) |
 | 500 | `INTERNAL` (13) |
 
-So `return fail.notFound("no order {d}", .{id})` becomes `NOT_FOUND` with that message, and the handler does not need to know gRPC is involved. For a code with no HTTP status of its own, such as `ALREADY_EXISTS`, set a `grpc-status` header on a 200: `try c.setHeader("grpc-status", "6")`.
+So `return fail.notFound("no order {d}", .{id})` becomes `NOT_FOUND` with that message, and the handler does not need to know gRPC is involved. For a code no error names, answer with the code yourself, as a trailer: `try c.setTrailer("grpc-status", "5")`. A `grpc-status` trailer the route set wins over the one nilo would have chosen.
+
+**`grpc-status` and `grpc-message` are trailers, so `c.setHeader` refuses them** with a sentence that points at `setTrailer`. gRPC sends them after the message, and a header would put them before it.
 
 A path no route answers is `UNIMPLEMENTED`, and a message larger than its route's limit is `RESOURCE_EXHAUSTED`: `max_body`, or what the route said with [`nilo.maxBody`](../reference/middleware.md#nilomaxbody), raised or lowered, as on any route. A connection's messages together are held to `max_body`, or the largest limit a route raised to. A request whose `content-type` is not `application/grpc` or `application/grpc+` and a subtype (`application/grpc-web` is another protocol) is a 415, and one that is not well-formed HTTP/2 (a pseudo-header twice, unknown or after a regular field, or no `:scheme`) has its stream reset with `PROTOCOL_ERROR`.
 

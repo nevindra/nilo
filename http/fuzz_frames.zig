@@ -29,6 +29,7 @@
 const std = @import("std");
 const bulkhead = @import("bulkhead.zig");
 const fail = @import("fail.zig");
+const framing = @import("framing.zig");
 const grpc = @import("grpc.zig");
 const h2 = @import("h2.zig");
 const hpack = @import("hpack.zig");
@@ -77,8 +78,8 @@ pub fn dump(bytes: []const u8) void {
 // ---- the route behind it ----
 
 /// Three routes, so an answer can be each shape the listener writes: `/e…`
-/// echoes the message back, `/f…` fails with text, `/c…` answers chunked
-/// with a header of its own. Anything else is no route.
+/// echoes the message back, `/f…` fails with text, `/c…` answers with a
+/// header and a trailer of its own. Anything else is no route.
 fn stub(gpa: std.mem.Allocator, stop: *const bulkhead.Stop) grpc.Host {
     const Stub = struct {
         fn routes(_: *anyopaque, path: []const u8) bool {
@@ -95,7 +96,7 @@ fn stub(gpa: std.mem.Allocator, stop: *const bulkhead.Stop) grpc.Host {
             _: *core.Lifetime,
             _: *fail.InFlight,
             in: *std.Io.Reader,
-            out: *std.Io.Writer,
+            collected: *framing.Collected,
             _: bulkhead.Peer,
             _: u64,
         ) void {
@@ -104,10 +105,13 @@ fn stub(gpa: std.mem.Allocator, stop: *const bulkhead.Stop) grpc.Host {
             const body = request[end + 4 ..];
             const path_at = "POST ".len;
             const which = if (request.len > path_at + 1) request[path_at + 1] else 'e';
+            var to: framing.Framing = .{ .http2 = collected };
             switch (which) {
-                'f' => out.writeAll("HTTP/1.1 404 Not Found\r\ncontent-type: text/plain\r\ncontent-length: 7\r\n\r\nno such") catch {},
-                'c' => out.print("HTTP/1.1 200 OK\r\ncontent-type: application/grpc\r\nX-Kind: chunked\r\ntransfer-encoding: chunked\r\n\r\n{x}\r\n{s}\r\n0\r\n\r\n", .{ body.len, body }) catch {},
-                else => out.print("HTTP/1.1 200 OK\r\ncontent-type: application/grpc\r\ncontent-length: {d}\r\n\r\n{s}", .{ body.len, body }) catch {},
+                'f' => to.whole(404, "text/plain", "no such", false, true, &.{}, .{}) catch {},
+                'c' => to.whole(200, "application/grpc", body, false, true, &.{.{ .name = "X-Kind", .value = "own" }}, .{
+                    .list = &.{.{ .name = "x-checked", .value = "yes" }},
+                }) catch {},
+                else => to.whole(200, "application/grpc", body, false, true, &.{}, .{}) catch {},
             }
         }
     };

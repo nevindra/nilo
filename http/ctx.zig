@@ -108,6 +108,21 @@ const Resolved = struct {
     value: *anyopaque,
 };
 
+/// An answer a middleware is holding (`Next.hold`), kept until the chain has
+/// unwound and written then (ADR 008). In the request arena, so only a
+/// request that holds pays for it.
+pub const Held = union(enum) {
+    whole: struct {
+        status: u16,
+        content_type: []const u8,
+        body: []const u8,
+        /// Whether `app.compress` may still gzip it, which it may for an
+        /// answer `send` made and not for one App made itself.
+        compress: bool,
+    },
+    file: sendfile_mod.Held,
+};
+
 pub const Ctx = struct {
     /// What a nilo compile error calls this type, which is the name the
     /// reader's own import line gives it (ADR 074).
@@ -290,6 +305,21 @@ pub const Ctx = struct {
     /// Resolved values already worked out for this request (ADR 015).
     /// Stays empty — and costs nothing — on a request that asks for none.
     _resolved: std.ArrayList(Resolved) = .empty,
+    /// Trailers the route set, sent after the body by whichever framing
+    /// carries it (ADR 254). Empty, and costing nothing, on an answer that
+    /// sets none.
+    _trailers: framing_mod.Trailing = .{},
+    /// Set by `Next.hold`: a whole answer and a stream's end wait for the
+    /// chain to unwind, so the middleware that asked can still change them
+    /// (ADR 008). Never cleared before then.
+    _hold: bool = false,
+    /// What is being held, while `_hold` is set and something answered.
+    _held: ?*Held = null,
+    /// Set once the head is on its way. A header after it has nowhere to go,
+    /// and is refused rather than lost.
+    _head_written: bool = false,
+    /// Set once the body has ended. A trailer after it has nowhere to go.
+    _body_ended: bool = false,
 
     /// Memory that lasts exactly as long as this request.
     ///
@@ -1599,9 +1629,10 @@ pub const Ctx = struct {
 
     // ---- the response side ----
 
-    /// Add a response header. Set it before sending — a response is
-    /// flushed the moment it is sent, so there is nothing left to change
-    /// afterwards (ADR 008).
+    /// Add a response header. Set it before sending: an answer is written
+    /// when it is sent, unless a middleware holds it with `next.hold(c)`, and
+    /// a header set once the head is written is refused with a sentence
+    /// saying so rather than lost (ADR 008).
     ///
     /// `name` and `value` are copied into the request arena, so passing a
     /// value you built on the stack is safe. Setting a header the
@@ -1693,6 +1724,7 @@ pub const Ctx = struct {
     /// cookie value. A bare error here would arrive as "internal server
     /// error" and send somebody looking through their handler for it.
     fn putHeader(self: *Ctx, entry: http1.Header) !void {
+        try self.headStillOpen(entry.name);
         try checkHeader(entry);
         // Setting a header twice is somebody changing their mind, so the
         // second call replaces the first — except for the two a response may
@@ -1741,6 +1773,7 @@ pub const Ctx = struct {
     /// The framework's own: `block` is checked line by line while compiling,
     /// which is the only reason it may skip `checkHeader`.
     pub fn putPolicy(self: *Ctx, block: []const u8) !void {
+        try self.headStillOpen("the nilo.secure block");
         self._policy_edit = &policyWithout;
         for (self.extraHeadersMutable()) |*h| {
             if (h.name.len == 0) {
@@ -1757,6 +1790,24 @@ pub const Ctx = struct {
     fn policyWithout(gpa: std.mem.Allocator, block: []const u8, name: []const u8) error{OutOfMemory}![]const u8 {
         if (!http1.isPolicyHeader(name)) return block;
         return http1.withoutLine(gpa, block, name);
+    }
+
+    /// A header set once the head has gone is refused with a sentence, where
+    /// it used to be added to a list nothing would write again and lost
+    /// without a word, the way Go and Gin lose one.
+    fn headStillOpen(self: *const Ctx, name: []const u8) !void {
+        if (!self._head_written) return;
+        return refuseField(name, "is a header set after the head of this answer was written, so it " ++
+            "has nowhere to go. Set it before the answer is sent; a middleware that changes an answer " ++
+            "after `next` calls `next.hold(c)` instead of `next.run(c)`.");
+    }
+
+    /// A refusal that names a field and says why, through one format. Every
+    /// refusal of a header or a trailer starts with the field's name, and a
+    /// format shared is what keeps them from being one copy each of the
+    /// formatting code (ADR 017's size axis).
+    noinline fn refuseField(name: []const u8, sentence: []const u8) fail.Error {
+        return fail.internal("\"{s}\" {s}", .{ name, sentence });
     }
 
     fn appendHeader(self: *Ctx, entry: http1.Header) !void {
@@ -1781,18 +1832,25 @@ pub const Ctx = struct {
     /// it is kept, because a kept refusal is replayed until it expires
     /// (ADR 155, ADR 188).
     pub fn checkHeader(entry: http1.Header) !void {
-        if (http1.isReservedHeader(entry.name)) return fail.internal(
-            "\"{s}\" is a header nilo writes itself, so setting it would send the response two " ++
-                "of them — which is malformed, and for Content-Length is a request-smuggling " ++
-                "bug. The content type is chosen through `send`; the other three are the " ++
-                "framing and are not yours to set.",
-            .{entry.name},
-        );
-        if (!http1.headerNameOk(entry.name)) return fail.internal(
-            "\"{s}\" is not a name a header can have — a field name is letters, digits, and " ++
-                "any of !#$%&'*+-.^_`|~",
-            .{entry.name},
-        );
+        if (http1.isReservedHeader(entry.name)) return refuseField(entry.name, "is a header nilo writes " ++
+            "itself, so setting it would send the response two of them — which is malformed, and " ++
+            "for Content-Length is a request-smuggling bug. The content type is chosen through " ++
+            "`send`; the other three are the framing and are not yours to set.");
+        // gRPC reads its status after the message, and a client that found it
+        // among the headers would take the call as over before its answer.
+        if (std.ascii.eqlIgnoreCase(entry.name, "grpc-status") or
+            std.ascii.eqlIgnoreCase(entry.name, "grpc-message")) return refuseField(entry.name, "is a trailer: " ++
+            "gRPC reads it after the message, so it is set with `c.setTrailer`. A failure needs " ++
+            "neither: `return error.AlreadyExists`, or a fail function, is answered with the " ++
+            "matching code (ADR 220).");
+        return checkBytes(entry);
+    }
+
+    /// What a header and a trailer are both held to: a name that is a token,
+    /// and a value with nothing in it that ends a line.
+    fn checkBytes(entry: http1.Header) !void {
+        if (!http1.headerNameOk(entry.name)) return refuseField(entry.name, "is not a name a header can " ++
+            "have — a field name is letters, digits, and any of !#$%&'*+-.^_`|~");
         // The value is **not** quoted into the message. It is the half most
         // likely to have come from a request, a row or a filename, and a
         // response that echoed it back would hand the sender a way to read
@@ -1907,19 +1965,44 @@ pub const Ctx = struct {
     /// build and wrote a second response in ReleaseFast. The first answer
     /// stands, and App closes the connection, because a half-sent response
     /// cannot be taken back (the audit of `http/` at `39896d2`).
+    ///
+    /// **Under a middleware that called `next.hold(c)` the body is copied into
+    /// the request arena** and written when the chain has unwound: the
+    /// handler's frame, and whatever its `defer`s gave back, are gone by
+    /// then. That copy is the one cost holding has, and it is the body's
+    /// size: free while it fits in what the arena keeps (16 KiB), and 63% of
+    /// throughput at 64 KiB in the run that settled it (ADR 008). An answer
+    /// the typed layer sends from a returned value is not copied.
     pub fn send(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8) !void {
+        return self.sendWhole(status, content_type, response_body, false);
+    }
+
+    /// `send`, for a body that outlives the middleware chain already: one in
+    /// the request arena, or one a typed handler returned, whose frame was
+    /// gone before it was sent whether or not anything holds. Not copied
+    /// when a middleware holds the answer.
+    pub fn sendKept(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8) !void {
+        return self.sendWhole(status, content_type, response_body, true);
+    }
+
+    fn sendWhole(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8, kept: bool) !void {
         if (self.answered() != null) return error.AlreadyAnswered; // one request, one response
         try self.contentTypeOk(content_type);
         self.markAnswered(status);
+        if (self._hold) return self.holdWhole(status, content_type, response_body, kept, true);
+        return self.deliverWhole(status, content_type, response_body, true);
+    }
 
+    /// A whole answer compressed where it qualifies, then put on the wire.
+    fn deliverWhole(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8, compress: bool) !void {
         // Gzipped, when the App asked for that and this body and this client
         // both qualify (ADR 211). Before the wait below rather than inside
         // it: compressing is the handler's work, and it borrows a compressor
         // nothing waiting on a client may hold.
         var outgoing = response_body;
-        if (self._compressors) |pool| {
+        if (compress) if (self._compressors) |pool| {
             if (try self.squeezed(pool, status, content_type, response_body)) |smaller| outgoing = smaller;
-        }
+        };
 
         // Putting the answer on the wire is nilo waiting on the client, not
         // the handler running. A client too slow to take a large response
@@ -1929,16 +2012,145 @@ pub const Ctx = struct {
         defer watchdog.waited(self._watch, w);
         self.armWriteLimit();
 
-        try self.writeWhole(status, content_type, outgoing);
+        try self.putWhole(status, content_type, outgoing);
+    }
+
+    /// A whole answer App makes itself (a 404, an empty 200, a failure),
+    /// held like any other when a middleware holds the answer, and written
+    /// otherwise. `send` and these both end in `putWhole`, so there is one
+    /// way out.
+    pub fn writeWhole(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8) !void {
+        if (self._hold) return self.holdWhole(status, content_type, response_body, false, false);
+        return self.putWhole(status, content_type, response_body);
     }
 
     /// A whole answer handed to the framing, with the headers middleware and
-    /// the handler set. A handler need not know this is a HEAD: it assembles
-    /// a response as usual, and what must not go out is filtered by the
-    /// framing. The length is the one a GET would have carried. `send` and
-    /// the answers App makes itself both end here, so there is one way out.
-    pub fn writeWhole(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8) !void {
-        try self._framing.whole(status, content_type, response_body, self.method == .HEAD, self.keepAlive(), self.extraHeaders());
+    /// the handler set and the trailers after it. A handler need not know
+    /// this is a HEAD: it assembles a response as usual, and what must not go
+    /// out is filtered by the framing. The length is the one a GET would have
+    /// carried.
+    fn putWhole(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8) !void {
+        self._head_written = true;
+        self._body_ended = true;
+        try self._framing.whole(status, content_type, response_body, self.method == .HEAD, self.keepAlive(), self.extraHeaders(), self.trailersOut());
+    }
+
+    /// Keep a whole answer for the chain's end, copied unless it outlives the
+    /// chain already.
+    fn holdWhole(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8, kept: bool, compress: bool) !void {
+        const held = try self.heldSlot();
+        held.* = .{ .whole = .{
+            .status = status,
+            .content_type = try self._arena.dupe(u8, content_type),
+            .body = if (kept) response_body else try self._arena.dupe(u8, response_body),
+            .compress = compress,
+        } };
+    }
+
+    /// Where a held answer goes: the one already there when an answer is
+    /// being replaced, so a request holds at most one.
+    pub fn heldSlot(self: *Ctx) !*Held {
+        if (self._held) |held| return held;
+        const held = try self._arena.create(Held);
+        self._held = held;
+        return held;
+    }
+
+    /// Write what a middleware held, now that the chain has unwound, and
+    /// stop holding: App's own answers after this go straight out.
+    pub fn releaseHeld(self: *Ctx) !void {
+        self._hold = false;
+        const held = self._held orelse return;
+        self._held = null;
+        switch (held.*) {
+            .whole => |w| try self.deliverWhole(w.status, w.content_type, w.body, w.compress),
+            .file => |f| try sendfile_mod.writeHeld(self, f),
+        }
+    }
+
+    /// Let go of a held answer a failure is replacing. Nothing of it has
+    /// been written, so the request reads as unanswered again and the
+    /// failure goes out in its place.
+    pub fn dropHeld(self: *Ctx) void {
+        self._hold = false;
+        const held = self._held orelse return;
+        self._held = null;
+        if (held.* == .file) held.file.contents.file.close();
+        self._sent = false;
+        self._status = 0;
+    }
+
+    /// The trailers for a whole answer, and whether the client said it reads
+    /// them, worked out only when there are some.
+    fn trailersOut(self: *const Ctx) framing_mod.Trailers {
+        if (self._trailers.list.items.len == 0) return .{};
+        return self._trailers.out(self.clientReadsTrailers());
+    }
+
+    /// Whether the client said it reads trailers: a `TE` naming `trailers`
+    /// (RFC 9110 §10.1.4). What decides whether a whole HTTP/1.1 answer with
+    /// trailers is chunked to carry them (ADR 254).
+    pub fn clientReadsTrailers(self: *const Ctx) bool {
+        const te = self.header("TE") orelse return false;
+        var parts = std.mem.splitScalar(u8, te.view(), ',');
+        while (parts.next()) |part| {
+            const coding = part[0 .. std.mem.indexOfScalar(u8, part, ';') orelse part.len];
+            if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, coding, " \t"), "trailers")) return true;
+        }
+        return false;
+    }
+
+    /// Add a trailer: a field sent after the body, for what is known only
+    /// once the body is (ADR 254).
+    ///
+    /// ```zig
+    /// try c.setTrailer("Server-Timing", "db;dur=12");
+    /// ```
+    ///
+    /// **Settable until the body ends, on every framing alike**: before
+    /// `send` for a whole answer, before `finish` for a stream, and after
+    /// `next` from a middleware that called `next.hold(c)`. HTTP/2 sends it
+    /// after the body; a chunked HTTP/1.1 stream as a trailer section; a
+    /// whole HTTP/1.1 answer chunked to carry it when the client sent
+    /// `TE: trailers`, and without it otherwise, which a client that never
+    /// asked could not have read anyway (RFC 9110 §6.5.1).
+    ///
+    /// Copied into the request arena, as `setHeader` copies. Refused: a name
+    /// RFC 9110 §6.5.1 keeps out of trailers (the framing, the route,
+    /// authentication, a cache rule, the content's type and encoding), and
+    /// anything `setHeader` would refuse for its bytes.
+    pub fn setTrailer(self: *Ctx, name: []const u8, value: []const u8) !void {
+        if (self._body_ended) return refuseField(name, "is a trailer set after the body ended, so it has " ++
+            "nowhere to go. Set it before `send`, before a stream's `finish`, or from a middleware " ++
+            "that called `next.hold(c)` rather than `next.run(c)`.");
+        try checkTrailer(.{ .name = name, .value = value });
+        const entry: http1.Header = .{
+            .name = try self._arena.dupe(u8, name),
+            .value = try self._arena.dupe(u8, value),
+        };
+        for (self._trailers.list.items) |*t| {
+            if (std.ascii.eqlIgnoreCase(t.name, name)) {
+                t.* = entry; // last one wins, as a header set twice
+                return;
+            }
+        }
+        try self._trailers.list.append(self._arena, entry);
+        self._trailers.writers = &framing_mod.writers;
+    }
+
+    /// The checks `setTrailer` makes on a field, on their own, for a caller
+    /// that keeps an answer to send again and has to know first (ADR 155).
+    pub fn checkTrailer(entry: http1.Header) !void {
+        if (http1.barredFromTrailer(entry.name)) return refuseField(entry.name, "cannot be a trailer: it says " ++
+            "something a client needs before the body (its framing, its route, its format, a cache " ++
+            "or authentication rule), and RFC 9110 §6.5.1 lets a client drop or misread it after. " ++
+            "Set it with `setHeader`.");
+        return checkBytes(entry);
+    }
+
+    /// The trailers set so far, in the order they were set.
+    pub fn trailers(self: *const Ctx) []const http1.Header {
+        return self._trailers.list.items;
     }
 
     /// The compressed body, when this answer is one to compress: long
@@ -2022,7 +2234,7 @@ pub const Ctx = struct {
     pub fn sendJson(self: *Ctx, status: u16, value: anytype) !void {
         var out: std.Io.Writer.Allocating = try .initCapacity(self._arena, json_hint);
         try json_mod.write(&out.writer, value);
-        try self.send(status, "application/json", out.written());
+        try self.sendKept(status, "application/json", out.written());
     }
 
     /// Answer with an open file, without ever holding it in memory
@@ -2115,6 +2327,10 @@ pub const Ctx = struct {
             .promised = options.length,
         };
 
+        // A stream's head cannot wait for the chain, held or not: the body
+        // follows it now. What a holding middleware can still change is the
+        // end, and the trailers that go with it.
+        self._head_written = true;
         try self._framing.streamHead(status, content_type, shape, options.length, self.keepAlive(), self.extraHeaders());
 
         // The one allocation a stream makes, made once. Everything written
@@ -2123,6 +2339,9 @@ pub const Ctx = struct {
         var out: stream_mod.Stream =
             .initClosing(buffer, &self._framing, self._stopping, &self._stream, &self._force_close);
         out._watch = self._watch;
+        out._trailers = &self._trailers;
+        out._hold = &self._hold;
+        out._ended = &self._body_ended;
         return out;
     }
 
@@ -2262,6 +2481,7 @@ pub const Ctx = struct {
 
         // From here the answer is written, so nothing above may fail.
         self.markAnswered(101);
+        self._head_written = true;
         self.tookOver();
         // The connection stops being HTTP at the blank line below, so it can
         // never carry another request.
@@ -2406,6 +2626,7 @@ pub const Ctx = struct {
         try self.setStaticHeader("X-Accel-Buffering", "no");
         self.markAnswered(200);
         self.tookOver();
+        self._head_written = true;
         try self._framing.streamHead(200, stream_mod.Events.content_type, shape, null, self.keepAlive(), self.extraHeaders());
         if (head_only) return;
 

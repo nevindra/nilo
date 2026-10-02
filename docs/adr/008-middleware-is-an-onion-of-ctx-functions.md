@@ -61,9 +61,15 @@ Fusing the whole chain into a single function at compile time would remove the i
 
 Otherwise the logger never sees a 404 and CORS cannot answer a preflight for a path that does not exist, both of which are exactly when they matter. So the chain always runs; when nothing matched, the innermost call is the 404 responder instead of a handler.
 
-### Headers are set on the way in, not streamed
+### An answer is written when it is sent, unless a middleware holds it
 
-`c.setHeader(name, value)` accumulates into the request arena and is written out by `send`. Middleware sets headers before calling `next`, which is what CORS is built on. A finished response is flushed before the connection waits, not before `send` returns, so a pipelining client gets one write for many responses ([ADR 201](./201-a-response-is-flushed-before-the-connection-waits.md)). The p99 metric stays honest, and the "after" half of a middleware can observe and clean up but cannot rewrite a response `send` has already written.
+`c.setHeader(name, value)` accumulates into the request arena and is written out by `send`. Middleware sets headers before calling `next`, which is what CORS is built on. A finished response is flushed before the connection waits, not before `send` returns, so a pipelining client gets one write for many responses ([ADR 201](./201-a-response-is-flushed-before-the-connection-waits.md)).
+
+**A middleware that changes an answer after `next` asks for it: `next.hold(c)` in place of `next.run(c)`.** It hands back a `nilo.Answer`, the answer below unwritten, and the answer is written when the chain has unwound, not when the handler sent it. What has not had to leave yet can still change: a whole answer's status, headers, body and trailers (`Answer.replace` swaps the whole answer, a 304 for an ETag middleware), and a stream's trailers and its end, whose head left when it opened. A failure after `hold` replaces a held whole answer with its own. A failure below `hold` comes back as an error, as from `run`, so a header meant for every answer, failures included, is set with `defer c.setHeader(...) catch {};` around `next.run(c)`.
+
+**A body handed to `c.send` under a hold is copied into the arena**, because the handler's frame and anything its `defer` released are gone by the time the answer is written. That copy is free while it fits in what the arena keeps (16 KiB) and costly beyond it; a body that already outlives the chain is not copied: a typed handler's return, `sendJson`, `c.sendKept` and a static file.
+
+**A header set after the head of an answer was written is refused** with a sentence naming `hold`. It used to go into a list nothing would write again and be lost without a word, which is what Go's `net/http` and Gin still do.
 
 ### A group can say a middleware does not cover it
 
@@ -120,6 +126,12 @@ A middleware guarding `/api` can reject a request but was once unable to pass th
 
 **Leaving `Group` out to keep the compile-time engine simple.** It now exists precisely because `without`'s exclusion list needs a type to carry it, and it is what a plugin reads its own prefix from through `mounted_at`.
 
+**Every answer held until the chain unwinds**, which is what Axum and Hono give a middleware. Holding itself cost nothing measurable, but every body handed to `c.send` then has to be copied into the arena, and past the 16 KiB the arena keeps that copy cost 63% of throughput at 64 KiB and 87% at 1 MiB, with 8.6 times the peak memory ([`bench/result/http.md`](../../bench/result/http.md#holding-every-answer-until-the-chain-unwinds)). `hold` puts that cost on the route behind a middleware that asked.
+
+**A hook per framing for changing an answer**, a function a framing calls before it writes. It would be a second way to do what the onion does, with nowhere to keep state between the halves, which is the reason the onion was chosen.
+
+**A header set after the answer was written, kept losing without a word.** The behaviour Go and Gin ship. Nothing could tell the author the header never left.
+
 **An empty 200 for a chain a middleware stopped without a word**, which was the rule until the audit of `http/` at `39896d2`: it was the handler's rule applied to a layer that is not the handler.
 
 **A middleware that has to return proof it answered or called `next`**, a value only `next.run` and `c.send` can make. The compiler would catch the forgotten 401 rather than a test, and every middleware ever written would change signature for one mistake a 500 and a log line already make loud the first time the route is hit.
@@ -128,9 +140,9 @@ A middleware guarding `/api` can reject a request but was once unable to pass th
 
 | Axis | Cost |
 |---|---|
-| Allocations per request | 0. `Next` is two words passed by value; a request that matches no `without` exemption allocates nothing extra |
+| Allocations per request | 0. `Next` is two words passed by value; a request that matches no `without` exemption allocates nothing extra. A route behind `next.hold` pays a copy of a body sent with `c.send`, one arena bump, and a growth of the arena past 16 KiB when the body is larger |
 | Memory per idle connection | 0 |
-| Throughput and p99 | An indirect call per middleware layer, two to four deep on a typical route; fusing the chain to remove it was measured against [ADR 017](./017-the-trade-budget-has-four-axes.md)'s threshold and not worth the ordering it would force on the caller |
+| Throughput and p99 | 1.3% of throughput in the default build for the bookkeeping a hold needs ([ADR 254](./254-an-answer-can-carry-trailers.md) has the run). An indirect call per middleware layer, two to four deep on a typical route; fusing the chain to remove it was measured against [ADR 017](./017-the-trade-budget-has-four-axes.md)'s threshold and not worth the ordering it would force on the caller |
 | Binary size | The exclusion list is a comptime parameter folded away for a group with none; an App with no `without` call carries one empty `ArrayList` and never looks at it |
 
 Chains, and the exemptions inside them, are resolved once per route in `resolveChains`, which runs at `listen()`; the request path only ever sees a resolved slice of function pointers.

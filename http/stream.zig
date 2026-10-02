@@ -84,7 +84,39 @@ pub const Open = struct {
     /// inferred, because the buffer means the writer and the wire are never
     /// at the same place.
     written: u64 = 0,
+    /// `finish` was called while a middleware held the answer: the body is
+    /// over as far as the handler is concerned, and its end, with the
+    /// trailers, is written when the chain has unwound (ADR 008).
+    finished: bool = false,
 };
+
+/// End a body: the promise checked, then the marker and the trailers where
+/// the framing has them. What `finish` does, and what App does for a stream
+/// whose end a middleware held.
+pub fn close(framing: *Framing, open: Open, trailers: framing_mod.Trailers, force_close: ?*bool) !void {
+    // A promise that was not met. The head has gone out saying how many
+    // bytes are coming, so there is no correcting it: what is left is to
+    // stop the client waiting for the rest, and to stop the next response
+    // on this connection being read as the tail of this one. A HEAD is not
+    // this case — nothing was going to be written (ADR 101).
+    if (open.promised) |promised| {
+        if (!open.drop and open.written < promised) {
+            // A warning rather than an error, because in this project
+            // `std.log.err` means the server is refusing to start — every
+            // other one is a `listen()` that returns rather than binds.
+            // A handler that mis-counted its own body is one request going
+            // wrong, which is what `warn` is for here and in `App`.
+            std.log.warn(
+                "nilo: a stream promised {d} bytes and wrote {d} — the response is short, " ++
+                    "so the connection is being closed rather than left half-answered",
+                .{ promised, open.written },
+            );
+            if (force_close) |flag| flag.* = true;
+        }
+    }
+
+    try framing.end(open.chunked and !open.drop, trailers);
+}
 
 /// A response being written in pieces.
 ///
@@ -117,6 +149,15 @@ pub const Stream = struct {
     /// handler time ends at every write, which is what lets a stream be
     /// watched rather than excused (ADR 013).
     _watch: ?*watchdog.Watch = null,
+    /// The `Ctx`'s trailers, written after the last chunk (ADR 254). Null
+    /// for a Stream a test built, which ends with none.
+    _trailers: ?*const framing_mod.Trailing = null,
+    /// The `Ctx`'s "a middleware holds this answer" flag: `finish` then
+    /// leaves the end to App, after the chain (ADR 008).
+    _hold: ?*const bool = null,
+    /// The `Ctx`'s "the body has ended" flag, set once the end is written,
+    /// after which a trailer has nowhere to go.
+    _ended: ?*bool = null,
 
     /// Write `bytes` into the stream. Nothing leaves until the buffer fills
     /// or something flushes.
@@ -163,37 +204,25 @@ pub const Stream = struct {
 
     /// End the body. Required, and safe to call twice.
     pub fn finish(self: *Stream) !void {
-        if (self._open.* == null) return;
+        const before = self._open.* orelse return;
+        if (before.finished) return;
         // Flushed before the record is cleared, not after: `drain` reads it
         // to know how to frame what it is writing, and a null one means the
         // body has already ended. Re-read afterwards, because the flush is
         // what moves `written`.
         try self.writer.flush();
-        const open = self._open.*.?;
-        self._open.* = null;
-
-        // A promise that was not met. The head has gone out saying how many
-        // bytes are coming, so there is no correcting it: what is left is to
-        // stop the client waiting for the rest, and to stop the next response
-        // on this connection being read as the tail of this one. A HEAD is not
-        // this case — nothing was going to be written (ADR 101).
-        if (open.promised) |promised| {
-            if (!open.drop and open.written < promised) {
-                // A warning rather than an error, because in this project
-                // `std.log.err` means the server is refusing to start — every
-                // other one is a `listen()` that returns rather than binds.
-                // A handler that mis-counted its own body is one request going
-                // wrong, which is what `warn` is for here and in `App`.
-                std.log.warn(
-                    "nilo: a stream promised {d} bytes and wrote {d} — the response is short, " ++
-                        "so the connection is being closed rather than left half-answered",
-                    .{ promised, open.written },
-                );
-                if (self._force_close) |flag| flag.* = true;
-            }
+        const held = if (self._hold) |flag| flag.* else false;
+        if (held) {
+            // The end waits for the chain, so a middleware holding the answer
+            // can still add a trailer. The record stays, marked, so App knows
+            // the body was finished rather than abandoned.
+            self._open.*.?.finished = true;
+        } else {
+            const open = self._open.*.?;
+            self._open.* = null;
+            try close(self._framing, open, if (self._trailers) |t| t.out(false) else .{}, self._force_close);
+            if (self._ended) |flag| flag.* = true;
         }
-
-        try self._framing.end(open.chunked and !open.drop);
 
         // Take the buffer away, so that anything written from here on has
         // nowhere to sit and goes straight to `drain` — which is where the
@@ -234,7 +263,8 @@ pub const Stream = struct {
         // finished body — but silently dropping what a handler wrote is how
         // somebody spends an afternoon looking for the missing half of a
         // report, so it says so once.
-        const open = self._open.* orelse {
+        const current: ?Open = if (self._open.*) |o| (if (o.finished) null else o) else null;
+        const open = current orelse {
             if (total > 0) std.log.warn(
                 "nilo: {d} bytes were written to a stream after finish() — " ++
                     "the body had already ended, so they were dropped",

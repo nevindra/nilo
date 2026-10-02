@@ -26,6 +26,7 @@ const websocket = @import("websocket.zig");
 const handover_mod = @import("handover.zig");
 const metrics_mod = @import("metrics.zig");
 const failurebody = @import("failurebody.zig");
+const framing_mod = @import("framing.zig");
 const json = @import("json.zig");
 const trace_mod = @import("trace.zig");
 
@@ -81,7 +82,7 @@ pub fn handleConnection(
         // Back to `listen()`'s limit for this request, undoing whatever the
         // last one's deadline did to it. A field store and no allocation.
         deadlines.armWrite();
-        var served = serveRequest(self, arena.allocator(), &lifetime, &in_flight, in, out, deadlines, waker, peer);
+        var served = serveRequest(self, arena.allocator(), &lifetime, &in_flight, in, .{ .wire = out }, deadlines, waker, peer);
         // A handler that upgraded runs its loop here rather than inside
         // `serveRequest`, so that the request's 1,608 bytes are unwound
         // before a socket suspends for the next hour (ADR 062).
@@ -282,7 +283,7 @@ pub noinline fn serveRequest(
     lifetime: *str_mod.Lifetime,
     in_flight: *fail.InFlight,
     in: *std.Io.Reader,
-    out: *std.Io.Writer,
+    sink: framing_mod.Sink,
     deadlines: bulkhead.Deadlines,
     waker: bulkhead.Waker,
     peer: bulkhead.Peer,
@@ -317,11 +318,11 @@ pub noinline fn serveRequest(
             // halfway through a head gets a 408, a connection that sat
             // idle without asking for anything is just closed.
             error.ReadFailed => if (deadlines.timedOut() and in.buffered().len > 0) {
-                sendFinal(out, RESPONSE_408);
+                sendFinal(sink, RESPONSE_408, 408);
                 record.finish(408);
             },
             error.HeadTooLong => {
-                sendFinal(out, RESPONSE_431);
+                sendFinal(sink, RESPONSE_431, 431);
                 record.finish(431);
                 // The rest of the head is still queued: the reason it was
                 // refused is that it did not fit in the buffer.
@@ -352,7 +353,7 @@ pub noinline fn serveRequest(
             error.UnsupportedTransferEncoding => .{ RESPONSE_501, 501 },
             else => .{ RESPONSE_400, 400 },
         };
-        sendFinal(out, answer);
+        sendFinal(sink, answer, status);
         record.finish(status);
         // A head that did not parse may have a body behind it, and a body
         // under a coding nilo cannot read certainly does.
@@ -365,7 +366,7 @@ pub noinline fn serveRequest(
     // the head is copied, before the router is asked: a shed request costs
     // one write of a constant.
     if (self.limits.max_in_flight != 0 and already >= self.limits.max_in_flight) {
-        sendFinal(out, RESPONSE_503_SHED);
+        sendFinal(sink, RESPONSE_503_SHED, 503);
         record.at(metrics_mod.shed);
         record.finish(503);
         return .{ .keep_alive = false, .linger = http1.readsMore(&r) };
@@ -413,7 +414,7 @@ pub noinline fn serveRequest(
         ._arena = arena,
         ._lifetime = lifetime,
         ._in = in,
-        ._framing = .{ .http1 = .{ .in = in, .out = out, .minor_version = r.minor_version } },
+        ._framing = framing_mod.of(sink, in, r.minor_version),
         ._request = &r,
         ._path = path,
         ._query = raw_query,
@@ -564,6 +565,9 @@ pub noinline fn serveRequest(
 
     (mw.Next{ .rest = chain, .handler = terminal }).run(&c) catch |err| {
         watchdog.finish(&in_flight.watch);
+        // An answer a middleware held has not been written, so the failure
+        // replaces it as it would replace nothing (ADR 008).
+        c.dropHeld();
         // A half-sent response cannot be taken back, so the connection
         // is closed: the next request on it would read leftover bytes
         // of unclear provenance.
@@ -591,6 +595,12 @@ pub noinline fn serveRequest(
     const reusable = drain(&c, in, &r);
     const linger = !reusable and http1.readsMore(&r);
 
+    // What a middleware held goes out now that every layer has had its say
+    // (ADR 008). A held file that can no longer be positioned has had its
+    // status taken already, so the connection goes rather than a second
+    // answer.
+    c.releaseHeld() catch return .{ .keep_alive = false, .handover = handover, .linger = linger };
+
     if (c.answered() == null) {
         // A handler that returned without answering meant an empty 200
         // (ADR 120). A middleware that returned without answering and
@@ -611,7 +621,7 @@ pub noinline fn serveRequest(
         // No content type, because there is no content to give one to.
         sendDirect(&c, 200, "", "") catch return .{ .keep_alive = false, .handover = handover, .linger = linger };
     }
-    if (c._stream != null) return .{ .keep_alive = endAbandonedStream(&c), .handover = handover, .linger = linger };
+    if (c._stream != null) return .{ .keep_alive = endStream(&c), .handover = handover, .linger = linger };
     return .{ .keep_alive = reusable, .handover = handover, .linger = linger };
 }
 
@@ -1101,7 +1111,7 @@ fn serveHeldFile(c: *Ctx, file: *const static_mod.File) anyerror!void {
         .whole => {},
         .part => |part| {
             try c.setHeader("Content-Range", range_mod.contentRange(&buf, part, total));
-            return c.send(206, file.content_type, part.slice(sending.bytes));
+            return c.sendKept(206, file.content_type, part.slice(sending.bytes));
         },
         .unsatisfiable => {
             // The one answer whose whole content is "you have the wrong idea
@@ -1112,7 +1122,9 @@ fn serveHeldFile(c: *Ctx, file: *const static_mod.File) anyerror!void {
         },
     }
 
-    try c.send(200, file.content_type, sending.bytes);
+    // The bytes are the App's, loaded at startup, so a middleware holding the
+    // answer does not copy them (ADR 008).
+    try c.sendKept(200, file.content_type, sending.bytes);
 }
 
 /// A request header as plain bytes. The `Str` a handler gets is the right
@@ -1123,23 +1135,28 @@ fn headerValue(c: *const Ctx, name: []const u8) ?[]const u8 {
     return found.view();
 }
 
-/// A handler opened a stream and returned without calling `finish()`.
+/// A stream still open when the chain has unwound: one whose end a
+/// middleware held, or one a handler returned from without calling
+/// `finish()`.
 ///
 /// The zero-length chunk is written here so the client is told where the
 /// body stopped instead of waiting for more, and so the connection is left
-/// in a state the next request can start from. What cannot be recovered is
-/// anything still in the stream's buffer — that lived in the handler's own
-/// frame and went with it — which is why this says so out loud rather than
-/// quietly tidying up (ADR 019).
-noinline fn endAbandonedStream(c: *Ctx) bool {
+/// in a state the next request can start from. What cannot be recovered from
+/// an abandoned one is anything still in the stream's buffer — that lived in
+/// the handler's own frame and went with it — which is why that case says so
+/// out loud rather than quietly tidying up (ADR 019).
+noinline fn endStream(c: *Ctx) bool {
     const open = c._stream.?;
     c._stream = null;
-    std.log.warn(
+    // Finished while a middleware held its end (ADR 008): nothing was lost,
+    // and the end goes out now with the trailers that middleware added.
+    if (!open.finished) std.log.warn(
         "handler {s} {s} opened a stream and never finished it; " ++
             "call stream.finish() — anything still buffered was lost",
         .{ @tagName(c.method), c._path },
     );
-    c._framing.end(open.chunked and !open.drop) catch return false;
+    c._framing.end(open.chunked and !open.drop, c._trailers.out(false)) catch return false;
+    c._body_ended = true;
 
     // A promised length that was never met cannot be tidied up the way a
     // missing zero-length chunk can: the head has gone out saying how many
@@ -1188,9 +1205,18 @@ noinline fn warnSocketFailed(path: []const u8, err: anyerror) void {
     std.log.warn("the WebSocket loop on {s} failed: {s}", .{ path, @errorName(err) });
 }
 
-fn sendFinal(out: *std.Io.Writer, response: http1.Static) void {
-    http1.writeStatic(out, response) catch return;
-    out.flush() catch return;
+/// An answer made before there was a `Ctx`: written as the constant it is,
+/// or, for a call an HTTP/2 connection is collecting, kept as its status.
+fn sendFinal(sink: framing_mod.Sink, response: http1.Static, status: u16) void {
+    switch (sink) {
+        .wire => |out| {
+            http1.writeStatic(out, response) catch return;
+            out.flush() catch return;
+        },
+        .collect => |collected| if (comptime !framing_mod.grpc_built) unreachable else {
+            collected.status = status;
+        },
+    }
 }
 
 /// Responses App assembles itself — an empty 200, a failure response —
@@ -1254,6 +1280,9 @@ noinline fn sendFailure(c: *Ctx, failure: *const fail.Failure, err: anyerror, sh
     // The buffer is sized for the longest message a Failure can hold, so
     // this cannot run out of room; if it somehow did, what was written so
     // far would not be JSON, and the status alone is better than that.
+    // Said to the framing as well as written, so an envelope with codes of
+    // its own can choose one from the error (ADR 220).
+    try c._framing.failed(err, message);
     if (shape == null) writeFailureBody(&body, status, message) catch {
         return sendDirect(c, status, "", "");
     };
@@ -1281,7 +1310,7 @@ fn serveOnce(app: *App, request: []const u8) Served {
     var limited = std.Io.Reader.Limited.init(&underlying, .unlimited, &read_buf);
     var buf: [4096]u8 = undefined;
     var out = std.Io.Writer.fixed(&buf);
-    var served = serveRequest(app, arena.allocator(), &lifetime, &in_flight, &limited.interface, &out, .off, .off, .{});
+    var served = serveRequest(app, arena.allocator(), &lifetime, &in_flight, &limited.interface, .{ .wire = &out }, .off, .off, .{});
     runHandover(&served);
     lifetime.end();
     return served;
@@ -1390,7 +1419,7 @@ test "a head that does not fit is answered 431 and lingered on" {
     var in_flight = fail.InFlight{};
     var buf: [4096]u8 = undefined;
     var out = std.Io.Writer.fixed(&buf);
-    const served = serveRequest(&app, arena.allocator(), &lifetime, &in_flight, &limited.interface, &out, .off, .off, .{});
+    const served = serveRequest(&app, arena.allocator(), &lifetime, &in_flight, &limited.interface, .{ .wire = &out }, .off, .off, .{});
     lifetime.end();
 
     try testing.expect(std.mem.startsWith(u8, out.buffered(), "HTTP/1.1 431"));
@@ -1409,7 +1438,7 @@ fn serveAnswer(app: *App, request: []const u8, wire: []u8) struct { served: Serv
     var read_buf: [4096]u8 = undefined;
     var limited = std.Io.Reader.Limited.init(&underlying, .unlimited, &read_buf);
     var out = std.Io.Writer.fixed(wire);
-    var served = serveRequest(app, arena.allocator(), &lifetime, &in_flight, &limited.interface, &out, .off, .off, .{});
+    var served = serveRequest(app, arena.allocator(), &lifetime, &in_flight, &limited.interface, .{ .wire = &out }, .off, .off, .{});
     runHandover(&served);
     lifetime.end();
     return .{ .served = served, .answer = out.buffered() };

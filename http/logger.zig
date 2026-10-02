@@ -120,7 +120,6 @@ pub fn with(comptime options: Options) mw.Middleware {
                 .debug => std.log.debug("{s}", .{line}),
             }
         }
-
     }.run;
 }
 

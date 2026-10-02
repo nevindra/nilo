@@ -662,6 +662,9 @@ pub const Patch = @import("patch.zig").Patch;
 
 pub const Middleware = @import("middleware.zig").Middleware;
 pub const Next = @import("middleware.zig").Next;
+/// The answer a middleware holds after `next.hold(c)`, to read and change
+/// before it is written (ADR 008).
+pub const Answer = @import("middleware.zig").Answer;
 
 /// A monotonic clock reading in nanoseconds, for measuring how long
 /// something took.
@@ -942,7 +945,6 @@ test "every type this module exports is named the way the import line names it" 
         }
     }
 }
-
 
 test "json can be written outside a request by the rules a response is written by" {
     const Alert = struct {

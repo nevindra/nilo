@@ -26,6 +26,7 @@ const session_mod = @import("session.zig");
 const password_mod = @import("password.zig");
 const metrics_mod = @import("metrics.zig");
 const serve = @import("serve.zig");
+const framing_mod = @import("framing.zig");
 const wiring = @import("wiring.zig");
 const health_mod = @import("health.zig");
 const failurebody = @import("failurebody.zig");
@@ -982,7 +983,6 @@ pub const App = struct {
             }
         }
 
-
         try self.requirements.appendSlice(self.gpa, comptime typed.requirements(pattern, handler));
         // The name the route answers to at run time is the one the document
         // prints — given, or derived by the same function the document
@@ -1709,6 +1709,13 @@ pub const App = struct {
     /// this core and cannot name `App`, so it is handed the few things it
     /// uses instead: the router's answer to one path, and `handleRequest`.
     pub fn grpcHost(self: *App) grpc.Host {
+        // A call is collected into a `framing.Collected`, which a build
+        // without `-Dgrpc` does not have: the arm is `noreturn` there, so
+        // reaching it would be undefined behaviour in ReleaseFast. A compile
+        // error says so instead (ADR 220).
+        if (comptime !framing_mod.grpc_built) @compileError(
+            "nilo: the App answers gRPC only in a build with `.grpc = true` (`-Dgrpc`).",
+        );
         const Adapter = struct {
             fn routes(ptr: *anyopaque, path: []const u8) bool {
                 const app: *App = @ptrCast(@alignCast(ptr));
@@ -1724,12 +1731,15 @@ pub const App = struct {
                 lifetime: *str_mod.Lifetime,
                 in_flight: *fail.InFlight,
                 in: *std.Io.Reader,
-                out: *std.Io.Writer,
+                collected: *framing_mod.Collected,
                 peer: bulkhead.Peer,
                 until_ns: u64,
             ) void {
                 const app: *App = @ptrCast(@alignCast(ptr));
-                _ = app.handleRequest(arena, lifetime, in_flight, in, out, .{ .until_ns = until_ns }, .{}, peer);
+                // Answered into `collected`, never onto a socket: the
+                // connection's fiber frames it (ADR 220, ADR 253). A call
+                // cannot hand a socket over, so there is no handover to run.
+                _ = serve.serveRequest(app, arena, lifetime, in_flight, in, .{ .collect = collected }, .{ .until_ns = until_ns }, .{}, peer);
             }
         };
         return .{
@@ -1810,7 +1820,7 @@ pub const App = struct {
         waker: bulkhead.Waker,
         peer: bulkhead.Peer,
     ) bool {
-        var served = serve.serveRequest(self, arena, lifetime, in_flight, in, out, deadlines, waker, peer);
+        var served = serve.serveRequest(self, arena, lifetime, in_flight, in, .{ .wire = out }, deadlines, waker, peer);
         serve.runHandover(&served);
         return served.keep_alive;
     }

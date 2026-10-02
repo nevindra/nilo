@@ -159,10 +159,6 @@ The entries here came from an audit of `s3/` at `1738286`, by two readers betwee
 
 **Needs:** two named signals rather than one flag — "the client half-closed and is waiting" and "the socket is gone". What is already real is a write that fails, and a handler sees that today.
 
-**gRPC still parses its answer back out of HTTP/1.1 text.** The App writes a call's answer as HTTP/1.1 into memory and `grpc.zig` reads it back (`parseResponse`, `unchunk`, the prefix written over the head in `framedIn`), and `grpc-status` and `grpc-message` reach the wire as headers the translation lifts out. `Framing`'s HTTP/2 arm collects the same answer whole and is not constructed yet ([ADR 253](./adr/253-an-answer-is-handed-to-the-framing-that-carried-its-request.md), stage 2 of [the framing page](./design/framing.md#how-the-direction-is-built)).
-
-**Needs:** the trailer built as stage 2 of [the framing page](./design/framing.md#how-the-direction-is-built) decides it, and the hook before the head is written decided first (that page's open questions); then the call's allocations and `zig build profile`'s gRPC call measured against the translation.
-
 **`Ctx.connection()` returns `http1.Connection`.** It is public ([reference](./reference/ctx.md)) and names an HTTP/1.1 header, which means nothing on HTTP/2; `keepAlive()` says the same thing in neutral words. Leaving it is harmless until HTTP/2 serves ordinary routes, and removing it is a break.
 
 **Needs:** a decision to drop it from the public surface, or to keep it documented as HTTP/1.1's, before stage 5 of [the framing page](./design/framing.md#how-the-direction-is-built).

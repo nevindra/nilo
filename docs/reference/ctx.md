@@ -64,10 +64,12 @@ This page covers reading a request, answering it, its cookies, session and uploa
 |---|---|
 | `c.setHeader(name, value)` | copied into the request arena |
 | `c.setStaticHeader(name, value)` | not copied: for text that already outlives the request |
+| `c.setTrailer(name, value)` | `!void`: a field sent after the body, for what is known only once the body is. Copied into the request arena. See [Trailers](#trailers) |
 | `c.setCookie(cookie)` | a `Set-Cookie`. Calling it twice sets two, not one |
 | `c.clearCookie(.{ .name = …, .path = …, .domain = … })` | delete one. Path and domain have to match |
 | `c.redirect(status, location)` | a `Location` and no body |
 | `c.send(status, content_type, bytes)` | **a second answer is `error.AlreadyAnswered`**, and the first stands; gzipped on the way out when `app.compress` is on and the body, the type and the client all qualify ([ADR 211](../adr/211-a-response-is-compressed-on-a-compressor-borrowed-from-a-pool.md)); so are the two below |
+| `c.sendKept(status, content_type, bytes)` | `send` for a body that already outlives the middleware chain (one in the request arena, or one a typed handler returned). Not copied when a middleware holds the answer, which `send` does copy ([ADR 008](../adr/008-middleware-is-an-onion-of-ctx-functions.md)) |
 | `c.sendText(status, text)` | `text/plain` |
 | `c.sendJson(status, value)` | `application/json` |
 | `c.sendEmpty(status)` | no body and no `Content-Type`: a 204, usually |
@@ -82,9 +84,24 @@ This page covers reading a request, answering it, its cookies, session and uploa
 
 ### Response headers
 
-**nilo writes some headers itself, and refuses to let `setHeader` write the ones that frame the response.** Every response carries a `Date` written by nilo; set one yourself and yours is sent instead ([ADR 197](../adr/197-a-response-says-when-it-was-sent.md)). `setHeader` refuses `Content-Type`, `Content-Length`, `Transfer-Encoding` and `Connection`. It also refuses a name that is not a valid token, and a value containing a control byte, because a newline in a value would start a second header, and two newlines would start a second response ([ADR 029](../adr/029-a-header-is-checked-once-and-two-of-them-repeat.md)). All three cases are a 500 naming the header. Set headers before sending.
+**nilo writes some headers itself, and refuses to let `setHeader` write the ones that frame the response.** Every response carries a `Date` written by nilo; set one yourself and yours is sent instead ([ADR 197](../adr/197-a-response-says-when-it-was-sent.md)). `setHeader` refuses `Content-Type`, `Content-Length`, `Transfer-Encoding` and `Connection`. It also refuses a name that is not a valid token, and a value containing a control byte, because a newline in a value would start a second header, and two newlines would start a second response ([ADR 029](../adr/029-a-header-is-checked-once-and-two-of-them-repeat.md)). All three cases are a 500 naming the header. It also refuses `grpc-status` and `grpc-message`, which are trailers: use `setTrailer`. **A header set after the answer's head was written is refused with a sentence saying so, where it used to be lost without a word.** Set headers before sending, or hold the answer from a middleware with `next.hold(c)`, which keeps the head back until the chain has unwound ([ADR 008](../adr/008-middleware-is-an-onion-of-ctx-functions.md), [Middleware](middleware.md#holding-the-answer-with-nexthold)).
 
 Setting the same header twice replaces it, except for `Set-Cookie` and `Vary`, which a response may carry more than once. `Set-Cookie` because two cookies cannot be folded into one line; `Vary` because two layers can each name their own axis, and replacing one would drop the other ([ADR 029](../adr/029-a-header-is-checked-once-and-two-of-them-repeat.md)). Setting either with a name and value that are already present adds nothing.
+
+### Trailers
+
+**A trailer is a field sent after the body, for what is known only once the body is** (a `Server-Timing` for work the body did, a checksum, a gRPC status) ([ADR 254](../adr/254-an-answer-can-carry-trailers.md)).
+
+| | |
+|---|---|
+| `c.setTrailer(name, value)` | `!void`. Settable until the body ends, on every framing alike: before `send` for a whole answer, before `finish` for a stream, and after `next` from a middleware that called `next.hold(c)`. The last one set under a name wins |
+| `c.trailers()` | the trailers set so far, in the order they were set |
+| `c.clientReadsTrailers()` | `bool`: whether the request said so with a `TE` naming `trailers` (RFC 9110 §10.1.4) |
+| `Ctx.checkTrailer(entry)` | `!void`: the checks `setTrailer` makes, on their own, for a caller that keeps an answer to send again and has to know first |
+
+**How each framing carries them.** HTTP/2 sends them after the body. A chunked HTTP/1.1 stream sends them as the trailer section. **A whole HTTP/1.1 answer is chunked to carry them only when the request was HTTP/1.1, not a HEAD, had `TE: trailers`, and the status has a body; otherwise they are left off**, because a client that never asked could not have read them (RFC 9110 §6.5.1).
+
+**Refused, with a sentence naming the field:** the names RFC 9110 §6.5.1 keeps out of trailers (the framing, the route, authentication, a cache rule, the content's type and encoding), a name that is not a token, and a value with a control byte. Copied into the request arena, so an answer with none costs nothing.
 
 ### `c.host` and `c.scheme`
 

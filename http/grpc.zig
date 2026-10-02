@@ -59,6 +59,7 @@ const bulkhead = @import("bulkhead.zig");
 const fail = @import("fail.zig");
 const encoded = @import("encoded.zig");
 const core = @import("nilo_core");
+const framing = @import("framing.zig");
 
 /// What a gRPC connection asks of the App, handed over by `app.zig` rather
 /// than named here. This file sits outside the App's core (`http_core` in
@@ -80,7 +81,8 @@ pub const Host = struct {
     body_limit: *const fn (ptr: *anyopaque, path: []const u8) usize,
     /// Whether a `POST` to this path reaches a route.
     routes: *const fn (ptr: *anyopaque, path: []const u8) bool,
-    /// `App.handleRequest`, with no waker and no read limits: a call's fiber
+    /// One call through the App, its answer kept in `collected` rather than
+    /// written (ADR 253), with no waker and no read limits: a call's fiber
     /// never reads from the socket, so there is nothing for either to arm.
     /// `until_ns` is the call's `grpc-timeout` as a `monotonicNanos` reading,
     /// or 0, and it is the request's deadline (ADR 105).
@@ -90,7 +92,7 @@ pub const Host = struct {
         lifetime: *core.Lifetime,
         in_flight: *fail.InFlight,
         in: *std.Io.Reader,
-        out: *std.Io.Writer,
+        collected: *framing.Collected,
         peer: bulkhead.Peer,
         until_ns: u64,
     ) void,
@@ -1445,12 +1447,12 @@ fn answer(s: *Stream, in_flight: *fail.InFlight) !void {
     var lifetime = core.Lifetime.init();
     defer lifetime.deinit();
     var in: std.Io.Reader = .fixed(request);
-    var out: std.Io.Writer.Allocating = .init(a);
-    s.app.handle(s.app.ptr, a, &lifetime, in_flight, &in, &out.writer, s.peer, s.until_ns);
+    // Five bytes in front of the body, so the message is framed where it
+    // lies and held once for as long as the client's window keeps it.
+    var collected: framing.Collected = .{ .arena = a, .front = 5 };
+    s.app.handle(s.app.ptr, a, &lifetime, in_flight, &in, &collected, s.peer, s.until_ns);
     lifetime.end();
-    // `out`'s buffer is the arena's and is not freed here: the framed answer
-    // is a slice of it, held once (`framedIn`).
-    try fromResponse(a, s, out.written());
+    try fromCollected(a, s, &collected);
 }
 
 /// `grpc-timeout`: at most eight digits and one unit, `H`, `M`, `S`, `m`,
@@ -1496,8 +1498,7 @@ fn asRequest(a: std.mem.Allocator, s: *const Stream) ![]const u8 {
         if (hopByHop(f.name)) continue;
         if (std.mem.eql(u8, f.name, "content-length")) continue;
         // The whole message is already here, so there is nothing to wait
-        // for leave to send; carried, it has `Ctx` write a 100 head in front
-        // of the answer, which `parseResponse` would read as the answer.
+        // for leave to send.
         if (std.mem.eql(u8, f.name, "expect")) continue;
         try out.writeAll(f.name);
         try out.writeAll(": ");
@@ -1569,56 +1570,53 @@ fn validField(f: hpack.Field) bool {
 
 /// Turn what the route answered into the call's answer: HEADERS with the
 /// route's headers as metadata, the body as one length-prefixed message, and
-/// trailers with `grpc-status`. A status other than 200 is a failed call,
-/// said in one HEADERS frame.
-fn fromResponse(a: std.mem.Allocator, s: *Stream, raw: []u8) !void {
-    const response = try parseResponse(a, raw);
-    if (response.status != 200) {
+/// trailers with `grpc-status` and the route's own. A failed call, a status
+/// other than 200 or a `grpc-status` the route set that is not 0, is said in
+/// one HEADERS frame, Trailers-Only, carrying the route's trailers too.
+fn fromCollected(a: std.mem.Allocator, s: *Stream, collected: *const framing.Collected) !void {
+    const said = statusSaid(collected.trailers);
+    if (collected.status != 200 or (said.code orelse 0) != 0) {
         // A route that failed after the client's deadline failed because of
         // it, as far as the client can tell: `nilo.deadline`'s 503 and a wait
         // cut short both read as DEADLINE_EXCEEDED rather than UNAVAILABLE.
         const late = s.until_ns != 0 and bulkhead.monotonicNanos() >= s.until_ns;
-        const code = response.grpc_status orelse if (late) 4 else codeForStatus(response.status);
-        const message: Message = if (response.grpc_message) |sent| .{ .routes = sent } else .{ .ours = try failureMessage(a, response) };
-        s.head_block = try trailersOnly(a, code, message);
+        const code = said.code orelse if (late) 4 else codeFor(collected.failure, collected.status);
+        const message: Message = if (said.message) |sent| .{ .routes = sent } else .{ .ours = failureMessage(collected) };
+        s.head_block = try trailersOnlyWith(a, code, message, try ownTrailers(a, collected.trailers));
         s.trailers_only = true;
         return;
     }
-    if (response.grpc_status) |code| if (code != 0) {
-        s.head_block = try trailersOnly(a, code, .{ .routes = response.grpc_message orelse "" });
-        s.trailers_only = true;
-        return;
-    };
 
-    if (response.headers.len == 0 and std.mem.eql(u8, response.content_type, "application/grpc")) {
+    if (collected.headers.len == 0 and std.mem.eql(u8, collected.content_type, "application/grpc")) {
         s.head_block = ok_head;
-        s.data = try framedIn(a, raw, response.body);
-        s.trailers = ok_trailers;
-        return;
+    } else {
+        var head: std.ArrayList(hpack.Field) = .empty;
+        try head.append(a, .{ .name = ":status", .value = "200" });
+        try head.append(a, .{ .name = "content-type", .value = if (isGrpcContentType(collected.content_type)) collected.content_type else "application/grpc" });
+        for (collected.headers) |f| if (!hopByHop(f.name)) try head.append(a, .{ .name = f.name, .value = f.value });
+        s.head_block = try encodeBlock(a, head.items);
     }
 
-    var head: std.ArrayList(hpack.Field) = .empty;
-    try head.append(a, .{ .name = ":status", .value = "200" });
-    try head.append(a, .{ .name = "content-type", .value = if (isGrpcContentType(response.content_type)) response.content_type else "application/grpc" });
-    for (response.headers) |f| try head.append(a, f);
-    s.head_block = try encodeBlock(a, head.items);
-
-    s.data = try framedIn(a, raw, response.body);
-    s.trailers = ok_trailers;
+    s.data = try prefixed(a, collected);
+    const own = try ownTrailers(a, collected.trailers);
+    if (own.len == 0) {
+        s.trailers = ok_trailers;
+    } else {
+        var fields: std.ArrayList(hpack.Field) = .empty;
+        try fields.append(a, .{ .name = "grpc-status", .value = "0" });
+        try fields.appendSlice(a, own);
+        s.trailers = try encodeBlock(a, fields.items);
+    }
 }
 
-/// `framed`, written over the five bytes in front of `message` when it lies
-/// inside `raw` with that much room before it, which an answer read out of
-/// an HTTP/1.1 response always has: those bytes are the end of its head,
-/// and nothing reads the head once the HEADERS block has been encoded.
-/// **The answer was held twice**, in the response and in its framed copy,
-/// for as long as the client's window kept it waiting (ADR 220).
-fn framedIn(a: std.mem.Allocator, raw: []u8, message: []const u8) ![]const u8 {
-    const start = @intFromPtr(raw.ptr);
-    const at = @intFromPtr(message.ptr);
-    if (at < start + 5 or at + message.len > start + raw.len) return framed(a, message);
-    const offset = at - start;
-    const data = raw[offset - 5 .. offset + message.len];
+/// The message with its five-byte prefix, written into the room the
+/// collector left in front of it, so the answer is held once (ADR 220).
+/// Copied only when there is no such room, which an answer with no body
+/// handed over has not.
+fn prefixed(a: std.mem.Allocator, collected: *const framing.Collected) ![]const u8 {
+    const message = collected.body;
+    if (collected.room.len != 5 + message.len) return framed(a, message);
+    const data = collected.room;
     data[0] = 0;
     std.mem.writeInt(u32, data[1..5], @intCast(message.len), .big);
     return data;
@@ -1640,87 +1638,64 @@ fn framed(a: std.mem.Allocator, message: []const u8) ![]const u8 {
 const ok_head = "\x88\x0f\x10\x10application/grpc";
 const ok_trailers = "\x00\x0bgrpc-status\x010";
 
-const Response = struct {
-    status: u16,
-    content_type: []const u8 = "",
-    /// Everything else worth carrying as metadata, names lowercased.
-    headers: []const hpack.Field = &.{},
-    grpc_status: ?u8 = null,
-    grpc_message: ?[]const u8 = null,
-    body: []const u8,
+/// What the route said with `c.setTrailer("grpc-status", …)` and
+/// `"grpc-message"`, for a code no failure of nilo's names.
+const Said = struct {
+    code: ?u8 = null,
+    message: ?[]const u8 = null,
 };
 
-/// Read back what `handleRequest` wrote: a status line, a head, and a body
-/// that is either as long as it says or chunked.
-fn parseResponse(a: std.mem.Allocator, raw: []const u8) !Response {
-    const end = std.mem.indexOf(u8, raw, "\r\n\r\n") orelse return error.BadResponse;
-    var lines = std.mem.splitSequence(u8, raw[0..end], "\r\n");
-    const status_line = lines.next() orelse return error.BadResponse;
-    if (status_line.len < 12) return error.BadResponse;
-    const status = std.fmt.parseInt(u16, status_line[9..12], 10) catch return error.BadResponse;
-
-    var response: Response = .{ .status = status, .body = "" };
-    var headers: std.ArrayList(hpack.Field) = .empty;
-    var chunked = false;
-    var length: ?usize = null;
-    while (lines.next()) |line| {
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        const raw_name = std.mem.trim(u8, line[0..colon], " ");
-        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
-        const is = std.ascii.eqlIgnoreCase;
-        if (is(raw_name, "content-type")) {
-            response.content_type = value;
-        } else if (is(raw_name, "content-length")) {
-            length = std.fmt.parseInt(usize, value, 10) catch null;
-        } else if (is(raw_name, "transfer-encoding")) {
-            chunked = std.ascii.indexOfIgnoreCase(value, "chunked") != null;
-        } else if (is(raw_name, "grpc-status")) {
-            response.grpc_status = std.fmt.parseInt(u8, value, 10) catch 2;
-        } else if (is(raw_name, "grpc-message")) {
-            response.grpc_message = value;
-        } else if (!is(raw_name, "date")) {
-            // Lowercased only when it is carried, which HTTP/2 requires.
-            const name = try std.ascii.allocLowerString(a, raw_name);
-            if (!hopByHop(name)) try headers.append(a, .{ .name = name, .value = value });
+fn statusSaid(trailers: []const framing.Header) Said {
+    var said: Said = .{};
+    for (trailers) |t| {
+        if (std.mem.eql(u8, t.name, "grpc-status")) {
+            said.code = std.fmt.parseInt(u8, t.value, 10) catch 2; // UNKNOWN
+        } else if (std.mem.eql(u8, t.name, "grpc-message")) {
+            said.message = t.value;
         }
     }
-    response.headers = headers.items;
-    const rest = raw[end + 4 ..];
-    if (chunked) {
-        response.body = try unchunk(a, rest);
-    } else {
-        response.body = rest[0..@min(rest.len, length orelse rest.len)];
-    }
-    return response;
+    return said;
 }
 
-fn unchunk(a: std.mem.Allocator, raw: []const u8) ![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    var rest = raw;
-    while (true) {
-        const line_end = std.mem.indexOf(u8, rest, "\r\n") orelse return error.BadResponse;
-        const size_text = std.mem.trim(u8, rest[0..line_end], " ");
-        const semi = std.mem.indexOfScalar(u8, size_text, ';') orelse size_text.len;
-        const size = std.fmt.parseInt(usize, size_text[0..semi], 16) catch return error.BadResponse;
-        rest = rest[line_end + 2 ..];
-        if (size == 0) return out.items;
-        if (rest.len < size + 2) return error.BadResponse;
-        try out.appendSlice(a, rest[0..size]);
-        rest = rest[size + 2 ..];
+/// The route's trailers other than the two gRPC writes itself, which go out
+/// once, in the place it puts them.
+fn ownTrailers(a: std.mem.Allocator, trailers: []const framing.Header) ![]const hpack.Field {
+    var kept: std.ArrayList(hpack.Field) = .empty;
+    for (trailers) |t| {
+        if (std.mem.eql(u8, t.name, "grpc-status") or std.mem.eql(u8, t.name, "grpc-message")) continue;
+        try kept.append(a, .{ .name = t.name, .value = t.value });
     }
+    return kept.items;
 }
 
-/// What a failed route said, for `grpc-message`: the `error` of nilo's own
-/// failure body when that is what came back, or the body itself when it is
-/// short text, or nothing.
-fn failureMessage(a: std.mem.Allocator, response: Response) ![]const u8 {
-    if (std.mem.startsWith(u8, response.content_type, "application/json")) {
-        const Shape = struct { @"error": []const u8 = "" };
-        const parsed = std.json.parseFromSliceLeaky(Shape, a, response.body, .{ .ignore_unknown_fields = true }) catch return "";
-        return parsed.@"error";
-    }
-    if (std.mem.startsWith(u8, response.content_type, "text/plain") and response.body.len <= 1024) return response.body;
+/// What a failed route said, for `grpc-message`: the sentence of the failure
+/// nilo answered for it, or, for a route that sent its own error status, its
+/// body when that is short text, or nothing.
+fn failureMessage(collected: *const framing.Collected) []const u8 {
+    if (collected.failure != null) return collected.message;
+    if (std.mem.startsWith(u8, collected.content_type, "text/plain") and collected.body.len <= 1024) return collected.body;
     return "";
+}
+
+/// The code a failed call is answered with: the one its error names when it
+/// names one, the one its status means otherwise (ADR 220).
+pub fn codeFor(failure: ?anyerror, status: u16) u8 {
+    if (failure) |err| if (codeForError(err)) |code| return code;
+    return codeForStatus(status);
+}
+
+/// The gRPC code a failure's error says more precisely than its HTTP status
+/// does. A duplicate row and a lost race are both a 409, and a client is
+/// told to retry the second and not the first: `ALREADY_EXISTS` says the
+/// thing is there, `ABORTED` that the transaction around the call should go
+/// again, which is what a rolled-back one means, where its 503 would read as
+/// `UNAVAILABLE`. Null for every other error, whose status decides.
+pub fn codeForError(err: anyerror) ?u8 {
+    return switch (err) {
+        error.AlreadyExists => 6, // ALREADY_EXISTS
+        error.RolledBack => 10, // ABORTED
+        else => null,
+    };
 }
 
 /// The gRPC code an HTTP status means when a route failed with it. Chosen by
@@ -2006,9 +1981,26 @@ fn missingRoute(_: *Ctx) anyerror!void {
 
 /// A route saying its own status, with a message it encoded itself.
 fn refusingRoute(c: *Ctx) anyerror!void {
-    try c.setHeader("grpc-status", "9");
-    try c.setHeader("grpc-message", "caf%C3%A9 is 50%25 off");
+    try c.setTrailer("grpc-status", "9");
+    try c.setTrailer("grpc-message", "caf%C3%A9 is 50%25 off");
     try c.send(200, "application/grpc", "");
+}
+
+/// A unique violation, the way `nilo_sql` reports one.
+fn duplicateRoute(_: *Ctx) anyerror!void {
+    return error.AlreadyExists;
+}
+
+/// A transaction given up to keep the ones beside it consistent.
+fn rolledBackRoute(_: *Ctx) anyerror!void {
+    return error.RolledBack;
+}
+
+/// A trailer of the route's own beside the message, and one on a failure.
+fn trailerRoute(c: *Ctx) anyerror!void {
+    try c.setTrailer("x-checked", "yes");
+    if ((try c.body()).view().len == 0) return fail.notFound("nothing to check", .{});
+    try c.send(200, "application/grpc", "ok");
 }
 
 fn metadataRoute(c: *Ctx) anyerror!void {
@@ -2031,6 +2023,9 @@ fn testApp() !App {
     try app.post("/test.Meta/Who", metadataRoute);
     try app.post("/test.Clock/Check", clockRoute);
     try app.post("/test.Status/Refuse", refusingRoute);
+    try app.post("/test.Orders/Duplicate", duplicateRoute);
+    try app.post("/test.Orders/RolledBack", rolledBackRoute);
+    try app.post("/test.Orders/Check", trailerRoute);
     try app.resolveChains();
     return app;
 }
@@ -2283,6 +2278,44 @@ test "a grpc-message the route encoded itself goes out as it wrote it" {
     const trailers = try got.trailers(1);
     try testing.expectEqualStrings("9", Answer.value(trailers, "grpc-status").?);
     try testing.expectEqualStrings("caf%C3%A9 is 50%25 off", Answer.value(trailers, "grpc-message").?);
+}
+
+test "a duplicate row is ALREADY_EXISTS and a rolled-back transaction ABORTED, which their statuses alone would not say" {
+    var app = try testApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try client.call(1, "/test.Orders/Duplicate", "");
+    try client.call(3, "/test.Orders/RolledBack", "");
+
+    var got = try converse(&app, &client);
+    defer got.deinit();
+    // Both answer 409 and 503 over HTTP/1.1, which read as ABORTED and
+    // UNAVAILABLE; the error says which it was.
+    try testing.expectEqualStrings("6", Answer.value(try got.trailers(1), "grpc-status").?);
+    try testing.expectEqualStrings("10", Answer.value(try got.trailers(3), "grpc-status").?);
+}
+
+test "a route's own trailers go out after the message, and on a failure beside its status" {
+    var app = try testApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try client.call(1, "/test.Orders/Check", "x");
+    try client.call(3, "/test.Orders/Check", "");
+
+    var got = try converse(&app, &client);
+    defer got.deinit();
+    const ok = try got.trailers(1);
+    try testing.expectEqualStrings("0", Answer.value(ok, "grpc-status").?);
+    try testing.expectEqualStrings("yes", Answer.value(ok, "x-checked").?);
+    const failed = try got.trailers(3);
+    try testing.expectEqualStrings("5", Answer.value(failed, "grpc-status").?);
+    try testing.expectEqualStrings("yes", Answer.value(failed, "x-checked").?);
+}
+
+test "a gRPC status set as a header is refused with a sentence naming setTrailer" {
+    try testing.expectError(error.Failed, Ctx.checkHeader(.{ .name = "grpc-status", .value = "6" }));
 }
 
 test "nilo's own grpc-message is encoded whole, a percent sign included" {
