@@ -1,0 +1,2864 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A toolkit for Zig 0.16, and an HTTP server">
+      
+      
+      
+        <link rel="canonical" href="https://nevindra.github.io/nilo/0.7/s3/">
+      
+      
+        <link rel="prev" href="../fetch/">
+      
+      
+        <link rel="next" href="../jobs/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Object storage - nilo</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#object-storage" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="nilo" class="md-header__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            nilo
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Object storage
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="nilo" class="md-nav__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    nilo
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../handlers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handlers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handling a request
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Handling a request
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../requests/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requests
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../forms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Forms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../responses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Responses
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cookies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cookies
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sessions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Streaming
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../websocket/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WebSocket
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grpc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    gRPC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building an application
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Building an application
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../middleware/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Middleware and resolved values
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../static-files/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Static files
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../errors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../background/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Background work
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Idempotency keys
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The other modules
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    The other modules
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../sql/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Talking to a database
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Talking to a database
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A table is a struct
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/reading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Parents, children and aggregates
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/writing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Writing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/transactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/raw/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Raw SQL
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/sqlite/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQLite
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/migrations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migrations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/running/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running a database: checks, logging and errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fetch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Calling somebody else's API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Object storage
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Object storage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#a-complete-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A complete example
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reading-objects" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reading objects
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Reading objects">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#listing-objects" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Listing objects
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#writing-objects" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Writing objects
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#an-upload-of-unknown-size" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        An upload of unknown size
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#streaming-a-large-object" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Streaming a large object
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#presigned-urls-and-upload-forms" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Presigned URLs and upload forms
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#store-options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Store options
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Store options">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#a-public-endpoint-for-the-browser" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A public endpoint for the browser
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bucket-options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bucket options
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#credentials" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Credentials
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#errors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Errors
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-costs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it costs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-will-not-do" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it will not do
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#testing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jobs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that runs later, again, or on a schedule
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cache/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A cache in this process
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jwt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Checking somebody else's token
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../proto/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Protobuf messages
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../id/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Identifiers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Shipping it
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Shipping it
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../openapi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenAPI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../deploying/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deploying
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#a-complete-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A complete example
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reading-objects" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reading objects
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Reading objects">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#listing-objects" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Listing objects
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#writing-objects" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Writing objects
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#an-upload-of-unknown-size" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        An upload of unknown size
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#streaming-a-large-object" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Streaming a large object
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#presigned-urls-and-upload-forms" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Presigned URLs and upload forms
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#store-options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Store options
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Store options">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#a-public-endpoint-for-the-browser" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A public endpoint for the browser
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bucket-options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bucket options
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#credentials" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Credentials
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#errors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Errors
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-costs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it costs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-will-not-do" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it will not do
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#testing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/nevindra/nilo/edit/main/docs/guide/s3.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="object-storage">Object storage<a class="headerlink" href="#object-storage" title="Permanent link">&para;</a></h1>
+<p><strong><code>nilo_s3</code> reads and writes objects in an S3-compatible bucket, where the bucket is a type your handler asks for and the key is ordinary data.</strong></p>
+<p><strong>Reference:</strong> <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/reference/s3.md#nilo_s3"><code>nilo_s3</code></a> · <strong>Design:</strong> <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/design/s3.md">Object storage</a></p>
+<p><code>nilo_s3</code> works with S3, MinIO, R2, Backblaze and anything else that speaks the same API. <strong>A bucket is a type, and a key is not</strong> (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/059-a-bucket-is-a-type-and-a-key-is-not.md">ADR 059</a>). The bucket's type carries its name as a default, so a handler asks for the bucket by type, the same way it asks for a database; a program whose bucket name is configuration opens it with <code>openAs</code>. The key is data, the same way a path param is.</p>
+<p>It is a <strong>Service</strong>: it borrows the event loop and holds a named destination (an endpoint, a region, credentials). It implements SigV4 and S3's semantics and nothing else. The HTTP underneath is <a href="../fetch/"><code>nilo_fetch</code></a>, which makes this the only module that imports a Fitting (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/058-most-of-an-s3-client-is-not-s3.md">ADR 058</a>, <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/063-an-object-store-is-a-service-that-dials.md">ADR 063</a>).</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">s3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@import</span><span class="p">(</span><span class="s">"nilo_s3"</span><span class="p">);</span>
+</code></pre></div>
+<p>and in <code>build.zig</code>, beside <code>nilo_http</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"nilo_s3"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">module</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">module</span><span class="p">(</span><span class="s">"nilo_s3"</span><span class="p">)</span><span class="w"> </span><span class="p">},</span>
+</code></pre></div>
+<h2 id="a-complete-example">A complete example<a class="headerlink" href="#a-complete-example" title="Permanent link">&para;</a></h2>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">s3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@import</span><span class="p">(</span><span class="s">"nilo_s3"</span><span class="p">);</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">Avatars</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">s3</span><span class="p">.</span><span class="n">Bucket</span><span class="p">(</span><span class="s">"avatars"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">max_bytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">20</span><span class="w"> </span><span class="p">});</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">avatar</span><span class="p">(</span><span class="n">avatars</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Avatars</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">key</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Str</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">object</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">avatars</span><span class="p">.</span><span class="n">get</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="n">key</span><span class="p">.</span><span class="n">view</span><span class="p">());</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">send</span><span class="p">(</span><span class="mi">200</span><span class="p">,</span><span class="w"> </span><span class="n">object</span><span class="p">.</span><span class="n">content_type</span><span class="p">.</span><span class="n">view</span><span class="p">(),</span><span class="w"> </span><span class="n">object</span><span class="p">.</span><span class="n">bytes</span><span class="p">.</span><span class="n">view</span><span class="p">());</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>and at startup:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">store</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">s3</span><span class="p">.</span><span class="n">open</span><span class="p">(</span><span class="n">gpa</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">endpoint</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"https://s3.ap-southeast-1.amazonaws.com"</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">region</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"ap-southeast-1"</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">credentials</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">static</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">access_key_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">settings</span><span class="p">.</span><span class="n">aws_key</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">secret_access_key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">settings</span><span class="p">.</span><span class="n">aws_secret</span><span class="p">,</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="p">});</span>
+<span class="k">defer</span><span class="w"> </span><span class="n">store</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span>
+
+<span class="kr">var</span><span class="w"> </span><span class="n">avatars</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">Avatars</span><span class="p">.</span><span class="n">open</span><span class="p">(</span><span class="o">&amp;</span><span class="n">store</span><span class="p">);</span>
+<span class="k">defer</span><span class="w"> </span><span class="n">avatars</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">provide</span><span class="p">(</span><span class="o">&amp;</span><span class="n">avatars</span><span class="p">);</span>
+</code></pre></div>
+<p><strong>A bucket named by configuration</strong> is opened under that name and stays the same type, so one binary serves every deployment:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">durable</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Durable</span><span class="p">.</span><span class="n">openAs</span><span class="p">(</span><span class="o">&amp;</span><span class="n">store</span><span class="p">,</span><span class="w"> </span><span class="n">settings</span><span class="p">.</span><span class="n">durable_bucket</span><span class="p">)</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="o">|</span><span class="n">err</span><span class="o">|</span><span class="w"> </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">error</span><span class="p">.</span><span class="n">BadBucketName</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">fatal</span><span class="p">(</span><span class="n">Durable</span><span class="p">.</span><span class="n">nameProblem</span><span class="p">(</span><span class="n">settings</span><span class="p">.</span><span class="n">durable_bucket</span><span class="p">).</span><span class="o">?</span><span class="p">),</span>
+<span class="w">    </span><span class="k">else</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="o">|</span><span class="n">e</span><span class="o">|</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">e</span><span class="p">,</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>The name is checked by the rules the compiler applies to a declared one, copied into the bucket, and used by every log line and <code>presignPost</code>. <code>open</code> still opens the declared name.</p>
+<p><strong>One Store, many Buckets.</strong> The Store holds what changes between a laptop and production: the endpoint, the credentials, the signing key derived from them, and one connection pool. A Bucket holds a name and the options that belong to the bucket itself. Two buckets over one Store are two types, two services a handler can name, and one shared pool.</p>
+<p><strong><code>open</code> does not connect to anything.</strong> A Service that needs the loop is finished when the loop exists (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/037-a-service-that-needs-the-loop-is-finished-when-the-loop-exists.md">ADR 037</a>), so the first credential fetch and the first connection happen inside <code>listen()</code>, before any connection is accepted. A bucket used before that returns <code>error.Failed</code>, with the reason in the log.</p>
+<p><code>c</code> is a Scope: the <code>*Ctx</code>, or a <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/reference/core.md#run"><code>nilo.Run</code></a> for work outside a request.</p>
+<h2 id="reading-objects">Reading objects<a class="headerlink" href="#reading-objects" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Call</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>bucket.get(c, key)</code></td>
+<td><code>Object</code>: <code>bytes</code>, <code>content_type</code>, <code>etag</code>, <code>len</code>, all <code>Str</code> in the Scope, from one allocation</td>
+</tr>
+<tr>
+<td><code>bucket.getRange(c, key, .{ .from = 0, .to = 1023 })</code></td>
+<td>the same, for a slice. <code>to</code> is inclusive, the way HTTP counts</td>
+</tr>
+<tr>
+<td><code>bucket.getIf(c, key, etag)</code></td>
+<td><code>Conditional</code>: <code>.unmodified</code> or <code>.{ .object = … }</code>. A 304 is a success, so it is a union rather than an error</td>
+</tr>
+<tr>
+<td><code>bucket.head(c, key)</code></td>
+<td><code>Meta</code>: <code>len</code>, <code>content_type</code>, <code>etag</code>, and no bytes</td>
+</tr>
+<tr>
+<td><code>bucket.stream(c, key, &amp;reading)</code></td>
+<td>the object left on the socket: <a href="#streaming-a-large-object">below</a></td>
+</tr>
+<tr>
+<td><code>bucket.list(c, .{ .prefix, .max_keys, .cursor })</code></td>
+<td><code>Page</code>: <code>objects</code> and <code>next</code>, one page of keys and where the next page starts. <a href="#listing-objects">Below</a></td>
+</tr>
+</tbody>
+</table>
+<p><strong><code>max_bytes</code> is checked against <code>content-length</code> before any byte is read</strong>, so an object over the limit costs one round trip instead of a download, and comes back as <code>error.TooLarge</code>. The limit is the largest thing a bounded <code>get</code> will ever put in a request arena. That is why it is part of the type: it is a fact about how much the program is prepared to hold.</p>
+<p><code>getIf</code> is for an endpoint that forwards an ETag. The browser's <code>If-None-Match</code> becomes the bucket's, and <code>.unmodified</code> becomes a 304 with no body moved at either end.</p>
+<h3 id="listing-objects">Listing objects<a class="headerlink" href="#listing-objects" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">cursor</span><span class="o">:</span><span class="w"> </span><span class="o">?</span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="kc">true</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">page</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">files</span><span class="p">.</span><span class="n">list</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">prefix</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"exports/2026/"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">max_keys</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">200</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">cursor</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cursor</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">page</span><span class="p">.</span><span class="n">objects</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="n">o</span><span class="o">|</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// o.key, o.size, o.etag, o.last_modified — every text a Str in the Scope</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">cursor</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">page</span><span class="p">.</span><span class="n">next</span><span class="w"> </span><span class="k">orelse</span><span class="w"> </span><span class="k">break</span><span class="p">).</span><span class="n">view</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>list</code> is the only call here that asks about the bucket rather than one key, and it is bounded in three ways on purpose (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/058-most-of-an-s3-client-is-not-s3.md">ADR 058</a>):</p>
+<ul>
+<li>A page holds at most <code>max_keys</code> objects, and at most 1,000, which is S3's own limit. Asking for more returns <code>error.Rejected</code> instead of a page that is silently capped, so a loop sized by what it asked for never gets less.</li>
+<li>The response body is read into the Scope up to a limit worked out from <code>max_keys</code> and the bucket's <code>key_max</code>. A server that answers with more than was asked for returns <code>error.TooLarge</code> instead of filling the arena.</li>
+<li><strong>A page marked truncated with no usable continuation token is <code>error.Failed</code></strong>: the token is missing, empty or over 1,024 bytes. Reading it as the last page would end a backup or a cleanup loop as though the bucket had been read to the end.</li>
+<li><strong>Nothing follows the cursor for you.</strong> <code>next</code> comes back as text, the loop above is yours, and there is no <code>listAll</code>. A helper that walked every page would be a call with unbounded output, which this module does not have, and it would turn a bucket into a database.</li>
+</ul>
+<p><code>etag</code> comes back quoted, the same way <code>head</code> and <code>get</code> return it, so it can go straight into <code>getIf</code>. <code>last_modified</code> is the server's own text (<code>2026-09-18T10:11:12.000Z</code>), and <code>sql.Timestamp</code> can parse it if you need arithmetic. The cost is two allocations for the body and the page, plus one per key and one per ETag for decoding. A key arrives percent-encoded (the request asks for it that way, so a key with an <code>&amp;</code> in it is not an XML problem), and an ETag arrives with its quotes as XML entities.</p>
+<h2 id="writing-objects">Writing objects<a class="headerlink" href="#writing-objects" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Call</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>bucket.put(c, key, .{ .bytes = …, .content_type = … })</code></td>
+<td>also reads <code>.cache_control</code> and <code>.content_disposition</code> if the value has them</td>
+</tr>
+<tr>
+<td><code>bucket.putStream(c, key, .{ .reader = …, .len = …, .content_type = … })</code></td>
+<td>from a <code>*std.Io.Reader</code> of a known length</td>
+</tr>
+<tr>
+<td><code>bucket.putMultipart(c, key, .{ .reader = …, .content_type = … })</code></td>
+<td>from a <code>*std.Io.Reader</code> of <em>unknown</em> length: S3's multipart upload, the whole protocol in one call. <a href="#an-upload-of-unknown-size">Below</a></td>
+</tr>
+<tr>
+<td><code>bucket.delete(c, key)</code></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p><strong><code>put</code> takes any value with <code>.bytes</code> and <code>.content_type</code></strong>, checked while compiling. A <a href="../forms/#file-uploads"><code>nilo.Upload</code></a> already has that shape, so a file from a form goes straight through:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">NewAvatar</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">image</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Upload</span><span class="w"> </span><span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">setAvatar</span><span class="p">(</span><span class="n">avatars</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Avatars</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">account</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="n">incoming</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Form</span><span class="p">(</span><span class="n">NewAvatar</span><span class="p">))</span><span class="w"> </span><span class="o">!</span><span class="n">nilo</span><span class="p">.</span><span class="n">Status</span><span class="p">(</span><span class="mi">201</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">key</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="mi">32</span><span class="p">]</span><span class="kt">u8</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">undefined</span><span class="p">;</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">avatars</span><span class="p">.</span><span class="n">put</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">fmt</span><span class="p">.</span><span class="n">bufPrint</span><span class="p">(</span><span class="o">&amp;</span><span class="n">key</span><span class="p">,</span><span class="w"> </span><span class="s">"{d}.png"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="n">account</span><span class="p">}),</span><span class="w"> </span><span class="n">incoming</span><span class="p">.</span><span class="n">value</span><span class="p">.</span><span class="n">image</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">.{};</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Choose the key yourself, and do not use <code>image.filename</code> for it: that is whatever the browser sent, <code>../../etc/passwd</code> included. <code>nilo_s3</code> encodes the key into a URL, once. Deciding what an object is called is the application's job.</p>
+<p><strong><code>putStream</code> sends a length, never a chunked body</strong>, because S3 answers <code>411</code> to a body whose length it was not told. The length is a required field rather than an optional one, so "I do not know the length" is a compile error here instead of an S3 status code. An upload whose size is unknown before it starts is <code>putMultipart</code>'s.</p>
+<h2 id="an-upload-of-unknown-size">An upload of unknown size<a class="headerlink" href="#an-upload-of-unknown-size" title="Permanent link">&para;</a></h2>
+<p><strong><code>putMultipart</code> reads a reader to its end and makes one object of it, with S3's multipart upload underneath and none of the protocol in your hands:</strong></p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">s3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@import</span><span class="p">(</span><span class="s">"nilo_s3"</span><span class="p">);</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">Backups</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">s3</span><span class="p">.</span><span class="n">Bucket</span><span class="p">(</span><span class="s">"backups"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">archive</span><span class="p">(</span><span class="n">backups</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Backups</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">source</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">std</span><span class="p">.</span><span class="n">Io</span><span class="p">.</span><span class="n">Reader</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">backups</span><span class="p">.</span><span class="n">putMultipart</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="s">"dump.tar.zst"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">reader</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">source</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">content_type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"application/zstd"</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">send</span><span class="p">(</span><span class="mi">201</span><span class="p">,</span><span class="w"> </span><span class="s">"text/plain; charset=utf-8"</span><span class="p">,</span><span class="w"> </span><span class="s">"stored"</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The reader is read in parts of <code>.part_bytes</code> (8 MiB unless the source says otherwise; S3 refuses less than 5 MiB for any part but the last, so a smaller <code>.part_bytes</code> is <code>error.Rejected</code> before a byte moves). Each part goes up as its own PUT, and a completion document seals them into one object. A source that ends inside the first part becomes a plain <code>put</code>: one round trip instead of three, and the ETag stays the content's own MD5 rather than a multipart digest, which matters if you store objects by hash. Each part and the completion run under the source's optional <code>.timeout_ms</code> (no whole-call limit unless it names one) and the Store's <code>stall_ms</code> bound on silence, the same terms <code>putStream</code> gives its one body; <code>.cache_control</code> and <code>.content_disposition</code> are read off the source if it has them. Three things the call does that are easy to get wrong by hand:</p>
+<ul>
+<li><strong>The completion's 200 is not believed on its own.</strong> S3 can answer a <code>CompleteMultipartUpload</code> with 200 and an error in the body, so the body is read and has to say so too; a 200 that does not is <code>error.Failed</code>, with the reason in the log.</li>
+<li><strong>A failure after the initiate aborts the upload on the way out.</strong> Parked parts are paid-for bytes that no <code>list</code> shows and no <code>delete</code> of the key removes; a bucket with no lifecycle rule keeps them forever.</li>
+<li><strong>The part count is bounded by S3's own ceiling.</strong> At 10,000 parts the upload has outgrown its <code>.part_bytes</code>, and the call says so (<code>error.Rejected</code>, with the fix named in the log) rather than letting the server refuse part 10,001. For a reader of unknown length that moment can only arrive on the way, after those parts went up; only the part floor is checkable before any byte moves.</li>
+</ul>
+<p>What it costs in the Scope: one buffer of <code>.part_bytes</code>, one copy of each part's ETag, and the completion document. The call holds one stream share for its whole life, the same bound <code>stream</code> and <code>putStream</code> honour, so uploads that take minutes cannot crowd out the quick calls. A part is bytes in hand, so it goes over the pooled connections and a connection the server reaped while it idled retries the way every other call here does.</p>
+<p>A body whose size <em>is</em> known stays <code>putStream</code>'s: one request, no protocol, no part floor.</p>
+<h2 id="streaming-a-large-object">Streaming a large object<a class="headerlink" href="#streaming-a-large-object" title="Permanent link">&para;</a></h2>
+<p><strong><code>get</code> puts the object in the request arena, which is right for an avatar and wrong for a video. <code>stream</code> leaves it on the socket:</strong></p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">s3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@import</span><span class="p">(</span><span class="s">"nilo_s3"</span><span class="p">);</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">Videos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">s3</span><span class="p">.</span><span class="n">Bucket</span><span class="p">(</span><span class="s">"videos"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">watch</span><span class="p">(</span><span class="n">videos</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Videos</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">key</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Str</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">reading</span><span class="o">:</span><span class="w"> </span><span class="n">Videos</span><span class="p">.</span><span class="n">Reading</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">idle</span><span class="p">;</span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="n">reading</span><span class="p">.</span><span class="n">close</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">videos</span><span class="p">.</span><span class="n">stream</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="n">key</span><span class="p">.</span><span class="n">view</span><span class="p">(),</span><span class="w"> </span><span class="o">&amp;</span><span class="n">reading</span><span class="p">);</span>
+
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">streamWith</span><span class="p">(</span><span class="mi">200</span><span class="p">,</span><span class="w"> </span><span class="n">reading</span><span class="p">.</span><span class="n">content_type</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">length</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">reading</span><span class="p">.</span><span class="n">len</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">reading</span><span class="p">.</span><span class="n">pipe</span><span class="p">(</span><span class="o">&amp;</span><span class="n">body</span><span class="p">.</span><span class="n">writer</span><span class="p">);</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">body</span><span class="p">.</span><span class="n">finish</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>After <code>stream</code> returns, <code>Reading</code> carries <code>len</code>, <code>content_type</code> and <code>etag</code>. <code>pipe(w)</code> then moves the bytes into any <code>*std.Io.Writer</code> (a response, a file), and <code>close()</code> gives the connection, the permit and the stream slot back.</p>
+<p><strong>A stream is not cut at <code>timeout_ms</code>.</strong> That is the budget for a call that moves a bounded body, and a video going to a slow browser has no honest bound, so <code>watch()</code> above ends when the object does, or when no byte has moved for <code>stall_ms</code> (30 s), which is <code>error.TimedOut</code>. To put a ceiling on one, set it before the call: <code>var reading: Videos.Reading = .{ .timeout_ms = 600_000 };</code>. A streamed put takes the same from its source, <code>.timeout_ms = 600_000</code> beside <code>.reader</code>, <code>.len</code> and <code>.content_type</code>. A stream also takes one of <code>max_streams</code> slots (half of <code>max_in_flight</code> unless you say), so a few slow viewers leave the rest of the permits to the short calls.</p>
+<p><strong><code>content_type</code> and <code>etag</code> are borrowed and valid only until <code>pipe</code>.</strong> They point into the connection's read buffer, and the first byte of the body overwrites it. Set the response headers from them first, and copy them if you need them afterwards. A <code>Reading</code> must not be copied once started, for the same reason a <code>fetch.Exchange</code> must not: it holds one.</p>
+<p><code>.length = reading.len</code> gives the browser a <code>Content-Length</code> to draw a progress bar against and lets it resume with a <code>Range</code> (<a href="../streaming/#a-stream-with-a-known-length">Streaming</a>).</p>
+<p><strong>There is no buffer to declare.</strong> Until 0.5, <code>stream</code> took one, and the guide said a bigger buffer meant fewer trips into the connection. In fact the bytes go from the connection's own read buffer to your writer and never passed through it; <code>bench/result/s3.md</code> had already measured going from 64 KB to 8 KB as a one-byte difference. How much one read brings in is set by the client's <code>read_buffer_size</code> (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/186-the-transfer-buffer-serves-nothing-here.md">ADR 186</a>).</p>
+<h2 id="presigned-urls-and-upload-forms">Presigned URLs and upload forms<a class="headerlink" href="#presigned-urls-and-upload-forms" title="Permanent link">&para;</a></h2>
+<p><strong>These two calls let a browser read or upload an object without the bytes passing through your server. Neither opens a socket</strong>: each only computes a signature.</p>
+<table>
+<thead>
+<tr>
+<th>Call</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>bucket.presign(c, key, seconds)</code></td>
+<td><code>Presigned</code>: <code>url</code> and <code>expires_at</code>. A link to download one object</td>
+</tr>
+<tr>
+<td><code>bucket.presignPut(c, key, seconds)</code></td>
+<td>the same, for a PUT: a link a <em>process</em> uploads one object to</td>
+</tr>
+<tr>
+<td><code>bucket.presignPost(c, key, .{ .seconds = 900 })</code></td>
+<td><code>Posted</code>: <code>url</code>, <code>fields</code> and <code>expires_at</code>. A form for uploading one</td>
+</tr>
+</tbody>
+</table>
+<p><strong>A PUT link is for a process the server checks up on; a browser gets the form.</strong> The method is inside the signature, so <code>presign</code>'s URL and <code>presignPut</code>'s are not interchangeable: each is a 403 under the other's verb. And a plain PUT has no size condition (SigV4 has nowhere to carry one), so a server handing out PUT links verifies what arrived (a <code>head</code> for the size, the content hash if it stores by one) before recording it. A browser upload belongs on <code>presignPost</code>, whose policy always carries the bucket's ceiling (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/112-a-browser-uploads-with-a-form-rather-than-a-link.md">ADR 112</a>).</p>
+<p><strong><code>expires_at</code> is the real expiry.</strong> A URL signed with temporary credentials stops working when they expire, whatever <code>X-Amz-Expires</code> says. So the reported lifetime is the smallest of what you asked for, the bucket's <code>presign_max</code>, and what the credentials have left. A caller that stores it in a database stores the right value.</p>
+<p>A presigned POST is a form rather than a link. <code>url</code> is the bucket, and <code>fields</code> go into the form in the order they come back, with the file input <strong>last</strong>, because S3 ignores anything after the file part. The first field is <code>bucket</code>, because Garage rejects the form without it and AWS ignores it.</p>
+<div class="highlight"><pre><span></span><code><span class="p">&lt;</span><span class="nt">form</span> <span class="na">action</span><span class="o">=</span><span class="s">"{url}"</span> <span class="na">method</span><span class="o">=</span><span class="s">"post"</span> <span class="na">enctype</span><span class="o">=</span><span class="s">"multipart/form-data"</span><span class="p">&gt;</span>
+  <span class="cm">&lt;!-- one hidden input per field, in order --&gt;</span>
+  <span class="p">&lt;</span><span class="nt">input</span> <span class="na">type</span><span class="o">=</span><span class="s">"file"</span> <span class="na">name</span><span class="o">=</span><span class="s">"file"</span><span class="p">&gt;</span>   <span class="cm">&lt;!-- last --&gt;</span>
+<span class="p">&lt;/</span><span class="nt">form</span><span class="p">&gt;</span>
+</code></pre></div>
+<table>
+<thead>
+<tr>
+<th><code>s3.Post</code></th>
+<th>Default</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>seconds</code></td>
+<td>none</td>
+<td>clamped the same three ways <code>presign</code>'s are</td>
+</tr>
+<tr>
+<td><code>content_type</code></td>
+<td><code>null</code></td>
+<td>an <code>eq</code> condition on <code>$Content-Type</code>. Null lets the browser send what it likes</td>
+</tr>
+<tr>
+<td><code>max_bytes</code></td>
+<td>the bucket's</td>
+<td><strong>clamped to it, and defaulted to it</strong>, so this never hands out a form with no size limit</td>
+</tr>
+<tr>
+<td><code>prefix</code></td>
+<td><code>false</code></td>
+<td><code>key</code> is the start of a key rather than the whole of one, so the browser picks the filename</td>
+</tr>
+</tbody>
+</table>
+<p>The POST policy lives in nilo rather than in your application because of one detail of SigV4. It is signed with the key nilo derives once a day (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/060-a-signing-key-changes-once-a-day.md">ADR 060</a>), and a second implementation outside nilo means two places that have to agree about the daily rotation. They disagree at 00:00 UTC, and the symptom is uploads failing with a 403 that explains nothing.</p>
+<h2 id="store-options">Store options<a class="headerlink" href="#store-options" title="Permanent link">&para;</a></h2>
+<p>Passed to <code>s3.open</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Default</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>endpoint</code></td>
+<td>none</td>
+<td><code>https://host[:port]</code> or <code>http://host[:port]</code>, no path</td>
+</tr>
+<tr>
+<td><code>public_endpoint</code></td>
+<td><code>null</code></td>
+<td>the endpoint a browser reaches, when it is not the one this process connects to: <a href="#a-public-endpoint-for-the-browser">below</a></td>
+</tr>
+<tr>
+<td><code>region</code></td>
+<td><code>us-east-1</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>credentials</code></td>
+<td>none</td>
+<td><code>.static</code> or <code>.fetch</code>: <a href="#credentials">below</a></td>
+</tr>
+<tr>
+<td><code>max_in_flight</code></td>
+<td>32</td>
+<td>calls at once, across the process. An HTTPS connection holds 59,151 bytes, so this times that is the store's memory ceiling</td>
+</tr>
+<tr>
+<td><code>timeout_ms</code></td>
+<td>30,000</td>
+<td>one call, end to end, for <code>get</code>, <code>head</code>, <code>list</code>, <code>put</code> and <code>delete</code>; <code>stream</code> and <code>putStream</code> are not cut by it</td>
+</tr>
+<tr>
+<td><code>stall_ms</code></td>
+<td>30,000</td>
+<td>how long a <code>stream</code> or <code>putStream</code> may move no bytes before it fails with <code>error.TimedOut</code>: a slow transfer that keeps moving is fine, a quiet one is not</td>
+</tr>
+<tr>
+<td><code>max_streams</code></td>
+<td>half of <code>max_in_flight</code></td>
+<td>how many <code>stream</code> and <code>putStream</code> calls may be open at once, so that slow downloads cannot hold every permit and queue <code>get</code>, <code>head</code> and <code>list</code> behind them</td>
+</tr>
+<tr>
+<td><code>fetch_timeout_ms</code></td>
+<td>10,000</td>
+<td>how long a credential <code>fetch</code> may take: <a href="#credentials">below</a></td>
+</tr>
+<tr>
+<td><code>max_drain</code></td>
+<td>64 KiB</td>
+<td>how much of a rejected response body is worth reading to keep the connection</td>
+</tr>
+<tr>
+<td><code>refresh_margin_s</code></td>
+<td>300</td>
+<td>how long before expiry temporary credentials are replaced</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The endpoint's scheme decides whether payloads are hashed</strong>: <code>UNSIGNED-PAYLOAD</code> over TLS, a real SHA-256 over plain HTTP. There is nothing to configure (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/060-a-signing-key-changes-once-a-day.md">ADR 060</a>). This means the plain-HTTP numbers in <a href="https://github.com/nevindra/nilo/blob/v0.7.0/bench/result/s3.md"><code>bench/result/s3.md</code></a> include a hash over every body that the HTTPS numbers do not, and the HTTPS numbers include a TLS record layer that the plain-HTTP ones do not.</p>
+<p>An endpoint that is not <code>scheme://host[:port]</code>, or whose host and port run past 255 bytes, returns <code>error.BadEndpoint</code> from <code>open</code>, and a region longer than a credential scope can hold, or holding a <code>,</code>, <code>/</code>, space or control byte, returns <code>error.BadRegion</code>. A <code>max_streams</code> larger than <code>max_in_flight</code> returns <code>error.BadStreams</code>. Static credentials that could never sign return <code>error.BadCredentials</code>: an empty key id or secret, a key id with those same bytes in it, or an <code>expires_at</code> already past. <code>open</code> copies a static pair, so a config buffer may be reused afterwards.</p>
+<h3 id="a-public-endpoint-for-the-browser">A public endpoint for the browser<a class="headerlink" href="#a-public-endpoint-for-the-browser" title="Permanent link">&para;</a></h3>
+<p><strong>Set <code>public_endpoint</code> when the browser reaches the store at a different address than your process does.</strong> A process might reach the store on a Docker network or a Tailscale address that a browser holding a presigned URL cannot reach. <code>public_endpoint</code> is the host the browser uses, and it appears in every presigned URL and every POST form, <strong>signed as that host</strong>. Rewriting the URL afterwards cannot do this job: the host is part of the signature, and a presigned GET with a rewritten host fails with a 403 that looks like a signing bug (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/177-a-presigned-url-names-the-host-the-browser-reaches.md">ADR 177</a>). Every call that connects (<code>get</code>, <code>put</code>, <code>head</code>, <code>delete</code>) still connects to and signs for <code>endpoint</code>.</p>
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">store</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">s3</span><span class="p">.</span><span class="n">open</span><span class="p">(</span><span class="n">gpa</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">endpoint</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"http://garage:3900"</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">public_endpoint</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"https://files.example.com"</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">credentials</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">static</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">access_key_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cfg</span><span class="p">.</span><span class="n">s3_key</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">secret_access_key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cfg</span><span class="p">.</span><span class="n">s3_secret</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="p">});</span>
+</code></pre></div>
+<h2 id="bucket-options">Bucket options<a class="headerlink" href="#bucket-options" title="Permanent link">&para;</a></h2>
+<p>The second argument to <code>s3.Bucket</code>. Every field describes the bucket itself; anything that changes between development and production belongs on the Store.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Default</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>max_bytes</code></td>
+<td>8 MiB</td>
+<td>the largest object a bounded <code>get</code> will hold</td>
+</tr>
+<tr>
+<td><code>style</code></td>
+<td><code>.virtual</code></td>
+<td><code>https://avatars.s3…/key</code>. <code>.path</code> (<code>https://s3…/avatars/key</code>) is for MinIO and anything on a bare host</td>
+</tr>
+<tr>
+<td><code>sse</code></td>
+<td><code>null</code></td>
+<td><code>.aes256</code> or <code>.aws_kms</code>, sent as the header S3 already understands</td>
+</tr>
+<tr>
+<td><code>presign_max</code></td>
+<td>3600</td>
+<td>the longest lifetime a presigned URL from this bucket may have</td>
+</tr>
+<tr>
+<td><code>key_max</code></td>
+<td>512</td>
+<td>the longest key. Comptime because it sizes a stack buffer at 3× this, and stack is per connection; S3's own limit is 1,024</td>
+</tr>
+<tr>
+<td><code>session_token_max</code></td>
+<td>0</td>
+<td>room for a session token beside a signature. <strong>Zero is right for static credentials</strong> and costs nothing; an STS source sets 2048 and pays for it per connection</td>
+</tr>
+</tbody>
+</table>
+<p><strong>A bucket name that could never work stops the build with a message.</strong> That covers an empty name, or a name that is not a legal DNS label under <code>.virtual</code>, and the same rules run in <code>openAs</code> on a name read at run time, which answers <code>error.BadBucketName</code>. A credential written into the options also stops the build: <code>secret</code>, <code>access_key</code> and similar names are rejected, because a bucket's type is compiled into the binary and ships with it. Credentials belong on the Store, where a Config can read them.</p>
+<h2 id="credentials">Credentials<a class="headerlink" href="#credentials" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><span class="p">.</span><span class="n">credentials</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">static</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">access_key_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"…"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">secret_access_key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"…"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+</code></pre></div>
+<p>is a key pair for the life of the process. Temporary credentials (IRSA, IMDS, anything STS hands out) are a function:</p>
+<div class="highlight"><pre><span></span><code><span class="p">.</span><span class="n">credentials</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">fetch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fromIrsa</span><span class="w"> </span><span class="p">},</span><span class="w">   </span><span class="c1">// fn (gpa: std.mem.Allocator, io: std.Io) anyerror!s3.Credentials</span>
+</code></pre></div>
+<p>It is called once at startup, and again when the credentials in hand are within <code>refresh_margin_s</code> of expiring. <strong>It is called lazily, by the request that notices</strong>: there is no background task. Because the refresh happens five minutes early, the request that pays for it is never one that would otherwise have failed. If the refresh fails, the credentials in hand keep signing until they actually expire, and the next try is five seconds later; one request refreshes while the others keep signing. Credentials that live less than the margin are refreshed at half their life. The Store copies what the function returns, so its strings only have to outlive the call, and the Store cancels the function if it takes longer than <code>fetch_timeout_ms</code> (ten seconds). A timeout counts as a failed fetch: the credentials in hand keep signing until they expire, and past that the requests that wait get <code>error.TimedOut</code> from the bucket, with <code>CredentialsTimedOut</code> in the log. Cancellation is cooperative and lands at the function's next <code>Io</code> call, so pass the <code>io</code> you are given to whatever you call and return what it returns. A <code>Credentials</code> carries <code>session_token</code> and <code>expires_at</code> for this case, and the bucket's <code>session_token_max</code> has to be raised from zero to make room for the token.</p>
+<h2 id="errors">Errors<a class="headerlink" href="#errors" title="Permanent link">&para;</a></h2>
+<p><strong>There are seven errors, because a handler would do something different about each:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Error</th>
+<th></th>
+<th>Answer</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>error.NotFound</code></td>
+<td>no object at that key</td>
+<td>404. The only one with a default, because its meaning does not change with the request</td>
+</tr>
+<tr>
+<td><code>error.TooLarge</code></td>
+<td>the object is over <code>max_bytes</code>, rejected before any byte was read</td>
+<td>yours</td>
+</tr>
+<tr>
+<td><code>error.Throttled</code></td>
+<td>S3 is shedding load: <code>SlowDown</code>, or a 503</td>
+<td>a default image and a 200, or a 503; only the handler knows</td>
+</tr>
+<tr>
+<td><code>error.Unavailable</code></td>
+<td>S3 answered 5xx. Separate from <code>Throttled</code> because backing off helps with one and not the other</td>
+<td>502 or 503</td>
+</tr>
+<tr>
+<td><code>error.TimedOut</code></td>
+<td>this call's deadline passed</td>
+<td>504</td>
+</tr>
+<tr>
+<td><code>error.Rejected</code></td>
+<td>S3 rejected the request: credentials, signature, permissions. Or nilo refused it before sending: an empty key, which would address the bucket rather than an object, or a header value with a control byte, which would split the request</td>
+<td><strong>500, not 403</strong>. Telling the caller they are not allowed, when the real problem is that the server's credentials are wrong, is a lie in the place where it costs the most debugging</td>
+</tr>
+<tr>
+<td><code>error.Failed</code></td>
+<td>everything else, including a response nilo could not make sense of</td>
+<td>502</td>
+</tr>
+</tbody>
+</table>
+<p>S3's own error code and message are logged, not sent to the client. A skewed clock (<code>RequestTimeTooSkewed</code>) is read out of the response body and stated plainly in the log, because it is the one S3 error whose fix is on your machine.</p>
+<h2 id="what-it-costs">What it costs<a class="headerlink" href="#what-it-costs" title="Permanent link">&para;</a></h2>
+<p>Per request, nothing beyond the call itself. Signing is one SHA-256 over the canonical request, one HMAC, and the hex encoding, because the derived key changes once a day and is kept for the day (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/060-a-signing-key-changes-once-a-day.md">ADR 060</a>). The canonical request is never built as bytes; it is written straight into the hash, which is why the module has no per-request buffer for it.</p>
+<p>Per idle connection, what a handler's stack adds: the encoded key at <code>3 × key_max</code>, and the stack depth <code>nilo_fetch</code> drives the fiber to. <a href="https://github.com/nevindra/nilo/blob/v0.7.0/bench/result/s3.md"><code>bench/result/s3.md</code></a> measures all of it against the same seven routes written in Go and Rust, and explains which route was the expensive one and why it was not the one anybody expected.</p>
+<h2 id="what-it-will-not-do">What it will not do<a class="headerlink" href="#what-it-will-not-do" title="Permanent link">&para;</a></h2>
+<p><strong><code>COPY</code> is not built: it is where S3 stops being bytes at a key and becomes a document format</strong>, and it can answer 200 with an error in the body, so the client has to parse XML to know whether it succeeded. It is on the <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/roadmap.md#known-waiting-for-a-caller">roadmap</a> with that reason attached, waiting for someone who needs it. <code>list</code> and multipart upload were refused on the same ground and let in the same way, one caller each (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/058-most-of-an-s3-client-is-not-s3.md">ADR 058</a>): a fixed, flat document with a handful of interesting names is a scan rather than a parser, and <code>putMultipart</code> reads its completion body precisely because a 200 there carries <code>COPY</code>'s own trap.</p>
+<p>Arbitrary <code>x-amz-meta-*</code> headers are rejected for a performance reason that a measurement could change: a fixed header set is what keeps building <code>SignedHeaders</code> a simple walk instead of a sort on every request.</p>
+<h2 id="testing">Testing<a class="headerlink" href="#testing" title="Permanent link">&para;</a></h2>
+<p><code>zig build test-s3</code> runs the module's tests against a fake S3 on a loopback socket that checks every signature, with no container and no network. With <code>S3_ENDPOINT</code> and the related variables set, it runs against a real one. The quickest one to develop against is SeaweedFS in a container, which is what CI runs, with <a href="https://github.com/nevindra/nilo/blob/v0.7.0/bench/s3_setup.py"><code>bench/s3_setup.py</code></a> creating the bucket and objects the tests and the benchmark need:</p>
+<div class="highlight"><pre><span></span><code>docker run -d --name seaweedfs -p 9100:8333 \
+  -e AWS_ACCESS_KEY_ID=niloadmin -e AWS_SECRET_ACCESS_KEY=nilosecret123 \
+  chrislusf/seaweedfs:4.47 server -dir=/data -s3 -s3.port=8333
+python3 bench/s3_setup.py
+</code></pre></div>
+<p>Then <code>.endpoint = "http://127.0.0.1:9100"</code> and <code>.style = .path</code>.</p>
+<p>A handler that takes a <code>*Avatars</code> is an ordinary function. Test the parts that do not need the bucket (which key a request maps to, what a <code>NotFound</code> becomes) and leave the bucket calls to the module's own test suite.</p>
+<h2 id="see-also">See also<a class="headerlink" href="#see-also" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/reference/s3.md#nilo_s3">The reference</a>: the full list of calls.</li>
+<li><a href="../fetch/">Calling somebody else's API</a>: the client underneath, and the <code>Exchange</code> a <code>Reading</code> is built on.</li>
+<li><a href="../forms/#file-uploads">Forms</a>: the <code>Upload</code> that <code>put</code> accepts as it is.</li>
+<li><a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/059-a-bucket-is-a-type-and-a-key-is-not.md">ADR 059</a>: why the name is a compiled-in default and the key is not.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../fetch/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Calling somebody else&#39;s API">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Calling somebody else's API
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../jobs/" class="md-footer__link md-footer__link--next" aria-label="Next: Work that runs later, again, or on a schedule">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Work that runs later, again, or on a schedule
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.sections", "navigation.top", "navigation.footer", "navigation.indexes", "search.highlight", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

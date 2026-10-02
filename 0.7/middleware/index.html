@@ -1,0 +1,2584 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A toolkit for Zig 0.16, and an HTTP server">
+      
+      
+      
+        <link rel="canonical" href="https://nevindra.github.io/nilo/0.7/middleware/">
+      
+      
+        <link rel="prev" href="../grpc/">
+      
+      
+        <link rel="next" href="../services/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Middleware and resolved values - nilo</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#middleware-and-resolved-values" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="nilo" class="md-header__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            nilo
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Middleware and resolved values
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="nilo" class="md-nav__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    nilo
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../handlers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handlers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handling a request
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Handling a request
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../requests/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requests
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../forms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Forms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../responses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Responses
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cookies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cookies
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sessions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Streaming
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../websocket/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WebSocket
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grpc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    gRPC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building an application
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Building an application
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Middleware and resolved values
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Middleware and resolved values
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#how-middleware-works" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How middleware works
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="How middleware works">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#excluding-routes-from-a-middleware-without" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Excluding routes from a middleware (without)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#adding-a-middleware-to-one-route-with" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Adding a middleware to one route (with)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#built-in-logger-and-cors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Built-in logger and CORS
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Built-in logger and CORS">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#cors-origins-from-the-environment" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CORS origins from the environment
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#csrf-protection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CSRF protection
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#security-headers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security headers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rate-limiting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rate limiting
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Rate limiting">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#rate-limiting-behind-a-proxy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rate limiting behind a proxy
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rate-limiting-cost-and-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rate limiting: cost and limits
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#resolved-values" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Resolved values
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#middleware-or-resolved-value" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Middleware or resolved value?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-permission-table-for-every-route" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A permission table for every route
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#writing-your-own-middleware" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Writing your own middleware
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../static-files/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Static files
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../errors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../background/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Background work
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Idempotency keys
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The other modules
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    The other modules
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../sql/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Talking to a database
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Talking to a database
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A table is a struct
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/reading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Parents, children and aggregates
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/writing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Writing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/transactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/raw/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Raw SQL
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/sqlite/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQLite
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/migrations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migrations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/running/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running a database: checks, logging and errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fetch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Calling somebody else's API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../s3/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Object storage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jobs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that runs later, again, or on a schedule
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cache/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A cache in this process
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jwt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Checking somebody else's token
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../proto/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Protobuf messages
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../id/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Identifiers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Shipping it
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Shipping it
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../openapi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenAPI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../deploying/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deploying
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#how-middleware-works" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How middleware works
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="How middleware works">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#excluding-routes-from-a-middleware-without" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Excluding routes from a middleware (without)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#adding-a-middleware-to-one-route-with" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Adding a middleware to one route (with)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#built-in-logger-and-cors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Built-in logger and CORS
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Built-in logger and CORS">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#cors-origins-from-the-environment" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CORS origins from the environment
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#csrf-protection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CSRF protection
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#security-headers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security headers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rate-limiting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rate limiting
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Rate limiting">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#rate-limiting-behind-a-proxy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rate limiting behind a proxy
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rate-limiting-cost-and-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rate limiting: cost and limits
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#resolved-values" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Resolved values
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#middleware-or-resolved-value" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Middleware or resolved value?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-permission-table-for-every-route" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A permission table for every route
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#writing-your-own-middleware" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Writing your own middleware
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/nevindra/nilo/edit/main/docs/guide/middleware.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="middleware-and-resolved-values">Middleware and resolved values<a class="headerlink" href="#middleware-and-resolved-values" title="Permanent link">&para;</a></h1>
+<p><strong>There are two ways to put something between the request and the handler, and they are not interchangeable: middleware enforces a rule, a resolved value provides a value.</strong></p>
+<p><strong>Reference:</strong> <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/reference/app.md#app"><code>app.use</code>, <code>app.useOn</code></a>, <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/reference/app.md#group"><code>with</code>, <code>without</code></a>, <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/reference/middleware.md#built-in-middleware">built-in middleware</a> · <strong>Design:</strong> <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/design/middleware.md">Middleware</a>, <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/design/cors-proxy.md">CORS and the proxy</a>, <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/design/rate-limiting.md">Rate limiting</a></p>
+<h2 id="how-middleware-works">How middleware works<a class="headerlink" href="#how-middleware-works" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">timing</span><span class="p">(</span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">next</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Next</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">started</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">monotonicNanos</span><span class="p">();</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">next</span><span class="p">.</span><span class="n">run</span><span class="p">(</span><span class="n">c</span><span class="p">);</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">took_us</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">nilo</span><span class="p">.</span><span class="n">monotonicNanos</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">started</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">time</span><span class="p">.</span><span class="n">ns_per_us</span><span class="p">;</span>
+<span class="w">    </span><span class="n">std</span><span class="p">.</span><span class="n">log</span><span class="p">.</span><span class="n">info</span><span class="p">(</span><span class="s">"{f} took {d}µs"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">path</span><span class="p">(),</span><span class="w"> </span><span class="n">took_us</span><span class="w"> </span><span class="p">});</span>
+<span class="p">}</span>
+
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">use</span><span class="p">(</span><span class="n">nilo</span><span class="p">.</span><span class="n">logger</span><span class="p">.</span><span class="n">standard</span><span class="p">);</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">use</span><span class="p">(</span><span class="n">nilo</span><span class="p">.</span><span class="n">cors</span><span class="p">.</span><span class="n">permissive</span><span class="p">);</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">use</span><span class="p">(</span><span class="n">timing</span><span class="p">);</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">useOn</span><span class="p">(</span><span class="s">"/api"</span><span class="p">,</span><span class="w"> </span><span class="n">requireToken</span><span class="p">);</span>
+</code></pre></div>
+<p><strong>Middleware is an onion: everything before <code>next.run(c)</code> happens on the way in, everything after it on the way out.</strong> Not calling <code>next</code> at all ends the chain, which is all an auth middleware has to do to reject a request:</p>
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">requireToken</span><span class="p">(</span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">next</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Next</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">token</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">header</span><span class="p">(</span><span class="s">"Authorization"</span><span class="p">)</span><span class="w"> </span><span class="k">orelse</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">fail</span><span class="p">.</span><span class="n">unauthorized</span><span class="p">(</span><span class="s">"this endpoint needs a token"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">valid</span><span class="p">(</span><span class="n">token</span><span class="p">.</span><span class="n">view</span><span class="p">()))</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">fail</span><span class="p">.</span><span class="n">unauthorized</span><span class="p">(</span><span class="s">"that token is not valid"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">next</span><span class="p">.</span><span class="n">run</span><span class="p">(</span><span class="n">c</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Returning an error takes exactly the same path as a failing handler. <strong>A middleware that stops the chain has to answer</strong>, with a fail function or a <code>c.send</code>: one that returns without answering and without calling <code>next</code> is a 500, and the log names it as <code>middleware N of M</code>. The empty 200 a handler gets for returning nothing is the handler's, and a guard that forgot its 401 must not read as a success.</p>
+<p><strong>To learn the status after <code>next.run(c)</code>, read it the way the logger does.</strong> <code>c.answered()</code> is the status once something has been written. When <code>next.run</code> returned an error before anything was written, the status the App is about to send is <code>fail.resolveStatus(failure, err)</code> with <code>fail.current()</code>, or <code>fail.statusFor(err)</code> when there is no failure set. Asking <code>fail</code> instead of mapping the error yourself keeps what you record in step with what was actually sent.</p>
+<p>The order of <code>use</code> and <code>get</code> calls does not matter. Chains are resolved when <code>listen()</code> is called, so middleware registered after a route still applies to it. Middleware also runs when no route matched, so your logger sees 404s and CORS can answer a preflight for a path that has no route.</p>
+<p><code>useOn(prefix, mw)</code> limits a middleware to paths that start with the prefix. <code>group("/api").use(mw)</code> does the same thing more clearly; see <a href="../routing/#groups">Routing</a>.</p>
+<p>See <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/008-middleware-is-an-onion-of-ctx-functions.md">ADR 008</a>.</p>
+<h3 id="excluding-routes-from-a-middleware-without">Excluding routes from a middleware (<code>without</code>)<a class="headerlink" href="#excluding-routes-from-a-middleware-without" title="Permanent link">&para;</a></h3>
+<p><strong>Every API with accounts has a prefix behind a session and two routes inside it that cannot require one: you cannot require a session to create one.</strong></p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">v1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">group</span><span class="p">(</span><span class="s">"/v1"</span><span class="p">);</span>
+<span class="k">try</span><span class="w"> </span><span class="n">v1</span><span class="p">.</span><span class="n">use</span><span class="p">(</span><span class="n">requireOperator</span><span class="p">);</span><span class="w">          </span><span class="c1">// everything under /v1</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">open</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">v1</span><span class="p">.</span><span class="n">without</span><span class="p">(</span><span class="n">requireOperator</span><span class="p">);</span>
+<span class="k">try</span><span class="w"> </span><span class="n">open</span><span class="p">.</span><span class="n">post</span><span class="p">(</span><span class="s">"/sign-up"</span><span class="p">,</span><span class="w"> </span><span class="n">signUp</span><span class="p">);</span><span class="w">    </span><span class="c1">// …except these two</span>
+<span class="k">try</span><span class="w"> </span><span class="n">open</span><span class="p">.</span><span class="n">post</span><span class="p">(</span><span class="s">"/sign-in"</span><span class="p">,</span><span class="w"> </span><span class="n">signIn</span><span class="p">);</span>
+</code></pre></div>
+<p><a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/reference/app.md#group"><code>without(mw)</code></a> returns the same group with that one middleware turned off for the routes registered through it. Everything else in the chain still runs: your logger still logs the sign-up, and CORS still answers its preflight.</p>
+<p><strong>The default stays deny</strong>, and that is the point. A route added to <code>/v1</code> next month is guarded without anyone doing anything, instead of open because somebody forgot. The exception is also written where the route is, so renaming <code>/sign-up</code> moves it. The alternative, a list of paths compared against <code>c.path()</code> inside the middleware, would keep guarding a route that no longer exists while the real one was left open, and nothing would fail to compile (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/008-middleware-is-an-onion-of-ctx-functions.md">ADR 008</a>).</p>
+<p>Registering the open routes before the <code>use</code> call does <strong>not</strong> work, even though it looks like it should: chains are resolved in <code>listen()</code>, so the order you register things in has no meaning at all (ADR 008).</p>
+<h3 id="adding-a-middleware-to-one-route-with">Adding a middleware to one route (<code>with</code>)<a class="headerlink" href="#adding-a-middleware-to-one-route-with" title="Permanent link">&para;</a></h3>
+<p><strong><code>with</code> does the opposite of <code>without</code>: it adds a guard to one endpoint that its neighbours do not have.</strong></p>
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">with</span><span class="p">(</span><span class="n">adminOnly</span><span class="p">).</span><span class="n">delete</span><span class="p">(</span><span class="s">"/users/:id"</span><span class="p">,</span><span class="w"> </span><span class="n">removeUser</span><span class="p">);</span>
+</code></pre></div>
+<p><code>with</code> returns a group exactly as <code>without</code> does, so there is no second way to register a route and nothing new to learn. A middleware added this way runs <strong>innermost</strong>, because the group's session check has to run before the route's own check of what that session is allowed to do.</p>
+<p>The two combine:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">v1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">group</span><span class="p">(</span><span class="s">"/v1"</span><span class="p">);</span>
+<span class="k">try</span><span class="w"> </span><span class="n">v1</span><span class="p">.</span><span class="n">use</span><span class="p">(</span><span class="n">requireOperator</span><span class="p">);</span>
+<span class="k">try</span><span class="w"> </span><span class="n">v1</span><span class="p">.</span><span class="n">without</span><span class="p">(</span><span class="n">requireOperator</span><span class="p">).</span><span class="n">with</span><span class="p">(</span><span class="n">rateLimitSignups</span><span class="p">).</span><span class="n">post</span><span class="p">(</span><span class="s">"/sign-up"</span><span class="p">,</span><span class="w"> </span><span class="n">signUp</span><span class="p">);</span>
+</code></pre></div>
+<p>Both match on the full pattern <strong>and the method</strong>. So renaming the route moves its middleware with it, <code>/v1/orders</code> does not cover <code>/v1/orders/:id</code>, and a guard on <code>DELETE /users/:id</code> does not cover the <code>GET</code> beside it. That is the difference from <code>useOn</code>, where the prefix is a string somebody has to keep in step with the routes (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/099-a-route-can-say-what-covers-it.md">ADR 099</a>).</p>
+<h2 id="built-in-logger-and-cors">Built-in logger and CORS<a class="headerlink" href="#built-in-logger-and-cors" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">use</span><span class="p">(</span><span class="n">nilo</span><span class="p">.</span><span class="n">logger</span><span class="p">.</span><span class="n">standard</span><span class="p">);</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">use</span><span class="p">(</span><span class="n">nilo</span><span class="p">.</span><span class="n">cors</span><span class="p">.</span><span class="n">permissive</span><span class="p">);</span>
+</code></pre></div>
+<p><code>logger.with(.{ .level = .debug, .slow_micros = 250_000 })</code> logs ordinary requests at a level you choose and anything slower than <code>slow_micros</code> at <code>.warn</code>, so slow requests stand out without a second tool.</p>
+<p><code>cors.with(.{ .origins = &amp;.{"https://app.example.com"}, .credentials = true })</code> also accepts <code>methods</code>, <code>headers</code>, <code>expose</code> and <code>max_age</code>. <code>permissive</code> is <code>origins: &amp;.{"*"}</code> with no credentials, which is reasonable for a public API and wrong for one behind a cookie.</p>
+<p><strong>List every origin you serve.</strong> A production front end plus a staging one is the ordinary case, and <code>Access-Control-Allow-Origin</code> can carry only one value, so nilo compares the request's <code>Origin</code> against your list and sends back the one that matched:</p>
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">use</span><span class="p">(</span><span class="n">nilo</span><span class="p">.</span><span class="n">cors</span><span class="p">.</span><span class="n">with</span><span class="p">(.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">origins</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="w"> </span><span class="s">"https://app.example.com"</span><span class="p">,</span><span class="w"> </span><span class="s">"https://staging.example.com"</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">.</span><span class="n">credentials</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="p">}));</span>
+</code></pre></div>
+<p>The comparison is unrolled while compiling, so it is one <code>mem.eql</code> per entry against a literal, and nothing is allocated. An origin you did not list gets an ordinary response with no <code>Access-Control-Allow-Origin</code>, and the browser is what blocks it. Write origins in lowercase, as browsers do: nilo rejects a capital letter at build time rather than letting it silently never match.</p>
+<h3 id="cors-origins-from-the-environment">CORS origins from the environment<a class="headerlink" href="#cors-origins-from-the-environment" title="Permanent link">&para;</a></h3>
+<p><strong>When the front-end address differs between deployments, read the origin list at startup with <code>cors.reading</code>.</strong> The address of your front end is a fact about <em>where this was deployed</em>, not about the program, so staging and production naming different origins is normal. <code>cors.reading</code> is the same middleware with its list read from something you fill before <code>listen()</code> (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/088-an-origin-is-a-fact-about-the-deployment.md">ADR 088</a>):</p>
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">origins</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">cors</span><span class="p">.</span><span class="n">Origins</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">empty</span><span class="p">;</span><span class="w">      </span><span class="c1">// outlives the App</span>
+
+<span class="kr">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">main</span><span class="p">()</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// …settings read with nilo_config…</span>
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">buf</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="mi">4</span><span class="p">][]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">undefined</span><span class="p">;</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">origins</span><span class="p">.</span><span class="n">setSplit</span><span class="p">(</span><span class="o">&amp;</span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="n">settings</span><span class="p">.</span><span class="n">web_origins</span><span class="p">);</span><span class="w">   </span><span class="c1">// "https://a.com,https://b.com"</span>
+
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">use</span><span class="p">(</span><span class="n">nilo</span><span class="p">.</span><span class="n">cors</span><span class="p">.</span><span class="n">reading</span><span class="p">(</span><span class="o">&amp;</span><span class="n">origins</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">credentials</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">}));</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">listen</span><span class="p">(.{});</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Everything else stays compile-time: the methods, the headers, <code>credentials</code> and <code>max_age</code>, because none of them changes between deployments of the same service.</p>
+<p>Three things to know:</p>
+<ul>
+<li><strong>The text is borrowed</strong>, so whatever you split has to outlive the server. The environment block and a <code>.env</code> file's text both do, and that is what keeps a cross-origin response at zero allocations.</li>
+<li><strong><code>"*"</code> is rejected.</strong> To allow anybody, use <code>cors.permissive</code>, which needs no list.</li>
+<li>A list you never filled rejects every cross-origin request, so nilo says so in the log once, the first time it happens.</li>
+</ul>
+<h2 id="csrf-protection">CSRF protection<a class="headerlink" href="#csrf-protection" title="Permanent link">&para;</a></h2>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">use</span><span class="p">(</span><span class="n">nilo</span><span class="p">.</span><span class="n">csrf</span><span class="p">.</span><span class="n">sameOrigin</span><span class="p">);</span>
+</code></pre></div>
+<p><strong>A <code>POST</code>, <code>PUT</code>, <code>PATCH</code> or <code>DELETE</code> that the browser says came from a page this server does not serve gets a 403, and your handler never runs.</strong> A <code>GET</code> is never checked, because a link from another site is a <code>GET</code>. A route that changes something on a <code>GET</code> is the thing to fix, and no CSRF check can fix it. See <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/reference/middleware.md#nilocsrf"><code>nilo.csrf</code></a>.</p>
+<p>There is no token to put in your forms. The browser writes <code>Sec-Fetch-Site</code> and <code>Origin</code> on the request, and a page cannot forge either, so nilo reads those (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/224-a-request-that-changes-something-says-where-it-came-from.md">ADR 224</a>). <code>curl</code>, a webhook and another server send neither and are let through: none of them is carrying somebody else's cookie.</p>
+<p><strong>Why you would want this even with <code>SameSite=Lax</code> on your cookie:</strong> Lax lets through a page on another subdomain of your site (a user's upload on <code>files.example.com</code>, for instance), and does nothing once a cookie needs <code>SameSite=None</code>. This check blocks both.</p>
+<p>A front end served from another origin is listed, the same way CORS lists it:</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">use</span><span class="p">(</span><span class="n">nilo</span><span class="p">.</span><span class="n">csrf</span><span class="p">.</span><span class="n">with</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">origins</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="s">"https://app.example.com"</span><span class="p">}</span><span class="w"> </span><span class="p">}));</span>
+</code></pre></div>
+<p>When that address comes from the environment, <code>nilo.csrf.reading(&amp;origins)</code> takes the same <code>nilo.cors.Origins</code> your <code>cors.reading</code> does, so one variable filled before <code>listen()</code> serves both. A route that really does accept posts from anywhere opts out with <code>app.without(nilo.csrf.sameOrigin).post(…)</code>.</p>
+<h2 id="security-headers">Security headers<a class="headerlink" href="#security-headers" title="Permanent link">&para;</a></h2>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">use</span><span class="p">(</span><span class="n">nilo</span><span class="p">.</span><span class="n">secure</span><span class="p">.</span><span class="n">api</span><span class="p">(.{}));</span>
+</code></pre></div>
+<p><strong>One line sends the headers a browser reads as policy: <code>nosniff</code>, a Content-Security-Policy, HSTS, <code>X-Frame-Options</code> and a <code>Referrer-Policy</code>.</strong> There are two presets, one for each kind of server. <code>api</code> is for a server that answers with JSON: it tells the browser not to render, frame or run anything in the answer. <code>pages</code> is for a server that also serves its own front end: scripts, styles, fonts and images load from your own origin, and nothing frames the page but your own. See <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/reference/middleware.md#nilosecure"><code>nilo.secure</code></a> for every header and its value.</p>
+<p>A page that loads something from elsewhere names it in its own CSP:</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">use</span><span class="p">(</span><span class="n">nilo</span><span class="p">.</span><span class="n">secure</span><span class="p">.</span><span class="n">pages</span><span class="p">(.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">csp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"default-src 'self'; img-src 'self' https://cdn.example.com; connect-src 'self' https://api.example.com"</span><span class="p">,</span>
+<span class="p">}));</span>
+</code></pre></div>
+<p>Every header is a field, and <code>null</code> turns one off: <code>.hsts = null</code> on a server that is only ever reached over plain HTTP inside a cluster. The values with a fixed set of choices are enums, so <code>.referrer_policy = .same_origin</code> is checked by the compiler and a typo does not compile. The whole block is put together while compiling, so it costs one store per request and no allocation.</p>
+<p><strong>A server with both an API and pages uses both presets.</strong> Install <code>api</code> on the App and <code>pages</code> on the group that serves the front end; the group's replaces the App's on its routes. A handler that sets one of these headers itself, such as a <code>Content-Security-Policy</code> for one page, replaces that one line, and the rest of the block still goes out.</p>
+<p><strong>HSTS is sent on plain HTTP too, and a browser ignores it there.</strong> Behind a platform that terminates TLS for you (Fly, Render, Cloud Run, a load balancer), it is the only place the header comes from. One thing to know: if you serve <code>https://localhost</code> in development, the browser remembers HSTS for <code>localhost</code> on every port, so use <code>.hsts = null</code> in that build.</p>
+<h2 id="rate-limiting">Rate limiting<a class="headerlink" href="#rate-limiting" title="Permanent link">&para;</a></h2>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">useOn</span><span class="p">(</span><span class="s">"/api"</span><span class="p">,</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">allowance</span><span class="p">.</span><span class="n">with</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">per_window</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">100</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">window_s</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">60</span><span class="w"> </span><span class="p">}));</span>
+</code></pre></div>
+<p><strong>This allows a hundred requests a minute from one address; the hundred-and-first gets a 429 with a <code>Retry-After</code>, and your handler never runs.</strong> Put it on a group rather than the whole App and routes outside that prefix are not counted at all. A health check that a load balancer hits every second is the usual reason. See <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/reference/middleware.md#niloallowance"><code>nilo.allowance</code></a>.</p>
+<p>The sign-in form deserves its own limit, because the right number differs by two orders of magnitude:</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">useOn</span><span class="p">(</span><span class="s">"/api"</span><span class="p">,</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">allowance</span><span class="p">.</span><span class="n">with</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">per_window</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">100</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">window_s</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">60</span><span class="w"> </span><span class="p">}));</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">useOn</span><span class="p">(</span><span class="s">"/sign-in"</span><span class="p">,</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">allowance</span><span class="p">.</span><span class="n">with</span><span class="p">(.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">per_window</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">window_s</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">60</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"sign-in"</span><span class="p">,</span><span class="w">       </span><span class="c1">// ← counted apart from the one above</span>
+<span class="p">}));</span>
+</code></pre></div>
+<p><strong><code>.name</code> keeps two allowances separate.</strong> Two <code>with()</code> calls with the same options share one table. That is usually what you want (the same allowance applied in two places), and wrong as soon as the two are meant to be counted separately. Different numbers already make them different tables; give one a name when the numbers happen to match.</p>
+<h3 id="rate-limiting-behind-a-proxy">Rate limiting behind a proxy<a class="headerlink" href="#rate-limiting-behind-a-proxy" title="Permanent link">&para;</a></h3>
+<p><strong>Tell nilo which machines are in front of it, or every request is counted against the proxy's address.</strong> The allowance counts against <code>c.clientIp()</code>, which is the socket's address unless you have said what stands in front:</p>
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">listen</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">trusted_proxies</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="s">"private"</span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<p>An entry is a CIDR, a bare address, or one of two names: <code>"private"</code> for the RFC 1918 ranges plus loopback and their IPv6 equivalents, and <code>"loopback"</code> for loopback alone. <code>trusted_hops = 1</code> still works and is the older setting. When both are set, <code>trusted_proxies</code> wins, because a hop count goes wrong the day somebody puts a CDN in front and nothing says so (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/102-a-proxy-is-trusted-by-which-one-it-is.md">ADR 102</a>).</p>
+<p>Leave it unset behind a proxy and every request looks like it came from the proxy: one address, one slot, and the first busy second locks out everybody. nilo cannot see your deployment, but it can see a rejected request that carried an <code>X-Forwarded-For</code> and was counted against the connection's own address, and it logs that the first time it happens.</p>
+<h3 id="rate-limiting-cost-and-limits">Rate limiting: cost and limits<a class="headerlink" href="#rate-limiting-cost-and-limits" title="Permanent link">&para;</a></h3>
+<p><strong>It costs nothing per request.</strong> The table is sized while compiling and lives in the binary's <code>.bss</code>: 131,072 bytes at the default <code>.slots = 16 * 1024</code>. Nothing is allocated at startup either, and a program that never calls <code>with</code> links none of it. <code>.slots</code> is the number of addresses remembered at once, at eight bytes each, and must be a power of two.</p>
+<p><strong><code>allowance.keyed</code> counts against something your application knows instead of the address</strong>: the signed-in account, the API key, the tenant. Ten accounts behind one office NAT would otherwise share one address-keyed allowance, and one account on ten machines would get ten:</p>
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">useOn</span><span class="p">(</span><span class="s">"/api"</span><span class="p">,</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">allowance</span><span class="p">.</span><span class="n">keyed</span><span class="p">(</span><span class="n">account</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">per_window</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1000</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">on_null</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">reject</span><span class="p">,</span>
+<span class="p">}));</span>
+</code></pre></div>
+<p><code>account</code> is any <code>fn (*nilo.Ctx) ?nilo.Str</code>, and its bytes are not kept: the table stores a tag computed from them. <code>.on_null</code> has no default, on purpose. On a sign-in route, silently not counting a request with no key would leave every <em>failed</em> sign-in uncounted, which is exactly the attack the limit exists to stop (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/104-a-key-the-application-knows-is-a-word-of-its-own.md">ADR 104</a>).</p>
+<p>Two behaviours are deliberate, and both make the same trade (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/092-an-allowance-is-a-table-sized-while-compiling.md">ADR 092</a>). When the table is full, it <strong>forgets the address that has been quiet longest</strong> rather than making two addresses share one allowance. And when two requests reach the same slot at the same instant, it <strong>lets both through</strong>. Being loose for one window is a smaller mistake than rejecting somebody who has made no requests at all.</p>
+<p><strong>It is not a defence against a flood.</strong> A rejected request is still read, parsed, matched and answered: cheaply, but not for free. Somebody opening ten thousand sockets is stopped by <code>max_connections</code> on <code>listen</code>, which counts per process rather than per address.</p>
+<h2 id="resolved-values">Resolved values<a class="headerlink" href="#resolved-values" title="Permanent link">&para;</a></h2>
+<p><strong>Some things a handler needs are neither a service nor request data: they are worked out from the request.</strong> Authentication is the typical case. The type says how the value is worked out, and a handler asks for it by writing it in its argument list:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">CurrentUser</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_resolve</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">authenticate</span><span class="p">;</span><span class="w">   </span><span class="c1">// ← the whole wiring</span>
+
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">,</span>
+<span class="w">    </span><span class="n">name</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">authenticate</span><span class="p">(</span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Db</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">CurrentUser</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">token</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">header</span><span class="p">(</span><span class="s">"Authorization"</span><span class="p">)</span><span class="w"> </span><span class="k">orelse</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">fail</span><span class="p">.</span><span class="n">unauthorized</span><span class="p">(</span><span class="s">"this endpoint needs a token"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">userForToken</span><span class="p">(</span><span class="n">token</span><span class="p">.</span><span class="n">view</span><span class="p">())</span><span class="w"> </span><span class="k">orelse</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">fail</span><span class="p">.</span><span class="n">unauthorized</span><span class="p">(</span><span class="s">"that token is not valid"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="p">}</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">me</span><span class="p">(</span><span class="n">user</span><span class="o">:</span><span class="w"> </span><span class="n">CurrentUser</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">Profile</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">user</span><span class="p">.</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">user</span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="p">};</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>There is no registration step and nothing to add to <code>main</code>. A resolver that fails takes the same path as a failing handler, so it rejects with <code>fail.unauthorized</code>. And <code>me</code> is still an ordinary function: call <code>me(.{ .id = 7, .name = … })</code> in a test.</p>
+<p>A resolver can take a <code>*Ctx</code>, a service, a <code>std.mem.Allocator</code>, and <strong>other resolved values</strong>. That last one is how <code>Admin</code> is built from <code>CurrentUser</code> instead of from a second copy of the auth code. It cannot take a path param or the body: a resolver belongs to the request, not to a route, and the same <code>CurrentUser</code> serves <code>/me</code> and <code>/orders/:id</code>. Ask for a <code>*Ctx</code> if you need one.</p>
+<p>It is worked out <strong>once per request</strong>, which matters as soon as you also want to guard a whole prefix.</p>
+<h2 id="middleware-or-resolved-value">Middleware or resolved value?<a class="headerlink" href="#middleware-or-resolved-value" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">requireAdmin</span><span class="p">(</span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">next</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Next</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">resolve</span><span class="p">(</span><span class="n">CurrentUser</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">user</span><span class="p">.</span><span class="n">is_admin</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">fail</span><span class="p">.</span><span class="n">forbidden</span><span class="p">(</span><span class="s">"admins only"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">next</span><span class="p">.</span><span class="n">run</span><span class="p">(</span><span class="n">c</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">useOn</span><span class="p">(</span><span class="s">"/admin"</span><span class="p">,</span><span class="w"> </span><span class="n">requireAdmin</span><span class="p">);</span>
+<span class="k">fn</span><span class="w"> </span><span class="n">stats</span><span class="p">(</span><span class="n">user</span><span class="o">:</span><span class="w"> </span><span class="n">CurrentUser</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">Stats</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="p">}</span><span class="w">   </span><span class="c1">// the same user, not a second lookup</span>
+</code></pre></div>
+<p><strong>Use middleware to secure a prefix, and a resolved value to hand the user to a handler.</strong> Only routes that name a resolved value get it, so it is the wrong tool for securing a prefix: a handler that forgets the argument is simply not authenticated. <code>useOn</code> makes a rule apply whether or not the handler cooperates. <code>c.resolve</code> is where the two meet: the middleware's lookup and the handler's argument are the same single lookup.</p>
+<p>See <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/015-resolved-values-are-declared-by-their-type.md">ADR 015</a>.</p>
+<h2 id="a-permission-table-for-every-route">A permission table for every route<a class="headerlink" href="#a-permission-table-for-every-route" title="Permanent link">&para;</a></h2>
+<p><strong>Check permissions in one table, from one middleware, instead of in every handler.</strong> A check per handler leaves the ninety-first endpoint open with no error and no failing test. A table consulted from one place does not, as long as that place can tell which route it is in front of. <code>c.routeName()</code> is the route's <code>operationId</code>, the same name the API description prints, so a middleware can key a default-deny table by it, and a test can check the table against the document in both directions:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">required</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">StaticStringMap</span><span class="p">(</span><span class="n">Capability</span><span class="p">).</span><span class="n">initComptime</span><span class="p">(.{</span>
+<span class="w">    </span><span class="p">.{</span><span class="w"> </span><span class="s">"createPartner"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">manage_partners</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">.{</span><span class="w"> </span><span class="s">"addPartnerCapability"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">manage_partners</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="c1">// …every write in the product, or it is refused for everybody</span>
+<span class="p">});</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">authorize</span><span class="p">(</span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">next</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Next</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">routeName</span><span class="p">()</span><span class="w"> </span><span class="k">orelse</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">next</span><span class="p">.</span><span class="n">run</span><span class="p">(</span><span class="n">c</span><span class="p">);</span><span class="w">   </span><span class="c1">// a 404 is not ours to refuse</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">c</span><span class="p">.</span><span class="n">method</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="p">.</span><span class="n">GET</span><span class="w"> </span><span class="k">or</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">method</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="p">.</span><span class="n">HEAD</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">next</span><span class="p">.</span><span class="n">run</span><span class="p">(</span><span class="n">c</span><span class="p">);</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">needed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">required</span><span class="p">.</span><span class="n">get</span><span class="p">(</span><span class="n">name</span><span class="p">)</span><span class="w"> </span><span class="k">orelse</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">fail</span><span class="p">.</span><span class="n">forbidden</span><span class="p">(</span><span class="s">"{s} is not in the permission table"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="n">name</span><span class="p">});</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">resolve</span><span class="p">(</span><span class="n">CurrentUser</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">user</span><span class="p">.</span><span class="n">can</span><span class="p">(</span><span class="n">needed</span><span class="p">))</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">fail</span><span class="p">.</span><span class="n">forbidden</span><span class="p">(</span><span class="s">"{s} needs {s}"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="nb">@tagName</span><span class="p">(</span><span class="n">needed</span><span class="p">)</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">next</span><span class="p">.</span><span class="n">run</span><span class="p">(</span><span class="n">c</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">useOn</span><span class="p">(</span><span class="s">"/api"</span><span class="p">,</span><span class="w"> </span><span class="n">authorize</span><span class="p">);</span>
+</code></pre></div>
+<p>A route registered without <code>named</code> still has a name: the derived one, so <code>getApiPartners</code> is what the table sees and what the document says. <code>app.routes()</code> lists the same name for each route, for a test that checks every key is a route and every route is a key without going through the document (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/162-a-middleware-can-learn-which-route-it-is-in-front-of.md">ADR 162</a>).</p>
+<h2 id="writing-your-own-middleware">Writing your own middleware<a class="headerlink" href="#writing-your-own-middleware" title="Permanent link">&para;</a></h2>
+<p><strong>The signature is <code>fn (c: *nilo.Ctx, next: nilo.Next) !void</code>.</strong> There is no registration type and no builder: <code>app.use</code> takes the function.</p>
+<p>Middleware works at the <code>Ctx</code> layer on purpose. It has no argument list to inject into, and giving it one would mean a second dependency system that runs for every request whether or not anybody wanted it. What it can do instead is set headers, read the request, reject it, and hand something to the handler through <code>c.cacheResolved</code>, which is what <code>c.resolve</code> uses.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../grpc/" class="md-footer__link md-footer__link--prev" aria-label="Previous: gRPC">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                gRPC
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../services/" class="md-footer__link md-footer__link--next" aria-label="Next: Services">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Services
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.sections", "navigation.top", "navigation.footer", "navigation.indexes", "search.highlight", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

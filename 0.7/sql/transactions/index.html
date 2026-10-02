@@ -1,0 +1,2415 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A toolkit for Zig 0.16, and an HTTP server">
+      
+      
+      
+        <link rel="canonical" href="https://nevindra.github.io/nilo/0.7/sql/transactions/">
+      
+      
+        <link rel="prev" href="../writing/">
+      
+      
+        <link rel="next" href="../raw/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Transactions - nilo</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#transactions" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="nilo" class="md-header__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            nilo
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Transactions
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="nilo" class="md-nav__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    nilo
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../handlers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handlers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handling a request
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Handling a request
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../requests/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requests
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../forms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Forms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../responses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Responses
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../cookies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cookies
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sessions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Streaming
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../websocket/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WebSocket
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../grpc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    gRPC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building an application
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Building an application
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../middleware/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Middleware and resolved values
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../static-files/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Static files
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../errors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../background/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Background work
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Idempotency keys
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The other modules
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    The other modules
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Talking to a database
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Talking to a database
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A table is a struct
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Parents, children and aggregates
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../writing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Writing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transactions
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#giving-a-statement-a-deadline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Giving a statement a deadline
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#isolation-level-and-read-only" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Isolation level and read-only
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#retrying-a-rolled-back-transaction" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Retrying a rolled-back transaction
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#locking-the-rows-you-read" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Locking the rows you read
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Locking the rows you read">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#optimistic-locking-with-a-version-column" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Optimistic locking with a version column
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lock-modes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Lock modes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a-lock-needs-a-transaction" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A lock needs a transaction
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#savepoints" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Savepoints
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../raw/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Raw SQL
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sqlite/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQLite
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../migrations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migrations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../running/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running a database: checks, logging and errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../fetch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Calling somebody else's API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../s3/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Object storage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../jobs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that runs later, again, or on a schedule
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../cache/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A cache in this process
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../jwt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Checking somebody else's token
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../proto/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Protobuf messages
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../id/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Identifiers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Shipping it
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Shipping it
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../openapi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenAPI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deploying/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deploying
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#giving-a-statement-a-deadline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Giving a statement a deadline
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#isolation-level-and-read-only" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Isolation level and read-only
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#retrying-a-rolled-back-transaction" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Retrying a rolled-back transaction
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#locking-the-rows-you-read" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Locking the rows you read
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Locking the rows you read">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#optimistic-locking-with-a-version-column" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Optimistic locking with a version column
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lock-modes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Lock modes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a-lock-needs-a-transaction" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A lock needs a transaction
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#savepoints" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Savepoints
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/nevindra/nilo/edit/main/docs/guide/sql/transactions.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="transactions">Transactions<a class="headerlink" href="#transactions" title="Permanent link">&para;</a></h1>
+<p><strong>A <code>Tx</code> holds one connection until it ends, and it rolls back on every path out of the handler unless you commit it.</strong></p>
+<p><strong>Reference:</strong> <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/reference/sql.md#tx"><code>Tx</code></a>, <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/reference/sql.md#lock-holding-the-rows-a-read-matched">locked reads</a>, <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/reference/sql.md#savepoints">savepoints</a> · <strong>Design:</strong> <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/design/sql-runtime.md">The SQL runtime</a></p>
+<p>This page covers deadlines, isolation, row locks and savepoints. The statements you run inside a transaction are the same ones <a href="../reading/">reading</a> and <a href="../writing/">writing</a> describe.</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">tx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">begin</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="k">defer</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span><span class="w">                  </span><span class="c1">// rolls back unless committed</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">Order</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">user_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">user</span><span class="p">.</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">total</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4200</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"new"</span><span class="w"> </span><span class="p">});</span>
+<span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">update</span><span class="p">(</span><span class="n">User</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">set</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">orders</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">plus</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">user</span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+
+<span class="k">try</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">commit</span><span class="p">();</span>
+</code></pre></div>
+<p><code>.{ .plus = 1 }</code> becomes <code>SET "orders" = "orders" + $1</code>: the database adds one to whatever the row holds when the statement runs. If you write <code>.orders = user.orders + 1</code> instead, you send a number this handler read earlier. Two requests that read the same number then both write the same answer, and one order goes uncounted. That is a lost update, and a transaction alone does not stop it. See <a href="#locking-the-rows-you-read">Locking the rows you read</a>.</p>
+<p><code>tx</code> has the same calls as <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/reference/sql.md#db"><code>db</code></a>, and all of them go down the one connection it holds.</p>
+<p><strong>The <code>defer tx.deinit()</code> is required.</strong> If a connection went back to the pool with a transaction still open, the <em>next</em> request would run inside that stranger's transaction. <code>deinit</code> rolls back on every path out, including the ones nobody wrote. In Debug, a forgotten <code>deinit</code> is caught by a counter checked at <code>db.deinit()</code>.</p>
+<h2 id="giving-a-statement-a-deadline">Giving a statement a deadline<a class="headerlink" href="#giving-a-statement-a-deadline" title="Permanent link">&para;</a></h2>
+<p><strong><code>tx.deadline</code> limits how long the statements themselves may run.</strong> <code>timeout_ms</code> on the pool only limits how long you wait <em>for a connection</em>. It stops counting the moment you get one, so an expensive query runs until somebody notices.</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">tx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">begin</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="k">defer</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span>
+
+<span class="k">try</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">deadline</span><span class="p">(</span><span class="mi">2</span><span class="n">_000</span><span class="p">);</span><span class="w">             </span><span class="c1">// milliseconds, one round trip</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">rows</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">select</span><span class="p">(</span><span class="n">Report</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">month</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">month</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="o">|</span><span class="n">err</span><span class="o">|</span><span class="w"> </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">error</span><span class="p">.</span><span class="n">TimedOut</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">status</span><span class="p">(</span><span class="mi">504</span><span class="p">,</span><span class="w"> </span><span class="s">"that report is taking too long"</span><span class="p">,</span><span class="w"> </span><span class="p">.{}),</span>
+<span class="w">    </span><span class="k">else</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">,</span>
+<span class="p">};</span>
+<span class="k">try</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">commit</span><span class="p">();</span>
+</code></pre></div>
+<p>Postgres undoes the setting when the transaction ends, however it ends, so the connection goes back to the pool clean.</p>
+<p><strong>Only a transaction can have a deadline.</strong> A deadline is always a separate command, because SQL cannot attach one to a statement in the same message. So it has to go down the same connection as the statement it limits. <code>db.select</code> takes whichever connection is free and hands it straight back, so there is nothing to set a deadline on (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/043-a-deadline-needs-a-connection-you-hold.md">ADR 043</a>).</p>
+<p>For a limit on <em>every</em> query, including the ones outside a transaction, set it on the database role instead of in your code:</p>
+<div class="highlight"><pre><span></span><code><span class="k">ALTER</span><span class="w"> </span><span class="k">ROLE</span><span class="w"> </span><span class="n">app</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="n">statement_timeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">'30s'</span><span class="p">;</span>
+</code></pre></div>
+<h2 id="isolation-level-and-read-only">Isolation level and read-only<a class="headerlink" href="#isolation-level-and-read-only" title="Permanent link">&para;</a></h2>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">tx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">begin</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">isolation</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">serializable</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">read_only</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<p><strong>Both options go on the <code>BEGIN</code> itself</strong> (<code>BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY</code>), so neither costs a round trip.</p>
+<p><code>.isolation</code> is <code>.read_committed</code>, <code>.repeatable_read</code> or <code>.serializable</code>. If you leave it out you get whatever the server is set to. That is usually read committed, but not always, because <code>ALTER ROLE … SET default_transaction_isolation</code> exists. A transaction that needs read committed should say so.</p>
+<p><code>.read_only = true</code> is worth writing on a report or an export. Postgres can skip some work, and an accidental write is rejected by the server instead of quietly happening.</p>
+<h2 id="retrying-a-rolled-back-transaction">Retrying a rolled-back transaction<a class="headerlink" href="#retrying-a-rolled-back-transaction" title="Permanent link">&para;</a></h2>
+<p><strong>When the database rolls a transaction back, you get <code>error.RolledBack</code>, and the fix is to run the whole transaction again.</strong> Under <code>.repeatable_read</code> or <code>.serializable</code>, two transactions that touch the same rows cannot both win: Postgres rolls one back with a serialization failure (<code>40001</code>). A deadlock (<code>40P01</code>) ends the same way at any level. Nothing the transaction did was kept.</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">takeOne</span><span class="p">(</span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">sql</span><span class="p">.</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">attempt</span><span class="o">:</span><span class="w"> </span><span class="kt">u8</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="kc">true</span><span class="p">)</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="n">attempt</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kr">var</span><span class="w"> </span><span class="n">tx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">begin</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">isolation</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">serializable</span><span class="w"> </span><span class="p">});</span>
+<span class="w">        </span><span class="k">defer</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span>
+
+<span class="w">        </span><span class="kr">const</span><span class="w"> </span><span class="n">item</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">one</span><span class="p">(</span><span class="n">Item</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="k">orelse</span>
+<span class="w">            </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">notFound</span><span class="p">(</span><span class="s">"no item {d}"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="n">id</span><span class="p">});</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">tx</span><span class="p">.</span><span class="n">update</span><span class="p">(</span><span class="n">Item</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">set</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">qty</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">item</span><span class="p">.</span><span class="n">qty</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}))</span><span class="w"> </span><span class="o">|</span><span class="n">_</span><span class="o">|</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">tx</span><span class="p">.</span><span class="n">commit</span><span class="p">()</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="o">|</span><span class="n">err</span><span class="o">|</span><span class="w"> </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="k">error</span><span class="p">.</span><span class="n">RolledBack</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">attempt</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">3</span><span class="p">)</span><span class="w"> </span><span class="k">continue</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">,</span>
+<span class="w">                </span><span class="k">else</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">,</span>
+<span class="w">            </span><span class="p">};</span>
+<span class="w">            </span><span class="k">return</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="o">|</span><span class="n">err</span><span class="o">|</span><span class="w"> </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">error</span><span class="p">.</span><span class="n">RolledBack</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">attempt</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">3</span><span class="p">)</span><span class="w"> </span><span class="k">continue</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">,</span>
+<span class="w">            </span><span class="k">else</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">,</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>RolledBack</code> can come from any statement, <code>COMMIT</code> included, which is why the example catches it in both places. It is the only error where sending the same thing again is the right move. Every other error means something is wrong with the statement, and retrying will not help. When a handler returns <code>RolledBack</code>, the client gets a 503, which tells it the same thing: send the request again.</p>
+<p>A migration that changes a column's type while a server is running can also cause this. Each connection kept the old plan for its prepared statements (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/051-a-statement-that-is-a-constant-can-be-prepared-once.md">ADR 051</a>), and Postgres now rejects that plan. Outside a transaction, nilo prepares the statement again and the caller never notices. Inside a transaction, the transaction is already aborted, so the answer is <code>RolledBack</code>, and the next attempt prepares the statement fresh.</p>
+<h2 id="locking-the-rows-you-read">Locking the rows you read<a class="headerlink" href="#locking-the-rows-you-read" title="Permanent link">&para;</a></h2>
+<p><strong>A read-modify-write is a race unless the read locks the rows it matched.</strong> Every service ends up writing one:</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">tx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">begin</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="k">defer</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">held</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">one</span><span class="p">(</span><span class="n">Item</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">.</span><span class="n">lock</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">update</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="k">orelse</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">notFound</span><span class="p">(</span><span class="s">"no item {d}"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="n">id</span><span class="p">});</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">held</span><span class="p">.</span><span class="n">qty</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">conflict</span><span class="p">(</span><span class="s">"out of stock"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">update</span><span class="p">(</span><span class="n">Item</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">set</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">qty</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">held</span><span class="p">.</span><span class="n">qty</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+
+<span class="k">try</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">commit</span><span class="p">();</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><span class="k">SELECT</span><span class="w"> </span><span class="ss">"id"</span><span class="p">,</span><span class="w"> </span><span class="ss">"sku"</span><span class="p">,</span><span class="w"> </span><span class="ss">"qty"</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="ss">"items"</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="ss">"id"</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="err">$</span><span class="mi">1</span><span class="w"> </span><span class="k">LIMIT</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="k">FOR</span><span class="w"> </span><span class="k">UPDATE</span>
+</code></pre></div>
+<p><code>tx.one</code> returns <code>?Item</code>, so an id that is not there becomes a 404, rather than <code>held[0]</code> on an empty slice, which would panic.</p>
+<p>When the decision fits in the <code>WHERE</code>, one statement does the same job with no lock and no transaction:</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">taken</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">update</span><span class="p">(</span><span class="n">Item</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">set</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">qty</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">minus</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">qty</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">gt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="p">});</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">taken</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">conflict</span><span class="p">(</span><span class="s">"out of stock"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+</code></pre></div>
+<p>The row is checked and changed in one statement, so two requests cannot both take the last item. Use the lock when the decision needs more than a condition can express.</p>
+<h3 id="optimistic-locking-with-a-version-column">Optimistic locking with a version column<a class="headerlink" href="#optimistic-locking-with-a-version-column" title="Permanent link">&para;</a></h3>
+<p><strong>A form somebody keeps open for ten minutes cannot hold a lock that long.</strong> The edit screen read the row, the user typed, and meanwhile somebody else saved. Holding the row for those ten minutes would keep a connection busy and block every other writer. Instead, the row carries a version number, and the save names the version it read:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Page</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"pages"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="p">};</span>
+
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">body</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Str</span><span class="p">,</span>
+<span class="w">    </span><span class="n">version</span><span class="o">:</span><span class="w"> </span><span class="kt">i32</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">savePage</span><span class="p">(</span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">sql</span><span class="p">.</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">page_id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="n">read_version</span><span class="o">:</span><span class="w"> </span><span class="kt">i32</span><span class="p">,</span><span class="w"> </span><span class="n">body</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Str</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">Page</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">updateReturningOne</span><span class="p">(</span><span class="n">Page</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">set</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">body</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">version</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">plus</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">page_id</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">version</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">read_version</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">})</span><span class="w"> </span><span class="k">orelse</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">conflict</span><span class="p">(</span><span class="s">"somebody saved this page after you opened it"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The check and the write are one statement, so two saves of the same version cannot both succeed. The second finds that <code>version</code> has already moved, changes nothing, and the handler answers 409 instead of overwriting the first save. The id is in the condition next to the version, so <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/reference/sql.md#db"><code>updateReturningOne</code></a> still targets exactly one row. A page that was deleted in the meantime also answers 409 here; if the screen needs to tell the two apart, call <code>db.find</code> after the miss.</p>
+<h3 id="lock-modes">Lock modes<a class="headerlink" href="#lock-modes" title="Permanent link">&para;</a></h3>
+<p>There are four locks, for four different jobs:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>.update</code></td>
+<td>lock the rows, and wait for anyone already holding them</td>
+</tr>
+<tr>
+<td><code>.update_nowait</code></td>
+<td>lock them, or fail at once with <code>error.Locked</code></td>
+</tr>
+<tr>
+<td><code>.update_skip_locked</code></td>
+<td>lock whatever nobody else holds, and leave the rest out</td>
+</tr>
+<tr>
+<td><code>.share</code></td>
+<td>lock against writers; other readers may lock them too</td>
+</tr>
+</tbody>
+</table>
+<p><code>.update_skip_locked</code> is how you write a work queue. Several workers run the same statement, and no two of them ever get the same row:</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">batch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">select</span><span class="p">(</span><span class="n">Job</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">pending</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">.</span><span class="n">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">asc</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">.</span><span class="n">limit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">lock</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">update_skip_locked</span><span class="p">,</span>
+<span class="p">});</span>
+</code></pre></div>
+<p><code>find</code> takes a key rather than options, so it has no <code>.lock</code>. A locked read of one row is <code>tx.one(Row, c, .{ .where = .{ .id = id }, .lock = .update })</code>.</p>
+<h3 id="a-lock-needs-a-transaction">A lock needs a transaction<a class="headerlink" href="#a-lock-needs-a-transaction" title="Permanent link">&para;</a></h3>
+<p><strong>Outside a transaction, a <code>.lock</code> does not compile, because the wrong version would appear to work.</strong> Postgres wraps a single statement in its own transaction and ends it immediately, so the lock is taken and released before you read the first row. The SQL is valid, the lock protects nothing, and the race you wrote it to prevent still happens under load:</p>
+<div class="highlight"><pre><span></span><code>error: nilo: `db.select` on Item was given a `.lock`, and there is no
+       transaction to hold it.
+</code></pre></div>
+<h2 id="savepoints">Savepoints<a class="headerlink" href="#savepoints" title="Permanent link">&para;</a></h2>
+<p><strong>A failed statement inside a transaction aborts all of it, and a savepoint is how you undo just that one statement.</strong> After a failure, every later statement answers <code>error.QueryFailed</code> (Postgres's <code>25P02</code>) until the whole transaction is rolled back, and <strong><code>tx.commit()</code> answers <code>error.QueryFailed</code> too</strong>: the transaction is rolled back and nothing in it was kept. So catching a statement's error and carrying on is a mistake:</p>
+<div class="highlight"><pre><span></span><code><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">Tag</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tag</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="o">|</span><span class="n">err</span><span class="o">|</span><span class="w"> </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">error</span><span class="p">.</span><span class="n">AlreadyExists</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{},</span><span class="w">   </span><span class="c1">// the transaction is already aborted here</span>
+<span class="w">    </span><span class="k">else</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">,</span>
+<span class="p">};</span>
+<span class="k">try</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">commit</span><span class="p">();</span><span class="w">                 </span><span class="c1">// error.QueryFailed, and the other inserts are gone</span>
+</code></pre></div>
+<p>On Postgres, a <code>COMMIT</code> sent after a failure is answered <code>ROLLBACK</code> with no error. nilo rejects the commit instead of reporting a success that did not happen. SQLite would carry on after the failed statement, but nilo holds it to Postgres's rule, so a handler tested against SQLite fails the same way.</p>
+<p>When the only failure you expect is a duplicate, <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/reference/sql.md#upserts"><code>insertOrIgnore</code></a> does it in one statement and nothing fails. A savepoint is for the other failures, the ones no upsert can avoid:</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">tx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">begin</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="k">defer</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span>
+
+<span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">lines</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="n">line</span><span class="o">|</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">sp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">savepoint</span><span class="p">();</span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="n">sp</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span><span class="w">                       </span><span class="c1">// undoes it, unless released</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">tx</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">Order</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="n">line</span><span class="p">))</span><span class="w"> </span><span class="o">|</span><span class="n">_</span><span class="o">|</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">try</span><span class="w"> </span><span class="n">sp</span><span class="p">.</span><span class="n">release</span><span class="p">();</span><span class="w">                    </span><span class="c1">// keep it</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="o">|</span><span class="n">err</span><span class="o">|</span><span class="w"> </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// The user on this line is not there. Skip the line, keep the rest.</span>
+<span class="w">        </span><span class="k">error</span><span class="p">.</span><span class="n">ForeignKeyViolated</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">sp</span><span class="p">.</span><span class="n">rollback</span><span class="p">(),</span>
+<span class="w">        </span><span class="k">else</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">,</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">try</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">commit</span><span class="p">();</span>
+</code></pre></div>
+<p><code>deinit</code> undoes, <code>release</code> keeps, and <code>rollback</code> undoes now. They are the same three calls a <code>Tx</code> has, one level down.</p>
+<p><strong>A savepoint is what a nested transaction really is.</strong> Postgres has no nested <code>BEGIN</code>, and libraries that offer one write savepoints underneath. nilo shows the savepoints, because they do not behave like a transaction: an inner "commit" is not durable, it only means the outer transaction may still commit it.</p>
+<p>One rule comes from Postgres, not from nilo: rolling back or releasing a savepoint destroys every savepoint taken after it. A <code>defer sp.deinit()</code> on one of those later savepoints then sends nothing, instead of asking the server to release a savepoint it no longer has, so nesting them is safe.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../writing/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Writing">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Writing
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../raw/" class="md-footer__link md-footer__link--next" aria-label="Next: Raw SQL">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Raw SQL
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.sections", "navigation.top", "navigation.footer", "navigation.indexes", "search.highlight", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

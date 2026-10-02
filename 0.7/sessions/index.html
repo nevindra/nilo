@@ -1,0 +1,2611 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A toolkit for Zig 0.16, and an HTTP server">
+      
+      
+      
+        <link rel="canonical" href="https://nevindra.github.io/nilo/0.7/sessions/">
+      
+      
+        <link rel="prev" href="../cookies/">
+      
+      
+        <link rel="next" href="../streaming/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Sessions - nilo</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#sessions" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="nilo" class="md-header__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            nilo
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Sessions
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="nilo" class="md-nav__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    nilo
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../handlers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handlers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handling a request
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Handling a request
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../requests/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requests
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../forms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Forms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../responses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Responses
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cookies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cookies
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sessions
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sessions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#setting-the-session-secret" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Setting the session secret
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rotating-the-secret" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rotating the secret
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-a-session-can-store" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What a session can store
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#changing-a-session-value" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changing a session value
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#session-lifetime-max_age" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Session lifetime (max_age)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#revoking-a-session-early" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Revoking a session early
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Revoking a session early">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-__host-cookie-name" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The __Host- cookie name
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#changing-the-session-struct" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changing the session struct
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sign-in-and-password-checking" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sign-in and password checking
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Sign-in and password checking">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#checking-a-password-outside-a-request" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Checking a password outside a request
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#password-reset-tokens-and-api-keys" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Password reset tokens and API keys
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#testing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testing
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Streaming
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../websocket/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WebSocket
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grpc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    gRPC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building an application
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Building an application
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../middleware/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Middleware and resolved values
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../static-files/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Static files
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../errors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../background/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Background work
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Idempotency keys
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The other modules
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    The other modules
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../sql/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Talking to a database
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Talking to a database
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A table is a struct
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/reading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Parents, children and aggregates
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/writing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Writing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/transactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/raw/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Raw SQL
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/sqlite/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQLite
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/migrations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migrations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/running/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running a database: checks, logging and errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fetch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Calling somebody else's API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../s3/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Object storage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jobs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that runs later, again, or on a schedule
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cache/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A cache in this process
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jwt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Checking somebody else's token
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../proto/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Protobuf messages
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../id/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Identifiers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Shipping it
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Shipping it
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../openapi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenAPI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../deploying/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deploying
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#setting-the-session-secret" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Setting the session secret
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rotating-the-secret" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rotating the secret
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-a-session-can-store" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What a session can store
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#changing-a-session-value" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changing a session value
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#session-lifetime-max_age" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Session lifetime (max_age)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#revoking-a-session-early" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Revoking a session early
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Revoking a session early">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-__host-cookie-name" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The __Host- cookie name
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#changing-the-session-struct" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changing the session struct
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sign-in-and-password-checking" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sign-in and password checking
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Sign-in and password checking">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#checking-a-password-outside-a-request" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Checking a password outside a request
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#password-reset-tokens-and-api-keys" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Password reset tokens and API keys
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#testing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testing
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/nevindra/nilo/edit/main/docs/guide/sessions.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="sessions">Sessions<a class="headerlink" href="#sessions" title="Permanent link">&para;</a></h1>
+<p><strong><code>Session(T)</code> seals a struct of yours into one encrypted, signed cookie, so nothing about a session is kept on the server.</strong></p>
+<p><strong>Reference:</strong> <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/reference/ctx.md#sessiont"><code>Session(T)</code></a>, <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/reference/app.md#listen-options"><code>session_secret</code> and the other <code>listen</code> options</a>, <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/reference/ctx.md#reading">password calls on <code>Ctx</code></a>, <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/reference/pw.md"><code>nilo_pw</code></a> · <strong>Design:</strong> <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/design/cookies-sessions.md">Cookies and sessions</a></p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Signed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">user</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="n">admin</span><span class="o">:</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">signIn</span><span class="p">(</span><span class="n">s</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Session</span><span class="p">(</span><span class="n">Signed</span><span class="p">),</span><span class="w"> </span><span class="n">form</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Form</span><span class="p">(</span><span class="n">Login</span><span class="p">))</span><span class="w"> </span><span class="o">!</span><span class="n">nilo</span><span class="p">.</span><span class="n">Redirect</span><span class="p">(</span><span class="mi">303</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">accounts</span><span class="p">.</span><span class="n">check</span><span class="p">(</span><span class="n">form</span><span class="p">.</span><span class="n">email</span><span class="p">,</span><span class="w"> </span><span class="n">form</span><span class="p">.</span><span class="n">password</span><span class="p">.</span><span class="n">view</span><span class="p">())</span><span class="w"> </span><span class="k">orelse</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="p">.</span><span class="n">to</span><span class="p">(</span><span class="s">"/login?wrong"</span><span class="p">);</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">set</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">.</span><span class="n">to</span><span class="p">(</span><span class="s">"/"</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">me</span><span class="p">(</span><span class="n">s</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Session</span><span class="p">(</span><span class="n">Signed</span><span class="p">))</span><span class="w"> </span><span class="o">!?</span><span class="n">Profile</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">signed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">get</span><span class="p">()</span><span class="w"> </span><span class="k">orelse</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span><span class="w">   </span><span class="c1">// null → 404</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">profiles</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">signed</span><span class="p">.</span><span class="n">user</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">signOut</span><span class="p">(</span><span class="n">s</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Session</span><span class="p">(</span><span class="n">Signed</span><span class="p">))</span><span class="w"> </span><span class="o">!</span><span class="n">nilo</span><span class="p">.</span><span class="n">Redirect</span><span class="p">(</span><span class="mi">303</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">clear</span><span class="p">();</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">.</span><span class="n">to</span><span class="p">(</span><span class="s">"/"</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong>Nothing is kept on the server.</strong> The whole session is serialised, encrypted and signed, and handed to the browser as one cookie. There is no table, no expiry sweep, no lock, and nothing added to what an idle connection costs. That is the reason to choose it, not an implementation detail (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/033-a-session-is-sealed-into-the-cookie.md">ADR 033</a>).</p>
+<p>A request that does not ask for a session runs exactly the code it ran before.</p>
+<h2 id="setting-the-session-secret">Setting the session secret<a class="headerlink" href="#setting-the-session-secret" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">listen</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">session_secret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">secret</span><span class="w"> </span><span class="p">});</span><span class="w">   </span><span class="c1">// exactly 32 bytes</span>
+</code></pre></div>
+<p><strong>nilo has no default secret; you supply one.</strong> It can come from an environment variable, a mounted file or a secrets manager. There is no default because a default key is a key everybody who has read this repository already has.</p>
+<p>Three things must be true of it, and getting any of them wrong fails silently:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Exactly 32 bytes</td>
+<td>checked at <code>listen()</code>, which stops with a message</td>
+</tr>
+<tr>
+<td>The same on every instance</td>
+<td>otherwise a request lands on a machine that cannot read its own cookies</td>
+</tr>
+<tr>
+<td>The same after a restart</td>
+<td>otherwise a deploy signs everybody out</td>
+</tr>
+</tbody>
+</table>
+<p>Generate one once, and keep it wherever your other secrets live:</p>
+<div class="highlight"><pre><span></span><code>head -c 32 /dev/urandom | base64
+</code></pre></div>
+<p>A handler that asks for a <code>Session(T)</code> when no secret was set answers <strong>500</strong> with a sentence naming the option. It does not fall back to anything.</p>
+<h2 id="rotating-the-secret">Rotating the secret<a class="headerlink" href="#rotating-the-secret" title="Permanent link">&para;</a></h2>
+<p><strong>Put the new secret in <code>session_secret</code> and the old one in <code>session_fallback_secrets</code>:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">listen</span><span class="p">(.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">session_secret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">new_secret</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">session_fallback_secrets</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="n">old_secret</span><span class="p">},</span>
+<span class="p">});</span>
+</code></pre></div>
+<p>Every session sealed from then on uses the new secret. A cookie sealed under the old one still opens, so nobody is signed out by the deploy (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/225-a-fallback-session-secret-opens-and-never-seals.md">ADR 225</a>).</p>
+<p><strong>Remove the old secret once one <code>max_age</code> has passed.</strong> The expiry is sealed inside every cookie, so by then nothing sealed under the old secret can open anyway. With no <code>max_age</code> that is 24 hours; with <code>.max_age = 30 * 24 * 60 * 60</code> it is thirty days.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>At most three fallback secrets</td>
+<td>each is one more decryption, about 270 ns, for every cookie the current secret does not open</td>
+</tr>
+<tr>
+<td>Each exactly 32 bytes</td>
+<td>checked at <code>listen()</code>, like the current one</td>
+</tr>
+<tr>
+<td>None the same as <code>session_secret</code>, and none twice</td>
+<td>that is a rotation that did not happen, and <code>listen()</code> says so</td>
+</tr>
+<tr>
+<td>Fallback secrets need a <code>session_secret</code></td>
+<td>otherwise nothing could seal a new session</td>
+</tr>
+</tbody>
+</table>
+<p>A cookie under the current secret costs exactly what it did before. Only a cookie the current secret does not open is tried under the fallbacks, in the order you listed them.</p>
+<p><strong>With several instances, it takes two deploys.</strong> While a deploy rolls out, the instances already updated seal under the new secret, and an instance not yet updated cannot open what they wrote. So stage the new secret first:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// Deploy 1: every instance learns to open the new secret. Nothing seals under it yet.</span>
+<span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">session_secret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">old_secret</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">session_fallback_secrets</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="n">new_secret</span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+
+<span class="c1">// Deploy 2, once the first has reached every instance: swap them.</span>
+<span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">session_secret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">new_secret</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">session_fallback_secrets</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="n">old_secret</span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p>A single instance can go straight to the second step.</p>
+<p><strong>Do not use a fallback after a leak.</strong> A fallback secret still opens every cookie sealed under it, including one forged by whoever has the secret. Drop a leaked secret outright, and everybody signs in again. After a leak that is the correct result, not a side effect.</p>
+<h2 id="what-a-session-can-store">What a session can store<a class="headerlink" href="#what-a-session-can-store" title="Permanent link">&para;</a></h2>
+<p><strong>A struct of your own whose size is known at compile time:</strong> integers, floats, bools, enums, <code>[N]u8</code> arrays, optionals of those, and structs of those.</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Signed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">user</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">,</span>
+<span class="w">    </span><span class="n">role</span><span class="o">:</span><span class="w"> </span><span class="k">enum</span><span class="p">(</span><span class="kt">u8</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">member</span><span class="p">,</span><span class="w"> </span><span class="n">admin</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">member</span><span class="p">,</span>
+<span class="w">    </span><span class="n">tenant</span><span class="o">:</span><span class="w"> </span><span class="o">?</span><span class="kt">u32</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="p">};</span>
+</code></pre></div>
+<p><strong>Not a slice.</strong> <code>name: []const u8</code> is a compile error, and not because it would be hard to support: a browser drops an oversized cookie <em>silently</em>, so the size has to be checkable, and a size that depends on the data cannot be checked in advance. The limit is about 4 KB, and a <code>Session(T)</code> over it stops the build with the number.</p>
+<p>For text, give it a fixed size (<code>name: [32]u8</code>), or better, keep an id in the session and look the rest up. <strong>The session is sent with every request</strong>, static files included, so keeping it small matters.</p>
+<h2 id="changing-a-session-value">Changing a session value<a class="headerlink" href="#changing-a-session-value" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">set</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="p">});</span><span class="w">     </span><span class="c1">// ✅</span>
+<span class="n">s</span><span class="p">.</span><span class="n">value</span><span class="p">.</span><span class="n">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">id</span><span class="p">;</span><span class="w">              </span><span class="c1">// ❌ compiles, and does nothing</span>
+</code></pre></div>
+<p><strong>To change a session, call <code>set</code>; assigning to a field does nothing.</strong> A session is a <a href="../middleware/#resolved-values">resolved value</a>, handed to the handler by value. A changed copy goes nowhere and looks exactly like it worked, so writing is a call: <code>set</code> becomes one <code>Set-Cookie</code> on this response.</p>
+<p>Being a resolved value also makes it cheap: the cookie is decrypted <strong>once per request</strong> however many things ask for it, so a middleware guarding <code>/admin</code> and the handler behind it do not both pay.</p>
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">requireAdmin</span><span class="p">(</span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">next</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Next</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">s</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">resolve</span><span class="p">(</span><span class="n">nilo</span><span class="p">.</span><span class="n">Session</span><span class="p">(</span><span class="n">Signed</span><span class="p">));</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">signed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">get</span><span class="p">()</span><span class="w"> </span><span class="k">orelse</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">unauthorized</span><span class="p">(</span><span class="s">"sign in first"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">signed</span><span class="p">.</span><span class="n">role</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="p">.</span><span class="n">admin</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">forbidden</span><span class="p">(</span><span class="s">"admins only"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">next</span><span class="p">.</span><span class="n">run</span><span class="p">(</span><span class="n">c</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<h2 id="session-lifetime-max_age">Session lifetime (<code>max_age</code>)<a class="headerlink" href="#session-lifetime-max_age" title="Permanent link">&para;</a></h2>
+<p><strong>By default the cookie is a browser-session cookie, gone when the browser closes</strong>, which is what a sign-in usually wants. To keep it longer, say for how long:</p>
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">setWith</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">max_age</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">30</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">24</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">60</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">60</span><span class="w"> </span><span class="p">});</span><span class="w">   </span><span class="c1">// 30 days</span>
+</code></pre></div>
+<p><strong>That one number sets two things</strong>, and the second is the one that matters. <code>Max-Age</code> is an instruction to the browser, and a browser follows it. A copy of the cookie (from a proxy log, a <code>curl -v</code> pasted into a ticket, a backup) follows nothing. So the same thirty days is also sealed <em>inside</em> the cookie, where the client cannot change it, and after thirty days it stops opening for anybody (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/033-a-session-is-sealed-into-the-cookie.md">ADR 033</a>).</p>
+<p>A browser-session cookie has a limit too, for the same reason: leaving <code>max_age</code> unset asks the browser to forget the cookie when it closes, and seals <code>nilo.session.default_max_age</code>, <strong>24 hours</strong>, for any copy that does not. Null does not mean forever, and could never safely mean that.</p>
+<p><a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/reference/ctx.md#sessiont"><code>setWith</code></a> also takes <code>path</code>, <code>domain</code>, <code>secure</code> and <code>same_site</code>. It does not take <code>http_only</code>: a session a script can read is a session an injected script can send somewhere.</p>
+<p>Testing the expiry boundary needs no clock and no waiting. <code>nilo.session.openAt(T, cookie, key, when)</code> opens a cookie as of a time you choose, which is how nilo's own tests check the second before an expiry, the second of it, and the second after.</p>
+<h2 id="revoking-a-session-early">Revoking a session early<a class="headerlink" href="#revoking-a-session-early" title="Permanent link">&para;</a></h2>
+<p><strong>A session cannot be revoked early.</strong> A sealed cookie is valid until the expiry sealed into it, and nothing can cut that short, because there is no row to mark. <code>s.clear()</code> deletes the cookie in <em>this</em> browser; a cookie somebody copied keeps opening until its expiry. That is why the expiry exists, and why it is not optional.</p>
+<p>If you need revocation, put a number in the session and check it:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Signed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">user</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="n">token_version</span><span class="o">:</span><span class="w"> </span><span class="kt">u16</span><span class="w"> </span><span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">me</span><span class="p">(</span><span class="n">s</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Session</span><span class="p">(</span><span class="n">Signed</span><span class="p">),</span><span class="w"> </span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Db</span><span class="p">)</span><span class="w"> </span><span class="o">!?</span><span class="n">Profile</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">signed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">get</span><span class="p">()</span><span class="w"> </span><span class="k">orelse</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">account</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">signed</span><span class="p">.</span><span class="n">user</span><span class="p">)</span><span class="w"> </span><span class="k">orelse</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">account</span><span class="p">.</span><span class="n">token_version</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">signed</span><span class="p">.</span><span class="n">token_version</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span><span class="w">   </span><span class="c1">// signed out everywhere</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">account</span><span class="p">.</span><span class="n">profile</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>That is a database lookup, but it is the lookup you were already doing to answer the request, not a second one just to find the session.</p>
+<p><strong>Changing the secret does not have to sign everybody out</strong>: keep the old one as a fallback (<a href="#rotating-the-secret">above</a>). Dropping it outright does, and after a leak that is what you want.</p>
+<h3 id="the-__host-cookie-name">The <code>__Host-</code> cookie name<a class="headerlink" href="#the-__host-cookie-name" title="Permanent link">&para;</a></h3>
+<p><strong>The cookie is called <code>__Host-session</code>, so another subdomain cannot plant one.</strong> A browser only accepts a cookie with that prefix from this host, over HTTPS, at <code>/</code>. A plain <code>session</code> cookie could be set by any page on a sibling subdomain with <code>Domain=example.com; Path=/account</code>, and the browser would send that one first under <code>/account</code>, so the person would be working inside somebody else's account without knowing. A <code>setWith</code> that names a <code>domain</code>, another <code>path</code> or <code>secure = false</code> writes the plain name, because a browser drops the prefixed one with any of those, and so gives up that protection; it needs <code>listen(.{ .session_plain_name = true })</code>, without which the plain name is never read and the <code>set</code> fails with a message saying so. A program upgrading from 0.6.0, which wrote every session under the plain name, turns the same option on for as long as its longest <code>max_age</code>: each visitor's next <code>set</code> moves them to the new name, and then the option goes off.</p>
+<h2 id="changing-the-session-struct">Changing the session struct<a class="headerlink" href="#changing-the-session-struct" title="Permanent link">&para;</a></h2>
+<p><strong>Adding a field to your session struct is safe: cookies already issued are ignored, not misread</strong>, and the people holding them sign in again.</p>
+<p>This is by design. The sealed bytes carry a fingerprint of the struct's layout, so a cookie written by a different build does not open. Without it, the bytes that were a <code>bool</code> would become the low byte of a <code>u32</code> and somebody would be signed in as the wrong user. The same would happen if two fields of the same type swapped places, which no size check would catch.</p>
+<h2 id="sign-in-and-password-checking">Sign-in and password checking<a class="headerlink" href="#sign-in-and-password-checking" title="Permanent link">&para;</a></h2>
+<p><strong>A session is not authentication: it only holds a user's id once something else has confirmed who they are.</strong> Talking to an identity provider, deciding what a role means, limiting sign-in attempts per address: all of that is yours. nilo provides the mechanism and no policy, the same line it draws around <a href="../middleware/">middleware and resolved values</a>.</p>
+<p><strong>Checking the password is the one part nilo does provide</strong>, because getting it wrong fails silently:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">pw</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@import</span><span class="p">(</span><span class="s">"nilo_pw"</span><span class="p">);</span><span class="w"> </span><span class="c1">// the hashing module, for `pw.huge_pages` and `pw.Cost`</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">signIn</span><span class="p">(</span>
+<span class="w">    </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span>
+<span class="w">    </span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">sql</span><span class="p">.</span><span class="n">Db</span><span class="p">,</span>
+<span class="w">    </span><span class="n">s</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Session</span><span class="p">(</span><span class="n">Signed</span><span class="p">),</span>
+<span class="w">    </span><span class="n">form</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Form</span><span class="p">(</span><span class="n">SignIn</span><span class="p">),</span>
+<span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">nilo</span><span class="p">.</span><span class="n">Redirect</span><span class="p">(</span><span class="mi">303</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">row</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">one</span><span class="p">(</span><span class="n">Account</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">form</span><span class="p">.</span><span class="n">value</span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="k">try</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">verifyPassword</span><span class="p">(</span>
+<span class="w">        </span><span class="n">pw</span><span class="p">.</span><span class="n">huge_pages</span><span class="p">,</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">row</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="n">r</span><span class="o">|</span><span class="w"> </span><span class="n">r</span><span class="p">.</span><span class="n">password</span><span class="p">.</span><span class="n">view</span><span class="p">()</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">        </span><span class="n">form</span><span class="p">.</span><span class="n">value</span><span class="p">.</span><span class="n">password</span><span class="p">.</span><span class="n">view</span><span class="p">(),</span>
+<span class="w">    </span><span class="p">))</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">unauthorized</span><span class="p">(</span><span class="s">"that is not a sign-in"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">set</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@intCast</span><span class="p">(</span><span class="n">row</span><span class="p">.</span><span class="o">?</span><span class="p">.</span><span class="n">id</span><span class="p">)</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">.</span><span class="n">to</span><span class="p">(</span><span class="s">"/"</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Three things about <a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/reference/ctx.md#reading"><code>c.verifyPassword</code></a> are the whole reason it exists (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/044-a-password-hash-is-gated-because-forgetting-is-silent.md">ADR 044</a>):</p>
+<ul>
+<li><strong>The stored hash is optional, and <code>null</code> means there is no such account.</strong> The call still does the full work and answers false. Returning early for an unknown address answers in a millisecond instead of thirty, which lets anyone use the form to find out which addresses are registered. If you hash at a Cost of your own, pass it here too (<code>c.verifyPasswordWith(cost, …)</code>), because that Cost sets how long the no-account path takes.</li>
+<li><strong>It is a <code>Ctx</code> method, not a direct call to <code>nilo_pw</code>.</strong> One hash takes 13 ms and 19 MiB, which is under <code>block_warning_ms</code>, so calling the module directly would block the thread on every sign-in with nothing in the log. The method parks the fiber and holds one of <code>password_hashes_at_once</code> permits.</li>
+<li><strong>The allocator is <code>pw.huge_pages</code>, not <code>db.gpa</code>.</strong> The 19 MiB arrives in ten pages instead of 4,864, which is 11.0 ms a hash against 13.6, with nothing held between hashes. Any allocator works; this is the fastest, and on anything other than Linux it <em>is</em> <code>page_allocator</code>.</li>
+</ul>
+<p>Signing somebody up is the other direction:</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">stored</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">hashPassword</span><span class="p">(</span><span class="n">pw</span><span class="p">.</span><span class="n">huge_pages</span><span class="p">,</span><span class="w"> </span><span class="n">form</span><span class="p">.</span><span class="n">password</span><span class="p">.</span><span class="n">view</span><span class="p">());</span>
+<span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">Account</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">form</span><span class="p">.</span><span class="n">email</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">password</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">stored</span><span class="p">.</span><span class="n">text</span><span class="p">()</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<p>A successful sign-in is the only moment the plaintext password is available, so it is the only place a hash written at an older Cost can be upgraded:</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">row</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">one</span><span class="p">(</span><span class="n">Account</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">form</span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">try</span><span class="w"> </span><span class="n">pw</span><span class="p">.</span><span class="n">needsRehash</span><span class="p">(</span><span class="n">row</span><span class="p">.</span><span class="o">?</span><span class="p">.</span><span class="n">password</span><span class="p">.</span><span class="n">view</span><span class="p">(),</span><span class="w"> </span><span class="p">.</span><span class="n">default</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">fresh</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">hashPassword</span><span class="p">(</span><span class="n">pw</span><span class="p">.</span><span class="n">huge_pages</span><span class="p">,</span><span class="w"> </span><span class="n">form</span><span class="p">.</span><span class="n">password</span><span class="p">.</span><span class="n">view</span><span class="p">());</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">update</span><span class="p">(</span><span class="n">Account</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">set</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">password</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fresh</span><span class="p">.</span><span class="n">text</span><span class="p">()</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">row</span><span class="p">.</span><span class="o">?</span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3 id="checking-a-password-outside-a-request">Checking a password outside a request<a class="headerlink" href="#checking-a-password-outside-a-request" title="Permanent link">&para;</a></h3>
+<p><strong><code>nilo.verifyPassword</code> is the same check without a <code>Ctx</code>.</strong> A CLI that resets an account, a job that re-hashes every row at a higher Cost, a test that wants neither an App nor a <code>Ctx</code>: none of them has a request, and none needs one, because the salt is in the stored string. It uses the same Gate and the same blocking pool, and runs inline when there is no event loop at all (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/044-a-password-hash-is-gated-because-forgetting-is-silent.md">ADR 044</a>):</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">checkFromTheCommandLine</span><span class="p">(</span><span class="n">gpa</span><span class="o">:</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">mem</span><span class="p">.</span><span class="n">Allocator</span><span class="p">,</span><span class="w"> </span><span class="n">stored</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="n">typed</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">verifyPassword</span><span class="p">(</span><span class="n">gpa</span><span class="p">,</span><span class="w"> </span><span class="n">stored</span><span class="p">,</span><span class="w"> </span><span class="n">typed</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>There is no matching <code>nilo.hashPassword</code>. Making a hash needs entropy, and <code>c.entropy</code> is where the wait for it happens. Outside a request, fill a <code>[pw.salt_len]u8</code> with <code>std.Io.randomSecure</code> and call <code>pw.hash</code>; that is all it takes.</p>
+<h2 id="password-reset-tokens-and-api-keys">Password reset tokens and API keys<a class="headerlink" href="#password-reset-tokens-and-api-keys" title="Permanent link">&para;</a></h2>
+<p><strong><a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/reference/pw.md"><code>pw.Token</code></a> is a random token for a reset link, an email verification or an API key, stored as a digest.</strong> Every application needs all three, and the recipe is small enough that everybody writes it, yet easy enough to get wrong that most get one part wrong: storing the token as it was sent (so a copy of the table is a set of working links), comparing with <code>std.mem.eql</code>, or using a UUID as the token. <code>pw.Token</code> is the recipe written once (<a href="https://github.com/nevindra/nilo/blob/v0.7.0/docs/adr/044-a-password-hash-is-gated-because-forgetting-is-silent.md">ADR 044</a>).</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">pw</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@import</span><span class="p">(</span><span class="s">"nilo_pw"</span><span class="p">);</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">Forgot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">email</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="w"> </span><span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">forgot</span><span class="p">(</span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">sql</span><span class="p">.</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">form</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Form</span><span class="p">(</span><span class="n">Forgot</span><span class="p">))</span><span class="w"> </span><span class="o">!</span><span class="n">nilo</span><span class="p">.</span><span class="n">Redirect</span><span class="p">(</span><span class="mi">303</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// The same answer whether or not the address is known, for the reason a</span>
+<span class="w">    </span><span class="c1">// sign-in's is.</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">one</span><span class="p">(</span><span class="n">Account</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">form</span><span class="p">.</span><span class="n">value</span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="k">orelse</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="p">.</span><span class="n">to</span><span class="p">(</span><span class="s">"/check-your-mail"</span><span class="p">);</span>
+
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">token</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pw</span><span class="p">.</span><span class="n">Token</span><span class="p">.</span><span class="n">new</span><span class="p">(</span><span class="k">try</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">entropy</span><span class="p">(</span><span class="n">pw</span><span class="p">.</span><span class="n">token_len</span><span class="p">));</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">digest</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">token</span><span class="p">.</span><span class="n">digest</span><span class="p">();</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">Reset</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">user_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">user</span><span class="p">.</span><span class="n">id</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">digest</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">Bytes</span><span class="p">.</span><span class="n">of</span><span class="p">(</span><span class="o">&amp;</span><span class="n">digest</span><span class="p">),</span>
+<span class="w">        </span><span class="p">.</span><span class="n">expires_at</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">Timestamp</span><span class="p">.</span><span class="n">fromSeconds</span><span class="p">(</span><span class="n">sql</span><span class="p">.</span><span class="n">Timestamp</span><span class="p">.</span><span class="n">now</span><span class="p">().</span><span class="n">seconds</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">3600</span><span class="p">),</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="c1">// The text goes in the mail and nowhere else.</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">sent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">token</span><span class="p">.</span><span class="n">text</span><span class="p">();</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">sendResetMail</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="n">user</span><span class="p">.</span><span class="n">email</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">sent</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">.</span><span class="n">to</span><span class="p">(</span><span class="s">"/check-your-mail"</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">NewPassword</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">password</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="w"> </span><span class="p">};</span>
+
+<span class="c1">// `POST /reset/:token`</span>
+<span class="k">fn</span><span class="w"> </span><span class="n">reset</span><span class="p">(</span>
+<span class="w">    </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span>
+<span class="w">    </span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">sql</span><span class="p">.</span><span class="n">Db</span><span class="p">,</span>
+<span class="w">    </span><span class="n">token</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="p">,</span>
+<span class="w">    </span><span class="n">form</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Form</span><span class="p">(</span><span class="n">NewPassword</span><span class="p">),</span>
+<span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">nilo</span><span class="p">.</span><span class="n">Redirect</span><span class="p">(</span><span class="mi">303</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">presented</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pw</span><span class="p">.</span><span class="n">Token</span><span class="p">.</span><span class="n">parse</span><span class="p">(</span><span class="n">token</span><span class="p">.</span><span class="n">view</span><span class="p">())</span><span class="w"> </span><span class="k">orelse</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">unauthorized</span><span class="p">(</span><span class="s">"that link is not one"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">digest</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">presented</span><span class="p">.</span><span class="n">digest</span><span class="p">();</span>
+
+<span class="w">    </span><span class="c1">// Found and taken in one statement: two requests with the same link</span>
+<span class="w">    </span><span class="c1">// cannot both get past this line.</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">row</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">deleteReturningOne</span><span class="p">(</span><span class="n">Reset</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">digest</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">Bytes</span><span class="p">.</span><span class="n">of</span><span class="p">(</span><span class="o">&amp;</span><span class="n">digest</span><span class="p">)</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="k">orelse</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">unauthorized</span><span class="p">(</span><span class="s">"that link is not one"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">row</span><span class="p">.</span><span class="n">expires_at</span><span class="p">.</span><span class="n">micros</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">nowMicros</span><span class="p">())</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">unauthorized</span><span class="p">(</span><span class="s">"that link is not one"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">fresh</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">hashPassword</span><span class="p">(</span><span class="n">pw</span><span class="p">.</span><span class="n">huge_pages</span><span class="p">,</span><span class="w"> </span><span class="n">form</span><span class="p">.</span><span class="n">value</span><span class="p">.</span><span class="n">password</span><span class="p">.</span><span class="n">view</span><span class="p">());</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">update</span><span class="p">(</span><span class="n">Account</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">set</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">password</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fresh</span><span class="p">.</span><span class="n">text</span><span class="p">()</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">row</span><span class="p">.</span><span class="n">user_id</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">.</span><span class="n">to</span><span class="p">(</span><span class="s">"/sign-in"</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">sendResetMail</span><span class="p">(</span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">to</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="p">,</span><span class="w"> </span><span class="n">text</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">c</span><span class="p">;</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">to</span><span class="p">;</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">text</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Four things to know:</p>
+<ul>
+<li><strong>Send the text, store the digest, keep nothing else.</strong> <code>token.text()</code> is 43 characters of base64url, safe in a URL, a header and an email, and <code>token.digest()</code> is SHA-256 over the bytes. A row holding the digest is useless to whoever reads the table, which is the point.</li>
+<li><strong>Every wrong token gets the same answer.</strong> <code>parse</code> returns null for the wrong length, a character outside base64url or a padded spelling, and the lookup returns null for a token nobody issued. Both end in the same 401, because how a token was wrong is not something to tell whoever presented it. Looking the row up by its digest leaks no useful timing: whoever sends a token cannot choose the bytes of its SHA-256. Where the row is found some other way, <code>pw.Token.matches(stored, presented)</code> is the constant-time compare, and a stored value that is not 32 bytes gives <code>false</code>, so a table that kept the text by mistake signs nobody in rather than everybody.</li>
+<li><strong>No argon2.</strong> A token has 256 bits of entropy and needs no stretching; a reset endpoint that took 13 ms to say no would be one that can be brute-forced. That is why this is <code>pw.Token</code> and not a Cost.</li>
+<li><strong>Expiry and single use are yours to implement.</strong> <code>expires_at</code> is a column in your table, and single use is <code>deleteReturningOne</code>: the row is found by its digest and removed in the same statement, so a link clicked twice at once works only once. Reading it with <code>db.one</code> and deleting it afterwards leaves a gap where both requests read it. The digest needs <code>.unique</code> in the marker, which is what lets <code>deleteReturningOne</code> promise one row. A failure after the delete, such as the password update, uses up the link, and the user asks for another; that is the safe way round. An API key is the same calls with no expiry and no delete: look the row up by <code>pw.Token.parse(header).?.digest()</code>.</li>
+</ul>
+<h2 id="testing">Testing<a class="headerlink" href="#testing" title="Permanent link">&para;</a></h2>
+<p><strong>A handler that takes a session is an ordinary function, and the session is an ordinary value:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="k">test</span><span class="w"> </span><span class="s">"me answers with the signed-in profile, and 404s without one"</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// No request, no cookie, no server: the handler is a function of what it</span>
+<span class="w">    </span><span class="c1">// was given.</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">testing</span><span class="p">.</span><span class="n">expectEqualStrings</span><span class="p">(</span><span class="s">"Wati"</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="k">try</span><span class="w"> </span><span class="n">me</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">7</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">})).</span><span class="o">?</span><span class="p">.</span><span class="n">name</span><span class="p">);</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">testing</span><span class="p">.</span><span class="n">expect</span><span class="p">(</span><span class="k">try</span><span class="w"> </span><span class="n">me</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="kc">null</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>set</code> and <code>clear</code> are the exception: outside a request there is no response to put a cookie on, so they fail instead of silently doing nothing.</p>
+<p>To test the round trip (that the cookie really is set and really comes back), drive the App with the <a href="../testing/">test client</a>, setting the key directly instead of calling <code>listen</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">App</span><span class="p">.</span><span class="n">init</span><span class="p">(</span><span class="n">testing</span><span class="p">.</span><span class="n">allocator</span><span class="p">);</span>
+<span class="k">defer</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span>
+<span class="n">app</span><span class="p">.</span><span class="n">session_key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@splat</span><span class="p">(</span><span class="mh">0xA5</span><span class="p">);</span><span class="w">          </span><span class="c1">// what `.session_secret` becomes</span>
+<span class="n">app</span><span class="p">.</span><span class="n">session_fallbacks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="nb">@splat</span><span class="p">(</span><span class="mh">0x5A</span><span class="p">)};</span><span class="w">  </span><span class="c1">// and `.session_fallback_secrets`, for a rotation</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">post</span><span class="p">(</span><span class="s">"/sign-in"</span><span class="p">,</span><span class="w"> </span><span class="n">signIn</span><span class="p">);</span>
+</code></pre></div>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../cookies/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Cookies">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Cookies
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../streaming/" class="md-footer__link md-footer__link--next" aria-label="Next: Streaming">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Streaming
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.sections", "navigation.top", "navigation.footer", "navigation.indexes", "search.highlight", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
