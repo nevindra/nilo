@@ -49,6 +49,12 @@ fn flushEvery(exporter: *Exporter) void {
 }
 ```
 
+### A swallowed cancel does not keep the server
+
+The stop reaches a spawned fiber as one cancel, and the first wait the fiber reaches spends it. Work that reads that wait's failure as an ordinary one, a cancelled S3 call logged as a storage error inside a job that then carries on, goes back to its loop with nothing left to cancel it: the `nilo.sleep` that was meant to say stop sleeps instead, the group's cancel waits for the fiber, and `listen()` never returns. A server stopped by SIGTERM stayed up with every thread idle (found by cid, whose version worker did exactly this).
+
+So `spawn` and `spawnLocal` bind a task-local mark around the work, and `serve` raises a `cancelling` flag for the length of the group's cancel. `nilo.sleep` in marked work answers `error.Canceled` at once while the flag is up, however many cancels came before. Requests are not marked: one still waiting while the server drains keeps its wait. Only `sleep` reads it, because the loop above is the shape the work is documented to have; a loop that waits on something else and swallows that wait's cancel still has to check for itself.
+
 `func` may not fail: there is no request to answer and nobody to answer it, so an error has nowhere to go, and it logs instead. The two things that must not travel in are the same two `nilo.spawn` refuses to survive: a `Str`, and a fail function, which has no request to fail.
 
 The Engine's group is armed before `ready` runs rather than after, so a `ready` that fails cancels whatever it had already started, which is what "the server did not start" has to mean. `App` keeps two separate flags for this: `services_started` (ADR 180's guard, skipped when `app.start(io)` ran first) and `background_started` (set once, by whichever of `listen()`'s two callers reaches it first). They are separate because skipping the background work along with the services is exactly the bug this decision fixes: a program that calls `app.start` before `listen` still needs `listen()` to start what `app.spawn` registered.

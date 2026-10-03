@@ -1697,8 +1697,14 @@ pub fn serve(
 
     var group: zio.Group = .init;
     // Whatever is still running when the grace period is over is cut off
-    // here. By then it has had its chance.
-    defer group.cancel();
+    // here. By then it has had its chance. Spawned work is told twice:
+    // the one cancel, and `cancelling`, which its every `sleep` reads, so
+    // a cancel it swallowed cannot keep it, and the server, going.
+    defer {
+        cancelling.store(true, .release);
+        group.cancel();
+        cancelling.store(false, .release);
+    }
 
     // Registered after the cancel above, so it runs before it: nothing can
     // be spawned into a group that is already winding up (ADR 028).
@@ -2422,9 +2428,16 @@ pub const blockingReserved = zio.blockInPlaceReserved;
 /// cancelled while waiting — the same failure `Mutex.lock` has, and it maps
 /// to a 503 already.
 ///
+/// In spawned work it is also `error.Canceled`, at once, for as long as the
+/// server is cancelling it, however many cancels came before. A fiber gets
+/// one cancel and the first wait it reaches spends it; work that read that
+/// as an ordinary failure and carried on would otherwise sleep through the
+/// stop, and `listen()` would wait for it forever (ADR 028).
+///
 /// Outside a fiber this really does sleep, rather than returning at once,
 /// so a test measuring a timeout still measures one.
 pub fn sleep(ms: u64) error{Canceled}!void {
+    if (cancelling.load(.acquire) and background_work.get() != null) return error.Canceled;
     return zio.sleep(.fromMilliseconds(ms));
 }
 
@@ -2570,6 +2583,27 @@ pub const File = struct {
 // the state `serve` already carries.
 var background: std.atomic.Value(?*zio.Group) = .init(null);
 
+/// Set while `serve` cancels the background group: what `sleep` reads in
+/// spawned work, so the stop is not one signal that can be swallowed.
+var cancelling: std.atomic.Value(bool) = .init(false);
+
+/// Bound for the life of every fiber `spawn` and `spawnLocal` start, and
+/// only those: a request sleeping while the server drains keeps its wait.
+var background_work: zio.TaskLocal(*const u8) = .{};
+const background_mark: u8 = 0;
+
+/// `func`, run with `background_work` bound around it.
+fn Background(comptime func: anytype) type {
+    return struct {
+        fn run(args: std.meta.ArgsTuple(@TypeOf(func))) @typeInfo(@TypeOf(func)).@"fn".return_type.? {
+            var node: zio.TaskLocal(*const u8).Node = .unset;
+            background_work.set(&node, &background_mark);
+            defer background_work.clear(&node);
+            return @call(.auto, func, args);
+        }
+    };
+}
+
 /// The Runtime of the server that is running, for `serverIo`. A pointer to
 /// the Runtime rather than a stored `std.Io`, so the read is one atomic load
 /// and the `Io` is built from it on the way out; nothing is held per
@@ -2593,7 +2627,7 @@ pub fn serverIo() ?std.Io {
 /// is a failure or a no-op.
 pub fn spawn(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void {
     const group = background.load(.acquire) orelse return error.NoServer;
-    return group.spawn(func, args);
+    return group.spawn(Background(func).run, .{args});
 }
 
 /// `spawn`, on the executor of the fiber that calls it rather than the next
@@ -2605,8 +2639,8 @@ pub fn spawn(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void {
 /// executor to stay on and zio refuses `.local`.
 pub fn spawnLocal(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void {
     const group = background.load(.acquire) orelse return error.NoServer;
-    return group.spawnInto(.local, func, args) catch |err| switch (err) {
-        error.InvalidPlacement => group.spawn(func, args),
+    return group.spawnInto(.local, Background(func).run, .{args}) catch |err| switch (err) {
+        error.InvalidPlacement => group.spawn(Background(func).run, .{args}),
         else => err,
     };
 }

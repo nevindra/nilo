@@ -10,7 +10,13 @@ in [`docs/history.md`](./docs/history.md); what is coming is in
 
 ## Unreleased
 
-Nothing yet. Work lands here under `### Breaking`, `### Added`, `### Changed` and `### Fixed`, newest first.
+### Fixed
+
+- **A spawned fiber that swallowed the stop's cancel no longer keeps the server up.** The first wait it reached spent the one cancel, its next `nilo.sleep` slept on, and `listen()` waited for it forever. `nilo.sleep` in spawned work now answers `error.Canceled` for as long as the server is cancelling it ([ADR 028](./docs/adr/028-a-spawned-fiber-belongs-to-the-server.md#a-swallowed-cancel-does-not-keep-the-server)).
+
+### Added
+
+- **`bucket.copy` and `bucket.compose`**: copy an object to another key, and join objects into one, inside the store, with no byte passing through the caller ([reference](./docs/reference/s3.md)).
 
 ## Released
 
