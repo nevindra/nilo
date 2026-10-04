@@ -79,8 +79,9 @@ zig build test-sql     # nilo_sql, with test-job-sql and refusals-sql; Postgres 
 zig build layering     # no module imports upward or sideways
 zig build two-modes    # configure a dependent asking for nilo in Debug and ReleaseSafe; on test
 zig build adr-check    # ADR files, their Topic lines, and every ADR cited exists; on test
-zig build docs-check   # every doc page's head, prose, links and anchors, the map, the reference's heading list; on test
-zig build docs-index   # rewrite the reference's list of every heading after renaming or adding one
+zig build docs-check   # every doc page's head, prose, links and anchors, the map, the reference's heading list,
+                       #   the roadmap's lists of todo entries, and the todo list ranked at this version; on test
+zig build docs-index   # rewrite the reference's list of every heading, and the roadmap's lists of todo entries
 zig build refusals     # the framework's table only; refusals-{sql,config,pw,cache,s3,job,fetch,proto} for the others
 zig build snippets     # the documentation's marked snippets, which must compile
 zig build examples     # build every example; run-{hello,rest,orders,forms,spa,embedded,stream,chat,scheduled,outbound,sqlite}
@@ -171,20 +172,20 @@ The habits, each of which caught something here (the cases are under *Measuring*
 | a lesson: a number measured, a premise that turned out false, a design tried and lost | `docs/history.md`, as one paragraph under the theme it teaches (its header has the rules) |
 | what a user has to change | `CHANGELOG.md`, under `## Unreleased` |
 | a direction the framework is heading, larger than one change | `docs/roadmap.md` (its rules are under [How this file is written](docs/roadmap.md#how-this-file-is-written)) |
-| a concrete item still open: a defect, a decision, a caller awaited, a question, a measurement, an upstream fix | `docs/todo.md` (its own rules are under [How this file is written](docs/todo.md#how-this-file-is-written)) |
+| a concrete item still open: a defect, a decision, a question, a measurement, an upstream fix | `docs/todo.md`, in the tier P0 to P3 its evidence puts it (its own rules are under [How this file is written](docs/todo.md#how-this-file-is-written)) |
 | a question answered, a gap kept as the rule, a feature refused with its reason | `docs/decided.md` |
 | a risk with no mechanism under it yet | `docs/risks.md`, under `## Open` |
 | a benchmark run | `bench/result/` |
 | a new guide page | `docs/guide/`, with the five-line head and a row in `docs/README.md` (`docs-check` refuses either missing), plus a line in `nav:` in `mkdocs.yml` or CI's `docs` job fails |
 | a new reference or design page, or a renamed heading on one | the five-line head, a link in `docs/README.md`, and `zig build docs-index` for the reference's heading list |
 
-**The roadmap and the todo list hold nothing built and nothing decided.** The roadmap is a few directions, each naming the todo entries it gathers; the todo list is every concrete item. When something ships its entry leaves entirely, no strikethrough; what was learned moves to `docs/history.md`. Every entry opens with its whole claim in bold and closes with a `Needs:` or `What would settle it:` line, which is what makes a blocker that has quietly stopped being one findable. **`docs/history.md` stays short**: a lesson, not an account of what shipped, and a lesson learned again extends its entry rather than adding one.
+**The roadmap and the todo list hold nothing built and nothing decided.** The roadmap is a few directions grouped by when (Now, Alongside, Next, Later); the todo list is every concrete item, ranked P0 to P3 by the evidence that it matters and never by who has asked. A todo entry that serves a direction says so on a `**Direction:**` line, `zig build docs-index` writes each direction's list from those lines, and `docs-check` refuses a stale one. A release bumps `build.zig.zon`, and `docs-check` then refuses the todo list until its `Ranked at` line is brought up to it by ranking it again. When something ships its entry leaves entirely, no strikethrough; what was learned moves to `docs/history.md`. Every entry opens with its whole claim in bold and closes with a `Needs:` or `What would settle it:` line, which is what makes a blocker that has quietly stopped being one findable. **`docs/history.md` stays short**: a lesson, not an account of what shipped, and a lesson learned again extends its entry rather than adding one.
 
 Cutting a release (the version bumps, the pinned `?ref=#commit`, the release page) is [`docs/releasing.md`](docs/releasing.md).
 
 ## Refused on the record
 
-Templates and HTTP/2 for ordinary routes are decisions, not gaps (README "What it won't do", ADR 027); propose a change to the ADR instead of adding them. gRPC moved the same way: behind `-Dgrpc`, unary only, on a listener of its own (ADR 220), with streaming and h1 plus h2c on one port waiting for a caller. TLS is the precedent for moving one: an option behind a build flag, the default build unchanged on the memory axis and 2.8 KB on the size one, and every number on the record before it shipped (ADR 212).
+Templates and HTTP/2 for ordinary routes are decisions, not gaps (README "What it won't do", ADR 027); propose a change to the ADR instead of adding them. gRPC moved the same way: behind `-Dgrpc`, unary only, on a listener of its own (ADR 220), with streaming and h1 plus h2c on one port on the roadmap. TLS is the precedent for moving one: an option behind a build flag, the default build unchanged on the memory axis and 2.8 KB on the size one, and every number on the record before it shipped (ADR 212).
 
 <!-- devrun:begin -->
 ## Running this project's services

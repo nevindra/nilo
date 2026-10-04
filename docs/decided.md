@@ -26,6 +26,18 @@ A gap that is the rule. Each was looked at, priced, and kept as it is, and the e
 
 **Reopened by:** nothing on its own. The allocation-free property is worth more than one uniform call.
 
+### `nilo_id`
+
+**A v7 is not sortable within a millisecond.** Two made in the same one come back in random order relative to each other. RFC 9562 allows a counter in `rand_a` and this has none, on the grounds that it buys ordering nobody asked for at the price of a threadlocal.
+
+**Reopened by:** a service inserting a batch in a tight loop that has noticed.
+
+### `nilo_jwt`
+
+**HS256 is absent on purpose, and that is not free.** A shared-secret token is what a service issues to itself, and a module verifying both algorithms has to be careful about the confusion attack that a module verifying one cannot commit. A caller who needs it writes four lines of `HmacSha256` beside this module and gets the constant-time compare right on their own, which is the shape of mistake this module exists to prevent.
+
+**Reopened by:** a caller, brought with the reason a sealed cookie or an RS256 issuer will not do.
+
 ### `nilo_job`
 
 **Nothing sweeps finished rows.** `Table.sweep(scope, before)` deletes `done` rows older than a moment, and nothing calls it: a program that wants the table small runs it from a scheduled job of its own. Written down so nobody is surprised by a table that only grows.

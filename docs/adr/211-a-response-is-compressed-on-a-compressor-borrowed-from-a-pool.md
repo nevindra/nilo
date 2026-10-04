@@ -262,4 +262,4 @@ only to ask whether it carried a body, and the headers only to ask about
   executors are sized from one number.
 - `bench/compress_bench.zig` and `zig build bench-compress`.
 - The roadmap entry closes; what is left (a stream, an event stream,
-  brotli) is one sentence under `Known, waiting for a caller`.
+  brotli) is one entry in the todo list.

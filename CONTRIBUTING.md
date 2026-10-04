@@ -93,7 +93,7 @@ Documentation is part of the change, not a follow-up:
 | something you measured, or a guess that turned out wrong | [`docs/history.md`](./docs/history.md) |
 | a benchmark you ran | [`bench/result/`](./bench/result/), one file an area |
 | a direction the framework should take, larger than one change | [`docs/roadmap.md`](./docs/roadmap.md) |
-| something left open: a defect, a decision, a caller awaited, a question, a measurement | an entry in [`docs/todo.md`](./docs/todo.md) |
+| something left open: a defect, a decision, a question, a measurement, a fix upstream | an entry in [`docs/todo.md`](./docs/todo.md), in the tier its evidence puts it, with a `Direction:` line if it serves a direction of the roadmap |
 | something now built | delete its entry from [`docs/todo.md`](./docs/todo.md), and from [`docs/roadmap.md`](./docs/roadmap.md) when it closes a direction |
 | a question answered, or a feature refused with its reason | [`docs/decided.md`](./docs/decided.md), and out of the todo list |
 | something a user has to change | [`CHANGELOG.md`](./CHANGELOG.md), under `## Unreleased` |
@@ -141,7 +141,7 @@ One decision per pull request. A branch carrying two is two pull requests, and t
 
 ## Where to start
 
-- **An [open question](./docs/todo.md#open-questions) in the todo list.** Those want an argument more than a patch, and each entry ends with what would settle it.
+- **A todo entry that ends with `What would settle it:`** ([the list](./docs/todo.md)). Those want an argument or a number more than a patch, and the line says which.
 - **A module that dials out.** Mail and Redis are ordinary work now: the outbound seam is designed ([ADR 061](./docs/adr/061-a-fitting-borrows-the-loop.md)), `nilo_fetch` is the way out and `s3/` is a worked example on top of it.
 - **The small end, which is real work here.** A refusal whose wording could be clearer, a guide page that assumes something it shouldn't, an example for the case you hit. Wording is a feature in this repository, so improving a sentence is a change, not a chore.
 

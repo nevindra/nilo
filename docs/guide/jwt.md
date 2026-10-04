@@ -77,7 +77,7 @@ fn whoIsThis(gpa: std.mem.Allocator, keys: *const jwt.Keys, token: []const u8) !
 | `error.NoExpiry`, `error.Expired`, `error.NotYetValid` | `exp` missing, `exp` passed, `nbf` not reached | 401 |
 | `error.WrongIssuer`, `error.WrongAudience` | `iss` or `aud` is not what you set | 401 |
 | `error.ClaimsNotReadable` | the signature passed and the payload does not fit your struct | 401, or a 500 if your struct is what is wrong |
-| `error.KeySizeNotSupported` | a modulus that is not 2048, 3072 or 4096 bits | 500, and an entry on the [todo list](../todo.md#known-waiting-for-a-caller) waiting for someone who needs it |
+| `error.KeySizeNotSupported` | a modulus that is not 2048, 3072 or 4096 bits | 500, and an entry on the [todo list](../todo.md) under `nilo_jwt` |
 | `error.CurveNotSupported` | an EC key whose `crv` is not `P-256` | the same 500, and the same todo entry |
 | `error.SignatureWrongLength` | a signature that is not the size of its key (for ES256, sixty-four bytes of `r \|\| s`) | 401. If it is *your* test token, the signer wrote DER: [below](#es256-signatures) |
 | `error.KeyNotUsable` | the set carried a key the arithmetic cannot use: an even exponent, a point that is not on the curve | 500. The key document is wrong, and no token will pass |
@@ -241,7 +241,7 @@ The module's own suite does exactly that against two fixed vectors in `jwt/vecto
 
 ## What it will not do
 
-**Not supported: HS256, any curve but P-256, encrypted tokens (JWE), signing, discovery, PKCE and the nonce.** Signing is missing because a server that issues its own sessions has [`Session(T)`](./sessions.md) and needs no token. HS256 is missing because a module that verifies both a shared secret and a public key has to defend against an algorithm-confusion attack that a module verifying only one cannot fall for ([todo list](../todo.md#known-waiting-for-a-caller)). The rest is the sign-in flow (redirecting to the provider, exchanging a code), which is yours.
+**Not supported: HS256, any curve but P-256, encrypted tokens (JWE), signing, discovery, PKCE and the nonce.** Signing is missing because a server that issues its own sessions has [`Session(T)`](./sessions.md) and needs no token. HS256 is missing because a module that verifies both a shared secret and a public key has to defend against an algorithm-confusion attack that a module verifying only one cannot fall for ([decided](../decided.md#accepted)). The rest is the sign-in flow (redirecting to the provider, exchanging a code), which is yours.
 
 ## See also
 
