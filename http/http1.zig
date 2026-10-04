@@ -726,11 +726,44 @@ pub fn findEndOfHead(buf: []const u8, from: usize) ?usize {
 /// Tab is the one control a header value may hold; the request line may hold
 /// none, so there it is refused too.
 pub fn parseHead(head: []const u8, r: *Request) ParseError!void {
+    return parseLines(head, r, true);
+}
+
+/// The fields of a request whose method and target arrived some other way,
+/// which is an HTTP/2 call's: `head` is a head whose request line is empty, so
+/// `HeaderIterator` reads it as it reads any other, and its fields are held
+/// to every rule `parseHead` holds an HTTP/1.1 head's to, by the same loop
+/// (ADR 253). `applyTarget` is the request line's half.
+pub fn parseFields(head: []const u8, r: *Request) ParseError!void {
+    if (head.len == 0 or head[0] != '\n') return error.BadRequestLine;
+    return parseLines(head[1..], r, false);
+}
+
+/// The method and target of a request that had no request line to carry
+/// them, held to what `parseRequestLine` holds a line's to: a method that is
+/// a token, and a target with no space or control byte in it, which in a
+/// line would have split it or been refused. A target is a path, or `*` for
+/// an `OPTIONS`: the absolute and authority forms are HTTP/1.1's, and HTTP/2
+/// says the authority in a field of its own (RFC 9113 §8.3.1).
+pub fn applyTarget(method: []const u8, target: []const u8, r: *Request) ParseError!void {
+    if (method.len == 0 or target.len == 0) return error.BadRequestLine;
+    if (!tokenAt(method, 0, method.len)) return error.BadRequestLine;
+    for (target) |ch| if (ch <= ' ' or ch == 0x7F) return error.BadRequestLine;
+    if (target[0] != '/' and !(std.mem.eql(u8, target, "*") and std.mem.eql(u8, method, "OPTIONS")))
+        return error.BadRequestLine;
+    r.method = method;
+    r.target = target;
+}
+
+/// `parseHead`'s loop, with or without a request line in front of the fields.
+/// Comptime, so the head an HTTP/1.1 connection reads compiles to exactly the
+/// loop it did before there was a second caller.
+inline fn parseLines(head: []const u8, r: *Request, comptime request_line: bool) ParseError!void {
     var line_start: usize = 0;
     // Where this line's first colon is. 0 stands for "none yet" — a line
     // cannot begin with one, so the position is free to be the sentinel.
     var colon: usize = 0;
-    var first_line = true;
+    var first_line = request_line;
     // Whether the line still open holds a byte no line may. Carried across
     // blocks for the same reason `colon` is.
     var line_bad = false;
@@ -3336,4 +3369,60 @@ test "a Host that is not an authority is a 400" {
         try parseHead(head, &r);
         try testing.expect(r.has_host);
     }
+}
+
+test "a field block is held to every rule a head's fields are, and parses to what the head would" {
+    // What an HTTP/2 call's fields reach the App as (ADR 253). Each of these
+    // is refused for the reason the same line in an HTTP/1.1 head is.
+    const refused = [_]struct { []const u8, ParseError }{
+        .{ "\nhost: a\r\nx-note: a\x01b\r\n\r\n", error.BadHeader },
+        .{ "\nhost: a\r\nhost: b\r\n\r\n", error.BadHeader },
+        .{ "\nhost: evil.com/reset\r\n\r\n", error.BadHeader },
+        .{ "\nhost: a\r\nbad name: x\r\n\r\n", error.BadHeader },
+        .{ "\nhost: a\r\n folded\r\n\r\n", error.BadHeader },
+        .{ "\nhost: a\r\ncontent-length: 4\r\ncontent-length: 5\r\n\r\n", error.BadHeader },
+        .{ "\nhost: a\r\ncontent-encoding: br\r\ncontent-length: 4\r\n\r\n", error.UnsupportedContentEncoding },
+        // No host at all, which RFC 9112 §3.2 makes a 400 on HTTP/1.1.
+        .{ "\ncontent-length: 4\r\n\r\n", error.BadHeader },
+        // No empty request line in front: not a field block.
+        .{ "host: a\r\n\r\n", error.BadRequestLine },
+    };
+    for (refused) |case| {
+        var r = Request{};
+        try testing.expectError(case[1], parseFields(case[0], &r));
+    }
+
+    const block = "\nhost: example.com\r\nx-note: a\tb\r\ncontent-encoding: gzip\r\ncontent-length: 4\r\n\r\n";
+    var fields = Request{};
+    try parseFields(block, &fields);
+    var head = Request{};
+    try parseHead("POST / HTTP/1.1" ++ block, &head);
+    try testing.expectEqual(head.content_length, fields.content_length);
+    try testing.expectEqual(head.content_encoding, fields.content_encoding);
+    try testing.expect(fields.has_host and fields.has_content_length);
+    // And `Ctx` reads its headers as it reads a head's, past the empty line.
+    var it = HeaderIterator.from(block);
+    try testing.expectEqualStrings("host", it.next().?.name);
+    try testing.expectEqualStrings("a\tb", it.next().?.value);
+}
+
+test "a target that arrived without a request line is held to what one in a line is" {
+    var r = Request{};
+    try applyTarget("POST", "/pkg.Service/Method?x=1", &r);
+    try testing.expectEqualStrings("/pkg.Service/Method?x=1", r.target);
+    try applyTarget("OPTIONS", "*", &r);
+    // A space or a control byte would have split a line or been refused in
+    // it; a method that is not a token, or a form that is HTTP/1.1's alone,
+    // is refused as it is there.
+    for ([_][2][]const u8{
+        .{ "POST", "/a b" },
+        .{ "POST", "/a\tb" },
+        .{ "POST", "/a\x7fb" },
+        .{ "POST", "" },
+        .{ "", "/" },
+        .{ "PO ST", "/" },
+        .{ "GET", "*" },
+        .{ "GET", "http://example.com/" },
+        .{ "CONNECT", "example.com:443" },
+    }) |case| try testing.expectError(error.BadRequestLine, applyTarget(case[0], case[1], &r));
 }

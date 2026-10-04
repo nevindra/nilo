@@ -1,13 +1,16 @@
 //! gRPC over h2c: one listener's connections, spoken as HTTP/2 with prior
-//! knowledge, each unary call handed to the App as the HTTP/1.1 request it
-//! would have been ([ADR 220](../docs/adr/220-grpc-is-served-over-h2c-behind-a-flag.md)).
+//! knowledge, each unary call handed to the App as its fields and its one
+//! message ([ADR 220](../docs/adr/220-grpc-is-served-over-h2c-behind-a-flag.md),
+//! [ADR 253](../docs/adr/253-an-answer-is-handed-to-the-framing-that-carried-its-request.md)).
 //!
 //! **A gRPC method is an ordinary route.** `POST /package.Service/Method`,
 //! registered with `app.post`, reached through the same router, middleware,
 //! services and logger as every other route. What this file does is carry a
-//! call across: the HTTP/2 frames of one stream become `POST <path>` with
-//! the call's metadata as headers and its one message as the body, the
-//! length prefix and any gzip already taken off; and what the route answers
+//! call across: the HTTP/2 frames of one stream become a `framing.Call`, the
+//! call's metadata as the request's headers and its one message as the body,
+//! the length prefix and any gzip already taken off, which the App reads as
+//! it reads an HTTP/1.1 head and never as text it has to parse back; and
+//! what the route answers
 //! goes back as HEADERS, one DATA frame's worth of message per frame, and
 //! trailers carrying `grpc-status`. A route that fails with a status is a
 //! call that fails with the gRPC code that status means, and a path no route
@@ -81,7 +84,8 @@ pub const Host = struct {
     body_limit: *const fn (ptr: *anyopaque, path: []const u8) usize,
     /// Whether a `POST` to this path reaches a route.
     routes: *const fn (ptr: *anyopaque, path: []const u8) bool,
-    /// One call through the App, its answer kept in `collected` rather than
+    /// One call through the App, handed over as what was read rather than
+    /// as HTTP/1.1 text, and its answer kept in `collected` rather than
     /// written (ADR 253), with no waker and no read limits: a call's fiber
     /// never reads from the socket, so there is nothing for either to arm.
     /// `until_ns` is the call's `grpc-timeout` as a `monotonicNanos` reading,
@@ -91,7 +95,7 @@ pub const Host = struct {
         arena: std.mem.Allocator,
         lifetime: *core.Lifetime,
         in_flight: *fail.InFlight,
-        in: *std.Io.Reader,
+        call: framing.Call,
         collected: *framing.Collected,
         peer: bulkhead.Peer,
         until_ns: u64,
@@ -273,8 +277,8 @@ const Stream = struct {
     /// Bytes read since this stream's window was last topped up.
     unacked: u32 = 0,
     /// Bytes counted in the connection's `collected`: the message as it
-    /// arrived, and once the call starts, its inflated copy and the request
-    /// text built from it. Given back when the call is let go of.
+    /// arrived, and once the call starts, its inflated copy and the copy the
+    /// route reads it into. Given back when the call is let go of.
     held: usize = 0,
     /// Its window is owed a top-up the connection's budget held back.
     starved: bool = false,
@@ -1309,8 +1313,8 @@ const Conn = struct {
                 else => return c.answerNow(s, 13, "the message's gzip could not be read"),
             };
         }
-        // The request text `asRequest` builds holds the message once more,
-        // for as long as the call runs.
+        // The route's `c.body()` reads the message into the arena once
+        // more, for as long as the call runs.
         c.hold(s, message.len);
         s.body.items = @constCast(message);
         s.state = .running;
@@ -1416,7 +1420,7 @@ const Conn = struct {
 
 // ---- the call's fiber ----
 
-/// One call, run as the HTTP/1.1 request it would have been, and its answer
+/// One call, run through the App as a request of its own, and its answer
 /// turned back into frames. On a fiber of its own; everything it touches is
 /// the stream's, until `finish` hands the stream back.
 fn runCall(s: *Stream, on_engine: bool) void {
@@ -1442,15 +1446,19 @@ fn runCall(s: *Stream, on_engine: bool) void {
 
 fn answer(s: *Stream, in_flight: *fail.InFlight) !void {
     const a = s.arena.allocator();
-    const request = try asRequest(a, s);
+    const call: framing.Call = .{
+        .method = "POST",
+        .target = s.field(":path").?,
+        .head = try fieldHead(a, s),
+        .body = s.body.items,
+    };
 
     var lifetime = core.Lifetime.init();
     defer lifetime.deinit();
-    var in: std.Io.Reader = .fixed(request);
     // Five bytes in front of the body, so the message is framed where it
     // lies and held once for as long as the client's window keeps it.
     var collected: framing.Collected = .{ .arena = a, .front = 5 };
-    s.app.handle(s.app.ptr, a, &lifetime, in_flight, &in, &collected, s.peer, s.until_ns);
+    s.app.handle(s.app.ptr, a, &lifetime, in_flight, call, &collected, s.peer, s.until_ns);
     lifetime.end();
     try fromCollected(a, s, &collected);
 }
@@ -1474,14 +1482,17 @@ pub fn timeoutNanos(text: []const u8) ?u64 {
     return n *| unit;
 }
 
-/// The call as an HTTP/1.1 request: `POST <path>`, `:authority` as `Host`,
-/// the metadata as headers, and the one message, unframed, as the body.
-fn asRequest(a: std.mem.Allocator, s: *const Stream) ![]const u8 {
-    var w: std.Io.Writer.Allocating = try .initCapacity(a, 256 + s.body.items.len);
+/// The call's fields as the head `framing.Call` asks for: an empty request
+/// line, `:authority` as `host`, the metadata, and the length of the one
+/// message. The method and path are handed over as they are, and the message
+/// is not copied into this; what was a whole HTTP/1.1 request, body and all,
+/// for the App to parse back, is now only what it reads headers from.
+fn fieldHead(a: std.mem.Allocator, s: *const Stream) ![]const u8 {
+    var size: usize = "\nhost: localhost\r\ncontent-length: 4294967295\r\n\r\n".len;
+    for (s.fields.items) |f| size += f.name.len + f.value.len + 4;
+    var w: std.Io.Writer.Allocating = try .initCapacity(a, size);
     const out = &w.writer;
-    try out.writeAll("POST ");
-    try out.writeAll(s.field(":path").?);
-    try out.writeAll(" HTTP/1.1\r\n");
+    try out.writeByte('\n');
     // One `host`, which `http1.zig` insists on: `:authority` when the call
     // has it, over a `host` field beside it (§8.3.1).
     const authority = s.field(":authority");
@@ -1506,7 +1517,6 @@ fn asRequest(a: std.mem.Allocator, s: *const Stream) ![]const u8 {
         try out.writeAll("\r\n");
     }
     try out.print("content-length: {d}\r\n\r\n", .{s.body.items.len});
-    try out.writeAll(s.body.items);
     return w.written();
 }
 
@@ -1552,10 +1562,10 @@ fn isGrpcContentType(value: []const u8) bool {
     return rest.len == 0 or (rest[0] == '+' and rest.len > 1);
 }
 
-/// A field that can be written into an HTTP/1.1 head as it is: a lowercase
-/// token for a name, and a value with no line break and no NUL in it. What
-/// makes turning a call into a request text safe; a field that is not this
-/// is a malformed request (§8.2.1), refused before anything reads it.
+/// A field that can be written into a head as it is: a lowercase token for a
+/// name, and a value with no line break and no NUL in it. What makes writing
+/// a call's fields as a head safe; a field that is not this is a malformed
+/// request (§8.2.1), refused before anything reads it.
 fn validField(f: hpack.Field) bool {
     if (f.name.len == 0) return false;
     const name = if (f.name[0] == ':') f.name[1..] else f.name;
@@ -2783,6 +2793,53 @@ test "a request with no :scheme is a stream error PROTOCOL_ERROR" {
         .{ .name = ":path", .value = "/test.Echo/Say" },
         .{ .name = "content-type", .value = "application/grpc" },
     });
+}
+
+/// The `grpc-status` a call with exactly `fields` is answered with.
+fn statusFor(fields: []const hpack.Field) ![]const u8 {
+    var app = try testApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try callWithFields(&client, 1, fields);
+
+    var got = try converse(&app, &client);
+    defer got.deinit();
+    const code = Answer.value(try got.trailers(1), "grpc-status").?;
+    return if (std.mem.eql(u8, code, "0")) "0" else if (std.mem.eql(u8, code, "3")) "3" else "other";
+}
+
+test "metadata an HTTP/1.1 head would be refused for is INVALID_ARGUMENT, by the same rules" {
+    // A call reaches the App as its fields rather than as a head the App
+    // parses, and they are held to `parseHead`'s rules by its own loop
+    // (ADR 253): a control byte in a value, a body coding nilo does not
+    // read, and two hosts with no `:authority` to settle it are each the
+    // 400 or 415 an HTTP/1.1 request gets, which a call reads as code 3.
+    try testing.expectEqualStrings("3", try statusFor(&(base_fields ++ [_]hpack.Field{.{ .name = "x-note", .value = "a\x01b" }})));
+    try testing.expectEqualStrings("3", try statusFor(&(base_fields ++ [_]hpack.Field{.{ .name = "content-encoding", .value = "br" }})));
+    try testing.expectEqualStrings("3", try statusFor(&[_]hpack.Field{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":path", .value = "/test.Echo/Say" },
+        .{ .name = "content-type", .value = "application/grpc" },
+        .{ .name = "host", .value = "a.example" },
+        .{ .name = "host", .value = "b.example" },
+    }));
+    // And a tab in a value is the one control a field may hold.
+    try testing.expectEqualStrings("0", try statusFor(&(base_fields ++ [_]hpack.Field{.{ .name = "x-note", .value = "a\tb" }})));
+}
+
+test "a call's own content-length is not what its route reads: the message is" {
+    var app = try testApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try callWithFields(&client, 1, &(base_fields ++ [_]hpack.Field{.{ .name = "content-length", .value = "999" }}));
+
+    var got = try converse(&app, &client);
+    defer got.deinit();
+    try testing.expectEqualStrings("0", Answer.value(try got.trailers(1), "grpc-status").?);
+    try testing.expectEqualStrings("x", try got.message(1));
 }
 
 test "a request with :authority and host is served, with :authority as its one host" {

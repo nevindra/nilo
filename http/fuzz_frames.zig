@@ -95,16 +95,13 @@ fn stub(gpa: std.mem.Allocator, stop: *const bulkhead.Stop) grpc.Host {
             _: std.mem.Allocator,
             _: *core.Lifetime,
             _: *fail.InFlight,
-            in: *std.Io.Reader,
+            arrived: framing.Call,
             collected: *framing.Collected,
             _: bulkhead.Peer,
             _: u64,
         ) void {
-            const request = in.buffered();
-            const end = std.mem.indexOf(u8, request, "\r\n\r\n") orelse return;
-            const body = request[end + 4 ..];
-            const path_at = "POST ".len;
-            const which = if (request.len > path_at + 1) request[path_at + 1] else 'e';
+            const body = arrived.body;
+            const which = if (arrived.target.len > 1) arrived.target[1] else 'e';
             var to: framing.Framing = .{ .http2 = collected };
             switch (which) {
                 'f' => to.whole(404, "text/plain", "no such", false, true, &.{}, .{}) catch {},

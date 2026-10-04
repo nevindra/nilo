@@ -810,10 +810,14 @@ const h2load_block = [_]u8{
 };
 const sum_message = [_]u8{ 0, 0, 0, 0, 4, 0x08, 0x01, 0x10, 0x02 };
 
-/// The request the call becomes, as `grpc.zig` writes it for that block.
-const grpc_as_http1 = "POST /benchmark.BenchmarkService/GetSum HTTP/1.1\r\nhost: 127.0.0.1:50061\r\n" ++
-    "user-agent: h2load nghttp2/1.59.0\r\ncontent-type: application/grpc\r\ncontent-length: 4\r\n\r\n" ++
-    "\x08\x01\x10\x02";
+/// The call the App is handed for that block, as `grpc.zig` writes it.
+const grpc_call: framing_mod.Call = .{
+    .method = "POST",
+    .target = "/benchmark.BenchmarkService/GetSum",
+    .head = "\nhost: 127.0.0.1:50061\r\nuser-agent: h2load nghttp2/1.59.0\r\n" ++
+        "content-type: application/grpc\r\ncontent-length: 4\r\n\r\n",
+    .body = "\x08\x01\x10\x02",
+};
 
 fn getSum(c: *ctx_mod.Ctx) anyerror!void {
     const body = (try c.body()).view();
@@ -882,19 +886,20 @@ fn grpcCalls() !void {
     }
     sink += fields.items.len;
 
-    // The App's share: the same request as HTTP/1.1, the way a call reaches it.
+    // The App's share: the call handed over as `grpc.zig` hands it, and its
+    // answer collected, the way a call reaches it.
     var app_arena = std.heap.ArenaAllocator.init(gpa);
     defer app_arena.deinit();
     var app_best: u64 = std.math.maxInt(u64);
-    var answer_buf: [512]u8 = undefined;
+    const host = grpc_app.grpcHost();
     for (0..grpc_reps) |_| {
         const started = clock();
         for (0..grpc_calls) |_| {
-            var in = std.Io.Reader.fixed(grpc_as_http1);
-            var answer_out = std.Io.Writer.fixed(&answer_buf);
             var request_lifetime = str_mod.Lifetime{};
             var request_in_flight = fail.InFlight{};
-            sink += @intFromBool(grpc_app.handleRequest(app_arena.allocator(), &request_lifetime, &request_in_flight, &in, &answer_out, .off, .off, .{}));
+            var collected: framing_mod.Collected = .{ .arena = app_arena.allocator(), .front = 5 };
+            host.handle(host.ptr, app_arena.allocator(), &request_lifetime, &request_in_flight, grpc_call, &collected, .{}, 0);
+            sink += collected.status;
             request_lifetime.end();
             _ = app_arena.reset(.{ .retain_with_limit = arena_keep });
         }
@@ -907,8 +912,8 @@ fn grpcCalls() !void {
         \\fiber: h2load's header block, HttpArena's GetSum, answered inline.
         \\
         \\  HPACK decode of the header block{d:>8}ns {d:>6.1}%
-        \\  the App, as the HTTP/1.1 request{d:>7}ns {d:>6.1}%
-        \\  the rest: frames, translation, answer{d:>3}ns {d:>6.1}%
+        \\  the App, handed the call       {d:>7}ns {d:>6.1}%
+        \\  the rest: frames, the call, answer{d:>6}ns {d:>6.1}%
         \\
     , .{
         per_call,

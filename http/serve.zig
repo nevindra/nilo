@@ -82,7 +82,7 @@ pub fn handleConnection(
         // Back to `listen()`'s limit for this request, undoing whatever the
         // last one's deadline did to it. A field store and no allocation.
         deadlines.armWrite();
-        var served = serveRequest(self, arena.allocator(), &lifetime, &in_flight, in, .{ .wire = out }, deadlines, waker, peer);
+        var served = serveRequest(self, arena.allocator(), &lifetime, &in_flight, in, .wire, .{ .wire = out }, deadlines, waker, peer);
         // A handler that upgraded runs its loop here rather than inside
         // `serveRequest`, so that the request's 1,608 bytes are unwound
         // before a socket suspends for the next hour (ADR 062).
@@ -272,6 +272,16 @@ fn spanMethod(method: http1.Method) []const u8 {
 
 /// Answer one request, and hand back a socket if the handler opened one.
 ///
+/// **The one way into the App, whichever framing the request arrived in**
+/// (ADR 253). `arrival` says which: `.wire` reads an HTTP/1.1 head from `in`;
+/// `.call` is an HTTP/2 call its connection has already read, handed over
+/// as its target, its fields and its body (in `in`) rather than as HTTP/1.1
+/// text to parse back. Only the head differs, and from the parsed head on it
+/// is one body of code: two entries over one inlined core compiled it twice,
+/// and the HTTP/1.1 path of a `-Dgrpc` build paid 6% for the copy
+/// (`bench/result/http.md`). Without `-Dgrpc` the `.call` arm is `noreturn`,
+/// as `Sink`'s is, and the default build compiles none of it.
+///
 /// `noinline` deliberately. Everything this touches — the `Ctx`, the
 /// parsed head, the route match — is 1,608 bytes that the connection loop
 /// must not be holding while it waits for the next request, and a frame
@@ -283,6 +293,7 @@ pub noinline fn serveRequest(
     lifetime: *str_mod.Lifetime,
     in_flight: *fail.InFlight,
     in: *std.Io.Reader,
+    arrival: framing_mod.Arrival,
     sink: framing_mod.Sink,
     deadlines: bulkhead.Deadlines,
     waker: bulkhead.Waker,
@@ -308,28 +319,32 @@ pub noinline fn serveRequest(
         _ = bulkhead.setFallbackSlot(prev_slot);
     };
 
-    const raw_head = http1.readHead(in, deadlines) catch |err| {
-        switch (err) {
-            error.EndOfStream => {},
-            // A timeout arrives as a read failure like any other, so
-            // which one it was has to be asked (ADR 022). The bytes
-            // that did turn up are still buffered, and they are what
-            // separates the two cases worth telling apart: a client
-            // halfway through a head gets a 408, a connection that sat
-            // idle without asking for anything is just closed.
-            error.ReadFailed => if (deadlines.timedOut() and in.buffered().len > 0) {
-                sendFinal(sink, RESPONSE_408, 408);
-                record.finish(408);
-            },
-            error.HeadTooLong => {
-                sendFinal(sink, RESPONSE_431, 431);
-                record.finish(431);
-                // The rest of the head is still queued: the reason it was
-                // refused is that it did not fit in the buffer.
-                return .{ .keep_alive = false, .linger = true };
-            },
-        }
-        return .{ .keep_alive = false };
+    // An HTTP/2 call's head is in its arena already, with nothing to wait for.
+    const raw_head = switch (arrival) {
+        .call => |call| call.head,
+        .wire => http1.readHead(in, deadlines) catch |err| {
+            switch (err) {
+                error.EndOfStream => {},
+                // A timeout arrives as a read failure like any other, so
+                // which one it was has to be asked (ADR 022). The bytes
+                // that did turn up are still buffered, and they are what
+                // separates the two cases worth telling apart: a client
+                // halfway through a head gets a 408, a connection that sat
+                // idle without asking for anything is just closed.
+                error.ReadFailed => if (deadlines.timedOut() and in.buffered().len > 0) {
+                    sendFinal(sink, RESPONSE_408, 408);
+                    record.finish(408);
+                },
+                error.HeadTooLong => {
+                    sendFinal(sink, RESPONSE_431, 431);
+                    record.finish(431);
+                    // The rest of the head is still queued: the reason it was
+                    // refused is that it did not fit in the buffer.
+                    return .{ .keep_alive = false, .linger = true };
+                },
+            }
+            return .{ .keep_alive = false };
+        },
     };
     // From here there is a request to answer, and a stop has to wait for
     // it. Not before: until the head arrived this connection was parked
@@ -339,7 +354,7 @@ pub noinline fn serveRequest(
     defer _ = self.stop.in_flight.fetchSub(1, .acq_rel);
 
     var r = http1.Request{};
-    http1.parseHead(raw_head, &r) catch |err| {
+    parseArrived(arrival, raw_head, &r) catch |err| {
         // One of these is not a malformed request: a body under a
         // `Content-Encoding` nilo cannot decode is a request everybody
         // understands and this server cannot read (ADR 089). gzip is not
@@ -385,8 +400,11 @@ pub noinline fn serveRequest(
     // What holds it together is `Ctx.aboutToRead`: every path that reads
     // from the connection calls it, and it fails loudly in a debug build
     // if this decision said there would be no such path.
-    const borrowed = !http1.readsMore(&r);
-    const request_head = if (borrowed) raw_head else copy: {
+    //
+    // An HTTP/2 call's head is in the call's arena, which nothing reads
+    // into, so it is never borrowed and never copied.
+    const borrowed = arrival == .wire and !http1.readsMore(&r);
+    const request_head = if (borrowed or arrival == .call) raw_head else copy: {
         const copied = arena.dupe(u8, raw_head) catch return .{ .keep_alive = false };
         // The slices the parser left pointing into the old bytes.
         // Everything derived below — the path, the query, the params —
@@ -399,7 +417,7 @@ pub noinline fn serveRequest(
         if (r.authority.len > 0) r.authority = rebase(raw_head, copied, r.authority);
         break :copy copied;
     };
-    in.toss(raw_head.len);
+    if (arrival == .wire) in.toss(raw_head.len);
 
     const qmark = std.mem.indexOfScalar(u8, r.target, '?');
     const path = if (qmark) |i| r.target[0..i] else r.target;
@@ -623,6 +641,23 @@ pub noinline fn serveRequest(
     }
     if (c._stream != null) return .{ .keep_alive = endStream(&c), .handover = handover, .linger = linger };
     return .{ .keep_alive = reusable, .handover = handover, .linger = linger };
+}
+
+/// The head that arrived, parsed. An HTTP/1.1 one by `parseHead`; an HTTP/2
+/// call's target by `applyTarget` and its fields by `parseFields`, which is
+/// `parseHead`'s own loop, so a call is refused for exactly what a request
+/// is and with the same status (ADR 253). The framing frames the body, so a
+/// field that frames it again, or says a length the body is not, is a
+/// framing that broke its side of `Call` rather than a request to guess at.
+inline fn parseArrived(arrival: framing_mod.Arrival, head: []const u8, r: *http1.Request) http1.ParseError!void {
+    switch (arrival) {
+        .wire => return http1.parseHead(head, r),
+        .call => |call| {
+            try http1.applyTarget(call.method, call.target, r);
+            try http1.parseFields(head, r);
+            if (r.chunked or r.content_length != call.body.len) return error.BadHeader;
+        },
+    }
 }
 
 /// Run the socket a handler handed back, from the caller's frame.
@@ -1310,7 +1345,7 @@ fn serveOnce(app: *App, request: []const u8) Served {
     var limited = std.Io.Reader.Limited.init(&underlying, .unlimited, &read_buf);
     var buf: [4096]u8 = undefined;
     var out = std.Io.Writer.fixed(&buf);
-    var served = serveRequest(app, arena.allocator(), &lifetime, &in_flight, &limited.interface, .{ .wire = &out }, .off, .off, .{});
+    var served = serveRequest(app, arena.allocator(), &lifetime, &in_flight, &limited.interface, .wire, .{ .wire = &out }, .off, .off, .{});
     runHandover(&served);
     lifetime.end();
     return served;
@@ -1419,7 +1454,7 @@ test "a head that does not fit is answered 431 and lingered on" {
     var in_flight = fail.InFlight{};
     var buf: [4096]u8 = undefined;
     var out = std.Io.Writer.fixed(&buf);
-    const served = serveRequest(&app, arena.allocator(), &lifetime, &in_flight, &limited.interface, .{ .wire = &out }, .off, .off, .{});
+    const served = serveRequest(&app, arena.allocator(), &lifetime, &in_flight, &limited.interface, .wire, .{ .wire = &out }, .off, .off, .{});
     lifetime.end();
 
     try testing.expect(std.mem.startsWith(u8, out.buffered(), "HTTP/1.1 431"));
@@ -1438,7 +1473,7 @@ fn serveAnswer(app: *App, request: []const u8, wire: []u8) struct { served: Serv
     var read_buf: [4096]u8 = undefined;
     var limited = std.Io.Reader.Limited.init(&underlying, .unlimited, &read_buf);
     var out = std.Io.Writer.fixed(wire);
-    var served = serveRequest(app, arena.allocator(), &lifetime, &in_flight, &limited.interface, .{ .wire = &out }, .off, .off, .{});
+    var served = serveRequest(app, arena.allocator(), &lifetime, &in_flight, &limited.interface, .wire, .{ .wire = &out }, .off, .off, .{});
     runHandover(&served);
     lifetime.end();
     return .{ .served = served, .answer = out.buffered() };

@@ -1707,7 +1707,7 @@ pub const App = struct {
 
     /// The App as a gRPC connection sees it (ADR 220). `grpc.zig` is outside
     /// this core and cannot name `App`, so it is handed the few things it
-    /// uses instead: the router's answer to one path, and `handleRequest`.
+    /// uses instead: the router's answer to one path, and `serve.serveRequest`.
     pub fn grpcHost(self: *App) grpc.Host {
         // A call is collected into a `framing.Collected`, which a build
         // without `-Dgrpc` does not have: the arm is `noreturn` there, so
@@ -1730,16 +1730,19 @@ pub const App = struct {
                 arena: std.mem.Allocator,
                 lifetime: *str_mod.Lifetime,
                 in_flight: *fail.InFlight,
-                in: *std.Io.Reader,
+                call: framing_mod.Call,
                 collected: *framing_mod.Collected,
                 peer: bulkhead.Peer,
                 until_ns: u64,
             ) void {
                 const app: *App = @ptrCast(@alignCast(ptr));
-                // Answered into `collected`, never onto a socket: the
-                // connection's fiber frames it (ADR 220, ADR 253). A call
-                // cannot hand a socket over, so there is no handover to run.
-                _ = serve.serveRequest(app, arena, lifetime, in_flight, in, .{ .collect = collected }, .{ .until_ns = until_ns }, .{}, peer);
+                // Handed over as what was read, with its body as the
+                // reader, and answered into `collected`, never onto a
+                // socket: the connection's fiber frames it (ADR 220,
+                // ADR 253). A call cannot hand a socket over, so there is no
+                // handover to run.
+                var in: std.Io.Reader = .fixed(call.body);
+                _ = serve.serveRequest(app, arena, lifetime, in_flight, &in, .{ .call = &call }, .{ .collect = collected }, .{ .until_ns = until_ns }, .{}, peer);
             }
         };
         return .{
@@ -1820,7 +1823,7 @@ pub const App = struct {
         waker: bulkhead.Waker,
         peer: bulkhead.Peer,
     ) bool {
-        var served = serve.serveRequest(self, arena, lifetime, in_flight, in, .{ .wire = out }, deadlines, waker, peer);
+        var served = serve.serveRequest(self, arena, lifetime, in_flight, in, .wire, .{ .wire = out }, deadlines, waker, peer);
         serve.runHandover(&served);
         return served.keep_alive;
     }

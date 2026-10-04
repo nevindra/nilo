@@ -40,12 +40,40 @@ pub const grpc_built = @import("nilo_build").grpc;
 
 pub const Header = http1.Header;
 
-/// Where `serveRequest` hands its answers: the connection's writer, or an
+/// Where an answer is handed: the connection's writer, or an
 /// answer kept whole for an HTTP/2 connection's fiber. Without `-Dgrpc` the
 /// second has no values, as the framing's own second arm has none.
 pub const Sink = union(enum) {
     wire: *std.Io.Writer,
     collect: if (grpc_built) *Collected else noreturn,
+};
+
+/// How a request reaches `serve.serveRequest`: as an HTTP/1.1 head still to
+/// be read from the connection, or as an HTTP/2 call its connection has read
+/// already. Without `-Dgrpc` the second has no values, as `Sink`'s second arm
+/// has none, so the default build knows the tag while compiling.
+pub const Arrival = union(enum) {
+    wire,
+    call: if (grpc_built) *const Call else noreturn,
+};
+
+/// A request that arrived as HTTP/2 rather than as HTTP/1.1 text, the way
+/// `serve.serveRequest` takes it: what the framing read, and nothing written
+/// back into a protocol it did not arrive in (ADR 253).
+///
+/// `head` is the request's fields as a head whose request line is empty
+/// (`"\n"`, then a `name: value` line each, then the blank line), which
+/// `http1.parseFields` holds to every rule an HTTP/1.1 head's fields are
+/// held to and `Ctx` reads a header from as it reads any head. It is the
+/// framing's to leave out what belongs to one connection rather than to the
+/// request (RFC 9113 §8.2.2), and to say the body's length in it.
+pub const Call = struct {
+    method: []const u8,
+    /// `:path`.
+    target: []const u8,
+    head: []const u8,
+    /// The body, whole, with whatever envelope carried it taken off.
+    body: []const u8,
 };
 
 /// The framing a request's answers go to, from where `serveRequest` was told

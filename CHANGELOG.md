@@ -23,7 +23,7 @@ in [`docs/history.md`](./docs/history.md); what is coming is in
 
 - **`c.setTrailer(name, value)`**, a field sent after the body: a HEADERS frame on HTTP/2, a trailer section on a chunked HTTP/1.1 stream, and on a whole HTTP/1.1 answer when the client sent `TE: trailers`. With it `c.trailers()`, `c.clientReadsTrailers()`, `Ctx.checkTrailer`, and `.trailers` on `nilo.Response(T)` and `nilo.Status(code)`. A route that sets none pays nothing ([ADR 254](docs/adr/254-an-answer-can-carry-trailers.md)).
 - **`next.hold(c)`**, which hands a middleware the answer below it unwritten as a `nilo.Answer` (`status`, `body`, `setHeader`, `setTrailer`, `replace`), written when the chain has unwound. A body sent with `c.send` under a hold is copied into the arena, free under 16 KiB and costly above it; **`c.sendKept`** sends one that already outlives the chain without the copy ([ADR 008](docs/adr/008-middleware-is-an-onion-of-ctx-functions.md)).
-- **A unary gRPC call is 17% faster in process and a `-Dgrpc` build 47 KB smaller**: the answer is collected by the framing rather than written as HTTP/1.1 and parsed back.
+- **A unary gRPC call is about a fifth faster in process, makes one allocation fewer, and a `-Dgrpc` build is 46 KB smaller**: the call reaches the App as what was read and its answer is collected by the framing, where both used to be written as HTTP/1.1 and parsed back (876 to 887 ns a call, from 1,083 to 1,118; [ADR 253](docs/adr/253-an-answer-is-handed-to-the-framing-that-carried-its-request.md)). Its metadata is held to the same rules an HTTP/1.1 head is, as it was.
 
 ## Released
 

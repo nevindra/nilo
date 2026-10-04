@@ -145,12 +145,15 @@ pub const Ctx = struct {
     _query_params: []const router.Param = &.{},
     /// The whole request head, request line included. Headers are read out
     /// of it on demand rather than collected up front — most handlers ask
-    /// for none, and the ones that ask, ask for two.
+    /// for none, and the ones that ask, ask for two. An HTTP/2 call's head
+    /// has an empty request line, its method and path having arrived as
+    /// fields of their own (`framing.Call`, ADR 253), and is read the same.
     _head: []const u8,
     /// Whether `_head` is still the connection's own read buffer rather than a
     /// copy in the request arena. True for a request nothing will read from
     /// the connection for again, which is most of them — see the copy in
-    /// `App.handleRequest`, and `aboutToRead` for what keeps it honest.
+    /// `serve.serveRequest`, and `aboutToRead` for what keeps it honest.
+    /// Never for an HTTP/2 call, whose head is in the call's arena.
     _head_borrowed: bool = false,
     /// This connection's time limits (ADR 022). Every path that reads from
     /// the connection arms the one that applies to it first; `.off` — which

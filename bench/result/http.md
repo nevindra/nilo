@@ -3546,3 +3546,46 @@ The default build's −1.3% is small and is in every round, not inside the sprea
 The first cut was one more allocation on every call (5, 11 and 9): the body and the content type were copied separately. They are now one block, with the five bytes of the gRPC prefix in front of the body so the frame is written without a second copy. `Meta/Who` keeps one more, the copy of the headers it sets, which the old path paid as part of a larger text. Heap allocations from the second call on stay zero.
 
 **The decision it moved:** the stage ships with `noinline` on the collecting methods, and the default build's 1.3% is the price of the hold. **Can it be pushed further:** the 1.3% could come back if the late-header check moved off `setHeader` into Debug only, which would turn a refusal into a silent loss in ReleaseFast; refused, for the reason ADR 008 gives.
+
+## A call handed to the App as it was read
+
+The cost of the framing's third stage ([ADR 253](../../docs/adr/253-an-answer-is-handed-to-the-framing-that-carried-its-request.md), [ADR 220](../../docs/adr/220-grpc-is-served-over-h2c-behind-a-flag.md)): a gRPC call handed to `serve.serveRequest` as a `framing.Call` (its method, path, a field block and its message) where it was written as HTTP/1.1 text and parsed back, its fields held to `parseHead`'s rules by `parseHead`'s own loop (`http1.parseFields`). **The question: does the read half of the translation pay for itself, and what does a second way in cost the HTTP/1.1 path.**
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`. Before is `3b76ed2` exported with `git archive`; after is the working tree on top of it, same afternoon, same flags, each built default and with `-Dgrpc`. The profile pinned to one core (`taskset -c 2`), four rounds interleaved, best of five inside each.
+
+**The first cut was a regression and is not what ships.** It had two entries, `serveRequest` and a `serveCall`, over one `inline` core, so that each would keep a frame of its own. In the `-Dgrpc` build the routed GET went from 414 to 417 ns to 440 to 442 (+6%) and stripped `example-hello` grew 9,920 bytes, for a call that went from 912 to 914 ns to 900 to 911 (−1%). The default build was level on time and 1,232 bytes larger. The core compiled once per entry, and every function it calls had a second call site; the reading that the compiler stopped inlining them into the HTTP/1.1 path is the experiment's, not a profile's (no `perf` here), and the shape that fixed it is consistent with it: one `serveRequest` told how its request arrived by a `framing.Arrival`, `.wire` or `.call`, branching only to read and parse the head, with the `.call` arm `noreturn` without `-Dgrpc`.
+
+**What ships**, the profile:
+
+| row | before | after |
+|---|---|---|
+| routed GET, default build | 404 to 405 ns | 404 ns |
+| routed GET, `-Dgrpc` build | 414 to 416 ns | 417 to 422 ns |
+| unary gRPC call over h2c, end to end | 913 to 921 ns | 876 to 887 ns |
+| of which HPACK decode | 246 to 251 ns | 244 to 247 ns |
+
+The call is 4% faster. The `-Dgrpc` build's GET is about 1% slower, a margin the size of its spread: the compare on the arrival, which that build cannot fold. The App's row is not in the table because it measured different things on the two sides: before, the App handed HTTP/1.1 text and writing HTTP/1.1 bytes (270 to 273 ns), not counting what `asRequest` spent writing the text, which no row timed; after, the App handed the call and collecting its answer (213 to 216 ns). **Most of the 229 ns the roadmap called the translation was never the translation**: it was the App, the field parse and the route, which a call still runs and should. What went is the request line, the copy of the message into the text, finding the end of a head this side had just written, and the copy of that head into the arena.
+
+**Size**, stripped `ReleaseFast`:
+
+| binary | build | before | after | |
+|---|---|---|---|---|
+| `example-hello` | default | 1,013,248 | 1,013,248 | 0 |
+| `example-hello` | `-Dgrpc` | 1,086,616 | 1,087,864 | +1,248 |
+| `nilo-hello` (`bench/main.zig`) | `-Dgrpc` | 1,094,120 | 1,095,384 | +1,264 |
+
+The default build is the same binary to the byte. The `-Dgrpc` build carries the second arm of the head: `applyTarget`, the field loop's instance with no request line, and the checks on a `Call`.
+
+**Allocations.** The request path's budget test (`http/behaviour.zig`) passes unchanged, and heap allocations from a connection's second call on stay zero (`grpc.zig`'s budget test). A gRPC call's arena, counted with `budget.Counting` around it in a scratch build of each side, over the suite's three services with a forty-byte message:
+
+| call | before: allocations, bytes | after: allocations, bytes |
+|---|---|---|
+| `/test.Echo/Say` | 4, 495 | 3, 269 |
+| `/test.Meta/Who` | 10, 697 | 9, 471 |
+| `/test.Orders/Get` | 8, 824 | 7, 598 |
+
+The before column is the after column of the stage 2 entry above, to the byte. The allocation that went is the copy of the head into the arena, which a request with a body pays on HTTP/1.1 because the next read overwrites its buffer, and which a call's head, already in the call's arena, never needed; the bytes are that copy and `asRequest`'s 256 bytes of slack, the field block being sized exactly.
+
+**Idle memory** (`bench/mem.py`, `nilo-hello` built with `-Dgrpc`, `/users/1`, server on cores 0 to 3, 1,000, 5,000 and 10,000 idle connections, two rounds interleaved): 9,253 to 9,257, 9,276 and 9,278 bytes a connection before; 9,253, 9,275 to 9,276 and 9,277 to 9,278 after. Unchanged. The default build is the same binary, so its figure is unchanged by construction.
+
+**The decision it moved:** the stage ships with one entry and an `Arrival`, and ADR 253's rejected list carries the two-entry shape with these numbers. **Can it be pushed further:** (1) the route's `c.body()` copies the message once more into the arena it already lies in; handing the `Call`'s body to `Ctx` as already read would take a copy of every message off a call, at the cost of a second way for a body to be read. (2) HPACK decode is now the largest single row of a call, 28%, with a table advertised at 0, so every field is a Huffman-coded literal decoded afresh.
